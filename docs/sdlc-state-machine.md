@@ -355,11 +355,10 @@ standing. Keying by the producing turn as well as the SHA means a patch that
 answers findings with reasons and no code change still gets fresh checks.
 
 **Scheduling.** The three run concurrently when the machine has the slots,
-and back to back when it does not, with identical semantics: the join
-waits for all three either way. On the 16 GB Air the suite run and the two
-agent turns each take the one turn slot ([machine.md](machine.md),
-Concurrency), so the Air runs test, then review, then docs, with the
-judgement calls running beside whatever holds the slot.
+and back to back when it does not; the join waits for all three either
+way. On the 16 GB Air the suite and the two agent turns each take the one
+turn slot ([machine.md](machine.md), Concurrency), so it runs test, review,
+then docs, with judgement calls beside whatever holds the slot.
 
 #### `checks.test`: the suite, then breadth
 
@@ -423,13 +422,12 @@ removed (rebuild-baseline.md, Review rounds), hence the Opus class.
 **Goal.** No doc says something the candidate made untrue.
 
 **What runs.** A fresh session in its own checkout of the candidate. It
-reads the request, the plan, and the diff, and changes only doc paths:
-Markdown files that instruct no turn, so never a `CLAUDE.md`,
-`CLAUDE.local.md`, `AGENTS.md`, or `AGENTS.override.md` anywhere nor
-anything under `skills/`, `persona/`, or `.claude/`, in any letter case,
-since this Mac's file system ignores case (`machine.is_doc_path`). A plan cannot widen this: code riding in an
-unreviewed docs commit would be a merge on no review. Its commits sit on
-top of the candidate and touch no code, so the three cannot conflict.
+reads the request, the plan, and the diff, and changes only Markdown that
+instructs no turn: never a `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, or
+`AGENTS.override.md`, nor anything under `skills/`, `persona/`, or
+`.claude/`, in any letter case, since this Mac's file system ignores case
+(`machine.is_doc_path`). No plan widens this, so no code rides in an
+unreviewed docs commit. Its commits sit on the candidate and touch no code.
 
 **Exit evidence.** `docs.decided`: the candidate, the head of the docs
 commits on top of it, their paths, and the governance boolean over their
@@ -535,7 +533,9 @@ these are facts in the task's ledger:
 
 Each term is deterministic: a row exists or a git fact holds, or not. No
 model call decides whether a merge may happen. The broker checks all five
-and writes the merge's intent in one transaction under the task's lock.
+and writes the merge's intent in one transaction under the task's lock. A
+merge whose performing process died leaves an intent with no outcome; the
+next run settles it from the target (`broker.reconcile`).
 
 **Where a merge goes.** At start the kernel records origin's push URL (as
 an absolute path) and the target branch (the flag, or the branch origin's
@@ -548,13 +548,12 @@ names a program, redirects a push, or includes other config is refused
 
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the
-candidate's real diff and refuses an instance it does not find. An
-instance's id is a digest of its path, the hunk header's function context,
-and its added lines, without line numbers, so a review rerun or a later
-candidate with the same hunk names the same id, and a grant (bound to the
-id) holds across patches; a changed, moved, or split hunk is a new
-instance and needs a new tap. Identical added lines in the same function
-context of the same file share an id. After the release the task is
+candidate's real diff and refuses one it does not find. An instance's id
+digests its path, the hunk header's function context, and its added lines,
+without line numbers, so the same hunk on a rerun or a later candidate
+keeps its id and its grant; a changed, moved, or split hunk needs a new
+tap, and identical added lines in one function context of one file share
+an id. After the release the task is
 `merged`; a defect found in use comes back as `feedback.given` on the same
 task and goes to `patch` (Mission item 1, "resolving discovered defects").
 

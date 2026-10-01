@@ -455,12 +455,14 @@ kernel process, outside the turn's sandbox, which is what lets it write a
 remote the turn cannot. Status: **in use**.
 
 - **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to
-  one branch of the workspace's origin over git, never with `--force`. Git
-  runs with no global config, hooks, helpers, pagers, and transports pinned
-  off, and refuses a workspace whose own config names a program, redirects
-  a push, or includes other config, because that config is the turn's to
-  write (`core/git.py`). `lookup` reads the remote's branch head to reconcile a dangling
-  intent. It pushes to the origin URL recorded at start and refuses the
+  one branch of the workspace's origin over git, never with `--force`,
+  tags, submodules, or a signature. Git runs from `/usr/bin/git`
+  (`VALOR_GIT`) with a system-only PATH, no global config, and hooks,
+  helpers, pagers, and transports pinned off, and refuses a workspace whose
+  own config names a program, redirects a push, or includes other config,
+  because that config is the turn's to write (`core/git.py`). `lookup`
+  reads the remote's branch head; `broker.reconcile` uses it to settle a
+  dangling intent. It pushes to the origin URL recorded at start and refuses the
   task's target branch.
 - **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
   passed candidate onto the target branch, released only when the merge

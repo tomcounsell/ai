@@ -48,12 +48,11 @@ Storage detail, the event types, and how the kernel's database is kept out
 of a turn's reach are in [data.md](data.md).
 
 The constraint it enforces: "A ledger the system cannot edit records every
-effect." The first demonstration's first incident was a breach of it:
-the machine's Postgres trusted every loopback connection, so a turn could
-have written ledger rows as the kernel (rebuild-demonstration.md, Kernel
-findings 1). The fix was separation, never a check: the kernel's cluster is
-unreachable from a turn's sandbox, and a workspace that needs Postgres gets
-a cluster of its own with password auth.
+effect." The first demonstration's first incident breached it: Postgres
+trusted every loopback connection, so a turn could have written rows as
+the kernel (rebuild-demonstration.md, Kernel findings 1). The fix was
+separation, never a check: the kernel's cluster is unreachable from a
+turn's sandbox, and a workspace's Postgres is its own, with password auth.
 
 ## The task and its Brief
 
@@ -163,9 +162,11 @@ task's lock:
 - holds every `act` as `effect.held` for Tom.
 
 Performing writes `effect.intent` and commits it before the performer runs,
-then `effect.outcome`. A kill between the two leaves a findable dangling
-intent and never a silent effect; the performer's `lookup` asks the target
-whether its key landed, which is how a dangling intent is reconciled.
+then `effect.outcome`, holding a session lock on the effect throughout. A
+kill between the two leaves a dangling intent, never a silent effect, and
+frees the lock; `broker.reconcile` then asks the target through the
+performer's `lookup` and writes the outcome it shows. The router does this
+for a task's merge on its next run.
 
 A `merge` adds governance when the review or docs verdict on its
 candidate answered the governance boolean yes, computed by the broker and
@@ -180,10 +181,12 @@ one commit to one branch, never the target branch, and `merge` (`act`,
 offered to no turn) pushes a passed candidate onto it, both to the origin
 URL recorded at start, never forcing; `workspace_write` (`propose`) and
 `outbox_send` (`act`) serve the tests. The kernel runs no program a turn
-chose: its git reads no global config or inherited `GIT_*` variable, pins
-hooks, helpers, pagers, and transports off, and refuses a workspace whose
-own config names a program, redirects a push, or includes other config
-(`core/git.py`).
+chose: its git runs from an absolute path (`settings.git_bin`) with a
+system-only PATH, reads no global config or inherited `GIT_*` variable,
+pins hooks, helpers, pagers, transports, and push's tags, submodules, and
+signing off, and refuses a workspace whose own config names a program,
+redirects a push, sets any `push.*`, or includes other config, or cannot
+be read (`core/git.py`).
 
 The constraint it enforces: bounded authority and spend. In the first
 demonstration all three deliveries went out as held pushes that landed only
@@ -508,12 +511,11 @@ event arrives for a task: a message from a bridge, a turn ending, a
 verdict, a refusal, an approval, a timer from a routine. It renders the
 task's context deterministically from the store (same store state in,
 byte-identical context out, ordered by volatility so the provider's cache
-does the work), then advances the task one SDLC state. Deterministic
-transitions are code in the state machine; decisions that are not authority
-go to the judgement tier; work goes to an agent turn. The supervisor holds
-no state of its own, so killing it mid-task loses nothing durable. Serves:
-reliable stop and recovery; Mission item 1, since Tom never coordinates the
-gaps between steps.
+does the work), then advances the task one SDLC state: transitions are
+code, decisions that are not authority go to the judgement tier, work goes
+to an agent turn. It holds no state, so killing it loses nothing durable.
+Serves reliable stop and recovery, and Mission item 1: Tom never
+coordinates the gaps between steps.
 
 **Steering.** A message for a task mid-turn is a ledger row, delivered as
 the opening of the next turn; only stop interrupts a running turn, and
@@ -567,7 +569,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
-| Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome | lossless stop |
+| Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling intent reconciled from the target | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
@@ -579,13 +581,11 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 
 ## Limits
 
-- **A scheming model.** If the model is deceptively aligned [5, 6] and finds
-  a side channel, the ledger records only what passed through the kernel.
-  The effect ceiling keeps the damage survivable while the audit sample
-  finds it.
-- **Tool results are the agent's account.** The transcript is written
-  inside the sandbox and can be falsified there; the verifier re-executes
-  in a fresh container for that reason.
+- **A scheming model.** A deceptively aligned model [5, 6] with a side
+  channel leaves in the ledger only what passed the kernel; the effect
+  ceiling keeps the damage survivable while the audit sample finds it.
+- **Tool results are the agent's account.** The transcript is written in
+  the sandbox and can be falsified there, so the verifier re-executes.
 - **The sandbox runs as the machine's user.** A deliberate keychain read
   through the `security` tool is not fenced (rebuild-demonstration.md,
   Setup, Isolation), and the public internet is reachable, so a turn set
