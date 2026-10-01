@@ -1533,3 +1533,24 @@ delivery is what would send it through the checks.
   plan's count.
 - **G6.** The HTTPS refusal test fetches from a loopback port where nothing
   listens; the credential refusal is tested on git's own error text.
+
+## Checks on the 1.4a proposed patch, and the recommendation to Tom
+
+Candidate `fb22c8796` plus the docs check's commit `0598e961a`. Iteration
+stopped here for Tom's decision.
+
+- **Review:** `pass`, governance no. The four gateway bypass paths and
+  variants (mixed-case escapes, overlong dots, semicolon parameters,
+  fragments, absolute-form targets) are refused; allowed paths arrive
+  byte for byte. The orphan race, the 401 re-read, and the docs-head
+  `.valor` refusal are fixed.
+- **Test:** `gaps`. 507 passed, 6 skipped; no regressions, no leftover
+  services. Untested on their own: the pre-existing `verdict.json` check in
+  `write_inputs` (shadowed by the `mkdir`), `safe_tail` on a gateway with no
+  credential, an allowed path with escapes in its query, and the task-row
+  recheck race. One sweep test is flaky when another suite runs on the same
+  machine, since the sweep is machine-wide.
+- **Docs:** `updated`.
+
+**Recommendation:** give feedback that accepts this patch with the four
+test gaps added, which needs one patch and one more run of the three checks.
