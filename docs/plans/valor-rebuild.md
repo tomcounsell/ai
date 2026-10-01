@@ -33,8 +33,9 @@ Each milestone below states:
 - **Done**, as evidence: tests on real services, and a replay or emulator
   result where one applies. Narration is not evidence.
 - **Stakes**, which set the critique and review loops (0 to 2 each). The
-  guidance in the state machine doc applies: the kernel, stored data, money,
-  and anything that sends to a person are a 2.
+  guidance in the state machine doc applies: a small reversible change in
+  well-tested code is a 0, and a change to stored data, money,
+  authentication, migrations, or the kernel itself is a 2.
 - **Absorbs**, the known tech debt the plan pulls in ("leave it cleaner").
 - **Leaves out**, on purpose.
 
@@ -46,7 +47,9 @@ Governance binds every milestone. A milestone that needs a new check, gate,
 hook, or review step names the incident and mission item and waits for
 Tom's tap. The checkpoints already granted are the ones in the state
 machine doc (the request judge, the breadth check, critique and review
-loops), each ledgered with its ninety-day expiry.
+loops), each ledgered with its ninety-day expiry, and the DMARC test on
+mail from Tom (open question 17, taken as an approved check), ledgered the
+same way when milestone 2 builds it.
 
 ## Execution: who builds what
 
@@ -70,22 +73,30 @@ verdicts in each commit message.
 
 **The takeover point.** When milestone 1 is done, Valor builds everything
 after it through its own kernel. Tom starts each task and taps each merge
-from the command line until the Telegram bridge lands, then from Telegram.
-Each task's workspace is a fresh clone of this repository; a merge is a
-held `act` that pushes to the rebuild branch on GitHub. The running kernel
-is a separate checkout that is pulled and restarted after a kernel merge.
+from the command line, and from Telegram while the new bridge is up (see
+Where it runs). Each task's workspace is a fresh clone of this repository;
+a merge is a held `act` that pushes to the rebuild branch on GitHub. The
+running kernel is a separate checkout. Releasing a merge that touches
+`core/` also pulls that checkout, applies any schema change, and restarts
+the kernel service, as part of the same tapped effect.
 
 **Phase B, self-built (milestones 2 to 6).** A driving session steps in
 only to repair the kernel when Valor cannot run its pipeline at all. Such
 a repair is a task in the ledger like any other once the kernel runs
 again, so the record shows every fix.
 
-**Where it runs.** The rebuild is built on one of Valor's Macs. The kernel
-milestones run beside the old system. From milestone 2 the new bridge uses
-Valor's real Telegram account and mailbox: the old bridge on that Mac is
-stopped with `worker-disable` only during live bridge test windows and
-re-enabled after. The new bridge honors the same single-machine ownership
-of chats, so it never reads chats another Mac owns.
+**Where it runs.** Milestone 1 runs in `~/src/valor-rebuild` on the Mac
+this plan was written on. Before milestone 2 the kernel moves to the build
+Mac, one of Valor's, by a fresh clone and a restore of the kernel's
+database dump; the old system keeps running there. From milestone 2 the
+new bridges use Valor's real Telegram account and mailbox, live only
+during test windows. For a window, the old Telegram bridge, email bridge,
+and worker on that Mac are disabled (`worker-disable`, `email-disable`,
+and the bridge's own disable, so launchd does not restart them), and
+enabled again after; messages that arrive in the window belong to the new
+system and the old one does not replay them. A window can be long enough
+for one whole real task. The new bridge honors the same single-machine
+ownership of chats, so it never reads chats another Mac owns.
 
 ## Milestone 1: the kernel and its Postgres data
 
@@ -99,11 +110,13 @@ charge (`core/budget.py`), the broker and approvals (`core/broker.py`),
 lossless stop and reaping (`core/runs.py`), the session and turn loop
 (`core/session.py`), corrections (`core/corrections.py`), the `.valor/`
 signal channel (`core/signals.py`), and the Claude Code wrapper
-(`harnesses/claude_code.py`). All 38 tests stay green throughout.
+(`harnesses/claude_code.py`). The 39 current tests pass throughout, apart
+from the ones this plan deletes with the code they test.
 
 **Replaced.** The hand-picked `--mode bare|clarify` (replaced by the judge
 state), `done.md` writing `task.delivered` at once (it becomes a
-candidate), prompt text inside `core/session.py` (moves to stage files), and
+candidate), prompt text in `core/signals.py` and `core/session.py`
+rendered by `core/tasks.py` (moves to stage files), and
 the hand-driven `run` loop's four-state fold (replaced by the typed state
 machine).
 
@@ -124,12 +137,17 @@ Tom writes (**Reliable stop, recovery, and correction**; Mission item 6).
   upstream replaying a recorded response.
 - One typed settings module with a model-seat registry and prices that
   carry the date they were checked.
+- A schema change applies to a ledger that already holds history without
+  rewriting any row, shown by migrating a copy of the demonstration's
+  database.
+- A nightly `pg_dump` to an external disk keeps 30 dumps, and one restore
+  into a scratch cluster has been rehearsed (open question 20).
 
 **Absorbs.** Scattered constants (`BYTES_PER_TOKEN`, `REAP_GRACE_S`,
 `IDLE_TURNS`, the price table, the claude path); hard-coded
-`/Users/tomcounsell/...` paths; the unenforced spend marker in
-`tests/README.md` (enforced in `conftest.py`, or the README sentence goes);
-smoke scripts become `VALOR_LIVE` tests.
+`/Users/tomcounsell/...` paths; the sentence in `tests/README.md` claiming
+a spend marker is enforced when nothing enforces it (the sentence goes);
+smoke scripts become `VALOR_LIVE` tests; data.md gap 5 (no backups).
 
 **Leaves out.** The objective tree (milestone 4), snapshot documents for
 long streams (until a stream is measured slow).
@@ -174,8 +192,10 @@ kernel (**Three tiers**; Mission items 3 and 6).
   budget; `judgement.answered` and `judgement.failed` rows.
 - Three sites wired: `intake.underspecified` (the judge state), the
   breadth call in `checks.test`, and the governance boolean.
-- A calibration record over the baseline's six items for the judge site,
-  with n and a Brier score.
+- Both legs label all seven seed cases (the six baseline items and
+  psyoptimal #894) correctly in one run at the judge site. The Brier score
+  is recorded with its n as information, not as evidence; seven cases
+  cannot carry one.
 
 **Absorbs.** The `--mode` flag and its tests are deleted.
 
@@ -198,8 +218,9 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
 - The blind verifier: Opus in a fresh session, rerunning the tests in an
   Apple container built by the kernel; `review.decided` carries the
   governance boolean. Container RAM measured.
-- A GitHub push performer (`act`), so a released merge reaches
-  the rebuild branch on GitHub.
+- `tools/push_branch.py` gains a GitHub credential held by the kernel and
+  never by a turn, so a released merge reaches the rebuild branch on
+  GitHub.
 - Transcript copies kept in the store with a digest.
 
 **Absorbs.** Redis left running at replay teardown; replay databases
@@ -222,9 +243,13 @@ it builds anything real (Evidence "Independent checks").
   `costs.jsonl`). The stand-in moves to an Opus-class model.
 - **The takeover gate.** The full pipeline, judge to held merge, carries
   three baseline items: popoto #191 (thin), psyoptimal #872 (precise), and
-  popoto #633 (stateful). Each reaches a held merge with fidelity and
-  hidden-test results no worse than its bare baseline run, and with the
-  attention it took logged. Spend within the $25 per-run cap.
+  popoto #633 (stateful). Scored by the same Sonnet judge as the baseline
+  so results compare. Each reaches a held merge with hidden tests no worse
+  than its bare baseline run and fidelity within one point of it; #191 is
+  held to its clarify run (fidelity 3, 7 of 11 hidden tests), since its
+  bare run set no bar. One rerun per item is allowed before the gate
+  fails, since n = 1 differences of a point are noise. The attention each
+  took is logged. Spend within the $25 per-run cap.
 
 **Absorbs.** `/tmp` shared between runs; answer keys for cuttlefish #646,
 popoto #191, and popoto #188 confirmed by Tom (open item).
@@ -234,11 +259,13 @@ in milestone 4).
 
 ## Milestone 2: the Telegram and email bridges
 
-Self-built. Stakes: sends to real people, critique 1 and review 2.
+Self-built. Stakes: 2.1 changes the kernel, critique 2 and review 2; 2.2
+and 2.3 send to real people under Valor's name, critique 1 and review 2.
 
 **Goal.** Tom gives Valor work and taps approvals where he already is
 (Mission items 1 and 6), and nothing leaves under Valor's name without
-passing the broker (**Bounded authority and spend**, **One identity**).
+passing the broker (**Bounded authority and spend**; the one identity in
+[persona.md](../persona.md)).
 
 ### 2.1 The resident kernel and the bridge port
 
@@ -327,7 +354,8 @@ tap each one); other channels.
 
 ## Milestone 3: the harnesses
 
-Self-built. Stakes: critique 1, review 1. The Claude Code wrapper already
+Self-built. Stakes: critique 1 and review 1, except the gateway's OpenAI
+route, which meters money: critique 2 and review 2. The Claude Code wrapper already
 runs every turn; this milestone makes the port real by putting a second
 harness and a second vendor behind it.
 
@@ -372,10 +400,10 @@ report lands where the parent reads it.
 
 ### 4.2 The persona
 
-Stakes: critique 1, review 1. Every persona change runs the emulator.
+Stakes: critique 1, review 1.
 
 **Goal.** One identity in every turn, with the conduct the evidence asked
-for (**One identity**; Mission items 2 and 3).
+for ([persona.md](../persona.md); Mission items 2 and 3).
 
 **Done.** `persona/` holds identity, voice, conduct, and delivery format;
 the kernel renders it at the top of every turn, before the Brief and the
@@ -396,13 +424,17 @@ Stakes: critique 1, review 1.
 **Done.** `python -m core routine NAME` runs a routine from its
 `routine.toml` under a 30-day period budget; launchd plists call only that;
 a routine never makes Tom's task wait for the slot. The first two routines:
-the emulator sweep (including the `routed` arm) and the ninety-day expiry
-sweep, which opens one deletion branch held for Tom's tap. A read-only page
+the emulator sweep (including the `routed` arm), which measures and
+reports and blocks nothing (its second need: the demonstration and the
+baseline both ran it by hand), and the ninety-day expiry sweep, which opens
+one deletion branch held for Tom's tap. A read-only page
 in `ui/` shows tasks, spend, pending approvals, the attention log, and
 routine runs against their period budget, since status messages to Tom are
 not sent.
 
-**Leaves out.** Any routine without a demonstrated second need.
+**Leaves out.** Any routine without a demonstrated second need. The cheap
+judgement sweeps over docs (use shape 7) wait for a doc found contradicting
+the code twice.
 
 ## Milestone 5: tools on demand
 
@@ -411,7 +443,7 @@ Self-built. Stakes set per tool.
 Nothing is built here ahead of need. A tool is built when a task needs it
 twice (Mission item 5), declares one effect class per operation, reaches
 the world through the broker, and is deleted after ninety days unused. The
-GitHub push performer is already built in 1.4. The OpenAI Decisions API
+GitHub credential for `push_branch` is already added in 1.4. The OpenAI Decisions API
 leg for images is built when the first judgement site needs images.
 
 ## Milestone 6: memory
@@ -449,9 +481,13 @@ Cutover is Tom's to plan. These must be true first:
 
 Tom can overturn any of these; each is reversible.
 
-- The judgement port, the blind verifier, the emulator, and the GitHub push
-  performer are built inside milestone 1, since the pipeline needs them
-  before takeover.
+- The judgement port, the blind verifier, the emulator, and the GitHub
+  credential for pushes are built inside milestone 1, since the pipeline
+  needs them before takeover.
+- Milestone 2 binds a message to a task without a classifier: a reply to
+  one of Valor's messages goes to that task, and any other message from Tom
+  starts a new task. Judgement use shapes 2 and 3 wait for a misrouted
+  message.
 - The objective tree is built at the start of milestone 4, where routines
   first need it.
 - Stage instructions live as plain files in `skills/sdlc/` until the skill
@@ -467,7 +503,7 @@ Tom can overturn any of these; each is reversible.
 
 ## Open items
 
-- Which of Valor's Macs hosts the rebuild (needed before milestone 2).
+- Which of Valor's Macs hosts the rebuild from milestone 2.
 - The provider hosting the open-weight judgement fallback (needed in 1.3).
 - Tom's confirmation of the answer keys for cuttlefish #646, popoto #191,
   and popoto #188 (needed in 1.5).
