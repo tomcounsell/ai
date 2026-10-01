@@ -534,8 +534,8 @@ these are facts in the task's ledger:
 Each term is deterministic: a row exists or a git fact holds, or not. No
 model call decides whether a merge may happen. The broker checks all five
 and writes the merge's intent in one transaction under the task's lock. A
-merge whose performing process died leaves an intent with no outcome; the
-next run settles it from the target (`broker.reconcile`).
+merge whose performing process died leaves an intent with no outcome; a
+later run settles it from the target once it answers (`broker.reconcile`).
 
 **Where a merge goes.** At start the kernel records origin's push URL (as
 an absolute path) and the target branch (the flag, or the branch origin's

@@ -164,16 +164,9 @@ task's lock:
 Performing writes `effect.intent` and commits it before the performer runs,
 then `effect.outcome`, holding a session lock on the effect throughout. A
 kill between the two leaves a dangling intent, never a silent effect, and
-frees the lock; `broker.reconcile`
-then asks the target through the performer's `lookup`, which answers
-present (the target branch holds the commit, at its tip or below it),
-absent, or unknown (the target did not answer). Present is written `done`.
-Absent is written `failed` only once the intent is older than
-`reconcile_after_s` (twice the hard limit on any git call), since a
-performer whose database connection dropped frees the lock while its push
-may still run. Unknown writes nothing, and the effect stays in flight. The router does this for a task's merge
-on its next run; no other dangling intent is settled automatically, and
-`tasks.audit` lists it.
+frees the lock. For a task's merge the router's next run settles it from
+the target (`broker.reconcile`, never on an unanswered lookup; the rule is
+in [data.md](data.md)); other dangling intents stay listed by `tasks.audit`.
 
 A `merge` adds governance when the review or docs verdict on its
 candidate answered the governance boolean yes, computed by the broker and
@@ -188,12 +181,11 @@ one commit to one branch, never the target branch, and `merge` (`act`,
 offered to no turn) pushes a passed candidate onto it, both to the origin
 URL recorded at start, never forcing; `workspace_write` (`propose`) and
 `outbox_send` (`act`) serve the tests. The kernel runs no program a turn
-chose: its git runs from an absolute path (`settings.git_bin`) with a
-system-only PATH, reads no global config or inherited `GIT_*` variable,
-pins hooks, helpers, pagers, transports, and push's tags, submodules, and
-signing off, and refuses a workspace whose own config names a program,
-redirects a push, sets any `push.*`, or includes other config, or cannot
-be read (`core/git.py`).
+chose: its git (the Command Line Tools' install), `ps`, and `sandbox-exec`
+are checked before each run to be root's alone (`core/binaries.py`), and
+its git refuses a workspace whose own config names a program, redirects a
+push, sets any `push.*` or `http.*`, or includes other config
+(`core/git.py`; [tech-stack.md](tech-stack.md), the broker's performers).
 
 The constraint it enforces: bounded authority and spend. In the first
 demonstration all three deliveries went out as held pushes that landed only
