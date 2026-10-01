@@ -20,8 +20,10 @@ of a task's turns because every model call of every turn goes through the
 same gateway against the same committed budget.
 
 The turn's prompt is the instruction on the first turn, Tom's answer after a
-question, his feedback after a delivery, and "Continue." otherwise, each followed by what became of the
-effects the previous turn requested. What a turn left under `.valor/` (see
+question, his feedback after a delivery, and "Continue." otherwise, each
+followed by what became of the effects the previous turn requested. An
+answer or feedback is spent only by a turn that finishes: after a turn that
+fails or is stopped, the next one opens with it again. What a turn left under `.valor/` (see
 `core.signals`) is recorded in one `turn.collected` row, effect requests go
 to the broker, and a question or delivery gets its own row.
 """
@@ -106,8 +108,21 @@ async def record(conn, task_id: str, turn_id: str, found: signals.Signals) -> No
             await ledger.append(conn, task_id, "task.delivered", {"turn_id": turn_id, "summary": found.done})
 
 
-async def answer(conn, task_id: str, text: str, *, by: str = "tom", via: str = "the command line") -> str:
-    """Record Tom's answer to the task's open question. Returns its id."""
+def _provenance(by: str, via: str, role_played: bool) -> dict[str, Any]:
+    return {"by": by, "via": via, "role_played": role_played, "at": datetime.now(UTC).isoformat()}
+
+
+async def answer(
+    conn,
+    task_id: str,
+    text: str,
+    *,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> str:
+    """Record the answer to the task's open question. `by` names who wrote
+    it and `role_played` says whether they stood in for Tom. Returns its id."""
     text = text.strip()
     if not text:
         raise ValueError("an answer has text")
@@ -123,15 +138,24 @@ async def answer(conn, task_id: str, text: str, *, by: str = "tom", via: str = "
             {
                 "question_id": question["question_id"],
                 "text": text,
-                "provenance": {"by": by, "via": via, "at": datetime.now(UTC).isoformat()},
+                "provenance": _provenance(by, via, role_played),
             },
         )
     return question["question_id"]
 
 
-async def feedback(conn, task_id: str, text: str, *, by: str = "tom", via: str = "the command line") -> str:
-    """Record Tom's feedback on the task's latest delivery, which puts the
-    task back to work. Returns the feedback's id."""
+async def feedback(
+    conn,
+    task_id: str,
+    text: str,
+    *,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> str:
+    """Record feedback on the task's latest delivery, which puts the task
+    back to work. `by` and `role_played` are as for `answer`. Returns the
+    feedback's id."""
     text = text.strip()
     if not text:
         raise ValueError("feedback has text")
@@ -153,7 +177,7 @@ async def feedback(conn, task_id: str, text: str, *, by: str = "tom", via: str =
                 "feedback_id": feedback_id,
                 "on_delivery": state["delivered"],
                 "text": text,
-                "provenance": {"by": by, "via": via, "at": datetime.now(UTC).isoformat()},
+                "provenance": _provenance(by, via, role_played),
             },
         )
     return feedback_id
@@ -175,8 +199,10 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     for row in rows:
         p = row["payload"]
         if row["type"] == "turn.ended":
-            session = (p.get("result") or {}).get("session_id") or session
-            answered = feedback = None
+            result = p.get("result") or {}
+            session = result.get("session_id") or session
+            if p["outcome"] == "done" and not result.get("is_error"):
+                answered = feedback = None
         elif row["type"] == "turn.collected":
             last = p
         elif row["type"] == "question.answered":

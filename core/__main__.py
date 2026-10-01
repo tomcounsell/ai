@@ -2,13 +2,18 @@
 
 migrate [--db NAME]            create the role, the database, the schema
 start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
-      [--model M] [--harness-config FILE]
-                               start a task; prints its id
+      [--model M] [--harness-config FILE] [--mode bare|clarify]
+                               start a task; prints its id. `clarify` has the
+                               Brief ask Valor to inspect and ask before building
 run TASK_ID                    run turns until a question, a delivery, the
                                budget's end, or a stop; prints one status line
-answer TASK_ID TEXT            Tom's answer to the task's open question
-feedback TASK_ID TEXT          Tom's feedback on a delivered task; the next
-                               run resumes its session with it
+answer TASK_ID TEXT [--by B] [--role-played]
+                               the answer to the task's open question
+feedback TASK_ID TEXT [--by B] [--role-played]
+                               feedback on a delivered task; the next run
+                               resumes its session with it. `--by` names who
+                               wrote it (default tom); `--role-played` marks a
+                               stand-in speaking for Tom
 status TASK_ID                 the task as a fold over its ledger, with the
                                attention log (questions, answers, feedback)
 ledger TASK_ID                 every ledger row of the task
@@ -110,14 +115,19 @@ async def _run(args) -> None:
                 workspace=str(Path(args.workspace).resolve()) if args.workspace else None,
                 model=args.model,
                 harness=harness,
+                mode=args.mode,
             )
             print(await tasks.start(conn, brief))
         elif args.command == "answer":
-            question_id = await session.answer(conn, args.task_id, args.text)
+            question_id = await session.answer(
+                conn, args.task_id, args.text, by=args.by, role_played=args.role_played
+            )
             print(f"answered question {question_id}; continue with: python -m core run {args.task_id}")
         elif args.command == "feedback":
             try:
-                feedback_id = await session.feedback(conn, args.task_id, args.text)
+                feedback_id = await session.feedback(
+                    conn, args.task_id, args.text, by=args.by, role_played=args.role_played
+                )
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"feedback {feedback_id} recorded; continue with: python -m core run {args.task_id}")
@@ -171,13 +181,14 @@ def main() -> None:
     start.add_argument("--workspace")
     start.add_argument("--model", default="haiku")
     start.add_argument("--harness-config")
+    start.add_argument("--mode", default="bare", choices=list(tasks.MODES))
     sub.add_parser("run").add_argument("task_id")
-    answer = sub.add_parser("answer")
-    answer.add_argument("task_id")
-    answer.add_argument("text")
-    feedback = sub.add_parser("feedback")
-    feedback.add_argument("task_id")
-    feedback.add_argument("text")
+    for name in ("answer", "feedback"):
+        reply = sub.add_parser(name)
+        reply.add_argument("task_id")
+        reply.add_argument("text")
+        reply.add_argument("--by", default="tom")
+        reply.add_argument("--role-played", action="store_true")
     sub.add_parser("status").add_argument("task_id")
     sub.add_parser("ledger").add_argument("task_id")
     stop = sub.add_parser("stop")

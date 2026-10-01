@@ -147,8 +147,10 @@ def test_question_answer_delivery_and_a_push_held_for_tom(dsn, workspace):
             "question_id": attention[0]["question_id"],
             "question": "Which greeting do you want?",
             "answer": "Morning, Tom.",
+            "provenance": attention[0]["provenance"],
         }
     ]
+    assert attention[0]["provenance"]["by"] == "tom" and attention[0]["provenance"]["role_played"] is False
     answered = next(r["payload"] for r in rows if r["type"] == "question.answered")
     assert answered["provenance"]["by"] == "tom"
 
@@ -259,6 +261,97 @@ def test_feedback_reopens_a_delivery_and_the_next_run_resumes_the_same_session(d
     ]
 
 
+# Asks on its first turn and delivers on every turn that opens with an answer
+# or feedback; exits 1 without a result when `.valor/fail_next` exists (and
+# removes it), the way a turn the sandbox or the network broke would end.
+FLAKY = r"""
+import json, pathlib, sys
+prompt, resume = sys.argv[1], sys.argv[2]
+v = pathlib.Path(".valor")
+v.mkdir(exist_ok=True)
+with (v / "turns.jsonl").open("a") as f:
+    f.write(json.dumps({"prompt": prompt, "resume": resume}) + "\n")
+if (v / "fail_next").exists():
+    (v / "fail_next").unlink()
+    sys.exit(1)
+if not resume:
+    (v / "question.md").write_text("Which greeting?")
+elif prompt.startswith(("Tom answered", "Tom reviewed")):
+    (v / "done.md").write_text("Delivered: " + prompt.splitlines()[2])
+print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+"""
+
+
+def flaky_for(prompt, resume, b):
+    def build(url, brief):
+        return claude_code.TurnCommand(
+            argv=[sys.executable, "-c", FLAKY, prompt, resume or ""],
+            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+            cwd=b.workspace,
+            harness="script",
+            parse=claude_code.parse,
+        )
+
+    return build
+
+
+def test_a_failed_turn_leaves_the_answer_and_the_feedback_for_the_next_turn(dsn, tmp_path):
+    fail_next = tmp_path / ".valor" / "fail_next"
+
+    async def go():
+        task = await new_task(dsn, tmp_path)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        outs = [await session.run(gateway, task, flaky_for, dsn=dsn)]
+        async with await db.connect(dsn) as conn:
+            await session.answer(conn, task, "Morning, Tom.", by="stand-in", role_played=True)
+        fail_next.touch()
+        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
+        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
+        async with await db.connect(dsn) as conn:
+            await session.feedback(conn, task, "Shorter, please.")
+        fail_next.touch()
+        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
+        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
+        await gateway.close()
+        return outs
+
+    outs = run(go())
+    assert [o["status"] for o in outs] == ["waiting", "failed", "delivered", "failed", "delivered"]
+    assert outs[2]["state"]["delivered"] == "Delivered: Morning, Tom."
+    assert outs[4]["state"]["delivered"] == "Delivered: Shorter, please."
+
+    prompts = [
+        json.loads(line)["prompt"] for line in (tmp_path / ".valor" / "turns.jsonl").read_text().splitlines()
+    ]
+    answered = "Tom answered your question:\n\nMorning, Tom."
+    assert prompts[1:3] == [answered, answered]
+    assert prompts[3] == prompts[4] and "Shorter, please." in prompts[3]
+
+    question, feedback = outs[4]["state"]["attention"]
+    assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
+    assert feedback["provenance"]["by"] == "tom" and feedback["provenance"]["role_played"] is False
+
+
+def test_the_clarify_mode_is_recorded_and_carried_in_the_brief_and_bare_is_unchanged(dsn, tmp_path):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            bare = await new_task(dsn, tmp_path)
+            clarify = await new_task(dsn, tmp_path, mode="clarify")
+            return (
+                await tasks.dispatch(conn, bare),
+                await tasks.dispatch(conn, clarify),
+                await ledger.read(conn, clarify),
+            )
+
+    bare, clarify, rows = run(go())
+    assert signals.CLARIFY not in bare["text"] and bare["text"].endswith(signals.PROTOCOL)
+    assert clarify["text"].endswith(signals.PROTOCOL + "\n\n" + signals.CLARIFY)
+    assert rows[0]["type"] == "task.started" and rows[0]["payload"]["mode"] == "clarify"
+    with pytest.raises(ValueError, match="mode"):
+        tasks.Brief(instruction="x", budget_usd_micros=0, mode="interview")
+
+
 def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, workspace):
     ws, _ = workspace
 
@@ -360,3 +453,23 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     assert command.env["GH_CONFIG_DIR"] == "/gh" and command.env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert command.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4321/t/token"
     assert command.env["TEST_DB_PORT"] == "5439"
+
+
+def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(workspace, tmp_path):
+    ws, origin = workspace
+    marker = tmp_path / "ran"
+    hook = f"#!/bin/sh\necho $0 >> {marker}\n"
+    for path in (ws / ".git" / "hooks" / "pre-push", tmp_path / "hooks" / "pre-push"):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(hook)
+        path.chmod(0o755)
+    receive = tmp_path / "receive"
+    receive.write_text(f'#!/bin/sh\necho receive >> {marker}\nexec git-receive-pack "$@"\n')
+    receive.chmod(0o755)
+    git(ws, "config", "core.hooksPath", str(tmp_path / "hooks"))
+    git(ws, "config", "remote.origin.receivepack", str(receive))
+    head = git(ws, "rev-parse", "HEAD").strip()
+
+    pushed = PushBranch(ws).perform(broker.Action("push_branch", "valor/x", {"head_sha": head}), "key")
+    assert pushed["sha"] == head and git(origin, "rev-parse", "valor/x").strip() == head
+    assert not marker.exists()

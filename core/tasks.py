@@ -15,6 +15,12 @@ from core import corrections, ledger, signals
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
+# How the Brief asks Valor to open the task. `bare` gives the instruction
+# alone; `clarify` is an experimental arm whose Brief tells Valor to spend
+# its first turn inspecting and asking (`signals.CLARIFY`). The mode is data
+# in the Brief, never something the kernel enforces.
+MODES = ("bare", "clarify")
+
 STOP_CHANNEL = "valor_stop"
 
 
@@ -31,6 +37,7 @@ class Brief:
 
     `workspace` is the directory a turn works in, `model` the model it runs,
     and `harness` the harness's own settings for the task (its isolation).
+    `mode` is one of `MODES`.
     """
 
     instruction: str
@@ -40,6 +47,7 @@ class Brief:
     workspace: str | None = None
     model: str = "haiku"
     harness: dict[str, Any] = field(default_factory=dict)
+    mode: str = "bare"
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -48,6 +56,8 @@ class Brief:
             raise ValueError("a budget is never negative")
         if self.max_effect_class not in EFFECT_RANK:
             raise ValueError(f"unknown effect class {self.max_effect_class!r}")
+        if self.mode not in MODES:
+            raise ValueError(f"unknown mode {self.mode!r}")
 
 
 class TaskStopped(RuntimeError):
@@ -70,6 +80,7 @@ async def start(conn, brief: Brief) -> str:
                 "budget_usd_micros": brief.budget_usd_micros,
                 "max_effect_class": brief.max_effect_class,
                 "governance_grant": brief.governance_grant,
+                "mode": brief.mode,
             },
         )
     return brief.id
@@ -105,6 +116,8 @@ async def dispatch(conn, task_id: str) -> dict[str, Any]:
     sections = [head, corrections.render(standing)]
     if b.workspace:
         sections.append(signals.PROTOCOL)
+        if b.mode == "clarify":
+            sections.append(signals.CLARIFY)
     text = "\n\n".join(sections)
     return {
         "text": text,
@@ -145,7 +158,9 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 
     `attention` lists every point where Tom acted on the task, in ledger
     order: each question (`kind` "question") with his answer, and each piece
-    of feedback on a delivery (`kind` "feedback"). `delivered` is the latest
+    of feedback on a delivery (`kind` "feedback"), each with the provenance
+    it was recorded with (`by`, `via`, `at`, and `role_played`, true when
+    someone stood in for Tom). `delivered` is the latest
     delivery's summary; feedback after it puts the task back to `live` until
     the next `task.delivered`."""
     rows = await ledger.read(conn, task_id)
@@ -187,6 +202,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
             for q in attention:
                 if q.get("question_id") == p["question_id"]:
                     q["answer"] = p["text"]
+                    q["provenance"] = _provenance(p)
         elif kind == "feedback.given":
             attention.append(
                 {
@@ -194,7 +210,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "feedback_id": p["feedback_id"],
                     "on_delivery": p["on_delivery"],
                     "feedback": p["text"],
-                    "provenance": p["provenance"],
+                    "provenance": _provenance(p),
                 }
             )
             reopened = True
@@ -223,6 +239,12 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         "attention": attention,
         "delivered": delivered,
     }
+
+
+def _provenance(payload: dict[str, Any]) -> dict[str, Any]:
+    """A row's provenance as recorded; a row from before `role_played` was
+    recorded says nothing about it, and reads as not role-played."""
+    return {"role_played": False, **payload.get("provenance", {})}
 
 
 def audit(state: dict[str, Any]) -> list[str]:

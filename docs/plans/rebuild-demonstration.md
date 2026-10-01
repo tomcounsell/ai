@@ -248,16 +248,16 @@ Incidents during the demo, from this branch's history after 46e6ac0a9:
    Constraint "Reliable stop, recovery, and correction": it failed cleanly,
    metered $0, lost nothing.
 
-Two further defects this record found, not yet fixed:
+Two further defects this record found, since fixed:
 
 4. **A failed turn consumes the feedback.** `core/session.py` clears pending
    feedback on any `turn.ended`, failed or not, so the retry (row 181) was
    prompted "Continue." Valor saw the feedback only because Claude Code had
-   saved the failed turn's prompt in session `d0f7ce5e`. A bug: clear it
-   only on a `done` turn.
+   saved the failed turn's prompt in session `d0f7ce5e`. Fixed: only a
+   turn that finishes spends a pending answer or feedback.
 5. **Feedback provenance cannot name its author.** Rows 177 and 207 both
    read `"by": "tom"`; 207 was role-played. Constraint: corrections "carry
-   provenance". Let `feedback` record who wrote it and on what permission.
+   provenance". Fixed: answers and feedback record `by` and `role_played`.
 
 **What the kernel lacked.** Nothing in the structure forced or prompted a
 question. The Brief told Valor how to ask and quoted item 3's restraint
@@ -277,7 +277,6 @@ change" lists were the right instinct, placed after the build.
   settled. Mission items 3 and 6.
 - A way to run the app and view it in a headless browser in the workspace
   (Mission item 1, "testing actual use"). A capability, not a gate.
-- Findings 4 and 5: fix the code; no guard.
 
 ## Correction 1 rendering, verified
 

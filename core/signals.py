@@ -13,7 +13,8 @@ deliberate tool call that survives whatever prose follows it, and a turn
 killed mid-way leaves whatever it wrote readable. Each file is moved to
 `.valor/handled/<turn_id>/` once read, so no signal is read twice.
 
-`PROTOCOL` is the text every workspace turn's Brief carries.
+`PROTOCOL` is the text every workspace turn's Brief carries, and `CLARIFY`
+the extra section a task in the `clarify` mode carries.
 """
 
 import json
@@ -46,6 +47,24 @@ turn ends. `.valor/` is ignored by git.
 
 A turn that ends with neither a question nor `done.md` is resumed with
 "Continue." """
+
+# The `clarify` arm's opening, carried in the Brief of a task started with
+# `--mode clarify`. It is the experiment's data, not a rule the kernel
+# checks: nothing reads the first turn for compliance.
+CLARIFY = """# Mode: clarify
+
+This task opens with a clarifying turn. In your first turn, only inspect:
+read the code and whatever else in the workspace you need, and change no
+file. End that turn by writing `.valor/question.md` holding:
+
+1. The questions for Tom whose answers would materially change what you
+   build or the authority it needs, numbered, each with the answer you will
+   assume if he leaves it open. Ask nothing you can settle by reading the
+   code.
+2. The approach you intend to take, in a few lines.
+
+If you have no such questions, say so in `question.md` and still state your
+approach. Tom's reply opens your next turn; build from there."""
 
 
 @dataclass
