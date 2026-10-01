@@ -6,13 +6,15 @@ ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task now, wherever its turn runs
 pending                        act-class effects held for Tom
 approve EFFECT_ID --note TEXT  Tom's tap on one held effect
+correct TEXT [--by] [--via]    record Tom's next correction (global, direct)
+corrections                    every correction, in force for every turn
 """
 
 import argparse
 import asyncio
 import json
 
-from core import broker, db, ledger, tasks
+from core import broker, corrections, db, ledger, tasks
 
 
 async def _run(args) -> None:
@@ -31,6 +33,11 @@ async def _run(args) -> None:
                 )
         elif args.command == "approve":
             print(await broker.approve(conn, args.effect_id, note=args.note))
+        elif args.command == "correct":
+            c = await corrections.record(conn, args.text, by=args.by, via=args.via)
+            print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
+        elif args.command == "corrections":
+            print(corrections.render(await corrections.in_force(conn)))
 
 
 def main() -> None:
@@ -48,6 +55,11 @@ def main() -> None:
     approve = sub.add_parser("approve")
     approve.add_argument("effect_id")
     approve.add_argument("--note", required=True)
+    correct = sub.add_parser("correct")
+    correct.add_argument("text")
+    correct.add_argument("--by", default="tom")
+    correct.add_argument("--via", default="the command line")
+    sub.add_parser("corrections")
     args = parser.parse_args()
     if args.command == "migrate":
         print(db.migrate(args.db))

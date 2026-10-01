@@ -2,8 +2,11 @@
 instant.
 
 The harness port is `TurnCommand`: the argv, environment, and working
-directory that run one turn against a given gateway base URL, plus how to
-read the result from stdout. `core` never knows which harness it runs.
+directory that run one turn against a given gateway base URL and the
+dispatched Brief, plus how to read the result from stdout. `core` never
+knows which harness it runs. The dispatched Brief is rendered from the ledger
+as the turn starts, Tom's corrections included, and recorded whole in
+`turn.started`, so the ledger shows exactly what the turn was given.
 
 Stop is lossless because nothing the turn owns lives only in this process.
 The `task.stopped` row fences the task in the database; the notification
@@ -36,7 +39,7 @@ class TurnCommand:
 async def run_turn(
     gateway: Gateway,
     task_id: str,
-    build: Callable[[str], TurnCommand],
+    build: Callable[[str, str], TurnCommand],
     dsn: str | None = None,
 ) -> dict[str, Any]:
     """Run one turn of the task to its end or its stop. Returns the
@@ -46,17 +49,26 @@ async def run_turn(
     listener = await db.connect(dsn)
     try:
         await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
-        command = build(gateway.issue(task_id, turn_id))
+        base_url = gateway.issue(task_id, turn_id)
         async with await db.connect(dsn) as conn, conn.transaction():
             await ledger.lock(conn, f"task:{task_id}")
             if await tasks.is_stopped(conn, task_id):
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)
+            dispatched = await tasks.dispatch(conn, task_id)
+            command = build(base_url, dispatched["text"])
             await ledger.append(
                 conn,
                 task_id,
                 "turn.started",
-                {"turn_id": turn_id, "harness": command.harness, "argv": command.argv},
+                {
+                    "turn_id": turn_id,
+                    "harness": command.harness,
+                    "argv": command.argv,
+                    "brief": dispatched["text"],
+                    "brief_sha256": dispatched["sha256"],
+                    "corrections": dispatched["corrections"],
+                },
             )
         proc = await asyncio.create_subprocess_exec(
             *command.argv,

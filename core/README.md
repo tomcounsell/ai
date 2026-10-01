@@ -39,5 +39,6 @@ Effect classes are defined in `core/`: `read` (no effect), `propose` (reversible
 
 ## Entry points
 
-- `python -m core migrate` creates the `valor_kernel` role, the `valor_rebuild` database, and the schema in `core/schema.sql`. `python -m core --help` lists the rest: `status`, `ledger`, `stop`, `pending`, `approve`.
+- `python -m core migrate` creates the `valor_kernel` role, the `valor_rebuild` database, and the schema in `core/schema.sql`. `python -m core --help` lists the rest: `status`, `ledger`, `stop`, `pending`, `approve`, `correct`, `corrections`.
+- `python -m core correct "TEXT"` records Tom's next correction in the ledger. Every turn's dispatched Brief renders the corrections in force from the ledger as the turn starts, and `turn.started` records that text.
 - `scripts/kernel_smoke.py` runs the kernel end to end: a task with a budget, one `claude -p` turn through the gateway, a `propose` effect, an `act` effect held for Tom's approval, a second task stopped mid-turn, and the ledger.

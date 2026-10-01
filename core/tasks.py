@@ -11,7 +11,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from core import ledger
+from core import corrections, ledger
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
@@ -76,6 +76,33 @@ async def brief(conn, task_id: str) -> Brief:
     if row is None:
         raise KeyError(task_id)
     return Brief(**row[0])
+
+
+async def dispatch(conn, task_id: str) -> dict[str, Any]:
+    """The Brief as a turn receives it: the task's commitments plus every
+    correction in force, rendered from the ledger now, never from a copy
+    made when the task started. Returns the text, the correction numbers it
+    carries, and the text's digest."""
+    b = await brief(conn, task_id)
+    standing = await corrections.in_force(conn)
+    text = "\n\n".join(
+        [
+            (
+                "# Brief\n\n"
+                f"Task: {b.id}\n"
+                f"Instruction: {b.instruction}\n"
+                f"Budget: ${b.budget_usd_micros / 1_000_000:.4f}\n"
+                f"Effect ceiling: {b.max_effect_class}\n"
+                f"Governance grant: {b.governance_grant or 'none'}"
+            ),
+            corrections.render(standing),
+        ]
+    )
+    return {
+        "text": text,
+        "corrections": [c["number"] for c in standing],
+        "sha256": ledger.digest(text),
+    }
 
 
 async def is_stopped(conn, task_id: str) -> bool:

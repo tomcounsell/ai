@@ -7,6 +7,8 @@ the gateway, so every model call it makes is metered against the task.
 gateway's worst-case reservation close to what a call can really cost.
 Claude Code's own session variables are dropped from the environment, so a
 turn started from inside a Claude Code session is still a fresh process.
+The dispatched Brief, Tom's corrections included, follows the persona in the
+system prompt.
 """
 
 import json
@@ -28,9 +30,10 @@ def turn(
     tools: str = "",
     max_output_tokens: int = 1024,
 ):
-    """A builder: given the gateway base URL, the command for one turn."""
+    """A builder: given the gateway base URL and the dispatched Brief, the
+    command for one turn."""
 
-    def build(base_url: str) -> TurnCommand:
+    def build(base_url: str, brief: str) -> TurnCommand:
         env = {
             k: v
             for k, v in os.environ.items()
@@ -50,7 +53,7 @@ def turn(
             "--strict-mcp-config",
             "--no-session-persistence",
             "--system-prompt",
-            system_prompt,
+            f"{system_prompt}\n\n{brief}",
             "--tools",
             tools,
         ]

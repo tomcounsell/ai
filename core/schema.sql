@@ -24,7 +24,8 @@ CREATE INDEX IF NOT EXISTS events_task_idx ON events (task_id, id);
 CREATE INDEX IF NOT EXISTS events_payload_gin ON events USING gin (payload jsonb_path_ops);
 
 -- One reservation and one charge per gateway call, one of each effect row
--- per effect, and an approval consumed by at most one intent. These make
+-- per effect, an approval consumed by at most one intent, and one correction
+-- per number. These make
 -- every fold over the ledger total.
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_call_row
     ON events (type, (payload->>'call_id'))
@@ -35,6 +36,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_effect_row
 CREATE UNIQUE INDEX IF NOT EXISTS events_approval_used_once
     ON events ((payload->>'approval_id'))
     WHERE type = 'effect.intent' AND payload->>'approval_id' IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_correction_number
+    ON events ((payload->>'number'))
+    WHERE type = 'correction.recorded';
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_stop
     ON events (task_id) WHERE type = 'task.stopped';
 
