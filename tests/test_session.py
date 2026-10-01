@@ -473,3 +473,29 @@ def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(workspace, tmp_p
     pushed = PushBranch(ws).perform(broker.Action("push_branch", "valor/x", {"head_sha": head}), "key")
     assert pushed["sha"] == head and git(origin, "rev-parse", "valor/x").strip() == head
     assert not marker.exists()
+
+
+def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path):
+    """Tom's request for pso-a began "- Create new flag ..."; as a bare argv
+    element after `-p`, claude rejected it ("unknown option") and the turn
+    failed before any model call. The prompt now follows `--`. The real CLI
+    parses it: pointed at a dead gateway, it is still retrying after two
+    seconds, not exiting on an option error."""
+    request = "- Create new flag, separate from the old one"
+    for build in (
+        claude_code.turn(request, cwd=str(tmp_path)),
+        claude_code.workspace_turn(request, cwd=str(tmp_path), resume="abc"),
+    ):
+        argv = build("http://127.0.0.1:9/t/x", "# Brief").argv
+        assert argv[-2:] == ["--", request]
+    argv = claude_code.turn(request, cwd=str(tmp_path))("http://127.0.0.1:9/t/x", "# Brief").argv
+    env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"}
+    proc = subprocess.Popen(
+        argv, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    try:
+        out, _ = proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+    assert "unknown option" not in out

@@ -48,7 +48,6 @@ def turn(
         argv = [
             CLAUDE,
             "-p",
-            prompt,
             "--output-format",
             "json",
             "--model",
@@ -60,6 +59,8 @@ def turn(
             f"{system_prompt}\n\n{brief}",
             "--tools",
             tools,
+            "--",
+            prompt,
         ]
         return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
 
@@ -133,7 +134,6 @@ def workspace_turn(
         argv = [
             CLAUDE,
             "-p",
-            prompt,
             "--output-format",
             "json",
             "--model",
@@ -152,6 +152,7 @@ def workspace_turn(
         ]
         if resume:
             argv += ["--resume", resume]
+        argv += ["--", prompt]
         if harness.get("sandbox_profile"):
             port = urlparse(base_url).port
             argv = ["sandbox-exec", "-D", f"GATEWAY_PORT={port}", "-f", harness["sandbox_profile"], *argv]
