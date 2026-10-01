@@ -1,5 +1,5 @@
-"""What the replay scripts share: where their mess lives, the machine's one
-turn lock, the kernel's command line, and a plain `claude -p` call for the
+"""What the replay scripts share: where their mess lives, the machine's turn
+slots, the kernel's command line, and a plain `claude -p` call for the
 stand-in and the judge.
 
 Everything a replay writes (caches, workspaces, results, logs) lives under
@@ -23,6 +23,7 @@ PYTHON = str(ROOT / ".venv" / "bin" / "python") if (ROOT / ".venv").exists() els
 CLAUDE = "claude"
 COSTS = DEMO / "costs.jsonl"
 LOCK = DEMO / "claude-turn.lock"
+SLOTS = int(os.environ.get("VALOR_DEMO_SLOTS", "3"))
 
 
 def now() -> str:
@@ -65,26 +66,37 @@ def status(task_id: str) -> dict:
 
 @contextmanager
 def machine_lock(holder: str):
-    """One claude turn at a time on this Mac (16 GB): every replay driver
-    holds this for its whole run, so two drivers never overlap."""
+    """At most `SLOTS` replays' claude turns at once on this Mac: every
+    replay driver holds one slot (a lock file) for its whole run and takes
+    whichever is free, waiting while none is."""
     DEMO.mkdir(parents=True, exist_ok=True)
-    with LOCK.open("a+") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            f.seek(0)
-            print(f"waiting for the machine lock, held by: {f.read().strip() or 'unknown'}", file=sys.stderr)
-            fcntl.flock(f, fcntl.LOCK_EX)
+    waited = False
+    while True:
+        for i in range(SLOTS):
+            f = LOCK.with_name(f"{LOCK.name}.{i}").open("a+")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                f.close()
+        else:
+            if not waited:
+                print(f"waiting for one of {SLOTS} machine slots", file=sys.stderr)
+                waited = True
+            time.sleep(5)
+            continue
+        break
+    f.seek(0)
+    f.truncate()
+    f.write(f"{holder} pid {os.getpid()} since {now()}\n")
+    f.flush()
+    try:
+        yield
+    finally:
         f.seek(0)
         f.truncate()
-        f.write(f"{holder} pid {os.getpid()} since {now()}\n")
-        f.flush()
-        try:
-            yield
-        finally:
-            f.seek(0)
-            f.truncate()
-            fcntl.flock(f, fcntl.LOCK_UN)
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
 
 
 def claude_json(prompt: str, *, system: str, model: str, purpose: str, subject: str) -> dict:

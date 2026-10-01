@@ -93,3 +93,43 @@ def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_pat
     assert subprocess.run(
         ["git", "-C", str(stranger), "rev-parse", "valor/work"], capture_output=True, check=False
     ).returncode
+
+
+def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
+    """Up to SLOTS drivers run at once; the next waits for a free slot."""
+    import threading
+    import time
+
+    import replay_common
+
+    monkeypatch.setattr(replay_common, "DEMO", tmp_path)
+    monkeypatch.setattr(replay_common, "LOCK", tmp_path / "claude-turn.lock")
+    monkeypatch.setattr(replay_common, "SLOTS", 2)
+    entered = []
+
+    def third():
+        with replay_common.machine_lock("third"):
+            entered.append(time.monotonic())
+
+    with replay_common.machine_lock("one"), replay_common.machine_lock("two"):
+        t = threading.Thread(target=third)
+        t.start()
+        time.sleep(1)
+        assert entered == []
+        released = time.monotonic()
+    t.join(timeout=15)
+    assert entered and entered[0] >= released
+
+
+def test_each_redis_run_gets_a_port_no_other_run_holds(tmp_path, monkeypatch):
+    import json
+
+    import replay_workspace
+
+    monkeypatch.setattr(replay_workspace, "DEMO", tmp_path)
+    for name, info in {"old": {}, "a": {"redis_port": 6391}, "b": {"redis_port": 6393}}.items():
+        (tmp_path / "runs" / name).mkdir(parents=True)
+        (tmp_path / "runs" / name / "replay.json").write_text(json.dumps(info))
+    assert replay_workspace._redis_port(tmp_path / "runs" / "new") == 6392
+    assert replay_workspace._redis_port(tmp_path / "runs" / "b") == 6393
+    assert replay_workspace._redis_port(tmp_path / "runs" / "old") == 6390

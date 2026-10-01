@@ -28,8 +28,9 @@ Layout under $VALOR_DEMO (default /Users/tomcounsell/src/valor-demo):
                                 own database, owned by the `test` role
     bin/                        binaries every run shares (uv): first on the
                                 turn's PATH, readable, not writable
-    redis/                      one redis-server for every workspace, on
-                                127.0.0.1:6390, no persistence; its log and pid
+    redis/                      redis-servers on 127.0.0.1, one per run that
+                                asks for Redis (6391 to 6399; 6390 for runs
+                                built before that), no persistence; logs, pids
 
 The sandbox (`sandbox_profile`) lets a turn read and write its own run
 directory and its own Claude Code transcripts and nothing else under ~/src
@@ -57,6 +58,7 @@ from replay_common import DEMO, git, now, ok, sh
 PG_BIN = Path("/opt/homebrew/opt/postgresql@18/bin")
 PG_PORT = 5439
 REDIS_PORT = 6390
+REDIS_PORTS = range(6391, 6400)
 DEV_PORTS = range(8000, 8010)
 SERVICES = ("postgres", "redis")
 HOME = Path.home()
@@ -124,12 +126,12 @@ def sandbox_profile(
     return "\n".join(lines) + "\n"
 
 
-def ports_for(services: list[str]) -> list[int]:
+def ports_for(services: list[str], redis_port: int = REDIS_PORT) -> list[int]:
     ports = list(DEV_PORTS)
     if "postgres" in services:
         ports.append(PG_PORT)
     if "redis" in services:
-        ports.append(REDIS_PORT)
+        ports.append(redis_port)
     return ports
 
 
@@ -166,19 +168,19 @@ def ensure_postgres() -> None:
         sh(str(PG_BIN / "pg_ctl"), "-D", str(data), "-l", str(DEMO / "pg" / "postgres.log"), "-w", "start")
 
 
-def ensure_redis() -> None:
+def ensure_redis(port: int = REDIS_PORT) -> None:
     """A redis-server of the replays' own on 127.0.0.1:6390: no persistence,
     no unix socket, and the protected configs (`dir`, `dbfilename`), DEBUG,
     and MODULE closed, since the server runs outside the sandbox and those
     would let a turn write files through it."""
-    if sh("redis-cli", "-p", str(REDIS_PORT), "ping", check=False) == "PONG":
+    if sh("redis-cli", "-p", str(port), "ping", check=False) == "PONG":
         return
     d = DEMO / "redis"
     d.mkdir(parents=True, exist_ok=True)
     sh(
         "redis-server",
         "--port",
-        str(REDIS_PORT),
+        str(port),
         "--bind",
         "127.0.0.1",
         "--protected-mode",
@@ -198,22 +200,38 @@ def ensure_redis() -> None:
         "--daemonize",
         "yes",
         "--pidfile",
-        str(d / "redis.pid"),
+        str(d / f"redis-{port}.pid"),
         "--logfile",
-        str(d / "redis.log"),
+        str(d / f"redis-{port}.log"),
     )
     for _ in range(50):
-        if sh("redis-cli", "-p", str(REDIS_PORT), "ping", check=False) == "PONG":
+        if sh("redis-cli", "-p", str(port), "ping", check=False) == "PONG":
             return
         sh("sleep", "0.1")
-    raise SystemExit(f"redis-server did not come up on {REDIS_PORT}; see {d / 'redis.log'}")
+    raise SystemExit(f"redis-server did not come up on {port}; see {d / f'redis-{port}.log'}")
 
 
-def ensure_services(services: list[str]) -> None:
+def ensure_services(services: list[str], redis_port: int = REDIS_PORT) -> None:
     if "postgres" in services:
         ensure_postgres()
     if "redis" in services:
-        ensure_redis()
+        ensure_redis(redis_port)
+
+
+def _redis_port(run: Path) -> int:
+    """The run's own redis-server port, so concurrent runs never flush each
+    other's data: the one its replay.json records, 6390 for a run built
+    before ports were per run, else the lowest port no other run holds."""
+    own = run / "replay.json"
+    if own.exists():
+        return json.loads(own.read_text()).get("redis_port", REDIS_PORT)
+    taken = {
+        json.loads(f.read_text()).get("redis_port", REDIS_PORT) for f in (DEMO / "runs").glob("*/replay.json")
+    }
+    free = [p for p in REDIS_PORTS if p not in taken]
+    if not free:
+        raise SystemExit(f"no free replay Redis port in {REDIS_PORTS}")
+    return free[0]
 
 
 # -- the clone -----------------------------------------------------------------
@@ -272,7 +290,8 @@ def build(
     run = DEMO / "runs" / run_name
     if rebuild:
         teardown(run_name)
-    ensure_services(services)
+    redis_port = _redis_port(run) if "redis" in services else REDIS_PORT
+    ensure_services(services, redis_port)
     cache = _cache(repo, base)
     base = git(cache, "rev-parse", f"{base}^{{commit}}")
     workdir = run / Path(repo).name.removesuffix(".git")
@@ -315,7 +334,9 @@ def build(
     (home / "gitconfig").write_text(
         "[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n[init]\n\tdefaultBranch = main\n"
     )
-    (home / "sandbox.sb").write_text(sandbox_profile(run=run, workdir=workdir, ports=ports_for(services)))
+    (home / "sandbox.sb").write_text(
+        sandbox_profile(run=run, workdir=workdir, ports=ports_for(services, redis_port))
+    )
     env: dict[str, str] = {"PATH": f"{TOOLS}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
     if "postgres" in services:
         name = db_name(run_name)
@@ -327,6 +348,7 @@ def build(
                 "TEST_DB_PORT": str(PG_PORT),
                 "TEST_DB_USER": "test",
                 "TEST_DB_PASSWORD": "test",
+                "TEST_DB_NAME": f"test_{name}",
                 "DATABASE_URL": f"postgresql://test:test@127.0.0.1:{PG_PORT}/{name}",
                 "PGHOST": "127.0.0.1",
                 "PGPORT": str(PG_PORT),
@@ -338,9 +360,9 @@ def build(
     if "redis" in services:
         env.update(
             {
-                "REDIS_URL": f"redis://127.0.0.1:{REDIS_PORT}/0",
+                "REDIS_URL": f"redis://127.0.0.1:{redis_port}/0",
                 "REDIS_HOST": "127.0.0.1",
-                "REDIS_PORT": str(REDIS_PORT),
+                "REDIS_PORT": str(redis_port),
             }
         )
     harness = {
@@ -359,6 +381,7 @@ def build(
         "base": base,
         "branch": branch,
         "services": services,
+        **({"redis_port": redis_port} if "redis" in services else {}),
         "run_dir": str(run),
         "workdir": str(workdir),
         "origin": str(run / "origin.git"),

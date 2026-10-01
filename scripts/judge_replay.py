@@ -124,7 +124,7 @@ def verify(result: dict) -> list[dict]:
             "GIT_TERMINAL_PROMPT": "0",
         }
     )
-    replay_workspace.ensure_services(item["services"])
+    replay_workspace.ensure_services(item["services"], ws.get("redis_port", replay_workspace.REDIS_PORT))
     out = []
     for command in item["verify"]:
         argv = [

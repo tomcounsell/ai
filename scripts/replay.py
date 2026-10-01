@@ -27,9 +27,8 @@ The task runs at effect ceiling `act` with no governance grant. Every held
 `push_branch` is approved and released by this driver under Tom's standing
 permission for pushes to local bare origins, and only when the workspace's
 push URL is the run's own `origin.git`; any other held effect stays held and
-the run ends. One driver at a time holds the machine lock
-($VALOR_DEMO/claude-turn.lock) for its whole run, so no two replays' claude
-turns overlap. A run whose result file has no outcome yet is resumed: the
+the run ends. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine slots
+($VALOR_DEMO/claude-turn.lock.N) for its whole run. A run whose result file has no outcome yet is resumed: the
 driver continues its task instead of starting another.
 
 Live spend: up to the task's budget (default $8.00, Opus 5.5) through the
@@ -230,7 +229,9 @@ def replay(item: dict, arm: str, args) -> dict:
             if runs >= MAX_RUNS:
                 result["outcome"] = "run cap"
                 break
-            replay_workspace.ensure_services(item["services"])
+            replay_workspace.ensure_services(
+                item["services"], ws.get("redis_port", replay_workspace.REDIS_PORT)
+            )
             line = core("run", task_id)
             runs += 1
             log.append({"at": now(), "step": "run", "said": line[:2000]})
