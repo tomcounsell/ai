@@ -198,7 +198,11 @@ the emulator's forced arms need no key.
 kernel process, through `core/budget.py`'s `reserve` and `charge`: the
 gateway's rows with `route: judgement`, and no HTTP route, since no turn
 makes these calls. Both legs' worst cases are reserved before the first
-call; the unused fallback is charged 0. A charge is the usage at the pinned
+call: estimated input at the input price plus every output token allowed.
+Input is estimated as bytes / 3 of the request body; for Jev, which bills a
+prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
+question, sized from the 70 calibration calls (`tools/jev.py`). The unused
+fallback is charged 0. A charge is the usage at the pinned
 price (`JUDGEMENT_PRICES`) or the reported cost if more, rounded up; the
 whole reservation when billing is unknown; 0 when nothing reached the
 provider or it returned an error status. Serves: constraint "Bounded
@@ -219,7 +223,8 @@ chose what it chose.
 Each judgement task declares a floor per leg and an abstain route. The gate
 is on the kernel action, never on a single label: per question, the port
 normalizes the leg's probabilities and sums those of the `proceed` labels
-(`p_proceed`). With the leg's floor `f`, the leg proceeds when `p_proceed`
+(`p_proceed`, rounded to nine places so a float sum never lands a hair
+under a floor it meets). With the leg's floor `f`, the leg proceeds when `p_proceed`
 is at least `f`, is cautious when it is at most `1 - f`, and abstains in
 between. The band is two-sided: a confident cautious answer is not
 second-guessed, since the fallback could only move it toward less caution.
@@ -276,11 +281,13 @@ of each leg; the floors; the task's `task_sha256`; the run's number for its
 site; and the date.
 
 **How a record is made.** `python -m core calibrate CASES.json --budget-usd
-N` (at most 50 cases and $0.50) starts a calibration task, which runs no
+N` (at most 50 cases and $0.50) refuses any leg endpoint other than the
+provider's, naming it, since only the providers make a record; then starts a calibration task, which runs no
 turn and takes no verdict, answer, feedback, grant, raise, or stop; asks
 each leg alone on every case; and writes and prints one
-`judgement.calibrated` row on the `judgement` stream, with each case's
-verdicts and `entry_check` (both legs right on every case).
+`judgement.calibrated` row on the `judgement` stream, with each leg's
+endpoint host, each case's verdicts, and `entry_check` (both legs right on
+every case).
 
 **Both legs, one run.** A task lands only on a record in which both legs
 answered the same inputs in the same run. A fallback proven on older inputs
@@ -547,7 +554,8 @@ ahead of `turn.started`; after a crash it reuses an unconsumed row. The
 kernel maps the row to `judge.decided` (`verdicts.record_judge`): proceed
 is `precise`, anything else `thin`, with `leg: judgement`, the
 `judgement_id`, `p_precise`, the argmax label, the model, and the cost. A
-budget that cannot cover both legs leaves the task in `judge`.
+budget that cannot cover both legs returns `budget exhausted` and leaves
+the task in `judge`; a stopped task returns `stopped`.
 
 ### The guard entry
 

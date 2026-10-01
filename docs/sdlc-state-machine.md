@@ -366,9 +366,8 @@ head and at the task's base commit, deterministic. Then one judgement call
 the tests it changed: three yes/no questions, one per gap kind (records in
 states other than the obvious one, a member of an enumeration the code
 branches on, existing tests whose bounds encode the old behavior); the
-kernel lists each kind at caution as a behavior. It runs whether the suite
-passed or not, so one patch gets both. Both legs failing leaves no verdict,
-to rerun; after two such runs the failure is listed as a behavior.
+kernel lists each kind at caution as a behavior and refuses a caller's.
+Both legs failing leaves no verdict; after two such runs it is a behavior.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
 at head that do not fail at base, the behaviors, the breadth judgement
@@ -399,9 +398,10 @@ another vendor through another harness, never a cheaper class. It reads the
 request, Tom's answers and feedback, the plan, the diff, and the docs at the
 candidate as the contract, never the executor's narration. It reruns the
 checks itself, so it needs nothing from the test branch. The kernel asks
-the governance boolean per hunk (use shape 6); the verifier can add
-instances, never remove one. Both legs failing leaves no verdict, to rerun;
-after two such runs the unjudged hunks become one instance.
+the governance boolean per hunk (use shape 6); the verifier adds instances,
+never removes one, and a line it names in a flagged hunk merges into it.
+Both legs failing leaves no verdict; after two such runs the unjudged hunks
+become one instance.
 
 **Exit evidence.** `review.decided`: the candidate, the verdict, the
 findings (each with a kind, `debt` among them), the governance boolean and

@@ -304,7 +304,9 @@ What the stack fixes:
 - **Metered like every other call.** Judgement calls are reserved and
   charged against the task's budget, so their cost shows in the same
   ledger: in the kernel process through `core/budget.py`, the gateway's
-  rows with `route: judgement`, no HTTP route
+  rows with `route: judgement`, no HTTP route. Jev's reservation allows for
+  the prompt it bills around the request (1.25 times bytes / 3 plus a fixed
+  margin, sized from the calibration calls)
   ([judgement-layer.md](judgement-layer.md)).
 - **First use: the request judge.** Each incoming request is read by the
   judgement tier before the first turn. An underspecified request (a
