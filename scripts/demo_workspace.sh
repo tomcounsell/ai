@@ -107,7 +107,10 @@ EOF
 # credential helper; and on this Mac's loopback it reaches only the gateway,
 # the workspace's Postgres on $PG_PORT, and dev servers on 8000-8009. This
 # Mac's own Postgres (port 5432 and its socket, which hold the kernel's
-# ledger) and Redis are out of reach.
+# ledger) and Redis are out of reach. The loopback allows come last: any
+# network-outbound rule after them makes sandbox-exec refuse the allowed
+# ports for roughly two in five port numbers, so a turn's gateway, which
+# listens on whatever port the OS hands it, came out EPERM at random.
 H="$HOME"
 PG_SOCKET="$(cd /tmp && pwd -P)/.s.PGSQL.5432"
 TRANSCRIPTS="$H/.claude/projects/$(echo "$DEMO/psyoptimal" | tr '/.' '--')"
@@ -138,15 +141,14 @@ cat > home/sandbox.sb <<EOF
 (deny file-read* file-write* (subpath "$PG/data"))
 (deny file-write* (literal "$PG/postgres.log"))
 (deny process-exec (regex #"/git-credential-osxkeychain$"))
-(deny network-outbound (remote ip "localhost:*"))
+(deny network-outbound
+    (remote ip "localhost:*")
+    (remote unix-socket (path-literal "$PG_SOCKET"))
+    (remote unix-socket (path-literal "/tmp/.s.PGSQL.5432")))
 (allow network-outbound
     (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))
     (remote ip "localhost:$PG_PORT")
 $(for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008 8009; do echo "    (remote ip \"localhost:$p\")"; done))
-(deny network-outbound
-    (remote ip "localhost:5432")
-    (remote unix-socket (path-literal "$PG_SOCKET"))
-    (remote unix-socket (path-literal "/tmp/.s.PGSQL.5432")))
 EOF
 
 # The app's settings read the database from the environment: settings/test.py
