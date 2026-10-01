@@ -53,8 +53,8 @@ enforcing outside the model is AI Control [4].
 | Redis | none | in use (absent by decision) |
 | Memory | popoto over Postgres | chosen, not built |
 | Model gateway | in-house aiohttp proxy, Anthropic wire format | in use |
-| Model prices | a table in `core/budget.py` | in use |
-| Model seats | a pinned registry of frontier, reviewer, and judgement seats | chosen, not built |
+| Model prices | a dated table in `core/settings.py` | in use |
+| Model seats | a pinned registry in `core/settings.py`: frontier, reviewer, light; judgement arrives with the judgement tier | in use |
 | Frontier provider | Anthropic, one provider | in use |
 | Judgement tier | Jev, with OpenAI's Decisions API for judgements that need images; open-weight fallback hosted by a second provider behind the same port | chosen, not built; fallback provider open |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
@@ -68,7 +68,7 @@ enforcing outside the model is AI Control [4].
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules | chosen, not built; libraries open |
 | Scheduling | launchd | chosen, not built |
-| Secrets | macOS Keychain, durable copy in the vault | chosen, not built |
+| Secrets | macOS Keychain, durable copy in the vault; the kernel databases' passwords in a libpq password file outside both | chosen, not built; the password file in use |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -166,21 +166,28 @@ lives in `core/`, readable line by line. Status: **in use**.
 
 **Schema changes.** `core/schema.sql` is idempotent and applied by
 `migrate`. Events are never rewritten; a reader that meets an older payload
-upcasts it ([data.md](data.md)). A migration tool is **open** and is added
+upcasts it ([data.md](data.md)). An additive change (a nullable column, a
+plain or partial unique index) applies over a populated ledger without
+rewriting a row or a table: `tests/test_migrate_history.py` shows it on a
+copy of the kernel database, row by row (`xmin`) and table by table
+(`pg_relation_filenode`). A migration tool is **open** and is added
 when a change to `documents` needs more than an idempotent statement.
 
 **Which cluster.** The kernel connects over the Unix socket to the Mac's
 own cluster on port 5432 (`core/settings.py`, every value overridable by a
-`VALOR_*` variable). Turns never reach it: the sandbox profile denies port
-5432 and its socket, and every workspace that needs a database gets a
+`VALOR_*` variable). Turns never reach it: the sandbox profiles deny its
+port, its socket, and its data directory, and every workspace that needs a database gets a
 cluster of its own (section 7). This is the fix for the demonstration's
 first incident, a machine cluster that trusted loopback and could have let a
 turn write ledger rows (rebuild-demonstration.md, Kernel findings 1). The
 kernel cluster's authentication method and role separation are
 [data.md](data.md)'s.
 
-**Backups.** Nightly `pg_dump` to an external disk, restore rehearsed once.
-Status: **chosen, not built**. Serves "Reliable stop, recovery, and
+**Backups.** `pg_dump` to an external disk with a manifest, 30 kept, and a
+restore into a scratch cluster checked against the manifest
+(`core/backup.py`; [machine.md](machine.md), Backups). Status: **in use**,
+rehearsed once from the command line; the nightly launchd job is **chosen,
+not built** until Tom loads it. Serves "Reliable stop, recovery, and
 correction": a ledger nobody can edit is still lost with the disk.
 
 **Queue.** Postgres is the only store and the only queue. A second queue
@@ -236,9 +243,9 @@ rerun through the same path for $18.37 (rebuild-baseline.md, Caveats).
 **Prices.** A table of US dollars per million tokens per model, input,
 output, cache write, and cache read, from the provider's public pricing
 page; a dated model id matches its undated entry, longest match first.
-Status: **in use**. Recording the date each price was checked is **chosen,
-not built**; until then a price change upstream is invisible to the
-ledger.
+Each price carries the day it was checked against that page, and every
+`gateway.charged` row records it as `price_checked`, so a price change
+upstream is visible in the ledger. Status: **in use**.
 
 **One provider.** Anthropic, through one wire format. Status: **in use**.
 A second provider arrives when the reviewer seat runs another vendor's
@@ -248,9 +255,10 @@ before any turn uses it.
 ### Model seats
 
 Model choice is data the kernel reads, not code: a small registry of pinned
-model ids with their prices and the seats they fill. Status: **chosen, not
-built**; today each task names its model on `start` and every replay used
-`claude-opus-5-5`.
+model ids with their prices and the seats they fill (`core/settings.py`,
+`SEATS`). `python -m core start --model` takes a seat name or a model id
+and records the pinned id in the Brief. Status: **in use** for frontier,
+reviewer, and light; the judgement seat arrives with the judgement tier.
 
 - **Frontier**: the newest model, for turns.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
@@ -492,9 +500,10 @@ spends from a budget like any other task.
 
 **Secrets.** macOS Keychain on the machine, with the vault `.env` as the
 durable copy; nothing in a dotfile in the repository. Status: **chosen, not
-built**. Today the kernel holds no secret of its own: it connects to Postgres
-by socket as `valor_kernel`, the provider credential is Claude Code's, and
-the workspace database password is a fixed test value.
+built**. The kernel's one secret of its own is the kernel databases'
+passwords, in a libpq password file outside the Keychain and the vault
+([machine.md](machine.md), Keychain, for why); the provider credential is
+Claude Code's, and the workspace database password is a fixed test value.
 
 **Telemetry.** None beyond the ledger. The events table is the only record
 with evidentiary standing; `python -m core status` and `ledger` read it.

@@ -9,20 +9,23 @@ the gateway, so every model call it makes is metered against the task.
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output, which keeps the
 gateway's worst-case reservation close to what a call can really cost.
 Claude Code's own session variables are dropped from the environment, so a
-turn started from inside a Claude Code session is still a fresh process.
+turn started from inside a Claude Code session is still a fresh process,
+and so is every libpq variable (`PG*`, including a `PGPASSFILE` naming the
+kernel's password file) and every `VALOR_PG*` override, so a turn never
+learns where the kernel's credential is.
 The dispatched Brief, Tom's corrections included, follows the persona in the
 system prompt.
 """
 
 import json
 import os
-import shutil
-from pathlib import Path
 from urllib.parse import urlparse
 
 from core.runs import TurnCommand
+from core.settings import settings
 
-CLAUDE = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+# What `turn` leaves out of the environment it copies.
+DROP_ENV = ("CLAUDE", "ANTHROPIC", "PG", "VALOR_PG")
 
 
 def turn(
@@ -38,15 +41,11 @@ def turn(
     turn's id, the command for one turn."""
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("CLAUDE", "ANTHROPIC")) and k != "AI_AGENT"
-        }
+        env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_ENV) and k != "AI_AGENT"}
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
         argv = [
-            CLAUDE,
+            settings.claude,
             "-p",
             "--output-format",
             "json",
@@ -138,7 +137,7 @@ def workspace_turn(
         if harness.get("gh_config_dir"):
             env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
         argv = [
-            CLAUDE,
+            settings.claude,
             "-p",
             "--output-format",
             "json",

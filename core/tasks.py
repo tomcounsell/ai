@@ -103,11 +103,12 @@ async def dispatch(conn, task_id: str) -> dict[str, Any]:
     and the text's digest."""
     b = await brief(conn, task_id)
     standing = await corrections.in_force(conn)
+    committed = money(await ledger.read(conn, task_id))["committed_usd_micros"]
     head = (
         "# Brief\n\n"
         f"Task: {b.id}\n"
         f"Instruction: {b.instruction}\n"
-        f"Budget: ${b.budget_usd_micros / 1_000_000:.4f}\n"
+        f"Budget: ${committed / 1_000_000:.4f}\n"
         f"Effect ceiling: {b.max_effect_class}\n"
         f"Governance grant: {b.governance_grant or 'none'}"
     )
@@ -153,20 +154,56 @@ async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
     return True
 
 
+# The rows remaining money is folded from.
+MONEY_EVENTS = ("task.started", "budget.raised", "gateway.reserved", "gateway.charged")
+
+
+def money(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The one computation of a task's money, over its rows in id order
+    (rows of other types are ignored): committed is the Brief's budget plus
+    every raise Tom gave; remaining is committed minus every charge minus
+    every open reservation. `budget.reserve` and `status` both call this."""
+    committed = 0
+    charged = 0
+    reserved: dict[str, int] = {}
+    for row in rows:
+        kind, p = row["type"], row["payload"]
+        if kind == "task.started":
+            committed += p["budget_usd_micros"]
+        elif kind == "budget.raised":
+            committed += p["usd_micros"]
+        elif kind == "gateway.reserved":
+            reserved[p["call_id"]] = p["usd_micros"]
+        elif kind == "gateway.charged":
+            reserved.pop(p["call_id"], None)
+            charged += p["usd_micros"]
+    return {
+        "committed_usd_micros": committed,
+        "charged_usd_micros": charged,
+        "open_reservations": reserved,
+        "remaining_usd_micros": committed - charged - sum(reserved.values()),
+    }
+
+
+# Every kind of attention entry, in the order `attention_counts` lists them.
+ATTENTION_KINDS = ("question", "feedback", "approval", "budget_raise")
+
+
 async def status(conn, task_id: str) -> dict[str, Any]:
     """The task as a fold over its ledger.
 
     `attention` lists every point where Tom acted on the task, in ledger
-    order: each question (`kind` "question") with his answer, and each piece
-    of feedback on a delivery (`kind` "feedback"), each with the provenance
-    it was recorded with (`by`, `via`, `at`, and `role_played`, true when
-    someone stood in for Tom). `delivered` is the latest
-    delivery's summary; feedback after it puts the task back to `live` until
-    the next `task.delivered`."""
+    order, each labelled by `kind`: a question (`question`) with his
+    answer, feedback on a delivery (`feedback`), an approval of a held
+    effect (`approval`), and a raise of the budget (`budget_raise`), each
+    with the provenance it was recorded with (see `provenance`).
+    `attention_counts` counts each kind, with how many were role-played and
+    how many are unknown (rows that recorded no `role_played`), so
+    approvals are counted apart from questions and feedback. A question not
+    yet answered is listed and not counted. `delivered` is the latest
+    delivery's summary; feedback after it puts the task back to `live`
+    until the next `task.delivered`."""
     rows = await ledger.read(conn, task_id)
-    committed = 0
-    charged = 0
-    reserved: dict[str, int] = {}
     turns: dict[str, str | None] = {}
     effects: dict[str, str] = {}
     attention: list[dict[str, Any]] = []
@@ -175,14 +212,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     stopped = False
     for row in rows:
         kind, p = row["type"], row["payload"]
-        if kind == "task.started":
-            committed = p["budget_usd_micros"]
-        elif kind == "gateway.reserved":
-            reserved[p["call_id"]] = p["usd_micros"]
-        elif kind == "gateway.charged":
-            reserved.pop(p["call_id"], None)
-            charged += p["usd_micros"]
-        elif kind == "turn.started":
+        if kind == "turn.started":
             turns[p["turn_id"]] = None
         elif kind == "turn.ended":
             turns[p["turn_id"]] = p["outcome"]
@@ -202,7 +232,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
             for q in attention:
                 if q.get("question_id") == p["question_id"]:
                     q["answer"] = p["text"]
-                    q["provenance"] = _provenance(p)
+                    q["provenance"] = provenance(row)
         elif kind == "feedback.given":
             attention.append(
                 {
@@ -210,10 +240,30 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "feedback_id": p["feedback_id"],
                     "on_delivery": p["on_delivery"],
                     "feedback": p["text"],
-                    "provenance": _provenance(p),
+                    "provenance": provenance(row),
                 }
             )
             reopened = True
+        elif kind == "approval.granted":
+            attention.append(
+                {
+                    "kind": "approval",
+                    "approval_id": p["approval_id"],
+                    "effect_id": p["effect_id"],
+                    "note": p.get("note"),
+                    "provenance": provenance(row),
+                }
+            )
+        elif kind == "budget.raised":
+            attention.append(
+                {
+                    "kind": "budget_raise",
+                    "raise_id": p["raise_id"],
+                    "usd_micros": p["usd_micros"],
+                    "note": p.get("note"),
+                    "provenance": provenance(row),
+                }
+            )
         elif kind == "task.delivered":
             delivered = p["summary"]
             reopened = False
@@ -230,21 +280,48 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     return {
         "task_id": task_id,
         "state": state,
-        "committed_usd_micros": committed,
-        "charged_usd_micros": charged,
-        "open_reservations": reserved,
-        "remaining_usd_micros": committed - charged - sum(reserved.values()),
+        **money(rows),
         "turns": turns,
         "effects": effects,
         "attention": attention,
+        "attention_counts": _counts(attention),
         "delivered": delivered,
     }
 
 
-def _provenance(payload: dict[str, Any]) -> dict[str, Any]:
-    """A row's provenance as recorded; a row from before `role_played` was
-    recorded says nothing about it, and reads as not role-played."""
-    return {"role_played": False, **payload.get("provenance", {})}
+def provenance(row: dict[str, Any]) -> dict[str, Any]:
+    """A row's provenance (`by`, `via`, `at`, `role_played`) as recorded.
+    A field the row does not carry reads as None, never as a default:
+    answers and feedback written before `role_played` existed say nothing
+    about it, and approvals written before approvals carried provenance hold
+    only a top-level `by` (unreliable: the replay driver's approvals say
+    `tom`), so their `at` is the row's own time. No row is rewritten."""
+    p = row["payload"]
+    recorded = p.get("provenance") or {"by": p.get("by")}
+    at = recorded.get("at")
+    if at is None and row.get("at") is not None:
+        at = row["at"].isoformat()
+    return {
+        "by": recorded.get("by"),
+        "via": recorded.get("via"),
+        "at": at,
+        "role_played": recorded.get("role_played"),
+    }
+
+
+def _counts(attention: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    counts = {k: {"total": 0, "role_played": 0, "unknown": 0} for k in ATTENTION_KINDS}
+    for entry in attention:
+        if "provenance" not in entry:
+            continue  # a question asked and not yet answered
+        c = counts[entry["kind"]]
+        c["total"] += 1
+        played = entry["provenance"]["role_played"]
+        if played is None:
+            c["unknown"] += 1
+        elif played:
+            c["role_played"] += 1
+    return counts
 
 
 def audit(state: dict[str, Any]) -> list[str]:

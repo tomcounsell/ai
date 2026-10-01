@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-1-store-hardening
 type: build
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -320,12 +320,18 @@ Files: `core/backup.py`, `core/__main__.py`, `tests/test_backup.py`,
 Done for items 1 and 8 needs the machine, so the merge carries these steps,
 each recorded in the merge commit:
 
-1. From the kernel checkout, `python -m core migrate` (which runs
-   `secure-login`). Then connect to `valor_rebuild` as `valor_kernel` and
-   as the owner with no password file, record that both are refused, and
-   connect with it and record success. This is a one-time verification
-   recorded in the commit, not a check the system runs.
-2. Tom installs and loads the plist (the coordinator asks him), grants the
+1. Stop any running task (`python -m core stop`) and let no new run start:
+   a kernel process from before the merge passes no password file and
+   cannot connect once the rules are in.
+2. Update the kernel checkout `~/src/valor-rebuild` to the merged branch.
+3. From it, `python -m core migrate` (which runs `secure-login`).
+4. Tom adds `export PGPASSFILE=~/.config/valor-kernel/pgpass` to his shell
+   profile, so his own `psql` reaches the kernel databases.
+5. Connect to `valor_rebuild` as `valor_kernel` and as the owner, over the
+   socket, `127.0.0.1`, and `::1`, with no password file, and record that
+   each is refused; connect with it and record success. This is a one-time
+   verification recorded in the commit, not a check the system runs.
+6. Tom installs and loads the plist (the coordinator asks him), grants the
    interpreter removable-volume access if macOS asks, and the job is fired
    once with `launchctl kickstart`; the dump it writes is restored with
    `python -m core restore` and both outputs recorded.
@@ -423,6 +429,12 @@ Live (`VALOR_LIVE=1`, spend declared): `test_live_turn.py` (now also the CLI
 approve and release on a live task) and `test_live_session.py` (the
 question, answer, delivery, held push, release, and corrections in every
 Brief, sandboxed).
+
+Where the build put them: the credential tests in
+`tests/test_credentials.py`, the approval and raise tests in
+`tests/test_attention.py`, and the settings tests in
+`tests/test_settings.py`, each on its own rather than inside
+`test_kernel.py` or `test_session.py`.
 
 The 39 existing tests keep passing, edited only where an API they call
 changed (`approve`, `remaining`, `_provenance`'s null, the `first` fixture,

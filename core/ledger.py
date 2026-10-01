@@ -8,10 +8,18 @@ all. Readers order by `id`.
 import hashlib
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+
+
+def provenance(by: str, via: str, role_played: bool) -> dict[str, Any]:
+    """Who wrote a row Tom (or someone for him) writes: `by`, the surface
+    it came `via`, `at`, and `role_played`, true when someone stood in for
+    Tom."""
+    return {"by": by, "via": via, "role_played": role_played, "at": datetime.now(UTC).isoformat()}
 
 
 def new_id() -> str:

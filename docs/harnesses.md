@@ -77,8 +77,9 @@ turn takes is `docs/machine.md`'s to state.
 `harnesses/claude_code.py` builds two kinds of turn.
 
 **`turn`** is one self-contained call: no tools by default, no session
-persistence, a system prompt of the persona followed by the Brief. The
-kernel's smoke script uses it.
+persistence, a system prompt of the persona followed by the Brief. The live
+tests use it. It copies the kernel's environment minus Claude Code's own
+variables and every libpq (`PG*`) and `VALOR_PG*` variable.
 
 **`workspace_turn`** is one turn of a task that works in a directory, and is
 what a real task runs. Its arguments:

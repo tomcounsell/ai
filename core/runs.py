@@ -21,7 +21,7 @@ to its id, and a sandboxed turn's profile denies the mach name
 `valor.turn.<id>`. When the turn ends, every process of this user that is
 in the turn's process group, carries the marker in its environment, or sits
 under a sandbox that denies the turn's name (and not another, which an App
-Sandbox denies too) gets SIGTERM, then SIGKILL after two seconds, and
+Sandbox denies too) gets SIGTERM, then SIGKILL after `reap_grace_s` (settings), and
 `turn.reaped` lists them. The sandbox mark is the one a daemon cannot shed:
 it survives setsid, re-parenting to launchd, and a process retitling
 itself over its environment (redis-server does), and platform binaries hide
@@ -43,9 +43,9 @@ from typing import Any
 
 from core import db, ledger, tasks
 from core.gateway import Gateway
+from core.settings import settings
 
 TURN_ENV = "VALOR_TURN"
-REAP_GRACE_S = 2.0
 
 
 @dataclass
@@ -166,7 +166,7 @@ def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
     names = _commands(pids)
     for pid in pids:
         _signal(pid, signal.SIGTERM)
-    deadline = time.monotonic() + REAP_GRACE_S
+    deadline = time.monotonic() + settings.reap_grace_s
     alive = set(pids)
     while alive and time.monotonic() < deadline:
         time.sleep(0.05)

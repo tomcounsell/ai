@@ -8,7 +8,7 @@ tests need, and the isolation every turn runs under.
 
 OWNER/NAME may also be a local git repository's path (the smoke's toy repo).
 
-Layout under $VALOR_DEMO (default /Users/tomcounsell/src/valor-demo):
+Layout under the `demo_dir` setting (`core/settings.py`, override $VALOR_DEMO):
 
     cache/<owner>__<name>.git   bare clone from GitHub, shared by every run of
                                 the repository; fetched by SHA when a base is
@@ -35,9 +35,11 @@ Layout under $VALOR_DEMO (default /Users/tomcounsell/src/valor-demo):
 The sandbox (`sandbox_profile`) lets a turn read and write its own run
 directory and its own Claude Code transcripts and nothing else under ~/src
 (other runs, the caches, the answer keys, results, Tom's checkouts), nor his
-notes or keys. On loopback it reaches the gateway, 8000 to 8009, and the
-services the run asked for; this Mac's own Postgres (5432) and Redis (6379)
-stay out of reach. Denies come before allows: a network rule after the
+notes or keys, nor the kernel's password file, the machine cluster's data
+directory, or the backup disk (each by its setting). On loopback it reaches
+the gateway, 8000 to 8009, and the services the run asked for; this Mac's
+own Postgres (its port and socket, from settings) and Redis (6379) stay out
+of reach. Denies come before allows: a network rule after the
 loopback allows makes sandbox-exec refuse allowed ports at random.
 
 A turn may listen only on 8000 to 8009 and on unix sockets inside its run.
@@ -63,7 +65,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from replay_common import DEMO, git, now, ok, sh
 
-PG_BIN = Path("/opt/homebrew/opt/postgresql@18/bin")
+from core.settings import settings
+
+PG_BIN = Path(settings.pg_bin)
 PG_PORT = 5439
 REDIS_PORT = 6390
 REDIS_PORTS = range(6391, 6400)
@@ -78,15 +82,28 @@ def transcripts_dir(workdir: Path) -> Path:
     return HOME / ".claude" / "projects" / re.sub(r"[/.]", "-", str(workdir))
 
 
+def kernel_paths() -> list[Path]:
+    """What a turn may neither read nor write, wherever settings put it:
+    the directory of the kernel's password file, the machine cluster's data
+    directory (its `pg_hba.conf` and heap files), and the backup disk."""
+    return [Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)]
+
+
 def sandbox_profile(
-    *, run: Path, workdir: Path, ports: list[int], home: Path = HOME, tools: Path = TOOLS
+    *,
+    run: Path,
+    workdir: Path,
+    ports: list[int],
+    home: Path = HOME,
+    tools: Path = TOOLS,
+    kernel: list[Path] | None = None,
 ) -> str:
     """The sandbox-exec profile for a turn working in `workdir` inside
     `run`; `GATEWAY_PORT` is a parameter, since the gateway takes whatever
     port the OS hands it. `tools` (binaries such as uv that the replays
     share) is readable and runnable, not writable. The run's ancestors are
     stat-able, not listable, so tools that resolve real paths (uv making a
-    virtualenv) work inside the run."""
+    virtualenv) work inside the run. `kernel` defaults to `kernel_paths()`."""
     denied = [
         "src",
         "work-vault",
@@ -121,6 +138,9 @@ def sandbox_profile(
         f'    (subpath "{run / "origin.git"}")',
         f'    (subpath "{run / "home"}")',
         f'    (literal "{run / "replay.json"}"))',
+        "(deny file-read* file-write*",
+        *(f'    (subpath "{p}")' for p in (kernel if kernel is not None else kernel_paths())),
+        ")",
         '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
         '(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))',
         "(deny network-bind network-inbound)",
@@ -129,8 +149,9 @@ def sandbox_profile(
         f'    (local unix-socket (subpath "{run}")))',
         "(deny network-outbound",
         '    (remote ip "localhost:*")',
-        '    (remote unix-socket (path-literal "/private/tmp/.s.PGSQL.5432"))',
-        '    (remote unix-socket (path-literal "/tmp/.s.PGSQL.5432")))',
+        f'    (remote ip "localhost:{settings.pgport}")',
+        f'    (remote unix-socket (path-literal "{settings.pg_socket_real}"))',
+        f'    (remote unix-socket (path-literal "{settings.pg_socket}")))',
         "(allow network-outbound",
         '    (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))',
         *(f'    (remote ip "localhost:{p}")' for p in ports),

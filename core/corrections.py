@@ -17,7 +17,7 @@ filter in `in_force`. `source_class` is `direct` for a correction Tom gave;
 superseding a correction is not built yet.
 """
 
-from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -27,6 +27,43 @@ from core import ledger
 STREAM = "corrections"
 SCOPES = ("global",)
 SOURCE_CLASSES = ("direct", "exemplar")
+
+# Correction 1 is the governance paragraph, which opens `CLAUDE.md`; a fresh
+# `migrate` records it from there (`core/db.py`).
+GOVERNANCE_SOURCE = Path(__file__).resolve().parent.parent / "CLAUDE.md"
+
+
+def governance_paragraph() -> str:
+    return next(
+        line for line in GOVERNANCE_SOURCE.read_text().splitlines() if line.startswith("**Governance")
+    )
+
+
+def payload(
+    number: int,
+    text: str,
+    *,
+    by: str,
+    via: str,
+    scope: str = "global",
+    source_class: str = "direct",
+    role_played: bool = False,
+) -> dict[str, Any]:
+    """A `correction.recorded` payload: the one place its shape is built."""
+    text = text.strip()
+    if not text:
+        raise ValueError("a correction has text")
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope {scope!r}")
+    if source_class not in SOURCE_CLASSES:
+        raise ValueError(f"unknown source class {source_class!r}")
+    return {
+        "number": number,
+        "scope": scope,
+        "source_class": source_class,
+        "text": text,
+        "provenance": ledger.provenance(by, via, role_played),
+    }
 
 
 async def record(
@@ -39,13 +76,6 @@ async def record(
     source_class: str = "direct",
 ) -> dict[str, Any]:
     """Append the next numbered correction. Returns its ledger id and payload."""
-    text = text.strip()
-    if not text:
-        raise ValueError("a correction has text")
-    if scope not in SCOPES:
-        raise ValueError(f"unknown scope {scope!r}")
-    if source_class not in SOURCE_CLASSES:
-        raise ValueError(f"unknown source class {source_class!r}")
     async with conn.transaction():
         await ledger.lock(conn, STREAM)
         row = await (
@@ -55,15 +85,9 @@ async def record(
                 (STREAM,),
             )
         ).fetchone()
-        payload = {
-            "number": row[0] + 1,
-            "scope": scope,
-            "source_class": source_class,
-            "text": text,
-            "provenance": {"by": by, "via": via, "at": datetime.now(UTC).isoformat()},
-        }
-        event_id = await ledger.append(conn, STREAM, "correction.recorded", payload)
-    return {"event_id": event_id, **payload}
+        recorded = payload(row[0] + 1, text, by=by, via=via, scope=scope, source_class=source_class)
+        event_id = await ledger.append(conn, STREAM, "correction.recorded", recorded)
+    return {"event_id": event_id, **recorded}
 
 
 async def in_force(conn) -> list[dict[str, Any]]:

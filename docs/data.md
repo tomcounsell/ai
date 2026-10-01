@@ -89,7 +89,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/tasks.py` | `task.stopped` | reason, by | Lossless stop |
 | `core/budget.py` | `gateway.reserved` | `call_id`, `turn_id`, model, `usd_micros` (worst case), estimated input, `max_tokens` | Money conserved per call |
 | `core/budget.py` | `gateway.refused` | the call's fields plus reason | Bounded spend; the refusal is itself recorded |
-| `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, provider status, cut, usage | Money conserved per call |
+| `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage | Money conserved per call |
 | `core/runs.py` | `turn.started` | `turn_id`, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
@@ -100,7 +100,8 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/session.py` | `task.delivered` | `turn_id`, summary. Written today when a turn leaves `done.md`; in the design that is a candidate, and `task.delivered` is written when the join of the test, review, and docs checks sends the task to `merge`. Those checks write `test.decided`, `review.decided`, and `docs.decided`, each keyed by the candidate's head SHA and producing turn, and the merge predicate reads only rows keyed by the current candidate (`docs/sdlc-state-machine.md`) | Mission item 1 |
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
-| `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), by | One tap, one effect |
+| `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
+| `core/budget.py` | `budget.raised` | `raise_id`, `usd_micros`, note, provenance | Only Tom raises a committed budget |
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id` | Recovery: a kill between intent and outcome leaves a findable row |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
@@ -176,9 +177,10 @@ privilege; a row lock would need `UPDATE`, which the kernel role does not
 have.
 
 Reserving money is the case that matters. Remaining budget is the Brief's
-budget minus every charge minus every open reservation (`core/budget.py`,
-`REMAINING_SQL`), computed under the task's lock, so two calls racing on
-one task cannot both reserve the last of it.
+budget plus every `budget.raised`, minus every charge, minus every open
+reservation, computed by one fold (`core/tasks.py`, `money`) that
+`tasks.status` and `budget.reserve` both call, the latter under the task's
+lock, so two calls racing on one task cannot both reserve the last of it.
 `test_racing_reservations_never_exceed_the_budget` runs that race on real
 Postgres.
 
@@ -217,11 +219,17 @@ charged, every turn ended, no effect between intent and outcome, nothing
 charged past the committed budget.
 
 **Shape changes.** A row is never rewritten, so when an event's payload
-gains a field, readers handle both shapes. The one instance so far is
-provenance: answers and feedback recorded before `role_played` existed
-read as not role-played (`core/tasks.py`, `_provenance`). The rule is that
-the reader carries the old shape forward, never a migration over the
-ledger.
+gains a field, readers handle both shapes. The instance so far is
+provenance (`core/tasks.py`, `provenance`): a field a row never recorded
+reads as null, never as a default. Answers and feedback recorded before
+`role_played` existed read `role_played: null`, and approvals recorded
+before approvals carried provenance hold only a top-level `by` and read
+`via` and `role_played` as null, with `at` from the row's own column. The
+rule is that the reader carries the old shape forward, never a migration
+over the ledger. A table change is additive (a nullable column, a new
+index) and rewrites no row; `tests/test_migrate_history.py` applies one to
+a copy of the kernel database and checks every row's `xmin` and each
+table's file node.
 
 **Scale.** Folding a whole stream on every read assumes a task's stream
 stays small. The demonstration's task, four turns and three deliveries,
@@ -270,6 +278,7 @@ are folds over rows the kernel already writes:
 - `feedback.given`: Tom's feedback on a delivery, bound to the delivery it
   answers (`on_delivery`).
 - `approval.granted`: Tom's tap on a held effect, with his literal message.
+- `budget.raised`: Tom's raise of the task's committed budget.
 
 Answers and feedback carry **provenance**: `by` (who wrote it), `via`
 (the channel), `at`, and `role_played` (true when someone stood in for
@@ -279,13 +288,16 @@ the ledger could not say so (rebuild-demonstration.md, Kernel findings 5).
 `tasks.status` returns the attention log as one list, each entry labelled
 by kind with its provenance.
 
-An approval carries `by` and the note today. In the design it carries the
-same provenance as an answer, `role_played` included: two of the
-demonstration's three pushes (rows 204 and 253) were approved under Tom's
-standing permission for local copies rather than by a tap each, and the
-row should say so (rebuild-demonstration.md, Where Tom acted as project
-manager). The current kernel
-does not record it.
+Approvals and raises carry the same provenance as an answer,
+`role_played` included, because two of the demonstration's three pushes
+(rows 204 and 253) were approved under Tom's standing permission for local
+copies rather than by a tap each (rebuild-demonstration.md, Where Tom acted
+as project manager); the replay driver approves its pushes with
+`role_played: true`. `tasks.status` counts each kind apart in
+`attention_counts` (total, role-played, unknown), so approvals never add to
+the questions and feedback counted as interruptions. The `by` on rows
+written before this shape is unreliable: every earlier approval says
+`tom`, the replay driver's included.
 
 The attention budget a task carries is a field of its Brief in the design
 (`docs/architecture.md`, The attention log); the attention it spent is the
@@ -325,12 +337,14 @@ REFERENCES.md sense.
 
 | Role | Login | Privileges | Used by |
 |---|---|---|---|
-| `valor_kernel` | yes | `SELECT, INSERT` on `events` and `documents`; nothing else | Every kernel process: the CLI, the gateway, the runner |
-| Owner | Tom's macOS user by default (`VALOR_PG_OWNER`) | Owns the database and the schema | `python -m core migrate` and the test fixtures, nothing else |
+| `valor_kernel` | yes, with its password on the kernel databases | `SELECT, INSERT` on `events` and `documents`; nothing else | Every kernel process: the CLI, the gateway, the runner |
+| Owner | Tom's macOS user by default (`VALOR_PG_OWNER`), with its password on the kernel databases | Owns the database and the schema | `python -m core migrate`, `backup`, and the test fixtures, nothing else |
 
 `python -m core migrate` (`core/db.py`, `migrate`) connects as the owner,
-creates `valor_kernel` if missing, creates the database if missing, and
-applies `core/schema.sql`. Every other connection is `valor_kernel`
+creates `valor_kernel` if missing, creates the database if missing,
+applies `core/schema.sql`, and records correction 1 (the governance
+paragraph, from `CLAUDE.md`) if the ledger has no correction 1; it then
+runs `secure-login` (below). Every other connection is `valor_kernel`
 (`core/settings.py`, `dsn`). Least privilege [11]: the role that runs the
 kernel holds exactly what appending and reading need. `LISTEN`,
 `pg_notify`, and advisory locks need no table privilege, so the stop
@@ -339,7 +353,10 @@ channel and the per-task locks work under the same grant.
 Connection settings come from one typed module, `core/settings.py`, each
 with a default for this Mac and an environment override: host
 (`VALOR_PGHOST`, default the `/tmp` socket), port (`VALOR_PGPORT`, 5432),
-database (`VALOR_DB`, `valor_rebuild`), and owner (`VALOR_PG_OWNER`).
+database (`VALOR_DB`, `valor_rebuild`), test database (`VALOR_TEST_DB`,
+`valor_rebuild_test`), owner (`VALOR_PG_OWNER`), and the password file
+(`VALOR_PG_PASSFILE`). Every connection string names the password file and
+never holds a password.
 
 ## The kernel database is out of a turn's reach
 
@@ -357,7 +374,11 @@ connected as `valor_kernel`, or as a superuser, and written ledger rows
 different clusters, and a turn cannot reach the kernel's.
 
 - The kernel's database lives on the machine cluster (port 5432 and its
-  socket in `/tmp`).
+  socket in `/tmp`), and every role logging into a kernel database needs
+  its password (`core/credentials.py`, `secure_login`: `scram-sha-256`
+  rules for the socket, `127.0.0.1`, and `::1`, first in `pg_hba.conf`).
+  The passwords live in a libpq password file only the kernel's user reads
+  (`settings.pg_passfile`; [machine.md](machine.md), Keychain).
 - A workspace that needs Postgres gets a cluster of its own on another
   port, with password authentication on every login, a superuser password
   generated and discarded once the app's role exists, and an app role with
@@ -365,43 +386,52 @@ different clusters, and a turn cannot reach the kernel's.
   The demonstration's ran on `127.0.0.1:5439`; the replays gave each
   concurrent run its own databases (rebuild-baseline.md, Infrastructure
   fixed during the series).
-- The turn's sandbox denies port 5432 and the machine socket, allows the
-  workspace cluster's port, and denies the workspace cluster's data
-  directory. `tests/test_demo_sandbox.py` probes it: the gateway reachable
-  at any port, 5432 and its socket refused.
+- The turn's sandbox denies port 5432 and the machine socket, the password
+  file's directory, the machine cluster's data directory, and the backup
+  disk; it allows the workspace cluster's port and denies the workspace
+  cluster's data directory. `tests/test_demo_sandbox.py` probes it: the
+  gateway reachable at any port, 5432 and its socket refused, the
+  password file, `pg_hba.conf`, and the dumps unreadable and unwritable.
+  `tests/test_credentials.py` shows a login without the password refused
+  on a scratch cluster secured the same way.
 
 How the sandbox is built, and which work runs under `sandbox-exec` and
 which in an Apple container, is `docs/architecture.md`'s.
 
-**What is still true.** The machine cluster trusts local connections, and
-a turn runs as Tom's user. The guarantee rests on the sandbox, not on the
-database refusing a login. This is a gap: a turn that escaped its sandbox
-could connect as `valor_kernel` and append rows. It could not edit or
-delete existing ones while the triggers stand, and a superuser login could
-drop them. Requiring a credential for `valor_kernel` that the kernel
-process holds and a turn's environment never carries would make the
-separation a database fact as well. If a deceptively aligned model [5, 6]
+**What is met, and what still rests on the sandbox.** Met: no role logs
+into a kernel database without the password, and a turn can read neither
+the password file, the cluster's data directory, nor the dumps. Still on
+the sandbox: other databases on the cluster (`postgres`, `psyoptimal`)
+trust local logins, so a turn that escaped its profile could log in as the
+superuser to one of them and change a role's password or the server's
+settings; and Tom's macOS user, outside any turn, can always edit the data
+directory. If a deceptively aligned model [5, 6]
 finds a side channel, the ledger records only what it chose to show; the
 effect ceiling keeps the damage survivable while that is discovered.
 
 ## Test databases
 
 `tests/conftest.py` runs every test session against `valor_rebuild_test`
-(`VALOR_TEST_DB`) on the same cluster, created fresh: `migrate` is called
+(the `test_database` setting) on the same cluster, created fresh: `migrate` is called
 with `fresh=True`, which drops the database as the owner and recreates it.
 The ledger cannot be emptied, so dropping the database is the only reset,
 and the owner is the only role that can do it. Tests connect as
 `valor_kernel` like the kernel does, plus an owner connection for the
-test that proves the trigger refuses the owner too.
+test that proves the trigger refuses the owner too. `db.migrate` touches no
+role password, password file, or `pg_hba.conf`, so a test run leaves the
+machine cluster's credentials as it found them; the credential tests run
+`secure_login` only on scratch clusters.
 
 The rule from `tests/README.md` applies: real Postgres, no mocks, and every
 test marks its live spend (`@pytest.mark.spend(usd=...)`, declared in
 `pyproject.toml`). The ledger tests spend nothing.
 
 The test database shares the kernel's cluster, so it is out of a turn's
-reach by the same sandbox rule. `tests/test_live_turn.py` runs one real
-`claude -p` turn through the gateway and a stop mid-stream, declares $0.03,
-and runs only with `VALOR_LIVE=1`, so a plain test run spends nothing.
+reach by the same sandbox rule. `tests/test_live_turn.py` and
+`tests/test_live_session.py` run real `claude -p` turns through the
+gateway, declare their spend, and run only with `VALOR_LIVE=1`, so a plain
+test run spends nothing; `tests/test_gateway_meter.py` meters a successful
+call in every run by replaying a recorded provider response.
 
 ## Memory, last
 
@@ -438,11 +468,11 @@ never writes the streams or owns them.
    documents are the planned answer.
 2. **Document store without a lattice.** Backed by the demonstration and
    the baseline, not by a published source.
-3. **Kernel database credentials.** The machine cluster trusts local
-   connections; separation from a turn is the sandbox's alone.
-4. **Approval provenance.** `approval.granted` records `by` and the note,
-   without `via`, `at`, or `role_played`.
-5. **Retention and backup.** The ledger only grows and is never pruned.
-   Nothing yet backs it up or says how long it is kept; `docs/machine.md`
-   owns the disk and backup budget on the M4 Air.
-6. **Memory's schema.** Waits on popoto's Postgres backend [20].
+3. **The rest of the cluster.** The kernel databases need a password from
+   every role, but other databases on the machine cluster trust local
+   logins, so a superuser login from an escaped turn is kept out by the
+   sandbox alone.
+4. **One backup disk.** The ledger is kept forever and dumped to one
+   external disk, 30 dumps deep (`docs/machine.md`, Backups). There is no
+   second copy elsewhere.
+5. **Memory's schema.** Waits on popoto's Postgres backend [20].

@@ -10,7 +10,7 @@ The rule: integration first, no mocks.
 - Real containers.
 - Real bridges against test accounts.
 - No mocks, fakes, or patched clients.
-- Every test declares its live spend: the money it may cost per run. A test without a declared spend does not run.
+- Every test declares its live spend: the money it may cost per run.
 
 The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) runs today from `scripts/` while it is an experiment, and moves here in the design.
 

@@ -1,0 +1,245 @@
+"""A schema change applies to a ledger that already holds history without
+rewriting any row.
+
+`db.migrate` takes the schema file as an argument; here it applies
+`core/schema.sql` plus an additive change of the kind later milestones make
+(a nullable column, a plain index, a partial unique index) to:
+
+- a copy of the kernel database `valor_rebuild`, which holds the
+  demonstration's and the baseline's ledger (dumped read-only as the owner
+  and restored into a scratch database; the original is never modified),
+  skipped where this machine has no such database; and
+- a database holding a row of every type the kernel writes, both approval
+  shapes included, always run.
+
+Each is checked row for row (`id`, `xmin`, and a digest of the rest),
+table by table (`pg_relation_filenode`), and fold by fold: every task's
+money through `tasks.money` against the computation the kernel used before
+(`REMAINING_SQL`, kept here as the oracle).
+
+Live spend: none.
+"""
+
+import asyncio
+import os
+import subprocess
+from pathlib import Path
+
+import psycopg
+import pytest
+from psycopg import sql
+
+from core import db, ledger, tasks
+from core.settings import settings
+
+pytestmark = pytest.mark.spend(usd=0)
+
+ADDITIVE = """
+ALTER TABLE events ADD COLUMN IF NOT EXISTS annotation text;
+CREATE INDEX IF NOT EXISTS events_type_idx ON events (type);
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_raise_row
+    ON events ((payload->>'raise_id')) WHERE type = 'budget.raised';
+"""
+
+# Remaining money as the kernel computed it before `tasks.money`: the
+# budget from the task's document, minus charges, minus open reservations.
+REMAINING_SQL = """
+SELECT
+  (SELECT (body->>'budget_usd_micros')::bigint FROM documents
+    WHERE kind = 'task' AND id = %(t)s)
+  - COALESCE((SELECT sum((payload->>'usd_micros')::bigint) FROM events
+    WHERE task_id = %(t)s AND type = 'gateway.charged'), 0)
+  - COALESCE((SELECT sum((r.payload->>'usd_micros')::bigint) FROM events r
+    WHERE r.task_id = %(t)s AND r.type = 'gateway.reserved'
+      AND NOT EXISTS (SELECT 1 FROM events c
+        WHERE c.task_id = %(t)s AND c.type = 'gateway.charged'
+          AND c.payload->>'call_id' = r.payload->>'call_id')), 0)
+"""
+
+
+def _owner(database: str) -> psycopg.Connection:
+    return psycopg.connect(settings.dsn(owner=True, database=database), autocommit=True)
+
+
+def _exists(database: str) -> bool:
+    with _owner("postgres") as conn:
+        return (
+            conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone() is not None
+        )
+
+
+def _drop(database: str) -> None:
+    with _owner("postgres") as conn:
+        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _snapshot(database: str) -> dict:
+    with _owner(database) as conn:
+        conn.execute("SET TIME ZONE 'UTC'")
+        return {
+            "events": conn.execute(
+                "SELECT id, xmin::text, encode(sha256(convert_to(task_id || '|' || type || '|' || "
+                "payload::text || '|' || at::text, 'UTF8')), 'hex') FROM events ORDER BY id"
+            ).fetchall(),
+            "documents": conn.execute(
+                "SELECT kind, id, xmin::text, encode(sha256(convert_to(body::text || '|' || "
+                "created_at::text, 'UTF8')), 'hex') FROM documents ORDER BY kind, id"
+            ).fetchall(),
+            "filenodes": conn.execute(
+                "SELECT pg_relation_filenode('events'), pg_relation_filenode('documents')"
+            ).fetchone(),
+            "money": {
+                t: conn.execute(REMAINING_SQL, {"t": t}).fetchone()[0]
+                for (t,) in conn.execute(
+                    "SELECT id FROM documents WHERE kind = 'task' ORDER BY id"
+                ).fetchall()
+            },
+        }
+
+
+def _migrate_with_change(database: str, tmp_path: Path) -> None:
+    schema = tmp_path / "schema.sql"
+    schema.write_text(db.SCHEMA.read_text() + ADDITIVE)
+    db.migrate(database, schema=schema)
+
+
+def _check(database: str, before: dict) -> None:
+    after = _snapshot(database)
+    assert after["events"] == before["events"]  # no row rewritten: same xmin, same content
+    assert after["documents"] == before["documents"]
+    assert after["filenodes"] == before["filenodes"]  # no table rewritten
+    with _owner(database) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'annotation'"
+        ).fetchone()
+        indexes = {r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'events'")}
+        assert {"events_type_idx", "events_one_raise_row", "events_one_correction_number"} <= indexes
+        triggers = {
+            r[0] for r in conn.execute("SELECT tgname FROM pg_trigger WHERE tgrelid = 'events'::regclass")
+        }
+        assert {"events_append_only", "events_no_truncate"} <= triggers
+        grants = conn.execute(
+            "SELECT has_table_privilege(%s, 'events', 'INSERT'), has_table_privilege(%s, 'events', 'UPDATE')",
+            (settings.kernel_role, settings.kernel_role),
+        ).fetchone()
+        assert grants == (True, False)
+        ones = conn.execute(
+            "SELECT count(*) FROM events WHERE type = 'correction.recorded' AND payload->>'number' = '1'"
+        ).fetchone()[0]
+        assert ones == 1
+
+    async def folds():
+        async with await db.connect(settings.dsn(database=database)) as conn:
+            return {t: (await tasks.status(conn, t))["remaining_usd_micros"] for t in before["money"]}
+
+    assert asyncio.run(folds()) == before["money"]
+
+
+@pytest.mark.skipif(not _exists(settings.database), reason=f"no {settings.database} database on this machine")
+def test_a_schema_change_applies_to_a_copy_of_the_kernel_ledger_without_rewriting_it(tmp_path):
+    copy = f"{settings.database}_copy_{os.getpid()}"
+    dump = tmp_path / "kernel.dump"
+    pg_bin = Path(settings.pg_bin)
+    subprocess.run(
+        [
+            str(pg_bin / "pg_dump"),
+            "--format=custom",
+            f"--file={dump}",
+            f"--dbname={settings.dsn(owner=True, database=settings.database)}",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    _drop(copy)
+    with _owner("postgres") as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(copy)))
+    try:
+        subprocess.run(
+            [
+                str(pg_bin / "pg_restore"),
+                "--exit-on-error",
+                "--no-owner",
+                f"--dbname={settings.dsn(owner=True, database=copy)}",
+                str(dump),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        before = _snapshot(copy)
+        assert len(before["events"]) > 1000 and before["money"]  # it holds history
+        _migrate_with_change(copy, tmp_path)
+        _check(copy, before)
+    finally:
+        _drop(copy)
+
+
+EVERY_TYPE = [
+    ("gateway.reserved", {"call_id": "c1", "turn_id": "t1", "model": "m", "usd_micros": 300}),
+    ("gateway.reserved", {"call_id": "c2", "turn_id": "t1", "model": "m", "usd_micros": 200}),
+    ("gateway.charged", {"call_id": "c1", "usd_micros": 120, "turn_id": "t1", "model": "m"}),
+    ("gateway.refused", {"call_id": "c3", "usd_micros": 9_999, "reason": "exceeds remaining"}),
+    ("turn.started", {"turn_id": "t1", "harness": "x", "argv": [], "brief": "b", "corrections": [1]}),
+    ("turn.collected", {"turn_id": "t1", "question": "?", "done": None, "effects": []}),
+    ("turn.reaped", {"turn_id": "t1", "processes": [{"pid": 1, "command": "x", "signal": "SIGTERM"}]}),
+    ("turn.ended", {"turn_id": "t1", "outcome": "done", "returncode": 0, "result": {}}),
+    ("question.asked", {"question_id": "q1", "turn_id": "t1", "text": "?"}),
+    ("question.answered", {"question_id": "q1", "text": "yes", "provenance": {"by": "tom", "via": "cli"}}),
+    ("task.delivered", {"turn_id": "t1", "summary": "done"}),
+    (
+        "feedback.given",
+        {"feedback_id": "f1", "on_delivery": "done", "text": "again", "provenance": {"by": "tom"}},
+    ),
+    ("effect.held", {"effect_id": "e1", "idempotency_key": "k1", "payload_sha256": "s"}),
+    ("effect.refused", {"effect_id": "e2", "idempotency_key": "k2", "reason": "ceiling"}),
+    (
+        "approval.granted",
+        {"approval_id": "a1", "effect_id": "e1", "payload_sha256": "s", "note": "ok", "by": "tom"},
+    ),
+    (
+        "approval.granted",
+        {
+            "approval_id": "a2",
+            "effect_id": "e1",
+            "payload_sha256": "s",
+            "note": "ok",
+            "provenance": ledger.provenance("stand-in", "test", True),
+        },
+    ),
+    ("effect.intent", {"effect_id": "e1", "idempotency_key": "k1", "approval_id": "a1"}),
+    (
+        "effect.outcome",
+        {"effect_id": "e1", "idempotency_key": "k1", "kind": "done", "result": {}, "error": None},
+    ),
+    (
+        "budget.raised",
+        {"raise_id": "r1", "usd_micros": 500, "provenance": ledger.provenance("tom", "cli", False)},
+    ),
+    ("task.stopped", {"reason": "test", "by": "tom"}),
+]
+
+
+def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(tmp_path):
+    database = f"{settings.test_database}_history_{os.getpid()}"
+    dsn = db.migrate(database, fresh=True)
+
+    async def populate():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="every type", budget_usd_micros=1_000))
+            async with conn.transaction():
+                for kind, payload in EVERY_TYPE:
+                    await ledger.append(conn, task, kind, payload)
+            return task
+
+    try:
+        task = asyncio.run(populate())
+        before = _snapshot(database)
+        with _owner(database) as conn:
+            types = {r[0] for r in conn.execute("SELECT DISTINCT type FROM events").fetchall()}
+        assert {k for k, _ in EVERY_TYPE} | {"task.started", "correction.recorded"} == types
+        # The old computation never saw raises; the new fold adds them, and
+        # differs from the oracle by exactly the raise.
+        before["money"][task] += 500
+        _migrate_with_change(database, tmp_path)
+        _check(database, before)
+    finally:
+        _drop(database)

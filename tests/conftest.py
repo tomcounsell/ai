@@ -1,17 +1,18 @@
-"""Real Postgres: a fresh `valor_rebuild_test` database per session.
+"""Real Postgres: a fresh test database (`settings.test_database`) per session.
 
 The ledger can never be emptied, so each session drops and recreates the
-database as its owner. Every test marks its live spend with
+database as its owner. `db.migrate` touches no role password, password
+file, or `pg_hba.conf`, so a test run leaves the machine cluster's
+credentials as it found them. Every test marks its live spend with
 `@pytest.mark.spend(usd=...)`.
 """
-
-import os
 
 import pytest
 
 from core import db
+from core.settings import settings
 
-TEST_DB = os.environ.get("VALOR_TEST_DB", "valor_rebuild_test")
+TEST_DB = settings.test_database
 
 
 @pytest.fixture(scope="session")
@@ -21,6 +22,4 @@ def dsn() -> str:
 
 @pytest.fixture(scope="session")
 def owner_dsn(dsn) -> str:
-    from core.settings import settings
-
     return settings.dsn(owner=True, database=TEST_DB)

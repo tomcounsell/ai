@@ -8,7 +8,9 @@
 #     scripts/demo_workspace.sh --rebuild   # delete everything and build it again
 #     scripts/demo_workspace.sh --teardown  # stop the workspace's Postgres, delete it
 #
-# Layout under $DEMO (default /Users/tomcounsell/src/valor-demo):
+# Paths and the Postgres binaries come from the kernel's settings
+# (`python -m core.settings`, run with $VALOR_PYTHON, default the
+# checkout's .venv). Layout under $DEMO (the `demo_dir` setting):
 #   psyoptimal/          the clone Valor works in, branch valor/profile-completion
 #   origin.git/          bare repository, the clone's `origin`; only the
 #                        broker's push_branch performer writes it, after Tom's tap
@@ -30,9 +32,16 @@ set -euo pipefail
 REPO="yudame/psyoptimal"
 BASE="ebdbf645a0c3302a90b77652852142f45983e84b"
 BRANCH="valor/profile-completion"
-DEMO="${VALOR_DEMO:-/Users/tomcounsell/src/valor-demo}"
-PG_BIN="/opt/homebrew/opt/postgresql@18/bin"
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+eval "$(cd "$ROOT" && "${VALOR_PYTHON:-$ROOT/.venv/bin/python}" -m core.settings)"
+DEMO="$SETTING_DEMO_DIR"
+PG_BIN="$SETTING_PG_BIN"
 PG_PORT="${VALOR_DEMO_PG_PORT:-5439}"
+# What a turn may neither read nor write: the kernel's password file, the
+# machine cluster's data directory, and the backup disk.
+KERNEL_PASSDIR="$(dirname "$SETTING_PG_PASSFILE")"
+KERNEL_PGDATA="$SETTING_PG_DATA_DIR"
+BACKUP_DIR="$SETTING_BACKUP_DIR"
 
 mkdir -p "$DEMO"
 DEMO="$(cd "$DEMO" && pwd -P)"
@@ -102,11 +111,13 @@ EOF
 # The turn may read and write the demo directory, its own Claude Code
 # session files, and everything a toolchain needs. It may not read Tom's
 # other checkouts (his psyoptimal holds the answer), his notes, his earlier
-# Claude Code transcripts and plans, or his keys; it may not write the bare
+# Claude Code transcripts and plans, his keys, the kernel's password file,
+# the machine cluster's data directory, or the backup disk (denied last, so
+# no allow above can reopen them); it may not write the bare
 # origin, touch the workspace cluster's data directory, or run git's keychain
 # credential helper; and on this Mac's loopback it reaches only the gateway,
 # the workspace's Postgres on $PG_PORT, and dev servers on 8000-8009. This
-# Mac's own Postgres (port 5432 and its socket, which hold the kernel's
+# Mac's own Postgres (its port and socket, which hold the kernel's
 # ledger) and Redis are out of reach. The loopback allows come last: any
 # network-outbound rule after them makes sandbox-exec refuse the allowed
 # ports for roughly two in five port numbers, so a turn's gateway, which
@@ -117,7 +128,8 @@ EOF
 # a turn. The mach name valor.turn.$VALOR_TURN marks the turn's processes for
 # the kernel's reaper, daemonized or not.
 H="$HOME"
-PG_SOCKET="$(cd /tmp && pwd -P)/.s.PGSQL.5432"
+PG_SOCKET="$SETTING_PG_SOCKET_REAL"
+KERNEL_SOCKET="$SETTING_PG_SOCKET"
 TRANSCRIPTS="$H/.claude/projects/$(echo "$DEMO/psyoptimal" | tr '/.' '--')"
 cat > home/sandbox.sb <<EOF
 (version 1)
@@ -145,6 +157,10 @@ cat > home/sandbox.sb <<EOF
 (deny file-write* (subpath "$DEMO/origin.git"))
 (deny file-read* file-write* (subpath "$PG/data"))
 (deny file-write* (literal "$PG/postgres.log"))
+(deny file-read* file-write*
+    (subpath "$KERNEL_PASSDIR")
+    (subpath "$KERNEL_PGDATA")
+    (subpath "$BACKUP_DIR"))
 (deny process-exec (regex #"/git-credential-osxkeychain$"))
 (deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))
 (deny network-bind network-inbound)
@@ -154,7 +170,7 @@ $(for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008 8009; do echo "    (loca
 (deny network-outbound
     (remote ip "localhost:*")
     (remote unix-socket (path-literal "$PG_SOCKET"))
-    (remote unix-socket (path-literal "/tmp/.s.PGSQL.5432")))
+    (remote unix-socket (path-literal "$KERNEL_SOCKET")))
 (allow network-outbound
     (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))
     (remote ip "localhost:$PG_PORT")

@@ -3,8 +3,7 @@ slots, the kernel's command line, and a plain `claude -p` call for the
 stand-in and the judge.
 
 Everything a replay writes (caches, workspaces, results, logs) lives under
-`DEMO`, `/Users/tomcounsell/src/valor-demo` unless `VALOR_DEMO` says
-otherwise.
+`DEMO`, the `demo_dir` setting (`core/settings.py`).
 """
 
 import fcntl
@@ -18,9 +17,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEMO = Path(os.environ.get("VALOR_DEMO", "/Users/tomcounsell/src/valor-demo")).resolve()
+sys.path.insert(0, str(ROOT))
+
+from core.settings import settings
+
+DEMO = Path(settings.demo_dir).resolve()
 PYTHON = str(ROOT / ".venv" / "bin" / "python") if (ROOT / ".venv").exists() else sys.executable
-CLAUDE = "claude"
+CLAUDE = settings.claude
 COSTS = DEMO / "costs.jsonl"
 LOCK = DEMO / "claude-turn.lock"
 SLOTS = int(os.environ.get("VALOR_DEMO_SLOTS", "3"))

@@ -1,21 +1,28 @@
-"""One real `claude -p` turn through the gateway, then a real stop mid-stream.
+"""Real `claude -p` turns through the gateway: one metered turn and a stop
+mid-stream, and one turn whose reply becomes a `propose` effect done at
+once and an `act` effect held until Tom approves it from the command line.
 
-Live spend: at most $0.03 per run (two Haiku turns under 1,024 and 4,096
+Live spend: at most $0.05 per run (three Haiku turns under 1,024 and 4,096
 output tokens; the stopped call is charged its full output allowance).
 Runs only when `VALOR_LIVE=1`, so a plain test run spends nothing.
 """
 
 import asyncio
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
-from core import db, runs, tasks
+from core import broker, db, runs, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
+from tests.conftest import TEST_DB
+from tools.workspace import OutboxAppend, WorkspaceWrite
 
 pytestmark = [
-    pytest.mark.spend(usd=0.03),
+    pytest.mark.spend(usd=0.05),
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
 ]
 
@@ -65,3 +72,60 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
     assert stopped["outcome"] == "stopped"
     assert stop_state["charged_usd_micros"] > 0  # the cut call is charged, not forgotten
     assert tasks.audit(done_state) == [] and tasks.audit(stop_state) == []
+
+
+def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_the_cli(dsn, tmp_path):
+    outbox = tmp_path / "outbox.jsonl"
+    broker.register(WorkspaceWrite(tmp_path))
+    broker.register(OutboxAppend(outbox))
+
+    def cli(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "core", *args],
+            cwd=Path(__file__).resolve().parent.parent,
+            env={**os.environ, "VALOR_DB": TEST_DB},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    async def go():
+        gateway = Gateway(dsn)
+        await gateway.start()
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(
+                conn, tasks.Brief(instruction="t", budget_usd_micros=50_000, max_effect_class="act")
+            )
+            ended = await runs.run_turn(
+                gateway,
+                task,
+                claude_code.turn("Reply with exactly one word: ready", cwd=str(tmp_path)),
+                dsn=dsn,
+            )
+            text = (ended["result"].get("text") or "").strip()
+            wrote = await broker.request(
+                conn, task, broker.Action("workspace_write", "reply.txt", {"text": text})
+            )
+            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": text}))
+            with pytest.raises(broker.NotApproved):
+                await broker.release(conn, held.effect_id)
+            lines_before = outbox.exists()
+            gate = broker.Action("workspace_write", "hooks/gate.py", {"text": "#"}, adds_governance=True)
+            guard = await broker.request(conn, task, gate)
+            pending = cli("pending")
+            cli("approve", held.effect_id, "--note", "yes, send it")
+            sent = await broker.release(conn, held.effect_id)
+            again = await broker.release(conn, held.effect_id)
+            state = await tasks.status(conn, task)
+        await gateway.close()
+        return ended, text, wrote, held, lines_before, guard, pending, sent, again, state
+
+    ended, text, wrote, held, lines_before, guard, pending, sent, again, state = asyncio.run(go())
+    assert ended["outcome"] == "done" and "ready" in text.lower()
+    assert wrote.kind == "done" and (tmp_path / "reply.txt").read_text() == text
+    assert held.kind == "pending" and not lines_before and held.effect_id in pending
+    assert guard.kind == "refused" and "governance_grant" in guard.error
+    assert sent.kind == "done" and again.effect_id == held.effect_id
+    assert len(outbox.read_text().splitlines()) == 1
+    assert state["attention_counts"]["approval"]["total"] == 1
+    assert tasks.audit(state) == []

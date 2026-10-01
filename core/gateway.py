@@ -254,6 +254,7 @@ class Gateway:
         detail = {
             "turn_id": grant.turn_id,
             "model": call["model"],
+            "price_checked": price["checked"],
             "status": status,
             "cut": cut,
             "unsent": unsent,

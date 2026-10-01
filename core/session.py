@@ -29,15 +29,11 @@ to the broker, and a question or delivery gets its own row.
 """
 
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Any
 
 from core import broker, db, ledger, runs, signals, tasks
 from core.gateway import Gateway
-
-# A turn that ends with neither a question nor a delivery is resumed with
-# "Continue."; after this many in a row the run returns so Tom can look.
-IDLE_TURNS = 2
+from core.settings import settings
 
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
@@ -74,7 +70,7 @@ async def run(gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
             return {"status": "failed", "state": state, "turn": ended}
         idle += 1
-        if idle >= IDLE_TURNS:
+        if idle >= settings.idle_turns:
             return {"status": "idle", "state": state, "turn": ended}
 
 
@@ -108,10 +104,6 @@ async def record(conn, task_id: str, turn_id: str, found: signals.Signals) -> No
             await ledger.append(conn, task_id, "task.delivered", {"turn_id": turn_id, "summary": found.done})
 
 
-def _provenance(by: str, via: str, role_played: bool) -> dict[str, Any]:
-    return {"by": by, "via": via, "role_played": role_played, "at": datetime.now(UTC).isoformat()}
-
-
 async def answer(
     conn,
     task_id: str,
@@ -138,7 +130,7 @@ async def answer(
             {
                 "question_id": question["question_id"],
                 "text": text,
-                "provenance": _provenance(by, via, role_played),
+                "provenance": ledger.provenance(by, via, role_played),
             },
         )
     return question["question_id"]
@@ -177,7 +169,7 @@ async def feedback(
                 "feedback_id": feedback_id,
                 "on_delivery": state["delivered"],
                 "text": text,
-                "provenance": _provenance(by, via, role_played),
+                "provenance": ledger.provenance(by, via, role_played),
             },
         )
     return feedback_id

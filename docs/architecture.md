@@ -94,8 +94,10 @@ HTTP proxy speaking the Anthropic Messages wire format; each turn is pointed
 at it through `ANTHROPIC_BASE_URL` with a per-turn token in the path. For
 every model call it:
 
-1. prices the model from a fixed table (an unpriced model is refused,
-   since it cannot be metered);
+1. prices the model from the table in `core/settings.py`, each price
+   carrying the day it was checked against the provider's page (an
+   unpriced model is refused, since it cannot be metered; the charge row
+   records `price_checked`);
 2. reserves the call's worst case, every input token at the most expensive
    input rate plus every output token the call may produce, under the
    task's lock, refusing with a `gateway.refused` row if it exceeds what
@@ -106,8 +108,10 @@ every model call it:
    cut before its usage arrives is charged its input plus every output
    token it was allowed, so the ledger never records less than the invoice.
 
-Remaining money is always derived from the ledger: committed, minus
-charges, minus open reservations. The per-call output cap
+Remaining money is always derived from the ledger, by one fold
+(`tasks.money`) that `status` and every reservation use: committed (the
+Brief's budget plus every `budget.raised`), minus charges, minus open
+reservations. The per-call output cap
 (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`) keeps the reservation close to what a call
 can cost.
 
@@ -117,8 +121,10 @@ starts included. In the first demonstration 69 calls were metered at
 $2.972649 against a harness-reported $2.972625 (rebuild-demonstration.md,
 Money): the meter sees what Claude Code spends on its own account.
 
-Serves bounded authority and spend. Only Tom raises a committed budget; a
-turn that hits a refusal ends the run as `budget exhausted`. The budget
+Serves bounded authority and spend. Only Tom raises a committed budget
+(`python -m core budget raise TASK N`, a `budget.raised` row with his
+provenance; a stopped task takes none); a turn that hits a refusal ends the
+run as `budget exhausted`, and the next run after a raise continues. The budget
 meters what passes the gateway; it is not a wall around the provider. A
 turn that deliberately called the provider directly with the machine's
 Claude login would spend outside it, and Tom accepted that on 2026-10-01:
@@ -183,7 +189,10 @@ manager).
 separate records:
 
 1. **Approve.** `approval.granted` binds Tom's tap to the held effect's
-   payload digest and stores his literal message as `note`, with `by`.
+   payload digest and stores his literal message as `note`, with
+   provenance: `by`, `via`, `at`, and `role_played`, so a stand-in's tap is
+   never read as Tom's. Approvals written before this carry only `by`, and
+   read with the rest unknown.
 2. **Release.** The broker finds an unused approval whose digest matches,
    writes the intent with that `approval_id`, and performs. A unique index
    makes each approval good for exactly one intent: one tap, one effect. An
@@ -198,9 +207,6 @@ separate records:
   destination's audience. Agent prose appears only in a marked,
   length-capped note, because agent text on an approval card is a
   persuasion channel aimed at the one person who can widen authority.
-- **Provenance on the approval.** Approvals record `role_played` beside
-  `by`, as answers and feedback already do, so a stand-in's tap is never
-  read as Tom's.
 - **Expiry.** An unanswered approval expires into a refusal with a typed
   cause, never an indefinite wait.
 
@@ -225,8 +231,8 @@ does hear it:
 
 `tasks.audit` states what a stop must leave true: every reserved call
 charged, every started turn ended, no effect between intent and outcome,
-nothing charged past the committed budget. The smoke test stops a task
-mid-turn and asserts the audit is empty.
+nothing charged past the committed budget. `tests/test_live_turn.py`
+stops a real task mid-turn and asserts the audit is empty.
 
 When a sandbox rule failed a turn mid-demonstration, it failed cleanly,
 metered $0, and lost nothing (rebuild-demonstration.md, Kernel findings 3).
@@ -376,17 +382,20 @@ the system cannot perform against".
 
 **Built.** Every question is a `question.asked` row and its answer a
 `question.answered` row; every piece of feedback on a delivery is a
-`feedback.given` row naming the delivery it answers. Answers and feedback
-carry provenance: `by`, `via`, `at`, and `role_played`, true when someone
-stood in for Tom. `tasks.status` folds these into the task's attention log,
-in ledger order, labelled by kind. `role_played` exists because the first
+`feedback.given` row naming the delivery it answers; every tap is an
+`approval.granted` row and every raise of the budget a `budget.raised` row.
+Each carries provenance: `by`, `via`, `at`, and `role_played`, true when
+someone stood in for Tom. `tasks.status` folds these into the task's
+attention log, in ledger order, labelled by kind (`question`, `feedback`,
+`approval`, `budget_raise`), and counts each kind apart in
+`attention_counts`, with how many were role-played and how many are
+unknown (rows written before a field existed read it as null, never as a
+default). `role_played` exists because the first
 demonstration's second feedback round was role-played and the ledger could
 not say so (rebuild-demonstration.md, Kernel findings 5).
 
 **Design.**
 
-- **Approvals in the log.** An approval is attention too; it joins the log
-  with the same provenance fields.
 - **Effect on the outcome.** Each entry records whether it changed the
   outcome or the authority required, the two columns of the demonstration's
   attention log. Valor proposes the label in its next delivery; Tom's
@@ -561,7 +570,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
-| A stand-in's words read as Tom's | `role_played` on answers and feedback (approvals: design) | provenance |
+| A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
 | Thin request built on a guess | judgement-tier routing to a clarify turn (design) | Mission 3, 6 |
 | A wrong plan reaches code | critique in a fresh session, rounds set by stakes (design) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |

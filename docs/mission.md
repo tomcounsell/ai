@@ -202,13 +202,17 @@ finding 5), and corrections must carry provenance (**Reliable stop,
 recovery, and correction**).
 
 What the current kernel does: `question.answered` and `feedback.given`
-carry `by`, `via`, `at`, and `role_played`, and `python -m core status`
-returns the task's `attention` list (questions with their answers, and
-feedback) in ledger order (`core/session.py`, `core/tasks.py`).
-`approval.granted` carries `by` and the note but no `role_played`, and
-approvals are not yet in the `attention` fold. Corrections carry `by`, `via`,
-and `at`, and are global rather than per task. Approvals with `role_played`,
-and approvals in the fold, are part of the design.
+carry `by`, `via`, `at`, and `role_played`, and so do `approval.granted`
+and `budget.raised`. `python -m core status` returns the task's `attention`
+list (questions with their answers, feedback, approvals, and raises) in
+ledger order, and `attention_counts`, which counts each kind apart, so
+approvals never add to the interruption count of questions and feedback
+(`core/tasks.py`). A row written before a provenance field existed reads it
+as null and counts as unknown: three answers and feedback from the
+demonstration have no `role_played`, and every approval before this shape
+carries only `by: tom`, which is unreliable, since the replay driver's
+standing-permission approvals say it too. Corrections carry `by`, `via`,
+`at`, and `role_played`, and are global rather than per task.
 
 ### How it is read
 

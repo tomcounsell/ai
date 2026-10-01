@@ -1,0 +1,52 @@
+{
+  "recorded": "2026-10-01",
+  "request": {
+    "model": "claude-haiku-4-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with exactly one word: ready"
+      }
+    ]
+  },
+  "test_database_task": "653a157c68af",
+  "charges": [
+    {
+      "turn_id": "record-messages_stream_haiku.sse",
+      "model": "claude-haiku-4-5",
+      "usd_micros": 34,
+      "price_checked": "2026-10-01",
+      "usage": {
+        "input_tokens": 14,
+        "service_tier": "standard",
+        "inference_geo": "not_available",
+        "output_tokens": 4,
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      }
+    },
+    {
+      "turn_id": "record-messages_haiku.json",
+      "model": "claude-haiku-4-5",
+      "usd_micros": 34,
+      "price_checked": "2026-10-01",
+      "usage": {
+        "input_tokens": 14,
+        "service_tier": "standard",
+        "inference_geo": "not_available",
+        "output_tokens": 4,
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      }
+    }
+  ]
+}

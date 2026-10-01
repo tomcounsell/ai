@@ -260,6 +260,20 @@ login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
 login to call the provider around the gateway is an accepted risk, because
 budgets are for visibility and honest metering, not a hard wall.
 
+**The one exception: the kernel databases' password file.** The passwords
+for `valor_kernel` and the owner role on the kernel databases live in a
+libpq password file, `~/.config/valor-kernel/pgpass` (the `pg_passfile`
+setting; mode 600, directory mode 700), not in the Keychain. A Keychain
+item is readable by a turn through `security`, and the vault `.env` syncs
+to iCloud and is loaded into the environment of the old system's
+unsandboxed sessions; this file is neither, and both turn sandbox profiles
+deny its directory by its setting. libpq reads it for every kernel
+connection, so no kernel process holds the password in a string or its
+environment. `python -m core secure-login` makes it and is the only code
+that writes it. Tom's own `psql` reaches the kernel databases by
+`export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which
+`claude_code.turn` drops from any turn's environment.
+
 ## Postgres on the machine
 
 Two kinds of cluster run on each machine, never one shared.
@@ -276,6 +290,59 @@ Two kinds of cluster run on each machine, never one shared.
 The separation exists because a machine cluster that trusted loopback let
 a turn reach the ledger as the kernel's role (rebuild-demonstration.md,
 Kernel findings 1). It costs one more Postgres, 36 MB idle.
+
+On the machine cluster, every role needs its password on the kernel
+databases (`valor_rebuild`, `valor_rebuild_test`): `python -m core
+secure-login` puts three `scram-sha-256` rules (socket, `127.0.0.1`, `::1`)
+in a marked block ahead of every other rule in `pg_hba.conf`, written to a
+temporary file and renamed into place, and puts the original back without
+reloading if the server would not parse the result. Other databases on the
+cluster keep their `trust` rules. Both turn sandbox profiles deny the
+cluster's data directory (the `pg_data_dir` setting), so a turn cannot
+edit `pg_hba.conf` or the heap files.
+
+**After a Homebrew major upgrade of Postgres.** The upgrade runs `initdb`
+for a new data directory, whose `pg_hba.conf` trusts every local login
+again. Update the `pg_data_dir` setting to the new directory, then run
+`python -m core secure-login` and check that a login without the password
+file is refused.
+
+## Backups
+
+`python -m core backup` dumps the kernel database to the `backup_dir`
+setting, an external disk (`/Volumes/<U+F028>/valor_temp` today; the
+volume's name is that one private-use character, which macOS shows as
+blank, and renaming it means changing the setting). Each dump is a
+`pg_dump` custom-format file with a manifest beside it (counts and SHA-256
+digests of the events and documents, read from the dump's own snapshot,
+and the dump's own SHA-256). The newest 30 are kept; the ledger itself is
+kept forever. The dump refuses a missing directory (an unmounted disk) and
+a directory on the cluster's own disk. `python -m core restore DUMP`
+restores a dump into a scratch cluster under `/tmp`, compares it with its
+manifest, and removes the cluster.
+
+**Rehearsed on 2026-10-01** from the command line: `backup` wrote
+`valor_rebuild-20261001T151206Z.dump` (1,416 events, max id 1,416, 22
+documents, 160,622 bytes) in 4.7 seconds, and `restore` of it matched its
+manifest in 1.2 seconds, leaving no cluster behind.
+
+**Installing the nightly job** (03:00; launchd runs a job missed during
+sleep once on wake):
+
+```bash
+mkdir -p ~/Library/Logs/valor
+.venv/bin/python -m core backup --plist > ~/Library/LaunchAgents/com.valor.backup.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.backup.plist
+launchctl kickstart gui/$(id -u)/com.valor.backup   # one dump now, by launchd
+tail ~/Library/Logs/valor/backup.log
+```
+
+Run the first two lines from the kernel checkout: the plist names that
+checkout and its interpreter. A launchd job needs macOS's permission to
+read and write removable volumes, which Terminal already has; if the
+kicked dump fails with "Operation not permitted", grant it to that
+interpreter in System Settings, Privacy and Security, then kick it again.
+`launchctl bootout gui/$(id -u)/com.valor.backup` removes the job.
 
 ## Open questions for Tom
 

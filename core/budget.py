@@ -1,4 +1,4 @@
-"""Money: prices, the per-call reservation, and conservation.
+"""Money: prices, the per-call reservation, raises, and conservation.
 
 A budget is integer micro-dollars and nothing else. Tokens are what the
 provider bills on; `cost` is the one place the two units meet.
@@ -6,49 +6,43 @@ provider bills on; `cost` is the one place the two units meet.
 Every model call reserves its worst case before it is forwarded and is
 charged what the provider reported when it closes. Both are ledger rows, and
 remaining money is always derived from the ledger under an advisory lock on
-the task, so two calls racing on one task can never spend the same money.
+the task, by the same fold `tasks.status` uses (`tasks.money`), so two calls
+racing on one task can never spend the same money. Only Tom raises a task's
+committed budget, with a `budget.raised` row carrying his provenance.
 """
 
 import json
 from math import ceil
 
 from core import ledger, tasks
-
-# US dollars per million tokens, from the provider's public pricing page.
-# `cache_write` is the five-minute write (1.25x input); the one-hour write is
-# 2x input and derived in `prices`. A model absent here is refused: an
-# unpriced call cannot be metered.
-PRICES_USD_PER_MTOK = {
-    "claude-opus-5-5": {"input": 4.00, "output": 20.00, "cache_write": 5.00, "cache_read": 0.20},
-    "claude-opus-5": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "claude-opus-4-8": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},
-    "claude-sonnet-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},
-    "claude-haiku-4-5": {"input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10},
-}
-
-# Bytes per token for the input estimate. An underestimate spends money
-# nobody reserved, so it leans high: English and JSON run above 3.
-BYTES_PER_TOKEN = 3
+from core.settings import PRICES, settings
 
 
 class BudgetRefused(RuntimeError):
     pass
 
 
-def prices(model: str) -> dict[str, int] | None:
-    """Micro-dollars per million tokens for a model id, matching a dated id
-    (`claude-haiku-4-5-20251001`) to its undated entry. The longest matching
-    entry wins, so `claude-opus-5-5` never takes `claude-opus-5`'s price."""
-    names = [n for n in PRICES_USD_PER_MTOK if model == n or model.startswith(n + "-")]
+def prices(model: str) -> dict | None:
+    """Micro-dollars per million tokens for a model id, plus the day the
+    price was checked (`checked`, ISO date). A dated id
+    (`claude-haiku-4-5-20251001`) matches its undated entry; the longest
+    matching entry wins, so `claude-opus-5-5` never takes `claude-opus-5`'s
+    price."""
+    names = [n for n in PRICES if model == n or model.startswith(n + "-")]
     if not names:
         return None
-    table = PRICES_USD_PER_MTOK[max(names, key=len)]
-    table = {**table, "cache_write_1h": 2 * table["input"]}
-    return {k: round(v * 1_000_000) for k, v in table.items()}
+    p = PRICES[max(names, key=len)]
+    per_mtok = {
+        "input": p.input,
+        "output": p.output,
+        "cache_write": p.cache_write,
+        "cache_write_1h": p.cache_write_1h,
+        "cache_read": p.cache_read,
+    }
+    return {**{k: round(v * 1_000_000) for k, v in per_mtok.items()}, "checked": p.checked.isoformat()}
 
 
-def cost(usage: dict, price: dict[str, int]) -> int:
+def cost(usage: dict, price: dict) -> int:
     """What the provider bills, rounded up per field, so the ledger never
     records less than the invoice. A cache write counts as a five-minute
     write only where the usage's `cache_creation` split says so; every other
@@ -66,10 +60,10 @@ def cost(usage: dict, price: dict[str, int]) -> int:
 
 
 def estimate_input(body: dict) -> int:
-    return ceil(len(json.dumps(body, separators=(",", ":")).encode()) / BYTES_PER_TOKEN)
+    return ceil(len(json.dumps(body, separators=(",", ":")).encode()) / settings.bytes_per_token)
 
 
-def worst_case(input_tokens: int, max_tokens: int, price: dict[str, int]) -> int:
+def worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
     """Input at the most expensive input rate plus every output token the
     caller allowed."""
     return ceil(input_tokens * price["cache_write_1h"] / 1_000_000) + ceil(
@@ -77,25 +71,18 @@ def worst_case(input_tokens: int, max_tokens: int, price: dict[str, int]) -> int
     )
 
 
-REMAINING_SQL = """
-SELECT
-  (SELECT (body->>'budget_usd_micros')::bigint FROM documents
-    WHERE kind = 'task' AND id = %(t)s)
-  - COALESCE((SELECT sum((payload->>'usd_micros')::bigint) FROM events
-    WHERE task_id = %(t)s AND type = 'gateway.charged'), 0)
-  - COALESCE((SELECT sum((r.payload->>'usd_micros')::bigint) FROM events r
-    WHERE r.task_id = %(t)s AND r.type = 'gateway.reserved'
-      AND NOT EXISTS (SELECT 1 FROM events c
-        WHERE c.task_id = %(t)s AND c.type = 'gateway.charged'
-          AND c.payload->>'call_id' = r.payload->>'call_id')), 0)
-"""
-
-
 async def remaining(conn, task_id: str) -> int:
-    row = await (await conn.execute(REMAINING_SQL, {"t": task_id})).fetchone()
-    if row[0] is None:
+    """The task's remaining money, folded from its money rows. Call it under
+    the task's lock when the answer decides a write."""
+    rows = await (
+        await conn.execute(
+            "SELECT type, payload FROM events WHERE task_id = %s AND type = ANY(%s) ORDER BY id",
+            (task_id, list(tasks.MONEY_EVENTS)),
+        )
+    ).fetchall()
+    if not any(t == "task.started" for t, _ in rows):
         raise KeyError(task_id)
-    return int(row[0])
+    return tasks.money([{"type": t, "payload": p} for t, p in rows])["remaining_usd_micros"]
 
 
 async def reserve(conn, task_id: str, call: dict) -> str:
@@ -127,3 +114,38 @@ async def charge(conn, task_id: str, call_id: str, usd_micros: int, detail: dict
             "gateway.charged",
             {"call_id": call_id, "usd_micros": usd_micros, **detail},
         )
+
+
+async def raise_budget(
+    conn,
+    task_id: str,
+    usd_micros: int,
+    *,
+    note: str = "",
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> str:
+    """Add `usd_micros` to the task's committed budget. A stopped task takes
+    no raise (stop is final), and nothing is written. Returns the raise's
+    id."""
+    if usd_micros <= 0:
+        raise ValueError("a raise is more than zero")
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        await tasks.brief(conn, task_id)  # KeyError for an unknown task
+        if await tasks.is_stopped(conn, task_id):
+            raise tasks.TaskStopped(task_id)
+        raise_id = ledger.new_id()
+        await ledger.append(
+            conn,
+            task_id,
+            "budget.raised",
+            {
+                "raise_id": raise_id,
+                "usd_micros": usd_micros,
+                "note": note,
+                "provenance": ledger.provenance(by, via, role_played),
+            },
+        )
+    return raise_id

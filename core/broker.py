@@ -114,9 +114,19 @@ async def request(conn, task_id: str, action: Action) -> Outcome:
     return await _perform(conn, task_id, effect_id, action, described, approval_id=None)
 
 
-async def approve(conn, effect_id: str, *, note: str, by: str = "tom") -> str:
+async def approve(
+    conn,
+    effect_id: str,
+    *,
+    note: str,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> str:
     """Tom's tap. Binds to the held effect's digest; `note` is his literal
-    message, kept as provenance."""
+    message. `provenance` says who tapped (`by`), through what (`via`),
+    when, and whether someone stood in for Tom (`role_played`), the shape
+    answers and feedback carry."""
     async with conn.transaction():
         held = await _held(conn, effect_id)
         approval_id = ledger.new_id()
@@ -129,7 +139,7 @@ async def approve(conn, effect_id: str, *, note: str, by: str = "tom") -> str:
                 "effect_id": effect_id,
                 "payload_sha256": held["payload"]["payload_sha256"],
                 "note": note,
-                "by": by,
+                "provenance": ledger.provenance(by, via, role_played),
             },
         )
     return approval_id

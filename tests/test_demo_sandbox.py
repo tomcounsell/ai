@@ -10,6 +10,10 @@ the replays' own Postgres (5439) and Redis (6390). A replay's turn reads and
 writes its own run and nothing else in the replay directory, and reads and
 runs the shared binaries in its `bin/`.
 
+Neither profile lets a turn read or write the kernel's password file, the
+machine cluster's data directory (its `pg_hba.conf` and heap files), or the
+backup disk, each named by its setting.
+
 A turn listens only on 8000 to 8009 and on unix sockets inside its own
 directory: never on 6379 or 5432, on any address, nor on an OS-assigned
 port. sandbox-exec matches a bind by port alone, so 0.0.0.0:8001 passes
@@ -38,6 +42,8 @@ SCRIPT = SCRIPTS / "demo_workspace.sh"
 sys.path.insert(0, str(SCRIPTS))
 
 import replay_workspace
+
+from core.settings import settings
 
 PROBE = """
 import os, socket, sys
@@ -99,20 +105,49 @@ for target in sys.argv[1:]:
 """
 
 
+def _kernel(tmp_path: Path) -> dict[str, Path]:
+    """Stand-ins for the kernel's paths, one file in each."""
+    paths = {
+        "passdir": tmp_path / "kernel" / "valor-kernel",
+        "pgdata": tmp_path / "kernel" / "pgdata",
+        "backup": tmp_path / "kernel" / "backup",
+    }
+    for d in paths.values():
+        d.mkdir(parents=True, exist_ok=True)
+    (paths["passdir"] / "pgpass").write_text("*:*:valor_rebuild:valor_kernel:x\n")
+    (paths["pgdata"] / "pg_hba.conf").write_text("local all all trust\n")
+    (paths["backup"] / "valor_rebuild-20261001T030000Z.dump").write_text("x")
+    return paths
+
+
+def _kernel_probes(paths: dict[str, Path]) -> list[str]:
+    files = [
+        paths["passdir"] / "pgpass",
+        paths["pgdata"] / "pg_hba.conf",
+        paths["backup"] / "valor_rebuild-20261001T030000Z.dump",
+    ]
+    return [f"{mode}:{f}" for f in files for mode in ("read", "write")] + [f"list:{paths['backup']}"]
+
+
 def _profile(tmp_path: Path) -> Path:
     """The profile text from the script's heredoc, expanded by bash with the
     script's own variables pointed at `tmp_path`."""
     heredoc = re.search(r"cat > home/sandbox\.sb <<EOF\n(.*?)\nEOF\n", SCRIPT.read_text(), re.DOTALL)
     assert heredoc
     out = tmp_path / "sandbox.sb"
+    kernel = _kernel(tmp_path)
     env = {
         "PATH": "/usr/bin:/bin",
         "H": str(tmp_path / "home"),
         "DEMO": str(tmp_path / "demo"),
         "PG": str(tmp_path / "demo" / "pg"),
         "PG_PORT": "5439",
-        "PG_SOCKET": "/private/tmp/.s.PGSQL.5432",
+        "PG_SOCKET": settings.pg_socket_real,
+        "KERNEL_SOCKET": settings.pg_socket,
         "TRANSCRIPTS": str(tmp_path / "transcripts"),
+        "KERNEL_PASSDIR": str(kernel["passdir"]),
+        "KERNEL_PGDATA": str(kernel["pgdata"]),
+        "BACKUP_DIR": str(kernel["backup"]),
     }
     subprocess.run(
         ["bash", "-c", f'cat > "$0" <<EOF\n{heredoc.group(1)}\nEOF', str(out)], env=env, check=True
@@ -143,7 +178,7 @@ def test_the_gateway_is_reachable_at_any_port_and_the_rest_of_loopback_is_not(tm
         ports = [s.getsockname()[1] for s in listeners]
         for i, port in enumerate(ports):
             other = ports[i - 1]
-            assert _probe(profile, port, port, 5439, 5432, 6379, "/tmp/.s.PGSQL.5432", other) == [
+            assert _probe(profile, port, port, 5439, settings.pgport, 6379, settings.pg_socket, other) == [
                 "open",
                 "open",
                 "denied",
@@ -188,7 +223,9 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
         gateway.bind(("127.0.0.1", 0))
         gateway.listen()
         port = gateway.getsockname()[1]
-        assert _probe(profile, port, port, 5439, 6390, 8003, 5432, 6379, "/tmp/.s.PGSQL.5432", 6391) == [
+        assert _probe(
+            profile, port, port, 5439, 6390, 8003, settings.pgport, 6379, settings.pg_socket, 6391
+        ) == [
             "open",
             "open",
             "open",
@@ -265,3 +302,50 @@ def test_a_replay_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
     )
     binds = _binds(run)
     assert dict(zip(binds, _probe(profile, 1, *binds))) == binds
+
+
+def test_the_demo_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
+    profile = _profile(tmp_path)
+    (tmp_path / "demo").mkdir(exist_ok=True)
+    (tmp_path / "demo" / "own.txt").write_text("x")
+    probes = _kernel_probes(_kernel(tmp_path))
+    found = _probe(profile, 1, *probes, f"read:{tmp_path / 'demo' / 'own.txt'}")
+    assert found == ["denied"] * len(probes) + ["open"]
+
+
+def test_a_replay_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
+    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
+    (run / "toy").mkdir(parents=True)
+    (run / "toy" / "own.txt").write_text("x")
+    kernel = _kernel(tmp_path)
+    profile = tmp_path / "replay.sb"
+    profile.write_text(
+        replay_workspace.sandbox_profile(
+            run=run,
+            workdir=run / "toy",
+            ports=replay_workspace.ports_for([]),
+            home=tmp_path / "home",
+            kernel=list(kernel.values()),
+        )
+    )
+    probes = _kernel_probes(kernel)
+    found = _probe(profile, 1, *probes, f"read:{run / 'toy' / 'own.txt'}")
+    assert found == ["denied"] * len(probes) + ["open"]
+
+
+def test_by_default_a_replay_profile_denies_the_kernel_paths_its_settings_name(tmp_path):
+    """The real paths, from settings: the password file's directory, the
+    machine cluster's data directory, and the backup disk (whose name is a
+    private-use character). Probed read-only where they exist."""
+    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
+    (run / "toy").mkdir(parents=True)
+    text = replay_workspace.sandbox_profile(
+        run=run, workdir=run / "toy", ports=replay_workspace.ports_for([]), home=tmp_path / "home"
+    )
+    for path in (Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)):
+        assert f'(subpath "{path}")' in text
+    profile = tmp_path / "replay.sb"
+    profile.write_text(text)
+    probes = [f"read:{p}" for p in [Path(settings.pg_data_dir) / "PG_VERSION"] if p.exists()]
+    probes += [f"list:{p}" for p in [Path(settings.backup_dir)] if p.is_dir()]
+    assert _probe(profile, 1, *probes) == ["denied"] * len(probes)

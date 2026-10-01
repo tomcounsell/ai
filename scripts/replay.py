@@ -99,7 +99,17 @@ def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
             left.append(effect_id)
             log.append({"at": now(), "step": "held effect left for Tom", "effect": line, "push_urls": urls})
             continue
-        core("approve", effect_id, "--note", PUSH_NOTE)
+        core(
+            "approve",
+            effect_id,
+            "--note",
+            PUSH_NOTE,
+            "--by",
+            "replay driver",
+            "--via",
+            "replay driver",
+            "--role-played",
+        )
         released = core("release", effect_id)
         log.append({"at": now(), "step": "push released", "effect_id": effect_id, "outcome": released})
     return left

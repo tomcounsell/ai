@@ -1,5 +1,6 @@
-"""Corrections on real Postgres: recorded in the ledger, numbered in order,
-never edited, and rendered into every turn's prompt and dispatched Brief.
+"""Corrections on real Postgres: correction 1 recorded by a fresh `migrate`,
+the rest recorded in the ledger, numbered in order, never edited, and
+rendered into every turn's prompt and dispatched Brief.
 
 No model call: the turn runs the argv the Claude Code harness builds, with
 the `claude` binary swapped for a Python process that exits at once.
@@ -33,18 +34,42 @@ def run(coro):
 
 @pytest.fixture(scope="module")
 def first(dsn):
+    """Correction 1, as the session's fresh `migrate` recorded it."""
+
     async def go():
         async with await db.connect(dsn) as conn:
-            return await corrections.record(conn, RESTRAINT, by="tom", via="the setup plan")
+            return (await corrections.in_force(conn))[0]
 
     return run(go())
 
 
-def test_correction_one_is_the_restraint_paragraph_with_provenance(first):
+def test_a_fresh_migrate_holds_correction_one_the_restraint_paragraph(first):
     assert first["number"] == 1
     assert first["scope"] == "global" and first["source_class"] == "direct"
     assert first["text"] == RESTRAINT
-    assert first["provenance"]["by"] == "tom" and first["provenance"]["via"] == "the setup plan"
+    p = first["provenance"]
+    assert p["by"] == "tom" and p["via"] == "CLAUDE.md, seeded by migrate" and p["role_played"] is False
+
+
+def test_migrating_again_adds_no_second_correction_one_and_the_next_is_two(dsn, first):
+    db.migrate(TEST_DB)
+    db.migrate(TEST_DB)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            ones = await (
+                await conn.execute(
+                    "SELECT count(*) FROM events WHERE type = 'correction.recorded' "
+                    "AND payload->>'number' = '1'"
+                )
+            ).fetchone()
+            before = len(await corrections.in_force(conn))
+            nxt = await corrections.record(conn, "After the seed.", by="tom", via="test")
+            return ones[0], before, nxt
+
+    ones, before, nxt = run(go())
+    assert ones == 1
+    assert nxt["number"] == before + 1
 
 
 def test_corrections_are_numbered_in_the_order_given_even_when_racing(dsn, first):
