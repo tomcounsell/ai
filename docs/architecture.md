@@ -35,16 +35,17 @@ prompt layer.
 
 ## The ledger
 
-**Built.** One Postgres table, `events`, append-only: an `UPDATE`,
-`DELETE`, or `TRUNCATE` raises, and the kernel's role `valor_kernel` is
-granted `SELECT` and `INSERT` only. Grants are the first lock, the trigger
-the second. Unique indexes make every fold total: one reservation and one
-charge per model call, one row of each kind per effect, one stop per task,
-an approval consumed by at most one effect, one correction per number.
-Writers take a transaction-scoped advisory lock on the task, so two
-processes racing on one task serialise. Storage detail, the event types,
-and how the kernel's database is kept out of a turn's reach are in
-[data.md](data.md).
+**Built.** One Postgres table, `events`, append-only: an `UPDATE`, `DELETE`,
+or `TRUNCATE` raises, and the kernel's role `valor_kernel` is granted
+`SELECT` and `INSERT` only. Grants are the first lock, the trigger the
+second. Unique indexes make every fold total: one reservation and one charge
+per model call, one row of each kind per effect, one stop per task, an
+approval consumed by at most one effect, one correction per number, one
+judge verdict per task, one row of each kind per turn, and one grant per
+guard and per governance instance. Writers take a transaction-scoped
+advisory lock on the task, so two processes racing on one task serialise.
+Storage detail, the event types, and how the kernel's database is kept out
+of a turn's reach are in [data.md](data.md).
 
 The constraint it enforces: "A ledger the system cannot edit records every
 effect." The first demonstration's first incident was a breach of it:
@@ -71,13 +72,13 @@ the task starts:
 | `mode` | `bare` or `clarify`: the starter's judge verdict (`precise` or `thin`) until the judge runs (milestone 1.3); none leaves the task in `judge` |
 | `target_branch`, `origin_url`, `base_sha` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then |
 
-The Brief a turn receives is **dispatched**: rendered from the ledger as
-the turn starts, carrying the task's commitments, every correction in force,
-the signal channel (how the turn reaches Tom, listing the effects the
-registered performers offer), and the stage file for the state the turn
-runs in (`skills/sdlc/<state>.md`). `turn.started` records
-the full dispatched text, its SHA-256, and the correction numbers it
-carried, so what a turn was told is a lookup.
+The Brief a turn receives is **dispatched**: rendered from the ledger as the
+turn starts, carrying the task's commitments, every correction in force, the
+signal channel (how the turn reaches Tom, listing the effects the registered
+performers offer), and the stage file for the state the turn runs in
+(`skills/sdlc/<state>.md`). `turn.started` records the full dispatched text,
+its SHA-256, and the correction numbers it carried, so what a turn was told
+is a lookup.
 
 **State.** A task's state is the SDLC state machine's, folded from its
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
@@ -86,8 +87,8 @@ Stop is final. A run (`core/router.py`) ends when the task needs Tom
 spends its budget, has a turn fail, or has two turns in a row end without
 their stage's signal (the idle bound).
 
-**Design.** The Brief gains an `attention_budget` beside the money budget
-(see The attention log) and, once tasks nest, a `parent_id` and a deadline.
+**Design.** The Brief gains an `attention_budget` (see The attention log)
+and, once tasks nest, a `parent_id` and a deadline.
 
 ## Budgets
 
@@ -113,9 +114,8 @@ every model call it:
 Remaining money is always derived from the ledger, by one fold
 (`tasks.money`) that `status` and every reservation use: committed (the
 Brief's budget plus every `budget.raised`), minus charges, minus open
-reservations. The per-call output cap
-(`CLAUDE_CODE_MAX_OUTPUT_TOKENS`) keeps the reservation close to what a call
-can cost.
+reservations. The per-call output cap (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`)
+keeps the reservation close to what a call can cost.
 
 Because the harness's base URL points at the gateway, every call the turn
 makes passes through it, Claude Code's own side calls and any subagents it
@@ -126,12 +126,9 @@ Money): the meter sees what Claude Code spends on its own account.
 Serves bounded authority and spend. Only Tom raises a committed budget
 (`python -m core budget raise TASK N`, a `budget.raised` row with his
 provenance; a stopped task takes none); a turn that hits a refusal ends the
-run as `budget exhausted`, and the next run after a raise continues. The budget
-meters what passes the gateway; it is not a wall around the provider. A
-turn that deliberately called the provider directly with the machine's
-Claude login would spend outside it, and Tom accepted that on 2026-10-01:
-budgets are for visibility and honest metering. Effect ceilings are not
-relaxed by this; effects still leave only through the broker.
+run as `budget exhausted`, and the next run after a raise continues. The
+budget meters what passes the gateway and is not a wall around the
+provider (see Limits).
 
 **Design.** Conservation down the tree (see The objective tree), and:
 
@@ -160,8 +157,8 @@ task's lock:
 - derives the idempotency key from the action (type, target, payload
   digest) and returns the earlier outcome for a repeat;
 - refuses, with an `effect.refused` row, an action with no performer, on a
-  stopped task, above the task's ceiling, or adding governance without a
-  grant;
+  stopped task, above the task's ceiling, adding governance without Tom's
+  grant, or one its performer's `refuse` declines;
 - performs `read` and `propose` at once;
 - holds every `act` as `effect.held` for Tom.
 
@@ -170,15 +167,21 @@ then `effect.outcome`. A kill between the two leaves a findable dangling
 intent and never a silent effect; the performer's `lookup` asks the target
 whether its key landed, which is how a dangling intent is reconciled.
 
-An action flagged as adding governance is `act` whatever its performer
-declares, and is refused outright when the Brief's `governance_grant` is
-none. This is the governing constraint as a kernel fact.
+A `merge` adds governance when the review or docs verdict on its
+candidate answered the governance boolean yes, computed by the broker and
+never said by the requester; it is refused while any instance lacks Tom's
+tap (`guard.granted`), and the Brief's `governance_grant` does not stand in.
+This is the governing constraint as a kernel fact. A `merge` is released
+only when the merge predicate holds, checked in the transaction that
+writes its intent ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
-Three performers exist: `push_branch` (`act`), which pushes one named
-commit to one branch of the workspace's `origin` and never forces, running in
-the kernel's process outside the turn's sandbox with the workspace's git
-hooks, credential helpers, and SSH command pinned off; and the local
-`workspace_write` (`propose`) and `outbox_send` (`act`) used by the tests.
+Four performers exist, run in the kernel's process outside the turn's
+sandbox: `push_branch` (`act`) pushes one named commit to one branch, never
+the target branch, and `merge` (`act`, offered to no turn) pushes a passed
+candidate onto the target branch, both to the origin URL recorded at
+start, never forcing, with git hooks, credential helpers, and SSH command
+pinned off; `workspace_write` (`propose`) and `outbox_send` (`act`) serve
+the tests.
 
 The constraint it enforces: bounded authority and spend. In the first
 demonstration all three deliveries went out as held pushes that landed only
@@ -191,23 +194,21 @@ manager).
 separate records:
 
 1. **Approve.** `approval.granted` binds Tom's tap to the held effect's
-   payload digest and stores his literal message as `note`, with
-   provenance: `by`, `via`, `at`, and `role_played`, so a stand-in's tap is
-   never read as Tom's. Approvals written before this carry only `by`, and
-   read with the rest unknown.
+   payload digest and stores his literal message as `note`, with `by`,
+   `via`, `at`, and `role_played`, so a stand-in's tap is never read as
+   Tom's (an approval row holding only `by` reads the rest as unknown).
 2. **Release.** The broker finds an unused approval whose digest matches,
-   writes the intent with that `approval_id`, and performs. A unique index
-   makes each approval good for exactly one intent: one tap, one effect. An
-   effect whose payload changed after approval has no matching approval and
-   is refused.
+   writes the intent with that `approval_id`, and performs; for a `merge`
+   the predicate is checked in the same transaction. A unique index makes
+   each approval good for one intent: one tap, one effect. An effect whose
+   payload changed after approval has no matching approval and is refused.
 
 **Design.**
 
 - **Cards rendered by the kernel.** On a bridge, an approval is a typed
-  card the kernel renders from structured fields: the action, its target,
-  a readable summary of the payload (a diff summary for a push), and the
-  destination's audience. Agent prose appears only in a marked,
-  length-capped note, because agent text on an approval card is a
+  card rendered from structured fields: the action, its target, a summary
+  of the payload, and the destination's audience. Agent prose appears only
+  in a marked, length-capped note, since agent text on a card is a
   persuasion channel aimed at the one person who can widen authority.
 - **Expiry.** An unanswered approval expires into a refusal with a typed
   cause, never an indefinite wait.
@@ -252,25 +253,21 @@ given the gateway URL, the dispatched Brief, and the turn's id, plus how to
 read the result. The kernel never knows which harness it runs; the Claude
 Code wrapper and its flags are in [harnesses.md](harnesses.md).
 
-A task's frontier turns resume one working session (clarify, plan, build,
-patch), so Valor keeps its context across a question, a send-back, and
-feedback; a patch is that session resumed, compacted when it nears the
-context limit, never a new agent (Tom, 2026-10-01). Critique, review, and
-docs run in fresh sessions. Each turn gets the Brief re-rendered from the
-ledger. Prompts per state are in [harnesses.md](harnesses.md).
+A task's clarify, plan, build, and patch turns resume one working session,
+so Valor keeps its context across a question, a send-back, and feedback; a
+patch is that session resumed, never a new agent (Tom, 2026-10-01).
+Critique, review, and docs run in fresh sessions. Prompts per state are in
+[harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
-`.valor/` in its workspace, read when the turn ends: `question.md` (a
-question for Tom; the task waits), `no_question.md` (clarify found nothing
-to ask), `plan.json` (the committed plan, its stakes and loop counts),
-`done.md` (a **candidate**: what, how it was verified, what Tom should
-know), and `effects/<name>.json` (one effect request each, passed to the
-broker; a merge is never a turn's to request). Each file is moved to
-`.valor/handled/<turn_id>/` once read. The layout is specified in
-[harnesses.md](harnesses.md). `turn.collected` records everything the turn
-left with the state it ran in and its verdict, beside `question.asked` or
-`plan.written` where the verdict calls for one; `task.delivered` waits for
-the test, review, and docs checks, per [sdlc-state-machine.md](sdlc-state-machine.md).
+`.valor/` in its workspace, read when the turn ends and then moved to
+`.valor/handled/<turn_id>/`: `question.md` (the task waits for Tom),
+`no_question.md` (clarify found nothing to ask), `plan.json` (the committed
+plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
+request each; never a merge). [harnesses.md](harnesses.md) specifies the
+layout. `turn.collected` records what the turn left, its state, and its
+verdict; `task.delivered` waits for the checks
+([sdlc-state-machine.md](sdlc-state-machine.md)).
 
 **An answer or feedback is spent only by a turn that finishes.** After a
 turn that fails or is stopped, the next turn opens with it again. This is
@@ -285,7 +282,7 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway | every model call: model, reservation, charge, usage | yes |
-| Turn record | the kernel | `turn.started` (harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record, but
@@ -308,7 +305,7 @@ turn under one (rebuild-demonstration.md, Setup, Isolation). The profile:
 - confines reads and writes to the workspace and what the toolchain needs,
   away from Tom's other checkouts, notes, transcripts, and keys;
 - denies writes to the workspace's bare `origin`, so a push leaves only
-  through the broker's `push_branch`;
+  through the broker's `push_branch` or `merge`;
 - on loopback, reaches only the gateway, the workspace's own Postgres, and
   the app's dev ports, and never the kernel's database;
 - puts denies before allows, because sandbox-exec refused allowed ports at
@@ -335,9 +332,9 @@ history only up to the base commit, a local bare repository as its only
 remote, a Postgres cluster of its own with password auth, and the sandbox
 above. Today scripts build it (`scripts/demo_workspace.sh`,
 `scripts/replay_workspace.py`). **Design:** the kernel provisions a
-workspace per task from the request's repository and the same template,
-and retains its disk after a stop. Serves Mission item 1 (Valor works
-without Tom setting up the gaps) and bounded authority.
+workspace per task from the request's repository and the same template, and
+retains its disk after a stop. Serves Mission item 1 (Valor works without
+Tom setting up the gaps) and bounded authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which
 sandbox. Turns run under sandbox-exec on the host, as built and as both
@@ -360,16 +357,15 @@ Correction 1 rendering).
 
 Source classes are `direct` (a correction Tom gave) and `exemplar`. Both
 streams are the kernel's; `memory/` later reads and curates them and never
-owns them. The **exemplar ledger** is the same store with a distinct source class: work
-Tom loved and why. Without it the system learns to avoid mistakes and never
-what excellent looks like. Serves: Evidence, "Tom's feedback, both
-directions"; Mission item 2; and corrections that are first-class, carry
-provenance, and reach every session and agent.
+owns them. The **exemplar ledger** is the same store with a distinct source
+class: work Tom loved and why. Without it the system learns to avoid
+mistakes and never what excellent looks like. Serves: Evidence, "Tom's
+feedback, both directions"; Mission item 2; and corrections that are
+first-class, carry provenance, and reach every session and agent.
 
 **Design.**
 
-- **Corrections reaching subagents.** Whether the appended system prompt
-  reaches subagents a turn starts is unverified, a gap
+- **Corrections reaching subagents.** Unverified, a gap
   (rebuild-demonstration.md, Correction 1 rendering, last line).
 - **Withdrawal and supersession.** A correction is withdrawn or replaced by
   a later row naming it, never by an edit.
@@ -386,14 +382,15 @@ the system cannot perform against".
 **Built.** Every question is a `question.asked` row and its answer a
 `question.answered` row; every piece of feedback on a delivery is a
 `feedback.given` row naming the delivery it answers; every tap is an
-`approval.granted` row and every raise of the budget a `budget.raised` row.
-Each carries provenance: `by`, `via`, `at`, and `role_played`, true when
-someone stood in for Tom. `tasks.status` folds these into the task's
-attention log, in ledger order, labelled by kind (`question`, `feedback`,
-`approval`, `budget_raise`), and counts each kind apart in
-`attention_counts`, with how many were role-played and how many are
-unknown (rows written before a field existed read it as null, never as a
-default). `role_played` exists because the first
+`approval.granted` row, every raise of the budget a `budget.raised` row,
+every verdict recorded by hand a verdict row with `leg: manual`, and every
+governance grant a `guard.granted` row. Each carries provenance: `by`,
+`via`, `at`, and `role_played`, true when someone stood in for Tom.
+`tasks.status` folds these into the task's attention log, in ledger order,
+labelled by kind (`question`, `feedback`, `approval`, `budget_raise`,
+`verdict`, `grant`), and counts each kind apart in `attention_counts`, with
+how many were role-played and how many are unknown (a field a row never
+recorded reads as null). `role_played` exists because the first
 demonstration's second feedback round was role-played and the ledger could
 not say so (rebuild-demonstration.md, Kernel findings 5).
 
@@ -417,26 +414,23 @@ Each judgement is a Jev call through `JudgementPort` in
 nothing about what it may do. The SDLC uses three:
 
 1. **Before any plan: is this request thin?** A thin request (a one-line
-   ask, an ask that leans on an example, an ask naming existing UI without
-   scope) opens with a clarify turn: Valor inspects, changes nothing, and
-   sends one message with its material questions, the answer it assumes
-   for each, and its intended approach. A guard Tom granted on 2026-10-01,
-   ledgered with its incidents (psyoptimal #894; popoto #191 and #188), mission
-   items 3 and 6, and a ninety-day expiry. Clarify raised fidelity on the
-   one-line requests and changed nothing on the precise ones; asked
-   unconditionally it hurt once (#633), so the classifier routes and
-   clarify is never the default (rebuild-baseline.md, Aggregate).
-   **Built:** the `judge` state, its `judge.decided` row, and the guard
-   row (seeded by `migrate`); the verdict is recorded by hand at `start`
-   (`--mode`) until the classifier (milestone 1.3).
+   ask, one leaning on an example, one naming existing UI without scope)
+   goes to `clarify`: one inspecting turn, one message with the material
+   questions, the assumed answers, and the approach. A guard Tom granted on
+   2026-10-01 (incidents psyoptimal #894, popoto #191 and #188; mission
+   items 3 and 6; ninety-day expiry). Clarify raised fidelity on one-line
+   requests and changed nothing on precise ones; asked unconditionally it
+   hurt once (#633), so it is never the default (rebuild-baseline.md,
+   Aggregate). **Built:** the `judge` state, `judge.decided`, and the
+   seeded guard; the verdict is recorded by hand (`start --mode`) until
+   the classifier (milestone 1.3).
 2. **After the tests: are they broad enough?** The breadth check in
    [sdlc-state-machine.md](sdlc-state-machine.md). **Design.**
 3. **Over every diff: does this add governance?** The blind verifier's one
    boolean, "does this add a check, gate, hook, round, or review step". A
-   yes with no grant is a refused merge. **Built:** the review and docs
-   verdicts carry the answer and its instances, the broker computes a
-   merge's governance flag from them, and a merge with an instance lacking
-   Tom's tap is refused. **Design:** the judgement that answers it.
+   yes with no grant is a refused merge. **Built:** review and docs
+   verdicts carry the answer and its instances, and the broker refuses a
+   merge with an instance lacking Tom's tap. **Design:** the judgement.
 
 ## Verification
 
@@ -444,8 +438,9 @@ The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md
 one blind verification per candidate, beside test and docs, with as many
 send-backs to patch as the plan allows (0, 1, or 2, set by the stakes).
 
-**Design.** Nothing in the kernel verifies yet; the baseline's judge
-(`scripts/judge_replay.py`) ran outside it. The verifier:
+**Design.** Nothing in the kernel verifies yet (review verdicts are recorded
+by hand); the baseline's judge (`scripts/judge_replay.py`) ran outside it.
+The verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
   deterministic check results, and the effect ledger. It never reads the
@@ -505,8 +500,8 @@ into children, each a task with its own Brief. Rules the kernel enforces:
 ## The supervisor turn
 
 **Built.** No separate supervisor: `python -m core run`, driven by hand,
-renders the Brief, runs a turn, collects its signals, and repeats until
-there is something for Tom.
+folds the task's state and runs that state's runner, repeating until there
+is something for Tom or a stage with no runner.
 
 **Design.** The supervisor turn is the loop step that runs whenever an
 event arrives for a task: a message from a bridge, a turn ending, a
@@ -520,10 +515,9 @@ no state of its own, so killing it mid-task loses nothing durable. Serves:
 reliable stop and recovery; Mission item 1, since Tom never coordinates the
 gaps between steps.
 
-**Steering.** A message for a task that is mid-turn is a ledger row,
-delivered as the opening of the next turn; nothing interrupts a running
-turn except stop. Answers and feedback already work this way. Serves:
-corrections reach every session.
+**Steering.** A message for a task mid-turn is a ledger row, delivered as
+the opening of the next turn; only stop interrupts a running turn, and
+answers and feedback work this way. Serves: corrections reach every session.
 
 ## Bridges
 
@@ -536,29 +530,26 @@ by email. The bridge port is owned by [bridges/telegram.md](bridges/telegram.md)
 
 ## How a task flows from request to merge
 
-1. **Intake.** Tom's message reaches the kernel through a bridge. The
-   kernel starts a task: a Brief with a money budget ($8 by default for a
-   task started from Telegram), an attention budget, an effect ceiling
-   (`act` for work that pushes), governance grant none, and a provisioned
-   workspace.
+1. **Intake.** Tom's message reaches the kernel through a bridge, which
+   starts a task: a money budget ($8 by default from Telegram), an
+   attention budget, an effect ceiling (`act` for work that pushes),
+   governance grant none, and a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
-3. **Plan.** The working session writes the plan: approach, stakes, how
-   many critique and review loops (0 to 2 each), and any related tech debt
-   pulled into scope.
+3. **Plan.** The working session writes the plan: approach, stakes, the
+   critique and review loops (0 to 2 each), and related tech debt in scope.
 4. **Critique.** A fresh session reads the plan; `revise` sends it back
    while the plan's critique rounds last.
 5. **Build.** The working session builds until it writes `done.md`, a
    candidate.
-6. **Test, review, and docs, in parallel.** Each checks the same candidate
-   in a fresh session: the suite at head and base plus the breadth check,
-   the blind verifier, and a docs session that commits only doc paths.
-   When all three have ruled, any findings go together to one patch in the
-   working session, resumed, and the three run again on the new candidate,
-   within the plan's loop counts.
-7. **Merge.** The delivery reaches Tom with its summary, the decisions
-   Valor made that he may want to change, and its held effects. Each `act`
-   is a card; his tap approves it, and release performs it. Feedback,
-   before or after the merge, goes to `patch` on the same task.
+6. **Test, review, and docs, in parallel,** each on the same candidate in
+   a fresh session: the suite at head and base plus the breadth check, the
+   blind verifier, and a docs session committing only doc paths. Their
+   findings go together to one patch in the resumed working session, and
+   the three run again on the new candidate, within the loop counts.
+7. **Merge.** The delivery reaches Tom with its summary, the decisions he
+   may want to change, and its held effects, each `act` a card his tap
+   approves and release performs. Feedback, before or after the merge,
+   goes to `patch` on the same task.
 
 The attention log, the money spent, and every verdict are read from the
 ledger at every step. The states, verdicts, loops, and the merge predicate
@@ -573,8 +564,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
 | Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the verifier's boolean over every diff (design) | governing constraint |
-| A merge on a model's say-so | the merge predicate, five terms read from rows and git, checked with the intent in one transaction | bounded authority |
-| A turn redirects where a merge lands | origin's URL and the target branch recorded at start and bound into the approval; a workspace config with includes, rewrites, or a push URL refused | bounded authority |
+| A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config with includes, rewrites, or a push URL refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome | lossless stop |

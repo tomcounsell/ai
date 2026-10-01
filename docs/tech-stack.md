@@ -63,7 +63,7 @@ enforcing outside the model is AI Control [4].
 | Sandbox for the verifier | Apple `container` (hypervisor-isolated Linux VMs) | chosen, not built |
 | Which sandbox for which work | owned by [architecture.md](architecture.md); containers for turns | open |
 | Workspace services | a Postgres cluster per workspace, scram auth | in use |
-| Broker performers | Python classes run in the kernel process; `push_branch` over git | in use |
+| Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules | chosen, not built; libraries open |
@@ -459,7 +459,11 @@ remote the turn cannot. Status: **in use**.
   is run with hooks, the fsmonitor, the credential helper, and the SSH
   command pinned off, because the workspace's git config is the turn's to
   write. `lookup` reads the remote's branch head to reconcile a dangling
-  intent.
+  intent. It pushes to the origin URL recorded at start and refuses the
+  task's target branch.
+- **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
+  passed candidate onto the target branch, released only when the merge
+  predicate holds; no turn is offered it.
 - **`WorkspaceWrite`** (`propose`) and **`OutboxAppend`** (`act`)
   (`tools/workspace.py`): a file in the workspace, and a local outbox that
   stands where a bridge's send will.

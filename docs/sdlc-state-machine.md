@@ -66,7 +66,8 @@ working session is the task's one harness session: the first frontier turn
 opens it, and clarify, plan, build, and patch resume it. Critique, review,
 and docs each run in a fresh session that never reads it.
 
-Two rules hold across every row:
+Two rules hold across every row, both serving the constraint "reliable
+stop, recovery, and correction":
 
 - **State is a fold over the ledger, never a stored field.** Nothing
   writes a "current state" column, so a stop, a crash, or a failed turn
@@ -75,112 +76,51 @@ Two rules hold across every row:
   harness session a turn resumes is recorded on `turn.ended` and is
   replaceable; losing it loses no state.
 
-Both serve the constraint "reliable stop, recovery, and correction".
-
 ## What exists and what is design
 
-The machine is kernel code: `core/machine.py` holds the types below, the
-total fold, the join, and the merge predicate; `core/router.py` is the
-control loop; `core/session.py` runs the working session; `core/verdicts.py`
-writes verdict rows; `core/guards.py` holds the guard records; the broker
-(`core/broker.py`) enforces the predicate. A verdict outside its enum is
-refused by Postgres (a `CHECK` constraint generated from `VERDICTS`).
-Stage instructions are plain files in `skills/sdlc/`, one per stage, and a
-turn's Brief carries the file for the state it runs in.
+The machine is kernel code: `core/machine.py` holds the types, the total
+fold, the join, and the merge predicate; `core/router.py` is the control
+loop; `core/session.py` runs the working session; `core/verdicts.py`
+writes verdict rows; `core/guards.py` holds the guards; the broker enforces
+the predicate. Postgres refuses a verdict outside its enum (a `CHECK`
+constraint generated from `VERDICTS`). A turn's Brief carries the stage
+file for its state from `skills/sdlc/`.
 
-Runners exist for `clarify`, `plan`, `build`, and `patch` (the working
-session). The judge's runner is the judgement port's (milestone 1.3); the
-critique, test, review, and docs runners are milestone 1.4's. Until each
-exists, the router stops at that stage and says so, and a person records
-its verdict by hand with `python -m core verdict TASK STAGE VERDICT`, the
-row carrying `leg: manual` and provenance; the command refuses a stage
-that has a runner, so it closes stage by stage, and 1.4 deletes it. The
-start command's `--mode bare|clarify` records the judge's verdict the same
-way (`precise` or `thin`) until 1.3.
+Runners exist for `clarify`, `plan`, `build`, and `patch`. The judge's is
+milestone 1.3's; critique, test, review, and docs are 1.4's. Until each
+exists the router stops there and says so, and a person records the
+verdict with `python -m core verdict TASK STAGE VERDICT` (`leg: manual`,
+with provenance), which refuses a stage that has a runner. `start --mode
+bare|clarify` records the judge's verdict the same way (`precise` or
+`thin`).
 
-**Before 1.4, a limitation.** There is no separate docs checkout, so docs
-commits recorded by hand sit in the builder's workspace on top of the
-candidate. After a send-back to `patch` they ride into the next candidate,
-although docs commits belong to their candidate (`checks.docs` below).
+**Before 1.4, a limitation.** With no separate docs checkout, docs commits
+recorded by hand sit in the builder's workspace on top of the candidate
+and ride into the next candidate after a send-back, although they belong
+to theirs (`checks.docs` below). Nothing drops a docs commit outside the
+doc paths at record time; predicate term 4 refuses the merge instead.
 
 **Tasks from before the machine.** A `task.started` without `sdlc: 1` is
-a legacy task. It folds, read-only, by the old kernel's precedence
-(stopped; a delivery not reopened by feedback is `merge`; an unanswered
-question is `waiting`; feedback after a delivery is `patch`; any turn is
-`build`; else `judge`). The router and every verdict, answer, feedback,
-and grant refuse it; status, stop, approve, and release still work.
+legacy and folds read-only by the old kernel's precedence (stopped; a
+delivery not reopened by feedback is `merge`; an unanswered question is
+`waiting`; feedback after a delivery is `patch`; any turn is `build`; else
+`judge`). The router, verdicts, answers, feedback, and grants refuse it;
+status, stop, budget raise, approve, and release work.
 
 ## Types
 
-The model as `core/machine.py` holds it, in brief; the shapes follow the
-kernel's convention of frozen dataclasses and JSONB payloads. Every
-working-session state (`clarify`, `plan`, `build`, `patch`) also has the
-verdicts `idle` and `failed`, since any turn can end with neither of its
-stage's signals or fail, and `turn.collected` always carries a verdict.
-
-```python
-class State(StrEnum):
-    JUDGE = "judge"; CLARIFY = "clarify"; WAITING = "waiting"
-    PLAN = "plan"; CRITIQUE = "critique"; BUILD = "build"
-    CHECKS = "checks"; PATCH = "patch"; MERGE = "merge"
-    MERGED = "merged"; STOPPED = "stopped"
-
-class Check(StrEnum):            # the three branches of CHECKS
-    TEST = "test"; REVIEW = "review"; DOCS = "docs"
-
-VERDICTS: dict[State | Check, frozenset[str]] = {  # one enum each in code
-    State.JUDGE: {"precise", "thin"},
-    State.CLARIFY: {"asked", "no_material_question", "idle", "failed"},
-    State.PLAN: {"planned", "asked", "idle", "failed"}, State.CRITIQUE: {"sound", "revise"},
-    State.BUILD: {"candidate", "asked", "idle", "failed"},  # PATCH the same
-    Check.TEST: {"pass", "red", "gaps"},
-    Check.REVIEW: {"pass", "changes", "governance_refused"},
-    Check.DOCS: {"updated", "no_change", "changes"}, ...
-}
-
-@dataclass(frozen=True)
-class Candidate:                 # from the turn.collected of a build or patch
-    sha: str                     # the head commit
-    turn_id: str                 # the turn that produced it
-
-@dataclass(frozen=True)
-class CheckVerdict:              # payload of test.decided, review.decided, docs.decided
-    check: Check
-    candidate: Candidate
-    verdict: str
-    findings: tuple[Finding, ...]
-
-@dataclass(frozen=True)
-class Checks:                    # the fold while in CHECKS
-    candidate: Candidate         # the latest; verdicts keyed to it only
-    verdicts: Mapping[Check, CheckVerdict]
-
-@dataclass(frozen=True)
-class Loops:
-    critique_rounds: Literal[0, 1, 2]
-    review_rounds: Literal[0, 1, 2]
-
-TRANSITIONS: dict[tuple[State, str], State] = {
-    (State.JUDGE, "precise"): State.PLAN,
-    (State.JUDGE, "thin"): State.CLARIFY,
-    (State.CLARIFY, "asked"): State.WAITING,
-    (State.CLARIFY, "no_material_question"): State.PLAN,
-    (State.PLAN, "planned"): State.CRITIQUE,
-    (State.CRITIQUE, "sound"): State.BUILD,
-    (State.CRITIQUE, "revise"): State.PLAN,       # while critique rounds remain
-    (State.BUILD, "candidate"): State.CHECKS,
-    (State.PATCH, "candidate"): State.CHECKS,
-    (State.MERGE, "released"): State.MERGED,
-    (State.MERGE, "feedback"): State.PATCH,
-    (State.MERGE, "governance_granted"): State.CHECKS,  # review reruns alone
-    (State.MERGED, "feedback"): State.PATCH,
-}
-# CHECKS leaves only through join(checks, loops, ledger), once all three
-# verdicts exist for the current candidate: MERGE or PATCH (see The join).
-# "asked" from CLARIFY, PLAN, BUILD, or PATCH: WAITING; "answered" returns
-# to the state named on the question.asked row.
-# Any state, on task.stopped: STOPPED. No edge leaves STOPPED.
-```
+`core/machine.py` holds the model as frozen dataclasses over JSONB
+payloads. `State` names the eleven states above and `Check` the three
+branches of `checks`. `VERDICTS` maps each to its enum as the table lists
+it; every working-session state also has `idle` and `failed`, since any
+turn can end with neither of its stage's signals or fail. `Candidate` is a
+head commit and the turn that produced it; `CheckVerdict` a check's
+verdict, findings, and governance instances on one candidate; `Loops` the
+two counts, 0 to 2; `Fold` the state with what it reads. `TRANSITIONS` is
+the Next column, with three rules beside it: `checks` leaves only through
+the join; `asked` from a working-session state goes to `waiting`, and
+`answered` returns to the state named on the `question.asked` row; any
+state goes to `stopped` on `task.stopped`, and nothing leaves `stopped`.
 
 A verdict outside its enum is refused when the row is written, so the fold
 is total: every ledger prefix maps to exactly one state, and inside
@@ -284,10 +224,10 @@ existing UI or behavior without saying what happens to it.
 
 **Exit evidence.** `judgement.answered` at site `intake.underspecified`:
 the label, the confidence, the leg and model, the metered cost, and the
-guard id. `precise` goes to `plan`; `thin` goes to `clarify`. A call below
-its confidence floor counts as `thin`: a wrong `thin` costs one clarify
-turn that may end without bothering Tom, a wrong `precise` costs review
-rounds.
+guard id, mapped to the task's one `judge.decided` row. `precise` goes to
+`plan`; `thin` goes to `clarify`. A call below its confidence floor counts
+as `thin`: a wrong `thin` costs one clarify turn that may end without
+bothering Tom, a wrong `precise` costs review rounds.
 
 **Guard record.** Granted by Tom on 2026-10-01; mission items 3 and 6.
 Incidents: psyoptimal #894 (task `32f800bce8a2`: two feedback rounds for
@@ -491,13 +431,14 @@ so the three cannot conflict.
 
 **Exit evidence.** `docs.decided`: the candidate, the head of the docs
 commits on top of it, their paths, and the governance boolean over their
-diff (a doc can add a rule). `updated` or `no_change` passes. `changes` means a doc states
-something the code should still honor and the candidate breaks it, or a doc
-cannot be made true without a code change. The kernel checks the commits'
-paths when the turn ends: a commit outside the doc paths is dropped and
-recorded as a `changes` finding, since code is the builder's to change.
-Docs commits belong to their candidate: after a send-back they are not
-merged, and the next docs session starts from them and keeps what holds.
+diff (a doc can add a rule). `updated` or `no_change` passes. `changes`
+means a doc states something the code should still honor and the candidate
+breaks it, or a doc cannot be made true without a code change. The kernel
+checks the commits' paths when the turn ends: a commit outside the doc paths
+is dropped and recorded as a `changes` finding, since code is the builder's
+to change. Docs commits belong to their candidate: after a send-back they
+are not merged, and the next docs session starts from them and keeps what
+holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 
@@ -516,18 +457,17 @@ them together, with the loop counts (see Loops), and moves the task once:
 | `pass` | test `red`, or docs `changes` | the repair round spent | `merge`, as a delivery that did not pass |
 | `pass` | test `gaps`, docs passing | the repair round spent | `merge`, with the gaps listed |
 
-The rows are read in this order and the first that matches decides, so a
-review `governance_refused` goes to Tom before a red test is looked at, and
-a review `changes` with a round left goes to `patch` whatever docs
-answered on governance. Row 2 reads review only; a docs instance awaiting
-a tap reaches Tom in `merge` and holds the merge request until he grants
-it (predicate term 4). The join is a function of the verdict rows, so no
-row records it. The verdict that completes a join to `merge` writes
-`task.delivered` with it, and the kernel then requests the merge for a
-delivery that passed (or passed with gaps); the router requests it again
-on any run that finds the task in `merge` without one, so a crash between
-the two strands nothing. A delivery that did not pass, or whose review
-refused governance, gets no merge request: no predicate could release it.
+The rows are read in order and the first match decides, so a review
+`governance_refused` reaches Tom before a red test is looked at, and a
+review `changes` with a round left goes to `patch` whatever docs answered
+on governance. Row 2 reads review only; a docs instance awaiting a tap
+reaches Tom in `merge` and holds the merge until he grants it (predicate
+term 4). No row records the join. The verdict that completes a join to
+`merge` writes `task.delivered` with it, and the kernel requests the merge
+for a delivery that passed (or passed with gaps); the router requests it
+again on any run that finds the task in `merge` without one, so a crash
+between the two strands nothing. A delivery that did not pass, or whose
+review refused governance, gets no merge request.
 The findings the join passes to `patch` are the next turn's prompt.
 
 ### `patch`: the builder resolves the findings
@@ -638,12 +578,11 @@ failed cleanly and metered $0 (rebuild-demonstration.md, Kernel findings,
 Not a state. Every model call in every state is metered by the gateway
 against the task's one money budget. When the remaining budget cannot
 cover a call, the gateway refuses it, the run returns "budget exhausted",
-and the task keeps its state with a question to Tom asking for more. Tom
-raises it with `python -m core budget raise TASK N` (`budget.raised`, with
-his provenance), and the next run continues. A turn that
-deliberately called the provider with the machine's Claude login would
-spend outside the meter; Tom accepted that on 2026-10-01 (see
-[architecture.md](architecture.md), Limits).
+and the task keeps its state. Tom raises the budget with `python -m core
+budget raise TASK N` (`budget.raised`, with his provenance), and the next
+run continues. A turn that deliberately called the provider with the
+machine's Claude login would spend outside the meter; Tom accepted that on
+2026-10-01 (see [architecture.md](architecture.md), Limits).
 
 ## Attention in the ledger
 

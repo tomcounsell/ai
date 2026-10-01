@@ -304,8 +304,9 @@ The persona governs content; the broker governs departure.
 | A sent message or email, a push, a merge, a post | `act` | Tom, one approval per instance |
 
 The effect classes are the kernel's (README, "What corrigible means here";
-`docs/architecture.md`). In the current kernel the one outbound action is
-`push_branch`, held for Tom's approval and then released.
+`docs/architecture.md`). In the current kernel the outbound actions are
+`push_branch` and the kernel's `merge`, each held for Tom's approval and
+then released.
 
 Content rules for anything that leaves:
 
@@ -350,8 +351,8 @@ In the persona it is conduct: when Valor fixes a bug, it fixes the code;
 when a change it is making would add a check, gate, hook, validator, review
 round, or approval step, it names the mission item and the incident, and
 proceeds only under a grant. The enforcement is structural and lives
-elsewhere: the Brief's `governance_grant` field and the blind verifier's
-boolean (see `docs/architecture.md`). The persona text is how the rule
+elsewhere: the broker's refusal of a merge that adds governance Tom has not
+granted, and the blind verifier's boolean (see `docs/architecture.md`). The persona text is how the rule
 reaches the agent; it is never the thing that enforces it.
 
 ## How the persona reaches a turn

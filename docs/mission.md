@@ -96,14 +96,21 @@ and every `act` waits for Tom's tap.
 
 The kernel holds the constraint as a fact from the first turn: the Brief
 carries `governance_grant`, default none (`core/tasks.py`), and the broker
-treats any action that adds governance as `act`, refused without a grant and
-held for Tom's tap with one. The blind verifier's boolean over every diff is
-part of the design; the current kernel has no verifier.
+computes whether a merge adds governance from the review and docs verdicts
+on its candidate, each of which names every instance by its hunk. A merge
+with an instance Tom has not granted by his own tap (`python -m core
+grant`) is refused; the Brief's field does not stand in for the tap. The
+blind verifier's boolean over every diff is part of the design; the current
+kernel has no verifier, and review verdicts are recorded by hand.
 
 A guard Tom grants is ledgered with three things: the incident, the mission
-item, and the expiry date ninety days out. The first guard granted under
-this constraint is the request judgement step described under
+item, and the expiry date ninety days out; a grant missing the incident or
+the mission item is refused (`core/guards.py`). The first guard granted
+under this constraint is the request judgement step described under
 [First evidence](#first-evidence-the-demonstration-and-the-baseline) below.
+It and the three other checkpoints of Tom's 2026-10-01 pipeline decision
+(the test-breadth check and the critique and review loops) are seeded as
+guards by `python -m core migrate`.
 
 ## Evidence
 

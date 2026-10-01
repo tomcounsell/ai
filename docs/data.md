@@ -252,8 +252,8 @@ gains a field, readers handle both shapes. A task whose `task.started` has
 no `sdlc` predates the state machine: it folds read-only by the old
 kernel's precedence (stopped; a delivery not reopened by feedback is
 `merge`; an unanswered question is `waiting`; feedback after a delivery is
-`patch`; any turn is `build`; else `judge`), and nothing but stop,
-approve, and release writes to it. The instance so far is
+`patch`; any turn is `build`; else `judge`), and nothing but stop, budget
+raise, approve, and release writes to it. The instance so far is
 provenance (`core/tasks.py`, `provenance`): a field a row never recorded
 reads as null, never as a default. Answers and feedback recorded before
 `role_played` existed read `role_played: null`, and approvals recorded

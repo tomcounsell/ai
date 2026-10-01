@@ -455,7 +455,7 @@ commit; `scripts/demo_workspace.sh` built the demonstration's. Each produces:
 | Part | What it is |
 |---|---|
 | the clone | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
-| `origin.git/` | a local bare repository, the clone's only remote, `main` at the base, every ref update logged, non-fast-forward pushes refused. The sandbox denies the turn writes to it. Only the broker's `push_branch` performer writes it, from the kernel's process, after Tom approves and releases the push |
+| `origin.git/` | a local bare repository, the clone's only remote, `main` at the base, every ref update logged, non-fast-forward pushes refused. The sandbox denies the turn writes to it. Only the broker's `push_branch` and `merge` performers write it, from the kernel's process, after Tom approves and releases the push |
 | `home/` | the turn's git config (Valor's identity, no credential helper), an empty gh config, the sandbox profile, and `harness.json` for `core start --harness-config` |
 | services | what the run's tests need, below |
 

@@ -101,8 +101,9 @@ Builds what a run works in, under `runs/<run>/`:
   commit after the base. The builder prints the count of commits after the
   base; it is zero.
 - **The origin.** A local bare repository is the clone's only remote, `main`
-  at the base. Only the broker's `push_branch` performer writes it, after
-  approval. Nothing reaches GitHub.
+  at the base, and its `HEAD` names `main`, so a task's merge has a target
+  branch. Only the broker's `push_branch` and `merge` performers write it,
+  after approval. Nothing reaches GitHub.
 - **Services.** One Postgres cluster for every run, on `127.0.0.1:5439` with
   password auth, separate from the kernel's own database; each run gets its
   own database, owned by a `test` role. Each run that asks for Redis gets its
@@ -131,26 +132,32 @@ a turn that can read the answer is not being measured.
 ### The driver: `scripts/replay.py`
 
 `replay.py ITEM.json --arm bare|clarify [--judge]` builds the workspace,
-starts a kernel task (`python -m core start --mode <arm>`) at effect ceiling
+starts a kernel task (`python -m core start --mode <arm> --target-branch
+main`, so the arm is the judge's verdict) at effect ceiling
 `act`, no governance grant, with the item's budget (default $8.00, Opus 5.5),
 and loops `python -m core run` until one of:
 
 | Outcome | When |
 |---|---|
-| `accepted` | the stand-in accepts a delivery |
+| `accepted` | the stand-in accepts a delivery (the task in `merge`) |
 | `feedback rounds used up` | a delivery arrives after the stand-in has given its maximum feedback (default 2) |
 | `budget exhausted` | the gateway refuses the next call |
 | `stopped` | the task was stopped |
 | `failed` | more than two runs of the task failed |
 | `run cap` | sixteen `core run` calls without an outcome |
 | `an effect other than a local push is held for Tom` | any held effect the driver may not release |
+| `NO RUNNER ...` | the router reached a stage with no runner (critique and the checks, until milestone 1.4); the driver records no verdict for them |
+
+Until milestone 1.4, then, a replay whose plan is written ends at critique
+with `NO RUNNER`, and no replay reaches a delivery.
 
 The driver approves and releases a held `push_branch` only when the
-workspace's push URL is exactly the run's own bare origin, under Tom's
+workspace's push URL is exactly the run's own bare origin, and a held
+`merge` only when the origin URL its payload names is, under Tom's
 standing permission for pushes to local copies; it records that permission in
 the approval note. Any other held effect stays held and ends the run. This is
 the effect-class constraint applied to the driver: it holds authority only
-for the one reversible effect Tom pre-authorized.
+for pushes to the run's own local origin, which Tom pre-authorized.
 
 A run whose result file has no outcome resumes its task. Each driver holds
 one of `VALOR_DEMO_SLOTS` lock files for its whole run, so at most that many
