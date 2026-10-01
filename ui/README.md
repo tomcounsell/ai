@@ -7,6 +7,8 @@ The read-only dashboard.
 - Views over `core/` read models: tasks, budgets and spend, the ledger, pending approvals, the attention log.
 - Read-only. Approvals are given on the approval surface, not here.
 
+Governed by [docs/tech-stack.md](../docs/tech-stack.md) (Surfaces) and [docs/mission.md](../docs/mission.md) (The attention log).
+
 ## Imports
 
 - May import: `core/` read models only.

@@ -8,7 +8,9 @@ Documentation that describes the system as it is.
 - `docs/plans/`: plans, each with `tracking:` frontmatter, and records such as the demonstration.
 - `docs/conventions/`: conventions that hold across the repository.
 - `docs/sdlc/`: repo-specific addenda for SDLC stages.
-- Top-level architecture docs that each directory README points at.
+- Top-level docs that each directory README points at: `architecture.md`, `mission.md`, `tech-stack.md`, `judgement-layer.md`, `sdlc-state-machine.md`, `data.md`, `persona.md`, `harnesses.md`, `routines.md`, `emulator.md`, `machine.md`, and `bridges/`.
+
+Governed by [mission.md](mission.md) (the constraint "Docs describe reality").
 
 Docs describe reality: the new status quo only, no history. Every design assumption cites `REFERENCES.md` or is marked as a gap.
 

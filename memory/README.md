@@ -5,10 +5,12 @@ What Valor remembers across sessions.
 ## Scope
 
 - The operator record: what Valor knows about Tom and his preferences.
-- The corrections ledger, and the exemplar ledger beside it (same store, distinct source class) for work Tom loved and why.
+- Reading and curating the corrections and exemplar streams (same store, distinct source class, the exemplars recording work Tom loved and why). `core/` keeps both in the ledger and owns them; memory never writes them.
 - Episodic memory.
 
 Built last, on popoto over Postgres. Until popoto's Postgres support ships, this directory holds this README and the port `core/` reads memory through.
+
+Governed by [docs/data.md](../docs/data.md) (Memory, last).
 
 ## Imports
 

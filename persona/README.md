@@ -10,6 +10,8 @@ Everything that defines Valor as one identity.
 
 Every outbound message and PR leaves as Valor. There is no per-space identity and no mode that sends as anyone else.
 
+Governed by [docs/persona.md](../docs/persona.md).
+
 ## Imports
 
 - May import: `core/`.

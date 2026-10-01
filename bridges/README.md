@@ -9,6 +9,8 @@ Self-contained comms modules.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
+Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, and [docs/bridges/email.md](../docs/bridges/email.md).
+
 ## Imports
 
 - May import: `core/` ports only.
@@ -17,8 +19,8 @@ Self-contained comms modules.
 ## Effect classes
 
 - Inbound receipt is `read`.
-- Delivering a message is `act` (send). A bridge delivers only what the broker releases with an approval or a standing grant on the ledger; it never decides that a message may go.
-- Posting a withdrawable draft or a reaction where the channel allows it is `propose`.
+- Delivering a message is `act` (send). A bridge delivers only what the broker releases with an approval on the ledger; it never decides that a message may go.
+- Posting a withdrawable draft where the channel allows it is `propose`.
 - A bridge declares, per operation, which class it performs, and reaches the world only through the broker.
 
 ## Not here

@@ -12,7 +12,9 @@ The rule: integration first, no mocks.
 - No mocks, fakes, or patched clients.
 - Every test declares its live spend: the money it may cost per run. A test without a declared spend does not run.
 
-The emulator lives here when it exists: human-originated historical requests, labelled by the human decision, scored by cheap judgement.
+The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) runs today from `scripts/` while it is an experiment, and moves here in the design.
+
+Governed by [docs/emulator.md](../docs/emulator.md), [docs/data.md](../docs/data.md) (Test databases), and [docs/tech-stack.md](../docs/tech-stack.md) (Tests).
 
 ## Imports
 

@@ -6,6 +6,8 @@ Versioned skills.
 
 Reserved. The structure of the versioned skill system, and of skills that refactor repo-specific skills in other repos, is deferred until Tom's requirements are gathered. In this phase the directory holds this README and nothing else.
 
+Governed by no doc yet; one is written when the requirements are gathered. Until then [docs/harnesses.md](../docs/harnesses.md) (Skill rendering) and [docs/sdlc-state-machine.md](../docs/sdlc-state-machine.md) (stages are skills) state what skills must fit.
+
 ## Imports
 
 Deferred with the structure.

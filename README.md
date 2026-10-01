@@ -100,7 +100,7 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 ## Directory map
 
 - [`core/`](core/README.md): the kernel and the control loop, including the SDLC state machine and the judgement layer's task taxonomy and router.
-- [`memory/`](memory/README.md): operator record, corrections ledger, and episodic memory, built last on popoto over Postgres.
+- [`memory/`](memory/README.md): operator record and episodic memory, built last on popoto over Postgres; it reads the corrections and exemplar streams `core/` keeps in the ledger.
 - [`persona/`](persona/README.md): the one identity, covering voice, conduct, and what may be sent as Valor.
 - [`bridges/`](bridges/README.md): self-contained comms modules (`telegram/`, `email/`), I/O and the outbox only.
 - [`harnesses/`](harnesses/README.md): wrappers for running work via a harness such as Claude Code, Codex, or Pi.
@@ -109,11 +109,11 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`tools/`](tools/README.md): non-core and vendor-dependent tooling, each declaring its effect class and acting through the broker.
 - [`api/`](api/README.md): programmatic interfaces such as MCP servers and HTTP surfaces; reserved.
 - [`ui/`](ui/README.md): the read-only dashboard.
-- [`site/`](site/README.md): the public site.
-- [`docs/`](docs/README.md): features, plans, conventions, and SDLC docs.
+- [`site/`](site/index.html): the public site.
+- [`docs/`](docs/README.md): the governing docs ([architecture](docs/architecture.md), [mission](docs/mission.md), and the rest listed there), plans, and records.
 - [`tests/`](tests/README.md): integration first, no mocks, real Postgres, real containers, real bridges on test accounts.
 - `_archive_/`: temporary, read-only reference during the setup phase; nothing imports from it, and it is deleted before the rebuild.
 
 ## Status
 
-Setup phase. The branch holds this README, the top-level directories with their scope READMEs, and next a minimal kernel that bounds one demonstration. The rebuild plan follows from that demonstration. The setup plan lives in [docs/plans/](docs/plans/).
+Setup phase. The branch holds this README, the top-level directories with their scope READMEs, a minimal kernel that bounded one demonstration and a replay baseline, and the docs those showed were needed. The rebuild plan follows from them. The setup plan, the records, and the open questions for Tom live in [docs/plans/](docs/plans/).

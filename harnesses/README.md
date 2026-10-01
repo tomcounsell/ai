@@ -10,6 +10,8 @@ Wrappers for running work through an agent harness.
 - Per-harness skill rendering: turning a versioned skill into what the harness loads.
 - Each wrapper conforms to the harness port in `core/`.
 
+Governed by [docs/harnesses.md](../docs/harnesses.md).
+
 ## The Claude Code wrapper
 
 `claude_code.py` builds two kinds of turn. `turn` is one self-contained `claude -p` call with no tools by default. `workspace_turn` is one turn of a task that works in a directory: it keeps Claude Code's own system prompt and tools, appends the persona and the dispatched Brief re-rendered every turn, resumes the task's session, edits and runs commands without prompting, and runs with safe mode, no MCP servers, and no web tools. The task's `harness` settings may wrap the turn in a sandbox-exec profile, give git and gh their own config, and add the workspace's own variables to the environment. The environment it passes is an allowlist; tokens and agent sockets stay behind.

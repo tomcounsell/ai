@@ -11,10 +11,13 @@ The kernel and the control loop. Authority lives here and nowhere else.
 - Steering and lossless stop.
 - The supervisor turn and the prompt it builds.
 - The SDLC state machine as a typed state model. Stages are skills; the states, verdicts, and transitions are here.
-- The judgement layer's task taxonomy and router, and the decisions port.
+- The judgement layer's task taxonomy and router, and `JudgementPort`.
 - Ports that `bridges/`, `harnesses/`, and `memory/` conform to.
 - One typed settings module. Secrets stay in Keychain and the vault `.env`.
 - State lives in Postgres as JSONB documents plus an append-only events table.
+- The corrections and exemplar streams in the ledger. `memory/` reads them; `core/` owns them.
+
+Governed by [docs/architecture.md](../docs/architecture.md) (the kernel and control loop), [docs/sdlc-state-machine.md](../docs/sdlc-state-machine.md) (states and verdicts), [docs/judgement-layer.md](../docs/judgement-layer.md) (the judgement tier), and [docs/data.md](../docs/data.md) (storage), under [docs/mission.md](../docs/mission.md).
 
 No LLM call decides authority here. A classifier decides what a thing is; the kernel decides what it may do.
 
@@ -33,7 +36,7 @@ Effect classes are defined in `core/`: `read` (no effect), `propose` (reversible
 
 - Vendor clients, harness wrappers, and comms I/O. Those are `tools/`, `harnesses/`, and `bridges/`.
 - Persona text. That is `persona/`; core renders it.
-- Stage logic for the SDLC (how to plan, build, review). Stages are skills.
+- Stage logic for the SDLC (how to clarify, build, verify). Stages are skills.
 - A model call that grants, widens, or refuses authority. Judgement classifies; the kernel decides.
 - Relational schemas with a foreign-key lattice.
 

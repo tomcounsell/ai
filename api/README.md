@@ -6,6 +6,8 @@ Programmatic interfaces.
 
 Reserved for MCP servers and any HTTP surface. In this phase the directory holds this README and nothing else.
 
+Governed by [docs/architecture.md](../docs/architecture.md): any interface reaches authority only through the broker and approvals.
+
 ## Imports
 
 - May import: `core/`.

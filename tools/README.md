@@ -8,6 +8,8 @@ Non-core components and vendor-dependent tooling.
 - Each tool declares its effect class and reaches the world through the broker.
 - A tool is extracted on a demonstrated second need, never on a first. A tool unused for ninety days is deleted by default.
 
+Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and the broker) and [docs/tech-stack.md](../docs/tech-stack.md) (the broker's performers).
+
 ## Performers
 
 - `workspace.py`: `workspace_write` (`propose`) and `outbox_send` (`act`), local performers for the kernel's own tests and smoke.
