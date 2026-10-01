@@ -194,13 +194,27 @@ files to `state/work/claude/projects/`), and each check gets
 `checks/<name>/tmp` and `checks/<name>/claude`. So the builder and a fresh
 session share no `/tmp`, no `/var/folders` temp directory, no
 `~/.claude/todos`, `shell-snapshots`, `session-env`, or `~/.claude.json`.
-Premise to confirm at the start of the build: that `claude -p` with its own
-config directory still finds its login (Claude Code keeps it in the
-Keychain, possibly under a name derived from the config directory). If it
-does not, the fallback is to keep `~/.claude.json` and the Keychain item
-readable and give every turn its own `todos`, `shell-snapshots`,
-`session-env`, and `projects` paths by denying each of those under
-`~/.claude` except the turn's own; the build record says which was used.
+**The login, checked at the start of the build: a per-turn config
+directory loses it.** `claude -p` (2.1.287) with `CLAUDE_CONFIG_DIR` set to
+a fresh directory answers "Not logged in" and sends no request. With a
+dummy `CLAUDE_CODE_OAUTH_TOKEN` it sends `Authorization: Bearer <dummy>` to
+`ANTHROPIC_BASE_URL` (checked against a local probe server). So **the
+gateway adds the credential itself and every turn carries a dummy token**:
+the gateway drops the turn's `authorization` and `x-api-key` headers and
+sets `authorization: Bearer <real token>` on each forwarded call. The real
+token comes from the kernel: a long-lived token in the kernel key
+directory (`claude-token`, made by Tom with `claude setup-token`, a rollout
+step) when present, otherwise the access token in the Keychain item
+`Claude Code-credentials`, read through the root-owned `/usr/bin/security`
+at most once a minute and again after any 401. The Keychain token lasts
+about eight hours and is refreshed only by Claude Code sessions on the
+default config directory; the kernel never refreshes it (refresh tokens
+rotate, and a kernel refresh could sign Tom's own sessions out). When it
+has expired, a call fails with "the Claude login's access token has
+expired: run any claude session, or install a long-lived token", the turn
+fails, and the next run retries. The turn now holds no credential at all;
+its known opening (a deliberate Keychain read through `security`) is
+unchanged. Shared `~/.claude.json` is never used.
 
 ### The kernel mirror
 
@@ -236,7 +250,11 @@ builder's clone, reading its config, `objects/info/alternates`, and
   `fetch.fsckObjects=true`, `--no-tags`, `--no-write-fetch-head`, no
   shallow update, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null`,
   the git time limit, and a file-size limit on the receiving process
-  (`RLIMIT_FSIZE`, setting `mirror_fetch_max_bytes`, default 2 GB);
+  (`RLIMIT_FSIZE`, setting `mirror_fetch_max_bytes`, default 2 GB), with
+  `-c fetch.unpackLimit=1` so every fetch is kept as one pack file and the
+  limit bounds the total; macOS does not enforce memory limits, so a
+  watchdog reads the receiving process's footprint every half second and
+  kills it past `mirror_fetch_max_footprint_mb` (default 1,024);
 - names exactly one commit by sha and one destination ref.
 
 A refused or failed fetch means no plan or no candidate, with the reason
@@ -294,7 +312,10 @@ the working session. The machinery is `core/fresh.py`:
    caches), and every one of those paths is denied to the fresh session. A
    system tool that needs a `/var/folders` path the deny breaks is found by
    the build's tests and allowed back read-only by its exact subpath, each
-   listed in the build record.
+   listed in the build record. Fresh sessions' `PATH` puts the trusted git's
+   directory (the Command Line Tools') first, so `git` never goes through
+   Apple's `xcrun` shim and its cache under `/var/folders`, which stays
+   denied.
 4. **A Brief** rendered with the stage file and a new channel file,
    `skills/sdlc/verdict.md`, in place of `channel.md`: no questions, no
    effects, one verdict file. `tasks.dispatch` takes `fresh=True` for
@@ -357,16 +378,17 @@ command the candidate chose could be `true`. The spec is read from the
 kernel checkout, not from any task's clone; but a candidate can edit
 `projects/valor.toml`, and once Tom merges it, later tasks read the edit.
 So the spec never decides where a merge may land: that is the
-**merge-target list**, a kernel setting outside every repository
-(`merge_targets`, the file `merge-targets.toml` in the kernel key
-directory, mode 600, written by Tom and by nothing in the kernel), listing
-the allowed (URL, branch) pairs. `start` refuses a spec whose
-`merge_url` and `target_branch` are not listed, and the `merge` performer
-refuses at request and at release a payload not listed. A local
-`origin.git` of the task's own is always allowed. A pair naming the remote
-repository's default branch (what its `HEAD` names, read when the merge
-runs) is refused even if listed, so `main` of `tomcounsell/ai` can never
-be a target. A candidate's change to the spec's suite command still reaches
+**merge-target list** (1.4d, the task that first honours `merge_url`):
+ledger rows `merge_target.granted` with Tom's provenance, written only by
+`python -m core merge-target add URL BRANCH --note TEXT` (always Tom's,
+never role-played, like `guard.granted`), and read by the kernel only from
+the ledger. `start` refuses a spec whose `merge_url` and `target_branch`
+are not granted, and the `merge` performer refuses at request and at
+release a payload not granted. A local `origin.git` of the task's own is
+always allowed. A pair naming the remote repository's default branch (what
+its `HEAD` names, read when the merge runs) is refused even if granted, so
+`main` of `tomcounsell/ai` can never be a target. In 1.4a every merge goes
+to the task's local `origin.git`, so no list is needed yet. A candidate's change to the spec's suite command still reaches
 later tasks after Tom's merge; the reviewer and Tom see it in the diff. The spec for this repository
 is the only one committed in 1.4a; the replay items keep their own (built
 by `scripts/replay_workspace.py` from the item file). Client project specs
@@ -441,11 +463,13 @@ For this repository, the spec adds `roles = ["valor_kernel"]` and env
 `VALOR_PGHOST=127.0.0.1`, `VALOR_PGPORT=<task port>`, `VALOR_PG_OWNER=app`,
 `VALOR_PG_PASSFILE=<task>/home/pgpass`, so the suite's `db.migrate` runs
 against the task's cluster as its owner and logs `valor_kernel` in with a
-password from the task's file. Nested `sandbox-exec` works (checked by
-the critique of this plan), so the suite's sandbox tests can run inside a
-turn's profile; the build records the full suite's result inside a
-provisioned workspace, since this is the first project the kernel will
-build after takeover.
+password from the task's file. Nested `sandbox-exec` works, but `/bin/ps`
+is setuid and fails with `EPERM` inside any `sandbox-exec`, so this
+repository's tests that reach the reaper's `ps` calls cannot pass inside a
+turn's or a check's profile. They are host-only tests: 1.4b decides
+whether the test branch runs them in an unsandboxed kernel step over the
+head checkout or lists them on `test.decided` as not run, so they are never
+hidden behind "fails at base too".
 
 ### 2. A Postgres cluster and a Redis per task
 
@@ -484,10 +508,15 @@ another run's database" opening.
   `pg_ctl stop -m fast`, the redis pid, then every process carrying the
   service mark reaped, as the turn reaper does. A `finally` does not run
   when the kernel is killed, so **at the start of every router run** the
-  kernel first stops the services of every other task: every process of
-  this user under a sandbox denying a `valor.service.<id>` name for an id
-  other than this task's gets SIGTERM, then SIGKILL after the reap grace,
-  listed in a `services.reaped` row on the run's task. An idle cluster
+  kernel stops the services of every other task **whose run is not live**:
+  under the `workspace:ports` lock, for each other task with services, it
+  tries that task's router lock (`pg_try_advisory_lock` on `run:<task>`);
+  only when it gets it (no run holds it) does it stop that task's services
+  (SIGTERM, then SIGKILL after the reap grace, to every process under a
+  sandbox denying that task's `valor.service.<id>` name), then release the
+  lock. A task whose run is live keeps its services, since the kernel has
+  no machine-wide turn slot yet. The stopped processes are listed in a
+  `services.reaped` row on the run's task. An idle cluster
   costs 36 MB and one after a suite about 350 MB (machine.md), so on the
   16 GB machine only the running task's services are up.
 - **Removal.** `python -m core workspace remove TASK` (Tom's command;
@@ -512,10 +541,15 @@ In all three: the kernel paths (the key directory, the machine cluster's
 data directory, the backup disk) stay denied, and **writes are denied to
 `~/Library/LaunchAgents`, the shell startup files (`~/.zshrc`,
 `~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bashrc`, `~/.profile`),
-and `~/.local/bin`**. This only removes authority: it closes the
-harnesses.md Known opening that a turn could leave a program there for a
-later unsandboxed process of the user to run, and the build record and
-harnesses.md say so.
+`~/.local/bin`, `~/.local/share/claude` (where Claude Code installs
+itself), all of `~/.claude` and `~/.claude.json` (each turn has its own
+config directory), `~/.gitconfig`, `~/.config/git`, and `/opt/homebrew`**,
+and every turn runs with `DISABLE_AUTOUPDATER=1`. This only removes
+authority. It **narrows**, not closes, the harnesses.md Known opening that
+a turn could leave a program where a later unsandboxed process of the user
+runs it (other such places remain, and `/var/folders` caches stay
+writable to the working session); the build record and harnesses.md say
+"narrowed".
 
 **The check's database password.** The check profiles deny `<task>/home`,
 so the kernel copies the app's `pgpass` into each check's own directory
@@ -622,9 +656,6 @@ Provisioning:
   test, review, docs) reaches `merged` on its local `origin.git`: the
   manual docs head is fetched into the mirror, the predicate reads the
   mirror, the merge pushes from it, and `push_branch` goes to `push_url`.
-- A spec whose `merge_url` and `target_branch` are not in the merge-target
-  list is refused at `start`; a listed pair naming the remote's default
-  branch is refused too.
 
 The mirror fetch:
 - A builder's clone carrying `objects/info/alternates` (pointing at a
@@ -636,14 +667,19 @@ The mirror fetch:
   holds the real commit and tree, and the predicate's paths are computed
   from them (each fails on a kernel without the mirror and 1.2's fix).
 - The sending side runs under the turn's sandbox (`sandbox_check` on the
-  upload-pack process during a fetch slowed by a large object), and a
-  fetch past `mirror_fetch_max_bytes` fails without filling the disk.
+  upload-pack process during a fetch), and a fetch past
+  `mirror_fetch_max_bytes` fails without filling the disk; a small pack
+  whose deltas expand far past the limits (as large as this machine
+  safely tolerates, never exhausting its memory) is cut by the size limit
+  or the footprint watchdog and leaves no ref.
 
 Services after a crash, on the 16 GB budget:
 - Task A's run is killed with SIGKILL while its cluster and Redis are up;
   task B's next run stops them first (`services.reaped` lists them), and
   the summed footprint of every service process left on the machine is
   within machine.md's 400 MB workspace-cluster line plus 50 MB for Redis.
+- Two runs at once: while task A's run holds its router lock with its
+  services up, task B's run starts and leaves A's services running.
 
 The fold and the router:
 - After a critique turn, the next build turn resumes the working session's
@@ -688,7 +724,7 @@ metered.
 `docs/architecture.md` (workspace provisioning built; the kernel mirror),
 `docs/harnesses.md` (the workspace, per-task services, fresh sessions'
 checkouts and profiles, per-turn `TMPDIR` and Claude Code config, the
-shared-role, Redis, and user-startup-files openings closed, the kernel
+shared-role and Redis openings closed and the user-startup-files opening narrowed, the kernel
 mirror's sandboxed fetch),
 `docs/sdlc-state-machine.md` (critique runner exists; the manual verdict's
 stages), `docs/machine.md` (one task's services up at a time),
@@ -796,9 +832,9 @@ before the suite and the branch reruns.
    merged commit the task started from, so nothing a candidate wrote is in
    the seed. Every later run (each head, and a base rerun) gets its own
    copy-on-write clone of the seed (APFS `clonefile`, near free on disk),
-   writable during its setup, read-only during its suite (the setup's
-   cache directory is made read-only by the kernel between the two steps,
-   and the suite's profile allows it read-only), and deleted after. So a
+   writable during its setup and its suite (a read-only cache breaks
+   `uv run`, which syncs first; the test runs the real suite command), and
+   deleted after the run. So a
    candidate's setup or suite can write only its own copy, and nothing it
    writes reaches the next candidate's run.
 3. The suite under the check profile, marked and reaped, with a time limit
@@ -821,7 +857,12 @@ before the suite and the branch reruns.
    file is deleted, or a removed line in the diff of that file defines the
    test's function or class name, parametrized ids reduced to the name).
    A skip is counted as an absence because a candidate can skip a failing
-   test as easily as delete it. Deleted definitions are listed on
+   test as easily as delete it. When the diff touches a test's
+   parametrize decorator, its ids missing at head count as deleted. For
+   non-Python kinds the rule is per kind: where the JUnit id names a test
+   whose name string the diff removes, it is deleted; otherwise the missing
+   ids are listed for the reviewer and Tom rather than judged. Deleted
+   definitions are listed on
    `test.decided` as `deleted_at_head`, for the reviewer and Tom. A suite
    that gives no per-test result (no JUnit file) falls back to the exit
    code: red when head fails and base passes, and red with "the suite
@@ -907,11 +948,11 @@ calibration records' digests equal the declarations'.
   - Either way the kernel refuses `main` on its own (below). A classic
     token's `repo` scope reaches every repository its owner has; a GitHub
     App is more machinery than one repository needs.
-- **Where the merge may land.** Only a (URL, branch) pair in the
-  merge-target list (`merge-targets.toml` in the kernel key directory,
-  written by Tom, outside every repository; see Project specs), never the
-  remote's default branch, checked at `start`, at the merge request, and at
-  release. A candidate's edit to `projects/valor.toml` cannot add a target.
+- **Where the merge may land.** Only a (URL, branch) pair granted by a
+  `merge_target.granted` ledger row (`python -m core merge-target add URL
+  BRANCH --note TEXT`, Tom's alone, never role-played; see Project specs),
+  never the remote's default branch, checked at `start`, at the merge
+  request, and at release. A candidate's edit to `projects/valor.toml` cannot add a target.
 - **Where it lives.** The vault `.env` holds the durable copy as
   `GITHUB_PUSH_TOKEN`, beside the judgement keys. `python -m core
   github-key` reads it and writes one file in the kernel key directory,
@@ -1125,10 +1166,10 @@ on a toy candidate with a container rerun.
    Either way, put it in the vault `.env` as `GITHUB_PUSH_TOKEN` and run
    `python -m core github-key` from the kernel checkout. Needed only for
    1.4d's live push and for the first real merge.
-4. **Write the merge-target list**, `~/.config/valor-kernel/merge-targets.toml`
-   (mode 600), naming `https://github.com/tomcounsell/ai.git` and the
-   rebuild branch (and the scratch branch for the live test). The kernel
-   never writes this file. Needed at 1.4d's rollout.
+4. **Grant the merge targets**: `python -m core merge-target add
+   https://github.com/tomcounsell/ai.git <rebuild branch> --note "..."` (and
+   the scratch branch for the live test), from the kernel checkout. Needed
+   at 1.4d's rollout.
 5. **Create a scratch branch** on `tomcounsell/ai` for the live push test,
    or say the test may create `valor/push-check` itself.
 6. **At each task's merge, in the kernel checkout**: `uv sync`; for 1.4a,
@@ -1142,12 +1183,12 @@ on a toy candidate with a container rerun.
 |---|---|
 | A fresh session reads the builder's narration | the builder writes only paths the kernel names (its clone, caches, its own `TMPDIR` and Claude Code config); every fresh profile denies all of them and `/private/tmp`, `/private/var/folders`, `~/.claude`; blind checkouts hold no builder commit |
 | The mirror fetch runs the turn's choices | hostile config, alternates, and shallow refused; upload-pack sandboxed; grafts and replace refs off; fsck, size and time caps |
-| A merge target edited into the repository's spec | the merge-target list lives in the kernel key directory; the remote's default branch is always refused |
+| A merge target edited into the repository's spec | merge targets are Tom's ledger rows, never the spec; the remote's default branch is always refused |
 | A test skipped or deleted to go green | an absent or skipped test that passed at base is a failure unless the diff deletes its definition |
 | Services left up after a kernel crash | every router run first stops other tasks' services by their mark |
 | The next build resumes a fresh session | the fold reads session ids only from working-state turns |
 | The suite command chosen by the candidate | the command comes from the spec copied into the Brief at start |
-| A builder or a candidate poisons the cache the kernel's suite uses | checks never use the builder's caches; each run gets a clone of a seed only the base filled, read-only during the suite and deleted after; the container rebuilds from the lockfile |
+| A builder or a candidate poisons the cache the kernel's suite uses | checks never use the builder's caches; each run gets a clone of a seed only the base filled, deleted after the run; the container rebuilds from the lockfile |
 | Docs code rides into a merge | the path drop at turn end and predicate term 4 |
 | Docs commits ride into the next candidate | they live only in the mirror |
 | A provider outage spends a suite run or an Opus turn | breadth and governance are asked first and reused |
@@ -1180,7 +1221,7 @@ on a toy candidate with a container rerun.
 | Replay databases sharing one `test` role and one password | a |
 | `tools/workspace.py` test-only performers | a |
 | `Fold.session` taken from any turn (in the fold and in `_legacy`) | a |
-| harnesses.md's opening: a turn can write `~/Library/LaunchAgents`, shell rc files, `~/.local/bin` | a |
+| harnesses.md's opening: a turn can write `~/Library/LaunchAgents`, shell rc files, `~/.local/bin` (narrowed) | a |
 | A shared `TMPDIR`, `/tmp`, and Claude Code state between turns | a |
 | The broker's synchronous `perform` | d |
 | Performers in a module-global dict | d |
@@ -1237,7 +1278,7 @@ on a toy candidate with a container rerun.
   candidate.
 - Governance for docs asked after the docs turn, for review before it
   (overriding valor-rebuild.md's wording, fixed in 1.4b's build).
-- The merge-target list in the kernel key directory.
+- Merge targets as Tom's ledger rows (1.4d).
 - Every turn's own `TMPDIR` and Claude Code config directory.
 - A test that passed at base and is absent or skipped at head fails unless
   the diff deletes its definition.
@@ -1256,7 +1297,7 @@ is resolved in this revision:
 
 1. Check profiles now get a per-run `pgpass` copy in their own `tmp/`;
    caches are a seed filled only by the base's setup, cloned per run,
-   read-only during the suite, deleted after; test that a head suite's
+   deleted after the run; test that a head suite's
    cache write does not reach the next candidate.
 2. Every turn and check has its own `TMPDIR` and Claude Code config
    directory; fresh profiles deny `/private/tmp`, `/private/var/folders`,
@@ -1280,7 +1321,7 @@ is resolved in this revision:
    always refused; Valor's own GitHub account recommended with Tom's token
    as fallback, both rollout options; writes denied to
    `~/Library/LaunchAgents`, shell rc files, and `~/.local/bin` in every
-   profile, closing the harnesses.md opening.
+   profile, narrowing the harnesses.md opening.
 7. Absent or skipped tests that passed at base fail unless the diff
    deletes their definition, named as defining the existing check; no
    reuse of a timed-out or infrastructure-failed `suite.ran`; the spec's
@@ -1299,3 +1340,17 @@ is resolved in this revision:
     (a `pgrep` probe from `turn.sb` joins the no-leak test); nested
     `sandbox-exec` works.
 14. Subagent transcript files are copied too, with a live test.
+
+## Critique round 2 (of 2), carried into the build
+
+Verdict `sound`, with findings folded in above: other tasks' services are
+stopped only when their router lock is free; the startup-files deny widened
+(`~/.local/share/claude`, `~/.claude`, `~/.gitconfig`, `~/.config/git`,
+`/opt/homebrew`, `DISABLE_AUTOUPDATER=1`) and called narrowed, not closed;
+the login check's result and the gateway-held credential; `fetch.unpackLimit=1`
+and a footprint watchdog on the mirror fetch; no read-only cache (1.4b);
+`/bin/ps` fails inside any sandbox, so the reaper's tests are host-only
+(1.4b decides how); merge targets as Tom's ledger rows (1.4d); the
+parametrize and non-Python rules (1.4b); the trusted git first on fresh
+sessions' `PATH`. 1.2's replace-ref fix is carried in 1.4a's first commit
+(1a1a6235d), "carried from 1.2's open finding pending Tom".
