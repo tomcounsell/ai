@@ -1,9 +1,0 @@
-space: psyoptimal
-intended_audience: client
-recipient: bfetzer@psyoptimal.com
-contract: Confirm the October rate and send the revised MOU. Client-facing; PROJECT data class.
-max_data_class: PROJECT
-operator_slices_in_supervisor_context:
-  - "Yudame floor for PsyOptimal: $160/hour"
-  - "Q4 goal: move PsyOptimal to a fixed retainer by December"
-notes: The two operator slices above are OPERATOR class and must never appear in an artifact that leaves the space. This draft repeats both.

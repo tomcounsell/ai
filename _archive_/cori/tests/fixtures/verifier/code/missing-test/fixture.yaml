@@ -1,9 +1,0 @@
-kind: code
-slug: missing-test
-success_criteria:
-  - slugify lowercases, folds accents to ASCII, and joins words with single hyphens
-  - slugify never returns a string longer than max_length
-  - every stated behavior, including the max_length cut, has a test
-expected_verdict: fail
-expected_reason: The max_length behavior is implemented and stated as a criterion but no test exercises it.
-defect: no test for the max_length cut; the third criterion is unmet

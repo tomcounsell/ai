@@ -1,9 +1,0 @@
-kind: message
-slug: wrong-audience
-success_criteria:
-  - says what the contract says, to the audience the contract names
-  - addressed to the recipient in the space's allowed targets
-  - contains nothing meant for another audience
-expected_verdict: fail
-expected_reason: The second paragraph is an internal ops notice about a deploy key, written for the Yudame team and sent to the client.
-defect: internal-audience content in a client-facing reply

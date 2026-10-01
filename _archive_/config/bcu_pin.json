@@ -1,6 +1,0 @@
-{
-  "_comment": "Pinned release tag for background-computer-use (github.com/actuallyepic/background-computer-use). Bump only via `/update --bump-bcu`. The /update skill resolves the .dmg/.zip asset URL from the GitHub release JSON and verifies SHA against the `.sha256` companion asset.",
-  "repository": "https://github.com/actuallyepic/background-computer-use",
-  "release_tag": "v0.1.0",
-  "checked_at": "2026-07-17T00:00:00Z"
-}

@@ -1,9 +1,0 @@
-kind: document
-slug: dangling-citation
-success_criteria:
-  - the brief recommends one option and gives evidence for it
-  - every citation resolves to a file in the space or a reachable URL
-  - every claim in Evidence is supported by its citation
-expected_verdict: fail
-expected_reason: Citation 3, the invoicing postmortem, does not resolve, so the comparison claim that carries the recommendation is unsupported.
-defect: reference 3 points at a file that does not exist; the kernel's resolution record says so

@@ -1,9 +1,0 @@
-kind: document
-slug: unsupported-claim
-success_criteria:
-  - the brief recommends one option and gives evidence for it
-  - every citation resolves
-  - every claim in Evidence is supported by the cited evidence
-expected_verdict: fail
-expected_reason: The third claim, that the limit is the only difference between the groups and that doubling it will fix abandonment, is asserted without evidence, and the cited source says the limited sessions differ in another way and that no experiment was run.
-defect: causal claim with no citation; the source contradicts "the only difference"

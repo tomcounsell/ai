@@ -1,9 +1,0 @@
-kind: document
-slug: clean-brief
-success_criteria:
-  - the brief recommends one option and gives evidence for it
-  - every citation resolves
-  - every claim in Evidence is supported by the cited evidence
-expected_verdict: pass
-expected_reason: Every citation resolves and each claim is what its source says.
-defect: null

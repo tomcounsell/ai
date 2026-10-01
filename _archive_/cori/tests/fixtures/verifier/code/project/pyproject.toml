@@ -1,5 +1,0 @@
-[project]
-name = "verifier-fixture"
-version = "0.0.1"
-requires-python = ">=3.14"
-dependencies = ["pytest>=8"]

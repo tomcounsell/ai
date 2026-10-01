@@ -112,8 +112,7 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`site/`](site/index.html): the public site.
 - [`docs/`](docs/README.md): the governing docs ([architecture](docs/architecture.md), [mission](docs/mission.md), and the rest listed there), plans, and records.
 - [`tests/`](tests/README.md): integration first, no mocks, real Postgres, real containers, real bridges on test accounts.
-- `_archive_/`: temporary, read-only reference during the setup phase; nothing imports from it, and it is deleted before the rebuild.
 
 ## Status
 
-Setup phase. The branch holds this README, the top-level directories with their scope READMEs, a minimal kernel that bounded one demonstration and a replay baseline, and the docs those showed were needed. The rebuild plan follows from them. The setup plan, the records, and the open questions for Tom live in [docs/plans/](docs/plans/).
+Setup phase. The branch holds this README, the top-level directories with their scope READMEs, a minimal kernel that bounded one demonstration and a replay baseline, and the docs those showed were needed. The rebuild plan follows from them. The setup plan, the records, and the open questions for Tom live in [docs/plans/](docs/plans/). The previous system lives unchanged on the `main` branch; read any file from it with `git show main:<path>`.

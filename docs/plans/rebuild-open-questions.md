@@ -77,6 +77,10 @@ what the rebuild reads from.
 - **B.** Keep it until the new kernel reruns the #894 demonstration.
 (docs/README.md, CLAUDE.md)
 
+**Answered 2026-10-01 by Tom: deleted.** Tom deleted `_archive_/` himself on
+2026-10-01. The previous system's files stay readable on the `main` branch
+with `git show main:<path>`.
+
 ## Decide soon
 
 ### 9. Should Valor be able to message you directly without asking first?

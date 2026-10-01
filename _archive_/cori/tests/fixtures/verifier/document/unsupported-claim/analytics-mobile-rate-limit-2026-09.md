@@ -1,9 +1,0 @@
-# Mobile rate limit, week of 2026-09-07
-
-Table 2. Sessions hitting the 60 rpm limit: 4.2% (n = 118,400).
-
-Table 4. Abandonment: limited sessions 27%, unlimited sessions 9%.
-
-Note: limited sessions skew toward the sync-on-launch path on devices with
-more than 3,000 cached items; that path retries on failure, which is most of
-the excess requests. No experiment on a raised limit has been run.

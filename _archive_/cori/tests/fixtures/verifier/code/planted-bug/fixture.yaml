@@ -1,9 +1,0 @@
-kind: code
-slug: planted-bug
-success_criteria:
-  - line_total applies a percentage discount to the line total in cents, rounded down
-  - line_total(99, 100, 5) == 9405
-  - the existing tests keep passing
-expected_verdict: fail
-expected_reason: The discount is applied per unit and truncated before multiplying, so sub-dollar items get no discount; the tests only use round prices and hide it.
-defect: per-unit truncation of the discount; criterion line_total(99, 100, 5) == 9405 is unmet (returns 9400)

@@ -153,7 +153,6 @@ static/temp/*
 
 _study_/*.pdf
 _study_/*/*.pdf
-_archive_/
 
 apps/structures/pretrained/llama/
 usage_logs/

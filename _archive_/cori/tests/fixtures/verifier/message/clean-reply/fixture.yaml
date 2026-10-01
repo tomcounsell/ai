@@ -1,9 +1,0 @@
-kind: message
-slug: clean-reply
-success_criteria:
-  - says what the contract says, to the audience the contract names
-  - contains no OPERATOR-class content
-  - addressed to the recipient in the space's allowed targets
-expected_verdict: pass
-expected_reason: The reply explains the cause and the fix to the client, with nothing outside the contract.
-defect: null

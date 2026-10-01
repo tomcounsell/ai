@@ -1,6 +1,0 @@
-space: psyoptimal
-intended_audience: client
-recipient: bfetzer@psyoptimal.com
-contract: Reply to Bryan confirming the duplicate-row fix is in review and what happens next. Client-facing; PROJECT data class.
-max_data_class: PROJECT
-notes: The deploy key rotation is an internal Yudame ops matter; the reporting box is Yudame infrastructure and the client never runs the report by hand.

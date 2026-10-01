@@ -1,3 +1,0 @@
-{% for stage in p.stages %}
-<span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
-{% endfor %}
