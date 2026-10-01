@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-1-store-hardening
 type: build
-status: built
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -459,3 +459,28 @@ anything but the kernel database.
    other databases stay on `trust`. Assumed: yes.
 3. **Loading the backup plist at merge**, with removable-volume access for
    the interpreter. Assumed: yes; the coordinator asks you at merge.
+
+## Rollout record
+
+Merged 2026-10-01 at `2d176c08e` after test, review (round 2), and docs
+passed on candidate `3fb26024f`. Approved under Tom's standing instruction
+of 2026-10-01 ("get as far as you can possibly get"), given while away, not
+a live tap.
+
+1. No kernel task was running.
+2. `~/src/valor-rebuild` fast-forwarded to the merged branch.
+3. `python -m core migrate` printed
+   `{"passfile": "created", "pg_hba.conf": "written"}`. `pg_hba_file_rules`
+   shows lines 2 to 4 as `scram-sha-256` for `valor_rebuild` and
+   `valor_rebuild_test`, all users; every other database keeps `trust`
+   (a login to `psyoptimal` with no password still connects).
+4. Open for Tom: `export PGPASSFILE=~/.config/valor-kernel/pgpass` in his
+   shell profile.
+5. With no password file, `valor_kernel` and the owner were each refused
+   over the socket, `127.0.0.1`, and `::1` ("fe_sendauth: no password
+   supplied"); a wrong password was refused with "password authentication
+   failed". With the password file all six connected. The default suite then
+   passed on the secured cluster: 108 passed, 3 skipped.
+6. Open for Tom: install and load the plist, grant removable-volume access.
+   A dump run by hand after the rollout (1,416 events, 22 documents,
+   160,622 bytes) restored with `"match": true`.
