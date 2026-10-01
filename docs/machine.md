@@ -271,8 +271,9 @@ deny its directory by its setting. libpq reads it for every kernel
 connection, so no kernel process holds the password in a string or its
 environment. `python -m core secure-login` makes it and is the only code
 that writes it. Tom's own `psql` reaches the kernel databases by
-`export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which
-`claude_code.turn` drops from any turn's environment.
+`export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which no
+turn inherits: `turn` drops every `PG*` variable, and `workspace_turn`
+copies only its allowlist.
 
 ## Postgres on the machine
 

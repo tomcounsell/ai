@@ -330,7 +330,10 @@ user.
   paths (uv building a virtualenv) work; listing them stays denied.
 - **Denied writes inside the run:** the bare origin, the run's `home/` (its
   own profile, git config, and harness settings), and `replay.json`.
-- **Denied entirely:** the workspace Postgres cluster's data directory.
+- **Denied entirely:** the workspace Postgres cluster's data directory, and
+  the kernel's own paths, each named by its setting: the directory of the
+  kernel databases' password file (`pg_passfile`), the machine cluster's
+  data directory (`pg_data_dir`), and the backup disk (`backup_dir`).
 
 ### Loopback connects, and rule order
 

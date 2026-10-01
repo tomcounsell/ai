@@ -186,8 +186,9 @@ kernel cluster's authentication method and role separation are
 **Backups.** `pg_dump` to an external disk with a manifest, 30 kept, and a
 restore into a scratch cluster checked against the manifest
 (`core/backup.py`; [machine.md](machine.md), Backups). Status: **in use**,
-rehearsed once from the command line; the nightly launchd job is **chosen,
-not built** until Tom loads it. Serves "Reliable stop, recovery, and
+rehearsed once from the command line. The nightly launchd job is in the
+code (`python -m core backup --plist`) and runs once Tom loads it
+([machine.md](machine.md), Backups). Serves "Reliable stop, recovery, and
 correction": a ledger nobody can edit is still lost with the disk.
 
 **Queue.** Postgres is the only store and the only queue. A second queue

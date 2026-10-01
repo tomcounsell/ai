@@ -12,7 +12,7 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 
 ## Performers
 
-- `workspace.py`: `workspace_write` (`propose`) and `outbox_send` (`act`), local performers for the kernel's own tests and smoke.
+- `workspace.py`: `workspace_write` (`propose`) and `outbox_send` (`act`), local performers for the kernel's own tests.
 - `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its `origin`, never with force, after Tom's tap.
 
 ## Imports

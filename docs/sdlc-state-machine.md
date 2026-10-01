@@ -354,7 +354,7 @@ Effects beyond the workspace are requests to the broker.
   recorded on `turn.collected` with the head commit. Goes to `checks`.
 - `asked`: the turn wrote `.valor/question.md`. Goes to `waiting`.
 - `idle`: two consecutive turns ended with neither. The run returns so Tom
-  can look. **Exists in the kernel** (`IDLE_TURNS = 2`), because pso-a's
+  can look. **Exists in the kernel** (the `idle_turns` setting, 2), because pso-a's
   bare run ended 2 of 3 turns idle (rebuild-baseline.md, Caveats).
 - `failed`: the harness reported an error or the turn did not finish. The
   run returns; the next run retries from the ledger.
