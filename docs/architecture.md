@@ -297,8 +297,8 @@ process to reap and which directory a resume belongs to.
 
 ## The turn sandbox and reaping
 
-**Built.** A task's `harness` settings may wrap every turn in a
-sandbox-exec profile; its rules and the reaper's marks in full are in
+**Built.** A task's `harness` settings name the sandbox-exec profile every
+workspace turn runs under (`workspace_turn` refuses a task without one); its rules and the reaper's marks in full are in
 [harnesses.md](harnesses.md), and this section states what they guarantee. The first demonstration and the baseline ran every
 turn under one (rebuild-demonstration.md, Setup, Isolation). The profile:
 
