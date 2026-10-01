@@ -453,6 +453,7 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     assert command.env["GH_CONFIG_DIR"] == "/gh" and command.env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert command.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4321/t/token"
     assert command.env["TEST_DB_PORT"] == "5439"
+    assert command.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
 
 
 def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(workspace, tmp_path):

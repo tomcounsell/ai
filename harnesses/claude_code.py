@@ -126,6 +126,10 @@ def workspace_turn(
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
         env["GIT_TERMINAL_PROMPT"] = "0"
+        # A `-p` turn ends when the model stops, killing anything it left
+        # running in the background; so a turn runs its commands in the
+        # foreground or not at all.
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
         if harness.get("gitconfig"):
             env["GIT_CONFIG_GLOBAL"] = harness["gitconfig"]
             env["GIT_CONFIG_NOSYSTEM"] = "1"
