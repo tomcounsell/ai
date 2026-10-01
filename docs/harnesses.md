@@ -408,6 +408,13 @@ Stated so the boundary is drawn where it is [4]:
   wall.
 - `/tmp` is shared between runs. Common file names recurred across items in
   the baseline.
+- The profile denies no write to the machine user's own startup places:
+  `~/.local/bin` (which the user's PATH puts before `/usr/bin`),
+  `~/Library/LaunchAgents`, and the shell's rc files (`~/.zshrc` and the
+  like). A turn could leave a program there that a later process of the
+  user, outside the sandbox, runs. The kernel's own git calls are out of
+  that reach: they run `/usr/bin/git` by absolute path with a PATH of system
+  directories only (`core/git.py`).
 - Every replay database is owned by the same `test` role with the same
   password, so a turn could connect to another run's database on 5439.
 - sandbox-exec is marked deprecated by Apple. The plan names Apple

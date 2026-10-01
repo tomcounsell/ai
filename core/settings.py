@@ -93,6 +93,10 @@ class Settings:
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", _claude()))
 
+    # -- git, as the kernel runs it: an absolute path, never looked up on a
+    # PATH a turn can write to (core/git.py) ----------------------------------
+    git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", "/usr/bin/git"))
+
     # -- backups: the volume's name is the single character U+F028 ------------
     backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", "/Volumes//valor_temp"))
     backup_keep: int = field(default_factory=lambda: int(_env("VALOR_BACKUP_KEEP", "30")))

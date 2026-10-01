@@ -6,12 +6,17 @@ owns its workspace's `.git/config` (and any file it includes), `.git/hooks`,
 `.git/info/attributes`, and the committed `.gitattributes`. Attributes only
 name drivers; a driver's program comes from config. So every call:
 
+- runs git from an absolute path (`settings.git_bin`, default
+  `/usr/bin/git`) with a PATH of system directories only, so a `git` a
+  turn planted in a directory it can write (`~/.local/bin`) never runs;
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
-  gc, and the `ext::` transport off on its command line, which overrides
-  the repository's config;
+  gc, the `ext::` transport, and push's tag following, submodule recursion,
+  and signing off on its command line, which overrides the repository's
+  config; a push also passes `--no-follow-tags --no-recurse-submodules
+  --no-signed`, so it sends exactly the one commit Tom's approval binds;
 - passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
   submodules in `status`;
 - and first refuses the workspace outright (`GitError`) when its local or
@@ -20,13 +25,16 @@ name drivers; a driver's program comes from config. So every call:
   filter drivers, diff and merge drivers, the fsmonitor, hooks path,
   pager, editor, askpass, SSH and proxy commands, credential helpers,
   transport and upload or receive programs, URL rewrites and push URLs,
-  aliases, submodule settings, `core.worktree`, and every include.
+  any `push.*` or `hook.*` setting, the alternate refs command, the
+  interactive diff filter, partial clone, any `*.cmd`, aliases, submodule
+  settings, `core.worktree`, and every include. Config that cannot be read
+  is refused too.
 
 Reading config (`git config --list`) runs nothing: it only reads files. A
 workspace whose config the kernel refuses gets no candidate, no instance,
 no git facts, and no push until the turn removes the key.
 
-Imports only the standard library.
+Imports the standard library and `core.settings`.
 """
 
 import hashlib
@@ -37,15 +45,31 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-ENV = {
-    **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
-    "GIT_TERMINAL_PROMPT": "0",
-    "GIT_SSH_COMMAND": "false",
-    "GIT_ASKPASS": "/usr/bin/false",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_PAGER": "cat",
-}
+from core.settings import settings
+
+# The PATH every kernel git call runs with: system directories only, none a
+# turn can write (a turn can write ~/.local/bin, which Tom's own PATH puts
+# first).
+PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def env() -> dict[str, str]:
+    """The environment of a kernel git call, built when the call is made:
+    the kernel's own, less every inherited `GIT_*` variable (`GIT_DIR`,
+    `GIT_CONFIG_PARAMETERS`, `GIT_EXTERNAL_DIFF`, ...), with a system-only
+    PATH and git's prompts, global config, and system config off."""
+    return {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "PATH": PATH,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": "false",
+        "GIT_ASKPASS": "/usr/bin/false",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PAGER": "cat",
+    }
+
+
 PINNED = [
     "-c", "core.hooksPath=/dev/null",
     "-c", "core.fsmonitor=false",
@@ -58,6 +82,9 @@ PINNED = [
     "-c", "gc.auto=0",
     "-c", "maintenance.auto=false",
     "-c", "protocol.ext.allow=never",
+    "-c", "push.followTags=false",
+    "-c", "push.recurseSubmodules=no",
+    "-c", "push.gpgSign=false",
     "-c", "submodule.recurse=false",
 ]  # fmt: skip
 
@@ -69,11 +96,12 @@ HOSTILE_PREFIXES = (
     "core.fsmonitor", "core.hookspath", "core.pager", "core.editor", "core.askpass",
     "core.sshcommand", "core.gitproxy", "core.worktree", "core.attributesfile",
     "pager.", "sequence.editor", "protocol.", "uploadpack.", "receive.", "gpg.",
-    "diff.external", "ssh.",
+    "diff.external", "ssh.", "push.", "hook.", "core.alternaterefscommand",
+    "interactive.difffilter", "extensions.partialclone",
 )  # fmt: skip
 HOSTILE_SUFFIXES = (
     ".textconv", ".command", ".driver", ".pushurl", ".uploadpack", ".receivepack", ".proxy",
-    ".vcs", ".helper",
+    ".vcs", ".helper", ".cmd",
 )  # fmt: skip
 
 
@@ -82,12 +110,14 @@ class GitError(RuntimeError):
 
 
 def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+    """git at the absolute path in settings (`git_bin`), never whichever
+    `git` comes first on a PATH."""
     return subprocess.run(
-        ["git", "-C", str(workspace), *PINNED, *args],
+        [settings.git_bin, "-C", str(workspace), *PINNED, *args],
         capture_output=True,
         text=text,
         check=False,
-        env=ENV,
+        env=env(),
     )
 
 
@@ -95,6 +125,8 @@ def hostile(workspace: str | Path) -> list[str]:
     """Every key in the workspace's local or worktree config (includes
     followed) that the kernel will not run git under."""
     listed = _git(workspace, "config", "--list", "--show-scope", "--includes")
+    if listed.returncode != 0:  # unreadable config is refused, never assumed clean
+        return [f"the config could not be read: {listed.stderr.strip()[:200]}"]
     found = []
     for line in listed.stdout.splitlines():
         scope, _, entry = line.partition("\t")
@@ -207,6 +239,9 @@ def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
         workspace,
         "push",
         "--no-verify",
+        "--no-follow-tags",
+        "--no-recurse-submodules",
+        "--no-signed",
         "--receive-pack=git-receive-pack",
         url,
         f"{sha}:refs/heads/{branch_name}",

@@ -20,6 +20,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from core import broker, budget, db, guards, ledger, machine, router, session, tasks, verdicts
+from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
 from core.settings import settings
@@ -453,6 +454,10 @@ def _docs_head(ws, *paths) -> str:
         (["AGENTS.md"], False),
         (["persona/voice.md"], False),
         ([".claude/agents/x.md"], False),
+        (["docs/claude.md"], False),
+        (["Skills/sdlc/build.md"], False),
+        (["CLAUDE.local.md"], False),
+        (["AGENTS.override.md"], False),
         (["docs/guide.md", "core/x.py"], False),
     ],
 )
@@ -1165,11 +1170,12 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
 # -- races ---------------------------------------------------------------------------------
 
 
-def test_feedback_racing_the_release_never_lets_a_merge_follow_the_feedback(dsn, tmp_path):
+@pytest.mark.parametrize("order", ["feedback first", "release first", "together"])
+def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn, tmp_path, order):
     """Release checks the predicate and writes its intent under the task's
-    lock in one transaction; feedback takes the same lock. Whichever wins,
-    no merge intent lands after a feedback row, and the ledger stays
-    consistent."""
+    lock in one transaction; feedback takes the same lock. Each order is
+    forced, then both are raced, and the test names the interleaving that
+    happened: no merge intent ever lands after a feedback row."""
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
@@ -1193,15 +1199,33 @@ def test_feedback_racing_the_release_never_lets_a_merge_follow_the_feedback(dsn,
                 except LookupError as exc:
                     return exc
 
-        released, fed = await asyncio.gather(release(), give())
-        return released, fed, await rows(dsn, task), await scripted.status(dsn, task)
+        if order == "feedback first":
+            fed, released = await give(), await release()
+        elif order == "release first":
+            released, fed = await release(), await give()
+        else:
+            released, fed = await asyncio.gather(release(), give())
+        return task, released, fed, await rows(dsn, task), await scripted.status(dsn, task)
 
-    released, _fed, written, st = run(go())
+    _task, released, fed, written, st = run(go())
     ids = {r["type"]: r["id"] for r in written if r["type"] in ("effect.intent", "feedback.given")}
     if "effect.intent" in ids and "feedback.given" in ids:
-        assert ids["effect.intent"] < ids["feedback.given"]  # feedback came after the merge started
-    assert "effect.intent" in ids or isinstance(released, broker.MergeRefused)
-    assert tasks.audit(st) == []
+        happened = "release, then feedback on the merge"
+        assert ids["effect.intent"] < ids["feedback.given"]
+    elif "effect.intent" in ids:
+        happened = "release; feedback refused while the merge was in flight"
+        assert isinstance(fed, LookupError) and "in flight" in str(fed)
+    else:
+        happened = "feedback, then the release refused"
+        assert isinstance(released, broker.MergeRefused) and [t[0] for t in released.terms] == ["1"]
+        assert not [r for r in written if r["type"] == "effect.outcome"]  # nothing pushed
+    expected = {
+        "feedback first": "feedback, then the release refused",
+        "release first": "release, then feedback on the merge",
+    }
+    if order in expected:
+        assert happened == expected[order], happened
+    assert tasks.audit(st) == [], happened
 
 
 def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
@@ -1229,3 +1253,159 @@ def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
     assert len([r for r in written if r["type"] == "effect.outcome"]) == 1
     assert any(getattr(o, "kind", None) == "done" for o in outs)
     assert git(origin, "rev-parse", "main") == sha
+
+
+# -- review round 2 --------------------------------------------------------------------------
+
+
+def _sample(entry: str) -> str:
+    """A config key matching one entry of the refusal list."""
+    special = {
+        "include.": "include.path",
+        "includeif.": "includeIf.gitdir:/nowhere/.path",
+        "url.": "url.x.insteadOf",
+        "credential": "credential.helper",
+        "pager.": "pager.log",
+        "protocol.": "protocol.allow",
+        "uploadpack.": "uploadpack.packObjectsHook",
+        "receive.": "receive.procReceiveRefs",
+        "gpg.": "gpg.program",
+        "ssh.": "ssh.variant",
+        "push.": "push.followTags",
+        "hook.": "hook.x.command",
+        "filter.": "filter.x.clean",
+        "alias.": "alias.x",
+        "submodule.": "submodule.x.url",
+        "sequence.editor": "sequence.editor",
+        "diff.external": "diff.external",
+    }
+    if entry in special:
+        return special[entry]
+    if entry.startswith("."):  # a suffix
+        return (
+            f"remote.x{entry}"
+            if entry in (".pushurl", ".uploadpack", ".receivepack", ".proxy", ".vcs")
+            else f"x.y{entry}"
+        )
+    return entry
+
+
+@pytest.mark.parametrize("entry", list(kgit.HOSTILE_PREFIXES) + list(kgit.HOSTILE_SUFFIXES))
+def test_every_key_on_the_refusal_list_refuses_the_workspace(tmp_path, entry):
+    ws, _ = scripted.workspace(tmp_path)
+    key = _sample(entry)
+    lowered = key.lower()
+    assert lowered.startswith(kgit.HOSTILE_PREFIXES) or lowered.endswith(kgit.HOSTILE_SUFFIXES)
+    git(ws, "config", key, "x")
+    assert kgit.hostile(ws)
+    with pytest.raises(kgit.GitError, match="will not run"):
+        kgit.head(ws)
+
+
+def test_worktree_scope_config_is_refused_too(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    git(ws, "config", "core.repositoryformatversion", "1")
+    git(ws, "config", "extensions.worktreeConfig", "true")
+    git(ws, "config", "--worktree", "filter.x.clean", "x")
+    assert any(f.startswith("worktree: filter.x.clean") for f in kgit.hostile(ws))
+
+
+def test_unreadable_config_is_refused(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    (ws / ".git" / "config").write_text((ws / ".git" / "config").read_text() + "[broken\n")
+    assert kgit.hostile(ws) and "could not be read" in kgit.hostile(ws)[0]
+
+
+def test_kernel_git_drops_inherited_git_variables_and_a_planted_git_on_path(tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+    marker = tmp_path / "ran"
+    script = tmp_path / "evil.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    script.chmod(0o755)
+    planted = tmp_path / "bin"
+    planted.mkdir()
+    (planted / "git").write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n")
+    (planted / "git").chmod(0o755)
+    base = git(ws, "rev-parse", "HEAD")
+    after = commit(ws, "a.txt", "a\n")
+    monkeypatch.setenv("PATH", f"{planted}:{os.environ['PATH']}")
+    monkeypatch.setenv("GIT_DIR", "/nonexistent")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'core.fsmonitor'='{script}'")
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(script))
+    built = kgit.env()
+    assert not {"GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF"} & set(built)
+    assert built["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+    assert kgit.head(ws) == after
+    assert kgit.diff_paths(ws, base, after) == ["a.txt"]
+    assert kgit.dirty(ws) == []
+    assert not marker.exists()
+
+
+def test_a_tag_the_turn_made_is_not_pushed_and_push_settings_refuse(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        sha = (await fold(dsn, task)).candidate.sha
+        git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "tag", "-a", "v9", "-m", "turn's tag", sha)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+            git(ws, "config", "push.followTags", "true")
+            with pytest.raises(broker.Refused, match="push.followtags"):
+                await broker.release(conn, effect)
+            git(ws, "config", "--unset", "push.followTags")
+            return await broker.release(conn, effect), sha
+
+    done, sha = run(go())
+    assert done.kind == "done" and git(origin, "rev-parse", "main") == sha
+    assert git(origin, "tag", "--list") == ""
+
+
+@pytest.mark.parametrize("landed", [True, False])
+def test_a_merge_intent_left_by_a_dead_release_is_reconciled_from_the_target(dsn, tmp_path, landed):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        sha = (await fold(dsn, task)).candidate.sha
+        held = next(r["payload"] for r in await rows(dsn, task) if r["type"] == "effect.held")
+        async with await db.connect(dsn) as conn:  # the release died after its intent
+            await broker.approve(conn, effect, note="merge")
+            await ledger.append(conn, task, "effect.intent",
+                                {"effect_id": effect, "idempotency_key": held["idempotency_key"]})  # fmt: skip
+            if landed:  # and after its push reached the target
+                git(ws, "push", "-q", str(origin), f"{sha}:refs/heads/main")
+            other = await db.connect(dsn)  # a live release still performing holds the effect
+            await other.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"effect:{effect}",))
+            assert await broker.reconcile(conn, effect) is None
+            await other.close()
+        out = await drive(dsn, task)
+        return effect, out, await rows(dsn, task)
+
+    effect, out, written = run(go())
+    outcome = next(
+        r["payload"] for r in written if r["type"] == "effect.outcome" and r["payload"]["effect_id"] == effect
+    )
+    assert outcome["reconciled"] is True
+    if landed:
+        assert outcome["kind"] == "done" and out["status"] == "merged"
+    else:
+        assert outcome["kind"] == "failed" and out["status"] == "delivered"
+        assert out["state"]["merge_effect"]["effect_id"] != effect  # a new merge, held for Tom
+
+
+def test_a_grant_is_refused_in_patch(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, review="changes")
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(guards.GrantRefused, match="in patch"):
+                await guards.grant(conn, task, "any", note="yes", incident="i", mission_item="1")
+
+    run(go())

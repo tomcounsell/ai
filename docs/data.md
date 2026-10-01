@@ -222,8 +222,12 @@ its question or delivery commit together. Connections are autocommit
 
 An effect's `effect.intent` row commits before its performer runs, and its
 `effect.outcome` row after. A kill between the two leaves an intent with no
-outcome, which the fold finds and the performer reconciles by looking up
-its idempotency key on the target (`docs/architecture.md`, the broker).
+outcome. The process performing an effect holds a session advisory lock on
+it from before the intent to the outcome, so the lock is free only when
+that process died. `broker.reconcile` then asks the target through the
+performer's `lookup` and writes the outcome it shows (`done` or `failed`,
+marked `reconciled`); the router does this for a task's merge on its next
+run (`docs/architecture.md`, the broker).
 
 ## State is a fold over events
 

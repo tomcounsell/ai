@@ -571,3 +571,50 @@ def test_the_predicate_refuses_when_the_docs_head_does_not_descend_or_git_facts_
     assert machine.merge_predicate(f, payload, approval_unused=True, facts=ok) == []
     for facts in (machine.GitFacts(False, (), ()), None, machine.GitFacts(True, (), ("core/x.py",))):
         assert [t[0] for t in machine.merge_predicate(f, payload, approval_unused=True, facts=facts)] == ["4"]
+
+
+@pytest.mark.parametrize(
+    ("path", "doc"),
+    [
+        ("docs/guide.md", True),
+        ("README.MD", True),
+        ("docs/Deep/Notes.Md", True),
+        ("core/x.py", False),
+        ("claude.md", False),
+        ("docs/Claude.MD", False),
+        ("CLAUDE.local.md", False),
+        ("x/claude.LOCAL.md", False),
+        ("AGENTS.md", False),
+        ("agents.override.md", False),
+        ("Skills/build.md", False),
+        ("docs/SKILLS/sdlc/plan.md", False),
+        ("Persona/voice.md", False),
+        (".Claude/agents/x.md", False),
+        ("docs/skills.md", True),  # a file named like a directory is a doc
+    ],
+)
+def test_doc_paths_ignore_letter_case_as_the_file_system_does(path, doc):
+    assert machine.is_doc_path(path) is doc
+
+
+def test_a_boolean_raise_is_not_a_count():
+    led = Ledger(critique_rounds=0).plan()
+    led.critique("revise", review_rounds=True)
+    f = led.fold()
+    assert f.state is State.CRITIQUE and f.raised == {"critique_rounds": 0, "review_rounds": 0}
+
+
+def test_an_unknown_mode_is_refused():
+    from core import tasks
+
+    with pytest.raises(ValueError, match="mode"):
+        tasks.Brief(instruction="x", budget_usd_micros=0, mode="x")
+
+
+def test_a_malformed_turn_ended_changes_nothing():
+    led = Ledger().plan().critique("sound")
+    before = led.fold()
+    led.add("turn.ended", {"outcome": "done", "result": {"session_id": "other"}})  # no turn_id
+    led.add("turn.ended", {"turn_id": "t", "outcome": "done", "result": "text"})
+    after = led.fold()
+    assert after.session == before.session and len(after.ignored) == len(before.ignored) + 2

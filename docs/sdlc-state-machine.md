@@ -424,9 +424,10 @@ removed (rebuild-baseline.md, Review rounds), hence the Opus class.
 
 **What runs.** A fresh session in its own checkout of the candidate. It
 reads the request, the plan, and the diff, and changes only doc paths:
-Markdown files that instruct no turn, so never a `CLAUDE.md` or `AGENTS.md`
-anywhere nor anything under `skills/`, `persona/`, or `.claude/`
-(`machine.is_doc_path`). A plan cannot widen this: code riding in an
+Markdown files that instruct no turn, so never a `CLAUDE.md`,
+`CLAUDE.local.md`, `AGENTS.md`, or `AGENTS.override.md` anywhere nor
+anything under `skills/`, `persona/`, or `.claude/`, in any letter case,
+since this Mac's file system ignores case (`machine.is_doc_path`). A plan cannot widen this: code riding in an
 unreviewed docs commit would be a merge on no review. Its commits sit on
 top of the candidate and touch no code, so the three cannot conflict.
 

@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import db, ledger, machine, tasks, verdicts
+from core import broker, db, ledger, machine, tasks, verdicts
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -77,6 +77,10 @@ async def run(
                 if f.state in SETTLED:
                     return {"status": SETTLED[f.state], "state": await tasks.status(conn, task_id)}
                 if f.state is State.MERGE:
+                    # A release that died mid-merge: settle it from the target, then fold again.
+                    dangling = f.merge_effect and f.merge_effect["state"] == "in_flight"
+                    if dangling and await broker.reconcile(conn, f.merge_effect["effect_id"]) is not None:
+                        continue
                     await verdicts.ensure_merge(conn, task_id)
                     return {"status": "delivered", "state": await tasks.status(conn, task_id)}
             ctx = Context(gateway, task_id, dsn, alive)

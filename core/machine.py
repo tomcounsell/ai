@@ -364,13 +364,16 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         f.turn_states[str(p["turn_id"])] = str(p.get("state"))
         return None
     if kind == "turn.ended":
+        turn_id = str(p["turn_id"])  # read before anything changes, so a malformed row changes nothing
         result = p.get("result") or {}
+        if not isinstance(result, dict):
+            return "turn.ended result is not an object"
         if result.get("session_id"):
             f.session = result["session_id"]
         if (
             p.get("outcome") == "done"
             and not result.get("is_error")
-            and f.turn_states.get(str(p["turn_id"])) == s.value
+            and f.turn_states.get(turn_id) == s.value
         ):
             f.entry_finished = True
         return None
@@ -578,16 +581,19 @@ def _legacy(rows: list[dict[str, Any]]) -> Fold:
 # Markdown that is instruction, not description: rendered into a turn's
 # Brief or read by a harness as its standing orders. A docs commit never
 # touches these; changing them is the builder's work, under review.
-INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
+# Compared casefolded: this Mac's file system ignores case, so `claude.md`
+# or `Skills/build.md` is read as `CLAUDE.md` or `skills/` on a clone.
+INSTRUCTION_FILES = ("claude.md", "claude.local.md", "agents.md", "agents.override.md")
 INSTRUCTION_DIRS = ("skills", "persona", ".claude")
 
 
 def is_doc_path(path: str) -> bool:
     """Whether a docs commit may touch this path: a Markdown file, and not
     one that instructs a turn (`INSTRUCTION_FILES` anywhere, anything under
-    `INSTRUCTION_DIRS` at any depth). A plan cannot widen this."""
-    parts = Path(path).parts
-    if not path.endswith(".md") or not parts:
+    `INSTRUCTION_DIRS` at any depth), whatever the case of any part. A plan
+    cannot widen this."""
+    parts = [part.casefold() for part in Path(path).parts]
+    if not parts or not parts[-1].endswith(".md"):
         return False
     if parts[-1] in INSTRUCTION_FILES:
         return False

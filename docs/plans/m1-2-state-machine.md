@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-2-state-machine
 type: build
-status: built
+status: delivered-not-passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -291,7 +291,7 @@ ungranted instance is refused at write, so the rows cannot say two things.
 After appending a check verdict the writer folds again; if the join just
 went to `merge`, it appends `task.delivered` in the same transaction.
 
-The merge effect is requested by `pipeline.ensure_merge` (in this module),
+The merge effect is requested by `core/verdicts.py::ensure_merge`,
 called after that transaction commits and by the router on every run that
 finds the task in `merge`: when the delivery passed or passed with gaps
 and the fold shows no held, in-flight, or done merge effect for the
@@ -813,6 +813,82 @@ On top of the docs session's `7a12ac817`. Every finding resolved:
 - **D1**, the Brief's docstring, says what the broker does.
 
 Evidence: 233 passed, 3 skipped (from 211); ruff clean on the code.
+
+## Delivery 1 (did not pass)
+
+Review round 2, the last the plan allows, on `1f0ffebb2` (docs at
+`1ec5988d6` on `m1.2-docs`): review `changes`, test `gaps`, docs `updated`.
+With both review rounds spent, the join sends the task to Tom as a
+delivery that did not pass (join row 4).
+
+Review findings, blocking:
+
+- **B1.** `machine.is_doc_path` compared case-sensitively; this Mac's file
+  system does not, so `claude.md` or `Skills/build.md` passed as a doc and
+  is read as `CLAUDE.md` or `skills/` on a clone. `CLAUDE.local.md` and
+  `AGENTS.override.md` were missing from the instruction files.
+- **B2.** A workspace-local `push.followTags=true` made the kernel's push
+  also send a tag the turn made, which Tom's approval digest does not bind.
+- **B3.** The kernel ran `git` by name on Tom's PATH, where
+  `~/.local/bin` comes before `/usr/bin` and the sandbox does not deny
+  writes to it, so a turn could plant a `git` the kernel ran outside the
+  sandbox.
+
+Non-blocking: N4 `hostile` ignored the config listing's return code; N5
+keys missing from the refusal list (`core.alternateRefsCommand`, `*.cmd`,
+`interactive.diffFilter`, `hook.*`, `extensions.partialClone`); N6 a
+dangling merge intent stayed in flight forever while the docs said it was
+reconciled; N9 a malformed `turn.ended` half-applied; N10 the plan named
+`pipeline.ensure_merge`.
+
+Test gaps: T-a a grant in checks or patch refused; T-b an unknown mode
+refused; T-c inherited `GIT_*` variables dropped; T-d worktree-scope config
+refused; T-e the feedback and release race asserting which interleaving
+happened; T-f a boolean raise rejected.
+
+## Proposed patch, awaiting Tom's feedback
+
+Prepared while Tom is away; not authorised by the pipeline, which has
+spent its review rounds. It is a candidate for his decision: his feedback
+on the delivery is what would send it through the checks.
+
+- **B1.** Doc paths compare every part casefolded; the instruction files
+  are `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`,
+  the directories `skills/`, `persona/`, `.claude/`. The contract doc and
+  the docs stage file say so. Tests: every case variant, pure and through
+  the merge predicate.
+- **B2.** Every kernel git call pins `push.followTags=false`,
+  `push.recurseSubmodules=no`, `push.gpgSign=false`; the push passes
+  `--no-follow-tags --no-recurse-submodules --no-signed`; any `push.*` key
+  in the workspace's own config is refused. Test: a turn-made annotated tag
+  is not pushed, and `push.followTags` refuses the release.
+- **B3.** The kernel runs git by absolute path (`settings.git_bin`,
+  default `/usr/bin/git`, `VALOR_GIT` overrides) with a PATH of system
+  directories only. `docs/harnesses.md`, Known openings, names the user's
+  writable `~/.local/bin`, `~/Library/LaunchAgents`, and shell rc files.
+  Test: a `git` planted first on PATH is not run.
+- **N4.** Config that cannot be read is refused.
+- **N5.** The refusal list gains `push.*`, `hook.*`,
+  `core.alternateRefsCommand`, `interactive.diffFilter`,
+  `extensions.partialClone`, and `*.cmd`; a parametrized test sets one
+  key per entry of the whole list and checks the workspace is refused.
+- **N6.** Reconciled, as the docs said: a process performing an effect
+  holds a session lock on it from intent to outcome; `broker.reconcile`
+  settles an intent whose lock is free through the performer's `lookup`
+  (`done` or `failed`, marked `reconciled`), and the router runs it for a
+  task's merge on the next run. Tests: a merge that landed before the crash
+  becomes `merged`; one that did not is `failed` and a new merge is held;
+  a live performer's lock leaves the intent alone.
+- **N9.** `turn.ended` reads its turn id before changing anything, and a
+  non-object result is ignored whole.
+- **N10.** The plan names `core/verdicts.py::ensure_merge`.
+- **T-a to T-f.** A grant in patch refused (checks was covered); an
+  unknown mode; `git.env()` drops `GIT_DIR`, `GIT_CONFIG_PARAMETERS`,
+  `GIT_EXTERNAL_DIFF` and the calls still work with no marker; worktree
+  scope refused; the race forced in each order and raced, naming the
+  interleaving; a boolean raise rejected.
+
+Evidence: 303 passed, 3 skipped (from 233); ruff clean on the code.
 
 ## Rollout at merge
 

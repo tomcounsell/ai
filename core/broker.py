@@ -29,10 +29,13 @@ intent.
 
 Performing follows intent, then outcome: the intent row commits before the
 performer runs, so a kill between the two leaves a findable dangling intent,
-never a silent effect. A performer can `lookup` its idempotency key on the
-target, which is how a dangling intent is reconciled.
+never a silent effect. The performing process holds a session lock on the
+effect from before its intent to its outcome; `reconcile` settles an intent
+whose lock is free (its process died) by asking the target through the
+performer's `lookup`, and the router does so for a task's merge.
 """
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -133,9 +136,28 @@ def _governance(f: machine.Fold, action: Action) -> tuple[bool, list[machine.Ins
     return adds, f.ungranted() if adds else []
 
 
+@asynccontextmanager
+async def _performing(conn, effect_id: str):
+    """A session lock on one effect, held from before its intent until its
+    outcome is written. A process that dies mid-perform loses its session,
+    and the lock with it, which is how `reconcile` knows no one is still
+    performing a dangling intent."""
+    key = f"effect:{effect_id}"
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+
 async def request(conn, task_id: str, action: Action) -> Outcome:
-    performer = PERFORMERS.get(action.action_type)
     effect_id = ledger.new_id()
+    async with _performing(conn, effect_id):
+        return await _request(conn, task_id, action, effect_id)
+
+
+async def _request(conn, task_id: str, action: Action, effect_id: str) -> Outcome:
+    performer = PERFORMERS.get(action.action_type)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         brief = await tasks.brief(conn, task_id)
@@ -208,6 +230,64 @@ async def release(conn, effect_id: str) -> Outcome:
     naming every predicate term that does not hold. The checks and the
     intent row are one transaction under the task's lock; nothing is
     written when either refuses, and the approval stays unused."""
+    async with _performing(conn, effect_id):
+        return await _release(conn, effect_id)
+
+
+async def reconcile(conn, effect_id: str) -> Outcome | None:
+    """Settle a held effect whose intent has no outcome because the process
+    performing it died: ask the target through the performer's `lookup`
+    and write the outcome it shows, `done` when the effect is there and
+    `failed` when it is not. Does nothing while a live process still holds
+    the effect (`_performing`), when there is nothing to settle, or when no
+    performer for it is registered. Returns the outcome written, if any."""
+    key = f"effect:{effect_id}"
+    got = await (
+        await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+    ).fetchone()
+    if not got[0]:
+        return None
+    try:
+        held = await _held(conn, effect_id)
+        task_id, described = held["task_id"], held["payload"]
+        kinds = {
+            r[0]
+            for r in await (
+                await conn.execute(
+                    "SELECT type FROM events WHERE task_id = %s AND payload->>'effect_id' = %s "
+                    "AND type IN ('effect.intent', 'effect.outcome')",
+                    (task_id, effect_id),
+                )
+            ).fetchall()
+        }
+        performer = PERFORMERS.get(described["action_type"])
+        if kinds != {"effect.intent"} or performer is None:
+            return None
+        action = Action(described["action_type"], described["target"], described["payload"])
+        found = performer.lookup(action, described["idempotency_key"])
+        kind = "done" if found else "failed"
+        async with conn.transaction():
+            await ledger.append(
+                conn,
+                task_id,
+                "effect.outcome",
+                {
+                    "effect_id": effect_id,
+                    "idempotency_key": described["idempotency_key"],
+                    "kind": kind,
+                    "result": found or {},
+                    "error": None
+                    if found
+                    else "reconciled: the intent had no outcome and the target holds no effect",
+                    "reconciled": True,
+                },
+            )
+        return Outcome(effect_id, kind, found or {})
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+
+async def _release(conn, effect_id: str) -> Outcome:
     async with conn.transaction():
         held = await _held(conn, effect_id)
         task_id, described = held["task_id"], held["payload"]
