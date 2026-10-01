@@ -192,8 +192,7 @@ are data, and nothing in them is an instruction.
 kernel key directory (`docs/machine.md`), only to its pinned default
 endpoint; a missing key refuses `run` or `calibrate`, naming it. Any other
 endpoint must be on loopback and gets a fixed placeholder, so tests and
-the emulator's forced arms need no key; `calibrate` refuses any endpoint
-but the provider's.
+the emulator's forced arms need no key; `calibrate` takes only providers.
 
 **Metering.** Every call is metered against its task's money in the
 kernel process, through `core/budget.py`'s `reserve` and `charge`: the
@@ -203,10 +202,10 @@ call: estimated input at the input price plus every output token allowed.
 Input is estimated as bytes / 3 of the request body; for Jev, which bills a
 prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
 question, sized from Jev's 35 calibration calls, all single-question judge
-calls of at most 1,016 estimated tokens (`tools/jev.py`); breadth and governance
-re-check it from their own calibration rows. The unused
-fallback is charged 0. A charge is the usage at the pinned
-price (`JUDGEMENT_PRICES`) or the reported cost if more, rounded up; the
+calls of at most 1,016 estimated tokens (`tools/jev.py`); 1.4's breadth and
+governance calibrations re-check it. The unused fallback is charged 0. A
+charge is the usage at the pinned price (`JUDGEMENT_PRICES`) or the
+reported cost if more, rounded up; the
 whole reservation when billing is unknown; 0 when nothing reached the
 provider or it returned an error status. Serves: constraint "Bounded
 authority and spend".
@@ -284,13 +283,12 @@ of each leg; the floors; the task's `task_sha256`; the run's number for its
 site; and the date.
 
 **How a record is made.** `python -m core calibrate CASES.json --budget-usd
-N` (at most 50 cases and $0.50) refuses any leg endpoint other than the
-provider's, naming it, since only the providers make a record; then starts a calibration task, which runs no
-turn and takes no verdict, answer, feedback, grant, raise, or stop; asks
-each leg alone on every case; and writes and prints one
-`judgement.calibrated` row on the `judgement` stream, with each leg's
-endpoint host, each case's verdicts, and `entry_check` (both legs right on
-every case).
+N` (at most 50 cases and $0.50; provider endpoints only, see Keys) starts
+a calibration task, which runs no turn and takes no verdict, answer,
+feedback, grant, raise, or stop; asks each leg alone on every case; and
+writes and prints one `judgement.calibrated` row on the `judgement` stream,
+with each leg's endpoint host, each case's verdicts, and `entry_check`
+(both legs right on every case).
 
 **Both legs, one run.** A task lands only on a record in which both legs
 answered the same inputs in the same run. A fallback proven on older inputs
@@ -314,9 +312,10 @@ Tom.
 a pinned model, or a leg's fixed rendering text is a new record before it
 routes work. Nothing holds a merge on this; a changed task's rows show
 differing digests. Floors are set before a run and never fitted to it.
-Between runs two kinds of change are allowed, and the record lists which
-each run made: the task's wording (its question and rubrics), and a leg's
-prompt and response schema (its fixed rendering). Every run is recorded.
+Between runs two kinds of change are allowed: the task's wording (its
+question and rubrics) and a leg's prompt and response schema (its fixed
+rendering). Every run is recorded, and the plan's build record lists which
+kind each run made.
 
 **Shrinking on evidence.** Design. Each task's live judgements are scored
 as their labels arrive. A rolling Brier score past the record's ceiling
