@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-3-judgement
 type: build
-status: built
+status: passed-held
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1135,3 +1135,21 @@ On top of the docs session's `04b412bb8`. Mechanical fixes only:
 
 Evidence: 435 passed, 5 skipped; ruff check clean; ruff format clean on
 code (the `docs/bridges/telegram.md` block, as on the base).
+
+## Checks passed, held behind 1.2
+
+On candidate `06efc9319` (with the docs check's commit `88c03083c` on top):
+test `pass` (435 passed, 5 skipped), review `pass` (governance yes: only
+`intake.underspecified`, `checks.test.breadth`, and `governance.adds`, each
+granted or required), docs `updated`. Review rounds used: 2; the repair
+round: spent. The merge predicate's terms hold for 1.3 on its own.
+
+It is not merged: it is stacked on milestone 1.2's proposed patch 2
+(`40db35f8e`), which is a delivery that did not pass and waits for Tom's
+feedback. If Tom accepts 1.2 with further changes, this branch is rebased
+onto the result and its three checks run again before merge.
+
+Held for the rollout with Tom: `python -m core migrate` (the
+`events_one_judgement` index), `python -m core judgement-keys` (creates
+`~/.config/valor-kernel/judgement-keys`), and one `calibrate` run against
+the real ledger whose digest must equal `JUDGE.calibrated`.
