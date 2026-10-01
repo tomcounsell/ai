@@ -34,8 +34,16 @@ sys.path.insert(0, str(SCRIPTS))
 import replay_workspace
 
 PROBE = """
-import socket, sys
+import os, socket, sys
 for target in sys.argv[1:]:
+    if target.startswith(("stat:", "list:")):
+        mode, path = target.split(":", 1)
+        try:
+            os.stat(path) if mode == "stat" else os.listdir(path)
+            print("open")
+        except PermissionError:
+            print("denied")
+        continue
     if target.startswith(("read:", "write:")):
         mode, path = target.split(":", 1)
         try:
@@ -174,7 +182,14 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
         f"read:{files['other']}",
         f"read:{files['tool']}",
         f"write:{files['tool']}",
-    ) == ["open", "open", "open", "denied", "denied", "denied", "denied", "open", "denied"]
+        f"stat:{demo / 'runs'}",
+        f"stat:{home / 'src'}",
+        f"list:{demo / 'runs'}",
+        f"list:{home / 'src'}",
+    ) == [
+        *["open", "open", "open", "denied", "denied", "denied", "denied", "open", "denied"],
+        *["open", "open", "denied", "denied"],
+    ]
 
 
 def test_a_replay_without_services_reaches_neither_service():

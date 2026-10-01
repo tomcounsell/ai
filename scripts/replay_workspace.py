@@ -74,7 +74,9 @@ def sandbox_profile(
     """The sandbox-exec profile for a turn working in `workdir` inside
     `run`; `GATEWAY_PORT` is a parameter, since the gateway takes whatever
     port the OS hands it. `tools` (binaries such as uv that the replays
-    share) is readable and runnable, not writable."""
+    share) is readable and runnable, not writable. The run's ancestors are
+    stat-able, not listable, so tools that resolve real paths (uv making a
+    virtualenv) work inside the run."""
     denied = [
         "src",
         "work-vault",
@@ -102,6 +104,9 @@ def sandbox_profile(
         f'    (subpath "{run}")',
         f'    (subpath "{transcripts_dir(workdir)}"))',
         f'(allow file-read* (subpath "{tools}"))',
+        "(allow file-read-metadata",
+        *(f'    (literal "{d}")' for d in reversed(run.parents)),
+        ")",
         "(deny file-write*",
         f'    (subpath "{run / "origin.git"}")',
         f'    (subpath "{run / "home"}")',
