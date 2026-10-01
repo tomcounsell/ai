@@ -17,9 +17,10 @@ Verification commands run on the final commit and nothing else: it is
 fetched into a repository of the judge's own ($VALOR_DEMO/judge/<run>.git,
 so no git config or hook the turn wrote applies) and exported to a clean
 tree at runs/<run>/verify/<name>, where the commands run with the turn's own
-sandbox profile, environment, and services. Anything the turn left
-uncommitted, a virtualenv included, is not there: an item's commands set up
-what they need.
+sandbox profile, environment, and services, and whatever a command leaves
+running (a test setup's daemonized redis-server) is stopped after it and
+listed under `reaped`. Anything the turn left uncommitted, a virtualenv
+included, is not there: an item's commands set up what they need.
 
 Live spend: one judge call (default Sonnet), logged in $VALOR_DEMO/costs.jsonl.
 """
@@ -38,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import replay_workspace
 from replay_common import DEMO, claude_json, git, machine_lock, now, sh, ws_git
 
+from core import ledger, runs
 from harnesses.claude_code import KEEP_ENV
 
 DIFF_LIMIT = 70_000
@@ -127,10 +129,13 @@ def verify(result: dict) -> list[dict]:
     replay_workspace.ensure_services(item["services"], ws.get("redis_port", replay_workspace.REDIS_PORT))
     out = []
     for command in item["verify"]:
+        mark = ledger.new_id()
         argv = [
             "sandbox-exec",
             "-D",
             "GATEWAY_PORT=1",
+            "-D",
+            f"VALOR_TURN={mark}",
             "-f",
             harness["sandbox_profile"],
             "/bin/bash",
@@ -141,7 +146,7 @@ def verify(result: dict) -> list[dict]:
             ran = subprocess.run(
                 argv,
                 cwd=tree,
-                env=env,
+                env={**env, runs.TURN_ENV: mark},
                 capture_output=True,
                 text=True,
                 timeout=VERIFY_TIMEOUT,
@@ -151,7 +156,8 @@ def verify(result: dict) -> list[dict]:
         except subprocess.TimeoutExpired as exc:
             code, text = "timeout", f"{exc.stdout or ''}{exc.stderr or ''}"
             text = text.decode(errors="replace") if isinstance(text, bytes) else text
-        out.append({"command": command, "exit": code, "output_tail": text[-OUTPUT_TAIL:]})
+        reaped = runs.reap(mark)
+        out.append({"command": command, "exit": code, "output_tail": text[-OUTPUT_TAIL:], "reaped": reaped})
     return out
 
 

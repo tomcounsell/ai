@@ -34,10 +34,10 @@ def turn(
     tools: str = "",
     max_output_tokens: int = 1024,
 ):
-    """A builder: given the gateway base URL and the dispatched Brief, the
-    command for one turn."""
+    """A builder: given the gateway base URL, the dispatched Brief, and the
+    turn's id, the command for one turn."""
 
-    def build(base_url: str, brief: str) -> TurnCommand:
+    def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         env = {
             k: v
             for k, v in os.environ.items()
@@ -110,8 +110,10 @@ def workspace_turn(
 
     `harness` carries the task's isolation, all optional:
     `sandbox_profile`, a sandbox-exec profile the whole turn runs under,
-    given the gateway's port as `GATEWAY_PORT`; `gitconfig`, used as git's
-    global config with the system config ignored; `gh_config_dir`, gh's
+    given the gateway's port as `GATEWAY_PORT` and the turn's id as
+    `VALOR_TURN`, which the profile names its processes by (`core.runs`
+    reaps them when the turn ends); `gitconfig`, used as git's global
+    config with the system config ignored; `gh_config_dir`, gh's
     config directory; `env`, variables added to the turn's environment (the
     workspace's own settings, such as where its test database listens);
     `max_output_tokens`, the per-call output cap, which sets the gateway's
@@ -120,7 +122,7 @@ def workspace_turn(
     harness = harness or {}
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
-    def build(base_url: str, brief: str) -> TurnCommand:
+    def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
         env.update(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
@@ -159,7 +161,16 @@ def workspace_turn(
         argv += ["--", prompt]
         if harness.get("sandbox_profile"):
             port = urlparse(base_url).port
-            argv = ["sandbox-exec", "-D", f"GATEWAY_PORT={port}", "-f", harness["sandbox_profile"], *argv]
+            argv = [
+                "sandbox-exec",
+                "-D",
+                f"GATEWAY_PORT={port}",
+                "-D",
+                f"VALOR_TURN={turn_id}",
+                "-f",
+                harness["sandbox_profile"],
+                *argv,
+            ]
         return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
 
     return build

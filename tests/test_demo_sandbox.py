@@ -10,6 +10,12 @@ the replays' own Postgres (5439) and Redis (6390). A replay's turn reads and
 writes its own run and nothing else in the replay directory, and reads and
 runs the shared binaries in its `bin/`.
 
+A turn listens only on 8000 to 8009 and on unix sockets inside its own
+directory: never on 6379 or 5432, on any address, nor on an OS-assigned
+port. sandbox-exec matches a bind by port alone, so 0.0.0.0:8001 passes
+like 127.0.0.1:8001; what keeps a dev port off the LAN for long is that the
+kernel reaps whatever a turn leaves running (tests/test_reap.py).
+
 Live spend: none.
 """
 
@@ -36,6 +42,28 @@ import replay_workspace
 PROBE = """
 import os, socket, sys
 for target in sys.argv[1:]:
+    if target.startswith("bind:"):
+        addr = target[5:]
+        if addr.startswith("/"):
+            s = socket.socket(socket.AF_UNIX)
+        else:
+            host, port = addr.rsplit(":", 1)
+            host = host.strip("[]")
+            s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+            addr = (host, int(port))
+        try:
+            s.bind(addr)
+            s.listen()
+            print("open")
+        except PermissionError:
+            print("denied")
+        except OSError:
+            print("open")
+        finally:
+            s.close()
+            if isinstance(addr, str) and os.path.exists(addr):
+                os.unlink(addr)
+        continue
     if target.startswith(("stat:", "list:")):
         mode, path = target.split(":", 1)
         try:
@@ -93,7 +121,7 @@ def _profile(tmp_path: Path) -> Path:
 
 
 def _probe(profile: Path, gateway_port: int, *targets) -> list[str]:
-    sandbox = ["sandbox-exec", "-D", f"GATEWAY_PORT={gateway_port}", "-f", str(profile)]
+    sandbox = ["sandbox-exec", "-D", f"GATEWAY_PORT={gateway_port}", "-D", "VALOR_TURN=t", "-f", str(profile)]
     run = subprocess.run(
         [*sandbox, sys.executable, "-c", PROBE, *(str(t) for t in targets)],
         capture_output=True,
@@ -195,3 +223,45 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
 def test_a_replay_without_services_reaches_neither_service():
     ports = replay_workspace.ports_for([])
     assert 5439 not in ports and 6390 not in ports and 8000 in ports
+
+
+def _binds(own_dir: Path) -> dict[str, str]:
+    """Each bind a turn might try, and whether the profile must allow it."""
+    return {
+        "bind:0.0.0.0:6379": "denied",
+        "bind:127.0.0.1:6379": "denied",
+        "bind:[::]:6379": "denied",
+        "bind:0.0.0.0:5432": "denied",
+        "bind:127.0.0.1:5432": "denied",
+        "bind:0.0.0.0:0": "denied",
+        "bind:127.0.0.1:0": "denied",
+        "bind:0.0.0.0:9000": "denied",
+        "bind:127.0.0.1:8010": "denied",
+        "bind:/tmp/popoto-redis-probe.sock": "denied",
+        "bind:127.0.0.1:8001": "open",
+        "bind:[::1]:8009": "open",
+        f"bind:{own_dir / 'redis.sock'}": "open",
+    }
+
+
+def test_the_demo_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
+    profile = _profile(tmp_path)
+    (tmp_path / "demo").mkdir()
+    binds = _binds(tmp_path / "demo")
+    assert dict(zip(binds, _probe(profile, 1, *binds))) == binds
+
+
+def test_a_replay_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
+    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
+    (run / "toy").mkdir(parents=True)
+    profile = tmp_path / "replay.sb"
+    profile.write_text(
+        replay_workspace.sandbox_profile(
+            run=run,
+            workdir=run / "toy",
+            ports=replay_workspace.ports_for(["postgres", "redis"]),
+            home=tmp_path / "home",
+        )
+    )
+    binds = _binds(run)
+    assert dict(zip(binds, _probe(profile, 1, *binds))) == binds

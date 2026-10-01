@@ -197,7 +197,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
         gateway = Gateway(dsn)
         await gateway.start()
         # A real subprocess that would run for a minute, with a child of its own.
-        build = lambda url, brief: runs.TurnCommand(
+        build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[
                 sys.executable,
                 "-c",

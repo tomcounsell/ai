@@ -2,11 +2,12 @@
 instant.
 
 The harness port is `TurnCommand`: the argv, environment, and working
-directory that run one turn against a given gateway base URL and the
-dispatched Brief, plus how to read the result from stdout. `core` never
-knows which harness it runs. The dispatched Brief is rendered from the ledger
-as the turn starts, Tom's corrections included, and recorded whole in
-`turn.started`, so the ledger shows exactly what the turn was given.
+directory that run one turn against a given gateway base URL, the
+dispatched Brief, and the turn's id, plus how to read the result from
+stdout. `core` never knows which harness it runs. The dispatched Brief is
+rendered from the ledger as the turn starts, Tom's corrections included,
+and recorded whole in `turn.started`, so the ledger shows exactly what the
+turn was given.
 
 Stop is lossless because nothing the turn owns lives only in this process.
 The `task.stopped` row fences the task in the database; the notification
@@ -14,17 +15,37 @@ wakes this runner, which revokes the gateway (cutting any stream), kills the
 harness's whole process group, waits for every in-flight call to be charged,
 and writes `turn.ended`. A turn's durable state is its ledger rows, and each
 of those lands whole or not at all.
+
+A turn's processes do not outlive it. The turn runs with `VALOR_TURN` set
+to its id, and a sandboxed turn's profile denies the mach name
+`valor.turn.<id>`. When the turn ends, every process of this user that is
+in the turn's process group, carries the marker in its environment, or sits
+under a sandbox that denies the turn's name (and not another, which an App
+Sandbox denies too) gets SIGTERM, then SIGKILL after two seconds, and
+`turn.reaped` lists them. The sandbox mark is the one a daemon cannot shed:
+it survives setsid, re-parenting to launchd, and a process retitling
+itself over its environment (redis-server does), and platform binaries hide
+their environment from other processes altogether.
 """
 
 import asyncio
+import ctypes
+import functools
 import os
+import platform
 import signal
+import subprocess
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from core import db, ledger, tasks
 from core.gateway import Gateway
+
+TURN_ENV = "VALOR_TURN"
+REAP_GRACE_S = 2.0
 
 
 @dataclass
@@ -56,7 +77,7 @@ async def run_turn(
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)
             dispatched = await tasks.dispatch(conn, task_id)
-            command = build(base_url, dispatched["text"])
+            command = build(base_url, dispatched["text"], turn_id)
             await ledger.append(
                 conn,
                 task_id,
@@ -72,7 +93,7 @@ async def run_turn(
             )
         proc = await asyncio.create_subprocess_exec(
             *command.argv,
-            env=command.env,
+            env={**command.env, TURN_ENV: turn_id},
             cwd=command.cwd,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -93,6 +114,7 @@ async def run_turn(
             stdout, stderr = finished.result()
             outcome = "done" if proc.returncode == 0 else "failed"
         await gateway.drain(task_id)
+        reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
     finally:
         await listener.close()
 
@@ -114,6 +136,8 @@ async def run_turn(
         ).fetchone()
         ended["metered_usd_micros"] = int(row[0])
         async with conn.transaction():
+            if reaped:
+                await ledger.append(conn, task_id, "turn.reaped", {"turn_id": turn_id, "processes": reaped})
             await ledger.append(conn, task_id, "turn.ended", ended)
     return ended
 
@@ -131,3 +155,84 @@ def _kill_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
+    """Stop every process the turn left behind (marked with `turn_id`, or in
+    process group `pgid`); return what was stopped."""
+    pids = _turn_processes(turn_id, pgid)
+    if not pids:
+        return []
+    names = _commands(pids)
+    for pid in pids:
+        _signal(pid, signal.SIGTERM)
+    deadline = time.monotonic() + REAP_GRACE_S
+    alive = set(pids)
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive = {pid for pid in alive if _signal(pid, 0)}
+    for pid in alive:
+        _signal(pid, signal.SIGKILL)
+    return [
+        {"pid": pid, "command": names.get(pid, ""), "signal": "SIGKILL" if pid in alive else "SIGTERM"}
+        for pid in sorted(pids)
+    ]
+
+
+def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
+    mark = f"{TURN_ENV}={turn_id}"
+    listing = subprocess.run(
+        ["ps", "-A", "-E", "-ww", "-o", "pid=,pgid=,uid=,command="],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    found = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or int(fields[2]) != os.getuid() or int(fields[0]) == os.getpid():
+            continue
+        pid = int(fields[0])
+        if int(fields[1]) == pgid or mark in fields[3:] or _sandbox_marked(pid, turn_id):
+            found.append(pid)
+    return found
+
+
+def _commands(pids: list[int]) -> dict[int, str]:
+    listing = subprocess.run(
+        ["ps", "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, pids))],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    rows = (line.strip().split(None, 1) for line in listing.splitlines() if line.strip())
+    return {int(row[0]): (row[1] if len(row) > 1 else "")[:200] for row in rows}
+
+
+def _signal(pid: int, sig: int) -> bool:
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError, PermissionError:
+        return False
+
+
+@functools.cache
+def _sandbox_check():
+    """libsandbox's `sandbox_check`, or None off macOS. It is variadic, and
+    on arm64 a variadic argument goes on the stack past the eight argument
+    registers, so five placeholders put the name there."""
+    if sys.platform != "darwin":
+        return None
+    check = ctypes.CDLL("/usr/lib/libSystem.B.dylib").sandbox_check
+    pad = 5 if platform.machine() == "arm64" else 0
+    check.restype = ctypes.c_int
+    check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, *[ctypes.c_void_p] * pad, ctypes.c_char_p]
+    return lambda pid, name: check(pid, b"mach-lookup", 2 | 0x40000000, *[None] * pad, name.encode()) == 1
+
+
+def _sandbox_marked(pid: int, turn_id: str) -> bool:
+    """Whether the process's sandbox denies the turn's mach name and not
+    another: GLOBAL_NAME filter, without logging the check."""
+    denies = _sandbox_check()
+    return bool(denies) and denies(pid, f"valor.turn.{turn_id}") and not denies(pid, "valor.turn.none")

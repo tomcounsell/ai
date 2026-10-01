@@ -40,6 +40,14 @@ services the run asked for; this Mac's own Postgres (5432) and Redis (6379)
 stay out of reach. Denies come before allows: a network rule after the
 loopback allows makes sandbox-exec refuse allowed ports at random.
 
+A turn may listen only on 8000 to 8009 and on unix sockets inside its run.
+sandbox-exec matches a bind on its port alone: `localhost:8001` admits
+0.0.0.0:8001 and the LAN address too, and a literal address does not parse,
+so the dev ports are the one place a turn can listen beyond loopback, and
+only while the turn lasts (the kernel reaps what a turn leaves running).
+The profile also denies the mach name `valor.turn.<VALOR_TURN>`, which
+names the turn's processes to the reaper even after they daemonize.
+
 Live spend: none. Network: a clone or fetch from GitHub, run as Tom.
 """
 
@@ -114,6 +122,11 @@ def sandbox_profile(
         f'    (subpath "{run / "home"}")',
         f'    (literal "{run / "replay.json"}"))',
         '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
+        '(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))',
+        "(deny network-bind network-inbound)",
+        "(allow network-bind network-inbound",
+        *(f'    (local ip "localhost:{p}")' for p in DEV_PORTS),
+        f'    (local unix-socket (subpath "{run}")))',
         "(deny network-outbound",
         '    (remote ip "localhost:*")',
         '    (remote unix-socket (path-literal "/private/tmp/.s.PGSQL.5432"))',

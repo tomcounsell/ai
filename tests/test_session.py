@@ -55,7 +55,7 @@ def git(cwd, *args) -> str:
 
 
 def turn_for(prompt, resume, b):
-    def build(url, brief):
+    def build(url, brief, turn_id):
         return claude_code.TurnCommand(
             argv=[sys.executable, "-c", VALOR, prompt, resume or "", brief],
             env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
@@ -195,7 +195,7 @@ print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error
 
 
 def deliverer_for(prompt, resume, b):
-    def build(url, brief):
+    def build(url, brief, turn_id):
         return claude_code.TurnCommand(
             argv=[sys.executable, "-c", DELIVERER, prompt, resume or ""],
             env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
@@ -283,7 +283,7 @@ print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error
 
 
 def flaky_for(prompt, resume, b):
-    def build(url, brief):
+    def build(url, brief, turn_id):
         return claude_code.TurnCommand(
             argv=[sys.executable, "-c", FLAKY, prompt, resume or ""],
             env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
@@ -443,9 +443,9 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
             "env": {"TEST_DB_PORT": "5439"},
         },
     )
-    command = build("http://127.0.0.1:4321/t/token", "# Brief")
+    command = build("http://127.0.0.1:4321/t/token", "# Brief", "turn1")
     argv = command.argv
-    assert argv[:5] == ["sandbox-exec", "-D", "GATEWAY_PORT=4321", "-f", "/p.sb"]
+    assert argv[:7] == ["sandbox-exec", "-D", "GATEWAY_PORT=4321", "-D", "VALOR_TURN=turn1", "-f", "/p.sb"]
     assert argv[argv.index("--resume") + 1] == "abc"
     assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
     assert argv[argv.index("--append-system-prompt") + 1] == "You are Valor.\n\n# Brief"
@@ -487,9 +487,9 @@ def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path
         claude_code.turn(request, cwd=str(tmp_path)),
         claude_code.workspace_turn(request, cwd=str(tmp_path), resume="abc"),
     ):
-        argv = build("http://127.0.0.1:9/t/x", "# Brief").argv
+        argv = build("http://127.0.0.1:9/t/x", "# Brief", "turn1").argv
         assert argv[-2:] == ["--", request]
-    argv = claude_code.turn(request, cwd=str(tmp_path))("http://127.0.0.1:9/t/x", "# Brief").argv
+    argv = claude_code.turn(request, cwd=str(tmp_path))("http://127.0.0.1:9/t/x", "# Brief", "turn1").argv
     env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"}
     proc = subprocess.Popen(
         argv, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True

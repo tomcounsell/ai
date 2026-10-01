@@ -96,8 +96,8 @@ def test_every_turn_renders_the_corrections_in_force_when_it_starts(dsn, first, 
     """A task started before a correction still gets it on its next turn:
     the Brief is rendered from the ledger at dispatch, not copied at start."""
 
-    def build(url, brief):
-        command = claude_code.turn("Reply with one word.", cwd=str(tmp_path))(url, brief)
+    def build(url, brief, turn_id):
+        command = claude_code.turn("Reply with one word.", cwd=str(tmp_path))(url, brief, turn_id)
         command.argv = [sys.executable, "-c", "pass", *command.argv[1:]]
         return command
 

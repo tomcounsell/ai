@@ -111,6 +111,11 @@ EOF
 # network-outbound rule after them makes sandbox-exec refuse the allowed
 # ports for roughly two in five port numbers, so a turn's gateway, which
 # listens on whatever port the OS hands it, came out EPERM at random.
+# A turn listens only on 8000-8009 and on unix sockets inside the demo
+# directory. sandbox-exec matches a bind on its port alone (localhost:8001
+# admits 0.0.0.0:8001), so nothing else, loopback or not, can be served from
+# a turn. The mach name valor.turn.$VALOR_TURN marks the turn's processes for
+# the kernel's reaper, daemonized or not.
 H="$HOME"
 PG_SOCKET="$(cd /tmp && pwd -P)/.s.PGSQL.5432"
 TRANSCRIPTS="$H/.claude/projects/$(echo "$DEMO/psyoptimal" | tr '/.' '--')"
@@ -141,6 +146,11 @@ cat > home/sandbox.sb <<EOF
 (deny file-read* file-write* (subpath "$PG/data"))
 (deny file-write* (literal "$PG/postgres.log"))
 (deny process-exec (regex #"/git-credential-osxkeychain$"))
+(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))
+(deny network-bind network-inbound)
+(allow network-bind network-inbound
+$(for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008 8009; do echo "    (local ip \"localhost:$p\")"; done)
+    (local unix-socket (subpath "$DEMO")))
 (deny network-outbound
     (remote ip "localhost:*")
     (remote unix-socket (path-literal "$PG_SOCKET"))
