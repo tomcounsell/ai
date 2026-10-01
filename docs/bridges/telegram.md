@@ -129,7 +129,8 @@ outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
 
 Notices are the approval surface itself, so they do not wait for an
-approval. Every other message, including a reply in a group where Tom is one
+approval (Tom, 2026-10-01). The README's effect table names "send" as
+`act`; a notice to Tom's own chat is the one send outside it. Every other message, including a reply in a group where Tom is one
 member, is an `act` effect. Each notice is also an attention item: the
 Evidence section counts "decisions escalated to Tom per finished task", and
 `notice.sent` rows are where that count starts.
@@ -243,6 +244,11 @@ A low-confidence call takes its judgement task's abstain route
 ([judgement-layer.md](../judgement-layer.md), Confidence gating) rather than
 being acted on. Where that route reaches Tom it costs attention, so the
 floor is set from the calibration record and the attention log, not once.
+
+A task started from a message takes its money budget and effect ceiling
+from settings, never from the message text, which would let a classifier
+set authority: $8 by default, the baseline's per-run budget, with every
+push or send still waiting for Tom's tap (Tom, 2026-10-01).
 
 A correction or exemplar is content, rendered into turns. It never widens a
 ceiling, raises a budget, or grants governance. Those change only through
@@ -375,11 +381,3 @@ port when:
   grant (say, "replies in this chat") would cut them, but the broker has no
   standing grants: every release consumes one approval bound to one digest.
   Whether to add one is Tom's call, since it widens authority.
-- **Budget and ceiling of a task started from chat.** A task started from a
-  message needs a money budget and an effect ceiling. Reading them from the
-  message text would let a classifier set authority, so they come from
-  settings until Tom says otherwise.
-- **Notices outside the broker.** Treating messages to Tom's operator chat
-  as the approval surface rather than as `act` effects is a design choice
-  this doc makes; the README's effect table names "send" as `act` without
-  that distinction.

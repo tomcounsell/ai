@@ -36,7 +36,7 @@ Effect classes are defined in `core/`: `read` (no effect), `propose` (reversible
 
 - Vendor clients, harness wrappers, and comms I/O. Those are `tools/`, `harnesses/`, and `bridges/`.
 - Persona text. That is `persona/`; core renders it.
-- Stage logic for the SDLC (how to clarify, build, verify). Stages are skills.
+- Stage logic for the SDLC (how to plan, build, review). Stages are skills.
 - A model call that grants, widens, or refuses authority. Judgement classifies; the kernel decides.
 - Relational schemas with a foreign-key lattice.
 

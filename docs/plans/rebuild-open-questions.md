@@ -2,6 +2,8 @@
 
 Each question is one decision. Answer with the letter, or "default" to take
 the recommendation. Questions that block planning the rebuild come first.
+Questions Tom answered in the 2026-10-01 interview carry his answer under
+them; the rest are still open.
 Terms used throughout: a **tap** is your one-time approval of one specific
 action (a push, a merge, a message). The **gateway** is the local proxy that
 every Claude call goes through so its cost is counted against the task's
@@ -18,6 +20,16 @@ plan at all reached the same quality score (4 of 5) for $1.30 to $2.10.
 - **B.** A lead agent hands work to builder agents in separate worktrees.
 (docs/architecture.md, docs/sdlc-state-machine.md)
 
+**Answered 2026-10-01 by Tom: neither as written.** Every stage of the
+documented pipeline stays as a checkpoint (intake, the request judgement and
+clarify step, plan, critique, build, test, the breadth check, review, patch,
+docs, merge), each with light, goal-oriented instructions: its goal and its
+exit evidence, not steps. The plan sets 0, 1, or 2 critique loops and 0, 1,
+or 2 review loops from the stakes, since the baseline did not test large
+high-stakes work. The plan and the review may pull in related tech debt.
+Patch is the builder's own session, resumed and compacted if needed, never a
+new agent.
+
 ### 2. Is this the build order?
 *Example:* the kernel (task, budget, ledger, approvals) and its database first;
 Telegram and email second; the `claude` CLI wrapper third; persona and
@@ -26,6 +38,10 @@ Postgres.
 - **A.** Yes, that order. **(Recommended)** Each step only needs the ones before it.
 - **B.** Change it (say how).
 (all docs)
+
+**Answered 2026-10-01 by Tom: A.** Kernel and its Postgres data, bridges,
+the Claude Code harness (built for harness independence), persona and
+routines, tools on demand, memory last.
 
 ### 3. Should Valor's work be walled off from your Mac account and your Claude login?
 *Example:* in the #894 demonstration Valor's sandbox ran as your user, so a
@@ -36,6 +52,10 @@ skipping the $15 budget entirely.
 - **B.** Later; keep the current sandbox for now.
 (docs/machine.md, docs/tech-stack.md, docs/architecture.md)
 
+**Answered 2026-10-01 by Tom: neither; accepted as a risk.** No separate
+macOS user for turns, and the direct-call hole stays open. Budgets are for
+visibility and honest metering, not a hard wall.
+
 ### 4. Is the MacBook Air dedicated to Valor?
 *Example:* after macOS, Postgres, the bridges, and one Valor session, about
 6 GB of RAM is left. Chrome, Slack, and other desktop apps would take about
@@ -44,6 +64,11 @@ half of that.
 - **B.** No, you also use it day to day; the plan budgets for desktop apps.
 (docs/machine.md)
 
+**Answered 2026-10-01 by Tom.** Design for one machine. Valor has four
+Macs, which exist for project isolation only: each runs its own install for
+the projects it owns, with no cross-machine ledger or hub. Production runs
+on Valor's machines, not Tom's, so no desktop apps of Tom's share them.
+
 ### 5. Should the model that checks Valor's work be as strong as the one that did it?
 *Example:* in the baseline, a cheaper Sonnet reviewer accepted popoto #191
 (the blind judge scored it 1 of 5; it passed 3 of 11 hidden tests) and
@@ -51,6 +76,10 @@ accepted #633 with a stale-cache bug moved, not fixed.
 - **A.** A frontier-strength model, but a different one from the builder (for example an earlier Opus). **(Recommended)** A weaker checker misses a stronger builder's mistakes; the extra cost per task is to be measured.
 - **B.** A cheaper Sonnet-class checker.
 (docs/architecture.md, docs/sdlc-state-machine.md, docs/tech-stack.md)
+
+**Answered 2026-10-01 by Tom: A, widened.** The reviewer is the same Opus
+model or an Opus-class model from another vendor or harness; never a
+cheaper Sonnet-class reviewer.
 
 ### 6. Does your 2026-10-01 "lean SDLC" decision count as your approval for the test-breadth check?
 *Example:* the rule is that any new check needs your tap and expires after
@@ -61,6 +90,8 @@ and #872 missed the archived-team cases.
 - **B.** No, it needs its own tap.
 (docs/sdlc-state-machine.md, docs/judgement-layer.md)
 
+**Answered 2026-10-01 by Tom: A** (default, not objected to).
+
 ### 7. Which cheap judgement model reads each request first, and what backs it up?
 *Example:* "Home page notification if user profile settings not complete"
 gets one quick call that decides "ask before building" or "just build". It
@@ -68,6 +99,10 @@ costs well under $0.05; on #894, asking first would have saved an estimated $1.4
 - **Primary.** **A.** Jev. **(Recommended)** The setup plan's pick. **B.** OpenAI's judgements API.
 - **Backup when it is down.** **A.** The same open model hosted by a second provider. **(Recommended)** Uses no Mac memory and works while Valor is busy. **B.** A local copy (about 5 GB) loaded only when Valor is idle; works offline but waits.
 (docs/judgement-layer.md, docs/tech-stack.md, docs/machine.md)
+
+**Primary answered 2026-10-01 by Tom: Jev for now.** OpenAI's Judgements
+API for any judgement that needs images, since Jev takes none. The backup
+is still open.
 
 ### 8. Can the old code in `_archive_/` be deleted once the rebuild plan is written?
 *Example:* `_archive_/agent/pipeline_state.py` and the old bridge and worker
@@ -92,12 +127,17 @@ profile or just the sports dates?"), requiring your tap first would be circular.
 - **B.** No, every message waits.
 (docs/bridges/telegram.md, docs/architecture.md)
 
+**Answered 2026-10-01 by Tom: A** (default, not objected to). Operator
+notices are not held.
+
 ### 10. May the text of a client's request go to the cheap judgement model?
 *Example:* your psyoptimal request about coaches assigning evaluations (#872)
 sent to Jev to decide whether to ask questions first. Request text only, no code.
 - **A.** Yes, request text only. **(Recommended)** It is one sentence, and the alternative runs the same check on Opus at about 100 times the cost.
 - **B.** No, client work stays on Anthropic only.
 (docs/judgement-layer.md)
+
+**Answered 2026-10-01 by Tom: A.** Client request text goes to Jev.
 
 ### 11. How should your interruptions per task be counted, and should a limit ever block Valor?
 *Example:* #894 cost you 2 feedback rounds and 3 push approvals. Counting
@@ -106,11 +146,16 @@ approvals, that is 5 interruptions; not counting them, 2.
 - **At the limit.** **A.** Never block; flag it on the delivery. **(Recommended)** A blocked question makes Valor guess, which costs you more later. **B.** Stop and ask.
 (docs/mission.md, docs/architecture.md, docs/data.md)
 
+**At the limit answered 2026-10-01 by Tom: A** (default, not objected
+to): counted and shown, never blocking. How to count is still open.
+
 ### 12. When you start a task from a Telegram message, what budget does it get?
 *Example:* you message "list() in popoto hydrates every row twice, fix it".
 - **A.** A fixed default from settings ($8, the baseline's per-run budget; every replay spent under $2.20), with every push or send still waiting for your tap. **(Recommended)** A message should never be able to grant itself more money or authority.
 - **B.** Let you write a budget in the message ("budget $20").
 (docs/bridges/telegram.md)
+
+**Answered 2026-10-01 by Tom: A** (default, not objected to): $8.
 
 ### 13. Which past work should Valor replay to test itself, and how much per run of the test set?
 *Example:* the baseline replayed 6 requests from psyoptimal, popoto, and

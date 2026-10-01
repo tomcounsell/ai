@@ -138,16 +138,35 @@ Serves Mission item 1 (own outcomes across the whole job: one working
 context from inspection to delivery) and Mission item 6 (Tom's answer lands
 in the context that asked, so he never restates the task).
 
-A task's first turn opens a Claude Code session; every later turn resumes it
+A task's first frontier turn opens a Claude Code session, the working
+session; every later clarify, plan, build, patch, and docs turn resumes it
 with `--resume`. `core.session.next_prompt` reads the session id from the
 last `turn.ended` that carried one, and chooses the prompt:
 
 | After | The turn's prompt |
 |---|---|
 | nothing (first turn) | the task's instruction |
-| Tom's feedback on a delivery | the feedback, framed as project-manager review, asking for a new `done.md` |
 | Tom's answer to a question | the answer |
+| a critique's findings | the findings, asking for a revised plan or, with no rounds left, for the build |
+| a `red` test run, breadth gaps, or review findings | the failures, gaps, or findings, asking for a new `done.md` (a patch) |
+| Tom's feedback on a delivery | the feedback, framed as project-manager review, asking for a new `done.md` (a patch) |
+| a review that passed | the doc paths and the diff, asking for the docs the change made untrue |
 | a turn that left neither | "Continue." |
+
+**Patch is a resume.** A patch never starts a new agent: it is the session
+that built, resumed with what came back (Tom, 2026-10-01). The session knows
+why each line is there; a fresh agent would rebuild that context from the
+diff at the cost of a full read and lose the decisions not written down.
+
+**Fresh sessions for critique and review.** Critique and review each run in
+a session of their own that never resumes, and never reads, the working
+session. Their inputs are files and ledger rows, so their independence is
+structural. The reviewer runs the same Opus model or an Opus-class model
+from another vendor through that vendor's harness; the port below is what
+lets either run without the kernel knowing which.
+
+The kernel's support today: the working session for first turn, answers,
+and feedback. The other rows, and the fresh sessions, are design.
 
 Each prompt is followed by what became of the effects the previous turn
 requested, read from the ledger now, so a push Tom has since released reads
@@ -173,12 +192,13 @@ tokens. Delivery 2 resumed over an hour after delivery 1 and wrote 77,602
 cache tokens in 9 calls, against 25,613 in 20 calls for delivery 3, which
 followed promptly (rebuild-demonstration.md, Money).
 
-**Gap.** When to resume and when to start a fresh session seeded with a
-summary is unmeasured. The design keeps resume as the default, since the
-whole demonstration and baseline ran on it and reached the reference's
-fidelity on precise requests (rebuild-baseline.md, Aggregate). The emulator
-can measure the alternative by replaying the same cases with a fresh-session
-arm after a long wait; no rule is set until it has.
+**Compaction, never replacement.** The working session is always resumed.
+When it nears the model's context limit it is compacted in place, by
+Claude Code's own compaction, and resumed; it is never swapped for a fresh
+session seeded with a summary. The demonstration and the baseline ran on
+resume throughout (rebuild-baseline.md, Aggregate). **Gap:** no run here
+has reached compaction, so its cost and what it drops are unmeasured; the
+first long task records both in `turn.ended`.
 
 ## The signal channel: `.valor/`
 
@@ -192,7 +212,7 @@ workspace, which the kernel reads when the turn ends:
 | File | Meaning | What the kernel does |
 |---|---|---|
 | `.valor/question.md` | a question for Tom | `question.asked`; the task waits for `python -m core answer` |
-| `.valor/done.md` | a candidate delivery: what, how it was verified, what Tom should know | today `task.delivered`; in the design a candidate that `breadth` and `verify` must pass before `task.delivered` (`docs/sdlc-state-machine.md`) |
+| `.valor/done.md` | a candidate delivery: what, how it was verified, what Tom should know | today `task.delivered`; in the design a candidate that test, breadth, review, and docs pass before `task.delivered` (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses |
 
 `core.signals.collect` reads them, then moves each to
@@ -355,12 +375,15 @@ listening beyond its dev ports and reap what it leaves running").
 
 Stated so the boundary is drawn where it is [4]:
 
-- The turn runs as Tom's user. A deliberate keychain read through
+- The turn runs as the machine's user. A deliberate keychain read through
   `security` is not fenced, and Claude Code itself reads its credential
   from the keychain.
 - The public internet is open, so a turn could reach a provider directly,
   outside the gateway, or reach GitHub anonymously. The baseline found no
   such call in any transcript (rebuild-baseline.md, Caveats).
+- Both openings above are accepted (Tom, 2026-10-01): no separate macOS
+  user, and budgets are for visibility and honest metering, not a hard
+  wall.
 - `/tmp` is shared between runs. Common file names recurred across items in
   the baseline.
 - Every replay database is owned by the same `test` role with the same
@@ -368,7 +391,7 @@ Stated so the boundary is drawn where it is [4]:
 - sandbox-exec is marked deprecated by Apple. The plan names Apple
   containers for sandboxes; which one runs which work is
   `docs/architecture.md`'s (The turn sandbox and reaping). A container closes
-  the first three openings by construction and costs RAM the 16 GB machine
+  the keychain, internet, and `/tmp` openings by construction and costs RAM the 16 GB machine
   has to find.
 
 ## Reaping what a turn leaves
@@ -480,7 +503,9 @@ channel, which needs nothing harness-specific beyond writing files.
 **Gap.** The gateway speaks the Anthropic Messages wire format. A harness
 whose provider speaks another format needs a gateway route that meters that
 format before its wrapper can exist, since a turn that bypasses the gateway
-spends outside the budget. Nothing about Codex or Pi has been run here.
+spends outside the budget. The first use is the review seat: an Opus-class
+model from another vendor reviewing through its own harness. Nothing about
+Codex or Pi has been run here.
 
 ## Skill rendering
 

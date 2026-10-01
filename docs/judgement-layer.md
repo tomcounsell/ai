@@ -36,9 +36,10 @@ doc is design, and each section says which.
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls.
-TypeSafe's Jev is one such API; OpenAI is naming its equivalent a
-"Judgements API" (Tom, 2026-10-01). The port is named so that either one, or
-the open-weight fallback, can sit behind it without a change to any caller.
+TypeSafe's Jev is the primary leg, and OpenAI's Judgements API answers the
+judgements that need images, which Jev does not take (Tom, 2026-10-01). The
+port is named so that either one, or the open-weight fallback, can sit
+behind it without a change to any caller.
 
 ## The boundary with the kernel
 
@@ -119,8 +120,9 @@ primary fails or abstains. Serves: constraint "16 GB of RAM" (no resident
 model) and Mission item 6 (a failed vendor call does not become a frontier
 call).
 
-1. Every judgement task routes to the primary leg, a hosted judgements API,
-   with the open-weight leg as its fallback.
+1. Every judgement task routes to the primary leg, Jev, with the
+   open-weight leg as its fallback. A task whose inputs include an image
+   routes to OpenAI's Judgements API instead, with the same fallback.
 2. The fallback runs once, on the same inputs, when the primary returns a
    transport error, a timeout, a malformed answer, or an abstain.
 3. When both legs fail, the port returns no label and says why. The
@@ -156,15 +158,17 @@ The adapters live in `tools/`, one per vendor, because they are
 vendor-dependent and the core runs without any one of them
 (`tools/README.md`). Each adapter turns a `choice` or `boolean` judgement
 task into its vendor's request and the vendor's answer back into a
-`Judgement`. Serves: plan step 6, question 5 (judgement vendor), and
-constraint "Three tiers".
+`Judgement`. Serves: constraint "Three tiers".
 
-- **Primary: a hosted judgements API.** Jev answers a closed-choice
-  question with a probability per option and a confidence, and a boolean
-  question with a probability; that is the shape the port's `Judgement`
-  mirrors. OpenAI's Judgements API is the other candidate behind the same
-  port (Tom, 2026-10-01). Its request and response shapes are not verified
-  here; the adapter is written when it is chosen.
+- **Primary: Jev.** Jev answers a closed-choice question with a
+  probability per option and a confidence, and a boolean question with a
+  probability; that is the shape the port's `Judgement` mirrors. Request
+  text from client repositories goes to Jev like any other input (Tom,
+  2026-10-01).
+- **Images: OpenAI's Judgements API.** Jev takes no images, so a judgement
+  whose inputs include one goes here (Tom, 2026-10-01). Its request and
+  response shapes are not verified here; the adapter is written with the
+  first judgement task that needs an image.
 - **Fallback: a hosted open-weight model.** Prompted with the same question
   and labels, asked for structured output with a probability per label. A
   generative model's stated probabilities are a weaker signal than a
@@ -476,8 +480,7 @@ What the seed set can and cannot show:
 
 ### Where it runs
 
-The SDLC opens with this judgement: judge the request, clarify if thin,
-build, test-breadth check, one blind verification, deliver
+The SDLC opens with this judgement, after intake and before the plan
 (`docs/sdlc-state-machine.md`). The call runs after the task record exists
 and before its first turn, charged to the task's budget, and its
 `judgement.answered` row sits in the task's ledger ahead of `turn.started`.
@@ -533,11 +536,8 @@ governance dashboard: each is the disease presenting as the cure.
 
 ## Open
 
-- Which hosted judgements API is primary, Jev or OpenAI's, and which
-  provider hosts the open-weight fallback (plan step 6, question 5).
-- Whether request text from client repositories may go to a judgements
-  vendor at all, or client work stays on the frontier provider already in
-  use. Nothing in the plan says; the answer may add a routing rule.
+- Which provider hosts the open-weight fallback, or whether a local copy
+  loads only while no turn holds the slot.
 - The tier bars: minimum `n` and Brier ceilings per error-cost tier.
 - What happens at expiry to a guard that did fire: renewal by a new grant,
   or kept until it stops firing.

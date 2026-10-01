@@ -54,9 +54,9 @@ enforcing outside the model is AI Control [4].
 | Memory | popoto over Postgres | chosen, not built |
 | Model gateway | in-house aiohttp proxy, Anthropic wire format | in use |
 | Model prices | a table in `core/budget.py` | in use |
-| Model seats | a pinned registry of frontier, verifier, and judgement seats | chosen, not built |
+| Model seats | a pinned registry of frontier, reviewer, and judgement seats | chosen, not built |
 | Frontier provider | Anthropic, one provider | in use |
-| Judgement tier | hosted Jev-class API, open-weight fallback behind the same port | chosen, not built; vendor open |
+| Judgement tier | Jev, with OpenAI's Judgements API for judgements that need images; open-weight fallback behind the same port | chosen, not built; fallback host open |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
@@ -71,7 +71,7 @@ enforcing outside the model is AI Control [4].
 | Secrets | macOS Keychain, durable copy in the vault | chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
-| Machine | MacBook Air M4, 16 GB | chosen; the experiments ran on a 64 GB Mac |
+| Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
 
 ## 1. Language and tooling
 
@@ -126,13 +126,13 @@ which is Claude Code's own login on this Mac. A turn's environment is an
 allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`, locale, terminal) with
 no tokens and no agent sockets. Status: **in use**.
 
-The gateway holding the only provider key, so no turn ever possesses one, is
-**chosen, not built** (least privilege [11]). Today the turn's own process
-authenticates, which means a turn could in principle call the provider
-around the gateway with that credential. The sandbox profile limits loopback
-but leaves the public internet open (section 6), so the gateway is the
-metered path, not the only path. Marked as a gap until the gateway holds the
-key.
+The turn's own process authenticates with the machine's Claude login, so a
+turn could call the provider around the gateway with that credential: the
+sandbox profile limits loopback but leaves the public internet open
+(section 6). The gateway is the metered path, not the only path. Tom
+accepted this on 2026-10-01 and it is not to be closed: budgets are for
+visibility and honest metering, not a hard wall, and turns run as the
+machine's user with no separate macOS account.
 
 ## 3. Persistence
 
@@ -241,8 +241,9 @@ not built**; until then a price change upstream is invisible to the
 ledger.
 
 **One provider.** Anthropic, through one wire format. Status: **in use**.
-A second provider arrives when the verifier needs a different family to be
-independent of the executor [16], or when Tom asks for one.
+A second provider arrives when the reviewer seat runs another vendor's
+Opus-class model, or when Tom asks for one; the gateway meters a provider
+before any turn uses it.
 
 ### Model seats
 
@@ -252,14 +253,17 @@ built**; today each task names its model on `start` and every replay used
 `claude-opus-5-5`.
 
 - **Frontier**: the newest model, for turns.
-- **Verifier**: never the executor's snapshot, so the blind verifier is not
-  grading itself [16]. The trusted-monitoring argument for a weaker or older
-  monitor is [4]; what a weaker judge loses is [18].
+- **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
+  frontier model itself in a fresh blind session, or an Opus-class model
+  from another vendor through another harness. What a weaker judge loses is
+  [18]; the baseline's Sonnet reviewer accepted #191 at fidelity 1. A
+  model's preference for its own output [16] is countered by blindness when
+  the reviewer shares the builder's model.
 - **Judgement**: the Jev-class seat (section 5).
 
 Ids are pinned, never floating aliases, because a ledger row has to describe
 a fixed thing. Editing the registry is a change inside the trust boundary,
-reviewed like kernel code: whoever can rewrite the verifier's seat can
+reviewed like kernel code: whoever can rewrite the reviewer's seat can
 defeat verification without touching an agent. Serves "Bounded authority and
 spend" and the Evidence item "Independent checks".
 
@@ -303,10 +307,11 @@ What the stack fixes:
   against $1.40 to $1.80 of frontier spend it would have saved; an estimate,
   to be measured by replay.
 
-**Vendor.** Which Jev-class API is the primary leg, which open-weight model
-is the fallback, and where the fallback runs given 16 GB, are **open**
-(setup plan, Step 6, question 5). The fallback cannot run resident on this
-machine. The router's design hosts it ([judgement-layer.md](judgement-layer.md));
+**Vendor.** Jev is the primary leg, including for client request text
+(Tom, 2026-10-01). Jev takes no images, so a judgement that needs one goes
+to OpenAI's Judgements API behind the same port. Which open-weight model is
+the fallback, and where it runs given 16 GB, are **open**. The fallback
+cannot run resident on this machine. The router's design hosts it ([judgement-layer.md](judgement-layer.md));
 the local, load-on-demand alternative is sized in [machine.md](machine.md).
 
 ## 6. Harness and sandbox
@@ -360,10 +365,11 @@ spend" and "Stop is immediate and lossless".
 
 What `sandbox-exec` gives: no RAM overhead, the Mac's native toolchains
 (Homebrew Postgres, uv, Xcode), and a profile a person can read in a minute.
-What it does not give: the turn runs as Tom's user on Tom's host, so a
+What it does not give: the turn runs as the machine's user, so a
 deliberate Keychain read through the `security` tool is not fenced, and the
 public internet is reachable so package installs work
-(rebuild-demonstration.md, Setup, Isolation). Apple's man page marks
+(rebuild-demonstration.md, Setup, Isolation). Both are accepted (Tom,
+2026-10-01). Apple's man page marks
 `sandbox-exec` deprecated; whether that matters on the timescale of this
 system is a gap to check, not a known risk.
 
@@ -497,8 +503,10 @@ Status: **in use**. An operational telemetry stack (latency, error rates) is
 
 ## 11. The 16 GB M4 Air
 
-Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM (Tom's
-decision). The demonstration and the baseline ran on a 64 GB Mac, so no
+Everything runs Mac native, one install per machine, with a MacBook Air M4
+and 16 GB of RAM as the target (Tom's decision). Valor's four Macs each run
+their own install for the projects they own, with nothing shared between
+them. The demonstration and the baseline ran on a 64 GB Mac, so no
 memory figure from them carries over; the RAM budget per component is
 [machine.md](machine.md). What the target machine fixes in the stack:
 
@@ -519,18 +527,18 @@ memory figure from them carries over; the RAM budget per component is
 
 ## Limits
 
-- **The turn holds the provider credential** until the gateway holds the key
-  (section 2), and the public internet is open to it (section 6). Metering
-  covers every call that goes through the gateway; a turn that deliberately
-  went around it would be visible only in the provider's invoice.
-- **`sandbox-exec` runs as Tom.** It fences paths and loopback ports; it does
-  not fence the Keychain or the internet. Containers close that, at a RAM
-  cost the 16 GB machine has to carry.
-- **One provider.** Verifier independence rests on a different snapshot of
-  the same family until a second provider exists [16].
-- **One machine, one operator, no encryption at rest beyond the disk's.** The
-  kernel's database is as safe as Tom's Mac. A second machine or a client's
-  destruction clause reopens this.
+- **The turn holds the provider credential** (section 2), and the public
+  internet is open to it (section 6). Metering covers every call that goes
+  through the gateway; a turn that deliberately went around it would be
+  visible only in the provider's invoice. An accepted risk (Tom,
+  2026-10-01).
+- **`sandbox-exec` runs as the machine's user.** It fences paths and
+  loopback ports; it does not fence the Keychain or the internet.
+- **One provider today.** Reviewer independence rests on blindness until
+  another vendor's Opus-class model is metered [16].
+- **One machine per install, no encryption at rest beyond the disk's.** Each
+  kernel database is as safe as the Mac it runs on. A client's destruction
+  clause reopens this.
 - **The gateway is a single point of failure and a single point of control.**
   Those are the same property.
 

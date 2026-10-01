@@ -1,7 +1,12 @@
 # The machine
 
-Valor runs on one MacBook Air M4 with 16 GB of RAM, Mac native. This doc
-says what runs on it all the time, what runs only while work is in flight,
+One Valor install runs on one Mac, and the design is for one machine. Valor
+has four Macs; they exist for project isolation only. Each runs its own
+install, with its own Postgres, ledger, and bridges, for the projects it
+owns. Nothing is shared between them: no cross-machine ledger, no hub, no
+replication. Production runs on Valor's Macs, never on Tom's (Tom,
+2026-10-01). The design target for one install is a MacBook Air M4 with
+16 GB of RAM, Mac native. This doc says what runs on it all the time, what runs only while work is in flight,
 how much memory each part may take, how many turns run at once, where
 secrets live, and how launchd starts things. It enforces the plan
 constraint "16 GB of RAM": Postgres, one container runtime, one `claude -p`
@@ -103,19 +108,16 @@ is why it is stopped rather than left up.
 | **Peak with everything on demand running at once** | **10,430** |
 | **Left of 16,384** | **about 6,000** |
 
-The 6 GB left is file cache, memory compression, and anything Tom runs on
-the Air himself. It is not room for a second turn: a second turn and its
+The 6 GB left is file cache and memory compression. The machine is
+Valor's, so no desktop apps of Tom's share it. It is not room for a second
+turn: a second turn and its
 work add about 4 GB, which leaves almost nothing for the cache that keeps
 git, the test runner, and Postgres fast. It is not room for a local model
 either (see Judgement).
 
-Whether the Air is also Tom's desktop changes this table. On the
-measuring Mac, the Claude desktop app's largest renderer was 923 MB RSS and
-Slack's was 452 MB. If the Air carries those, the headroom is about half.
-
 ## Concurrency
 
-**One turn at a time.** The kernel runs one `claude -p` turn on the Air at
+**One turn at a time.** The kernel runs one `claude -p` turn per machine at
 once, whatever task it belongs to; the blind verifier's turn, a routine's
 turn, and a build turn all take the same slot. A task whose turn is ready
 while the slot is held waits in Postgres, in order. This is a scheduling
@@ -248,15 +250,16 @@ A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is
 blocked in the sandbox, and gh runs with an empty config.
 
-A turn runs as Tom's macOS user, so it can still read his login keychain
-on purpose through the `security` tool (rebuild-demonstration.md, Setup:
-Isolation). Running turns as a separate macOS user with no keychain of its
-own closes that by structure, per least privilege [11]. It is not built;
-see Open questions.
+A turn runs as the machine's one macOS user, so it can read that user's
+login keychain on purpose through the `security` tool, the machine's Claude
+login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
+2026-10-01 not to add a separate macOS user for turns: a turn that used the
+login to call the provider around the gateway is an accepted risk, because
+budgets are for visibility and honest metering, not a hard wall.
 
 ## Postgres on the machine
 
-Two kinds of cluster run on the Air, never one shared.
+Two kinds of cluster run on each machine, never one shared.
 
 - **The machine cluster**, resident, on the default port and a Unix
   socket. The kernel connects as `valor_kernel`, which can read and append
@@ -273,14 +276,10 @@ Kernel findings 1). It costs one more Postgres, 36 MB idle.
 
 ## Open questions for Tom
 
-1. **Is the Air dedicated?** The budget leaves about 6 GB. Desktop apps on
-   the same machine take about half of it.
-2. **Where does the open-weight fallback run?** Hosted at a second provider
+1. **Where does the open-weight fallback run?** Hosted at a second provider
    (no memory, available during turns) or local and loaded only when the
    turn slot is free (offline, waits for the slot).
-3. **A separate macOS user for turns?** It removes the turn's path to the
-   login keychain and to Tom's files without a sandbox rule for each.
-4. **Mains power and sleep.** Whether the Air is kept awake, or a power
+2. **Mains power and sleep.** Whether the machine is kept awake, or a power
    assertion per turn is enough.
 
 ## Gaps

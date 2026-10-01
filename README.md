@@ -30,7 +30,7 @@ compound the ability to build. Concretely:
    Tom's preferences. Extraction happens only on a demonstrated second need,
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
-   regrowing the archive.
+   regrowing the old system's sprawl.
 6. **Spend attention as carefully as money.** A task carries an attention
    budget beside its dollar budget. Valor carries routine decisions,
    investigates failures, and brings consequential choices with evidence and

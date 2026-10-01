@@ -39,7 +39,7 @@ compound the ability to build. Concretely:
    Tom's preferences. Extraction happens only on a demonstrated second need,
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
-   regrowing the archive.
+   regrowing the old system's sprawl.
 6. **Spend attention as carefully as money.** A task carries an attention
    budget beside its dollar budget. Valor carries routine decisions,
    investigates failures, and brings consequential choices with evidence and
@@ -80,6 +80,17 @@ enforces them is `docs/architecture.md`. The platform constraints that every
 doc respects (16 GB of RAM, Mac native, Postgres as a document store, one
 identity, three tiers) are owned by `docs/machine.md`, `docs/tech-stack.md`,
 `docs/data.md`, and `docs/persona.md`.
+
+### How "bounded spend" is read
+
+A budget bounds what the gateway meters, and every call a turn makes is
+pointed at the gateway. It is not a wall: a turn that deliberately called
+the provider directly with the machine's Claude login would spend outside
+it, visible only on the provider's invoice. Tom accepted that risk on
+2026-10-01 and chose not to close it, with no separate macOS user for
+turns: budgets are for visibility and honest metering. Bounded authority is
+unchanged by this. Effects on shared targets leave only through the broker,
+and every `act` waits for Tom's tap.
 
 ### What the governance constraint means in practice
 
@@ -337,12 +348,15 @@ $0.05 per request against a saving of $1.40 to $1.80 and both review rounds
 on #894; the emulator measures that by replaying the case with and without
 it.
 
-The same records are why the work runs lean: neither arm wrote a plan
-document, and both reached fidelity 4 on the items whose old pipeline ran a
-full plan, critique, and revision chain (rebuild-baseline.md, "Plan,
-critique, revise"). Every replay wrote fewer tests than its reference, and
-the hidden tests found what that missed (rebuild-baseline.md, "Test
-breadth"). Both readings shape `docs/sdlc-state-machine.md`.
+The same records are why each stage's instructions are light: neither arm
+wrote a plan document, and both reached fidelity 4 on the items whose old
+pipeline ran a full plan, critique, and revision chain (rebuild-baseline.md,
+"Plan, critique, revise"). They covered six small changes and no large,
+high-stakes one, so Tom kept every stage as a checkpoint and let each plan
+set how many critique and review loops its stakes earn (2026-10-01). Every
+replay wrote fewer tests than its reference, and the hidden tests found
+what that missed (rebuild-baseline.md, "Test breadth"). Both readings shape
+`docs/sdlc-state-machine.md`.
 
 **Spend.** Money is gateway-metered and exact: the demonstration's harness
 and gateway agreed to $0.000024. Each resumed turn carries the whole session
