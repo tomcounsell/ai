@@ -113,9 +113,9 @@ whole pipeline on its own branch, stacked on the one before.
 
 | Task | What it lands | Needs Tom first | Closes in `verdict` |
 |---|---|---|---|
-| **1.4a** | Kernel workspace provisioning (per-task clone, bare origin, kernel mirror, per-task Postgres and Redis, project specs, `start --project`); fresh-session machinery; the critique runner; the fold fix; absorbs the replay teardown, shared role, and test-performer debts | nothing | `critique` |
+| **1.4a** | Kernel workspace provisioning (per-task clone, bare origin, kernel mirror read by the merge, `push_url`, per-task Postgres and Redis, project specs, `start --project`); per-turn `TMPDIR` and Claude Code config; fresh-session machinery; the critique runner; the fold fix; absorbs the replay teardown, shared role, and test-performer debts | nothing (waits for, or carries, 1.2's replace-ref fix) | `critique` |
 | **1.4b** | Calibration records for breadth and governance (floors frozen first); then the test runner (breadth, then suite at base and head in fresh checkouts) and the docs runner (own checkout, path drop, governance after the turn) | nothing (live judgement spend under $1, through the builder's own key directory) | `test`, `docs` |
-| **1.4d** | The GitHub credential for the merge, held in the kernel key directory; `push_branch` kept local; transcript copies with digests; performers registered per task; awaitable performers | creating the token, for the one live push; everything else is built and tested against a local smart-HTTP server | none |
+| **1.4d** | The GitHub credential for the merge, held in the kernel key directory; the merge-target list; `merge_url` honoured; transcript copies with digests; performers registered per task; awaitable performers | choosing Valor's account or his own, creating the token, and writing the merge-target list, for the one live push; everything else is built and tested against a local smart-HTTP server | none |
 | **1.4c** | The container verifier (kernel-built images, a fresh VM per verification, RAM measured) and the review runner (Opus, blind, governance first); the `verdict` command deleted | installing `container` and Rosetta, starting the container system | `review`; the command is deleted |
 
 **Order: a, b, d, c.** 1.4a first because every runner needs provisioned
@@ -141,7 +141,7 @@ added to it.
 | Through the router: docs commits outside `machine.is_doc_path` dropped at turn end and recorded as a `changes` finding; a failed or stopped branch leaves no verdict and the next run reruns only it; the docs session works in its own checkout so docs commits do not ride into the next candidate | b | `core/fresh.py`, `core/workspace.py` (mirror), `core/verdicts.py` |
 | `checks.test` runs the suite at head and base, then the breadth call; `test.decided` carries the command, the failures at head that do not fail at base, the behaviors, and breadth's model, confidence, cost, guard id; the order of breadth and suite settled | b | `core/checks.py` (new), `core/verdicts.py` |
 | The blind verifier: Opus in a fresh session, rerunning the tests in an Apple container built by the kernel; `review.decided` carries the governance boolean; container RAM measured | c | `core/container.py` (new), `core/checks.py`, `core/binaries.py`, `docs/machine.md` |
-| `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | d | `tools/push_branch.py`, `core/git.py`, `core/credentials.py`, `core/__main__.py` (`github-key`) |
+| `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | d (`push_url` split in a) | `tools/push_branch.py`, `core/git.py`, `core/credentials.py`, `core/__main__.py` (`github-key`), the merge-target list |
 | Transcript copies kept in the store with a digest | d | `core/transcripts.py` (new), `core/runs.py` |
 | Review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | b (test, docs), c (review) | `core/verdicts.py` |
 | Calibration records for breadth and governance, setting their floors, before either routes work; each re-checks Jev's reservation overhead against its own rows | b | `core/judgement_tasks.py`, `tools/jev.py`, cases under `~/src/valor-demo/items/judgement/` |
@@ -179,39 +179,91 @@ default `~/valor-tasks`), outside `~/src` because the turn sandbox denies
     kernel.git/             the kernel mirror: plan commits, candidates, docs heads; no turn writes it
     home/                   gitconfig, empty gh config, pgpass, profiles/*.sb; turns read, never write
     cache/                  the builder's uv and npm caches
-    checks/                 fresh checkouts and their caches; only the kernel and the check sessions write here
+    state/work/             the working session's own TMPDIR and Claude Code config dir; only the builder writes it
+    checks/                 fresh checkouts, each with its own tmp/ and claude/; only the kernel and that check write it
+    checks/seed/            the dependency cache the base's setup filled; written once by the kernel's base run
     pg/data, pg/run         the task's Postgres cluster and its socket; no turn reads or writes
     redis/                  the task's redis-server, when its project asks
 ```
 
+Every turn and every suite run gets its own `TMPDIR` and its own Claude
+Code config directory (`CLAUDE_CONFIG_DIR`) inside a path only it may
+write: the working session keeps `state/work/` for the life of the task
+(resume needs the same config directory, which also moves its session
+files to `state/work/claude/projects/`), and each check gets
+`checks/<name>/tmp` and `checks/<name>/claude`. So the builder and a fresh
+session share no `/tmp`, no `/var/folders` temp directory, no
+`~/.claude/todos`, `shell-snapshots`, `session-env`, or `~/.claude.json`.
+Premise to confirm at the start of the build: that `claude -p` with its own
+config directory still finds its login (Claude Code keeps it in the
+Keychain, possibly under a name derived from the config directory). If it
+does not, the fallback is to keep `~/.claude.json` and the Keychain item
+readable and give every turn its own `todos`, `shell-snapshots`,
+`session-env`, and `projects` paths by denying each of those under
+`~/.claude` except the turn's own; the build record says which was used.
+
 ### The kernel mirror
 
-`<task>/kernel.git` is a bare repository only the kernel writes. When a
-turn's plan is recorded (`plan.written`) or its candidate is collected
-(`turn.collected` verdict `candidate`), the kernel fetches that one commit
-from the builder's clone into the mirror under `refs/valor/plans/<turn>`
-or `refs/valor/candidates/<turn>`; a fetch the kernel's git refuses
-(`git.hostile`) means no plan or no candidate, as today. Every fresh
-checkout is made from the mirror, never from the builder's clone. Docs
-commits (1.4b) are fetched into the mirror under `refs/valor/docs/<turn>`
-and never into the builder's clone. For a provisioned task the merge
-predicate's git facts and the `merge` performer read the mirror
+`<task>/kernel.git` is a bare repository only the kernel writes, seeded at
+provisioning with the base commit from the kernel's own cache (never from
+the builder's clone). When a turn's plan is recorded (`plan.written`) or
+its candidate is collected (`turn.collected` verdict `candidate`), the
+kernel fetches that one commit from the builder's clone into the mirror
+under `refs/valor/plans/<turn>` or `refs/valor/candidates/<turn>`. Every
+fresh checkout is made from the mirror, never from the builder's clone.
+Docs commits are fetched into the mirror under `refs/valor/docs/<turn>`
+and never into the builder's clone: from the docs session's checkout in
+1.4b, and from the builder's clone for the manual `verdict TASK docs
+--head SHA` until then. **1.4a switches the merge predicate's git facts and
+the `merge` performer to read the mirror** for a provisioned task
 (`Brief.mirror`); a task started with `--workspace` (scripts, older tests)
 has no mirror and reads its workspace as today.
+
+**The fetch from the builder's clone is hostile input.** The receiving
+side is the kernel's git in a repository the turn cannot write; the
+sending side (`git-upload-pack`) would otherwise run unsandboxed in the
+builder's clone, reading its config, `objects/info/alternates`, and
+`info/grafts`. So each fetch:
+
+- runs `git.hostile(builder)` first and refuses on any finding;
+- refuses a source with `objects/info/alternates` or
+  `objects/info/http-alternates`, or a `shallow` file;
+- runs the sending side inside the turn's sandbox, as
+  `--upload-pack='/usr/bin/sandbox-exec -f <task>/home/profiles/turn.sb
+  -D ... <trusted git's libexec>/git-upload-pack'`, every path absolute,
+  so whatever upload-pack reads it reads with the turn's own reach;
+- runs the receiving side with `transfer.fsckObjects=true`,
+  `fetch.fsckObjects=true`, `--no-tags`, `--no-write-fetch-head`, no
+  shallow update, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null`,
+  the git time limit, and a file-size limit on the receiving process
+  (`RLIMIT_FSIZE`, setting `mirror_fetch_max_bytes`, default 2 GB);
+- names exactly one commit by sha and one destination ref.
+
+A refused or failed fetch means no plan or no candidate, with the reason
+in the next prompt, as a hostile config does today.
 
 Why: the turn owns its workspace's refs and objects. It can delete or
 move a ref the merge needs, rewrite `.git/info/grafts`, or add a replace
 ref. Fetching one named commit into a repository the turn cannot write
 puts the candidate, the docs head, and the merge's source out of its
-reach. It narrows 1.2's replace-ref finding without replacing 1.2's fix.
+reach.
+
+**Dependency on 1.2's fix.** 1.4a reads git facts with the kernel's git
+in both the builder's clone and the mirror, so it needs 1.2's
+`GIT_NO_REPLACE_OBJECTS=1` and `GIT_GRAFT_FILE=/dev/null` in `core/git.py`'s
+`env()`. 1.4a's build waits for that fix on 1.2's branch and rebases onto
+it. If Tom's feedback on 1.2 has not landed when 1.4a's build starts,
+1.4a carries the same two lines in its own first commit, flagged in the
+build record as 1.2's, to be dropped on rebase.
 
 ### Fresh sessions
 
 A fresh session is one `claude -p` turn that never resumes and never reads
 the working session. The machinery is `core/fresh.py`:
 
-1. **A checkout of its own**, made by the kernel under
-   `<task>/checks/<stage>-<key12>/`, where the key is the plan digest
+1. **A checkout of its own**, made by the kernel at
+   `<task>/checks/<stage>-<key12>/repo/`, beside that check's own `tmp/`
+   and `claude/`, where the key is the plan digest
    (critique) or the candidate's sha and turn (review, docs, test). The
    directory is removed and made again on every run, never followed
    through a symlink. Critique and review get a **blind checkout**: a new
@@ -228,14 +280,21 @@ the working session. The machinery is `core/fresh.py`:
    section below lists. The prompt names the files under short labels;
    what to do with them is the stage file.
 3. **A sandbox profile of its own** (`home/profiles/<stage>-<key12>.sb`),
-   written by the kernel: read and write only its checkout and the one
-   `~/.claude/projects/` directory for that checkout; read the shared
-   tools; on loopback reach the gateway, the task's Postgres port, and the
-   dev ports. It denies `<work_dir>` as a whole before allowing its
-   checkout back, so it cannot read the builder's clone (with
-   `.valor/handled/*/done.md`), the mirror, other checkouts, other tasks,
-   or the builder's transcripts. This is what makes the blindness
-   structural rather than a request in a prompt.
+   written by the kernel: read and write only its checkout, its own
+   `tmp/` and `claude/`; read the shared tools; on loopback reach the
+   gateway, the task's Postgres port, and the dev ports. It denies
+   `<work_dir>` as a whole, `/private/tmp`, `/private/var/folders`, and
+   `~/.claude` (with `~/.claude.json`) before allowing its own paths back,
+   so it cannot read the builder's clone (with `.valor/handled/*/done.md`),
+   the builder's `TMPDIR` or Claude Code state, the mirror, other
+   checkouts, other tasks, or any transcript. The profiles start from
+   `(allow default)`, as every profile here does, so the blindness rests on
+   two things together: nothing the builder writes lands outside paths the
+   kernel names (its own `TMPDIR` and config directory, its clone, its
+   caches), and every one of those paths is denied to the fresh session. A
+   system tool that needs a `/var/folders` path the deny breaks is found by
+   the build's tests and allowed back read-only by its exact subpath, each
+   listed in the build record.
 4. **A Brief** rendered with the stage file and a new channel file,
    `skills/sdlc/verdict.md`, in place of `channel.md`: no questions, no
    effects, one verdict file. `tasks.dispatch` takes `fresh=True` for
@@ -245,9 +304,14 @@ the working session. The machinery is `core/fresh.py`:
    by a new `claude_code.fresh_turn` (the `workspace_turn` flags without
    `--resume`, model from the stage's seat: `frontier` for critique and
    docs, `reviewer` for review).
-6. **The verdict** read from `.valor/verdict.json`: opened without
-   following symlinks, a regular file, at most 256 KB, a JSON object. Then
-   moved to `.valor/handled/<turn_id>/`. The kernel validates it and writes
+6. **The verdict** read from `.valor/verdict.json`: opened component by
+   component, each relative to its parent's descriptor (`os.open` with
+   `dir_fd`), every component with `O_NOFOLLOW` and the last also with
+   `O_NONBLOCK`, then `fstat` must show a regular file of at most 256 KB,
+   read through that descriptor, parsed as a JSON object. A symlinked
+   `.valor`, a symlinked file, a FIFO, a socket, or a device is refused
+   without blocking and without reading anything it points to. Then moved
+   to `.valor/handled/<turn_id>/`. The kernel validates it and writes
    the verdict row through `verdicts`; the session's text never names its
    own guard, leg, model, or cost.
 
@@ -258,7 +322,11 @@ returns, and the next run starts that stage or branch again, and only it.
 **The fold fix.** `Fold.session` takes a session id only from a turn whose
 recorded state is a working state (`clarify`, `plan`, `build`, `patch`).
 `turn.started` for a fresh session carries `fresh: true` and the check, so
-`entry_finished` and `last_collected` are untouched by it.
+`entry_finished` and `last_collected` are untouched by it. The same bug
+sits in `machine._legacy`, which takes the session id from every
+`turn.ended`; it is fixed the same way there (a turn whose `turn.started`
+says `fresh: true` never sets the session), and a test drives it through a
+legacy fold.
 
 ### Project specs
 
@@ -278,14 +346,28 @@ roles = ["valor_kernel"]                         # extra Postgres login roles th
 setup = ["uv sync --frozen"]                     # makes a checkout runnable
 suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
-merge_url = "https://github.com/tomcounsell/ai.git"   # where the merge lands; absent: the local origin
+merge_url = "https://github.com/tomcounsell/ai.git"   # where the merge lands from 1.4d; absent: the local origin
 target_branch = "<the rebuild branch>"
 [env]
 VALOR_TEST_DB = "app_test"
 ```
 
 The suite command comes from the spec, never from the candidate, because a
-command the candidate chose could be `true`. The spec for this repository
+command the candidate chose could be `true`. The spec is read from the
+kernel checkout, not from any task's clone; but a candidate can edit
+`projects/valor.toml`, and once Tom merges it, later tasks read the edit.
+So the spec never decides where a merge may land: that is the
+**merge-target list**, a kernel setting outside every repository
+(`merge_targets`, the file `merge-targets.toml` in the kernel key
+directory, mode 600, written by Tom and by nothing in the kernel), listing
+the allowed (URL, branch) pairs. `start` refuses a spec whose
+`merge_url` and `target_branch` are not listed, and the `merge` performer
+refuses at request and at release a payload not listed. A local
+`origin.git` of the task's own is always allowed. A pair naming the remote
+repository's default branch (what its `HEAD` names, read when the merge
+runs) is refused even if listed, so `main` of `tomcounsell/ai` can never
+be a target. A candidate's change to the spec's suite command still reaches
+later tasks after Tom's merge; the reviewer and Tom see it in the diff. The spec for this repository
 is the only one committed in 1.4a; the replay items keep their own (built
 by `scripts/replay_workspace.py` from the item file). Client project specs
 are added when a client task first starts (milestone 2), and may live
@@ -327,8 +409,15 @@ cache step through `gh`, `replay.json`, the leak check's inputs).
    the environment work is then the build's job, and the turn sees why.
 8. **The Brief's fields**: `workspace` (`repo/`), `mirror`, `harness`
    (profile, git config, gh config, env), `base_sha`, `target_branch`,
-   `origin_url` (`merge_url` if the spec names one, else `origin.git`),
-   and `project` (the spec, the allocated ports, the role names).
+   `push_url` (the local `origin.git`, where `push_branch` goes),
+   `origin_url` (the merge's destination), and `project` (the spec, the
+   allocated ports, the role names). **In 1.4a `origin_url` is always the
+   local `origin.git`**, so a project task merged with 1.4a alone works end
+   to end on the local origin, with the merge read from the mirror;
+   `merge_url` is honoured only from 1.4d, when the credential and the
+   merge-target list exist. `PushBranch` takes `push_url` (falling back to
+   `origin_url` for a Brief without one), so its destination is split from
+   the merge's here, not in 1.4d.
 
 Provisioning runs before `task.started`, in a directory named by the new
 task id, under a session advisory lock (`workspace:ports`) held through
@@ -352,10 +441,11 @@ For this repository, the spec adds `roles = ["valor_kernel"]` and env
 `VALOR_PGHOST=127.0.0.1`, `VALOR_PGPORT=<task port>`, `VALOR_PG_OWNER=app`,
 `VALOR_PG_PASSFILE=<task>/home/pgpass`, so the suite's `db.migrate` runs
 against the task's cluster as its owner and logs `valor_kernel` in with a
-password from the task's file. Which of this repository's tests run inside
-a turn's sandbox (it runs `sandbox-exec` itself, nested) is **measured at
-build** and written in the build record; it is the first project the
-kernel will build after takeover.
+password from the task's file. Nested `sandbox-exec` works (checked by
+the critique of this plan), so the suite's sandbox tests can run inside a
+turn's profile; the build records the full suite's result inside a
+provisioned workspace, since this is the first project the kernel will
+build after takeover.
 
 ### 2. A Postgres cluster and a Redis per task
 
@@ -392,9 +482,14 @@ another run's database" opening.
 - **Lifecycle.** The router starts the task's services at the start of a
   run (idempotent) and stops them when the run returns, in a `finally`:
   `pg_ctl stop -m fast`, the redis pid, then every process carrying the
-  service mark reaped, as the turn reaper does. An idle cluster costs
-  36 MB and one after a suite about 350 MB (machine.md), so on the 16 GB
-  machine only the running task's services are up.
+  service mark reaped, as the turn reaper does. A `finally` does not run
+  when the kernel is killed, so **at the start of every router run** the
+  kernel first stops the services of every other task: every process of
+  this user under a sandbox denying a `valor.service.<id>` name for an id
+  other than this task's gets SIGTERM, then SIGKILL after the reap grace,
+  listed in a `services.reaped` row on the run's task. An idle cluster
+  costs 36 MB and one after a suite about 350 MB (machine.md), so on the
+  16 GB machine only the running task's services are up.
 - **Removal.** `python -m core workspace remove TASK` (Tom's command;
   refused unless the task is `stopped` or `merged`) stops the services,
   deletes the directory, and writes `workspace.removed` with provenance,
@@ -409,12 +504,23 @@ allows as today:
 
 | Profile | Reads and writes | Denied beyond today's list | Loopback |
 |---|---|---|---|
-| `turn.sb` (working session, setup) | `<task>/repo`, `<task>/cache`, its transcripts directory | `<work_dir>` outside them; `<task>/kernel.git`, `origin.git`, `home`, `checks`, `pg`, `redis` writes; `pg/data` reads | gateway, the task's ports, 8000 to 8009 |
-| `<stage>-<key>.sb` (a fresh session, a suite run) | its checkout, its transcripts directory | `<work_dir>` outside its checkout, including `<task>/repo` and `kernel.git` | as above |
+| `turn.sb` (working session, setup) | `<task>/repo`, `<task>/cache`, `<task>/state/work` (its `TMPDIR` and Claude Code config, so its transcripts) | `<work_dir>` outside them; `<task>/kernel.git`, `origin.git`, `home`, `checks`, `pg`, `redis` writes; `pg/data` reads | gateway, the task's ports, 8000 to 8009 |
+| `<stage>-<key>.sb` (a fresh session, a suite run) | its checkout, its `tmp/` and `claude/`; for a suite run, its per-run cache | `<work_dir>` outside them, including `<task>/repo`, `state/`, `kernel.git`; `/private/tmp`, `/private/var/folders`, `~/.claude`, `~/.claude.json` | as above |
 | `service.sb` | `<task>/pg` or `<task>/redis` | `<work_dir>` outside them; no outbound | binds its port only |
 
-The kernel paths (the key directory, the machine cluster's data directory,
-the backup disk) stay denied in all three.
+In all three: the kernel paths (the key directory, the machine cluster's
+data directory, the backup disk) stay denied, and **writes are denied to
+`~/Library/LaunchAgents`, the shell startup files (`~/.zshrc`,
+`~/.zprofile`, `~/.zshenv`, `~/.bash_profile`, `~/.bashrc`, `~/.profile`),
+and `~/.local/bin`**. This only removes authority: it closes the
+harnesses.md Known opening that a turn could leave a program there for a
+later unsandboxed process of the user to run, and the build record and
+harnesses.md say so.
+
+**The check's database password.** The check profiles deny `<task>/home`,
+so the kernel copies the app's `pgpass` into each check's own directory
+(`checks/<name>/tmp/pgpass`, mode 600, inside a path its profile allows
+and outside the checkout's tree) for that run, and points `PGPASSFILE` and the spec's passfile variable at the copy.
 
 ### 4. Fresh sessions and the critique runner: `core/fresh.py` (new)
 
@@ -447,11 +553,12 @@ gains it, so `python -m core verdict TASK critique ...` is refused as
 
 | Row | Written by | New or changed |
 |---|---|---|
-| `task.started` | `start` | unchanged; the Brief document gains `mirror` and `project` |
+| `task.started` | `start` | unchanged; the Brief document gains `mirror`, `push_url`, and `project` |
 | `turn.started` | `run_turn` | `fresh: true` and `check` on a fresh session's turn |
 | `turn.ended` | `run_turn` | unchanged; the fold reads its session id only for working states |
 | `critique.decided` | the critique runner | `leg: "session"`, `turn_id`, `model`, `usd_micros`; no provenance |
 | `workspace.removed` | `workspace remove` | new: `by`, `via`, `at`, `role_played` |
+| `services.reaped` | the router, at run start | new: the other tasks' service processes it stopped (pid, command, task, signal) |
 
 No migration: a new event type and new Brief fields need none
 (data.md, documents). `Brief.load` already ignores unknown fields.
@@ -477,9 +584,10 @@ No migration: a new event type and new Brief fields need none
 | No free port in a range | `start` refuses, naming the range and the tasks holding it |
 | `setup` fails | the task starts with `setup_failed` on its Brief; the first turn's prompt carries the output tail |
 | The task's Postgres will not start at run start | the run returns `failed` naming the log path; no turn spends |
-| The kernel dies mid-run | services stay up until the next run's start (idempotent) or removal; the reaper's service mark finds them |
+| The kernel dies mid-run | the next router run, for any task, stops every other task's services by their mark first and records `services.reaped` |
+| The builder's clone carries alternates, a graft, a replace ref, a shallow file, or a hostile config | the fetch into the mirror is refused (alternates, shallow, config) or reads nothing the turn planted (grafts and replace refs off, upload-pack sandboxed); no plan or no candidate, with the reason |
 | A critique turn fails, is stopped, or leaves no or a malformed verdict file | no `critique.decided`; the run returns `failed`; the next run runs critique again on the same plan |
-| `verdict.json` is a symlink (for example to the kernel's `pgpass`) or over 256 KB | refused unread; `failed` with that reason |
+| `verdict.json` or `.valor` is a symlink (for example to the kernel's `pgpass`), the file is a FIFO, or it is over 256 KB | refused unread and without blocking; `failed` with that reason |
 | The builder plants a file or symlink under `checks/` | its profile denies writes there; the kernel also removes and makes each checkout without following links |
 | The fresh turn writes `.valor/effects/*.json` or `question.md` | ignored: a fresh session requests nothing and asks Tom nothing |
 | A plan revision | a new plan digest, so a new checkout; the old one is left for the record until removal |
@@ -510,10 +618,38 @@ Provisioning:
   task, its ports are offered to the next task; its redis-server is gone.
 - The replay script's existing tests pass through the new module, and a
   replay run no longer touches the shared 5439 cluster.
+- A project task provisioned and run with 1.4a alone (manual verdicts for
+  test, review, docs) reaches `merged` on its local `origin.git`: the
+  manual docs head is fetched into the mirror, the predicate reads the
+  mirror, the merge pushes from it, and `push_branch` goes to `push_url`.
+- A spec whose `merge_url` and `target_branch` are not in the merge-target
+  list is refused at `start`; a listed pair naming the remote's default
+  branch is refused too.
+
+The mirror fetch:
+- A builder's clone carrying `objects/info/alternates` (pointing at a
+  repository holding an object the candidate needs), a `shallow` file, or
+  a hostile config is refused, and no `plan.written` or candidate is
+  recorded.
+- A clone with `.git/info/grafts` rewriting the candidate's parent, and one
+  with a `refs/replace/` ref swapping the candidate's tree: the mirror
+  holds the real commit and tree, and the predicate's paths are computed
+  from them (each fails on a kernel without the mirror and 1.2's fix).
+- The sending side runs under the turn's sandbox (`sandbox_check` on the
+  upload-pack process during a fetch slowed by a large object), and a
+  fetch past `mirror_fetch_max_bytes` fails without filling the disk.
+
+Services after a crash, on the 16 GB budget:
+- Task A's run is killed with SIGKILL while its cluster and Redis are up;
+  task B's next run stops them first (`services.reaped` lists them), and
+  the summed footprint of every service process left on the machine is
+  within machine.md's 400 MB workspace-cluster line plus 50 MB for Redis.
 
 The fold and the router:
 - After a critique turn, the next build turn resumes the working session's
-  id, not the critique's (the bug fixed here; fails on the base).
+  id, not the critique's (the bug fixed here; fails on the base); the same
+  rows folded as a legacy task (no `sdlc` marker) give the working
+  session's id through `_legacy` too.
 - `sound` goes to `build`; `revise` with a round left goes to `plan`;
   `revise` with none goes to `build` with the findings in the build
   prompt; a raise applies and a lowering is refused.
@@ -532,7 +668,16 @@ Blindness, under the real sandbox:
   allows its own checkout and transcripts directory.
 - A `verdict.json` symlinked to a scratch file standing in for the
   kernel's `pgpass` is refused and the scratch file's contents appear in
-  no row.
+  no row; a `.valor` directory that is a symlink to a directory holding a
+  valid `verdict.json` is refused; a `verdict.json` that is a FIFO with no
+  writer is refused at once rather than hanging the run.
+- The builder writes a file into its `$TMPDIR` and into its Claude Code
+  `todos` directory; the critic, under its profile, can read neither, nor
+  anything under `/private/tmp`, `/private/var/folders`, or `~/.claude`
+  but its own config directory.
+- Under `turn.sb` and a check profile, creating a scratch file in
+  `~/Library/LaunchAgents` and `~/.local/bin`, and opening `~/.zshrc` for
+  append (writing nothing), are refused.
 
 Live (`VALOR_LIVE=1`, declared spend $0.60): one real fresh critique
 session on a toy repository writes a valid verdict through the gateway,
@@ -542,7 +687,9 @@ metered.
 
 `docs/architecture.md` (workspace provisioning built; the kernel mirror),
 `docs/harnesses.md` (the workspace, per-task services, fresh sessions'
-checkouts and profiles, the shared-role and Redis openings closed),
+checkouts and profiles, per-turn `TMPDIR` and Claude Code config, the
+shared-role, Redis, and user-startup-files openings closed, the kernel
+mirror's sandboxed fetch),
 `docs/sdlc-state-machine.md` (critique runner exists; the manual verdict's
 stages), `docs/machine.md` (one task's services up at a time),
 `docs/tech-stack.md` (workspaces in the kernel), `docs/data.md`
@@ -565,37 +712,59 @@ Neither breadth nor governance routes work before its record exists, so
 the records come first in the task, against a build database
 (`valor_rebuild_m14_calib`) with the builder's own key directory
 (`VALOR_PG_PASSFILE=~/.config/valor-kernel-m14/pgpass`), never the
-kernel's.
+kernel's. judgement-layer.md binds: labels come from humans, and the
+landing bars per tier are Tom's to set.
 
-- **Floors frozen before run 1**, as 1.3 left them: breadth 0.70 primary,
-  0.75 fallback; governance 0.65 primary, 0.70 fallback. Up to five runs
-  per site; between runs only wording and a leg's fixed rendering change,
-  each listed in the build record.
-- **Breadth cases** (`checks.test.breadth.json`, outside the repo): each
-  candidate diff from the baseline's thirteen runs and the
-  demonstration's three deliveries, with three labels per case
-  (`gap_state`, `gap_enum`, `gap_bound`). Labels come from the merged
-  reference work, which humans wrote: a gap is labelled where a hidden
-  reference test failed on the candidate, by what that test exercises
-  (#872's archived-team guards, #191's list key name and hash exclusion,
-  #633's bound in an existing test); no gap where every hidden test
-  passed. Each label carries its evidence pointer and source `reference`.
-- **Governance cases** (`governance.adds.json`, at most 50 hunks):
-  positives from Tom's recorded decisions (the hunks of 1.2 and 1.3 that
-  seed or route the checkpoints he granted on 2026-10-01; hunks on `main`
-  that added a hook, validator, or approval step, the kind his paragraph
-  names), negatives from hunks that add none (feature code, fixes,
-  removals of a check, dependency bumps, docs). A label drafted from the
-  paragraph's definition, with no decision of Tom's behind it, is marked
-  `drafted`, and the record counts it apart, as judgement-layer.md
-  requires ("how many labels are Tom's own").
-- **The bar**, decided by default while Tom's per-tier numbers are a gap:
-  governance lands when neither leg answers proceed (`false`) on any
-  positive case at its floor, since a wrong `false` is the error that lets
-  governance through without a tap, and a wrong `true` only costs one;
-  breadth lands when each leg's errors are at most one per question and no
-  case errs on all three. Brier and confusion counts are recorded with n,
-  as information.
+- **Frozen before run 1, by digest.** The floors (as 1.3 left them:
+  breadth 0.70 primary, 0.75 fallback; governance 0.65 primary, 0.70
+  fallback), the case set, and every label are written to the cases files
+  and their SHA-256 digests recorded in the build record before the first
+  call. Up to five runs per site; between runs only wording and a leg's
+  fixed rendering change, each listed. No case is added, removed, or
+  relabelled after run 1.
+- **Breadth cases** (`checks.test.breadth.json`, outside the repo). Rule:
+  every baseline run and demonstration delivery whose item has hidden
+  reference tests, **except the three items 1.5's takeover gate scores**
+  (popoto #191, psyoptimal #872, popoto #633), so the gate is not measured
+  on cases the classifier was tuned on. Each case is the candidate diff
+  with three labels (`gap_state`, `gap_enum`, `gap_bound`). Labels come
+  from the merged reference work, which humans wrote: a gap where a hidden
+  reference test failed on the candidate, by what that test exercises; no
+  gap where every hidden test passed. Source `reference`, with an evidence
+  pointer per label. Where the reference does not settle which of the
+  three kinds a failure is, that label is `drafted`.
+- **Governance cases** (`governance.adds.json`, at most 50 hunks). Rule:
+  every hunk with added lines in (a) the commits of 1.2 and 1.3 that seed
+  or route the checkpoints Tom granted on 2026-10-01 (positives by his
+  grant), (b) the commits on `main` that added a file under
+  `.claude/hooks/validators/` or a hook registration (positives, the kind
+  his paragraph names), and (c) the ten most recent commits on `main`
+  before 2026-10-01 that touch none of those paths (negatives), taking at
+  most five hunks per commit in diff order until 50. A label with a
+  decision of Tom's behind it (his grant, his paragraph's named kinds) is
+  source `tom`; every other label, all of (c) included, is `drafted`.
+- **Drafted labels count in neither bar** unless Tom confirms them. The
+  build sends Tom one message listing the drafted labels (case, hunk or
+  diff, proposed label, why), not a labelling session; each he confirms
+  becomes source `tom` in a new cases file and a new record. Until then the
+  record reports drafted cases' results as information only.
+- **The bars go to Tom** (Questions, 5). Until he sets them, a site routes
+  on its **entry check**: both legs right on every non-drafted case of
+  the record. For governance, "right" counts both directions: a wrong
+  `false` lets governance through without a tap, and a wrong `true` puts a
+  tap on every diff that touches that kind of code, so a false positive
+  fails the entry check as surely as a false negative. Brier scores and
+  confusion counts are recorded with n, as information.
+- **When a record misses its bar** (or its entry check, while the bars are
+  open): the site does not route. Its dependent runners are not
+  registered in `RUNNERS`, so those stages keep the manual `verdict` path
+  and the router stops at them with `no runner`, as today; nothing is set
+  to caution by default, because caution on every breadth question would
+  send every candidate to the repair round and caution on every hunk
+  would ask Tom for a tap per hunk. Concretely: breadth missing keeps
+  `test` manual; governance missing keeps `docs` manual in 1.4b and
+  `review` manual in 1.4c, and the `verdict` command is then not deleted.
+  The build stops and asks Tom, as 1.3 did for the judge.
 - **Jev's reservation overhead re-checked** from the records' own rows:
   every charge at most its reservation, and the largest billed over
   estimated ratio reported per site. Breadth inputs run to thousands of
@@ -621,26 +790,45 @@ before the suite and the branch reruns.
 1. `judgement_sites.breadth(port, dsn, task)`, reused if answered for this
    candidate.
 2. A fresh checkout at the base and one at the candidate (from the
-   mirror), each made runnable by the spec's `setup` with the checks'
-   own caches (`<task>/checks/cache`, which the builder cannot write, so a
-   cache the builder poisoned cannot pass the kernel's run).
+   mirror), each with the checks' pgpass copy and its own `tmp/`.
+   **Caches.** The builder's caches are never used. The base's setup runs
+   first, with `checks/seed/` writable, and fills it; the base is the
+   merged commit the task started from, so nothing a candidate wrote is in
+   the seed. Every later run (each head, and a base rerun) gets its own
+   copy-on-write clone of the seed (APFS `clonefile`, near free on disk),
+   writable during its setup, read-only during its suite (the setup's
+   cache directory is made read-only by the kernel between the two steps,
+   and the suite's profile allows it read-only), and deleted after. So a
+   candidate's setup or suite can write only its own copy, and nothing it
+   writes reaches the next candidate's run.
 3. The suite under the check profile, marked and reaped, with a time limit
    (`suite_timeout_s`, default 1,800), writing JUnit XML to a path the
    kernel gives (`{junit}`). Each run writes `suite.ran`: commit, role
-   (`base` or `head`), command, an environment digest (lockfile digests
-   and the setup commands), exit code, failing test ids, duration, output
-   tail, peak footprint. A `suite.ran` with the same commit, command, and
+   (`base` or `head`), command, an environment digest (lockfile digests,
+   the setup commands, the spec's `env`, and the versions of the tools in
+   `bin/`, uv's included), exit code, test ids by outcome (passed, failed,
+   errored, skipped), duration, output tail, peak footprint, and an
+   `infrastructure` flag. A `suite.ran` with the same commit, command, and
    environment digest is reused, so the base runs once per task and a
-   crash after a suite does not rerun it.
-4. Failures: test ids failing at head and not at base. A suite that gives
-   no per-test result (no JUnit file) falls back to the exit code: red
-   when head fails and base passes, and red with "the suite fails at base
-   too, and without per-test results no failure at head can be told
-   apart" when both fail. A head run that collected no test where the base
-   collected some is a failure ("no test ran at head"). Tests that passed at
-   base and are absent at head are listed on `test.decided` as
-   `missing_at_head`, not as failures, since deleting a test that encoded
-   the old behavior can be right; the reviewer and Tom see the list.
+   crash after a suite does not rerun it, **except** one that timed out or
+   failed for an infrastructure reason (setup failed, the run was killed or
+   stopped, the task's Postgres was down, the JUnit file is missing or
+   unreadable while the exit code says the runner itself failed): those are
+   never reused, and run again.
+4. Failures: test ids failing or erroring at head that passed (or did not
+   exist) at base; and **every test that passed at base and is absent or
+   skipped at head**, unless the diff deletes its definition (the test's
+   file is deleted, or a removed line in the diff of that file defines the
+   test's function or class name, parametrized ids reduced to the name).
+   A skip is counted as an absence because a candidate can skip a failing
+   test as easily as delete it. Deleted definitions are listed on
+   `test.decided` as `deleted_at_head`, for the reviewer and Tom. A suite
+   that gives no per-test result (no JUnit file) falls back to the exit
+   code: red when head fails and base passes, and red with "the suite
+   fails at base too, and without per-test results no failure at head can
+   be told apart" when both fail. This defines how the existing
+   `checks.test` question ("the suite passes at head where it passed at
+   base") is answered; it adds no check, and the build record says so.
 5. `record_check(TEST, verdict, breadth=id, command=..., failures=...,
    leg="session"... )`; the kernel computes the verdict.
 
@@ -662,6 +850,12 @@ before the suite and the branch reruns.
    mirror under `refs/valor/docs/<turn>`, never into the builder's clone.
 4. Governance over the kept docs diff (candidate to head), asked after the
    turn because the diff exists only then: `judgement_sites.governance`.
+   This follows sdlc-state-machine.md (the governance boolean "over their
+   diff") and overrides valor-rebuild.md's 1.4 Done line, which says one
+   governance judgement per hunk "asked before the reviewer's or docs
+   turn": before is impossible for docs, whose diff the turn makes. The
+   build fixes valor-rebuild.md to say before the reviewer's turn and
+   after the docs turn.
 5. `record_check(DOCS, verdict, head=kept, governance_from=ids, ...)`; any
    dropped commit makes the verdict `changes`.
 
@@ -681,20 +875,43 @@ while review's verdict stands; breadth both legs failing stops before any
 suite runs; the base suite runs once across two candidates; a JUnit file
 that is not XML, or a symlink, is a suite with no per-test result, never
 a crash; a candidate whose `conftest.py` exits 0 before collecting is red
-against a base that collects tests ("no test ran at head"), while one that
-deletes a single test is not red and lists it under `missing_at_head`;
+(every base test absent at head); one that marks a failing test `skip` is
+red; one that deletes a test's definition is not red and lists it under
+`deleted_at_head`; one that deletes a test's file but keeps the function
+elsewhere under the same name is judged by the name's removal; a head
+suite that writes into its cache leaves the next candidate's run
+unaffected (the next run's copy is cloned from the seed, and a planted
+file is absent from it); a `suite.ran` that timed out is run again, never
+reused; changing a tool's version in `bin/` changes the environment digest
+and reruns the base;
 calibration records' digests equal the declarations'.
 
 ## 1.4d outline: the GitHub credential, transcripts, the performer registry
 
 ### The credential
 
-- **Token.** A fine-grained personal access token, resource owner
-  `tomcounsell`, repository access "only select repositories:
-  `tomcounsell/ai`", permission Contents read and write (Metadata read is
-  implied), nothing else, 90-day expiry, named `valor-kernel-push`. A
-  classic token's `repo` scope reaches every repository Tom has; a GitHub
-  App is more machinery than one repository needs.
+- **Whose token: two rollout options, Tom chooses** (Questions, 3). The
+  code is the same for both; only who owns the token differs.
+  - **Recommended (the driving session's decision, Tom to confirm): a
+    GitHub account of Valor's own**, added to `tomcounsell/ai` as a
+    collaborator with write access, holding a fine-grained token for that
+    repository (Contents read and write; Metadata read is implied; nothing
+    else; 90-day expiry; named `valor-kernel-push`). Because it is not
+    Tom, a repository ruleset on `main` (restrict updates, Valor not on the
+    bypass list) makes GitHub itself refuse any push of Valor's to `main`,
+    whatever the kernel does. A second ruleset may let Valor update only
+    the rebuild branch.
+  - **Fallback: Tom's own fine-grained token** with the same scope. No
+    ruleset can refuse a push Tom himself could make, so with this token
+    only the kernel's restrictions keep it off `main`.
+  - Either way the kernel refuses `main` on its own (below). A classic
+    token's `repo` scope reaches every repository its owner has; a GitHub
+    App is more machinery than one repository needs.
+- **Where the merge may land.** Only a (URL, branch) pair in the
+  merge-target list (`merge-targets.toml` in the kernel key directory,
+  written by Tom, outside every repository; see Project specs), never the
+  remote's default branch, checked at `start`, at the merge request, and at
+  release. A candidate's edit to `projects/valor.toml` cannot add a target.
 - **Where it lives.** The vault `.env` holds the durable copy as
   `GITHUB_PUSH_TOKEN`, beside the judgement keys. `python -m core
   github-key` reads it and writes one file in the kernel key directory,
@@ -713,13 +930,17 @@ calibration records' digests equal the declarations'.
   refused and the PATH is system-only; it is delivered as a file path
   rather than as `-c http.<url>.extraHeader=...` on the command line,
   because any process of Tom's user, a running turn included, can read
-  another's arguments with `ps`. A test checks that while a push runs, the
-  token is in no process's arguments or environment (`ps -E -ww`).
-- **`push_branch` stays local.** The Brief gains `push_url` (the local
-  `origin.git`), which `push_branch` uses; `origin_url` stays the merge's
-  destination. So the credential is used for exactly one (URL, branch)
-  per task: the target branch the merge payload names and Tom's approval
-  binds. A turn's own branches never reach GitHub.
+  another's arguments: the critique of this plan confirmed that
+  `pgrep -lf` run inside `sandbox-exec` shows other processes' full
+  arguments. A test checks that while a push runs, the token is in no
+  process's arguments or environment, both from the kernel (`ps -E -ww`)
+  and from a probe running under `turn.sb` (`pgrep -lf`, `ps -E -ww`).
+- **`push_branch` stays local.** `push_url` (1.4a) keeps `push_branch` on
+  the local `origin.git`. 1.4d is where `origin_url` becomes the spec's
+  `merge_url` for a pair in the merge-target list. So the credential is
+  used for exactly one (URL, branch) per task: the target branch the merge
+  payload names and Tom's approval binds. A turn's own branches never
+  reach GitHub.
 - **How a turn can never read it.** The key directory is denied by every
   profile (turn, fresh session, suite, service); no environment a turn
   gets names it; the container never mounts it; no ledger row, exception,
@@ -735,17 +956,25 @@ calibration records' digests equal the declarations'.
   `git http-backend` behind a loopback HTTP server that refuses a push
   without the expected header): a released merge lands with the file, is
   refused without it, `push_branch` never sends the header, and a
-  workspace or mirror holding any `http.*` key is still refused. Live, at
-  rollout, with Tom's token: one released merge to a scratch branch on
-  `tomcounsell/ai`.
+  workspace or mirror holding any `http.*` key is still refused; a merge
+  to a pair missing from the merge-target list, or to the remote's default
+  branch (the local server's `HEAD`), is refused at request and at
+  release, with an edited `projects/valor.toml` naming it. Live, at
+  rollout, with the chosen token: one released merge to a scratch branch
+  on `tomcounsell/ai`.
 
 ### Transcripts
 
 When any turn ends (working or fresh), the kernel copies its Claude Code
 session file into a `transcript` document (id: the turn id) and records
 `transcript: {document, sha256, bytes, offset, prefix_changed}` on
-`turn.ended`. The file is opened without following symlinks, must be a
-regular file under the turn's own `~/.claude/projects/` directory, and is
+`turn.ended`. With the per-turn config directory (1.4a) the session file
+is under the turn's own `<config dir>/projects/`. Subagents a turn starts
+write their transcripts as separate files beside the session's (in the
+session's directory), and those are copied too, each with its own digest,
+listed on the same `turn.ended`. Each file is opened component by
+component without following symlinks (as `verdict.json` is), must be a
+regular file under that directory, and is
 capped at 50 MB (over that, the digest is kept and the text is not). A
 resumed session's file grows, so each copy stores the bytes appended since
 the previous copy when the earlier prefix still has the digest recorded
@@ -753,7 +982,8 @@ for it; otherwise it stores the whole file and marks `prefix_changed`,
 which is itself the sign that something rewrote the transcript (compaction
 or the turn). Tests: a turn that replaces its transcript with a symlink to
 a scratch secret stores nothing and records why; an edited earlier line
-shows `prefix_changed`.
+shows `prefix_changed`; a live turn that starts a subagent (`VALOR_LIVE`,
+under $0.30) has the subagent's transcript copied with its own digest.
 
 ### The performer registry, awaitable
 
@@ -807,8 +1037,21 @@ as before and stay in the attention log.
 - **Runtime.** Apple's `container`, installed from Apple's signed package
   to `/usr/local/bin` (root-owned), not from Homebrew, because the kernel
   runs only root-owned programs outside a sandbox; `binaries.CONTAINER`
-  is checked before every call. Rosetta is installed for the image
-  builder, which needs it even for arm64.
+  is checked before every call, and so is every helper the CLI runs under
+  `/usr/local/libexec/container/` (the API server and the runtime and
+  network plugins), each with `binaries.require`. Rosetta is installed for
+  the image builder, which needs it even for arm64.
+- **The trust boundary is the daemon and its data, not the CLI.** The
+  container system runs as Tom's user from launch agents, keeps images and
+  VM state in its data directory, and is reached over its mach services.
+  So every profile here (turn, fresh session, suite, service) denies
+  executing `/usr/local/bin/container` and anything under
+  `/usr/local/libexec/container/`, looking up the container services' mach
+  names, reading or writing the runtime's data directory, and writing its
+  launch-agent plists (covered by the `~/Library/LaunchAgents` write deny
+  of 1.4a, and named explicitly here). The exact data path and mach names
+  are read from the installed release at build and written in the build
+  record.
 - **Base image**, built once per pinned base digest:
   `debian:bookworm-slim` for arm64 by digest; git with
   `/usr/libexec/git-core` present (so this repository's
@@ -828,11 +1071,8 @@ as before and stay in the attention log.
   image. The newest three dependency images per project are kept, the
   rest pruned after a build; the builder VM is stopped after each build to
   give its memory back.
-- **Isolation.** Images are run by digest, never by tag. The turn
-  profiles deny executing `/usr/local/bin/container` and its helpers,
-  looking up the container services' mach names, and reading or writing
-  the runtime's data directory, so no turn can retag, replace, or enter
-  an image or a VM. The VM mounts the exported source read-only and one
+- **Isolation.** Images are run by digest, never by tag. With the denies
+  above, no turn can retag, replace, or enter an image or a VM. The VM mounts the exported source read-only and one
   output directory; nothing else of the host, never the key directory. It
   is killed, not stopped, on a stop or a timeout (machine.md: a graceful
   stop left the workload running), and removed after every run.
@@ -856,7 +1096,11 @@ A container killed on a stop leaves no VM; an image retagged by hand is not
 used (digest); a turn under its profile cannot run `container list`; the
 VM reaches no network (a probe to the internet and to a loopback-bound
 host port both fail); a passing candidate whose suite reads a host file
-fails in the VM; the review verdict's governance comes from the judgement
+fails in the VM; a helper under `/usr/local/libexec/container/` made
+group-writable in a scratch copy of the layout is refused by
+`binaries.require`; under every profile, writing a scratch plist named
+like the runtime's in `~/Library/LaunchAgents` and reading the data
+directory are refused; the review verdict's governance comes from the judgement
 rows, and a reviewer's line merges into a kernel instance; a review
 rerun after a grant reuses `verify.ran`; `verdict` is gone from the
 command line; live (`VALOR_LIVE=1`, under $3): one real blind Opus review
@@ -872,24 +1116,38 @@ on a toy candidate with a container rerun.
    `container system start`, which registers its launch agents and asks to
    download its default Linux kernel. Before 1.4c's build. The builder
    then pulls the pinned Debian base image once.
-3. **Create the GitHub token** as specified under 1.4d, put it in the
-   vault `.env` as `GITHUB_PUSH_TOKEN`, and run `python -m core github-key`
-   from the kernel checkout. Needed only for 1.4d's live push and for the
-   first real merge.
-4. **Create a scratch branch** on `tomcounsell/ai` for the live push test,
+3. **The GitHub credential, one of two options** (1.4d; Questions, 3).
+   *Recommended:* create a GitHub account for Valor, add it to
+   `tomcounsell/ai` as a collaborator with write access, add a repository
+   ruleset on `main` restricting updates with Valor not on the bypass list,
+   and create Valor's fine-grained token for the one repository.
+   *Fallback:* create Tom's own fine-grained token with the same scope.
+   Either way, put it in the vault `.env` as `GITHUB_PUSH_TOKEN` and run
+   `python -m core github-key` from the kernel checkout. Needed only for
+   1.4d's live push and for the first real merge.
+4. **Write the merge-target list**, `~/.config/valor-kernel/merge-targets.toml`
+   (mode 600), naming `https://github.com/tomcounsell/ai.git` and the
+   rebuild branch (and the scratch branch for the live test). The kernel
+   never writes this file. Needed at 1.4d's rollout.
+5. **Create a scratch branch** on `tomcounsell/ai` for the live push test,
    or say the test may create `valor/push-check` itself.
-5. **At each task's merge, in the kernel checkout**: `uv sync`; for 1.4a,
-   create `~/valor-tasks`; for 1.4b, the two calibration runs against the
+6. **At each task's merge, in the kernel checkout**: `uv sync`; for 1.4a,
+   create `~/valor-tasks`, and rebase onto 1.2's merged fix (or drop the
+   carried copy of it); for 1.4b, the two calibration runs against the
    real ledger and the digest comparison. No migration in any task.
 
 ## Failure modes across the milestone
 
 | Failure | Caught by |
 |---|---|
-| A fresh session reads the builder's narration | its profile denies the builder's clone, the mirror, and other transcripts; blind checkouts hold no builder commit |
+| A fresh session reads the builder's narration | the builder writes only paths the kernel names (its clone, caches, its own `TMPDIR` and Claude Code config); every fresh profile denies all of them and `/private/tmp`, `/private/var/folders`, `~/.claude`; blind checkouts hold no builder commit |
+| The mirror fetch runs the turn's choices | hostile config, alternates, and shallow refused; upload-pack sandboxed; grafts and replace refs off; fsck, size and time caps |
+| A merge target edited into the repository's spec | the merge-target list lives in the kernel key directory; the remote's default branch is always refused |
+| A test skipped or deleted to go green | an absent or skipped test that passed at base is a failure unless the diff deletes its definition |
+| Services left up after a kernel crash | every router run first stops other tasks' services by their mark |
 | The next build resumes a fresh session | the fold reads session ids only from working-state turns |
 | The suite command chosen by the candidate | the command comes from the spec copied into the Brief at start |
-| A builder poisons the cache the kernel's suite uses | checks use their own caches the builder cannot write; the container rebuilds from the lockfile |
+| A builder or a candidate poisons the cache the kernel's suite uses | checks never use the builder's caches; each run gets a clone of a seed only the base filled, read-only during the suite and deleted after; the container rebuilds from the lockfile |
 | Docs code rides into a merge | the path drop at turn end and predicate term 4 |
 | Docs commits ride into the next candidate | they live only in the mirror |
 | A provider outage spends a suite run or an Opus turn | breadth and governance are asked first and reused |
@@ -921,7 +1179,9 @@ on a toy candidate with a container rerun.
 | Redis left running at replay teardown | a |
 | Replay databases sharing one `test` role and one password | a |
 | `tools/workspace.py` test-only performers | a |
-| `Fold.session` taken from any turn | a |
+| `Fold.session` taken from any turn (in the fold and in `_legacy`) | a |
+| harnesses.md's opening: a turn can write `~/Library/LaunchAgents`, shell rc files, `~/.local/bin` | a |
+| A shared `TMPDIR`, `/tmp`, and Claude Code state between turns | a |
 | The broker's synchronous `perform` | d |
 | Performers in a module-global dict | d |
 | The manual `verdict` command | a, b, c |
@@ -937,23 +1197,24 @@ on a toy candidate with a container rerun.
    host run in a fresh checkout runs all of them, and `verify.ran` reports
    both counts. The alternative is a macOS VM, which Apple's `container`
    does not run.
-3. **The token is Tom's own fine-grained token**, so the kernel's pushes
-   appear on GitHub as pushed by Tom. Assumed acceptable. The alternative
-   is a GitHub account of Valor's own with write access to the one
-   repository, which would also let a branch rule on `main` refuse it;
-   with Tom's token no branch rule can stop a push Tom himself could make,
-   so the kernel's own restriction (the merge only, to the approved URL
-   and branch) is what keeps it off `main`.
+3. **Whose GitHub token.** Decided by the driving session, Tom to
+   confirm: a GitHub account of Valor's own with write access to
+   `tomcounsell/ai` and a ruleset on `main` that refuses it, so GitHub
+   itself stops a push to `main` whatever the kernel does. Fallback, if Tom
+   prefers: his own fine-grained token, where only the kernel's merge-target
+   list and its refusal of the default branch keep pushes off `main`. Both
+   are planned as rollout options; the code is the same.
 4. **The pinned header goes in through a kernel-owned config file, not
    `-c` on the command line**, because arguments are readable by a running
    turn. Assumed yes; it is still a pinned header, and helpers stay
    refused.
-5. **Calibration labels without a labelling session.** Assumed: breadth
-   labels come from the replays' hidden reference tests, governance labels
-   from Tom's 2026-10-01 grants and the kinds of addition his paragraph
-   names, the rest marked `drafted` and counted apart, with the landing
-   bar in 1.4b. Tom may want to read the drafted governance labels before
-   rollout's real-ledger run; that would be one message, not a session.
+5. **Calibration bars.** judgement-layer.md leaves the bars per error
+   tier to Tom. Assumed until he sets them: each site routes on its entry
+   check (both legs right on every case whose label is `reference` or
+   `tom`), with false positives counted for governance; drafted labels
+   count only after he confirms them from one message listing them; a site
+   that misses keeps its stages on the manual path. Tom may set n minimums
+   and Brier ceilings per tier instead.
 6. **Installing `container` from Apple's package rather than Homebrew.**
    Assumed yes: the kernel runs only root-owned programs outside a
    sandbox, and Homebrew's prefix is Tom's.
@@ -974,11 +1235,67 @@ on a toy candidate with a container rerun.
   reused by commit, command, and environment digest.
 - The docs drop keeps the longest doc-only run of commits from the
   candidate.
-- Governance for docs asked after the docs turn, for review before it.
+- Governance for docs asked after the docs turn, for review before it
+  (overriding valor-rebuild.md's wording, fixed in 1.4b's build).
+- The merge-target list in the kernel key directory.
+- Every turn's own `TMPDIR` and Claude Code config directory.
+- A test that passed at base and is absent or skipped at head fails unless
+  the diff deletes its definition.
 - Container: 2 GB and 4 CPUs per VM by default, no network at run time,
   three dependency images kept per project.
 - Transcripts: deltas per turn, 50 MB cap per copy.
 - The token: fine-grained, one repository, Contents read and write, 90
-  days.
+  days, owned by Valor's account unless Tom picks his own.
 - Live spend for the whole milestone's builds under $8, each live test
   declaring its spend.
+
+## Critique round 1 (of 2)
+
+Verdict `revise`; the split and the order were found sound. Each finding
+is resolved in this revision:
+
+1. Check profiles now get a per-run `pgpass` copy in their own `tmp/`;
+   caches are a seed filled only by the base's setup, cloned per run,
+   read-only during the suite, deleted after; test that a head suite's
+   cache write does not reach the next candidate.
+2. Every turn and check has its own `TMPDIR` and Claude Code config
+   directory; fresh profiles deny `/private/tmp`, `/private/var/folders`,
+   `~/.claude`, `~/.claude.json` except their own; tests that the critic
+   cannot read the builder's `$TMPDIR` or `todos`. The config-directory
+   login premise is checked first, with a fallback.
+3. Calibration: case sets, labels, and floors frozen by digest before run
+   1, chosen by stated rules; drafted labels count in neither bar until
+   Tom confirms; the bars are a question to Tom, with the entry check
+   (counting governance false positives) until then; 1.5's takeover items
+   excluded from breadth; a site that misses keeps its stages manual.
+4. `push_url` lands in 1.4a; `origin_url` stays the local origin until
+   1.4d; 1.4a switches merge reads to the mirror and the manual docs head
+   is fetched into it.
+5. The mirror fetch: `hostile` first, alternates and shallow refused,
+   upload-pack under `turn.sb`, fsck, no tags, size and time caps, replace
+   refs and grafts off; the mirror seeded with the base; 1.4a waits for or
+   carries 1.2's fix, flagged; tests with alternates, a graft, a replace
+   ref.
+6. The merge-target list in the kernel key directory, the default branch
+   always refused; Valor's own GitHub account recommended with Tom's token
+   as fallback, both rollout options; writes denied to
+   `~/Library/LaunchAgents`, shell rc files, and `~/.local/bin` in every
+   profile, closing the harnesses.md opening.
+7. Absent or skipped tests that passed at base fail unless the diff
+   deletes their definition, named as defining the existing check; no
+   reuse of a timed-out or infrastructure-failed `suite.ran`; the spec's
+   env and `bin/` versions in the environment digest.
+8. Every router run first stops other tasks' services by their mark
+   (`services.reaped`); tested after a SIGKILL against the 16 GB lines.
+9. `_legacy` fixed too, with a test through it.
+10. `verdict.json` opened component by component with no-follow and
+    non-blocking; tests for a symlinked `.valor` and a FIFO.
+11. Docs governance after the turn stated as overriding valor-rebuild.md,
+    which the 1.4b build fixes.
+12. `binaries.require` on the helpers in `/usr/local/libexec/container/`;
+    the runtime's launch-agent plists and data directory denied in every
+    profile.
+13. Premises recorded: arguments are visible from inside `sandbox-exec`
+    (a `pgrep` probe from `turn.sb` joins the no-leak test); nested
+    `sandbox-exec` works.
+14. Subagent transcript files are copied too, with a live test.
