@@ -76,6 +76,9 @@ async def run_turn(
         base_url = gateway.issue(task_id, turn_id)
         async with await db.connect(dsn) as conn, conn.transaction():
             await ledger.lock(conn, f"task:{task_id}")
+            if await tasks.is_calibration(conn, task_id):
+                gateway.retire(task_id)
+                raise tasks.CalibrationTask(f"task {task_id} is a calibration task; it runs no turn")
             if await tasks.is_stopped(conn, task_id):
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)

@@ -188,8 +188,10 @@ kernel (**Three tiers**; Mission items 3 and 6).
 **Done.**
 - `JudgementPort` and the router in `core/`; Jev and the open-weight
   fallback as adapters in `tools/`, models pinned by version.
-- A gateway route that meters non-Anthropic calls against the same task
-  budget; `judgement.answered` and `judgement.failed` rows.
+- Non-Anthropic judgement calls metered against the same task budget,
+  in the kernel process through `core/budget.py`'s reservation and
+  charge (the gateway's rows, with no HTTP route, since no turn makes
+  them); `judgement.answered` and `judgement.failed` rows.
 - Three sites wired: `intake.underspecified` (the judge state), the
   breadth call in `checks.test`, and the governance boolean.
 - Both legs label all seven seed cases (the six baseline items and

@@ -267,6 +267,8 @@ async def answer(
         f = machine.fold(await ledger.read(conn, task_id))
         if f.legacy:
             raise LookupError(f"task {task_id} predates the state machine")
+        if f.calibration:
+            raise LookupError(f"task {task_id} is a calibration task")
         if f.state is not State.WAITING:
             raise LookupError(f"task {task_id} has no open question (it is {f.state})")
         await ledger.append(
@@ -302,6 +304,8 @@ async def feedback(
         f = machine.fold(await ledger.read(conn, task_id))
         if f.legacy:
             raise LookupError(f"task {task_id} predates the state machine")
+        if f.calibration:
+            raise LookupError(f"task {task_id} is a calibration task")
         if f.state is State.STOPPED:
             raise LookupError(f"task {task_id} is stopped; a stopped task takes no feedback")
         if f.state is State.WAITING:

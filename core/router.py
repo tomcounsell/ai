@@ -6,9 +6,9 @@ Tom or something the router cannot run. It reads verdicts and follows the
 table; it never writes a verdict and never decides authority.
 
 Runners come in as a mapping from `State` or `Check` to an async callable
-taking a `Context`, never from a module global, so the judgement port (1.3)
-and the critique and check runners (1.4) are new entries and nothing here
-changes. A state, or a branch of `checks` still without a verdict for the
+taking a `Context`, never from a module global, so the judge runner (which
+asks the judgement port) and the critique and check runners (1.4) are
+entries and nothing here changes. A state, or a branch of `checks` still without a verdict for the
 current candidate, that has no runner ends the run with `no runner`, naming
 what is missing and writing nothing.
 
@@ -48,7 +48,7 @@ async def run(
 ) -> dict[str, Any]:
     """Run the task until it needs Tom or a runner that does not exist.
     Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
-    runner`, `legacy`, `already running`, `lock lost`, or what a runner
+    runner`, `legacy`, `calibration task`, `already running`, `lock lost`, or what a runner
     returned: `budget exhausted`, `failed`, `idle`) and the task's state."""
     dsn = dsn or gateway.dsn
     holder = await db.connect(dsn)
@@ -74,6 +74,8 @@ async def run(
                 f = machine.fold(await ledger.read(conn, task_id))
                 if f.legacy:
                     return {"status": "legacy", "state": await tasks.status(conn, task_id)}
+                if f.calibration:
+                    return {"status": "calibration task", "state": await tasks.status(conn, task_id)}
                 if f.state in SETTLED:
                     return {"status": SETTLED[f.state], "state": await tasks.status(conn, task_id)}
                 if f.state is State.MERGE:

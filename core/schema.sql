@@ -75,3 +75,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_guard
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_instance_grant
     ON events (task_id, (payload->>'instance_id'))
     WHERE type = 'guard.granted' AND payload->>'instance_id' IS NOT NULL;
+
+-- The judgement port's rows (core/judgement.py): one outcome per judgement.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_judgement
+    ON events ((payload->>'judgement_id'))
+    WHERE type IN ('judgement.answered', 'judgement.failed');

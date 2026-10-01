@@ -139,6 +139,8 @@ async def grant(
         f = machine.fold(await ledger.read(conn, task_id))
         if f.legacy:
             raise GrantRefused(f"task {task_id} predates the state machine")
+        if f.calibration:
+            raise GrantRefused(f"task {task_id} is a calibration task")
         if f.state is not machine.State.MERGE:
             raise GrantRefused(f"task {task_id} is in {f.state}; a grant is given in merge")
         instance = next((i for i in f.instances() if i.id == instance_id), None)

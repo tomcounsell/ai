@@ -1,0 +1,20 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "request": {
+      "type": "choice",
+      "choice": "one_line_ask",
+      "confidence": 0.68,
+      "probabilities": {
+        "existing_ui_unscoped": 0.15,
+        "precise": 0.09,
+        "one_line_ask": 0.76,
+        "example_as_spec": 0.0
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 489,
+    "output_tokens": 58
+  }
+}

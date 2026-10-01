@@ -7,21 +7,25 @@ appends in one transaction. A check verdict that completes a join to
 then requests the merge effect, and the router calls it again on every run
 that finds the task in `merge`, so a crash between the two strands nothing.
 
-Until the judge (1.3) and the critique and check runners (1.4) exist, a
-person records those verdicts by hand (`python -m core verdict`), each row
-`leg: manual` with provenance. `manual_allowed` refuses a stage that has a
-runner, so the stand-in closes as runners arrive.
+The judge's verdict is the kernel's reading of a judgement row
+(`record_judge`); nobody records it by hand. Until the critique and check
+runners (1.4) exist, a person records those verdicts by hand (`python -m
+core verdict`), each row `leg: manual` with provenance. `manual_allowed`
+refuses a stage that has a runner, so the stand-in closes as runners
+arrive. A test verdict given a breadth judgement, and a review or docs
+verdict given governance judgements, read those rows themselves: the
+behaviors and instances come from the kernel's tables, never from the
+caller's text.
 """
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import broker, git, ledger, machine, tasks
+from core import broker, git, judgement, judgement_sites, ledger, machine, tasks
 from core.machine import Check, State
 
 MANUAL_STAGES: dict[str, State | Check] = {
-    "judge": State.JUDGE,
     "critique": State.CRITIQUE,
     "test": Check.TEST,
     "review": Check.REVIEW,
@@ -58,6 +62,8 @@ async def _fold(conn, task_id: str, *stages: State) -> tuple[list[dict], machine
     f = machine.fold(rows)
     if f.legacy:
         raise VerdictRefused(f"task {task_id} predates the state machine")
+    if f.calibration:
+        raise VerdictRefused(f"task {task_id} is a calibration task")
     if f.state is State.STOPPED:
         raise VerdictRefused(f"task {task_id} is stopped")
     if f.state not in stages:
@@ -86,23 +92,34 @@ def _findings(items: Iterable) -> list[dict[str, str]]:
     return out
 
 
-async def record_judge(
-    conn, task_id: str, verdict: str, *, leg: str = "manual", by: str = "tom", via: str = "the command line",
-    role_played: bool = False,
-) -> int:  # fmt: skip
+async def record_judge(conn, task_id: str, judgement_id: str) -> int:
+    """The judge's verdict, read by the kernel from one `intake.underspecified`
+    judgement row on this task (`judgement_sites.judge_verdict`): proceed is
+    `precise`; caution, an abstain, or a failure of both legs is `thin`."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
-        await _fold(conn, task_id, State.JUDGE)
+        rows, _ = await _fold(conn, task_id, State.JUDGE)
+        row = judgement.find(rows, judgement_id)
+        if row is None or row["payload"].get("site") != machine.GUARD_JUDGE:
+            raise VerdictRefused(f"{judgement_id} is not a request judgement on task {task_id}")
+        p = row["payload"]
+        verdict = judgement_sites.judge_verdict(row)
+        answer = (p.get("answers") or {}).get("request") or {}
         return await ledger.append(
             conn,
             task_id,
             "judge.decided",
             {
                 "verdict": verdict,
-                "leg": leg,
-                "judgement_id": None,
+                "leg": "judgement",
+                "judgement_id": judgement_id,
+                "answered": row["type"] == "judgement.answered",
+                "p_precise": answer.get("p_proceed"),
+                "label": answer.get("label"),
+                "abstained": bool(p.get("abstained")),
+                "model": p.get("model"),
+                "usd_micros": p.get("usd_micros"),
                 "guard_id": machine.GUARD_JUDGE if verdict == "thin" else None,
-                **_manual(leg, by, via, role_played),
             },
         )
 
@@ -159,11 +176,24 @@ async def record_check(
     governance: Iterable[InstanceSpec] = (), head: str | None = None, command: str | None = None,
     failures: Iterable[str] = (), behaviors: Iterable[str] = (), leg: str = "manual",
     model: str | None = None, usd_micros: int = 0, by: str = "tom", via: str = "the command line",
-    role_played: bool = False,
+    role_played: bool = False, breadth: str | None = None, governance_from: Iterable[str] | None = None,
+    notes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> machine.Fold:  # fmt: skip
     """Record one branch's verdict on the current candidate. Returns the
     fold after it; when it completes a join to `merge`, `task.delivered` is
-    written with it."""
+    written with it.
+
+    `breadth` (test only) names the candidate's breadth judgement: the
+    listed behaviors come from it and the verdict is computed (any failure
+    `red`, else any behavior `gaps`, else `pass`); a `verdict` that
+    disagrees is refused. `governance_from` (review and docs) names one
+    governance judgement per hunk of the check's diff: the instances are the
+    hunks the kernel's table makes instances, together with any `governance`
+    the reviewer named (a reviewer adds caution, never removes it), and
+    `notes` attach a summary, incident, and mission item to an instance by
+    its id. A judgement both legs failed, with reruns left, refuses the
+    verdict as unanswered, so the branch has none and the next run asks
+    again."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CHECKS)
@@ -179,6 +209,23 @@ async def record_check(
             **_manual(leg, by, via, role_played),
         }
         specs = list(governance)
+        if breadth is not None and check is not Check.TEST:
+            raise VerdictRefused("only the test branch takes a breadth judgement")
+        if governance_from is not None and check is Check.TEST:
+            raise VerdictRefused("only review and docs answer the governance boolean")
+        if check is Check.TEST and breadth is not None:
+            try:
+                found = judgement_sites.breadth_outcome(rows, breadth, c)
+            except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
+                raise VerdictRefused(str(exc)) from None
+            behaviors = found["behaviors"]
+            computed = "red" if list(failures) else ("gaps" if behaviors else "pass")
+            if verdict != computed:
+                raise VerdictRefused(
+                    f"with these failures and this breadth judgement the verdict is {computed}"
+                )
+            payload["breadth"] = {k: found[k] for k in ("judgement_id", "actions", "abstained", "model",
+                                                         "usd_micros", "guard_id")}  # fmt: skip
         if check is Check.TEST:
             failures, behaviors = list(failures), list(behaviors)
             payload["command"] = command
@@ -197,13 +244,36 @@ async def record_check(
                         raise VerdictRefused("the docs commits hold a merge commit")
                 payload["head"] = head
                 payload["paths"] = git.diff_paths(b.workspace, c.sha, head) if head != c.sha else []
+            judged: dict[str, Any] | None = None
             if check in (Check.REVIEW, Check.DOCS):
                 older, newer = (b.base_sha, c.sha) if check is Check.REVIEW else (c.sha, payload["head"])
-                instances = _instances(b.workspace, older, newer, specs) if specs else []
+                if governance_from is not None:
+                    ids = list(governance_from)
+                    try:
+                        judged = judgement_sites.governance_outcome(
+                            rows, ids, judgement_sites.diff_hunks(b.workspace, older, newer)
+                        )
+                    except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
+                        raise VerdictRefused(str(exc)) from None
+                    specs = [InstanceSpec(h.path, h.start) for h in judged["instances"]] + specs
+                instances = _union(_instances(b.workspace, older, newer, specs) if specs else [])
+                if judged is not None and judged["unjudged"]:
+                    instances.append(judgement_sites.unjudged_instance(judged["unjudged"]))
+                instances = _annotate(instances, notes or {})
         except git.GitError as exc:
             raise VerdictRefused(str(exc)) from None
+        if notes and check is Check.TEST:
+            raise VerdictRefused("only review and docs carry governance notes")
         if check in (Check.REVIEW, Check.DOCS):
             payload["governance"] = {"adds": bool(instances), "instances": instances}
+            if judged is not None:
+                payload["governance"].update(
+                    {
+                        "judgements": ids,
+                        "abstain_instances": judged["abstain_instances"],
+                        "unjudged_hunks": [h.id for h, _ in judged["unjudged"]],
+                    }
+                )
             ungranted = [i for i in instances if i["id"] not in f.granted]
             if check is Check.REVIEW:
                 if verdict == "pass" and ungranted:
@@ -226,6 +296,31 @@ async def record_check(
         if f.state is State.CHECKS and after.state is State.MERGE and after.join is not None:
             await ledger.append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
     return after
+
+
+def _union(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Instances once per id, the first naming kept: the kernel's come
+    first, so a reviewer naming the same hunk adds nothing twice."""
+    seen: dict[str, dict[str, Any]] = {}
+    for i in instances:
+        seen.setdefault(i["id"], i)
+    return list(seen.values())
+
+
+def _annotate(
+    instances: list[dict[str, Any]], notes: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """A reviewer's summary, incident, and mission item on an instance, by
+    its id. A note for an id that is not an instance is refused."""
+    ids = {i["id"] for i in instances}
+    unknown = sorted(set(notes) - ids)
+    if unknown:
+        raise VerdictRefused(f"notes for ids that are not governance instances here: {unknown}")
+    out = []
+    for i in instances:
+        note = notes.get(i["id"]) or {}
+        out.append({**i, **{k: note[k] for k in ("summary", "incident", "mission_item") if note.get(k)}})
+    return out
 
 
 def _delivery(f: machine.Fold, rows: list[dict], event_id: int) -> dict[str, Any]:
@@ -276,7 +371,7 @@ async def ensure_merge(conn, task_id: str) -> broker.Outcome | None:
     after a refusal of the same payload unless Tom has granted something
     since, so runs never pile refusals up."""
     f = machine.fold(await ledger.read(conn, task_id))
-    if f.legacy or f.state is not State.MERGE or f.candidate is None:
+    if f.legacy or f.calibration or f.state is not State.MERGE or f.candidate is None:
         return None
     named = {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}
     if (f.delivery or {}).get("candidate") != named or f.delivery.get("outcome") not in ("passed", "gaps"):

@@ -6,7 +6,7 @@ stored field, so a stop at any instant leaves nothing to reconcile between
 the two.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,13 +17,6 @@ from core import corrections, git, ledger, machine
 from core.settings import settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
-
-# The starter's manual judge verdict until the judgement port (1.3) runs the
-# judge: `start --mode bare` records `precise`, `--mode clarify` records
-# `thin`, each `leg: manual` with the starter's provenance. No mode leaves
-# the task in `judge`.
-MODES = ("bare", "clarify")
-JUDGE_FOR_MODE = {"bare": "precise", "clarify": "thin"}
 
 STOP_CHANNEL = "valor_stop"
 
@@ -43,7 +36,7 @@ class Brief:
 
     `workspace` is the directory a turn works in, `model` the model it runs,
     and `harness` the harness's own settings for the task (its isolation).
-    `mode` is one of `MODES` or None. `target_branch` is the branch a merge
+    `target_branch` is the branch a merge
     lands on, `origin_url` the absolute push URL of the workspace's origin
     as it was at start (the merge goes there, whatever the workspace's
     config says later), and `base_sha` the workspace's head at start; all
@@ -57,7 +50,6 @@ class Brief:
     workspace: str | None = None
     model: str = "haiku"
     harness: dict[str, Any] = field(default_factory=dict)
-    mode: str | None = None
     target_branch: str | None = None
     origin_url: str | None = None
     base_sha: str | None = None
@@ -69,8 +61,14 @@ class Brief:
             raise ValueError("a budget is never negative")
         if self.max_effect_class not in EFFECT_RANK:
             raise ValueError(f"unknown effect class {self.max_effect_class!r}")
-        if self.mode is not None and self.mode not in MODES:
-            raise ValueError(f"unknown mode {self.mode!r}")
+
+    @classmethod
+    def load(cls, body: dict[str, Any]) -> Brief:
+        """A stored Brief, from the fields this dataclass has. A document
+        written when the Brief had a field it no longer has (`mode`, before
+        the judge ran) still loads; no document is rewritten."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in body.items() if k in known})
 
 
 class TaskStopped(RuntimeError):
@@ -114,8 +112,8 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
 async def start(
     conn, brief: Brief, *, by: str = "tom", via: str = "the command line", role_played: bool = False
 ) -> str:
-    """Write the task document and its first event in one transaction, and
-    with a mode, the manual judge verdict beside them."""
+    """Write the task document and its first event in one transaction. The
+    task starts in `judge`; the judge runner decides it."""
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
@@ -131,27 +129,51 @@ async def start(
                 "budget_usd_micros": brief.budget_usd_micros,
                 "max_effect_class": brief.max_effect_class,
                 "governance_grant": brief.governance_grant,
-                "mode": brief.mode,
                 "target_branch": brief.target_branch,
                 "origin_url": brief.origin_url,
                 "base_sha": brief.base_sha,
+                "provenance": ledger.provenance(by, via, role_played),
             },
         )
-        if brief.mode is not None:
-            verdict = JUDGE_FOR_MODE[brief.mode]
-            await ledger.append(
-                conn,
-                brief.id,
-                "judge.decided",
-                {
-                    "verdict": verdict,
-                    "leg": "manual",
-                    "judgement_id": None,
-                    "guard_id": machine.GUARD_JUDGE if verdict == "thin" else None,
-                    "provenance": ledger.provenance(by, via, role_played),
-                },
-            )
     return brief.id
+
+
+async def start_calibration(conn, site: str, budget_usd_micros: int, *, by: str = "tom") -> str:
+    """A calibration task: a document and a `task.started` carrying the site
+    and the budget its judgement calls are metered against, and no `sdlc`
+    marker. It folds as `calibration`, and every SDLC writer refuses it."""
+    b = Brief(instruction=f"calibrate {site}", budget_usd_micros=budget_usd_micros, max_effect_class="read")
+    async with conn.transaction():
+        await conn.execute(
+            "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)", (b.id, Jsonb(asdict(b)))
+        )
+        await ledger.append(
+            conn,
+            b.id,
+            "task.started",
+            {
+                "calibration": site,
+                "instruction": b.instruction,
+                "budget_usd_micros": budget_usd_micros,
+                "max_effect_class": "read",
+                "provenance": ledger.provenance(by, "python -m core calibrate", False),
+            },
+        )
+    return b.id
+
+
+async def is_calibration(conn, task_id: str) -> bool:
+    row = await (
+        await conn.execute(
+            "SELECT payload->>'calibration' FROM events WHERE task_id = %s AND type = 'task.started' LIMIT 1",
+            (task_id,),
+        )
+    ).fetchone()
+    return bool(row and row[0])
+
+
+class CalibrationTask(LookupError):
+    """An SDLC or budget writer was pointed at a calibration task."""
 
 
 async def brief(conn, task_id: str) -> Brief:
@@ -160,7 +182,7 @@ async def brief(conn, task_id: str) -> Brief:
     ).fetchone()
     if row is None:
         raise KeyError(task_id)
-    return Brief(**row[0])
+    return Brief.load(row[0])
 
 
 def stage_text(state: machine.State) -> str | None:
@@ -236,6 +258,8 @@ async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
     """
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
+        if await is_calibration(conn, task_id):
+            raise CalibrationTask(f"task {task_id} is a calibration task; it runs no turn to stop")
         if await is_stopped(conn, task_id):
             return False
         await ledger.append(conn, task_id, "task.stopped", {"reason": reason, "by": by})

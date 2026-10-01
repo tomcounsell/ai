@@ -3,7 +3,16 @@ it with a stand-in for Tom until the stand-in accepts a delivery, the
 feedback rounds run out, or the budget does. Writes the record to
 $VALOR_DEMO/results/<run>.json.
 
-    .venv/bin/python scripts/replay.py ITEM.json --arm bare|clarify [--judge]
+    .venv/bin/python scripts/replay.py ITEM.json --arm bare|clarify|routed [--judge]
+
+The arm is what the kernel's judge decides. `routed` uses the real
+judgement legs. `bare` and `clarify` force it without any switch in the
+kernel: the driver starts the local judgement upstream
+(`tests/judgement_upstream.py`) answering `precise` or `thin` and points the
+kernel's leg endpoints at it (`VALOR_JEV_URL`, `VALOR_OPEN_WEIGHT_URL`), so
+the real judge runner, port, metering, and rows run, and each row's
+endpoint (127.0.0.1) shows the arm was forced. A loopback endpoint is sent
+a placeholder key, never a real one.
 
 An item is a JSON file:
 
@@ -39,8 +48,11 @@ $VALOR_DEMO/costs.jsonl.
 import argparse
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -186,7 +198,44 @@ def summarize(result: dict, item: dict, ws: dict) -> None:
         result["diff_stat"] = result["diff_shortstat"] = ""
 
 
+FORCED = {"bare": "precise", "clarify": "thin"}
+
+
+@contextmanager
+def judged_as(arm: str):
+    """For a forced arm, a local judgement upstream answering the arm's
+    verdict, with the kernel's leg endpoints pointed at it while the run
+    lasts; for `routed`, nothing."""
+    if arm not in FORCED:
+        yield
+        return
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tests.judgement_upstream", "--answer", FORCED[arm]],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    saved = {k: os.environ.get(k) for k in ("VALOR_JEV_URL", "VALOR_OPEN_WEIGHT_URL")}
+    try:
+        os.environ.update(json.loads(proc.stdout.readline()))
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def replay(item: dict, arm: str, args) -> dict:
+    with judged_as(arm):
+        return _replay(item, arm, args)
+
+
+def _replay(item: dict, arm: str, args) -> dict:
     run_name = f"{item['name']}-{arm}"
     result_file = DEMO / "results" / f"{run_name}.json"
     result = json.loads(result_file.read_text()) if result_file.exists() else None
@@ -236,8 +285,6 @@ def replay(item: dict, arm: str, args) -> dict:
                 args.model,
                 "--harness-config",
                 ws["harness_config"],
-                "--mode",
-                arm,
                 "--target-branch",
                 "main",
             )
@@ -307,7 +354,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("item")
-    parser.add_argument("--arm", required=True, choices=["bare", "clarify"])
+    parser.add_argument("--arm", required=True, choices=["bare", "clarify", "routed"])
     parser.add_argument("--model", default="claude-opus-5-5")
     parser.add_argument("--budget", type=float, default=8.0)
     parser.add_argument("--stand-in-model", default="sonnet")

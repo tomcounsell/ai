@@ -232,22 +232,29 @@ def test_the_cli_raise_is_folded_and_shown_in_the_next_brief(dsn, tmp_path):
 
 
 def test_a_run_stopped_by_an_empty_budget_runs_again_after_a_raise(dsn, tmp_path):
+    """The judge is a task's first spend: with no money it asks no provider,
+    the task stays in judge, and after Tom's raise the next run judges and
+    the working session goes on."""
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, plan="ask")
 
     async def go():
-        task = await scripted.start(dsn, ws, budget_usd_micros=0)
+        task = await scripted.start(dsn, ws, budget_usd_micros=0, judge=None)
+        first = await scripted.run_judge(dsn, task, "precise")
+        async with await db.connect(dsn) as conn:
+            kinds = [r["type"] for r in await ledger.read(conn, task)]
+            await budget.raise_budget(conn, task, 1_000)
+        judged = await scripted.run_judge(dsn, task, "precise")
         gateway = Gateway(dsn)
         await gateway.start()
-        first = await session.run(gateway, task, turn_for, dsn=dsn)
-        async with await db.connect(dsn) as conn:
-            await budget.raise_budget(conn, task, 1_000)
         second = await session.run(gateway, task, turn_for, dsn=dsn)
         await gateway.close()
-        return first, second
+        return first, kinds, judged, second
 
-    first, second = run(go())
-    assert first["status"] == "budget exhausted"
+    first, kinds, judged, second = run(go())
+    assert first["status"] == "budget exhausted" and first["state"]["state"] == "judge"
+    assert kinds == ["task.started", "gateway.refused"]  # refused before any provider was asked
+    assert judged["status"] == "moved"
     # a turn ran and asked its question, which moved the task to waiting
     assert second["status"] == "moved" and second["state"]["state"] == "waiting"
 
@@ -333,9 +340,10 @@ def test_the_cli_raise_refuses_an_unknown_task_and_an_amount_not_above_zero(dsn,
 
 def test_an_open_question_is_listed_and_not_counted(dsn):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0, mode="bare")
+        task = await new_task(dsn, budget_usd_micros=0)
         async with await db.connect(dsn) as conn:
             async with conn.transaction():
+                await ledger.append(conn, task, "judge.decided", {"verdict": "precise", "leg": "judgement"})
                 await ledger.append(
                     conn,
                     task,
@@ -346,10 +354,7 @@ def test_an_open_question_is_listed_and_not_counted(dsn):
 
     state = run(go())
     assert state["state"] == "waiting" and state["return_to"] == "plan"
-    assert [(a["kind"], a.get("answer")) for a in state["attention"]] == [
-        ("verdict", None),
-        ("question", None),
-    ]
+    assert [(a["kind"], a.get("answer")) for a in state["attention"]] == [("question", None)]
     assert state["attention_counts"]["question"] == {"total": 0, "role_played": 0, "unknown": 0}
 
 

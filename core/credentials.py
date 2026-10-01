@@ -192,3 +192,82 @@ def _secure_hba(conn: psycopg.Connection, databases: list[str]) -> str:
     conn.execute("SELECT pg_reload_conf()")
     saved.unlink()
     return "written"
+
+
+# -- the judgement legs' keys ------------------------------------------------------
+#
+# Kernel-held secrets live in the kernel key directory, the password file's
+# directory, which both turn sandbox profiles deny. The judgement keys are
+# one `NAME=value` file there (`settings.judgement_keyfile`), written only by
+# `copy_keys` and read only by the kernel process, never into an
+# environment.
+
+
+class MissingKey(CredentialError):
+    """A key the kernel needs is not in its key file. The message names the
+    variable and the file, never a value."""
+
+
+def _parse_env(text: str) -> dict[str, str]:
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        out[name] = value
+    return out
+
+
+def read_key(keyfile: str | Path, name: str) -> str:
+    """One key from the kernel's key file, or `MissingKey` naming it."""
+    path = Path(keyfile)
+    try:
+        found = _parse_env(path.read_text())
+    except FileNotFoundError:
+        raise MissingKey(
+            f"{name}: the key file {path} does not exist; run `python -m core judgement-keys`"
+        ) from None
+    value = found.get(name)
+    if not value:
+        raise MissingKey(f"{name} is not in {path}; run `python -m core judgement-keys`")
+    return value
+
+
+def copy_keys(vault_env: str | Path, keyfile: str | Path, names: list[str]) -> dict[str, str]:
+    """Copy `names` from the vault `.env` into the key file (mode 600, its
+    directory 700), atomically. Returns each name's `written`, `kept`, or
+    `missing`; whether a value changed is decided by SHA-256 digest, and no
+    value or part of one is returned."""
+    keyfile = Path(keyfile)
+    vault = _parse_env(Path(vault_env).read_text())
+    keyfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(f"{keyfile}.lock", os.O_CREAT | os.O_WRONLY, 0o600), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = _parse_env(keyfile.read_text()) if keyfile.exists() else {}
+        status: dict[str, str] = {}
+        for name in names:
+            new = vault.get(name)
+            if not new:
+                status[name] = "missing"
+                continue
+            same = (
+                name in current
+                and hashlib.sha256(current[name].encode()).digest() == hashlib.sha256(new.encode()).digest()
+            )
+            status[name] = "kept" if same else "written"
+            current[name] = new
+        staged = keyfile.with_name(keyfile.name + ".new")
+        fd = os.open(staged, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as f:
+            for name, value in current.items():
+                f.write(f"{name}={value}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(staged, 0o600)
+        os.replace(staged, keyfile)
+    return status

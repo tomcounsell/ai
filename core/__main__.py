@@ -6,18 +6,28 @@ secure-login                   the kernel databases' password file, both roles'
                                passwords, and the pg_hba.conf rules; idempotent
 settings                       every setting, as shell assignments
 start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
-      [--model SEAT_OR_ID] [--harness-config FILE] [--mode bare|clarify]
-      [--target-branch B] [--by B] [--role-played]
+      [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
+      [--by B] [--role-played]
                                start a task; prints its id. `--model` takes a
                                seat (frontier, reviewer, light) or a model id.
-                               `--mode` is the starter's judge verdict until
-                               the judge runs (bare: precise, clarify: thin);
-                               without it the task waits in judge. The merge
-                               lands on `--target-branch` (default: the branch
-                               origin's HEAD names) at origin's URL as it is now
+                               The task starts in judge. The merge lands on
+                               `--target-branch` (default: the branch origin's
+                               HEAD names) at origin's URL as it is now
 run TASK_ID                    run the task through the state machine until it
                                needs Tom or a stage with no runner; prints one
-                               status line
+                               status line. The judge asks the judgement port;
+                               a leg pointed at its default endpoint needs its
+                               key in the kernel's key file, and a missing one
+                               refuses the run, naming it
+judgement-keys                 copy the judgement legs' keys from the vault
+                               .env into the kernel's key file (mode 600);
+                               prints each name with written, kept, or
+                               missing, never a value
+calibrate CASES.json --budget-usd N
+                               both judgement legs alone on every labelled
+                               case (at most 50, at most $0.50), one
+                               calibration task, one judgement.calibrated
+                               record on the judgement stream; prints it
 answer TASK_ID TEXT [--by B] [--role-played]
                                the answer to the task's open question
 feedback TASK_ID TEXT [--by B] [--role-played]
@@ -30,8 +40,8 @@ verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]... [--raise-critique N]
       [--mission-item N] [--head SHA] [--suite-command C] [--failure T]...
       [--behavior T]... [--by B] [--via V] [--role-played]
                                record by hand the verdict of a stage that has
-                               no runner yet (judge, critique, test, review,
-                               docs), `leg: manual`
+                               no runner yet (critique, test, review, docs),
+                               `leg: manual`
 grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
@@ -55,9 +65,10 @@ backup [--plist]               dump the kernel database to the backup disk and
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
-This module is the composition root: `run`, `verdict`, and `release` wire
-the Claude Code harness, the runners, and the workspace performers into the
-kernel. Nothing else in `core/` imports outside it.
+This module is the composition root: `run`, `verdict`, `release`, and
+`calibrate` wire the Claude Code harness, the judgement legs, the runners,
+and the workspace performers into the kernel. Nothing else in `core/`
+imports outside it.
 """
 
 import argparse
@@ -65,10 +76,24 @@ import asyncio
 import json
 from pathlib import Path
 
-from core import backup, broker, budget, corrections, credentials, db, guards, ledger, router, session, tasks
+from core import (
+    backup,
+    broker,
+    budget,
+    corrections,
+    credentials,
+    db,
+    guards,
+    judgement,
+    judgement_sites,
+    ledger,
+    router,
+    session,
+    tasks,
+)
 from core import verdicts as verdicts_
 from core.machine import State
-from core.settings import resolve_model, settings
+from core.settings import JEV_KEY, JEV_URL, OPEN_WEIGHT_KEY, OPEN_WEIGHT_URL, resolve_model, settings
 
 
 def _performers(b: tasks.Brief) -> None:
@@ -91,9 +116,41 @@ async def _working(ctx: router.Context) -> dict:
     return await session.run(ctx.gateway, ctx.task_id, _turn_for, dsn=ctx.dsn, alive=ctx.alive)
 
 
-# The runner for each state this kernel can run. The judge (1.3) and the
-# critique and check runners (1.4) are added here.
-RUNNERS: dict = {State.CLARIFY: _working, State.PLAN: _working, State.BUILD: _working, State.PATCH: _working}
+def port(keyfile: str | None = None) -> judgement.JudgementPort:
+    """The judgement port with both legs. A leg at its default endpoint
+    reads its key from the kernel's key file, and a missing key raises
+    `credentials.MissingKey` naming it, so the run refuses to start; a leg
+    pointed at a loopback endpoint (tests, the emulator's forced arms) gets
+    a placeholder and needs no key; any other endpoint is refused."""
+    from tools.jev import Jev
+    from tools.open_weight import OpenWeight
+
+    keyfile = keyfile or settings.judgement_keyfile
+    jev_key = judgement.endpoint_key(
+        settings.jev_url, JEV_URL, lambda: credentials.read_key(keyfile, JEV_KEY)
+    )
+    ow_key = judgement.endpoint_key(
+        settings.open_weight_url, OPEN_WEIGHT_URL, lambda: credentials.read_key(keyfile, OPEN_WEIGHT_KEY)
+    )
+    return judgement.JudgementPort(
+        {"jev": Jev(settings.jev_url, jev_key), "open_weight": OpenWeight(settings.open_weight_url, ow_key)}
+    )
+
+
+def runners(judgement_port: judgement.JudgementPort | None) -> dict:
+    """The runner for each state this kernel can run. The critique and check
+    runners (1.4) are added here."""
+    return {
+        State.JUDGE: judgement_sites.judge_runner(judgement_port),
+        State.CLARIFY: _working,
+        State.PLAN: _working,
+        State.BUILD: _working,
+        State.PATCH: _working,
+    }
+
+
+# The stages that have a runner, for the manual verdict's refusal.
+RUNNERS: dict = runners(None)
 
 
 def _usd(micros: int) -> str:
@@ -130,6 +187,8 @@ def _status_line(task_id: str, out: dict) -> str:
                 f"  then:         python -m core release {effect_id}"
             )
         return "\n".join(lines)
+    if status == "calibration task":
+        return f"CALIBRATION TASK (task {task_id}): a calibration task runs no stage"
     if status == "no runner":
         missing = out["missing"]
         stage = state.get("state")
@@ -157,10 +216,14 @@ async def _run_task(task_id: str) -> str:
     from harnesses import claude_code
 
     _performers(b)
+    try:
+        judgement_port = port()
+    except (credentials.MissingKey, ValueError) as exc:
+        raise SystemExit(f"run refused: {exc}") from None
     gateway = Gateway()
     await gateway.start()
     try:
-        out = await router.run(gateway, task_id, RUNNERS)
+        out = await router.run(gateway, task_id, runners(judgement_port))
     except claude_code.Unsandboxed as exc:
         raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
@@ -182,9 +245,7 @@ async def _verdict(conn, args) -> str:
     verdicts_.manual_allowed(stage, RUNNERS)
     who = {"by": args.by, "via": args.via, "role_played": args.role_played}
     _performers(await tasks.brief(conn, args.task_id))
-    if stage is State.JUDGE:
-        await verdicts_.record_judge(conn, args.task_id, args.verdict, **who)
-    elif stage is State.CRITIQUE:
+    if stage is State.CRITIQUE:
         raised = {
             k: v
             for k, v in (("critique_rounds", args.raise_critique), ("review_rounds", args.raise_review))
@@ -216,6 +277,19 @@ async def _run(args) -> None:
     if args.command == "run":
         print(await _run_task(args.task_id))
         return
+    if args.command == "calibrate":
+        try:
+            judgement_port = port()
+        except (credentials.MissingKey, ValueError) as exc:
+            raise SystemExit(f"calibrate refused: {exc}") from None
+        try:
+            record = await judgement_sites.calibrate(
+                judgement_port, settings.dsn(), args.cases, round(args.budget_usd * 1_000_000)
+            )
+        except (ValueError, budget.BudgetRefused) as exc:
+            raise SystemExit(f"calibrate refused: {exc}") from None
+        print(json.dumps(record, indent=2))
+        return
     async with await db.connect() as conn:
         if args.command == "start":
             harness = json.loads(Path(args.harness_config).read_text()) if args.harness_config else {}
@@ -231,7 +305,6 @@ async def _run(args) -> None:
                 workspace=workspace,
                 model=resolve_model(args.model),
                 harness=harness,
-                mode=args.mode,
                 **where,
             )
             print(await tasks.start(conn, brief, by=args.by, role_played=args.role_played))
@@ -275,7 +348,10 @@ async def _run(args) -> None:
         elif args.command == "ledger":
             print(ledger.render(await ledger.read(conn, args.task_id)))
         elif args.command == "stop":
-            fresh = await tasks.stop(conn, args.task_id, reason=args.reason)
+            try:
+                fresh = await tasks.stop(conn, args.task_id, reason=args.reason)
+            except tasks.CalibrationTask as exc:
+                raise SystemExit(str(exc)) from None
             print("stopped" if fresh else "already stopped")
         elif args.command == "pending":
             for effect in await broker.pending(conn):
@@ -330,6 +406,8 @@ async def _run(args) -> None:
                 )
             except tasks.TaskStopped:
                 raise SystemExit(f"task {args.task_id} is stopped; a stopped task takes no raise") from None
+            except tasks.CalibrationTask as exc:
+                raise SystemExit(str(exc)) from None
             except KeyError:
                 raise SystemExit(f"no task {args.task_id}") from None
             except ValueError as exc:
@@ -361,6 +439,15 @@ def _sync(args) -> bool:
         print(json.dumps(_secure_login()))
     elif args.command == "settings":
         print(settings.as_shell())
+    elif args.command == "judgement-keys":
+        try:
+            status = credentials.copy_keys(
+                settings.vault_env, settings.judgement_keyfile, [JEV_KEY, OPEN_WEIGHT_KEY]
+            )
+        except FileNotFoundError:
+            raise SystemExit(f"no vault .env at {settings.vault_env}") from None
+        for name, what in status.items():
+            print(f"{name}: {what}")
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -384,11 +471,20 @@ def _sync(args) -> bool:
     return True
 
 
+class _Parser(argparse.ArgumentParser):
+    """No abbreviated options: a removed flag (`--mode`) must be an error,
+    not a prefix of another (`--model`)."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="python -m core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     sub.add_parser("migrate").add_argument("--db")
     start = sub.add_parser("start")
     start.add_argument("instruction")
@@ -397,7 +493,6 @@ def main() -> None:
     start.add_argument("--workspace")
     start.add_argument("--model", default="light")
     start.add_argument("--harness-config")
-    start.add_argument("--mode", choices=list(tasks.MODES))
     start.add_argument("--target-branch")
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
@@ -453,6 +548,10 @@ def main() -> None:
     sub.add_parser("corrections")
     sub.add_parser("secure-login")
     sub.add_parser("settings")
+    sub.add_parser("judgement-keys")
+    calibrate = sub.add_parser("calibrate")
+    calibrate.add_argument("cases")
+    calibrate.add_argument("--budget-usd", type=float, required=True)
     raise_ = sub.add_parser("budget").add_subparsers(dest="budget_command", required=True).add_parser("raise")
     raise_.add_argument("task_id")
     raise_.add_argument("usd", type=float)

@@ -482,7 +482,16 @@ rows_strategy = st.lists(
     max_size=40,
 )
 STARTS = st.sampled_from(
-    [{"sdlc": 1, "instruction": "x"}, {"instruction": "x"}, None, MISSING, "text", {"sdlc": "1"}]
+    [
+        {"sdlc": 1, "instruction": "x"},
+        {"instruction": "x"},
+        None,
+        MISSING,
+        "text",
+        {"sdlc": "1"},
+        {"calibration": "intake.underspecified", "budget_usd_micros": 1},
+        {"calibration": "intake.underspecified", "sdlc": 1, "budget_usd_micros": 1},
+    ]
 )
 
 
@@ -510,6 +519,10 @@ def test_every_prefix_folds_to_exactly_one_state(start, generated):
     for n in range(len(rows) + 1):
         f = machine.fold(rows[:n])
         assert isinstance(f.state, State)
+        if n >= 1 and isinstance(start, dict) and start.get("calibration"):
+            # a calibration task: no row applies, whatever follows its start
+            assert f.calibration and not f.legacy and f.state is State.JUDGE and f.candidate is None
+            continue
         if stopped:
             assert f.state is State.STOPPED  # absorbing
         stopped = stopped or f.state is State.STOPPED
@@ -604,11 +617,13 @@ def test_a_boolean_raise_is_not_a_count():
     assert f.state is State.CRITIQUE and f.raised == {"critique_rounds": 0, "review_rounds": 0}
 
 
-def test_an_unknown_mode_is_refused():
+def test_a_brief_takes_no_mode_and_an_old_document_with_one_still_loads():
     from core import tasks
 
-    with pytest.raises(ValueError, match="mode"):
+    with pytest.raises(TypeError):
         tasks.Brief(instruction="x", budget_usd_micros=0, mode="x")
+    b = tasks.Brief(instruction="x", budget_usd_micros=0)
+    assert tasks.Brief.load({**tasks.asdict(b), "mode": "bare"}) == b
 
 
 def test_a_malformed_turn_ended_changes_nothing():

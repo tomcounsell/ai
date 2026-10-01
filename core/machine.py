@@ -194,6 +194,9 @@ class JoinResult:
 class Fold:
     state: State = State.JUDGE
     legacy: bool = False
+    # A calibration task (`python -m core calibrate`): a budget for judgement
+    # calls and nothing else. No SDLC row applies; every SDLC writer refuses it.
+    calibration: bool = False
     return_to: State | None = None
     open_question: str | None = None
     plan: dict[str, Any] | None = None
@@ -240,6 +243,7 @@ class Fold:
         return {
             "state": self.state.value,
             "legacy": self.legacy,
+            "calibration": self.calibration,
             "return_to": self.return_to.value if self.return_to else None,
             "plan": self.plan,
             "loops": {
@@ -321,6 +325,8 @@ def fold(rows: list[dict[str, Any]]) -> Fold:
     rows = [r for r in rows if isinstance(r, dict)]
     start = next((r for r in rows if r.get("type") == "task.started"), None)
     payload = start.get("payload") if start is not None else None
+    if isinstance(payload, dict) and payload.get("calibration"):
+        return Fold(calibration=True)
     sdlc = isinstance(payload, dict) and payload.get("sdlc") == 1
     if not sdlc:
         return _legacy(rows)

@@ -21,7 +21,7 @@ import pytest
 from core import broker, budget, db, ledger, router, session, signals, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
-from tests import scripted
+from tests import judgement_upstream, scripted
 from tests.conftest import TEST_DB
 from tests.scripted import git
 from tools.push_branch import PushBranch
@@ -48,7 +48,7 @@ def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, 
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await scripted.start(dsn, ws, mode="clarify")
+        task = await scripted.start(dsn, ws, judge="thin")
         first = await drive(dsn, task)
         again = await drive(dsn, task)  # runs no turn
         async with await db.connect(dsn) as conn:
@@ -74,7 +74,8 @@ def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, 
     for x in t:
         assert "# Corrections from Tom" in x["brief"] and "# How this task reaches Tom" in x["brief"]
     assert "push_branch" in t[0]["brief"] and "`merge`" not in t[0]["brief"]
-    assert (st["attention_counts"]["question"]["total"], st["attention_counts"]["verdict"]["total"]) == (1, 1)
+    # the judge's verdict is the kernel's reading of a judgement row: no attention spent
+    assert (st["attention_counts"]["question"]["total"], st["attention_counts"]["verdict"]["total"]) == (1, 0)
 
 
 def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(dsn, tmp_path):
@@ -123,7 +124,7 @@ def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await scripted.start(dsn, ws, mode="clarify")
+        task = await scripted.start(dsn, ws, judge="thin")
         outs = [await drive(dsn, task)]
         async with await db.connect(dsn) as conn:
             await session.answer(conn, task, "Morning, Tom.", by="stand-in", role_played=True)
@@ -137,7 +138,7 @@ def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     prompts = [x["prompt"] for x in scripted.turns(ws)]
     answered = "# Tom's answer\n\nMorning, Tom."
     assert prompts[1] == answered and prompts[2] == answered  # sent again after the failed turn
-    question = outs[2]["state"]["attention"][1]
+    question = outs[2]["state"]["attention"][0]
     assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
 
 
@@ -161,7 +162,7 @@ def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(d
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await scripted.start(dsn, ws, mode="clarify")
+        task = await scripted.start(dsn, ws, judge="thin")
         waiting = await drive(dsn, task)
         async with await db.connect(dsn) as conn:
             with pytest.raises(LookupError, match="open question"):
@@ -281,14 +282,15 @@ def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_r
         async with await db.connect(dsn) as conn:
             return await tasks.start(
                 conn,
-                tasks.Brief(instruction="x", budget_usd_micros=1_000, workspace=str(tmp_path), mode="bare"),
+                tasks.Brief(instruction="x", budget_usd_micros=1_000, workspace=str(tmp_path)),
             )
 
     task = run(start())
+    jev, ow = judgement_upstream.shared().urls(fixed="precise")
     out = subprocess.run(
         [sys.executable, "-m", "core", "run", task],
         cwd=ROOT,
-        env={**os.environ, "VALOR_DB": TEST_DB},
+        env={**os.environ, "VALOR_DB": TEST_DB, "VALOR_JEV_URL": jev, "VALOR_OPEN_WEIGHT_URL": ow},
         capture_output=True,
         text=True,
         check=False,
@@ -299,7 +301,8 @@ def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_r
         async with await db.connect(dsn) as conn:
             return [r["type"] for r in await ledger.read(conn, task)]
 
-    assert run(rows()) == ["task.started", "judge.decided"]  # no turn started, nothing reserved
+    got = run(rows())  # the judge ran through the local upstream; no turn started
+    assert got[0] == "task.started" and "judge.decided" in got and "turn.started" not in got
     assert not (tmp_path / ".valor").exists()
 
 

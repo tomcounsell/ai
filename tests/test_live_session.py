@@ -1,5 +1,6 @@
 """A task over several real turns, end to end through the command line, on a
-toy git repository: start; run until Valor asks Tom a question; answer; run
+toy git repository: start; the judge says precise (through the local judgement upstream, the
+way the emulator forces an arm); run until Valor asks Tom a question; answer; run
 until the plan is committed; critique by hand; run until Valor builds a
 candidate and requests a push; the three checks by hand; approve and release
 the push and the merge; the bare origin gets both; every turn's Brief
@@ -25,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from core import db, ledger
+from tests import judgement_upstream
 from tests.conftest import TEST_DB
 
 pytestmark = [
@@ -47,10 +49,11 @@ def sh(*args: str, cwd: Path | None = None) -> str:
 
 
 def core(*args: str) -> str:
+    jev, ow = judgement_upstream.shared().urls(fixed="precise")
     out = subprocess.run(
         [sys.executable, "-m", "core", *args],
         cwd=ROOT,
-        env={**os.environ, "VALOR_DB": TEST_DB},
+        env={**os.environ, "VALOR_DB": TEST_DB, "VALOR_JEV_URL": jev, "VALOR_OPEN_WEIGHT_URL": ow},
         capture_output=True,
         text=True,
         check=False,
@@ -94,7 +97,6 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     task = core(
         "start", INSTRUCTION, "--budget-usd", "0.25", "--ceiling", "act",
         "--workspace", str(ws), "--model", "light", "--harness-config", str(home / "harness.json"),
-        "--mode", "bare",
     )  # fmt: skip
     who = ["--by", "live test", "--role-played"]
     assert core("run", task).startswith("QUESTION")

@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-3-judgement
 type: build
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -99,6 +99,7 @@ Each is fixed in the doc named, in this build.
 | Breadth labels `covered`, `gap` | three yes/no questions in one call, one per gap kind | `test.decided` lists behaviors and a judgement returns no prose; one call can report two kinds | judgement-layer.md shape 8; sdlc-state-machine.md |
 | Each task names a `fail_safe` label | breadth and governance leave the branch without a verdict when both legs fail | a provider outage should rerun, not spend Tom's taps or a repair turn (1.4's failed-branch rule) | judgement-layer.md, Task taxonomy |
 | The judge reads "a short summary of the code it names" (sdlc-state-machine.md) | request, thread, project only | judgement-layer.md calls the summary a gap until the emulator measures it | sdlc-state-machine.md |
+| The judge's floor "is a gap until the record exists" (judgement-layer.md) | floors of 0.70 (Jev) and 0.75 (fallback) on P(precise), set before the first calibration run and frozen through it | a run needs a floor to gate at; fitting one to seven cases would be fitting noise. The risk, stated before the run: a precise case must clear .75 on the fallback, whose stated probabilities run coarse (.7, .8, .95) | judgement-layer.md, Confidence gating |
 
 ## What will be built, per Done item
 
@@ -111,51 +112,59 @@ label to one of two kernel actions: `proceed` (the less cautious one) or
 `caution`. The gate is on the action, never on a sub-label.
 
 ```python
-class Kind(StrEnum): CHOICE = "choice"; BOOLEAN = "boolean"
+class Kind(StrEnum):
+    CHOICE = "choice"
+    BOOLEAN = "boolean"
+
 
 @dataclass(frozen=True)
 class Question:
-    id: str                        # "kind", "gap_state", "adds"
+    id: str  # "kind", "gap_state", "adds"
     text: str
     kind: Kind
-    labels: dict[str, str]         # label -> rubric; BOOLEAN has "true" and "false"
-    proceed: frozenset[str]        # the labels whose action is proceed; the rest are caution
+    labels: dict[str, str]  # label -> rubric; BOOLEAN has "true" and "false"
+    proceed: frozenset[str]  # the labels whose action is proceed; the rest are caution
+
 
 @dataclass(frozen=True)
 class JudgementTask:
     site: str
     questions: tuple[Question, ...]
-    inputs: dict[str, str]         # field -> where the kernel reads it
-    error_cost: str                # "high" | "medium" | "low"
-    floor: dict[str, float]        # per leg, in (0.5, 1): {"primary": x, "fallback": y}
-    on_abstain: str                # always "caution"
-    on_failure: str                # "caution" or "no_verdict"
-    consumer: dict[str, str]       # each action -> what the kernel does, in words
+    inputs: dict[str, str]  # field -> where the kernel reads it
+    error_cost: str  # "high" | "medium" | "low"
+    floor: dict[str, float]  # per leg, in (0.5, 1): {"primary": x, "fallback": y}
+    on_abstain: str  # always "caution"
+    on_failure: str  # "caution" or "no_verdict"
+    consumer: dict[str, str]  # each action -> what the kernel does, in words
     serves: str
-    guard: str                     # the guard id, or the rule a site enforces
-    calibrated: str | None         # task_sha256 of the record it landed on
+    guard: str  # the guard id, or the rule a site enforces
+    calibrated: str | None  # task_sha256 of the record it landed on
+
 
 @dataclass(frozen=True)
-class Answer:                      # one question's answer from one leg
+class Answer:  # one question's answer from one leg
     question: str
-    label: str                     # argmax, for the record only
+    label: str  # argmax, for the record only
     probabilities: dict[str, float]  # normalized
-    p_proceed: float               # the sum over the proceed labels
-    decision: str                  # "proceed" | "caution" | "abstain"
-    provider_choice: str | None    # Jev's own choice, recorded, not used
+    p_proceed: float  # the sum over the proceed labels
+    decision: str  # "proceed" | "caution" | "abstain"
+    provider_choice: str | None  # Jev's own choice, recorded, not used
+
 
 @dataclass(frozen=True)
 class Judgement:
     judgement_id: str
     site: str
-    answers: dict[str, Answer]     # empty when both legs failed
-    action: dict[str, str]         # per question: "proceed" | "caution"; empty when failed
-    abstained: tuple[str, ...]     # questions whose action came from on_abstain
-    leg: str | None                # the leg whose answers stand
+    answers: dict[str, Answer]  # empty when both legs failed
+    action: dict[str, str]  # per question: "proceed" | "caution"; empty when failed
+    abstained: tuple[str, ...]  # questions whose action came from on_abstain
+    leg: str | None  # the leg whose answers stand
     model: str | None
-    usd_micros: int                # every leg's charge together
+    usd_micros: int  # every leg's charge together
     failed: bool
-    attempts: tuple[dict, ...]     # per leg: model, endpoint host, outcome, reason, status, call_id, charge, latency
+    attempts: tuple[
+        dict, ...
+    ]  # per leg: model, endpoint host, outcome, reason, status, call_id, charge, latency
 ```
 
 - **The gate.** For each question the port normalizes the leg's
@@ -179,6 +188,8 @@ class Judgement:
   | failed | answered | fallback's actions, abstains as above |
   | failed | failed | `judgement.failed`; the consumer applies `on_failure` |
 
+- **Each question records the leg and model that answered it**, and the
+  row's `leg` is `primary`, `fallback`, or `both`.
 - **Jev's `choice` disagreeing with the argmax** (ties, rounding) is not
   malformed: the probabilities decide, Jev's choice is recorded as
   `provider_choice`. **A declared label missing from a leg's
@@ -396,6 +407,13 @@ router does not change. One run:
 4. Return `{"status": "moved"}`; the router folds and continues to `plan`
    or `clarify`.
 
+**When 1.4 calls them.** Before the suite (breadth) and before the
+reviewer's or docs turn (governance), so an outage costs no suite run and
+no Opus turn. Each reuses an answered row on a rerun: breadth by the
+current candidate, governance by hunk id and input digest; and once a
+site's reruns are spent, the call returns the last failure without asking
+again. Both are in the functions 1.4 calls and are tested there.
+
 **How 1.4 calls breadth.** `judgement_sites.breadth(port, dsn, task_id) ->
 str` (a `judgement_id`) reads the current candidate from the fold and the
 base from the Brief, splits `git diff --no-renames base candidate` into
@@ -408,7 +426,12 @@ failures=...)`. With `breadth` given, `record_check` reads the row itself:
 - it refuses a row from another task, another site, or whose `ref` names a
   candidate other than the current one;
 - a `judgement.failed` row is refused with "breadth unanswered", so the
-  runner records no verdict and the next run reruns the branch;
+  runner records no verdict and the next run reruns the branch, until the
+  candidate has `UNANSWERED_RUNS` (2) failed breadth judgements: then the
+  failure stands as caution, listing "breadth not judged: both judgement
+  legs failed on 2 runs (...)". A failure because the change is larger
+  than either leg may be sent is caution at once ("breadth not judged:
+  the change is larger than either judgement leg may be sent");
 - it takes `behaviors` from the consumer table (the rubric of each question
   at caution), never from the caller;
 - it writes `breadth: {judgement_id, actions, abstained, model,
@@ -429,9 +452,13 @@ governance_from=ids, governance=specs, notes=...)`. `record_check` then:
   with added lines has exactly one row among the ids and every row's `ref`
   names a hunk id in that diff, so no hunk is skipped and no stale answer
   rides over a changed hunk;
-- refuses, with "governance unanswered", when any row is
-  `judgement.failed`: the branch records no verdict and the next run
-  reruns it;
+- refuses, with "governance unanswered", when any hunk's row is
+  `judgement.failed` with reruns left: the branch records no verdict and
+  the next run reruns it. A hunk with 2 failed judgements for the same
+  input is unjudged, and all unjudged hunks together become **one**
+  diff-level instance (`unjudged-<digest>`, path `(diff)`) naming them and
+  the reason: one tap, never one per hunk. A hunk too large for both legs
+  is an instance at once;
 - takes as instances the **union** of the hunks whose action is caution
   (built through the existing `_instances`, so ids still come from git) and
   any `PATH:LINE` the reviewer named (`governance=specs`): the reviewer can
@@ -447,10 +474,16 @@ The existing rules then hold unchanged: a review `pass` naming an
 ungranted instance is refused, and the broker refuses the merge while any
 instance lacks Tom's tap.
 
-`git.py` gains `Hunk.text` (not part of the id), `added_hunks(workspace,
-older, newer)` over every path, and `function_hunk(workspace, older, newer,
-hunk)`, the `git diff -W` hunk containing it, run with the same neutralized
-config as every other call.
+The hunks are `git.hunks`'s, with its default three lines of context, so
+the ids, the union with a reviewer's `PATH:LINE`, and the notes all match
+what `git.hunk_at` and `Hunk.id` compute. `git diff -W` (through `git.out`,
+so with the same neutralized config) shapes only the text the judgement
+reads: the `-W` hunk containing the default one, or the default hunk when
+the `-W` one is over 60 KB. Two hunks with the same id (identical added
+lines in the same function context of one file) are asked once. An
+unchanged hunk in a changed function keeps its id, and so its grant, while
+its input changes; the reuse key is the hunk id and the input digest, so
+such a hunk is asked again. `core/git.py` is not changed.
 
 ### 4. Both legs label the seven seed cases in one run; the calibration record
 
@@ -485,8 +518,13 @@ file over 50 cases is refused. It:
 1. starts a **calibration task**: a task document and a `task.started`
    carrying `calibration: SITE` and no `sdlc` marker. `machine.fold` gives
    it `Fold.calibration = True` (its own flag, not `legacy`); the router
-   returns `calibration task`, and every SDLC command refuses it with that
-   name;
+   returns `calibration task`. Every writer that refuses a legacy task also
+   refuses a calibration task by that name (`verdicts._fold`, so every
+   verdict; `ensure_merge`; `guards.grant`; `session.answer` and
+   `feedback`), and so do `budget.raise_budget`, `tasks.stop`, and
+   `runs.run_turn` (a calibration task runs no turn). Its `task.started`
+   carries `budget_usd_micros`, which is what `budget.reserve` reads;
+   the fold property test generates calibration starts;
 2. calls `ask_leg` for both legs on every case, writing their
    `judgement.answered`/`failed` rows on that task (`ref: {"case": id}`);
 3. writes one `judgement.calibrated` row on the `judgement` stream:
@@ -512,8 +550,11 @@ baseline items do.
 The Brier score is information with its `n` beside it, never evidence of
 calibration: seven cases cannot carry one.
 
-**Runs allowed.** Up to five, each recorded. The floors are frozen before
-run 1 (the table above); between runs only rubric wording may change. The
+**Runs allowed.** Up to five, each recorded. The judge's floors are frozen
+before run 1 (the table above); between runs only wording may change. The
+breadth and governance floors are not frozen here: they come from 1.4's
+calibration records. The expected risk: a precise case must reach P(precise)
+.75 on the fallback. The
 build record lists each run, the wording changed, and its result, so a
 reader sees how much the seven cases were fitted. If five runs do not give
 one with both legs all correct, the build stops and asks Tom.
@@ -570,11 +611,20 @@ secret is in a dotfile".
   It never prints a value or any part of one; whether a value changed is
   decided by comparing SHA-256 digests. It is the only code that writes the
   file.
-- **Read at start.** The composition root reads both names when it builds
-  the port, for `run` and `calibrate`, and refuses to start with the
-  missing name in the error (machine.md: a missing name fails the start).
-  A run of a task in any state needs them, since any run may reach the
-  judge. The values are held in the two adapter objects.
+- **Only to the pinned host.** A leg sends its real key only when its
+  endpoint is its pinned default (`settings.JEV_URL`,
+  `settings.OPEN_WEIGHT_URL`). Any other endpoint must be on loopback and
+  is sent a fixed placeholder (`judgement.LOOPBACK_KEY`); a non-loopback,
+  non-default endpoint is refused when the port is built. So the endpoint
+  override (`VALOR_JEV_URL`, `VALOR_OPEN_WEIGHT_URL`) can never carry a key
+  off the machine, and the forced-arm upstream never sees one.
+- **Read at start, only where needed.** The composition root reads a key
+  when it builds the port, for `run` and `calibrate`, and only for a leg
+  pointed at its default endpoint; a missing one refuses the start with
+  the name in the error (machine.md: a missing name fails the start). A leg
+  pointed at loopback needs no key, so the test suite and the emulator's
+  forced arms run with no key file at all. The values are held in the two
+  adapter objects.
 - **Never.** In `os.environ` (a bare `turn` copies the kernel's
   environment), in a ledger row, in an exception message, in a log line.
   Failure rows hold a status code and a fixed sentence, never a provider's
@@ -784,11 +834,20 @@ index names files. The governance paragraph is not edited anywhere.
 
 ## Rollout at merge
 
-Not done by the builder. In the kernel checkout: `python -m core migrate`
-(adds `events_one_judgement`; no row rewritten), `python -m core
-judgement-keys`, then one `python -m core calibrate intake.underspecified
-<cases> --budget-usd 0.05` against the real ledger, whose `task_sha256`
-must equal the declaration's.
+Not done by the builder; held for Tom, like the guard seeding of 1.2. In
+the kernel checkout:
+
+1. `python -m core migrate` (adds `events_one_judgement`; no row
+   rewritten).
+2. `python -m core judgement-keys`: creates `~/.config/valor-kernel/judgement-keys`
+   from the vault `.env`. Until it exists, `run` refuses to start, naming
+   `TYPESAFE_API_KEY`.
+3. One `python -m core calibrate ~/src/valor-demo/items/judgement/intake.underspecified.json
+   --budget-usd 0.05` against the real ledger (about $0.002); its
+   `task_sha256` must equal `JUDGE.calibrated`
+   (`32b8245e60649f4884abba82e5d02ea6cfc865acc7ec21f4afb2737af6ff9c21`), and
+   its `entry_check` should be true again. Every judgement row carries both
+   digests, so a mismatch shows on the ledger.
 
 ## Questions for Tom (assumed answers; the build proceeds on them)
 
@@ -845,9 +904,11 @@ must equal the declaration's.
 - The calibration task is its own fold flag (`calibration`), not `legacy`.
 - `calibrate`: budget required, at most $0.50; at most 50 cases.
 - The cases file and results live in `~/src/valor-demo/`, outside the repo.
-- The builder installs the key file at the real path with `python -m core
-  judgement-keys` (the rollout needs it there anyway) and runs calibration
-  against a build database, never `valor_rebuild`.
+- The builder never writes the kernel key directory: its keys sit in a
+  builder-owned directory (`VALOR_PG_PASSFILE=~/.config/valor-kernel-m13/pgpass`,
+  so `judgement-keys` derives `~/.config/valor-kernel-m13/judgement-keys`),
+  and its calibration runs go to a build database
+  (`valor_rebuild_m13_calib`), never `valor_rebuild`.
 - Up to five calibration runs, each recorded, only rubric wording changing
   between them, before asking Tom.
 
@@ -880,3 +941,128 @@ Every finding resolved in this revision:
     any hunk is an instance; the hunk input carries its enclosing function.
 13. `Decimal(str(cost))` rounded up; breadth as three booleans in one call;
     the calibration task has its own fold flag.
+
+## Critique round 2 (of 2), carried into the build
+
+The rounds were spent, so its findings were resolved in the build:
+
+1. **No unbounded no-verdict.** The calls are made before the suite and
+   the reviewer's turn and reuse answered rows; a site with 2 failed
+   judgements applies caution ("breadth not judged"; one diff-level
+   governance instance); inputs too large for both legs are caution at
+   once. In `judgement_sites.breadth`, `governance`, `breadth_outcome`,
+   and `governance_outcome`, tested through `record_check`.
+2. **No key off the machine.** A real key goes only to a leg's pinned
+   default host; any other endpoint must be loopback and gets a fixed
+   placeholder.
+3. **No key needed for loopback.** Only a leg at its default endpoint
+   needs a key at start; the suite runs with no key file.
+4. **Per-question merge.** The primary's confident answers stand; the
+   fallback's are taken only for the questions the primary abstained on;
+   each question records its leg.
+5. **Floors.** The judge's floors are in the differs table, frozen for the
+   judge only, with the fallback risk stated.
+6. **Hunks.** Ids and instances from `git.hunks`'s default diff; `-W`
+   shapes only the input; one row per hunk id; an unchanged hunk in a
+   changed function keeps its id.
+7. **Calibration tasks.** Every legacy-refusing writer, plus raise, stop,
+   and a turn, refuses them; the property test generates their starts;
+   their `task.started` carries the budget.
+8. **CLI bounds** kept: $0.50 and 50 cases.
+
+## Build record
+
+Built on `m1.3-judgement` from the plan above and both critique rounds.
+
+**What was built, per Done item.**
+
+1. *Port, router, adapters, pins.* `core/judgement.py` (types, `route`,
+   the gate, `JudgementPort.judge` and `ask_leg`, metering, rows, the
+   endpoint key rule, one HTTP attempt), `core/judgement_tasks.py` (the
+   three declarations), `tools/jev.py`, `tools/open_weight.py`, pins and
+   prices in `core/settings.py`.
+2. *Metering and rows.* `budget.judgement_price`, `judgement_worst_case`,
+   `judgement_cost`, `usd_micros`; `gateway.reserved`/`charged` rows with
+   `route: judgement`; `judgement.answered`, `judgement.failed`,
+   `judgement.calibrated`; `events_one_judgement` in `core/schema.sql`.
+3. *Three sites.* `core/judgement_sites.py`: `judge_runner` (registered in
+   `core/__main__.py`'s `runners(port)` for `State.JUDGE`), `breadth`,
+   `governance`, `diff_hunks`, and the outcome readers;
+   `verdicts.record_judge(judgement_id)` and `record_check(breadth=,
+   governance_from=, notes=)`.
+4. *Calibration.* `python -m core calibrate`, the calibration task and fold
+   flag, the record; five runs below.
+5. *Absorbed.* `--mode`, `MODES`, `Brief.mode`, the manual judge leg and
+   the `judge` stage of `verdict` are deleted; `Brief.load` reads old
+   documents; `replay.py --arm bare|clarify|routed` forces arms through the
+   local upstream.
+
+**Settled while building.**
+
+- The task digest also covers each leg's fixed rendering text
+  (`Leg.fixed_text`, `JudgementPort.signature`), so a reworded system
+  prompt is a new digest like a reworded rubric.
+- The fallback's schema asks for a short `notes` string before the
+  probabilities (comparing the inputs with each rubric); it is never kept.
+  This was the run 4 change that let the fallback read #893 and #188.
+- Option abbreviation is off in the command line (`allow_abbrev=False`):
+  otherwise a stale `--mode bare` is silently `--model bare`.
+- `task.started` now carries the starter's provenance, which only the
+  manual judge row held before.
+- `core/git.py` and `core/broker.py` are unchanged.
+
+**The calibration runs** (`intake.underspecified`, both legs alone on the
+seven seed cases, build database `valor_rebuild_m13_calib`, results in
+`~/src/valor-demo/results/calibration/intake.underspecified-run<k>.json`):
+
+| Run | Wording changed before it | Jev | Fallback | Entry check |
+|---|---|---|---|---|
+| 1 | (the plan's) | 5/7: #893 thin (`existing_ui_unscoped`), #633 abstained | 5/7: #188 precise, #893 thin | no |
+| 2 | question and all four rubrics rewritten around "would asking change what gets built" | 7/7 | 5/7: #872 abstained (.70), #893 thin | no |
+| 3 | `existing_ui_unscoped` excludes listed fixes; fallback system prompt | 7/7 | 5/7: #188 precise, #893 thin | no |
+| 4 | fallback `notes` before probabilities; `precise` and `one_line_ask` rubrics name the listed-fixes and short-label cases | 7/7 | 7/7 | yes |
+| 5 | none (the digest gained the rendering text; same wording as run 4) | 7/7 | 7/7 | yes |
+
+Run 5 is the record: `judgement.calibrated` with `task_sha256`
+`32b8245e60649f4884abba82e5d02ea6cfc865acc7ec21f4afb2737af6ff9c21`, both
+legs all correct, Brier 0.0114 (Jev) and 0.0040 (fallback), n = 7 each,
+abstain rate 0 on both, no errors, 32.7 and 225.9 micro-dollars per call.
+Label sources: Tom 1, role-played 0, judge 6. **These numbers are
+information, not evidence**: n = 7, and runs 2 to 4 changed wording after
+seeing which cases failed (the `precise` rubric now names "improve existing
+UI and lists candidate fixes" and the `one_line_ask` rubric "a short label
+plus a few words of purpose"), so the seven cases were fitted. The emulator
+and live labels are what can show whether the wording generalizes.
+
+**Spend.** All metered except the two premise probes. Probes $0.00004;
+fixture recording $0.0001; live judgement tests $0.0003; calibration runs
+1 to 5 $0.0063; `test_live_session.py` (Haiku turns) $0.0902. Total about
+$0.097, under the $2 declared.
+
+**Evidence.**
+
+- `cd ~/src/valor-rebuild-m13 && VALOR_TEST_DB=valor_rebuild_test_m13
+  ~/src/valor-rebuild-m12/.venv/bin/python -m pytest -q tests`: 397
+  passed, 5 skipped (the live tests), rebased onto 1.2's proposed patch 2
+  (`40db35f8e`). Before the rebase: 293 passed, 5 skipped, from 233 and 3.
+  Run with no `judgement-keys` file in the kernel key directory.
+- The rebase: `core/settings.py` kept both new blocks (git binary and
+  limits; judgement legs); 1.2's `test_an_unknown_mode_is_refused` became
+  `test_a_brief_takes_no_mode_and_an_old_document_with_one_still_loads`,
+  since the Brief has no `mode`. The judgement code reaches git only
+  through `core.git`, which runs the trusted binary; it spawns no process.
+  No prompt or declaration changed, so the calibration digest still
+  matches and calibration was not rerun.
+- With `VALOR_LIVE=1`: `tests/test_live_judgement.py` (2 passed, keys from
+  the builder's key directory) and `tests/test_live_session.py` (1 passed).
+- `uvx ruff check .`: clean. `uvx ruff format --check .`: clean on code;
+  it flags a Python block in `docs/bridges/telegram.md`, as on the base.
+- Tests: `tests/test_judgement.py` (the gate, the merge, metering,
+  malformed answers, budget and stop, keys and endpoints, declarations,
+  decoding by Hypothesis), `tests/test_judgement_sites.py` (the judge
+  runner, breadth and governance through `record_check`, calibration
+  tasks, the forced arm), `tests/test_live_judgement.py`, and the fold
+  property test's calibration starts in `tests/test_machine.py`.
+
+**Docs.** `docs/plans/valor-rebuild.md`'s 1.3 Done metering line is fixed
+here. The rest of "Docs the build makes true" is the docs stage's.

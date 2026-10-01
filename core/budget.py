@@ -12,10 +12,11 @@ committed budget, with a `budget.raised` row carrying his provenance.
 """
 
 import json
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from math import ceil
 
 from core import ledger, tasks
-from core.settings import PRICES, settings
+from core.settings import JUDGEMENT_PRICES, PRICES, settings
 
 
 class BudgetRefused(RuntimeError):
@@ -40,6 +41,54 @@ def prices(model: str) -> dict | None:
         "cache_read": p.cache_read,
     }
     return {**{k: round(v * 1_000_000) for k, v in per_mtok.items()}, "checked": p.checked.isoformat()}
+
+
+def judgement_price(model: str) -> dict | None:
+    """Micro-dollars per million tokens for a judgement leg's pinned model
+    (exact id only: a judgement model is pinned, never matched by prefix),
+    with the day it was checked."""
+    p = JUDGEMENT_PRICES.get(model)
+    if p is None:
+        return None
+    return {
+        "input": round(p.input * 1_000_000),
+        "output": round(p.output * 1_000_000),
+        "checked": p.checked.isoformat(),
+    }
+
+
+def judgement_worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
+    """A judgement call's reservation: its estimated input and every output
+    token it may produce, rounded up, never under one micro-dollar."""
+    return max(
+        1, ceil(input_tokens * price["input"] / 1_000_000) + ceil(max_tokens * price["output"] / 1_000_000)
+    )
+
+
+def usd_micros(reported) -> int | None:
+    """A provider's reported dollar cost as whole micro-dollars, rounded up.
+    Read through `Decimal(str(x))`, so a float's binary rounding never lowers
+    a charge. None when it is not a finite, non-negative number."""
+    if isinstance(reported, bool) or not isinstance(reported, int | float | str):
+        return None
+    try:
+        value = Decimal(str(reported))
+    except InvalidOperation:
+        return None
+    if not value.is_finite() or value < 0:
+        return None
+    return int((value * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+
+
+def judgement_cost(usage: dict, price: dict) -> int:
+    """What a judgement call costs from its usage: tokens at the pinned
+    price, rounded up, or the provider's reported cost when that is more,
+    so the ledger never records less than the invoice."""
+    tokens = ceil(int(usage["input_tokens"]) * price["input"] / 1_000_000) + ceil(
+        int(usage.get("output_tokens") or 0) * price["output"] / 1_000_000
+    )
+    reported = usd_micros(usage.get("reported_usd")) if usage.get("reported_usd") is not None else None
+    return max(tokens, reported or 0)
 
 
 def cost(usage: dict, price: dict) -> int:
@@ -128,6 +177,10 @@ async def raise_budget(
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         await tasks.brief(conn, task_id)  # KeyError for an unknown task
+        if await tasks.is_calibration(conn, task_id):
+            raise tasks.CalibrationTask(
+                f"task {task_id} is a calibration task; its budget is set when it starts"
+            )
         if await tasks.is_stopped(conn, task_id):
             raise tasks.TaskStopped(task_id)
         raise_id = ledger.new_id()

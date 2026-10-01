@@ -163,7 +163,7 @@ def test_the_constraint_is_put_in_place_once_and_a_removed_value_does_not_rechec
 
 def test_one_judge_verdict_per_task_and_one_collected_row_per_turn(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
-    task = run(scripted.start(dsn, ws, mode="clarify"))
+    task = run(scripted.start(dsn, ws, judge="thin"))
     with psycopg.connect(dsn, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.UniqueViolation):
             conn.execute(
@@ -756,7 +756,7 @@ def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await scripted.start(dsn, ws, mode=None if where == "judge" else "bare")
+        task = await scripted.start(dsn, ws, judge=None if where == "judge" else "precise")
         if where in ("critique", "checks", "merge"):
             await drive(dsn, task)
         if where in ("checks", "merge"):
@@ -774,7 +774,7 @@ def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
             with pytest.raises(LookupError):
                 await session.feedback(conn, task, "x")
             with pytest.raises(LookupError):
-                await verdicts.record_judge(conn, task, "precise")
+                await verdicts.record_judge(conn, task, "no-such-judgement")
             with pytest.raises(LookupError):
                 await verdicts.record_check(conn, task, Check.TEST, "pass")
             with pytest.raises(LookupError):
@@ -793,7 +793,7 @@ def test_the_brief_renders_the_stage_and_the_offered_effects(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await scripted.start(dsn, ws, mode="clarify")
+        task = await scripted.start(dsn, ws, judge="thin")
         async with await db.connect(dsn) as conn:
             clarify = await tasks.dispatch(conn, task)
             plan = await tasks.dispatch(conn, task, state=State.PLAN)
@@ -813,9 +813,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
     head = git(ws, "rev-parse", "HEAD")
 
     async def go():
-        b = tasks.Brief(
-            instruction="old", budget_usd_micros=0, max_effect_class="act", workspace=str(ws), mode="bare"
-        )
+        b = tasks.Brief(instruction="old", budget_usd_micros=0, max_effect_class="act", workspace=str(ws))
         async with await db.connect(dsn) as conn, conn.transaction():
             await conn.execute(
                 "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
@@ -1115,8 +1113,8 @@ def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_p
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        waiting = await scripted.start(dsn, ws, mode=None)
-        judge = await drive(dsn, waiting)
+        waiting = await scripted.start(dsn, ws, judge=None)
+        judge = await drive(dsn, waiting, {k: v for k, v in scripted.RUNNERS.items() if k is not State.JUDGE})
         task = await to_checks(dsn, ws)
         await scripted.checks(dsn, task)
         effect = await merge_effect(dsn, task)
@@ -1130,20 +1128,22 @@ def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_p
     assert merged["status"] == "merged" and merged["state"]["state"] == "merged"
 
 
-def test_the_start_command_records_the_manual_judge_with_the_starters_provenance(dsn, tmp_path):
+def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters_provenance(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
-    ids = {}
-    for mode in ("bare", "clarify"):
-        out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--mode", mode,
-                  "--by", "stand-in", "--role-played")  # fmt: skip
-        assert out.returncode == 0, out.stderr
-        ids[mode] = out.stdout.strip()
-    for mode, verdict in (("bare", "precise"), ("clarify", "thin")):
-        judged = next(r["payload"] for r in run(rows(dsn, ids[mode])) if r["type"] == "judge.decided")
-        assert judged["verdict"] == verdict and judged["leg"] == "manual"
-        assert judged["provenance"]["by"] == "stand-in" and judged["provenance"]["role_played"] is True
-    with pytest.raises(ValueError, match="mode"):
-        tasks.Brief(instruction="x", budget_usd_micros=0, mode="interview")
+    out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--by", "stand-in", "--role-played")
+    assert out.returncode == 0, out.stderr
+    task = out.stdout.strip()
+    got = run(rows(dsn, task))
+    assert [r["type"] for r in got] == ["task.started"]
+    assert (
+        got[0]["payload"]["provenance"]["by"] == "stand-in" and got[0]["payload"]["provenance"]["role_played"]
+    )
+    assert "mode" not in got[0]["payload"]
+    assert cli("start", "x", "--budget-usd", "1", "--mode", "bare").returncode == 2  # the flag is gone
+    with pytest.raises(TypeError):
+        tasks.Brief(instruction="x", budget_usd_micros=0, mode="bare")
+    by_hand = cli("verdict", task, "judge", "precise")
+    assert by_hand.returncode == 1 and "no manual verdict for judge" in by_hand.stderr
 
 
 def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):

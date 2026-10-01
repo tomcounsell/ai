@@ -75,6 +75,49 @@ SEATS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class JudgementPrice:
+    """US dollars per million tokens for a judgement leg's model, the day
+    they were checked, and where."""
+
+    input: float
+    output: float
+    checked: date
+    source: str
+
+
+# The judgement legs' pinned models (docs/judgement-layer.md). The fallback's
+# id names the weights, the host OpenRouter must use, and its quantization,
+# so a ledger row describes one fixed thing. Changing either is a new
+# calibration record before it routes work.
+JEV_MODEL = "jev-1.13.0"
+OPEN_WEIGHT_MODEL = "qwen/qwen3-235b-a22b-2507"
+OPEN_WEIGHT_PROVIDER = "parasail/fp8"  # OpenRouter's endpoint tag
+OPEN_WEIGHT_PROVIDER_NAME = "Parasail"  # what OpenRouter names on the response
+OPEN_WEIGHT_PIN = f"{OPEN_WEIGHT_MODEL}@{OPEN_WEIGHT_PROVIDER}"
+
+# Kept apart from `PRICES`, so the gateway never prices a model it would
+# forward to Anthropic.
+JUDGEMENT_PRICES: dict[str, JudgementPrice] = {
+    JEV_MODEL: JudgementPrice(0.042, 0.0, date(2026, 10, 2), "https://docs.typesafe.ai/models"),
+    OPEN_WEIGHT_PIN: JudgementPrice(
+        0.14,
+        0.80,
+        date(2026, 10, 2),
+        "https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints (Parasail, fp8)",
+    ),
+}
+
+# The endpoints each leg defaults to. Only these receive a real key; any
+# other endpoint must be on loopback and gets a fixed placeholder key
+# (`core.judgement.endpoint_key`).
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+OPEN_WEIGHT_URL = "https://openrouter.ai/api/v1/chat/completions"
+# The variables the kernel's judgement key file holds.
+JEV_KEY = "TYPESAFE_API_KEY"
+OPEN_WEIGHT_KEY = "OPENROUTER_API_KEY"
+
+
 def resolve_model(name: str) -> str:
     """A seat name's pinned id, or the name itself."""
     return SEATS.get(name, name)
@@ -113,6 +156,24 @@ class Settings:
     # git limit, so no performer can still be pushing it.
     reconcile_after_s: float = field(default_factory=lambda: float(_env("VALOR_RECONCILE_AFTER_S", "240")))
 
+    # -- the judgement legs ----------------------------------------------------
+    jev_url: str = field(default_factory=lambda: _env("VALOR_JEV_URL", JEV_URL))
+    open_weight_url: str = field(default_factory=lambda: _env("VALOR_OPEN_WEIGHT_URL", OPEN_WEIGHT_URL))
+    jev_timeout_s: float = 10.0
+    open_weight_timeout_s: float = 30.0
+    # Estimated input tokens a leg is sent at most (Jev documents 32k for
+    # the state plus the longest question; the fallback's context is 262k
+    # and the cap bounds a call's worst case).
+    jev_max_input_tokens: int = 30_000
+    open_weight_max_input_tokens: int = 100_000
+    open_weight_max_tokens: int = 400
+    # Judgement calls in flight at once for one diff's governance hunks.
+    judgement_concurrency: int = 8
+    # Where `python -m core judgement-keys` copies the keys from.
+    vault_env: str = field(
+        default_factory=lambda: _env("VALOR_VAULT_ENV", str(Path.home() / "Desktop" / "Valor" / ".env"))
+    )
+
     # -- backups: the volume's name is the single character U+F028 ------------
     backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", "/Volumes//valor_temp"))
     backup_keep: int = field(default_factory=lambda: int(_env("VALOR_BACKUP_KEEP", "30")))
@@ -148,6 +209,14 @@ class Settings:
                 f"({self.git_timeout_s}): reconcile must not read a merge as missing while a perform "
                 "could still be pushing it"
             )
+
+    @property
+    def judgement_keyfile(self) -> str:
+        """The judgement legs' keys, in the kernel key directory beside the
+        database password file. Derived from `pg_passfile`, never its own
+        setting, so the turn sandbox profiles' deny (derived from the same
+        directory) cannot drift from it."""
+        return str(Path(self.pg_passfile).parent / "judgement-keys")
 
     @property
     def pg_socket(self) -> str:

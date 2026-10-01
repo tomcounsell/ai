@@ -7,8 +7,9 @@ logged to `.git/valor-turns.jsonl`.
 
 Also: a workspace laid out the way `scripts/replay_workspace.py` lays one
 out (a work branch at the base, a bare origin whose HEAD names `main`), a
-task started on it, the router with the working-session runner, and manual
-verdicts.
+task started on it and judged by the real judge runner against the local
+judgement upstream (`tests/judgement_upstream.py`), the router with the
+working-session runner, and manual verdicts.
 """
 
 import json
@@ -17,9 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core import broker, db, router, session, tasks, verdicts
+from core import broker, db, judgement_sites, router, session, tasks, verdicts
 from core.machine import Check, State
 from harnesses import claude_code
+from tests import judgement_upstream
 from tools.push_branch import Merge, PushBranch
 
 SCRIPT = r"""
@@ -146,7 +148,19 @@ async def working(ctx: router.Context) -> dict:
     return await session.run(ctx.gateway, ctx.task_id, turn_for, dsn=ctx.dsn, alive=ctx.alive)
 
 
-RUNNERS = {State.CLARIFY: working, State.PLAN: working, State.BUILD: working, State.PATCH: working}
+def judge(answer: str = "precise"):
+    """The real judge runner, its port pointed at the local upstream
+    answering `precise` or `thin` with 0.95."""
+    return judgement_sites.judge_runner(judgement_upstream.shared().port(fixed=answer))
+
+
+RUNNERS = {
+    State.JUDGE: judge("precise"),
+    State.CLARIFY: working,
+    State.PLAN: working,
+    State.BUILD: working,
+    State.PATCH: working,
+}
 MANUAL = {"by": "test", "via": "the test suite", "role_played": True}
 
 
@@ -155,20 +169,33 @@ def performers(b: tasks.Brief) -> None:
     broker.register(Merge(b.workspace))
 
 
-async def start(dsn: str, ws: Path, mode: str | None = "bare", **kw) -> str:
+async def _always() -> bool:
+    return True
+
+
+async def run_judge(dsn: str, task: str, answer: str) -> dict:
+    """The judge state's runner, once, answering `precise` or `thin`."""
+    return await judge(answer)(router.Context(None, task, dsn, _always))
+
+
+async def start(dsn: str, ws: Path, judge: str | None = "precise", **kw) -> str:
+    """A task on the workspace, judged `precise` or `thin` by the real judge
+    runner against the local upstream (None leaves it in `judge`)."""
     where = tasks.resolve_workspace(str(ws), kw.pop("target_branch", None))
     b = tasks.Brief(
         instruction=kw.pop("instruction", "Write Tom a greeting."),
         budget_usd_micros=kw.pop("budget_usd_micros", 1_000),
         max_effect_class=kw.pop("max_effect_class", "act"),
         workspace=str(ws),
-        mode=mode,
         **where,
         **kw,
     )
     performers(b)
     async with await db.connect(dsn) as conn:
-        return await tasks.start(conn, b)
+        task = await tasks.start(conn, b)
+    if judge is not None:
+        await run_judge(dsn, task, judge)
+    return task
 
 
 async def status(dsn: str, task: str) -> dict:
