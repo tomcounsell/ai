@@ -365,6 +365,10 @@ async def _orphan(conn, args) -> str:
     if not got[0]:
         raise SystemExit(f"{lay.root} is being provisioned now")
     try:
+        if await (
+            await conn.execute("SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (args.task_id,))
+        ).fetchone():
+            raise SystemExit(f"{args.task_id} became a task; remove it as one once it is stopped or merged")
         await asyncio.to_thread(workspace.remove, args.task_id, lay)
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))

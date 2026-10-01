@@ -285,6 +285,8 @@ elif act == "revise":
         {"kind": "premise", "text": "the plan reads the wrong module"}]}))
 elif act == "raise":
     (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 2}}))
+elif act == "lower_raise":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 0}}))
 elif act == "bad_raise":
     (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 5}}))
 elif act == "malformed":

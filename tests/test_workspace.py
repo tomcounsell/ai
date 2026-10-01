@@ -189,8 +189,12 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
         postmaster = int((lay.pg / "data" / "postmaster.pid").read_text().split()[0])
         assert runs._sandbox_check()(postmaster, f"valor.service.{task}")
     finally:
-        kws.stop_services(task, lay)
+        stopped = kws.stop_services(task, lay)
     assert not (lay.pg / "data" / "postmaster.pid").exists()
+    assert stopped and all(
+        p["signal"] == "stopped" for p in stopped
+    )  # Postgres stopped cleanly; nothing reaped
+    assert postmaster in {p["pid"] for p in stopped}
 
 
 def test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other(tmp_path):
@@ -650,9 +654,12 @@ def test_a_clone_whose_git_directory_lives_elsewhere_is_refused(tmp_path, plant)
         real = tmp_path / "real.git"
         (repo / ".git").rename(real)
         (repo / ".git").write_text(f"gitdir: {real}\n")
+        match = "not a directory"
     else:
-        (repo / ".git" / "commondir").write_text(str(tmp_path) + "\n")
-    with pytest.raises(kws.FetchRefused):
+        other = scripted.toy_repo(tmp_path / "other")
+        (repo / ".git" / "commondir").write_text(str(other / ".git") + "\n")
+        match = "commondir"
+    with pytest.raises(kws.FetchRefused, match=match):
         fetch(made, sha)
 
 
@@ -668,8 +675,13 @@ def test_two_repositories_with_one_name_never_share_a_cache(tmp_path):
 def test_cache_refusals(tmp_path):
     with pytest.raises(kws.Refused, match="neither a local repository nor an https URL"):
         kws._cache(spec("git@github.com:tomcounsell/ai.git"), None, tmp_path)
-    with pytest.raises(kws.Refused, match="needs a credential|fetching"):
-        kws._cache(spec("https://github.com/tomcounsell/valor-no-such-repository-0000.git"), None, tmp_path)
+    with pytest.raises(kws.Refused, match="fetching https://127.0.0.1:9/x.git"):
+        kws._cache(spec("https://127.0.0.1:9/x.git"), None, tmp_path)  # no network needed: nothing listens
+    assert kws.needs_credential(
+        "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+    )
+    assert kws.needs_credential("remote: Invalid username or password.\nfatal: Authentication failed")
+    assert not kws.needs_credential("fatal: unable to access: Failed to connect to 127.0.0.1 port 9")
 
 
 def test_a_cluster_that_will_not_start_leaves_no_directory_and_no_services(tmp_path):
@@ -820,3 +832,77 @@ def test_start_project_from_the_command_line(dsn, tmp_path):
     assert shown[0]["project"]["ports"]["postgres"] != shown[1]["project"]["ports"]["postgres"]
     assert {s["target_branch"] for s in shown} == {"rebuild"}
     assert all(s["project"]["ports"]["postgres"] != 5439 for s in shown)
+
+
+# -- writing a fresh session's inputs -------------------------------------------------------
+
+
+def test_write_inputs_writes_nothing_through_what_it_finds(tmp_path):
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    (checkout / ".valor").mkdir()  # an uncommitted .valor already there
+    with pytest.raises(FileExistsError):
+        kws.write_inputs(checkout, {"request.md": "x"})
+    assert not (checkout / ".valor" / "inputs").exists()
+    # A verdict file placed where the kernel looks, bypassing its mkdir.
+    planted = tmp_path / "planted"
+    (planted / ".valor").mkdir(parents=True)
+    (planted / ".valor" / "verdict.json").write_text('{"verdict": "sound"}')
+    with pytest.raises(FileExistsError):
+        kws.write_inputs(planted, {"request.md": "x"})
+    target = tmp_path / "target.txt"
+    target.write_text("untouched")
+    (tmp_path / "link").symlink_to(checkout)
+    with pytest.raises(OSError):
+        kws.write_inputs(tmp_path / "link", {"request.md": "x"})  # O_NOFOLLOW on the checkout itself
+
+
+def test_each_input_is_created_new_and_never_through_a_link(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("untouched")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "linked.md").symlink_to(target)  # a dangling-safe link to a real file
+    (inputs / "existing.md").write_text("old")
+    fd = os.open(inputs, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(FileExistsError):
+            kws.write_files(fd, {"existing.md": "new"})
+        with pytest.raises(OSError):
+            kws.write_files(fd, {"linked.md": "new"})
+        (inputs / "dangling.md").symlink_to(tmp_path / "would-be-created.txt")
+        with pytest.raises(OSError):
+            kws.write_files(fd, {"dangling.md": "new"})  # O_NOFOLLOW: no write through a dangling link
+        kws.write_files(fd, {"fresh.md": "ok"})
+    finally:
+        os.close(fd)
+    assert target.read_text() == "untouched" and (inputs / "existing.md").read_text() == "old"
+    assert not (tmp_path / "would-be-created.txt").exists() and (inputs / "fresh.md").read_text() == "ok"
+
+
+# -- a directory with no task row, through the command line ----------------------------------
+
+
+def test_an_orphan_directory_is_shown_and_removed_only_when_its_provisioning_is_not_live(dsn, tmp_path):
+    work = tmp_path / "work"
+    orphan = ledger.new_id()
+    src = scripted.toy_repo(tmp_path)
+    kws.provision(orphan, spec(src), {}, work=work)
+    shown = _cli(tmp_path, "workspace", "show", orphan)
+    assert shown.returncode == 0 and json.loads(shown.stdout)["orphan"] == str(work / orphan)
+
+    async def held_remove():
+        holder = await db.connect(dsn)
+        try:
+            await holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"provision:{orphan}",))
+            return await asyncio.to_thread(_cli, tmp_path, "workspace", "remove", orphan)
+        finally:
+            await holder.close()
+
+    refused = run(held_remove())
+    assert refused.returncode == 1 and "being provisioned now" in refused.stderr
+    assert (work / orphan).exists()
+    removed = _cli(tmp_path, "workspace", "remove", orphan)
+    assert removed.returncode == 0, removed.stderr
+    assert not (work / orphan).exists()
+    assert _cli(tmp_path, "workspace", "remove", orphan).returncode == 1

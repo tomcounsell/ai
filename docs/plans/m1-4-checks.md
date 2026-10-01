@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: planned
+status: 1.4a did-not-pass, proposed patch awaiting Tom; 1.4b, 1.4d, 1.4c planned
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1439,6 +1439,8 @@ On top of the docs session's `0f24a571c`. Every finding resolved:
   openings says blindness holds for the paths the kernel names.
 - **R6.** With a credential, the gateway forwards only `v1/messages`,
   `v1/messages/count_tokens`, and `v1/models`; anything else is a 403.
+  (Review round 2 found the `v1/models/` prefix match let dot segments and
+  encoded slashes through; the proposed patch below closes it.)
 - **R7.** The sweep also stops the services of task directories with no task
   row whose `provision:<id>` lock is free; `workspace remove ID` removes
   such a directory.
@@ -1464,3 +1466,70 @@ On top of the docs session's `0f24a571c`. Every finding resolved:
   build, attach, and teardown through the kernel; critique with no database
   credential and no service port (`check_harness(services=False)`); and a
   merged task's workspace and Redis removed through the command line.
+
+## 1.4a delivery 1 (did not pass)
+
+Review round 2, the last the plan allows, on `88029a1f6` (docs at
+`7b2c5c4be`): review `changes`, test `gaps`, docs `updated`. With both
+review rounds spent, 1.4a goes to Tom as a delivery that did not pass.
+
+Review findings, blocking:
+
+- **B1.** The gateway's allowlist accepted any tail starting with
+  `v1/models/`, the upstream URL was built as a string, and the client's URL
+  parser resolves dot segments and decodes `%2f`, so
+  `/v1/models/../../api/oauth/profile`,
+  `/v1/models/%2e%2e/%2e%2e/api/oauth/profile`,
+  `/v1/models/..%2f..%2fapi/oauth/profile`, and
+  `/v1/models%2f..%2f..%2fapi/oauth` reached other upstream paths carrying
+  Tom's bearer token.
+
+Non-blocking: N2, `_orphan` and the sweep read the task row before taking
+`provision:<id>`; N3, a first 401 should allow one Keychain re-read despite
+the once-a-minute bound, since Tom's sessions rotate the token; N4,
+`_docs_into_mirror` should refuse a docs head that commits `.valor`.
+
+Test gaps: G1 the commondir test should point at a valid repository and
+match the refusal; G2 `write_inputs` with a pre-existing `.valor`, a planted
+verdict file, and its exclusive and no-follow creation each exercised; G3
+the orphan path through the command line, including the refusal while
+`provision:<id>` is held; G4 `stop_services`' `stopped` entries; G5 a lower
+raise through the runner; G6 the private-HTTPS refusal test without
+github.com.
+
+## 1.4a proposed patch, awaiting Tom's feedback
+
+Prepared while Tom is away; not authorised by the pipeline, which has spent
+its review rounds. It is a candidate for his decision: his feedback on the
+delivery is what would send it through the checks.
+
+- **B1.** The gateway checks each path as it arrived, undecoded, and
+  refuses (400) any tail with a percent escape, a backslash, or an empty,
+  `.`, or `..` segment; with a credential it forwards only `v1/messages`,
+  `v1/messages/count_tokens`, `v1/models`, and `v1/models/<id>` with an id
+  of letters, digits, `.`, `_`, `-` and no `..` (403 otherwise); the upstream
+  URL is built byte for byte (`yarl.URL(..., encoded=True)`), never
+  re-normalised. A test sends the four reproduced paths and the earlier
+  refused ones exactly as written and finds the upstream saw only the two
+  allowed paths.
+- **N2.** `_orphan` and the sweep look for the task row again after taking
+  `provision:<id>`, and leave a directory that became a task to its own run.
+- **N3.** The first 401 after a Keychain read allows one more read at once;
+  later ones wait out the minute. Tested.
+- **N4.** A docs head that commits `.valor` is refused. Tested.
+- **G1.** The commondir test points at a valid repository and matches
+  "commondir"; the gitfile test matches its own refusal.
+- **G2.** `write_inputs` refuses an existing `.valor` (nothing written), a
+  planted verdict file, and a linked checkout; `write_files` refuses an
+  existing name (exclusive creation), a link to a real file, and a dangling
+  link (nothing created through it). With both flags always set, a link is
+  refused by either; the existing plain file isolates exclusive creation.
+- **G3.** `workspace show` and `workspace remove` on a directory with no task
+  row through the command line, and the refusal while `provision:<id>` is
+  held.
+- **G4.** A clean Postgres stop is reported with `stopped` entries naming the
+  postmaster.
+- **G5.** A lower raise from a critique turn leaves the review rounds at the
+  plan's count.
+- **G6.** The HTTPS refusal test fetches from a loopback port where nothing
+  listens; the credential refusal is tested on git's own error text.

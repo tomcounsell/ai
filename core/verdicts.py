@@ -330,11 +330,13 @@ def _docs_into_mirror(b: tasks.Brief, head: str, task_id: str) -> None:
     if not re_sha(head):
         raise VerdictRefused(f"{head!r} is not a full commit id")
     try:
+        if workspace.tree_has_valor(b.workspace, head, trusted=False):
+            raise VerdictRefused(f"{head[:12]} commits a .valor entry")
         workspace.fetch_into_mirror(
             b.mirror, b.workspace, head, f"refs/valor/docs/{head}", b.harness["sandbox_profile"],
             f"mirror-docs-{task_id}",
         )  # fmt: skip
-    except workspace.FetchRefused as exc:
+    except (workspace.FetchRefused, git.GitError) as exc:
         raise VerdictRefused(str(exc)) from None
 
 

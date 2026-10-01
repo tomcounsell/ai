@@ -516,7 +516,7 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
             "+refs/heads/*:refs/heads/*",
         )
     except git.GitError as exc:
-        if "Authentication" in str(exc) or "could not read Username" in str(exc):
+        if needs_credential(str(exc)):
             raise Refused(
                 f"{origin} needs a credential to fetch; private repositories wait for 1.4d"
             ) from None
@@ -526,6 +526,12 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             git.trusted(cache, "symbolic-ref", "HEAD", line[len("ref: ") : -len("\tHEAD")])
     return cache
+
+
+def needs_credential(error: str) -> bool:
+    """Whether git's error says the remote wants a credential, which the
+    kernel has none of until 1.4d."""
+    return "Authentication" in error or "could not read Username" in error
 
 
 def _commit_of(cache: Path, rev: str) -> str:
@@ -1186,13 +1192,7 @@ def write_inputs(checkout: Path, files: dict[str, str]) -> None:
         os.mkdir("inputs", 0o755, dir_fd=valor)
         inputs = os.open("inputs", flags, dir_fd=valor)
         fds.append(inputs)
-        for name, text in files.items():
-            if "/" in name or name.startswith("."):
-                raise ValueError(f"input name {name!r}")
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
-                         dir_fd=inputs)  # fmt: skip
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
+        write_files(inputs, files)
         try:
             os.stat("verdict.json", dir_fd=valor, follow_symlinks=False)
         except FileNotFoundError:
@@ -1201,6 +1201,18 @@ def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     finally:
         for fd in reversed(fds):
             os.close(fd)
+
+
+def write_files(dir_fd: int, files: dict[str, str]) -> None:
+    """Each file created new in the directory `dir_fd` names: refused when
+    the name is taken (`O_EXCL`) or is a link (`O_NOFOLLOW`)."""
+    for name, text in files.items():
+        if "/" in name or name.startswith("."):
+            raise ValueError(f"input name {name!r}")
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                     dir_fd=dir_fd)  # fmt: skip
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
 
 
 def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1337,6 +1349,15 @@ async def sweep(conn, task_id: str, work: Path | None = None) -> list[dict[str, 
             if not got[0]:
                 continue
             try:
+                if (
+                    kind == "provision"
+                    and await (
+                        await conn.execute(
+                            "SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (other,)
+                        )
+                    ).fetchone()
+                ):
+                    continue  # it became a task while we looked: its run decides
                 found = await asyncio.to_thread(stop_services, other, lay)
                 stopped += [{**r, "task": other, "orphan": kind == "provision"} for r in found]
             finally:

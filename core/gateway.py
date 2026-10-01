@@ -24,10 +24,13 @@ gateway, when given a `credential`, drops whatever `authorization` or
 `x-api-key` the turn sent and sets the kernel's own: a long-lived token in
 the kernel key directory (`claude setup-token`) when one is there, otherwise
 the access token of the machine's Claude Code login, read from the Keychain
-through the root-owned `security` at most once a minute (a 401 asks for a
-fresh read, still at most once a minute). The credential is sent only on
-the Messages API, its token counting, and the model list; any other path
-is refused. The kernel never refreshes that login: refresh tokens rotate, and a
+through the root-owned `security` at most once a minute, except that the
+first 401 after a read allows one more (the user's own sessions rotate the
+token). The credential is sent only on the Messages API, its token
+counting, the model list, and one model by an id of letters, digits, `.`,
+`_`, and `-`; any other path is refused. Every path is checked as it
+arrived, undecoded (no percent escape, no empty, `.`, or `..` segment), and
+forwarded byte for byte, never re-normalised. The kernel never refreshes that login: refresh tokens rotate, and a
 refresh here could sign out the user's own sessions. An expired login is a
 401 naming the remedy, never a silent fallback. No credential is ever in a
 ledger row, an exception, or a log line.
@@ -35,6 +38,7 @@ ledger row, an exception, or a log line.
 
 import asyncio
 import json
+import re
 import secrets
 import subprocess
 import threading
@@ -44,6 +48,7 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp import web
+from yarl import URL
 
 from core import binaries, budget, db
 from core.ledger import new_id
@@ -69,9 +74,9 @@ class ClaudeLogin:
     """The credential the gateway sends upstream for every turn.
 
     The Keychain is read at most once a minute (`min_interval_s`), whether
-    the last read succeeded or failed and whether or not a 401 since asked
-    for a fresh one, so an expired login does not run `security` on every
-    call. `keychain` reads the login item's JSON, or returns None when there
+    the last read succeeded or failed, so an expired login does not run
+    `security` on every call; the one exception is the first 401 after a
+    read, which may read again at once. `keychain` reads the login item's JSON, or returns None when there
     is none; tests pass their own."""
 
     def __init__(
@@ -89,10 +94,17 @@ class ClaudeLogin:
         self.keychain = keychain or self._security
         self._cached: tuple[str | CredentialUnavailable, float] | None = None
         self._stale = False
+        self._retried = False
+        self._retry_now = False
         self._lock = threading.Lock()
 
     def invalidate(self) -> None:
+        """A 401: the next call reads again. The first 401 after a read may
+        read at once, since the user's own sessions rotate the token; later
+        ones wait out `min_interval_s`."""
         with self._lock:
+            if not self._stale and not self._retried:
+                self._retry_now = True
             self._stale = True
 
     def token(self) -> str:
@@ -101,10 +113,12 @@ class ClaudeLogin:
             if self._cached is not None:
                 value, at = self._cached
                 fresh = not self._stale and now - at < self.ttl_s
-                if fresh or now - at < self.min_interval_s:
+                if fresh or (now - at < self.min_interval_s and not self._retry_now):
                     if isinstance(value, CredentialUnavailable):
                         raise value
                     return value
+            self._retried = self._retry_now
+            self._retry_now = False
             try:
                 value = self._read()
             except CredentialUnavailable as exc:
@@ -157,11 +171,31 @@ class ClaudeLogin:
 # the Messages API, its token counting, and the model list. Any other path
 # is refused rather than sent with the credential.
 CREDENTIALED_PATHS = ("v1/messages", "v1/messages/count_tokens", "v1/models")
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def safe_tail(tail: str) -> bool:
+    """A path tail as it arrived, undecoded: no percent escape, no
+    backslash, and no empty, `.`, or `..` segment (one trailing slash
+    allowed). The upstream URL is built from it as is, so nothing a client's
+    parser or ours would resolve can move it to another path."""
+    if "%" in tail or "\\" in tail or not tail:
+        return False
+    body = tail.removesuffix("/")
+    return all(seg not in ("", ".", "..") for seg in body.split("/"))
 
 
 def credentialed(tail: str) -> bool:
+    """Whether a safe tail may be sent with the kernel's credential: the
+    three paths, or one model by an id of letters, digits, `.`, `_`, `-`
+    (never `..`)."""
+    if not safe_tail(tail):
+        return False
     tail = tail.rstrip("/")
-    return tail in CREDENTIALED_PATHS or tail.startswith("v1/models/")
+    if tail in CREDENTIALED_PATHS:
+        return True
+    model = tail.removeprefix("v1/models/")
+    return model != tail and MODEL_ID.fullmatch(model) is not None and ".." not in model
 
 
 @dataclass
@@ -279,8 +313,14 @@ class Gateway:
         grant = self.grants.get(request.match_info["token"])
         if grant is None or grant.task_id in self.revoked:
             return _error(403, "permission_error", "turn token revoked or unknown")
-        tail = request.match_info["tail"]
-        path = "/" + tail + (f"?{request.query_string}" if request.query_string else "")
+        # The tail as the client sent it, undecoded, so what is checked is
+        # what is forwarded.
+        raw_path, _, raw_query = request.raw_path.partition("?")
+        prefix = f"/t/{request.match_info['token']}/"
+        tail = raw_path[len(prefix) :] if raw_path.startswith(prefix) else ""
+        if not safe_tail(tail):
+            return _error(400, "invalid_request_error", "the gateway forwards no such path")
+        path = "/" + tail + (f"?{raw_query}" if raw_query else "")
         body = await request.read()
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQUEST}
         headers["accept-encoding"] = "identity"
@@ -306,7 +346,7 @@ class Gateway:
     async def _forward(self, request, path, headers, body) -> web.StreamResponse:
         try:
             async with self._session.request(
-                request.method, self.upstream + path, headers=headers, data=body
+                request.method, URL(self.upstream + path, encoded=True), headers=headers, data=body
             ) as up:
                 return web.Response(status=up.status, body=await up.read(), headers=_response_headers(up))
         except aiohttp.ClientError:
@@ -346,7 +386,9 @@ class Gateway:
         upstream = self.upstream_calls.setdefault(grant.task_id, set())
         upstream.add(asyncio.current_task())
         try:
-            async with self._session.post(self.upstream + path, headers=headers, data=body) as up:
+            async with self._session.post(
+                URL(self.upstream + path, encoded=True), headers=headers, data=body
+            ) as up:
                 status = up.status
                 response = web.StreamResponse(status=up.status, headers=_response_headers(up))
                 await response.prepare(request)

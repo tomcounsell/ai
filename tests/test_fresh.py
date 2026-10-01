@@ -441,3 +441,34 @@ def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line
     assert not lay.root.exists()
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_a_lower_raise_from_a_critique_turn_changes_nothing(dsn, tmp_path):
+    task, _b, ws = planned(
+        dsn, tmp_path, counts={"critique_rounds": 0, "review_rounds": 1}, fresh_acts=["lower_raise"]
+    )
+    run(drive(dsn, task, scripted.fresh_runners(ws)))
+    written = run(rows(dsn, task))
+    decided = next(r["payload"] for r in written if r["type"] == "critique.decided")
+    assert decided["raised"] == {"review_rounds": 0}
+    assert machine.fold(written).loops.review_rounds == 1
+
+
+def test_a_docs_head_that_commits_valor_is_refused(dsn, tmp_path):
+    from core import verdicts
+
+    task, _b, ws = planned(dsn, tmp_path)
+
+    async def go():
+        await drive(dsn, task, scripted.fresh_runners(ws))
+        (ws / ".valor").mkdir(exist_ok=True)
+        (ws / ".valor" / "verdict.json").write_text("{}")
+        scripted.git(ws, "add", "-f", ".valor/verdict.json")
+        head = scripted.commit(ws, "docs/x.md", "x\n", "docs")
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="commits a .valor"):
+                await verdicts.record_check(
+                    conn, task, machine.Check.DOCS, "updated", head=head, **scripted.MANUAL
+                )
+
+    run(go())

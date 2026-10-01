@@ -313,9 +313,12 @@ Money). A turn runs with its own Claude Code config directory, which holds no
 login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`) and the gateway
 sets the kernel's credential on each call: a long-lived token in the kernel
 key directory when one is there, otherwise the access token of the machine's
-Claude Code login, read from the Keychain at most once a minute; the
-credential goes only to `v1/messages`, its `count_tokens`, and `v1/models`,
-and any other path is refused; the kernel never refreshes the login, and an
+Claude Code login, read from the Keychain at most once a minute (the first
+401 after a read allows one more); the credential goes only to
+`v1/messages`, its `count_tokens`, `v1/models`, and one model by an id of
+letters, digits, `.`, `_`, and `-`; every path is checked as it arrived,
+undecoded (no percent escape, no empty, `.`, or `..` segment) and forwarded
+byte for byte, and any other path is refused; the kernel never refreshes the login, and an
 expired one fails the call naming the remedy; the harness never holds a
 budget, and a refused call reaches it as an API error.
 

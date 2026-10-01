@@ -186,7 +186,7 @@ def test_a_401_upstream_rereads_the_credential(dsn, tmp_path):
 
     token = tmp_path / "claude-token"
     token.write_text("first\n")
-    login = ClaudeLogin(str(token), ttl_s=3600, min_interval_s=0)
+    login = ClaudeLogin(str(token), ttl_s=3600)
     assert login.token() == "first"
     token.write_text("second\n")
     assert login.token() == "first"  # cached
@@ -207,7 +207,7 @@ def test_the_credential_goes_only_to_the_messages_api_and_the_model_list(dsn, tm
         and credentialed("v1/messages/count_tokens/")
         and credentialed("v1/models")
     )
-    assert credentialed("v1/models/claude-opus-5-5")
+    assert credentialed("v1/models/claude-opus-5-5") and not credentialed("v1/models/../x")
     assert (
         not credentialed("v1/files")
         and not credentialed("v1/messages/batches")
@@ -264,4 +264,74 @@ def test_an_expired_login_is_read_from_the_keychain_at_most_once_a_minute(tmp_pa
         with pytest.raises(CredentialUnavailable):
             login.token()
         login.invalidate()  # as a 401 would
-    assert len(calls) == 1
+    assert len(calls) == 2  # the first 401 after a read may read once more; then once a minute
+
+
+def _raw_calls(dsn, credential, paths):
+    """Each path sent exactly as written (no client normalising), and what
+    the upstream saw: its raw path and authorization."""
+    from yarl import URL
+
+    from core.gateway import TURN_TOKEN
+
+    async def go():
+        seen: list = []
+
+        async def handle(request: web.Request) -> web.Response:
+            seen.append((request.raw_path, request.headers.get("authorization")))
+            return web.Response(status=200, body=b"{}", headers={"content-type": "application/json"})
+
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        gateway = Gateway(dsn, upstream=url, credential=credential)
+        await gateway.start()
+        out = {}
+        try:
+            async with await db.connect(dsn) as conn:
+                task = await tasks.start(conn, tasks.Brief(instruction="x", budget_usd_micros=1_000_000))
+            base = gateway.issue(task, "turn-1")
+            async with aiohttp.ClientSession() as s:
+                for p in paths:
+                    async with s.get(
+                        URL(base + p, encoded=True), headers={"authorization": f"Bearer {TURN_TOKEN}"}
+                    ) as r:
+                        out[p] = r.status
+        finally:
+            await gateway.close()
+            await runner.cleanup()
+        return out, seen
+
+    return asyncio.run(go())
+
+
+def test_no_path_trick_carries_the_credential_anywhere_but_the_allowed_paths(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("kernel-held-token\n")
+    attacks = [
+        "/v1/models/../../api/oauth/profile",
+        "/v1/models/%2e%2e/%2e%2e/api/oauth/profile",
+        "/v1/models/..%2f..%2fapi/oauth/profile",
+        "/v1/models%2f..%2f..%2fapi/oauth",
+        "/v1/models/./x",
+        "/v1/models//x",
+        "/v1/models/a..b",
+        "/v1/files",
+        "/v1/messages/batches",
+        "/v1/organizations",
+        "/api/oauth/profile",
+    ]
+    statuses, seen = _raw_calls(
+        dsn, ClaudeLogin(str(token)), [*attacks, "/v1/models/claude-opus-5-5", "/v1/models"]
+    )
+    assert all(statuses[p] in (400, 403) for p in attacks), statuses
+    assert seen == [
+        ("/v1/models/claude-opus-5-5", "Bearer kernel-held-token"),
+        ("/v1/models", "Bearer kernel-held-token"),
+    ]
