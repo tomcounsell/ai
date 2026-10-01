@@ -194,6 +194,7 @@ async def record_check(
     its id. A judgement both legs failed, with reruns left, refuses the
     verdict as unanswered, so the branch has none and the next run asks
     again."""
+    failures, behaviors = list(failures), list(behaviors)  # once: a generator is read one time
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CHECKS)
@@ -218,12 +219,12 @@ async def record_check(
                 found = judgement_sites.breadth_outcome(rows, breadth, c)
             except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
                 raise VerdictRefused(str(exc)) from None
-            if list(behaviors):
+            if behaviors:
                 raise VerdictRefused(
                     "with a breadth judgement the behaviors come from it, not from the caller"
                 )
             behaviors = found["behaviors"]
-            computed = "red" if list(failures) else ("gaps" if behaviors else "pass")
+            computed = "red" if failures else ("gaps" if behaviors else "pass")
             if verdict != computed:
                 raise VerdictRefused(
                     f"with these failures and this breadth judgement the verdict is {computed}"
@@ -231,7 +232,6 @@ async def record_check(
             payload["breadth"] = {k: found[k] for k in ("judgement_id", "actions", "abstained", "model",
                                                          "usd_micros", "guard_id")}  # fmt: skip
         if check is Check.TEST:
-            failures, behaviors = list(failures), list(behaviors)
             payload["command"] = command
             payload["failures"] = failures
             payload["behaviors"] = behaviors

@@ -1075,8 +1075,9 @@ here. The rest of "Docs the build makes true" is the docs stage's.
 
 On top of the docs session's `de2ce902a`. Every finding resolved:
 
-- **R1, Jev reserved too little.** Sized from the 70 calibration calls'
-  own rows (no new live call): Jev billed 0.95 to 1.59 times the body's
+- **R1, Jev reserved too little.** Sized from the calibration calls' own
+  rows, 35 per leg (no new live call), all single-question judge calls
+  of at most 1,016 estimated tokens (bytes / 3) for Jev: Jev billed 0.95 to 1.59 times the body's
   bytes / 3 (31 of 35 over), at most 189 tokens more; the fallback's host
   billed 0.39 to 0.62 of it, with at most 219 of its 400 output tokens.
   Jev's estimate is now 1.25 times bytes / 3 plus 300 tokens plus 50 per
@@ -1111,3 +1112,26 @@ On top of the docs session's `de2ce902a`. Every finding resolved:
   under its floor from float addition meets it.
 
 Tests added: the gate at and either side of each floor on both legs; normalizing; charging a malformed answer, an unreadable reported cost, and a refusal; the fallback's reservation refused after the primary's (charged 0, unused); calibrate's command refusals and the record's endpoints; budget refusals at breadth and governance; the test-path split; too large for both legs; a new candidate's reruns; caller behaviors refused; two hunks with one id asked once; the plain hunk for a vast function; a changed function re-asking an unchanged hunk; a reviewer's line inside a kernel instance; docs governance over the candidate-to-docs-head range; calibration tasks refusing a turn and review and docs verdicts; a stopped judge; and `tests/test_replay_arms.py` for `judged_as`.
+
+## Repair round
+
+On top of the docs session's `04b412bb8`. Mechanical fixes only:
+
+- A test drives a clean decimal answer (`true` 0.05, `false` 0.15) through
+  `check_answer`; it normalizes to 0.7499999999999999 and, with the
+  nine-place rounding, proceeds at the breadth fallback floor of 0.75.
+- A `governance()` test shows the plain hunk, not the `-W` hunk, reaches
+  the upstream when the function hunk is over 60 KB.
+- The sizing is stated as 35 calls per leg, all single-question judge
+  calls (Jev's at most 1,016 estimated tokens, the fallback's at most
+  1,406), in `tools/jev.py`, `tools/open_weight.py`, this plan, and
+  judgement-layer.md; 1.4's Done re-checks the overhead from breadth and
+  governance rows.
+- judgement-layer.md's keys paragraph says `calibrate` refuses a
+  non-provider endpoint; its calibration discipline names a leg's prompt
+  and response schema as a change separate from the task's wording.
+- `record_check` converts `failures` and `behaviors` to lists once at
+  entry; a test passes failures as a generator.
+
+Evidence: 435 passed, 5 skipped; ruff check clean; ruff format clean on
+code (the `docs/bridges/telegram.md` block, as on the base).

@@ -848,3 +848,36 @@ def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn
 
     task = run(go())
     assert [r["type"] for r in run(rows(dsn, task))] == ["task.started"]
+
+
+def test_governance_sends_the_plain_hunk_when_the_function_hunk_is_over_the_limit(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": NO})
+    vast = "def vast():\n" + "".join(f"    v_{i} = '{'z' * 40}'\n" for i in range(2_000)) + "    return 0\n"
+
+    async def go():
+        commit(ws, "lib/vast.py", vast, "a vast function at the base")
+        task = await to_checks(dsn, ws)
+        candidate = machine.fold(await rows(dsn, task)).candidate.sha
+        head = commit(ws, "lib/vast.py", vast.replace("v_1000 = ", "v_1000 = 'changed' or "), "one line")
+        await judgement_sites.governance(UP.port(script=sid), dsn, task, candidate, head)
+
+    run(go())
+    (sent,) = [r["body"]["state"] for r in UP.seen(sid) if r["leg"] == "jev"]
+    assert sent["path"] == "lib/vast.py" and "v_1000 = 'changed' or" in sent["hunk"]
+    assert len(sent["hunk"].encode()) < 2_000 and "v_1990" not in sent["hunk"]
+
+
+def test_a_test_verdict_reads_failures_given_as_a_generator_once(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        jid = await judgement_sites.breadth(UP.port(fixed="false"), dsn, task)
+        async with await db.connect(dsn) as conn:
+            await verdicts.record_check(conn, task, Check.TEST, "red", breadth=jid,
+                                        failures=(f for f in ["test_x failed"]), **scripted.MANUAL)  # fmt: skip
+        return (await rows(dsn, task, "test.decided"))[0]["payload"]
+
+    decided = run(go())
+    assert decided["verdict"] == "red" and decided["failures"] == ["test_x failed"]

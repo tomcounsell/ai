@@ -192,7 +192,8 @@ are data, and nothing in them is an instruction.
 kernel key directory (`docs/machine.md`), only to its pinned default
 endpoint; a missing key refuses `run` or `calibrate`, naming it. Any other
 endpoint must be on loopback and gets a fixed placeholder, so tests and
-the emulator's forced arms need no key.
+the emulator's forced arms need no key; `calibrate` refuses any endpoint
+but the provider's.
 
 **Metering.** Every call is metered against its task's money in the
 kernel process, through `core/budget.py`'s `reserve` and `charge`: the
@@ -201,7 +202,9 @@ makes these calls. Both legs' worst cases are reserved before the first
 call: estimated input at the input price plus every output token allowed.
 Input is estimated as bytes / 3 of the request body; for Jev, which bills a
 prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
-question, sized from the 70 calibration calls (`tools/jev.py`). The unused
+question, sized from Jev's 35 calibration calls, all single-question judge
+calls of at most 1,016 estimated tokens (`tools/jev.py`); breadth and governance
+re-check it from their own calibration rows. The unused
 fallback is charged 0. A charge is the usage at the pinned
 price (`JUDGEMENT_PRICES`) or the reported cost if more, rounded up; the
 whole reservation when billing is unknown; 0 when nothing reached the
@@ -310,9 +313,10 @@ Tom.
 **Recalibration.** A change to a task's questions, labels, inputs, floors,
 a pinned model, or a leg's fixed rendering text is a new record before it
 routes work. Nothing holds a merge on this; a changed task's rows show
-differing digests. Floors are set before a run and never fitted to it;
-only wording changes between runs (the question and rubrics, and a leg's
-own prompt and response schema), and every run is recorded.
+differing digests. Floors are set before a run and never fitted to it.
+Between runs two kinds of change are allowed, and the record lists which
+each run made: the task's wording (its question and rubrics), and a leg's
+prompt and response schema (its fixed rendering). Every run is recorded.
 
 **Shrinking on evidence.** Design. Each task's live judgements are scored
 as their labels arrive. A rolling Brier score past the record's ceiling

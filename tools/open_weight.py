@@ -95,9 +95,10 @@ class OpenWeight:
         }
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
-        """Input tokens as bytes / 3. Over the 70 calibration calls of
+        """Input tokens as bytes / 3. Over its 35 calibration calls of
         2026-10-02 the host billed 0.39 to 0.62 of it, and at most 219 of
-        the 400 output tokens the reservation allows."""
+        the 400 output tokens the reservation allows. All 35 were
+        single-question judge calls of at most 1,406 estimated tokens."""
         return judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
 
     async def ask(self, task: JudgementTask, inputs: Mapping[str, str]) -> LegAnswer | LegError:

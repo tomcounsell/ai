@@ -695,3 +695,13 @@ def test_a_calibration_record_names_the_endpoints_it_asked(dsn, tmp_path):
     )
     record = run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, cases, 10_000))
     assert record["endpoints"] == {"jev": "127.0.0.1", "open_weight": "127.0.0.1"}
+
+
+def test_a_clean_decimal_answer_a_hair_under_the_floor_after_normalizing_still_meets_it():
+    # 0.15 / (0.05 + 0.15) is 0.7499999999999999 in floats; the floor is 0.75
+    q = BREADTH.questions[0]
+    probs = {q.id: {"true": 0.05, "false": 0.15} for q in BREADTH.questions}
+    checked, why = judgement.check_answer(BREADTH, judgement.LegAnswer(probs, {}, None, OPEN_WEIGHT_PIN))
+    assert not why and checked[q.id]["false"] < 0.75
+    got = judgement.decide(q, checked[q.id], BREADTH.floor["fallback"])
+    assert got["decision"] == "proceed" and got["p_proceed"] == 0.75

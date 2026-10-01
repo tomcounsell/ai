@@ -59,11 +59,13 @@ class Jev:
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
         """Input tokens, estimated high enough to reserve: Jev bills a prompt
-        of its own around the request. Over the 70 calibration calls of
+        of its own around the request. Over its 35 calibration calls of
         2026-10-02 it billed 0.95 to 1.59 times the body's bytes / 3, and at
         most 189 tokens more (`docs/plans/m1-3-judgement.md`, Patch round 1),
         so the estimate is a quarter over bytes / 3 plus 300 tokens and 50
-        per question."""
+        per question. All 35 were single-question judge calls of at most 1,016
+        estimated tokens (bytes / 3); breadth and governance re-check this from their own
+        rows when 1.4 calibrates them."""
         body = judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
         return math.ceil(body * OVERHEAD_RATIO) + OVERHEAD_FIXED + OVERHEAD_PER_QUESTION * len(task.questions)
 

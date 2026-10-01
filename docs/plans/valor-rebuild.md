@@ -240,7 +240,9 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   accepts neither as optional from a runner. The order of the breadth
   call and the suite is settled here.
 - Calibration records for breadth and governance, setting their floors,
-  before either routes work (1.3 plan, Questions 6).
+  before either routes work (1.3 plan, Questions 6); each re-checks Jev's
+  reservation overhead (`tools/jev.py`, sized from 35 single-question
+  judge calls) against its own rows.
 
 **Absorbs.** Redis left running at replay teardown; replay databases
 sharing one `test` role; `tools/workspace.py` test-only performers moved to
