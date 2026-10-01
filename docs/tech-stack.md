@@ -456,13 +456,16 @@ remote the turn cannot. Status: **in use**.
 
 - **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to
   one branch of the workspace's origin over git, never with `--force`,
-  tags, submodules, or a signature. Git runs from `/usr/bin/git`
-  (`VALOR_GIT`) with a system-only PATH, no global config, and hooks,
+  tags, submodules, or a signature. Git is the Command Line Tools' install
+  (`VALOR_GIT` overrides), checked before each call to be root's alone and
+  a real install, never Apple's `/usr/bin/git` shim (`core/binaries.py`),
+  with a system-only PATH and a time limit, no global config, and hooks,
   helpers, pagers, and transports pinned off, and refuses a workspace whose
   own config names a program, redirects a push, or includes other config,
   because that config is the turn's to write (`core/git.py`). `lookup`
-  reads the remote's branch head; `broker.reconcile` uses it to settle a
-  dangling intent. It pushes to the origin URL recorded at start and refuses the
+  answers present (the branch holds the commit, at its tip or below),
+  absent, or unknown; `broker.reconcile` uses it to settle a dangling merge
+  intent. It pushes to the origin URL recorded at start and refuses the
   task's target branch.
 - **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
   passed candidate onto the target branch, released only when the merge

@@ -412,9 +412,20 @@ Stated so the boundary is drawn where it is [4]:
   `~/.local/bin` (which the user's PATH puts before `/usr/bin`),
   `~/Library/LaunchAgents`, and the shell's rc files (`~/.zshrc` and the
   like). A turn could leave a program there that a later process of the
-  user, outside the sandbox, runs. The kernel's own git calls are out of
-  that reach: they run `/usr/bin/git` by absolute path with a PATH of system
-  directories only (`core/git.py`).
+  user, outside the sandbox, runs. So can the caches under
+  `/var/folders` that Apple's `/usr/bin` shims read: `/usr/bin/git` is the
+  `xcrun` shim, which finds the real git through such a cache. The kernel
+  runs nothing from that reach outside the sandbox: its git is the Command
+  Line Tools' install, its `ps` is `/bin/ps`, and the sandbox's own launcher
+  is `/usr/bin/sandbox-exec`, each checked before it runs to be root's
+  alone, file and every directory above it (`core/binaries.py`), with a
+  PATH of system directories only. `claude` lives in the user's own
+  directories and a turn can replace it; the kernel runs it only inside
+  the sandbox, where a replaced one has the turn's own reach. The one
+  exception is `claude_code.turn`, a tool-less turn with no workspace that
+  runs unsandboxed and only in tests (the router never builds one).
+  Homebrew's Postgres tools, which `python -m core backup` runs from
+  launchd, sit in the user's own prefix too.
 - Every replay database is owned by the same `test` role with the same
   password, so a turn could connect to another run's database on 5439.
 - sandbox-exec is marked deprecated by Apple. The plan names Apple

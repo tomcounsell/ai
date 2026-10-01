@@ -890,6 +890,68 @@ on the delivery is what would send it through the checks.
 
 Evidence: 303 passed, 3 skipped (from 233); ruff clean on the code.
 
+## Proposed patch 2, awaiting Tom's feedback
+
+The checks on the first proposed patch (`c20c55c1c`): review `changes`,
+test `gaps` (303 passed), docs `updated` (`50594dc94`). This second and
+last proposed patch answers them; after it the iteration stops and Tom
+decides. Like the first, it is not authorised by the pipeline.
+
+- **P1, the git binary.** `/usr/bin/git` is Apple's `xcrun` shim, which
+  finds the real git through a per-user cache a turn can write; the
+  reviewer made it run a planted script. The kernel now runs the Command
+  Line Tools' git (`/Library/Developer/CommandLineTools/usr/bin/git`),
+  chosen because it and every directory above it are root's and writable
+  by no one else; Xcode's copy sits under `/Applications`, which the admin
+  group (Tom, and any turn running as him) can write, and Homebrew's prefix
+  is Tom's. `core/binaries.py` checks before every call that the binary,
+  its `libexec/git-core`, and every directory above each are root-owned
+  and not group- or other-writable, and refuses a git with no exec path
+  beside it, which is what the shim is; `VALOR_GIT` overrides and is held
+  to the same check. The `xcrun` variables are dropped from git's
+  environment, and every call has a time limit (`git_timeout_s`). Test: a
+  scratch copy of the cache (named by `xcrun_db`; the real one is never
+  touched) poisoned to name a planted script makes the shim run it, and
+  the kernel's git calls do not.
+- **P1, `claude`, and two more found the same way.** The kernel launches a
+  workspace turn as `sandbox-exec ... claude`; `sandbox-exec` was looked
+  up by name on the turn's PATH, where `~/.local/bin` comes first, so a
+  planted one would have run unsandboxed. It is now `/usr/bin/sandbox-exec`
+  by absolute path, checked the same way. `claude` itself runs inside the
+  sandbox, so a replaced one has the turn's own reach and no more; this is
+  written in `docs/harnesses.md`, Known openings, with the one unsandboxed
+  builder (`claude_code.turn`, tests only, never built by the router).
+  The reaper ran `ps` by name on Tom's PATH outside any sandbox; it is now
+  `/bin/ps`, checked. Homebrew's Postgres tools, run by the launchd backup,
+  are named as an opening.
+- **P2, reconcile.** A performer's `lookup` answers present, absent, or
+  unknown. Any failure to read the remote is unknown, and `reconcile`
+  writes nothing, so the merge stays in flight. Present means the target
+  branch holds the commit at its tip or below it: the tip is fetched into
+  the kernel's own ref (`refs/valor-kernel/lookup`) and ancestry read from
+  what the remote sent, because a remote's tip alone cannot show ancestry.
+  Absent is written `failed` only once the intent is older than
+  `reconcile_after_s` (default 240 s, twice the git time limit), so a
+  performer whose database connection dropped, freeing its lock while its
+  push still runs, is not overtaken; if it finishes after a reconcile, its
+  outcome yields to the recorded one. Tests for the three reproduced cases
+  (unreachable remote, a branch moved on after the landing, a young intent)
+  and a landing reconciled as `done`.
+- **N-a.** The docs name only the merge as reconciled automatically;
+  other dangling intents stay listed by `tasks.audit`.
+- **N-b.** `http.*` is refused; the refusal message says every `push.*`
+  and `http.*` key is refused.
+- **N-c.** A failing unlock in a `finally` never hides the original error.
+- **G1 to G4.** Lookup unknown and unreachable (the P2 tests); an
+  independent table of required refused keys, so deleting a list entry
+  fails a test; a failing `push_branch` frees its effect lock, and
+  `reconcile` with no performer registered does nothing; `VALOR_GIT`
+  naming a user-owned git is refused at the call and naming the trusted
+  git is used.
+
+Evidence: 337 passed, 3 skipped (from 303); ruff clean on the code. The
+live tests were not rerun for this patch.
+
 ## Rollout at merge
 
 Not done by the builder. At merge, in the kernel checkout: `uv sync` (adds

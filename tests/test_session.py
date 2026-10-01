@@ -253,7 +253,15 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     )
     command = build("http://127.0.0.1:4321/t/token", "# Brief", "turn1")
     argv = command.argv
-    assert argv[:7] == ["sandbox-exec", "-D", "GATEWAY_PORT=4321", "-D", "VALOR_TURN=turn1", "-f", "/p.sb"]
+    assert argv[:7] == [
+        "/usr/bin/sandbox-exec",
+        "-D",
+        "GATEWAY_PORT=4321",
+        "-D",
+        "VALOR_TURN=turn1",
+        "-f",
+        "/p.sb",
+    ]
     assert argv[argv.index("--resume") + 1] == "abc"
     assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
     assert argv[argv.index("--append-system-prompt") + 1] == "You are Valor.\n\n# Brief"

@@ -22,7 +22,7 @@ branch, the head, and the candidate, so Tom's approval binds all four.
 
 from pathlib import Path
 
-from core import git
+from core import broker, git
 
 
 class PushBranch:
@@ -45,7 +45,10 @@ class PushBranch:
         return self._rewrites()
 
     def _rewrites(self) -> str | None:
-        found = git.hostile(self.workspace)
+        try:
+            found = git.hostile(self.workspace)
+        except git.GitError as exc:
+            return str(exc)
         return (
             f"the workspace's git config could redirect the push or run a program: {'; '.join(found)}"
             if found
@@ -64,14 +67,17 @@ class PushBranch:
         return {"remote": url, "branch": branch, "sha": action.payload["head_sha"]}
 
     def lookup(self, action, key: str) -> dict | None:
+        """Present (the remote branch holds the commit, at its tip or below
+        it): the result. Absent: None. Unknown (the workspace is refused or
+        the remote cannot be read): `broker.Unknown`."""
         try:
             url, branch = self.destination(action)
             sha = action.payload.get("head_sha")
-            if sha and git.remote_sha(self.workspace, url, branch) == sha:
+            if sha and git.holds(self.workspace, url, branch, sha):
                 return {"remote": url, "branch": branch, "sha": sha}
-        except git.GitError:
-            pass  # the workspace is refused; the outcome is failed, reconciled later
-        return None
+            return None
+        except git.GitError as exc:
+            raise broker.Unknown(str(exc)) from None
 
 
 class Merge(PushBranch):

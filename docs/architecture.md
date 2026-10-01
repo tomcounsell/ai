@@ -164,9 +164,16 @@ task's lock:
 Performing writes `effect.intent` and commits it before the performer runs,
 then `effect.outcome`, holding a session lock on the effect throughout. A
 kill between the two leaves a dangling intent, never a silent effect, and
-frees the lock; `broker.reconcile` then asks the target through the
-performer's `lookup` and writes the outcome it shows. The router does this
-for a task's merge on its next run.
+frees the lock; `broker.reconcile`
+then asks the target through the performer's `lookup`, which answers
+present (the target branch holds the commit, at its tip or below it),
+absent, or unknown (the target did not answer). Present is written `done`.
+Absent is written `failed` only once the intent is older than
+`reconcile_after_s` (twice the hard limit on any git call), since a
+performer whose database connection dropped frees the lock while its push
+may still run. Unknown writes nothing, and the effect stays in flight. The router does this for a task's merge
+on its next run; no other dangling intent is settled automatically, and
+`tasks.audit` lists it.
 
 A `merge` adds governance when the review or docs verdict on its
 candidate answered the governance boolean yes, computed by the broker and
@@ -569,7 +576,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
-| Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling intent reconciled from the target | lossless stop |
+| Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling merge intent reconciled from the target | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |

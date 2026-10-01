@@ -6,9 +6,11 @@ owns its workspace's `.git/config` (and any file it includes), `.git/hooks`,
 `.git/info/attributes`, and the committed `.gitattributes`. Attributes only
 name drivers; a driver's program comes from config. So every call:
 
-- runs git from an absolute path (`settings.git_bin`, default
-  `/usr/bin/git`) with a PATH of system directories only, so a `git` a
-  turn planted in a directory it can write (`~/.local/bin`) never runs;
+- runs a root-owned git install (`settings.git_bin`, checked by
+  `core.binaries.require_git` before every call: the Command Line Tools'
+  git by default, never Apple's `/usr/bin/git` shim, which finds the real
+  git through a per-user cache a turn can poison) with a PATH of system
+  directories only and a time limit (`settings.git_timeout_s`);
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
@@ -45,6 +47,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core import binaries
 from core.settings import settings
 
 # The PATH every kernel git call runs with: system directories only, none a
@@ -59,7 +62,11 @@ def env() -> dict[str, str]:
     `GIT_CONFIG_PARAMETERS`, `GIT_EXTERNAL_DIFF`, ...), with a system-only
     PATH and git's prompts, global config, and system config off."""
     return {
-        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        **{
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("GIT_") and k not in ("DEVELOPER_DIR", "xcrun_db", "SDKROOT")
+        },
         "PATH": PATH,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_SSH_COMMAND": "false",
@@ -96,7 +103,7 @@ HOSTILE_PREFIXES = (
     "core.fsmonitor", "core.hookspath", "core.pager", "core.editor", "core.askpass",
     "core.sshcommand", "core.gitproxy", "core.worktree", "core.attributesfile",
     "pager.", "sequence.editor", "protocol.", "uploadpack.", "receive.", "gpg.",
-    "diff.external", "ssh.", "push.", "hook.", "core.alternaterefscommand",
+    "diff.external", "ssh.", "push.", "hook.", "http.", "core.alternaterefscommand",
     "interactive.difffilter", "extensions.partialclone",
 )  # fmt: skip
 HOSTILE_SUFFIXES = (
@@ -110,15 +117,23 @@ class GitError(RuntimeError):
 
 
 def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-    """git at the absolute path in settings (`git_bin`), never whichever
-    `git` comes first on a PATH."""
-    return subprocess.run(
-        [settings.git_bin, "-C", str(workspace), *PINNED, *args],
-        capture_output=True,
-        text=text,
-        check=False,
-        env=env(),
-    )
+    """The trusted git (`settings.git_bin`, checked each call), never
+    whichever `git` comes first on a PATH."""
+    try:
+        binary = binaries.require_git(settings.git_bin)
+    except binaries.Untrusted as exc:
+        raise GitError(str(exc)) from None
+    try:
+        return subprocess.run(
+            [binary, "-C", str(workspace), *PINNED, *args],
+            capture_output=True,
+            text=text,
+            check=False,
+            env=env(),
+            timeout=settings.git_timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git {' '.join(args[:2])} did not finish in {settings.git_timeout_s}s") from None
 
 
 def hostile(workspace: str | Path) -> list[str]:
@@ -143,7 +158,11 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
     workspace's config is hostile."""
     found = hostile(workspace)
     if found:
-        raise GitError("the workspace's git config names what the kernel will not run: " + "; ".join(found))
+        raise GitError(
+            "the workspace's git config names what the kernel will not run (a program, an include, "
+            "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
+            "key is refused): " + "; ".join(found)
+        )
     return _git(workspace, *args, text=text)
 
 
@@ -154,7 +173,7 @@ def out(workspace: str | Path, *args: str) -> str:
     return done.stdout.strip()
 
 
-def is_repo(workspace: str | Path | None) -> bool:
+def is_repo(workspace: str | Path | None) -> bool:  # raises GitError when no trusted git exists
     """Whether the directory is a git repository; reads nothing the turn
     controls beyond what `git rev-parse` needs to find it."""
     return (
@@ -249,9 +268,36 @@ def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
 
 
 def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
+    """The branch's tip at the remote, or None when the remote answered and
+    holds no such branch. A remote that does not answer raises `GitError`:
+    unreachable is not the same as absent."""
     listed = run(workspace, "ls-remote", "--upload-pack=git-upload-pack", url, f"refs/heads/{branch_name}")
+    if listed.returncode != 0:
+        raise GitError(f"ls-remote {url}: {listed.stderr.strip()[:200]}")
     fields = listed.stdout.split()
-    return fields[0] if listed.returncode == 0 and fields else None
+    return fields[0] if fields else None
+
+
+LOOKUP_REF = "refs/valor-kernel/lookup"
+
+
+def holds(workspace: str | Path, url: str, branch_name: str, sha: str) -> bool | None:
+    """Whether the remote branch holds `sha`: its tip, or a commit the tip
+    descends from (the branch may have moved on since). None when the
+    remote holds no such branch. The tip is fetched into the kernel's own
+    ref (`LOOKUP_REF`), so ancestry is read from objects the remote sent
+    now. Raises `GitError` when the remote cannot be read."""
+    tip = remote_sha(workspace, url, branch_name)
+    if tip is None:
+        return None
+    if tip == sha:
+        return True
+    out(
+        workspace,
+        "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+        "--upload-pack=git-upload-pack", url, f"+refs/heads/{branch_name}:{LOOKUP_REF}",
+    )  # fmt: skip
+    return is_ancestor(workspace, sha, LOOKUP_REF)
 
 
 # -- governance instances --------------------------------------------------------

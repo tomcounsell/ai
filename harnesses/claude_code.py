@@ -28,6 +28,7 @@ import json
 import os
 from urllib.parse import urlparse
 
+from core import binaries
 from core.runs import TurnCommand
 from core.settings import settings
 
@@ -49,7 +50,9 @@ def turn(
     max_output_tokens: int = 1024,
 ):
     """A builder: given the gateway base URL, the dispatched Brief, and the
-    turn's id, the command for one turn."""
+    turn's id, the command for one tool-less turn with no workspace. It runs
+    `claude` unsandboxed, and `claude` lives where a turn can replace it, so
+    it is for tests only: the router builds `workspace_turn`, never this."""
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_ENV) and k != "AI_AGENT"}
@@ -175,8 +178,13 @@ def workspace_turn(
         if resume:
             argv += ["--resume", resume]
         argv += ["--", prompt]
+        # The sandbox's own launcher runs outside it, so it is the root-owned
+        # /usr/bin/sandbox-exec by absolute path, checked here, never a
+        # `sandbox-exec` found on the turn's PATH (which a turn can write).
+        # `claude` runs inside the sandbox, so a `claude` a turn replaced
+        # runs with the turn's own sandboxed reach and no more.
         argv = [
-            "sandbox-exec",
+            binaries.require(binaries.SANDBOX_EXEC),
             "-D",
             f"GATEWAY_PORT={urlparse(base_url).port}",
             "-D",

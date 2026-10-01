@@ -110,9 +110,9 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
     for k, v in counts.items():
         if not isinstance(v, int) or isinstance(v, bool) or v not in machine.ROUNDS:
             return None, f"plan.json {k} is {v!r}; each count is 0, 1, or 2"
-    if not git.is_repo(workspace):
-        return None, "the workspace is not a git repository, so the plan cannot be committed"
     try:
+        if not git.is_repo(workspace):
+            return None, "the workspace is not a git repository, so the plan cannot be committed"
         head = git.head(workspace)
         body = git.show(workspace, "HEAD", path) if head else None
     except git.GitError as exc:
@@ -133,9 +133,9 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
-    if not git.is_repo(workspace):
-        return None, "the workspace is not a git repository, so there is no commit to check"
     try:
+        if not git.is_repo(workspace):
+            return None, "the workspace is not a git repository, so there is no commit to check"
         left = git.dirty(workspace)
         head = git.head(workspace)
     except git.GitError as exc:

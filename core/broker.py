@@ -39,7 +39,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import psycopg
+
 from core import git, ledger, machine, tasks
+from core.settings import settings
 from core.tasks import EFFECT_RANK
 
 
@@ -88,6 +91,11 @@ class Outcome:
 
 class NotApproved(RuntimeError):
     pass
+
+
+class Unknown(RuntimeError):
+    """A performer's `lookup` could not tell whether the effect happened
+    (the target did not answer). Nothing is concluded from it."""
 
 
 class Refused(RuntimeError):
@@ -147,7 +155,17 @@ async def _performing(conn, effect_id: str):
     try:
         yield
     finally:
+        await _unlock(conn, key)
+
+
+async def _unlock(conn, key: str) -> None:
+    """Release a session lock, never letting a failure here (a dropped
+    connection, which releases the lock anyway) hide the error that ended
+    the block."""
+    try:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+    except Exception:  # noqa: BLE001, S110  the session is gone and its locks with it
+        pass
 
 
 async def request(conn, task_id: str, action: Action) -> Outcome:
@@ -234,13 +252,17 @@ async def release(conn, effect_id: str) -> Outcome:
         return await _release(conn, effect_id)
 
 
-async def reconcile(conn, effect_id: str) -> Outcome | None:
+async def reconcile(conn, effect_id: str, settle_after_s: float | None = None) -> Outcome | None:
     """Settle a held effect whose intent has no outcome because the process
-    performing it died: ask the target through the performer's `lookup`
-    and write the outcome it shows, `done` when the effect is there and
-    `failed` when it is not. Does nothing while a live process still holds
-    the effect (`_performing`), when there is nothing to settle, or when no
-    performer for it is registered. Returns the outcome written, if any."""
+    performing it died: ask the target through the performer's `lookup`.
+    Present: `done`. Absent: `failed`, but only once the intent is older
+    than `settle_after_s` (default `settings.reconcile_after_s`, twice the
+    hard limit on any git call, a push included), because a performer whose database connection
+    dropped frees its lock while its push may still be running; before
+    that, nothing. Unknown (the target did not answer): nothing; the effect
+    stays in flight. Also nothing while a live process holds the effect
+    (`_performing`), when there is nothing to settle, or when no performer
+    for it is registered. Returns the outcome written, if any."""
     key = f"effect:{effect_id}"
     got = await (
         await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
@@ -264,7 +286,21 @@ async def reconcile(conn, effect_id: str) -> Outcome | None:
         if kinds != {"effect.intent"} or performer is None:
             return None
         action = Action(described["action_type"], described["target"], described["payload"])
-        found = performer.lookup(action, described["idempotency_key"])
+        try:
+            found = performer.lookup(action, described["idempotency_key"])
+        except Exception:  # noqa: BLE001  unknown: conclude nothing
+            return None
+        if not found:
+            limit = settle_after_s if settle_after_s is not None else settings.reconcile_after_s
+            age = await (
+                await conn.execute(
+                    "SELECT extract(epoch FROM clock_timestamp() - at) FROM events "
+                    "WHERE type = 'effect.intent' AND payload->>'effect_id' = %s",
+                    (effect_id,),
+                )
+            ).fetchone()
+            if age is None or float(age[0]) < limit:
+                return None
         kind = "done" if found else "failed"
         async with conn.transaction():
             await ledger.append(
@@ -284,7 +320,7 @@ async def reconcile(conn, effect_id: str) -> Outcome | None:
             )
         return Outcome(effect_id, kind, found or {})
     finally:
-        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+        await _unlock(conn, key)
 
 
 async def _release(conn, effect_id: str) -> Outcome:
@@ -374,15 +410,36 @@ async def _perform(conn, task_id, effect_id, action, described) -> Outcome:
     try:
         result, kind, error = performer.perform(action, key), "done", None
     except Exception as exc:  # noqa: BLE001  the target said no, or its state is in doubt
-        found = performer.lookup(action, key)
+        try:
+            found = performer.lookup(action, key)
+        except Exception as unknown:  # noqa: BLE001
+            found, exc = None, RuntimeError(f"{exc!r}; and whether it happened is unknown: {unknown}")
         result, kind, error = found or {}, ("done" if found else "failed"), repr(exc)
-    async with conn.transaction():
-        await ledger.append(
-            conn,
-            task_id,
-            "effect.outcome",
-            {"effect_id": effect_id, "idempotency_key": key, "kind": kind, "result": result, "error": error},
-        )
+    try:
+        async with conn.transaction():
+            await ledger.append(
+                conn,
+                task_id,
+                "effect.outcome",
+                {
+                    "effect_id": effect_id,
+                    "idempotency_key": key,
+                    "kind": kind,
+                    "result": result,
+                    "error": error,
+                },
+            )
+    except psycopg.errors.UniqueViolation:
+        # `reconcile` settled it first (this process had lost its session);
+        # the recorded outcome stands.
+        row = await (
+            await conn.execute(
+                "SELECT payload FROM events WHERE type = 'effect.outcome' AND payload->>'effect_id' = %s",
+                (effect_id,),
+            )
+        ).fetchone()
+        recorded = row[0]
+        return Outcome(effect_id, recorded["kind"], recorded.get("result") or {}, recorded.get("error"))
     return Outcome(effect_id, kind, result, error)
 
 

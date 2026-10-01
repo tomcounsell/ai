@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from core import db, ledger, machine, tasks
+from core import binaries, db, ledger, machine, tasks
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -186,7 +186,7 @@ def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
 def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
     mark = f"{TURN_ENV}={turn_id}"
     listing = subprocess.run(
-        ["ps", "-A", "-E", "-ww", "-o", "pid=,pgid=,uid=,command="],
+        [binaries.require(binaries.PS), "-A", "-E", "-ww", "-o", "pid=,pgid=,uid=,command="],
         capture_output=True,
         text=True,
         check=True,
@@ -204,7 +204,7 @@ def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
 
 def _commands(pids: list[int]) -> dict[int, str]:
     listing = subprocess.run(
-        ["ps", "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, pids))],
+        [binaries.require(binaries.PS), "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, pids))],
         capture_output=True,
         text=True,
         check=False,

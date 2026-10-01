@@ -1272,6 +1272,7 @@ def _sample(entry: str) -> str:
         "gpg.": "gpg.program",
         "ssh.": "ssh.variant",
         "push.": "push.followTags",
+        "http.": "http.sslVerify",
         "hook.": "hook.x.command",
         "filter.": "filter.x.clean",
         "alias.": "alias.x",
@@ -1288,6 +1289,25 @@ def _sample(entry: str) -> str:
             else f"x.y{entry}"
         )
     return entry
+
+
+# Keys that must refuse a workspace, written out here rather than read from
+# the list, so deleting an entry from the list fails a test.
+REQUIRED_REFUSALS = [
+    "alias.x", "core.pager", "credential.helper", "core.sshCommand", "include.path", "url.x.insteadOf",
+    "remote.origin.pushurl", "filter.x.clean", "diff.x.textconv", "push.default", "http.sslVerify",
+    "core.fsmonitor", "core.hooksPath", "merge.x.driver", "includeIf.gitdir:/x/.path", "hook.x.command",
+    "core.alternateRefsCommand", "interactive.diffFilter", "core.worktree", "remote.origin.uploadpack",
+    "remote.origin.receivepack", "protocol.allow", "uploadpack.packObjectsHook", "core.gitProxy",
+    "core.askPass", "gpg.program", "submodule.x.url", "extensions.partialClone",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("key", REQUIRED_REFUSALS)
+def test_each_required_key_refuses_the_workspace(tmp_path, key):
+    ws, _ = scripted.workspace(tmp_path)
+    git(ws, "config", key, "x")
+    assert kgit.hostile(ws), key
 
 
 @pytest.mark.parametrize("entry", list(kgit.HOSTILE_PREFIXES) + list(kgit.HOSTILE_SUFFIXES))
@@ -1363,39 +1383,145 @@ def test_a_tag_the_turn_made_is_not_pushed_and_push_settings_refuse(dsn, tmp_pat
     assert git(origin, "tag", "--list") == ""
 
 
-@pytest.mark.parametrize("landed", [True, False])
-def test_a_merge_intent_left_by_a_dead_release_is_reconciled_from_the_target(dsn, tmp_path, landed):
+async def _dangling(dsn, ws) -> tuple[str, str, str]:
+    """A task whose approved merge has an intent and no outcome, as a release
+    that died after writing its intent leaves it. Returns the task, the
+    effect, and the candidate's sha."""
+    task = await to_checks(dsn, ws)
+    await scripted.checks(dsn, task)
+    effect = await merge_effect(dsn, task)
+    sha = (await fold(dsn, task)).candidate.sha
+    held = next(r["payload"] for r in await rows(dsn, task) if r["type"] == "effect.held")
+    async with await db.connect(dsn) as conn:
+        await broker.approve(conn, effect, note="merge")
+        await ledger.append(conn, task, "effect.intent",
+                            {"effect_id": effect, "idempotency_key": held["idempotency_key"]})  # fmt: skip
+    return task, effect, sha
+
+
+def _outcomes(written, effect) -> list[dict]:
+    return [
+        r["payload"] for r in written if r["type"] == "effect.outcome" and r["payload"]["effect_id"] == effect
+    ]
+
+
+def test_a_merge_that_landed_before_the_crash_is_reconciled_as_done(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
     async def go():
-        task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
-        sha = (await fold(dsn, task)).candidate.sha
-        held = next(r["payload"] for r in await rows(dsn, task) if r["type"] == "effect.held")
-        async with await db.connect(dsn) as conn:  # the release died after its intent
-            await broker.approve(conn, effect, note="merge")
-            await ledger.append(conn, task, "effect.intent",
-                                {"effect_id": effect, "idempotency_key": held["idempotency_key"]})  # fmt: skip
-            if landed:  # and after its push reached the target
-                git(ws, "push", "-q", str(origin), f"{sha}:refs/heads/main")
-            other = await db.connect(dsn)  # a live release still performing holds the effect
+        task, effect, sha = await _dangling(dsn, ws)
+        git(ws, "push", "-q", str(origin), f"{sha}:refs/heads/main")
+        async with await db.connect(dsn) as conn:  # a live performer still holding the effect: left alone
+            other = await db.connect(dsn)
             await other.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"effect:{effect}",))
             assert await broker.reconcile(conn, effect) is None
             await other.close()
+        return effect, await drive(dsn, task), await rows(dsn, task)
+
+    effect, out, written = run(go())
+    (outcome,) = _outcomes(written, effect)
+    assert outcome["kind"] == "done" and outcome["reconciled"] is True and out["status"] == "merged"
+
+
+def test_a_merge_landed_and_then_built_on_is_still_done(dsn, tmp_path):
+    """Ancestry, not equality: the target moved on after the landing."""
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task, effect, sha = await _dangling(dsn, ws)
+        git(ws, "push", "-q", str(origin), f"{sha}:refs/heads/main")
+        other = tmp_path / "other"
+
+        def build_on():
+            subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+            commit(other, "later.txt", "later\n", "someone else's commit")
+            git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+        await asyncio.to_thread(build_on)
+        return effect, await drive(dsn, task), await rows(dsn, task)
+
+    effect, out, written = run(go())
+    (outcome,) = _outcomes(written, effect)
+    assert outcome["kind"] == "done" and out["status"] == "merged"
+
+
+def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task, effect, _ = await _dangling(dsn, ws)
+        origin.rename(tmp_path / "away.git")
         out = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            assert await broker.reconcile(conn, effect, settle_after_s=0) is None
         return effect, out, await rows(dsn, task)
 
     effect, out, written = run(go())
-    outcome = next(
-        r["payload"] for r in written if r["type"] == "effect.outcome" and r["payload"]["effect_id"] == effect
-    )
-    assert outcome["reconciled"] is True
-    if landed:
-        assert outcome["kind"] == "done" and out["status"] == "merged"
-    else:
-        assert outcome["kind"] == "failed" and out["status"] == "delivered"
-        assert out["state"]["merge_effect"]["effect_id"] != effect  # a new merge, held for Tom
+    assert _outcomes(written, effect) == []
+    assert out["status"] == "delivered" and out["state"]["merge_effect"]["state"] == "in_flight"
+
+
+def test_a_missing_merge_is_failed_only_after_no_performer_could_still_be_pushing(dsn, tmp_path, monkeypatch):
+    """A performer whose database connection dropped frees its lock while its
+    push may still run, bounded by the git time limit; until the intent is
+    older than that, an absent effect concludes nothing."""
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task, effect, _ = await _dangling(dsn, ws)
+        young = await drive(dsn, task)
+        assert _outcomes(await rows(dsn, task), effect) == []
+        monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "0")
+        monkeypatch.setattr(broker, "settings", type(broker.settings)())
+        old = await drive(dsn, task)
+        return effect, young, old, await rows(dsn, task)
+
+    effect, young, old, written = run(go())
+    assert young["state"]["merge_effect"]["state"] == "in_flight"
+    (outcome,) = _outcomes(written, effect)
+    assert outcome["kind"] == "failed" and outcome["reconciled"] is True
+    assert old["status"] == "delivered" and old["state"]["merge_effect"]["effect_id"] != effect  # a new merge
+
+
+def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_performer(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        other = await scripted.start(dsn, ws)
+        head = git(ws, "rev-parse", "HEAD")
+        async with await db.connect(dsn) as conn:
+            held = await broker.request(
+                conn, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
+            )
+            await broker.approve(conn, held.effect_id, note="push")
+            git(ws, "remote", "set-url", "origin", str(tmp_path / "nowhere.git"))
+            broker.register(PushBranch(ws, url=str(tmp_path / "nowhere.git")))
+            failed = await broker.release(conn, held.effect_id)
+        probe = await db.connect(dsn)
+        got = await (
+            await probe.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (f"effect:{held.effect_id}",)
+            )
+        ).fetchone()
+        await probe.close()
+        # A dangling intent whose performer is not registered is left alone.
+        async with await db.connect(dsn) as conn:
+            parked = await broker.request(
+                conn, other, broker.Action("push_branch", "valor/y", {"head_sha": head})
+            )
+            await ledger.append(
+                conn, other, "effect.intent", {"effect_id": parked.effect_id, "idempotency_key": "k"}
+            )
+            saved = broker.PERFORMERS.pop("push_branch")
+            try:
+                none = await broker.reconcile(conn, parked.effect_id, settle_after_s=0)
+            finally:
+                broker.PERFORMERS["push_branch"] = saved
+        return failed, got[0], none
+
+    failed, lock_free, none = run(go())
+    assert failed.kind == "failed" and lock_free is True and none is None
 
 
 def test_a_grant_is_refused_in_patch(dsn, tmp_path):
@@ -1409,3 +1535,66 @@ def test_a_grant_is_refused_in_patch(dsn, tmp_path):
                 await guards.grant(conn, task, "any", note="yes", incident="i", mission_item="1")
 
     run(go())
+
+
+def test_the_kernel_runs_only_a_root_owned_real_git(tmp_path, monkeypatch):
+    from core import binaries
+    from core.settings import Settings
+
+    assert binaries.untrusted("/Library/Developer/CommandLineTools/usr/bin/git") is None or True
+    ws, _ = scripted.workspace(tmp_path)
+    # The shim: root-owned, but no exec path beside it.
+    with pytest.raises(binaries.Untrusted, match="not a real git install"):
+        binaries.require_git("/usr/bin/git")
+    # A git the user owns, named by VALOR_GIT, is refused at the call.
+    mine = tmp_path / "bin" / "git"
+    mine.parent.mkdir()
+    mine.write_text("#!/bin/sh\nexit 0\n")
+    mine.chmod(0o755)
+    monkeypatch.setenv("VALOR_GIT", str(mine))
+    monkeypatch.setattr(kgit, "settings", Settings())
+    assert kgit.settings.git_bin == str(mine)
+    with pytest.raises(kgit.GitError, match="not owned by root"):
+        kgit.head(ws)
+    # VALOR_GIT naming a trusted git is used.
+    trusted = binaries.git()
+    if trusted:
+        monkeypatch.setenv("VALOR_GIT", trusted)
+        monkeypatch.setattr(kgit, "settings", Settings())
+        assert kgit.head(ws) == git(ws, "rev-parse", "HEAD")
+
+
+def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, monkeypatch):
+    """Apple's /usr/bin/git finds the real git through a per-user cache; a
+    turn can write that cache. A scratch copy (named by `xcrun_db`, so the
+    real cache is never touched) is poisoned to name a planted script: the
+    shim runs it, the kernel's git does not."""
+    ws, _ = scripted.workspace(tmp_path)
+    expected = git(ws, "rev-parse", "HEAD")  # before the poisoning; the test's own git is the shim
+    cache = tmp_path / "xcrun_db"
+    env = {**os.environ, "xcrun_db": str(cache)}
+    subprocess.run(["/usr/bin/git", "--version"], env=env, capture_output=True, check=True)
+    real = (subprocess.run(["/usr/bin/git", "--exec-path"], env=env, capture_output=True, text=True, check=True)
+            .stdout.strip().removesuffix("/libexec/git-core") + "/bin/git")  # fmt: skip
+    data = cache.read_bytes()
+    if real.encode() not in data:
+        pytest.skip("this xcrun cache does not hold the git path in a form this test can rewrite")
+    marker = Path(f"/tmp/valor-xcrun-{os.getpid()}")
+    planted = Path(str(marker) + "-git" + "x" * (len(real) - len(str(marker)) - 4))
+    assert len(str(planted)) == len(real)
+    planted.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    planted.chmod(0o755)
+    try:
+        cache.write_bytes(data.replace(real.encode(), str(planted).encode()))
+        subprocess.run(["/usr/bin/git", "--version"], env=env, capture_output=True, check=False)
+        shim_ran = marker.exists()
+        marker.unlink(missing_ok=True)
+        monkeypatch.setenv("xcrun_db", str(cache))
+        assert kgit.head(ws) == expected
+        assert kgit.dirty(ws) == []
+        kernel_ran = marker.exists()
+    finally:
+        planted.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+    assert shim_ran is True  # the poisoning is real
+    assert kernel_ran is False

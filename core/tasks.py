@@ -88,9 +88,12 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
     head. A workspace on a detached HEAD is refused; so is an origin whose
     HEAD names no branch when none is given. A directory that is not a git
     repository, or has no origin, gives what it can."""
-    if not git.is_repo(workspace):
-        return {}
-    found_hostile = git.hostile(workspace)
+    try:
+        if not git.is_repo(workspace):
+            return {}
+        found_hostile = git.hostile(workspace)
+    except git.GitError as exc:
+        raise WorkspaceRefused(str(exc)) from None
     if found_hostile:
         raise WorkspaceRefused(
             "the workspace's git config names what the kernel will not run: " + "; ".join(found_hostile)

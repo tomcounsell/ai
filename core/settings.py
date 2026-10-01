@@ -28,6 +28,14 @@ def _pg_bin() -> str:
     return str(Path(found).parent) if found else "/opt/homebrew/opt/postgresql@18/bin"
 
 
+def _git() -> str:
+    """The trusted git (`core/binaries.py`), or empty when there is none, in
+    which case every kernel git call is refused."""
+    from core import binaries
+
+    return binaries.git() or ""
+
+
 def _claude() -> str:
     return shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 
@@ -93,9 +101,17 @@ class Settings:
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", _claude()))
 
-    # -- git, as the kernel runs it: an absolute path, never looked up on a
-    # PATH a turn can write to (core/git.py) ----------------------------------
-    git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", "/usr/bin/git"))
+    # -- git, as the kernel runs it: a root-owned install, never looked up on
+    # a PATH or through a cache a turn can write (core/binaries.py) -----------
+    git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", _git()))
+    # The longest one kernel git call may run (a push included) before it is
+    # killed and counted as failed; reconcile waits this long, and more,
+    # before it reads a missing effect as never having happened.
+    git_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_GIT_TIMEOUT_S", "120")))
+    # How old a dangling intent must be before `broker.reconcile` reads an
+    # effect missing from its target as never having happened: twice the
+    # git limit, so no performer can still be pushing it.
+    reconcile_after_s: float = field(default_factory=lambda: float(_env("VALOR_RECONCILE_AFTER_S", "240")))
 
     # -- backups: the volume's name is the single character U+F028 ------------
     backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", "/Volumes//valor_temp"))
