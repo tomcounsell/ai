@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import itertools
 import json
+import math
 import threading
 from pathlib import Path
 from typing import Any
@@ -181,7 +182,13 @@ class Upstream:
             if spec.get("drop_label"):
                 p = {k: v for k, v in p.items() if k != spec["drop_label"]}
             answers[qid] = p
-        tokens = len(raw) // 4
+        # Billed tokens as the providers bill them, measured on the calibration
+        # calls of 2026-10-02: Jev more than the body's bytes / 3 (its own
+        # prompt around the request), the fallback's host about half of it.
+        if leg == "jev":
+            tokens = math.ceil(len(raw) / 3 * 1.2) + 190
+        else:
+            tokens = math.ceil(len(raw) / 3 * 0.6)
         if leg == "jev":
             out = json.loads(json.dumps(JEV_TEMPLATE))
             out["model"] = spec.get("model", JEV_MODEL)

@@ -304,7 +304,8 @@ Tom.
 a pinned model, or a leg's fixed rendering text is a new record before it
 routes work. Nothing holds a merge on this; a changed task's rows show
 differing digests. Floors are set before a run and never fitted to it;
-only wording changes between runs, and every run is recorded.
+only wording changes between runs (the question and rubrics, and a leg's
+own prompt and response schema), and every run is recorded.
 
 **Shrinking on evidence.** Design. Each task's live judgements are scored
 as their labels arrive. A rolling Brier score past the record's ceiling
@@ -533,7 +534,9 @@ micro-dollars per call; label sources Tom 1, role-played 0, judge 6. This
 is information, not evidence: the judge's wording was fitted over five
 runs. Runs 2 to 4 rewrote it after seeing which cases failed (the listed
 fixes in `precise` and the short label in `one_line_ask` exist because
-#893 and #188 failed), and run 5 changed none. Only the emulator and live
+#893 and #188 failed); run 3 also rewrote the fallback's system prompt and
+run 4 added a `notes` field its answer writes before the probabilities;
+run 5 changed none. Only the emulator and live
 labels can show whether it generalizes (`docs/plans/m1-3-judgement.md`).
 
 ### Where it runs

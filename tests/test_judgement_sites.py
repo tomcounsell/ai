@@ -35,7 +35,7 @@ from core.judgement_tasks import GOVERNANCE, JUDGE
 from core.machine import Check, State
 from tests import judgement_upstream, scripted
 from tests.conftest import TEST_DB
-from tests.scripted import commit
+from tests.scripted import commit, git
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -617,3 +617,234 @@ def test_every_fold_of_a_calibration_start_is_a_calibration_task():
     f = machine.fold([start, {"id": 2, "type": "judge.decided", "payload": {"verdict": "precise"}}])
     assert f.calibration and not f.legacy and f.state is State.JUDGE
     assert judgement.route(JUDGE)  # the router is unaffected
+
+
+# -- patch round 1 -----------------------------------------------------------------
+
+
+def test_a_stopped_task_at_the_judge_reports_stopped_not_budget(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, judge=None)
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, task, reason="test")
+        return await scripted.run_judge(dsn, task, "precise")
+
+    assert run(go())["status"] == "stopped"
+
+
+def test_breadth_and_governance_refuse_on_budget_before_any_provider_is_asked(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        async with await db.connect(dsn) as conn:
+            st = await tasks.status(conn, task)
+            # spend all but a micro-dollar of what is left
+            call = {
+                "call_id": "drain",
+                "turn_id": None,
+                "model": "m",
+                "usd_micros": st["remaining_usd_micros"] - 1,
+            }
+            await budget.reserve(conn, task, call)
+        p = UP.port(script=sid)
+        with pytest.raises(budget.BudgetRefused):
+            await judgement_sites.breadth(p, dsn, task)
+        with pytest.raises(budget.BudgetRefused):
+            await judgement_sites.governance(p, dsn, task, older, newer)
+
+    run(go())
+    assert UP.seen(sid) == []
+
+
+def test_breadth_splits_test_paths_from_the_rest():
+    tests_ = ["tests/test_a.py", "app/test/b.py", "test_c.py", "src/d_test.go", "web/e.spec.ts", "web/f.test.js",
+              "conftest.py", "pkg/__tests__/g.js"]  # fmt: skip
+    code = ["src/a.py", "docs/testing.md", "contest.py", "attestation.py", "tests.md", "src/latest.py"]
+    assert all(judgement_sites.is_test_path(p) for p in tests_)
+    assert not any(judgement_sites.is_test_path(p) for p in code)
+
+
+def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": gaps()})
+    big = "".join(f"row_{i} = '{'y' * 60}'\n" for i in range(6_000))
+
+    async def go():
+        task = await scripted.start(dsn, ws, budget_usd_micros=1_000_000)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        commit(ws, "tests/test_greeting.py", "def test_it():\n    assert True\n", "a test")
+        scripted.steer(ws, build="reasons")
+        await drive(dsn, task)
+        await judgement_sites.breadth(UP.port(script=sid), dsn, task)
+
+    run(go())
+    sent = UP.seen(sid)[0]["body"]["state"]
+    assert "tests/test_greeting.py" in sent["tests"] and "tests/test_greeting.py" not in sent["diff"]
+    assert "docs/plan.md" in sent["diff"]
+
+    ws2, _ = scripted.workspace(tmp_path / "big")
+    sid2 = UP.script(default={"probs": gaps()})
+
+    async def go_big():
+        task = await scripted.start(dsn, ws2, budget_usd_micros=1_000_000)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        commit(ws2, "data/big.py", big, "a large change")
+        scripted.steer(ws2, build="reasons")
+        await drive(dsn, task)
+        jid = await judgement_sites.breadth(UP.port(script=sid2), dsn, task)
+        await record_test(dsn, task, jid, "gaps")
+        return (await rows(dsn, task, "test.decided"))[0]["payload"]
+
+    decided = run(go_big())
+    assert UP.seen(sid2) == []
+    assert decided["behaviors"] == [
+        "breadth not judged: the change is larger than either judgement leg may be sent"
+    ]
+
+
+def test_a_new_candidate_gets_its_own_reruns():
+    a, b = machine.Candidate("a" * 40, "t1"), machine.Candidate("b" * 40, "t2")
+
+    def failed(jid, c):
+        return {"type": "judgement.failed", "payload": {"judgement_id": jid, "site": "checks.test.breadth",
+                "ref": {"candidate": {"sha": c.sha, "turn_id": c.turn_id}}, "attempts": []}}  # fmt: skip
+
+    got = [failed("j1", a), failed("j2", a), failed("j3", b)]
+    assert judgement_sites.breadth_outcome(got, "j2", a)["behaviors"][0].startswith("breadth not judged")
+    with pytest.raises(judgement_sites.Unanswered):
+        judgement_sites.breadth_outcome(got, "j3", b)
+
+
+def test_a_test_verdict_with_a_breadth_judgement_takes_no_behaviors_from_the_caller(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        jid = await judgement_sites.breadth(UP.port(fixed="false"), dsn, task)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="behaviors come from it"):
+                await verdicts.record_check(conn, task, Check.TEST, "gaps", breadth=jid,
+                                            behaviors=["made up"], **scripted.MANUAL)  # fmt: skip
+
+    run(go())
+
+
+def test_two_hunks_with_one_id_are_asked_once(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    body = "".join(f"    line {i}\n" for i in range(40))  # indented: no function context
+    commit(ws, "notes/plain.txt", body, "base text")
+    older = git(ws, "rev-parse", "HEAD")
+    lines = body.splitlines(keepends=True)
+    lines.insert(30, "    same\n")
+    lines.insert(5, "    same\n")
+    commit(ws, "notes/plain.txt", "".join(lines), "the same line twice")
+    newer = git(ws, "rev-parse", "HEAD")
+    from core import git as git_
+
+    plain = [h for h in git_.hunks(ws, older, newer, "notes/plain.txt") if h.added]
+    assert len(plain) == 2 and plain[0].id() == plain[1].id()
+    assert len(judgement_sites.diff_hunks(ws, older, newer)) == 1
+
+
+def test_a_function_hunk_over_the_limit_is_sent_as_its_plain_hunk(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    vast = "def vast():\n" + "".join(f"    v_{i} = '{'z' * 40}'\n" for i in range(2_000)) + "    return 0\n"
+    commit(ws, "lib/vast.py", vast, "a vast function")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(ws, "lib/vast.py", vast.replace("v_1000 = ", "v_1000 = 'changed' or "), "one line")
+    newer = git(ws, "rev-parse", "HEAD")
+    (h,) = judgement_sites.diff_hunks(ws, older, newer)
+    assert len(h.text.encode()) < 2_000 and "v_1000" in h.text and "def vast" not in h.text.splitlines()[1:]
+
+
+def test_an_unchanged_hunk_whose_function_changed_keeps_its_id_and_is_asked_again(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        base, first = await candidate_range(dsn, task)
+        ids1 = await judgement_sites.governance(UP.port(script=sid), dsn, task, base, first)
+        commit(ws, "lib/handler.py",
+               (ws / "lib/handler.py").read_text().replace("step_3 = 3", "step_3 = 300"), "another step")  # fmt: skip
+        second = git(ws, "rev-parse", "HEAD")
+        ids2 = await judgement_sites.governance(UP.port(script=sid), dsn, task, base, second)
+        return base, first, second, ids1, ids2
+
+    base, first, second, ids1, ids2 = run(go())
+    h1 = {h.id: h for h in judgement_sites.diff_hunks(ws, base, first)}
+    h2 = {h.id: h for h in judgement_sites.diff_hunks(ws, base, second)}
+    kept = next(i for i, h in h1.items() if "2000" in h.text and h.path == "lib/handler.py")
+    assert kept in h2 and h1[kept].text != h2[kept].text  # same id, new input
+    asked = [r for r in UP.seen(sid) if r["leg"] == "jev" and r["body"]["state"]["path"] == "lib/handler.py"]
+    assert len(asked) == 1 + 2  # once in the first range; both handler hunks again in the second
+    unchanged = [i for i in ids2 if i in ids1]
+    assert len(unchanged) == 3  # gate, util, and the plan: same id and same input, reused
+
+
+def test_a_reviewer_naming_a_line_in_a_kernel_instance_adds_its_notes_to_it(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        spec = verdicts.InstanceSpec("hooks/gate.py", 2, "the reviewer's reading", "incident Z", "1")
+        await review(dsn, task, "governance_refused", ids, governance=[spec])
+        return (await rows(dsn, task, "review.decided"))[0]["payload"]["governance"]["instances"]
+
+    (instance,) = run(go())
+    assert instance["path"] == "hooks/gate.py" and instance["incident"] == "incident Z"
+    assert instance["summary"] == "the reviewer's reading"
+
+
+def test_docs_governance_reads_the_candidate_to_docs_head_range(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"by_path": {"docs/rules.md": YES}, "probs": NO})
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        candidate = machine.fold(await rows(dsn, task)).candidate.sha
+        head = commit(ws, "docs/rules.md", "# Rules\n\nEvery push waits for a second review.\n", "a rule")
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, candidate, head)
+        async with await db.connect(dsn) as conn:
+            await verdicts.record_check(conn, task, Check.DOCS, "updated", head=head, governance_from=ids,
+                                        **scripted.MANUAL)  # fmt: skip
+        return ids, (await rows(dsn, task, "docs.decided"))[0]["payload"]
+
+    ids, decided = run(go())
+    assert len(ids) == 1 and decided["governance"]["adds"] is True
+    assert [i["path"] for i in decided["governance"]["instances"]] == ["docs/rules.md"]
+
+
+def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn, tmp_path):
+    from core import runs
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start_calibration(conn, "intake.underspecified", 10_000)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        try:
+            with pytest.raises(tasks.CalibrationTask):
+                await runs.run_turn(
+                    gateway, task, scripted.turn_for("x", None, tasks.Brief("x", 0, workspace=str(tmp_path)))
+                )
+        finally:
+            await gateway.close()
+        async with await db.connect(dsn) as conn:
+            for check in (Check.REVIEW, Check.DOCS):
+                with pytest.raises(verdicts.VerdictRefused, match="calibration task"):
+                    await verdicts.record_check(conn, task, check, "pass", governance_from=[])
+        return task
+
+    task = run(go())
+    assert [r["type"] for r in run(rows(dsn, task))] == ["task.started"]

@@ -14,11 +14,17 @@ answer under the pinned name unnoticed.
 """
 
 import json
+import math
 from collections.abc import Mapping
 
 from core import judgement
 from core.judgement import DATA_ONLY, JudgementTask, Kind, LegAnswer, LegError
 from core.settings import JEV_MODEL, settings
+
+# Jev's billed input over the request body's bytes / 3 (see `Jev.estimate`).
+OVERHEAD_RATIO = 1.25
+OVERHEAD_FIXED = 300
+OVERHEAD_PER_QUESTION = 50
 
 
 class Jev:
@@ -52,7 +58,14 @@ class Jev:
         return {"model": self.model, "state": dict(inputs), "questions": questions}
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
-        return judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
+        """Input tokens, estimated high enough to reserve: Jev bills a prompt
+        of its own around the request. Over the 70 calibration calls of
+        2026-10-02 it billed 0.95 to 1.59 times the body's bytes / 3, and at
+        most 189 tokens more (`docs/plans/m1-3-judgement.md`, Patch round 1),
+        so the estimate is a quarter over bytes / 3 plus 300 tokens and 50
+        per question."""
+        body = judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
+        return math.ceil(body * OVERHEAD_RATIO) + OVERHEAD_FIXED + OVERHEAD_PER_QUESTION * len(task.questions)
 
     async def ask(self, task: JudgementTask, inputs: Mapping[str, str]) -> LegAnswer | LegError:
         got = await judgement.post(self.endpoint, self._key, self.body(task, inputs), self.timeout_s)

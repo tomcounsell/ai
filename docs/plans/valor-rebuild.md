@@ -234,6 +234,13 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   never by a turn, so a released merge reaches the rebuild branch on
   GitHub.
 - Transcript copies kept in the store with a digest.
+- The review and docs runners always pass `governance_from` (one
+  governance judgement per hunk, asked before the reviewer's or docs
+  turn), and the test runner always passes `breadth`: `record_check`
+  accepts neither as optional from a runner. The order of the breadth
+  call and the suite is settled here.
+- Calibration records for breadth and governance, setting their floors,
+  before either routes work (1.3 plan, Questions 6).
 
 **Absorbs.** Redis left running at replay teardown; replay databases
 sharing one `test` role; `tools/workspace.py` test-only performers moved to

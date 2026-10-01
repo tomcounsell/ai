@@ -218,6 +218,10 @@ async def record_check(
                 found = judgement_sites.breadth_outcome(rows, breadth, c)
             except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
                 raise VerdictRefused(str(exc)) from None
+            if list(behaviors):
+                raise VerdictRefused(
+                    "with a breadth judgement the behaviors come from it, not from the caller"
+                )
             behaviors = found["behaviors"]
             computed = "red" if list(failures) else ("gaps" if behaviors else "pass")
             if verdict != computed:
@@ -299,11 +303,19 @@ async def record_check(
 
 
 def _union(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Instances once per id, the first naming kept: the kernel's come
-    first, so a reviewer naming the same hunk adds nothing twice."""
+    """Instances once per id. The kernel's come first; a reviewer naming a
+    line inside a hunk the kernel already made an instance adds nothing
+    twice, and the summary, incident, and mission item it gave fill the
+    kernel's entry where that has none."""
     seen: dict[str, dict[str, Any]] = {}
     for i in instances:
-        seen.setdefault(i["id"], i)
+        if i["id"] not in seen:
+            seen[i["id"]] = dict(i)
+            continue
+        kept = seen[i["id"]]
+        for k in ("summary", "incident", "mission_item"):
+            if not kept.get(k) and i.get(k):
+                kept[k] = i[k]
     return list(seen.values())
 
 

@@ -551,7 +551,9 @@ The Brier score is information with its `n` beside it, never evidence of
 calibration: seven cases cannot carry one.
 
 **Runs allowed.** Up to five, each recorded. The judge's floors are frozen
-before run 1 (the table above); between runs only wording may change. The
+before run 1 (the table above); between runs only wording may change (in
+the build that came to include the fallback's system prompt and its
+response schema, see the Build record). The
 breadth and governance floors are not frozen here: they come from 1.4's
 calibration records. The expected risk: a precise case must reach P(precise)
 .75 on the fallback. The
@@ -909,7 +911,7 @@ the kernel checkout:
   so `judgement-keys` derives `~/.config/valor-kernel-m13/judgement-keys`),
   and its calibration runs go to a build database
   (`valor_rebuild_m13_calib`), never `valor_rebuild`.
-- Up to five calibration runs, each recorded, only rubric wording changing
+- Up to five calibration runs, each recorded, only wording changing
   between them, before asking Tom.
 
 ## Critique round 1 (of 2)
@@ -928,7 +930,9 @@ Every finding resolved in this revision:
    before 1.4's record.
 5. A missing key fails `run` and `calibrate` at start, naming it.
 6. The four combinations are specified, each with a test.
-7. Floors frozen before run 1; only rubric wording changes between runs.
+7. Floors frozen before run 1; only wording changes between runs (as
+   built: the rubrics and question, the fallback's system prompt in run 3,
+   and a `notes` field in its response schema in run 4).
 8. `calibrate` requires a budget capped at $0.50, refuses over 50 cases,
    and records the run index.
 9. Forced emulator arms through the scripted local upstream, by endpoint
@@ -1066,3 +1070,44 @@ $0.097, under the $2 declared.
 
 **Docs.** `docs/plans/valor-rebuild.md`'s 1.3 Done metering line is fixed
 here. The rest of "Docs the build makes true" is the docs stage's.
+
+## Patch round 1 (review round 1 of 2)
+
+On top of the docs session's `de2ce902a`. Every finding resolved:
+
+- **R1, Jev reserved too little.** Sized from the 70 calibration calls'
+  own rows (no new live call): Jev billed 0.95 to 1.59 times the body's
+  bytes / 3 (31 of 35 over), at most 189 tokens more; the fallback's host
+  billed 0.39 to 0.62 of it, with at most 219 of its 400 output tokens.
+  Jev's estimate is now 1.25 times bytes / 3 plus 300 tokens plus 50 per
+  question, which covers every row with margin (the worst, 319 estimated
+  and 499 billed, now reserves for 749); the fallback's stays. The local
+  upstream now bills Jev 1.2 times bytes / 3 plus 190 and the fallback 0.6
+  times, and every port test asserts no charge exceeds its reservation
+  (`within_reservations`).
+- **R2, calibration provenance.** `python -m core calibrate` refuses any
+  leg endpoint but the provider's, naming it, before it reads a key; every
+  `judgement.calibrated` record carries `endpoints` (each leg's host) and
+  prints it. Arguments are checked first (budget, cases file, site).
+- **R4.** The plan, the declaration's comment ("fitted over runs 1 to 5"),
+  and judgement-layer.md now say that run 3 changed the fallback's system
+  prompt and run 4 its response schema.
+- **R5.** 1.4's Done list says its runners always pass `governance_from`
+  and `breadth`, settles the breadth-suite order there, and carries the
+  breadth and governance calibration records.
+- **R6.** The judge runner reports `stopped` for a stopped task, both
+  when the fold says so and when a reservation is refused because of it.
+- **R7.** `tests/README.md` says the emulator runs
+  `tests/judgement_upstream.py`.
+- **T9, decided:** a reviewer's `PATH:LINE` inside a hunk the kernel made
+  an instance merges into it: one instance, the reviewer's summary,
+  incident, and mission item filling what the kernel's entry lacks.
+- **T7, decided:** a test verdict given a breadth judgement refuses
+  caller `behaviors`.
+- The judgement-sites docstring now says both check calls are asked
+  before the suite or the Opus turn and reused on rerun, with the order
+  for 1.4 to settle.
+- The gate rounds the summed probability to nine places, so a sum a hair
+  under its floor from float addition meets it.
+
+Tests added: the gate at and either side of each floor on both legs; normalizing; charging a malformed answer, an unreadable reported cost, and a refusal; the fallback's reservation refused after the primary's (charged 0, unused); calibrate's command refusals and the record's endpoints; budget refusals at breadth and governance; the test-path split; too large for both legs; a new candidate's reruns; caller behaviors refused; two hunks with one id asked once; the plain hunk for a vast function; a changed function re-asking an unchanged hunk; a reviewer's line inside a kernel instance; docs governance over the candidate-to-docs-head range; calibration tasks refusing a turn and review and docs verdicts; a stopped judge; and `tests/test_replay_arms.py` for `judged_as`.

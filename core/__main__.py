@@ -279,6 +279,19 @@ async def _run(args) -> None:
         return
     if args.command == "calibrate":
         try:
+            judgement_sites.check_calibration(args.cases, round(args.budget_usd * 1_000_000))
+        except ValueError as exc:
+            raise SystemExit(f"calibrate refused: {exc}") from None
+        elsewhere = [
+            url for url, default in ((settings.jev_url, JEV_URL), (settings.open_weight_url, OPEN_WEIGHT_URL))
+            if url != default
+        ]  # fmt: skip
+        if elsewhere:
+            # A record is what a judgement task lands on: only the providers make one.
+            raise SystemExit(
+                f"calibrate refused: a calibration asks the providers, not {', '.join(elsewhere)}"
+            )
+        try:
             judgement_port = port()
         except (credentials.MissingKey, ValueError) as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None

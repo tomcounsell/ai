@@ -2,8 +2,8 @@
 
 - The judge runner: the `judge` state's runner (`intake.underspecified`).
   The composition root registers `judge_runner(port)` for `State.JUDGE`.
-- `breadth`: the call `checks.test` makes after the suite
-  (`checks.test.breadth`). 1.4's test runner calls it and passes the id to
+- `breadth`: the call `checks.test` makes (`checks.test.breadth`). 1.4's
+  test runner calls it and passes the id to
   `verdicts.record_check(..., breadth=id)`, which reads the row itself.
 - `governance`: one call per hunk of a diff (`governance.adds`). 1.4's
   review and docs runners call it and pass the ids to
@@ -11,8 +11,8 @@
   hunks from git and reads the rows itself.
 
 Both check calls are meant to run before the suite or the reviewer's turn,
-so a provider outage costs no suite run, and each reuses an answered row on
-a rerun (breadth by candidate; governance by hunk id and input digest). A
+so a provider outage costs no suite run and no Opus turn, and each reuses
+an answered row on a rerun (1.4 settles the order in its runners) (breadth by candidate; governance by hunk id and input digest). A
 judgement both legs failed leaves its branch without a verdict, to be asked
 again on the next run; after `judgement.UNANSWERED_RUNS` such failures, or
 when the inputs were too large for both legs, the consumer applies caution
@@ -69,6 +69,8 @@ def judge_runner(port: JudgementPort):
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
             f = machine.fold(rows)
+            if f.state is State.STOPPED:
+                return {"status": "stopped", "state": await tasks.status(conn, ctx.task_id)}
             if f.state is not State.JUDGE:
                 return {"status": "moved"}
             b = await tasks.brief(conn, ctx.task_id)
@@ -96,7 +98,12 @@ def judge_runner(port: JudgementPort):
                 )
             except budget.BudgetRefused:
                 async with await db.connect(ctx.dsn) as conn:
-                    return {"status": "budget exhausted", "state": await tasks.status(conn, ctx.task_id)}
+                    state = await tasks.status(conn, ctx.task_id)
+                # A stopped task refuses every reservation too; say which.
+                return {
+                    "status": "stopped" if state["state"] == "stopped" else "budget exhausted",
+                    "state": state,
+                }
             judgement_id = j.judgement_id
         if not await ctx.alive():
             return {"status": "lock lost"}
@@ -399,17 +406,37 @@ def load_cases(path: str | Path) -> tuple[str, list[dict[str, Any]]]:
     return site, out
 
 
-async def calibrate(
-    port: JudgementPort, dsn: str, cases_path: str | Path, budget_usd_micros: int
-) -> dict[str, Any]:
-    """Both legs alone on every case, one calibration task, one record."""
+def check_calibration(cases_path: str | Path, budget_usd_micros: int) -> tuple[str, list[dict[str, Any]]]:
+    """The budget, the cases file, and its site, before anything is asked:
+    `ValueError` naming what is wrong."""
     if budget_usd_micros <= 0 or budget_usd_micros > MAX_CALIBRATION_USD_MICROS:
         raise ValueError(
             f"a calibration budget is more than $0 and at most ${MAX_CALIBRATION_USD_MICROS / 1e6:.2f}"
         )
-    site, cases = load_cases(cases_path)
+    try:
+        site, cases = load_cases(cases_path)
+    except FileNotFoundError as exc:
+        raise ValueError(f"no cases file {exc.filename}") from None
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{cases_path} is not a cases file ({exc!r})") from None
     if site not in CASE_ACTIONS:
         raise ValueError(f"no calibration case shape for {site}")
+    return site, cases
+
+
+def endpoint_hosts(port: JudgementPort) -> dict[str, str | None]:
+    from urllib.parse import urlparse
+
+    return {name: urlparse(leg.endpoint).hostname for name, leg in sorted(port.legs.items())}
+
+
+async def calibrate(
+    port: JudgementPort, dsn: str, cases_path: str | Path, budget_usd_micros: int
+) -> dict[str, Any]:
+    """Both legs alone on every case, one calibration task, one record. The
+    record names each leg's endpoint host, so a run against anything but the
+    providers says so; the command line refuses one (`check_calibration`)."""
+    site, cases = check_calibration(cases_path, budget_usd_micros)
     task = BY_SITE[site]
     expected = CASE_ACTIONS[site]
     async with await db.connect(dsn) as conn:
@@ -507,6 +534,7 @@ def _record(task, port, cases, results, task_id) -> dict[str, Any]:
         "site": task.site,
         "task_sha256": judgement.task_sha256(task, port.signature()),
         "models": port.models(),
+        "endpoints": endpoint_hosts(port),
         "floor": task.floor,
         "at": datetime.now(UTC).isoformat(),
         "calibration_task": task_id,

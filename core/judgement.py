@@ -198,7 +198,8 @@ def normalize(probs: Mapping[str, float]) -> dict[str, float] | None:
 def decide(question: Question, probs: Mapping[str, float], floor: float) -> dict[str, Any]:
     """One question's answer from one leg: the gate on the summed probability
     of the labels that proceed."""
-    p = sum(v for k, v in probs.items() if k in question.proceed)
+    # Rounded so float sums never land a hair under the floor they meet.
+    p = round(sum(v for k, v in probs.items() if k in question.proceed), 9)
     if p >= floor:
         decision = "proceed"
     elif p <= 1 - floor:

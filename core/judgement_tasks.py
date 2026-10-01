@@ -67,6 +67,8 @@ JUDGE = JudgementTask(
     guard=machine.GUARD_JUDGE,
     # Calibration run 5 of 2026-10-02 (results/calibration/intake.underspecified-run5.json):
     # both legs 7 of 7 on the seed cases; Brier 0.0114 (Jev) and 0.0040 (fallback), n = 7 each.
+    # Fitted over runs 1 to 5: the wording here and the fallback's prompt and schema were
+    # changed after seeing which cases failed (docs/plans/m1-3-judgement.md, Build record).
     calibrated="32b8245e60649f4884abba82e5d02ea6cfc865acc7ec21f4afb2737af6ff9c21",
 )
 

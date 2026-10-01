@@ -85,7 +85,21 @@ def ask(dsn, *replies, task_kind=JUDGE, inputs=REQUEST, budget_usd_micros=100_00
         return j, task
 
     j, task = run(go())
+    within_reservations(dsn, task)
     return j, task, UP.seen(sid)
+
+
+def within_reservations(dsn, task) -> None:
+    """No call was charged more than it reserved: the reservation is the
+    call's worst case, and an answer billed above it would spend money the
+    budget never held."""
+    got = run(rows(dsn, task))
+    reserved = {
+        r["payload"]["call_id"]: r["payload"]["usd_micros"] for r in got if r["type"] == "gateway.reserved"
+    }
+    for r in got:
+        if r["type"] == "gateway.charged":
+            assert r["payload"]["usd_micros"] <= reserved[r["payload"]["call_id"]], r["payload"]
 
 
 # -- the gate -----------------------------------------------------------------
@@ -246,8 +260,10 @@ def test_the_primary_is_charged_by_the_gateways_rules(dsn, reply, expect):
 
 
 def test_the_fallback_is_charged_the_reported_cost_when_it_is_more_and_a_tiny_cost_rounds_up(dsn):
-    j, task, _ = ask(dsn, {"status": 500}, {"probs": PRECISE, "cost": 0.5})
-    assert _charges(dsn, task)["open_weight"]["usd_micros"] == 500_000
+    j, task, _ = ask(dsn, {"status": 500}, {"probs": PRECISE, "cost": 0.0002})
+    tokens = j.attempts[1]["usage"]["input_tokens"]
+    assert math.ceil(tokens * 0.14) + math.ceil(30 * 0.80) < 200  # the tokens alone would charge less
+    assert _charges(dsn, task)["open_weight"]["usd_micros"] == 200
     j, task, _ = ask(dsn, {"status": 500}, {"probs": PRECISE, "cost": 1e-07})
     tokens = j.attempts[1]["usage"]["input_tokens"]
     by_tokens = math.ceil(tokens * 0.14) + math.ceil(30 * 0.80)
@@ -314,11 +330,20 @@ def test_inputs_too_large_for_both_legs_fail_as_too_large(dsn):
     assert run(rows(dsn, task, "judgement.failed"))[0]["payload"]["too_large"] is True
 
 
+def _worst(leg, task_kind=JUDGE, inputs=REQUEST) -> int:
+    return budget.judgement_worst_case(
+        leg.estimate(task_kind, inputs), leg.max_output_tokens, budget.judgement_price(leg.model)
+    )
+
+
 def test_a_budget_that_cannot_cover_both_legs_asks_no_provider(dsn):
+    """The primary reserves, the fallback's reservation is refused: the
+    primary's is charged 0 as unused, then the call raises."""
     sid = UP.script(default={"probs": PRECISE})
+    legs = UP.port(script=sid).legs
 
     async def go():
-        task = await new_task(dsn, budget_usd_micros=50)
+        task = await new_task(dsn, budget_usd_micros=_worst(legs["jev"]) + _worst(legs["open_weight"]) - 1)
         with pytest.raises(budget.BudgetRefused):
             await UP.port(script=sid).judge(JUDGE, REQUEST, task_id=task, ref={}, dsn=dsn)
         return task
@@ -327,7 +352,8 @@ def test_a_budget_that_cannot_cover_both_legs_asks_no_provider(dsn):
     assert UP.seen(sid) == []
     kinds = [r["type"] for r in run(rows(dsn, task))]
     assert kinds == ["task.started", "gateway.reserved", "gateway.refused", "gateway.charged"]
-    assert run(rows(dsn, task, "gateway.charged"))[0]["payload"]["usd_micros"] == 0
+    charged = run(rows(dsn, task, "gateway.charged"))[0]["payload"]
+    assert charged["usd_micros"] == 0 and charged["unused"] is True and charged["leg"] == "jev"
     assert tasks.audit(run(_status(dsn, task))) == []
 
 
@@ -366,9 +392,10 @@ def test_concurrent_judgements_never_spend_past_the_budget(dsn):
 
         got = await asyncio.gather(*(one() for _ in range(20)))
         async with await db.connect(dsn) as conn:
-            return got, await tasks.status(conn, task)
+            return got, await tasks.status(conn, task), task
 
-    got, state = run(go())
+    got, state, task = run(go())
+    within_reservations(dsn, task)
     answered = [j for j in got if j is not None]
     assert 1 <= len(answered) <= 12 and len(got) == 20
     assert state["charged_usd_micros"] <= state["committed_usd_micros"] and tasks.audit(state) == []
@@ -462,7 +489,9 @@ def test_run_and_calibrate_refuse_to_start_without_a_key_for_a_default_endpoint(
     }
     out = _cli("run", task, env=env)
     assert out.returncode == 1 and "TYPESAFE_API_KEY" in out.stderr and "run refused" in out.stderr
-    out = _cli("calibrate", str(tmp_path / "cases.json"), "--budget-usd", "0.01", env=env)
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps({"site": "intake.underspecified", "cases": []}))
+    out = _cli("calibrate", str(cases), "--budget-usd", "0.01", env=env)
     assert out.returncode == 1 and "TYPESAFE_API_KEY" in out.stderr
     assert not [r for r in run(rows(dsn, task)) if r["type"] != "task.started"]
 
@@ -565,3 +594,104 @@ def test_answers_of_any_shape_are_checked_without_raising(answers):
                 if isinstance(got, judgement.LegAnswer):
                     checked, why = judgement.check_answer(task, got)
                     assert checked is not None or why
+
+
+# -- patch round 1: boundaries, normalizing, charging, calibrate's command ------
+
+
+@pytest.mark.parametrize(
+    ("task_kind", "role", "p", "decision"),
+    [
+        (JUDGE, "primary", 0.70, "proceed"),
+        (JUDGE, "primary", 0.69, "abstain"),
+        (JUDGE, "primary", 0.31, "abstain"),
+        (JUDGE, "primary", 0.30, "caution"),
+        (JUDGE, "fallback", 0.75, "proceed"),
+        (JUDGE, "fallback", 0.74, "abstain"),
+        (JUDGE, "fallback", 0.26, "abstain"),
+        (JUDGE, "fallback", 0.25, "caution"),
+        (GOVERNANCE, "primary", 0.65, "proceed"),
+        (GOVERNANCE, "primary", 0.64, "abstain"),
+        (GOVERNANCE, "primary", 0.36, "abstain"),
+        (GOVERNANCE, "primary", 0.35, "caution"),
+        (GOVERNANCE, "fallback", 0.70, "proceed"),
+        (GOVERNANCE, "fallback", 0.30, "caution"),
+    ],
+)
+def test_the_gate_at_and_either_side_of_each_floor(task_kind, role, p, decision):
+    q = task_kind.questions[0]
+    proceed = next(iter(q.proceed))
+    others = [label for label in q.labels if label != proceed]
+    probs = {proceed: p, **{label: (1 - p) / len(others) for label in others}}
+    got = judgement.decide(q, judgement.normalize(probs), task_kind.floor[role])
+    assert got["decision"] == decision and got["p_proceed"] == pytest.approx(p)
+
+
+def test_probabilities_are_normalized_before_the_gate():
+    q = JUDGE.questions[0]
+    seventy_thirty = {"precise": 70, "one_line_ask": 30, "example_as_spec": 0, "existing_ui_unscoped": 0}
+    assert judgement.normalize(seventy_thirty)["precise"] == pytest.approx(0.7)
+    over = {
+        "precise": 0.84,
+        "one_line_ask": 0.36,
+        "example_as_spec": 0,
+        "existing_ui_unscoped": 0,
+    }  # sums 1.2
+    assert judgement.decide(q, judgement.normalize(over), 0.7)["decision"] == "proceed"
+    single = {"precise": 3.0, "one_line_ask": 0, "example_as_spec": 0, "existing_ui_unscoped": 0}
+    assert judgement.normalize(single)["precise"] == 1.0
+    answer = judgement.LegAnswer({"request": single}, {}, None, JEV_MODEL)
+    checked, why = judgement.check_answer(JUDGE, answer)
+    assert checked["request"]["precise"] == 1.0 and not why
+
+
+def test_charging_a_malformed_answer_a_bad_reported_cost_and_a_refusal():
+    call = {"model": JEV_MODEL, "usd_micros": 99}
+    usage = {"input_tokens": 1000, "output_tokens": 5, "reported_usd": None}
+    with_usage = judgement.LegError("malformed", "usage", status=200, usage=usage)
+    assert judgement._charge_for(call, with_usage, usage)[0] == 42  # 1000 x 0.042
+    without = judgement.LegError("malformed", "unknown", status=200)
+    charged, detail = judgement._charge_for(call, without, None)
+    assert charged == 99 and detail["usage_missing"] is True
+    unreadable = {"input_tokens": 1000, "output_tokens": 5, "reported_usd": "a lot"}
+    ow_call = {"model": OPEN_WEIGHT_PIN, "usd_micros": 500}
+    assert judgement._charge_for(ow_call, judgement.LegError("malformed", "usage"), unreadable)[0] == 500
+    refused = judgement.LegError("http_status", "none", status=429)
+    charged, detail = judgement._charge_for(call, refused, None)
+    assert charged == 0 and detail["status"] == 429 and detail["unsent"] is False
+
+
+def test_calibrate_from_the_command_line_refuses_before_asking(dsn, tmp_path):
+    good = tmp_path / "cases.json"
+    good.write_text(json.dumps({"site": "intake.underspecified", "cases": []}))
+    unknown = tmp_path / "unknown.json"
+    unknown.write_text(json.dumps({"site": "governance.adds", "cases": []}))
+    jev, ow = UP.urls(fixed="precise")
+    for args, env, said in (
+        ([str(good), "--budget-usd", "0.51"], {}, "at most $0.50"),
+        ([str(tmp_path / "missing.json"), "--budget-usd", "0.01"], {}, "no cases file"),
+        ([str(unknown), "--budget-usd", "0.01"], {}, "no calibration case shape for governance.adds"),
+        (
+            [str(good), "--budget-usd", "0.01"],
+            {"VALOR_JEV_URL": jev, "VALOR_OPEN_WEIGHT_URL": ow},
+            "a calibration asks the providers, not http://127.0.0.1",
+        ),
+    ):
+        out = _cli("calibrate", *args, env={"VALOR_PG_PASSFILE": str(tmp_path / "pgpass"), **env})
+        assert out.returncode == 1 and said in out.stderr and "Traceback" not in out.stderr, out.stderr
+
+
+def test_a_calibration_record_names_the_endpoints_it_asked(dsn, tmp_path):
+    from core import judgement_sites
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(
+        json.dumps(
+            {
+                "site": "intake.underspecified",
+                "cases": [{"id": "a", "request": "x", "label": "precise", "source": "judge"}],
+            }
+        )
+    )
+    record = run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, cases, 10_000))
+    assert record["endpoints"] == {"jev": "127.0.0.1", "open_weight": "127.0.0.1"}
