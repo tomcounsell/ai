@@ -412,10 +412,11 @@ instance, starts the review branch again on the same candidate; his
 feedback sends the work to `patch` to take it out.
 
 **Why.** Mission item 1 and the Evidence item "Independent checks". One
-review is a constraint of the setup plan with no expiry; rounds beyond it
-are guards under Tom's 2026-10-01 grant. The Sonnet stand-in accepted
-popoto #191 bare at fidelity 1 and #633 with the stale-cache bug moved, not
-removed (rebuild-baseline.md, Review rounds), hence the Opus class.
+review is a constraint of the setup plan with no expiry. Sending work back
+is the guard `review.loop`, on popoto #633: the stale-cache bug was moved,
+not removed, and the Sonnet stand-in accepted it, as it accepted #191 bare
+at fidelity 1 (rebuild-baseline.md, Review rounds), hence the Opus class.
+A second round has no incident and expires 2026-12-30 unless one occurs.
 
 #### `checks.docs`: the docs still describe reality
 
@@ -488,8 +489,7 @@ branches again on the new candidate; `asked`, `idle`, and `failed` as in
 `build`.
 
 **Why.** Tom's decision of 2026-10-01; the demonstration's two send-backs
-were one resumed turn each, at $0.89 and $0.85 (rebuild-demonstration.md,
-Money).
+were one resumed turn each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 
 ### `merge`: shown to Tom, merge held for his tap
 

@@ -229,7 +229,8 @@ then asks the target through the performer's `lookup`, which answers
 present (the target branch holds the commit, at its tip or below it),
 absent, or unknown (the target did not answer). Present is written `done`.
 Absent is written `failed` only once the intent is older than
-`reconcile_after_s` (twice the hard limit on any git call), since a
+`reconcile_after_s` (at least twice `git_timeout_s`, the one deadline on a
+perform's git calls; settings refuse less), since a
 performer whose database connection dropped frees the lock while its push
 may still run. Unknown writes nothing, and the effect stays in flight. Either outcome is marked `reconciled`. The router does this for a
 task's merge on its next run; other dangling intents stay listed by
