@@ -26,7 +26,8 @@ merged), say exactly where work stopped.
 Before any work, confirm in one pass: the branch is clean and up to date
 with origin; `.venv/bin/python -m core settings` runs and names this
 machine's owner role, Postgres, and backup folder; `~/.config/valor-kernel/`
-holds `pgpass` and `judgement-keys`; the suite command below runs. If any
+holds `pgpass`, `judgement-keys`, and `claude-token`; `~/src/valor-demo/items`
+exists; the suite command below runs. If any
 is missing, follow `docs/plans/rebuild-handoff.md` "Setup". Ask Tom only
 for what only he holds (a secret, an account, a disk). Never print a secret
 or any prefix of one.

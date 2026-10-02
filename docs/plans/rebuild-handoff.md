@@ -14,7 +14,11 @@ up where the build left off.
 ## Where the build stands
 
 The rebuild branch is `valor-cori-rebuild`. Milestones 1.1, 1.2, 1.3, and
-task 1.4a are merged and rolled out on the Mac where they were built. Next,
+task 1.4a are merged and rolled out on both Macs. Valor's Mac has the
+checkout at `~/src/valor-rebuild`, a fresh ledger with one passing
+calibration, the judgement keys, the long-lived Claude token, the demo
+items and results at `~/src/valor-demo`, and `GITHUB_PUSH_TOKEN` in the
+vault; its backup job waits on an external disk. Next,
 per `docs/plans/valor-rebuild.md` (1.4): the popoto #191 trial run, then
 1.4b, then 1.4d; 1.4c after takeover. Each milestone's plan file in
 `docs/plans/m*.md` carries its status and its records.
@@ -26,14 +30,19 @@ switch it off `main`; the rebuild is a separate checkout.
 
 1. **Prerequisites.** Apple's Command Line Tools (the kernel runs only the
    root-owned git at `/Library/Developer/CommandLineTools/usr/bin/git`),
-   Homebrew `postgresql@18` running as a service, `uv`, and the `claude`
-   CLI logged in.
+   Homebrew `postgresql@18` running as a service on port 5432 (if an older
+   Homebrew Postgres holds the port, dump its databases with `pg_dumpall`,
+   stop it, start 18, restore, and put `postgresql@18/bin` first on PATH),
+   `uv`, and the `claude` CLI logged in.
 2. **Checkout.**
-   `git clone -b valor-cori-rebuild git@github.com:tomcounsell/ai.git ~/src/valor-rebuild`,
+   `git clone -b valor-cori-rebuild https://github.com/tomcounsell/ai.git ~/src/valor-rebuild`
+   (Valor's Macs reach GitHub over HTTPS through `gh`, not SSH),
    then `cd ~/src/valor-rebuild && uv sync`. Python is pinned by
    `.python-version`.
 3. **The vault.** `~/Desktop/Valor/.env` holds `TYPESAFE_API_KEY` and
-   `OPENROUTER_API_KEY` (already present on Valor's machines).
+   `OPENROUTER_API_KEY`. If one is missing, it is in the `m-valor`
+   1Password vault ("TypeSafe API"); copy it in by fingerprint, never by
+   printing it.
 4. **The kernel database.** `.venv/bin/python -m core migrate` creates the
    `valor_kernel` role, the `valor_rebuild` database, the schema, correction
    1, and the four seeded guards, then runs `secure-login`: it writes
@@ -55,21 +64,32 @@ switch it off `main`; the rebuild is a separate checkout.
    `core/judgement_tasks.py` and its `entry_check` must be true.
 7. **The model credential.** The gateway reads the `claude` login from the
    Keychain, which expires after about eight hours unless the owner's own
-   sessions refresh it. Better: `claude setup-token`, saved as
-   `~/.config/valor-kernel/claude-token` (mode 600).
+   sessions refresh it. Better: a long-lived token saved as
+   `~/.config/valor-kernel/claude-token` (mode 600). The vault's 1Password
+   item `CLAUDE_CODE_OAUTH_TOKEN` holds one; `claude setup-token` makes a
+   fresh one. Check it with a one-word `claude -p` call under
+   `CLAUDE_CODE_OAUTH_TOKEN` before installing it.
 8. **Backups.** Set `VALOR_BACKUP_DIR` to a folder on that Mac's external
    disk (the disk must be on a different device from the Postgres data),
    run `.venv/bin/python -m core backup` once, then
    `.venv/bin/python -m core backup --plist`, load it with `launchctl`, and
    allow disk access when macOS asks.
 9. **Check.** `VALOR_TEST_DB=valor_rebuild_test_setup .venv/bin/python -m pytest -q tests`
-   passes with only the live tests skipped, and `.venv/bin/python -m core settings`
-   shows the right owner role, Postgres paths, and backup folder.
+   passes with only the live tests skipped, plus two machine-dependent
+   skips on a fresh Mac (the ledger-copy test needs task history, and the
+   planted commit-graph test needs a git that trusts the planted file,
+   which Apple's does not), and `.venv/bin/python -m core settings`
+   shows the right owner role, Postgres paths, and backup folder. Drop the
+   scratch database afterwards.
 
 ## Waiting on Tom
 
-- 1.4d: a Valor GitHub account with a ruleset on `main` (recommended) or
-  Tom's own fine-grained token, saved as `GITHUB_PUSH_TOKEN` in the vault.
+- 1.4d: a ruleset on `main` of `tomcounsell/ai` with `valorengels` off the
+  bypass list (Valor's account has push, not admin). The token itself is
+  settled: Valor's classic `repo`-scope token, in the vault as
+  `GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
+- Backups on Valor's Mac: an external disk for `VALOR_BACKUP_DIR`, then
+  step 8.
 - 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
   and popoto #188.
 - 1.4c, after takeover: install Apple's `container` from Apple's signed

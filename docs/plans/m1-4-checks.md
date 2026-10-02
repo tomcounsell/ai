@@ -1248,13 +1248,17 @@ on a toy candidate with a container rerun.
    host run in a fresh checkout runs all of them, and `verify.ran` reports
    both counts. The alternative is a macOS VM, which Apple's `container`
    does not run.
-3. **Whose GitHub token.** Decided by the driving session, Tom to
-   confirm: a GitHub account of Valor's own with write access to
-   `tomcounsell/ai` and a ruleset on `main` that refuses it, so GitHub
-   itself stops a push to `main` whatever the kernel does. Fallback, if Tom
-   prefers: his own fine-grained token, where only the kernel's merge-target
-   list and its refusal of the default branch keep pushes off `main`. Both
-   are planned as rollout options; the code is the same.
+3. **Whose GitHub token.** Answered by Tom on 2026-10-02: Valor's own
+   account (`valorengels`, a collaborator with write access to
+   `tomcounsell/ai`), holding a classic token with the `repo` scope that
+   expires 2026-12-31, in the vault `.env` as `GITHUB_PUSH_TOKEN` and in
+   1Password as "GitHub Push Token". A fine-grained token cannot reach this
+   repository: GitHub scopes those to the token owner's repositories or an
+   organisation's, and `tomcounsell/ai` belongs to a user account. The
+   classic token reaches every repository Valor's account can write to, so
+   the kernel's merge-target list and its refusal of the default branch are
+   the restriction, plus a ruleset on `main` with `valorengels` off the
+   bypass list once Tom adds it (Valor's account has push, not admin).
 4. **The pinned header goes in through a kernel-owned config file, not
    `-c` on the command line**, because arguments are readable by a running
    turn. Assumed yes; it is still a pinned header, and helpers stay
