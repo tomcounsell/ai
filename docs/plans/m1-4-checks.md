@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial stopped at its $5 cap, waiting on Tom; then 1.4b, then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial at $6.09 of $8 in build, no candidate, needs another raise from Tom; then 1.4b, then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1643,3 +1643,18 @@ test, review, and docs. The build needs about $1.50 to $2.50 more, and the
 checks and the merge have not yet run on a provisioned task. Findings 1
 and 2 then go into 1.4b's plan as questions about the reservation size and
 whether the build should start a fresh session from the plan.
+
+### Tom's answer, and the third build turn
+
+Tom raised the cap to $8 (`budget.raised`, by Tom, 2026-10-02). Build turn
+3 metered $1.49 and stopped the same way, with $1.91 left that the next
+reservation exceeded. Total metered: $6.09 of $8.00. The workspace now
+holds about 460 uncommitted lines across seven files, a new
+`tests/test_capped_list_field.py`, and doc edits, but no candidate yet. The
+task is in `build`; no service of it is running.
+
+Next: with $1.91 left and reservations near $1.75, one more turn gets
+almost nothing. Finishing needs another raise (about $2), which is past the
+$8 Tom set, so it is his call again. Then `python -m core run
+75c0902b6e25`, and at `NO RUNNER` fresh subagents play test, review, and
+docs through `python -m core verdict`, stopping at the held merge.
