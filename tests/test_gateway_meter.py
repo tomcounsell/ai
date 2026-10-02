@@ -335,3 +335,21 @@ def test_no_path_trick_carries_the_credential_anywhere_but_the_allowed_paths(dsn
         ("/v1/models/claude-opus-5-5", "Bearer kernel-held-token"),
         ("/v1/models", "Bearer kernel-held-token"),
     ]
+
+
+def test_without_a_credential_the_gateway_still_refuses_tricky_paths_before_forwarding(dsn):
+    statuses, seen = _raw_calls(
+        dsn, None, ["/v1/models/../x", "/v1/models/%2e%2e/x", "/v1//messages", "/v1/models"]
+    )
+    assert statuses["/v1/models/../x"] == statuses["/v1/models/%2e%2e/x"] == statuses["/v1//messages"] == 400
+    assert seen == [("/v1/models", "Bearer valor-turn-holds-no-credential")]
+
+
+def test_an_allowed_path_with_an_escaped_query_reaches_upstream_byte_for_byte(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("kernel-held-token\n")
+    path = "/v1/models?after_id=a%2Fb%20c&limit=2"
+    statuses, seen = _raw_calls(dsn, ClaudeLogin(str(token)), [path])
+    assert statuses[path] == 200 and seen == [(path, "Bearer kernel-held-token")]

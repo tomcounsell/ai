@@ -1193,14 +1193,20 @@ def write_inputs(checkout: Path, files: dict[str, str]) -> None:
         inputs = os.open("inputs", flags, dir_fd=valor)
         fds.append(inputs)
         write_files(inputs, files)
-        try:
-            os.stat("verdict.json", dir_fd=valor, follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        raise FileExistsError("a verdict file exists before the session's turn")
+        no_verdict_yet(valor)
     finally:
         for fd in reversed(fds):
             os.close(fd)
+
+
+def no_verdict_yet(valor_fd: int) -> None:
+    """Refuse a `.valor` that already holds a verdict file (or anything by
+    that name) before the session's turn."""
+    try:
+        os.stat("verdict.json", dir_fd=valor_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise FileExistsError("a verdict file exists before the session's turn")
 
 
 def write_files(dir_fd: int, files: dict[str, str]) -> None:
@@ -1297,7 +1303,7 @@ def remove(task_id: str, lay: Layout | None = None) -> None:
 # -- other tasks' services --------------------------------------------------------------------
 
 
-async def sweep(conn, task_id: str, work: Path | None = None) -> list[dict[str, Any]]:
+async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None) -> list[dict[str, Any]]:
     """Stop the services a killed kernel left up: those of every other task
     whose run is not live (its router lock `run:<task>` can be taken), and
     those of any directory under `work` with no task row whose provisioning
@@ -1305,7 +1311,9 @@ async def sweep(conn, task_id: str, work: Path | None = None) -> list[dict[str, 
     killed mid-setup leaves. Takes the `workspace:ports` lock only if it is
     free, so a start never waits on a sweep, nor a sweep on a start; a busy
     lock skips this sweep, and the next run's does it. Returns what was
-    stopped, each entry naming its task or directory."""
+    stopped, each entry naming its task or directory. `after_scan`, when
+    given, is awaited between the scan and the locks (tests drive the
+    window in which a task row can appear)."""
     import asyncio
 
     stopped: list[dict[str, Any]] = []
@@ -1340,6 +1348,8 @@ async def sweep(conn, task_id: str, work: Path | None = None) -> list[dict[str, 
                 if d not in known and d != task_id:
                     candidates[d] = ("provision", Layout(work / d))
         marked = await asyncio.to_thread(runs.marked_services, list(candidates))
+        if after_scan is not None:
+            await after_scan()
         for other in marked:
             kind, lay = candidates[other]
             key = f"{kind}:{other}"

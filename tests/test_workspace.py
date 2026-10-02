@@ -906,3 +906,73 @@ def test_an_orphan_directory_is_shown_and_removed_only_when_its_provisioning_is_
     assert removed.returncode == 0, removed.stderr
     assert not (work / orphan).exists()
     assert _cli(tmp_path, "workspace", "remove", orphan).returncode == 1
+
+
+def test_a_verdict_file_that_appears_after_the_kernels_mkdir_is_refused(tmp_path):
+    valor = tmp_path / ".valor"
+    valor.mkdir()
+    fd = os.open(valor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        kws.no_verdict_yet(fd)  # an empty .valor passes
+        (valor / "verdict.json").symlink_to(tmp_path / "nowhere")  # appeared after the kernel made .valor
+        with pytest.raises(FileExistsError, match="before the session's turn"):
+            kws.no_verdict_yet(fd)
+    finally:
+        os.close(fd)
+
+
+def _orphan_with_services(tmp_path):
+    work = tmp_path / "work"
+    orphan = ledger.new_id()
+    src = scripted.toy_repo(tmp_path)
+    port = kws.choose_port((5540, 5579), set())
+    kws.provision(orphan, spec(src, services=["postgres"]), {"postgres": port}, work=work)
+    lay = kws.Layout(work / orphan)
+    kws.start_services(orphan, lay, ["postgres"], {"postgres": port})
+    return work, orphan, lay
+
+
+async def _become_task(dsn, task_id):
+    async with await db.connect(dsn) as conn:
+        await tasks.start(conn, tasks.Brief(id=task_id, instruction="x", budget_usd_micros=1))
+
+
+def test_a_directory_that_becomes_a_task_after_the_scan_is_left_to_its_run(dsn, tmp_path):
+    work, orphan, lay = _orphan_with_services(tmp_path)
+    try:
+
+        async def go():
+            async with await db.connect(dsn) as conn:
+                return await kws.sweep(
+                    conn, "abcdef999999", work, after_scan=lambda: _become_task(dsn, orphan)
+                )
+
+        assert run(go()) == []
+        assert runs.marked_services([orphan])  # its services were not stopped
+    finally:
+        kws.stop_services(orphan, lay)
+
+
+@pytest.mark.parametrize("when", ["before the lock", "under the lock"])
+def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, monkeypatch, when):
+    import argparse
+
+    from core import __main__ as cli
+
+    work, orphan, lay = _orphan_with_services(tmp_path)
+    monkeypatch.setattr(kws, "work_dir", lambda: work)
+    args = argparse.Namespace(task_id=orphan, workspace_command="remove", by="tom", via="test")
+    try:
+
+        async def go():
+            if when == "before the lock":
+                await _become_task(dsn, orphan)
+            async with await db.connect(dsn) as conn:
+                hook = None if when == "before the lock" else (lambda: _become_task(dsn, orphan))
+                with pytest.raises(SystemExit, match="became a task"):
+                    await cli._orphan(conn, args, after_lock=hook)
+
+        run(go())
+        assert lay.root.exists()
+    finally:
+        kws.stop_services(orphan, lay)

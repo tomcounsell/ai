@@ -1554,3 +1554,21 @@ stopped here for Tom's decision.
 
 **Recommendation:** give feedback that accepts this patch with the four
 test gaps added, which needs one patch and one more run of the three checks.
+
+## Tom's feedback on 1.4a (delegated decision, 2026-10-02)
+
+Decided on Tom's behalf under his delegation: apply the proposed patch,
+with four test gaps added, and run the suite only; no further review round,
+since review passed the patch. Added:
+
+1. `write_inputs`' "a verdict file exists before the session's turn" check
+   is its own step (`workspace.no_verdict_yet`), and a test reaches it with
+   a verdict file appearing in `.valor` after the kernel made it.
+2. A gateway without a credential refuses `..`, `%2e`, and `//` paths with
+   400 before forwarding anything.
+3. An allowed path whose query carries percent escapes reaches the upstream
+   byte for byte.
+4. A task row appearing in the window: for the sweep, after its directory
+   scan (an `after_scan` hook the test drives); for `workspace remove` on an
+   orphan, before and under the provision lock (an `after_lock` hook). In
+   each case the directory is left to its task.

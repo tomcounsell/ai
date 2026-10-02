@@ -347,7 +347,7 @@ async def _workspace(conn, args) -> str:
     return f"removed the workspace of task {args.task_id}"
 
 
-async def _orphan(conn, args) -> str:
+async def _orphan(conn, args, *, after_lock=None) -> str:
     """A task directory with no task row: a provisioning that died before
     its start. `remove` deletes it once its provisioning is not live."""
     try:
@@ -365,6 +365,8 @@ async def _orphan(conn, args) -> str:
     if not got[0]:
         raise SystemExit(f"{lay.root} is being provisioned now")
     try:
+        if after_lock is not None:
+            await after_lock()  # tests drive the window in which a task row can appear
         if await (
             await conn.execute("SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (args.task_id,))
         ).fetchone():
