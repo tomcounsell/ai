@@ -92,15 +92,14 @@ switch it off `main`; the rebuild is a separate checkout.
 
 - The popoto #191 trial: raise its budget about $2 past $8 so the build can
   finish to a held merge, or accept the record as it stands.
-- 1.4d: a ruleset on `main` of `tomcounsell/ai` with `valorengels` off the
-  bypass list (Valor's account has push, not admin). Tom's admin token in
-  1Password ("AI Repo Admin PAT") is fine-grained and lacks Administration
-  write, which rulesets need; regenerate it with that permission. Create the
-  ruleset with enforcement disabled until takeover: today every commit and
-  PR merge on `main` lands under `valorengels`, so an active restrict-updates
-  rule would stop the running pipeline. The push token itself is settled:
-  Valor's classic `repo`-scope token, in the vault as `GITHUB_PUSH_TOKEN`
-  (m1-4-checks.md, Questions, 3).
+- 1.4d's ruleset is created (2026-10-02, by Tom through his `gh` login):
+  ruleset 24370170 on `main` of `tomcounsell/ai`, restrict updates, bypass
+  for the repository admin role only, so `valorengels` (push, not admin) is
+  off it. Enforcement is disabled until takeover: today every commit and PR
+  merge on `main` lands under `valorengels`, so an active rule would stop
+  the running pipeline. At takeover, set it to active. The push token is
+  settled: Valor's classic `repo`-scope token, in the vault as
+  `GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
 - 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
   and popoto #188.
 - 1.4c, after takeover: install Apple's `container` from Apple's signed
