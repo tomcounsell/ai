@@ -199,6 +199,18 @@ def test_a_schema_change_applies_to_a_copy_of_the_kernel_ledger_without_rewritin
         assert before["events"]
         if not before["money"]:
             pytest.skip("the ledger on this machine holds no task history to copy")
+        # The old computation never saw raises; the new fold adds each task's
+        # raises to committed and remaining.
+        with _owner(copy) as conn:
+            raised = dict(
+                conn.execute(
+                    "SELECT task_id, sum((payload->>'usd_micros')::bigint) FROM events "
+                    "WHERE type = 'budget.raised' GROUP BY task_id"
+                ).fetchall()
+            )
+        for t, r in raised.items():
+            committed, charged, remaining = before["money"][t]
+            before["money"][t] = (committed + int(r), charged, remaining + int(r))
         _migrate_with_change(copy, tmp_path)
         _check(copy, before)
         _legacy_folds(copy)
@@ -261,6 +273,9 @@ def _legacy_folds(database: str) -> None:
     for task, rows in streams.items():
         f = machine.fold(rows)
         if f.calibration:  # a calibration run's task, written by `core calibrate`
+            continue
+        started = next(r for r in rows if r["type"] == "task.started")
+        if started["payload"].get("sdlc") == 1:  # written by the state machine
             continue
         assert f.legacy, task
         assert f.state in ORACLE[old_state(rows)], (task, f.state, old_state(rows))
