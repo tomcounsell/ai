@@ -129,7 +129,7 @@ def commit(cwd, path: str, text: str, message: str = "change") -> str:
     p = Path(cwd) / path
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
-    git(cwd, "add", path)
+    git(cwd, "add", "--force", path)  # the operator's global excludes do not apply
     git(cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", message)
     return git(cwd, "rev-parse", "HEAD")
 
