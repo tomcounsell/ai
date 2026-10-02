@@ -43,6 +43,22 @@ A milestone may be split into several tasks, each through the pipeline on
 its own. The milestone is done when all of its evidence holds on the merged
 branch.
 
+How the loops end (Tom, delegated decision of 2026-10-02):
+
+- **Stop means stop.** When a task's critique or review rounds are spent,
+  its delivery goes to Tom with the findings and a recommendation, and
+  nothing more is built on it until he answers.
+- **Each plan states its threat model** in a few lines: what the turn
+  controls, and what the kernel must never do with it. Review checks the
+  Done items against that model. A finding that the kernel reads
+  turn-owned state is one finding, "remove the read", not a list of
+  vectors to refuse one by one.
+- **Done is the plan's Done items, a green suite, and a review pass or
+  Tom's tap.** "No findings left" is not the bar.
+- **Tom's queue holds three kinds of item:** deliveries to accept,
+  identity and credential choices, and questions about intent. Every
+  other call is recorded under "Decided by default" and not asked.
+
 Governance binds every milestone. A milestone that needs a new check, gate,
 hook, or review step names the incident and mission item and waits for
 Tom's tap. The checkpoints already granted are the ones in the state
@@ -227,9 +243,12 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   `test.decided` carries the command, the failures at head that do not
   fail at base, the listed behaviors, and the breadth call's model,
   confidence, cost, and guard id.
-- The blind verifier: Opus in a fresh session, rerunning the tests in an
-  Apple container built by the kernel; `review.decided` carries the
-  governance boolean. Container RAM measured.
+- The blind verifier: Opus in a fresh session, rerunning the tests in a
+  fresh sandboxed checkout like the test branch's; `review.decided`
+  carries the governance boolean. The Apple container verifier (task
+  1.4c) comes after takeover: the kernel's own suite is macOS-bound and
+  cannot run in it, and it is the heaviest piece between here and Valor
+  building itself.
 - `tools/push_branch.py` gains a GitHub credential held by the kernel and
   never by a turn, so a released merge reaches the rebuild branch on
   GitHub.
@@ -239,10 +258,15 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   turn), and the test runner always passes `breadth`: `record_check`
   accepts neither as optional from a runner. The order of the breadth
   call and the suite is settled here.
-- Calibration records for breadth and governance, setting their floors,
-  before either routes work (1.3 plan, Questions 6); each re-checks Jev's
-  reservation overhead (`tools/jev.py`, sized from 35 single-question
-  judge calls) against its own rows.
+- Breadth and governance route on the entry check (both legs right on
+  every frozen case) and log every row; floors are set from human labels
+  once real tasks have produced thirty or more. No calibration-first
+  machinery. Each re-checks Jev's reservation overhead (`tools/jev.py`,
+  sized from 35 single-question judge calls) against its own rows.
+- Before task 1.4b starts, popoto #191 runs end to end through the
+  kernel, judge to held merge, with `python -m core verdict` playing the
+  runners not yet built (under $5). Its record says what the pipeline
+  did and what Tom would have had to do.
 
 **Absorbs.** Redis left running at replay teardown; replay databases
 sharing one `test` role; `tools/workspace.py` test-only performers moved to
@@ -251,7 +275,15 @@ bridges need anyway); performers registered in a module-global dict (keyed
 per task).
 
 **Leaves out.** The headless browser (milestone 3); routing turns into
-containers (open until one replay runs end to end in one).
+containers (open until one replay runs end to end in one); the container
+verifier (after takeover).
+
+**First task after takeover.** Candidates arrive as a `git bundle` in the
+kernel-written `.valor/`, read through the same descriptor walk as
+`verdict.json` and fetched from the inert file into the mirror, so the
+kernel never opens a repository the turn owns. The hostile-config
+refusals, the sandboxed `upload-pack`, and their tests are then deleted.
+Valor builds this through its own pipeline (Mission items 1 and 2).
 
 ### 1.5 The emulator, and the takeover gate
 
