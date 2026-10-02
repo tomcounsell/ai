@@ -20,9 +20,13 @@ calibration, the judgement keys, the long-lived Claude token, the demo
 items and results at `~/src/valor-demo`, `GITHUB_PUSH_TOKEN` in the
 vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
 (a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
-Postgres). Next,
-per `docs/plans/valor-rebuild.md` (1.4): the popoto #191 trial run, then
-1.4b, then 1.4d; 1.4c after takeover. Each milestone's plan file in
+Postgres). The popoto #191 trial run (task `75c0902b6e25`) stopped at
+its $5 cap in the build and waits on Tom (m1-4-checks.md); then 1.4b, then
+1.4d; 1.4c after takeover. On this Mac a non-interactive shell finds
+Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
+`PGPASSFILE`, so commands run with `postgresql@18/bin` first,
+`VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
+`PGPASSFILE=~/.config/valor-kernel/pgpass` set. Each milestone's plan file in
 `docs/plans/m*.md` carries its status and its records.
 
 ## Setup
@@ -86,6 +90,8 @@ switch it off `main`; the rebuild is a separate checkout.
 
 ## Waiting on Tom
 
+- The popoto #191 trial: raise its cap from $5 to $8 so the build can
+  finish to a held merge (recommended), or accept the record as it stands.
 - 1.4d: a ruleset on `main` of `tomcounsell/ai` with `valorengels` off the
   bypass list (Valor's account has push, not admin). Tom's admin token in
   1Password ("AI Repo Admin PAT") is fine-grained and lacks Administration

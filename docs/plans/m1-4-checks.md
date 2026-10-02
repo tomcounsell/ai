@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; next the popoto #191 trial run, then 1.4b, then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial stopped at its $5 cap, waiting on Tom; then 1.4b, then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1586,3 +1586,60 @@ per the rebuild plan: the popoto #191 trial run through the kernel with
 and docs runners, routing on the entry check, no calibration-first), then
 1.4d (the GitHub credential), with 1.4c (the container verifier) after
 takeover.
+
+## The popoto #191 trial run (stopped at the spend cap)
+
+Run 2026-10-02 on Valor's Mac, in the real ledger, as task `75c0902b6e25`
+(`scripts/replay.py pop-b.json --arm routed --budget 4.5`, the real
+judgement legs, Opus 5.5 for every turn). The ledger was dumped to the
+backup disk first. It did not reach a held merge: the build ran out of
+money before it produced a candidate, and finishing would pass the $5 cap
+this plan set. Nothing more is spent on it until Tom answers.
+
+What the pipeline did, with the metered spend of each turn:
+
+| Step | Result | Spend |
+|---|---|---|
+| judge | Jev answered `one_line_ask`, so `thin` (the baseline's label for this item) | $0.00003 |
+| clarify | no question for Tom: "the task names its own mechanism" | $0.26 |
+| plan | `docs/plans/capped-list-field.md`, critique 1 and review 2 | $0.56 |
+| critique 1 | `revise`, seven findings, one a real wrong premise (a key change on full save loses the list) | $0.50 |
+| plan, revised | every finding met in the plan | $0.48 |
+| critique 2 | `sound`, four findings carried into the build | $0.37 |
+| build, turn 1 | stopped: the next call's reservation ($1.44) exceeded what was left ($1.38) | $0.93 |
+| build, turn 2 | after a $1.75 raise; stopped the same way (reservation $1.74, $1.65 left) | $1.49 |
+
+Total metered: $4.60 of $6.25 committed. The workspace holds about 380
+uncommitted lines across four files of popoto, with no tests yet.
+
+What Tom would have had to do: nothing up to the build (no question, no
+tap). Then two budget raises, one of which the driving session made under
+this plan's $5 cap (`budget.raised`, role played, with the reason).
+
+Findings:
+
+1. **A budget's last $1.40 to $1.75 cannot be spent.** Each Opus call
+   reserves its worst case (32,000 output tokens on the turn's whole
+   context) before it runs, so a turn stops with that much left. The tail
+   grows with the context.
+2. **The build turn starts carrying the whole working session.** The first
+   build call already sent about 70,000 input tokens (clarify, plan, and the
+   revision, resumed), and every call after resends it. The bare baseline
+   did this whole item in one turn for $1.57, and its clarify run for $1.75.
+   Before any code, the pipeline here spent $2.18.
+3. **The turn did not use the task's own Redis.** The kernel put
+   `REDIS_URL` on the task's port in the turn's environment; the turn ran
+   `redis-cli ping` on the default port, found TCP blocked, started its own
+   redis-server on a unix socket under `.valor/`, and overrode `REDIS_URL`.
+   The reaper stopped that server when the turn ended. Three of popoto's
+   tests reach `localhost:6379` directly and fail in the sandbox at the
+   base.
+4. The judge, clarify, plan, critique, and fresh-session pieces all ran as
+   built in 1.4a, with no manual step.
+
+**Recommendation to Tom:** raise this trial's cap to $8 (the default task
+budget) and let the build finish to a held merge, with `verdict` playing
+test, review, and docs. The build needs about $1.50 to $2.50 more, and the
+checks and the merge have not yet run on a provisioned task. Findings 1
+and 2 then go into 1.4b's plan as questions about the reservation size and
+whether the build should start a fresh session from the plan.
