@@ -1352,8 +1352,9 @@ def test_kernel_git_drops_inherited_git_variables_and_a_planted_git_on_path(tmp_
     monkeypatch.setenv("GIT_DIR", "/nonexistent")
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'core.fsmonitor'='{script}'")
     monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(script))
+    monkeypatch.setenv("DYLD_INSERT_LIBRARIES", str(tmp_path / "evil.dylib"))
     built = kgit.env()
-    assert not {"GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF"} & set(built)
+    assert not {"GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "DYLD_INSERT_LIBRARIES"} & set(built)
     assert built["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert kgit.head(ws) == after
     assert kgit.diff_paths(ws, base, after) == ["a.txt"]
@@ -1472,6 +1473,7 @@ def test_a_missing_merge_is_failed_only_after_no_performer_could_still_be_pushin
         young = await drive(dsn, task)
         assert _outcomes(await rows(dsn, task), effect) == []
         monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "0")
+        monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "0")  # for the broker's copy only
         monkeypatch.setattr(broker, "settings", type(broker.settings)())
         old = await drive(dsn, task)
         return effect, young, old, await rows(dsn, task)
@@ -1598,3 +1600,87 @@ def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, 
         marker.unlink(missing_ok=True)
     assert shim_ran is True  # the poisoning is real
     assert kernel_ran is False
+
+
+def test_settings_refuse_a_reconcile_wait_shorter_than_two_git_limits(monkeypatch):
+    from core.settings import Settings
+
+    monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "120")
+    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "239")
+    with pytest.raises(ValueError, match="at least twice"):
+        Settings()
+    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "240")
+    assert Settings().reconcile_after_s == 240
+
+
+def test_a_perform_has_one_deadline_for_all_its_git_calls(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    with kgit.deadline(60):
+        assert kgit.head(ws)
+    with kgit.deadline(0), pytest.raises(kgit.GitError, match="deadline"):
+        kgit.head(ws)
+    with kgit.deadline(60), kgit.deadline(3600):  # a nested block keeps the earlier deadline
+        assert kgit._DEADLINE.get() - __import__("time").monotonic() < 61
+
+
+def test_ps_and_sandbox_exec_must_be_roots_alone(tmp_path, monkeypatch):
+    from core import binaries, runs
+    from harnesses import claude_code
+
+    mine = tmp_path / "ps"
+    mine.write_text("#!/bin/sh\nexit 0\n")
+    mine.chmod(0o755)
+    monkeypatch.setattr(binaries, "PS", str(mine))
+    with pytest.raises(binaries.Untrusted, match="not owned by root"):
+        runs.reap("no-such-turn")
+    monkeypatch.setattr(binaries, "SANDBOX_EXEC", str(mine))
+    build = claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"})
+    with pytest.raises(binaries.Untrusted, match="not owned by root"):
+        build("http://127.0.0.1:9/t/x", "# Brief", "turn1")
+
+
+class RacedPerformer:
+    """Performs, and while it does, a reconcile elsewhere settles the same
+    effect first (the performing process had lost its session)."""
+
+    action_type = "raced"
+    effect_class = "act"
+    usage = None
+
+    def __init__(self, owner_dsn: str):
+        self.owner_dsn = owner_dsn
+
+    def perform(self, action, key):
+        with psycopg.connect(self.owner_dsn, autocommit=True) as conn:
+            effect_id, task_id = conn.execute(
+                "SELECT payload->>'effect_id', task_id FROM events WHERE type = 'effect.intent' "
+                "AND payload->>'idempotency_key' = %s",
+                (key,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES (%s, 'effect.outcome', %s)",
+                (task_id, Jsonb({"effect_id": effect_id, "idempotency_key": key, "kind": "done",
+                                 "result": {"by": "reconcile"}, "error": None, "reconciled": True})),
+            )  # fmt: skip
+        return {"by": "performer"}
+
+    def lookup(self, action, key):
+        return None
+
+
+def test_an_outcome_reconcile_wrote_first_stands_over_the_performers(dsn, owner_dsn, tmp_path):
+    broker.register(RacedPerformer(owner_dsn))
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(
+                conn, tasks.Brief(instruction="x", budget_usd_micros=0, max_effect_class="act")
+            )
+            held = await broker.request(conn, task, broker.Action("raced", "t", {"n": 1}))
+            await broker.approve(conn, held.effect_id, note="go")
+            out = await broker.release(conn, held.effect_id)
+            return out, await ledger.read(conn, task)
+
+    out, written = run(go())
+    assert out.kind == "done" and out.result == {"by": "reconcile"}
+    assert len([r for r in written if r["type"] == "effect.outcome"]) == 1

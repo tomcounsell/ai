@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-2-state-machine
 type: build
-status: delivered-not-passed
+status: feedback-applied
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -408,7 +408,7 @@ source named in the row.
 | `intake.underspecified` | routes a request judged thin to `clarify` | psyoptimal #894 (task `32f800bce8a2`: two feedback rounds for three decisions one message would have settled); popoto #191 bare (fidelity 1, 3 of 11 hidden tests); popoto #188 bare (built a feature Tom did not want) | 3, 6 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `judge`, Guard record; judgement-layer.md, The guard entry; mission.md, How the first numbers are read |
 | `checks.test.breadth` | a green suite with untested behaviors is `gaps`, which sends work to `patch` | every replay wrote fewer tests than its reference: #872 missed the archived-team guards, #191 the list key name and hash exclusion, the demonstration 10 tests against the reference's 35; on popoto #633 the clarify arm broke a bound in an existing test and was accepted | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `checks.test`, Why and Guard record for breadth |
 | `critique.loop` | a `revise` sends the plan back to `plan` | popoto #633: the clarify arm built on a wrong premise nothing read before code existed, and correctness fell from 5 to 2 | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `critique`, Why |
-| `review.loop` | a join sends work to `patch` on review `changes` (row 3) or in the repair round (row 5) | the Sonnet stand-in accepted popoto #191 bare at fidelity 1 and #633 with the stale-cache bug moved, not removed | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `checks.review`, Why ("rounds beyond it are guards under Tom's 2026-10-01 grant") |
+| `review.loop` | the review checkpoint: a join sends work to `patch` on review `changes` (row 3) or in the repair round (row 5); the round count is Tom's 2026-10-01 pipeline decision | popoto #633: the stale-cache bug was moved, not removed, and a lenient Sonnet stand-in accepted it (rebuild-baseline.md, Review rounds). The second round has no incident of its own and falls to expiry on 2026-12-30 unless one occurs | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `checks.review`, Why; rebuild-baseline.md, Review rounds |
 
 The repair round is not a guard of its own: it fires under `review.loop`
 (the driving session's decision, reversible). The single review per
@@ -951,6 +951,42 @@ decides. Like the first, it is not authorised by the pipeline.
 
 Evidence: 337 passed, 3 skipped (from 303); ruff clean on the code. The
 live tests were not rerun for this patch.
+
+## Tom's feedback (delegated decision, 2026-10-02)
+
+Decided on Tom's behalf under his delegation, and recorded as such: apply
+proposed patch 2, narrowed to the changes below. No third blind review
+runs. The class of finding that remains, the kernel reading a repository a
+turn owns, is to be removed structurally after the takeover, by delivering
+work as a bundle the kernel reads in its own repository, not hardened
+further here. After this patch: the suite and the docs check, then the
+merge on Tom's tap.
+
+What the patch changes:
+
+- **History the turn owns.** Every kernel git call ignores replace refs and
+  grafts (`GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null`; the
+  commit carried from `m1.4-checks`, `1a1a6235d`, reused so the later
+  rebase drops it) and the commit-graph and multi-pack-index files
+  (`core.commitGraph=false`, `core.multiPackIndex=false`). Tests: a replace
+  ref, a graft, and a planted commit-graph each fool plain git and change
+  neither `diff_paths` nor ancestry for the kernel.
+- **One deadline per perform.** A performer sets one deadline,
+  `git_timeout_s`, for all of its git calls together (`git.deadline`); git
+  runs in its own process group, killed whole when it outlives its time.
+  `reconcile_after_s` is checked at settings load to be at least twice
+  `git_timeout_s`, so reconcile never reads a merge as missing while a
+  perform could still be pushing it.
+- **`DYLD_*`** variables are dropped from git's environment.
+- **Tests** that `binaries.require` refuses a `ps` and a `sandbox-exec`
+  that are not root's alone, and that an outcome `reconcile` wrote first
+  stands over the performer's (the unique-violation path of a release).
+- **`review.loop`**, as seeded: the review checkpoint, its incident popoto
+  #633 (the stale-cache bug moved, not removed, and accepted by a lenient
+  Sonnet stand-in; rebuild-baseline.md, Review rounds); the round count is
+  Tom's 2026-10-01 pipeline decision; the second round has no incident of
+  its own and falls to expiry on 2026-12-30 unless one occurs. The guard
+  table above says the same.
 
 ## Rollout at merge
 

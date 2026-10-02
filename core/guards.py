@@ -61,14 +61,16 @@ SEEDED: tuple[dict[str, Any], ...] = (
     {
         "guard_id": machine.GUARD_REVIEW,
         "name": (
-            "the review loop: a join sends work to patch on review changes, or once in the repair round"
+            "the review checkpoint: a join sends work to patch on review changes, or once in the "
+            "repair round; the round count is Tom's 2026-10-01 pipeline decision"
         ),
         "incident": (
-            "the Sonnet stand-in accepted popoto #191 bare at fidelity 1 and #633 with the stale-cache "
-            "bug moved, not removed"
+            "popoto #633: the stale-cache bug was moved, not removed, and a lenient Sonnet stand-in "
+            "accepted it (rebuild-baseline.md, Review rounds). The second round has no incident of its "
+            "own and falls to expiry on 2026-12-30 unless one occurs"
         ),
         "mission_items": [1],
-        "source": "docs/sdlc-state-machine.md, checks.review, Why",
+        "source": "docs/sdlc-state-machine.md, checks.review, Why; rebuild-baseline.md, Review rounds",
     },
 )
 

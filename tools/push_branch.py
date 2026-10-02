@@ -23,6 +23,7 @@ branch, the head, and the candidate, so Tom's approval binds all four.
 from pathlib import Path
 
 from core import broker, git
+from core.settings import settings
 
 
 class PushBranch:
@@ -59,6 +60,12 @@ class PushBranch:
         return self.url or git.push_url(self.workspace), action.target
 
     def perform(self, action, key: str) -> dict:
+        """One deadline, `git_timeout_s`, for every git call of the perform,
+        so `reconcile_after_s` (at least twice it) bounds a live perform."""
+        with git.deadline(settings.git_timeout_s):
+            return self._perform(action)
+
+    def _perform(self, action) -> dict:
         said = self.refuse(action)
         if said:
             raise ValueError(said)
@@ -71,11 +78,12 @@ class PushBranch:
         it): the result. Absent: None. Unknown (the workspace is refused or
         the remote cannot be read): `broker.Unknown`."""
         try:
-            url, branch = self.destination(action)
-            sha = action.payload.get("head_sha")
-            if sha and git.holds(self.workspace, url, branch, sha):
-                return {"remote": url, "branch": branch, "sha": sha}
-            return None
+            with git.deadline(settings.git_timeout_s):
+                url, branch = self.destination(action)
+                sha = action.payload.get("head_sha")
+                if sha and git.holds(self.workspace, url, branch, sha):
+                    return {"remote": url, "branch": branch, "sha": sha}
+                return None
         except git.GitError as exc:
             raise broker.Unknown(str(exc)) from None
 

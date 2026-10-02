@@ -14,8 +14,15 @@ name drivers; a driver's program comes from config. So every call:
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
 - ignores replace refs and grafts (`GIT_NO_REPLACE_OBJECTS=1`,
-  `GIT_GRAFT_FILE=/dev/null`), which a turn can write and which are not
-  config;
+  `GIT_GRAFT_FILE=/dev/null`), and the commit-graph and multi-pack-index
+  files (`core.commitGraph=false`, `core.multiPackIndex=false`), all of
+  which a turn can write and none of which is config, so none can change
+  what history the kernel reads;
+- drops every `DYLD_*` variable, so no library is injected into git;
+- runs git in its own process group, killed whole when the call outlives
+  its time: the smaller of `git_timeout_s` and what is left of the
+  `deadline` the caller set (a performer sets one for its whole perform,
+  so a push and the calls around it share one limit);
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
@@ -42,11 +49,15 @@ no git facts, and no push until the turn removes the key.
 Imports the standard library and `core.settings`.
 """
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,7 +79,7 @@ def env() -> dict[str, str]:
         **{
             k: v
             for k, v in os.environ.items()
-            if not k.startswith("GIT_") and k not in ("DEVELOPER_DIR", "xcrun_db", "SDKROOT")
+            if not k.startswith(("GIT_", "DYLD_")) and k not in ("DEVELOPER_DIR", "xcrun_db", "SDKROOT")
         },
         "PATH": PATH,
         "GIT_TERMINAL_PROMPT": "0",
@@ -100,6 +111,8 @@ PINNED = [
     "-c", "push.followTags=false",
     "-c", "push.recurseSubmodules=no",
     "-c", "push.gpgSign=false",
+    "-c", "core.commitGraph=false",
+    "-c", "core.multiPackIndex=false",
     "-c", "submodule.recurse=false",
 ]  # fmt: skip
 
@@ -131,17 +144,44 @@ def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Com
         binary = binaries.require_git(settings.git_bin)
     except binaries.Untrusted as exc:
         raise GitError(str(exc)) from None
+    limit = settings.git_timeout_s
+    ends = _DEADLINE.get()
+    if ends is not None:
+        limit = min(limit, ends - time.monotonic())
+        if limit <= 0:
+            raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
+    proc = subprocess.Popen(
+        [binary, "-C", str(workspace), *PINNED, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=text,
+        env=env(),
+        start_new_session=True,
+    )
     try:
-        return subprocess.run(
-            [binary, "-C", str(workspace), *PINNED, *args],
-            capture_output=True,
-            text=text,
-            check=False,
-            env=env(),
-            timeout=settings.git_timeout_s,
-        )
+        stdout, stderr = proc.communicate(timeout=limit)
     except subprocess.TimeoutExpired:
-        raise GitError(f"git {' '.join(args[:2])} did not finish in {settings.git_timeout_s}s") from None
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
+        proc.communicate()
+        raise GitError(f"git {' '.join(args[:2])} did not finish in {limit:.0f}s") from None
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("git_deadline", default=None)
+
+
+@contextlib.contextmanager
+def deadline(seconds: float):
+    """One limit for every git call inside the block, together. Nested
+    blocks keep the earlier deadline."""
+    ends = time.monotonic() + seconds
+    outer = _DEADLINE.get()
+    token = _DEADLINE.set(ends if outer is None else min(outer, ends))
+    try:
+        yield
+    finally:
+        _DEADLINE.reset(token)
 
 
 def hostile(workspace: str | Path) -> list[str]:

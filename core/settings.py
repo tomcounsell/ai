@@ -141,6 +141,14 @@ class Settings:
     # run returns so Tom can look.
     idle_turns: int = 2
 
+    def __post_init__(self):
+        if self.reconcile_after_s < 2 * self.git_timeout_s:
+            raise ValueError(
+                f"reconcile_after_s ({self.reconcile_after_s}) must be at least twice git_timeout_s "
+                f"({self.git_timeout_s}): reconcile must not read a merge as missing while a perform "
+                "could still be pushing it"
+            )
+
     @property
     def pg_socket(self) -> str:
         """The machine cluster's Unix socket, as configured."""

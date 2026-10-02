@@ -64,3 +64,42 @@ def test_a_graft_cannot_change_ancestry(tmp_path):
     assert grafted == 0  # plain git follows the graft
     assert kgit.is_ancestor(ws, side, tip) is False
     assert kgit.is_ancestor(ws, base, tip) is True
+
+
+def _plant_parent(ws: Path, child: str, parent: str) -> None:
+    """Rewrite the commit-graph file so `child` lists `parent` as its first
+    parent, with a generation above it: the file a turn can write."""
+    import struct
+
+    sh(ws, "-c", "commitGraph.generationVersion=1", "commit-graph", "write", "--reachable")
+    path = ws / ".git" / "objects" / "info" / "commit-graph"
+    path.chmod(0o644)
+    data = bytearray(path.read_bytes())
+    count = data[6]
+    chunks = {bytes(data[8 + 12 * i : 12 + 12 * i]): struct.unpack(">Q", data[12 + 12 * i : 20 + 12 * i])[0]
+              for i in range(count + 1)}  # fmt: skip
+    oidl, cdat = chunks[b"OIDL"], chunks[b"CDAT"]
+    oids = [bytes(data[oidl + 20 * i : oidl + 20 * i + 20]).hex() for i in range((cdat - oidl) // 20)]
+    record = cdat + 36 * oids.index(child)
+    struct.pack_into(">I", data, record + 20, oids.index(parent))
+    date = struct.unpack(">Q", data[record + 28 : record + 36])[0] & ((1 << 34) - 1)
+    struct.pack_into(">Q", data, record + 28, (5 << 34) | date)
+    path.write_bytes(data)
+
+
+def test_a_planted_commit_graph_cannot_change_ancestry_or_hide_a_merge(tmp_path):
+    ws = repo(tmp_path)
+    base = commit(ws, "README.md", "a\n")
+    sh(ws, "checkout", "-q", "-b", "side")
+    side = commit(ws, "side.md", "s\n")
+    sh(ws, "checkout", "-q", "main")
+    tip = commit(ws, "core/x.py", "x = 1\n")
+    _plant_parent(ws, tip, side)
+    planted = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", side, tip], cwd=ws, capture_output=True, check=False
+    ).returncode
+    assert planted == 0  # plain git believes the planted graph
+    assert kgit.is_ancestor(ws, side, tip) is False
+    assert kgit.is_ancestor(ws, base, tip) is True
+    assert kgit.diff_paths(ws, base, tip) == ["core/x.py"]
+    assert kgit.merges_between(ws, base, tip) == []
