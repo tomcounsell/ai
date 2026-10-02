@@ -181,6 +181,19 @@ def _git(
 _DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("git_deadline", default=None)
 
 
+def remaining(limit: float) -> float:
+    """`limit`, or less when the caller's `deadline` ends sooner; a passed
+    deadline raises `GitError`. For a git run outside `_git` (the kernel
+    mirror's bounded fetch)."""
+    ends = _DEADLINE.get()
+    if ends is None:
+        return limit
+    left = ends - time.monotonic()
+    if left <= 0:
+        raise GitError("the deadline for this perform has passed")
+    return min(limit, left)
+
+
 @contextlib.contextmanager
 def deadline(seconds: float):
     """One limit for every git call inside the block, together. Nested

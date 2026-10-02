@@ -976,3 +976,17 @@ def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, mo
         assert lay.root.exists()
     finally:
         kws.stop_services(orphan, lay)
+
+
+def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
+    import time
+
+    from core import git as kgit
+
+    _, made = provision(tmp_path)
+    sha = candidate(made)
+    with kgit.deadline(0.01):
+        time.sleep(0.05)
+        with pytest.raises((kgit.GitError, kws.FetchRefused), match="deadline"):
+            fetch(made, sha)
+    assert kgit.remaining(5.0) == 5.0  # outside a deadline, the limit stands

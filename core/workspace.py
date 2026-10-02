@@ -1057,7 +1057,7 @@ def fetch_into_mirror(
         env=git.env(),
         max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
         max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
-        timeout=timeout or settings.git_timeout_s,
+        timeout=git.remaining(timeout or settings.git_timeout_s),
     )
     runs.reap(mark)
     if code != 0:
