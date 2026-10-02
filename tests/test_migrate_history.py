@@ -258,6 +258,8 @@ def _legacy_folds(database: str) -> None:
     assert streams
     for task, rows in streams.items():
         f = machine.fold(rows)
+        if f.calibration:  # a calibration run's task, written by `core calibrate`
+            continue
         assert f.legacy, task
         assert f.state in ORACLE[old_state(rows)], (task, f.state, old_state(rows))
 
