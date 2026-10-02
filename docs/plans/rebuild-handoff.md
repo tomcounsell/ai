@@ -17,8 +17,10 @@ The rebuild branch is `valor-cori-rebuild`. Milestones 1.1, 1.2, 1.3, and
 task 1.4a are merged and rolled out on both Macs. Valor's Mac has the
 checkout at `~/src/valor-rebuild`, a fresh ledger with one passing
 calibration, the judgement keys, the long-lived Claude token, the demo
-items and results at `~/src/valor-demo`, and `GITHUB_PUSH_TOKEN` in the
-vault; its backup job waits on an external disk. Next,
+items and results at `~/src/valor-demo`, `GITHUB_PUSH_TOKEN` in the
+vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
+(a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
+Postgres). Next,
 per `docs/plans/valor-rebuild.md` (1.4): the popoto #191 trial run, then
 1.4b, then 1.4d; 1.4c after takeover. Each milestone's plan file in
 `docs/plans/m*.md` carries its status and its records.
@@ -85,11 +87,14 @@ switch it off `main`; the rebuild is a separate checkout.
 ## Waiting on Tom
 
 - 1.4d: a ruleset on `main` of `tomcounsell/ai` with `valorengels` off the
-  bypass list (Valor's account has push, not admin). The token itself is
-  settled: Valor's classic `repo`-scope token, in the vault as
-  `GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
-- Backups on Valor's Mac: an external disk for `VALOR_BACKUP_DIR`, then
-  step 8.
+  bypass list (Valor's account has push, not admin). Tom's admin token in
+  1Password ("AI Repo Admin PAT") is fine-grained and lacks Administration
+  write, which rulesets need; regenerate it with that permission. Create the
+  ruleset with enforcement disabled until takeover: today every commit and
+  PR merge on `main` lands under `valorengels`, so an active restrict-updates
+  rule would stop the running pipeline. The push token itself is settled:
+  Valor's classic `repo`-scope token, in the vault as `GITHUB_PUSH_TOKEN`
+  (m1-4-checks.md, Questions, 3).
 - 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
   and popoto #188.
 - 1.4c, after takeover: install Apple's `container` from Apple's signed
