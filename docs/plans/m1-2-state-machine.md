@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-2-state-machine
 type: build
-status: feedback-applied
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1063,3 +1063,12 @@ items as one patch, then run test, review, and docs once more. Review found
 a new, smaller class of hole each round (git config programs, then the xcrun
 shim and PATH binaries, then replace refs), each closed when found; the
 kernel's git reads of a workspace a turn controls are where they cluster.
+
+## Merged
+
+Merged 2026-10-02 at `2b9885e27` (inside the fast-forward to `a30c03350`)
+on Tom's tap. Rollout done the same day: `uv sync`, then `python -m core
+migrate` on the real ledger seeded the four guards (`intake.underspecified`,
+`checks.test.breadth`, `critique.loop`, `review.loop`, each expiring
+2026-12-30) and added the verdict constraint; the 1,416 earlier rows were
+untouched.

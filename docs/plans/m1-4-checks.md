@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a did-not-pass, proposed patch awaiting Tom; 1.4b, 1.4d, 1.4c planned
+status: 1.4a merged; next the popoto #191 trial run, then 1.4b, then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1572,3 +1572,13 @@ since review passed the patch. Added:
    scan (an `after_scan` hook the test drives); for `workspace remove` on an
    orphan, before and under the provision lock (an `after_lock` hook). In
    each case the directory is left to its task.
+
+## 1.4a merged
+
+Merged 2026-10-02 at `a30c03350` on Tom's tap, after his delegated feedback
+(apply the proposed patch with four tests; no further review round). Next,
+per the rebuild plan: the popoto #191 trial run through the kernel with
+`python -m core verdict` playing the runners not yet built, then 1.4b (test
+and docs runners, routing on the entry check, no calibration-first), then
+1.4d (the GitHub credential), with 1.4c (the container verifier) after
+takeover.

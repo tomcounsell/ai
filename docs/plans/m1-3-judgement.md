@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-3-judgement
 type: build
-status: passed-held
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1153,3 +1153,13 @@ Held for the rollout with Tom: `python -m core migrate` (the
 `events_one_judgement` index), `python -m core judgement-keys` (creates
 `~/.config/valor-kernel/judgement-keys`), and one `calibrate` run against
 the real ledger whose digest must equal `JUDGE.calibrated`.
+
+## Merged
+
+Merged 2026-10-02 at `604dfc00b` (inside the fast-forward to `a30c03350`)
+on Tom's tap. Rollout done the same day: `migrate` added the
+`events_one_judgement` index, `judgement-keys` wrote both keys to the kernel
+key directory, and one `calibrate` run on the real ledger passed its entry
+check (both legs right on all seven cases) against `api.typesafe.ai` and
+`openrouter.ai`, with `task_sha256` equal to `JUDGE.calibrated`
+(`32b8245e...`).
