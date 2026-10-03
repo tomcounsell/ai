@@ -1,4 +1,4 @@
-"""The email bridge on the kernel: the poll through intake, the bridge
+"""The email bridge on the kernel: the IMAP watch through intake, the bridge
 under `bridge.serve`, the reply-all a turn asks for, the request-time size
 refusal, and a kill at every point of a send, on real Postgres and the
 local mail servers."""
@@ -53,8 +53,12 @@ def from_tom(auth: str | None = PASS, **more) -> bytes:
 
 
 async def poll(dsn, cfg) -> int:
-    async with await db.connect(dsn) as conn:
-        return await imap.poll(cfg, conn)
+    mailbox = await asyncio.to_thread(imap.connect, cfg)
+    try:
+        async with await db.connect(dsn) as conn:
+            return await imap.poll(cfg, mailbox, conn)
+    finally:
+        await asyncio.to_thread(imap.logout, mailbox)
 
 
 async def received(dsn, message_id) -> list[dict]:
@@ -146,13 +150,27 @@ def test_attachments_are_written_under_the_inbound_directory_by_sha256(dsn, op, 
     assert hashlib.sha256(data).hexdigest() in att["path"]
 
 
-def test_the_bridge_under_serve_sends_a_release_once_and_polls(dsn, op, mailbox):
+def test_the_bridge_under_serve_sends_a_release_once_and_receives_mail(dsn, op, mailbox):
+    """Mail delivered before the watch starts is received by its first
+    search."""
+    _send_and_receive(dsn, mailbox, deliver_after=False)
+
+
+def test_mail_delivered_while_the_bridge_idles_is_received(dsn, op, mailbox):
+    """The watch is in IDLE when the mail lands; the server's EXISTS
+    wakes it."""
+    _send_and_receive(dsn, mailbox, deliver_after=True)
+
+
+def _send_and_receive(dsn, mailbox, deliver_after: bool):
     to = "tom@yuda.me"
     payload = {"to": [to], "cc": [], "subject": "Re: plans", "body": "Done.", "in_reply_to": None,
                "references": [], "files": []}  # fmt: skip
     incoming = mid()
-    mailbox.dovecot.deliver(from_tom(message_id=incoming, body="while serving"))
-    cfg = mailbox.config(poll_s=0.2)
+    raw = from_tom(message_id=incoming, body="while serving")
+    if not deliver_after:
+        mailbox.dovecot.deliver(raw)
+    cfg = mailbox.config()
 
     async def go():
         task = await new_task(dsn)
@@ -166,6 +184,9 @@ def test_the_bridge_under_serve_sends_a_release_once_and_polls(dsn, op, mailbox)
             assert released.kind == "released", released
         served = asyncio.create_task(bridge.serve(EmailBridge(cfg, dsn), dsn))
         try:
+            if deliver_after:
+                assert await asyncio.to_thread(mailbox.imap.idling.wait, 30)
+                await asyncio.to_thread(mailbox.dovecot.deliver, raw)
             for _ in range(300):
                 done = await of_type(dsn, "effect.outcome", effect_id=held.effect_id)
                 got = await received(dsn, incoming)
@@ -189,6 +210,37 @@ def test_the_bridge_under_serve_sends_a_release_once_and_polls(dsn, op, mailbox)
     assert len(mailbox.smtp.accepted) == 1 and len(got) == 1
     assert again.kind == "done"  # the recorded outcome; nothing is sent again
     assert len(run(of_type(dsn, "effect.outcome", effect_id=effect_id))) == 1
+
+
+def test_a_watch_that_cannot_connect_connects_again_on_the_next_tick(dsn, op, mailbox):
+    incoming = mid()
+    mailbox.imap.stop()
+
+    async def go():
+        retry = asyncio.Event()
+        retry.set()  # a tick before the failure; the failed watch clears it and waits for the next
+        async with await db.connect(dsn) as conn:
+            watching = asyncio.create_task(imap.watch(mailbox.config(), conn, retry))
+            try:
+                for _ in range(300):
+                    if not retry.is_set():
+                        break
+                    await asyncio.sleep(0.1)
+                assert not retry.is_set() and not watching.done()
+                mailbox.imap.start()
+                mailbox.dovecot.deliver(from_tom(message_id=incoming, body="after the outage"))
+                retry.set()
+                for _ in range(300):
+                    if await received(dsn, incoming):
+                        break
+                    await asyncio.sleep(0.1)
+                return await received(dsn, incoming)
+            finally:
+                watching.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await watching
+
+    assert len(run(go())) == 1
 
 
 def test_a_reply_all_is_filled_in_from_the_received_email_before_it_is_held(dsn, op, tmp_path):
@@ -352,9 +404,7 @@ def killed_mid_send(dsn, mailbox, tmp_path, when: threading.Event) -> tuple[str,
         async with outbox(dsn, EmailBridge(cfg, dsn)) as box:
             return await box.reconcile()
 
-    with configure(reconcile_after_s=0.0):
-        (outcome,) = run(reconciled())
-    return effect_id, outcome
+    return effect_id, run(reconciled())
 
 
 def test_a_send_killed_after_its_end_of_data_line_is_reconciled_done_from_sent_mail(
@@ -365,23 +415,35 @@ def test_a_send_killed_after_its_end_of_data_line_is_reconciled_done_from_sent_m
     mailbox.smtp.behavior.on_data = lambda: threading.Thread(
         target=lambda: (_until(lambda: mailbox.smtp.accepted), accepted.set()), daemon=True
     ).start()
-    effect_id, outcome = killed_mid_send(dsn, mailbox, tmp_path, accepted)
+    effect_id, (outcome,) = killed_mid_send(dsn, mailbox, tmp_path, accepted)
     assert outcome.kind == "done"
     assert len(mailbox.smtp.accepted) == 1
     (row,) = run(of_type(dsn, "effect.outcome", effect_id=effect_id))
     assert row["reconciled"] is True and row["result"]["message_id"] == outcome.result["message_id"]
 
 
-def test_a_send_killed_mid_body_is_reconciled_failed(dsn, op, mailbox, tmp_path):
+def in_flight(dsn, effect_id) -> bool:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return effect_id in await broker.dangling(conn, ["email.send"])
+
+    return run(go())
+
+
+def test_a_send_killed_before_the_server_took_the_message_stays_in_flight(dsn, op, mailbox, tmp_path):
+    """The server answered DATA and never read the body; Sent Mail does
+    not hold it, which cannot show it failed, so the effect stays in
+    flight and is looked up again on each outbox wake."""
     started = threading.Event()
     mailbox.smtp.behavior.read_delay_s = 60.0
     mailbox.smtp.behavior.on_data = started.set
-    _, outcome = killed_mid_send(dsn, mailbox, tmp_path, started)
-    assert outcome.kind == "failed"
+    effect_id, outcomes = killed_mid_send(dsn, mailbox, tmp_path, started)
+    assert outcomes == [] and in_flight(dsn, effect_id)
+    assert not run(of_type(dsn, "effect.outcome", effect_id=effect_id))
     assert mailbox.smtp.accepted == []
 
 
-def test_a_send_killed_before_its_greeting_is_reconciled_failed(dsn, op, mailbox, tmp_path):
+def test_a_send_killed_before_its_greeting_stays_in_flight(dsn, op, mailbox, tmp_path):
     """The SMTP port accepts the connection and never greets."""
     with socket.create_server(("127.0.0.1", 0)) as silent:
         connected = threading.Event()
@@ -396,12 +458,12 @@ def test_a_send_killed_before_its_greeting_is_reconciled_failed(dsn, op, mailbox
         real = mailbox.config
         mailbox.config = lambda **o: real(**{"smtp_port": port, **o})
         try:
-            _, outcome = killed_mid_send(dsn, mailbox, tmp_path, connected)
+            effect_id, outcomes = killed_mid_send(dsn, mailbox, tmp_path, connected)
         finally:
             mailbox.config = real
             for c in held:
                 c.close()
-    assert outcome.kind == "failed"
+    assert outcomes == [] and in_flight(dsn, effect_id)
     assert mailbox.smtp.connections == 0
 
 
@@ -449,7 +511,7 @@ def test_a_file_swapped_after_approval_is_refused_at_release_and_never_sent(dsn,
         task = await new_task(dsn)
         effect_id = await released(dsn, task, payload)
         plan.write_bytes(b"swapped bytes")
-        return await served_until(dsn, mailbox.config(poll_s=0.2), effect_id, settled="effect.refused")
+        return await served_until(dsn, mailbox.config(), effect_id, settled="effect.refused")
 
     (refused,) = run(go())
     assert refused["at"] == "release" and "sha256 differs" in refused["reason"]

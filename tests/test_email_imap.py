@@ -1,6 +1,8 @@
-"""The poll's IMAP steps against Dovecot: the owned-sender search, the
+"""The watch's IMAP steps against Dovecot: the owned-sender search, the
 header fetch, the body fetch that leaves mail unseen, and `\\Seen`."""
 
+import imaplib
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 
@@ -32,7 +34,7 @@ def test_search_finds_unseen_mail_from_the_senders_since_the_date(mailbox):
         since = datetime.now(UTC).date() - timedelta(days=10)
         uids = imap.search(conn, since, ["tom@yuda.me"])
         heads = imap.headers(conn, uids)
-        # FROM is a substring search: xtom@ matches here, and the poll's
+        # FROM is a substring search: xtom@ matches here, and the watch's
         # `owns` check is what leaves it out.
         assert sorted(h["message_id"] for h in heads.values()) == ["<one@yuda.me>", "<two@yuda.me>"]
         assert {h["sender"] for h in heads.values()} == {"tom@yuda.me", "xtom@yuda.me"}
@@ -72,3 +74,39 @@ def test_uidvalidity_is_read_and_follows_the_mailbox(mailbox):
         assert imap.select_inbox(conn) == str(int(before) + 7)
     finally:
         imap.logout(conn)
+
+
+def test_idle_returns_when_mail_arrives(mailbox):
+    conn = imap.connect(mailbox.config())
+    try:
+        imap.select_inbox(conn)
+        raw = message(body="new", message_id="<new@yuda.me>")
+        threading.Thread(target=lambda: mailbox.imap.idling.wait(30) and mailbox.dovecot.deliver(raw)).start()
+        start = time.monotonic()
+        assert imap.idle(conn) is True
+        assert time.monotonic() - start < imap.IDLE_REISSUE_S
+        # IDLE has ended (DONE sent), so the connection takes commands.
+        assert imap.search(conn, date(2026, 1, 1), ["tom@yuda.me"])
+    finally:
+        imap.logout(conn)
+
+
+def test_dropping_the_connection_ends_an_idle_blocked_in_another_thread(mailbox):
+    conn = imap.connect(mailbox.config())
+    imap.select_inbox(conn)
+    ended = []
+
+    def idling():
+        try:
+            imap.idle(conn)
+        except (imaplib.IMAP4.error, OSError, ValueError) as e:
+            ended.append(e)
+        else:
+            ended.append(None)
+
+    t = threading.Thread(target=idling)
+    t.start()
+    assert mailbox.imap.idling.wait(30)
+    imap.drop(conn)
+    t.join(10)
+    assert not t.is_alive() and ended

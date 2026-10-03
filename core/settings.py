@@ -261,9 +261,6 @@ class Settings:
     imap_port: int = field(default_factory=lambda: int(_env("VALOR_IMAP_PORT", "993")))
     smtp_host: str = field(default_factory=lambda: _env("VALOR_SMTP_HOST", "smtp.gmail.com"))
     smtp_port: int = field(default_factory=lambda: int(_env("VALOR_SMTP_PORT", "587")))
-    # main's IMAP_POLL_INTERVAL and IMAP_SOCKET_TIMEOUT (bridge/email_bridge.py).
-    email_poll_s: float = field(default_factory=lambda: float(_env("VALOR_EMAIL_POLL_S", "30")))
-    imap_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_IMAP_TIMEOUT_S", "30")))
     # A CA file for the mail servers' certificates; unset, the system's.
     mail_cafile: str = field(default_factory=lambda: _env("VALOR_MAIL_CAFILE", ""))
 

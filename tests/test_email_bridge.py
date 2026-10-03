@@ -1,4 +1,4 @@
-"""The email bridge process: its performers and its launchd job. The poll
+"""The email bridge process: its performers and its launchd job. The watch
 through intake and the bridge under `bridge.serve` are in
 `tests/test_email_kernel.py`."""
 

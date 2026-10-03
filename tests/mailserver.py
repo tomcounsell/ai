@@ -109,9 +109,11 @@ class Loop:
         self.thread.join(5)
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, watch=None) -> None:
     try:
         while data := await reader.read(65536):
+            if watch:
+                watch(data)
             writer.write(data)
             await writer.drain()
     except ConnectionError, OSError, ssl.SSLError:
@@ -124,11 +126,17 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 class Terminator:
-    """TLS on `port`, plain to Dovecot's `backend` port."""
+    """TLS on `port`, plain to Dovecot's `backend` port. `idling` is set
+    each time Dovecot answers an IDLE with its continuation."""
 
     def __init__(self, loop: Loop, port: int, backend: int, ctx: ssl.SSLContext):
         self.loop, self.port, self.backend, self.ctx = loop, port, backend, ctx
         self.server = None
+        self.idling = threading.Event()
+
+    def _from_dovecot(self, data: bytes) -> None:
+        if b"+ idling" in data:
+            self.idling.set()
 
     async def _handle(self, reader, writer):
         try:
@@ -136,7 +144,7 @@ class Terminator:
         except OSError:
             writer.close()
             return
-        await asyncio.gather(_pipe(reader, w2), _pipe(r2, writer))
+        await asyncio.gather(_pipe(reader, w2), _pipe(r2, writer, self._from_dovecot))
 
     def start(self) -> None:
         async def go():
@@ -326,6 +334,8 @@ class Behavior:
     on_connect: Callable[[], None] | None = None
     on_data: Callable[[], None] | None = None  # after DATA's 354, before the body is read
     file_in_sent: bool = True
+    hang_up_after_354: bool = False  # closes the connection instead of reading the body
+    final_reply: str = "250 2.0.0 ok queued"  # the line sent after the body is taken
 
 
 class SMTPServer:
@@ -409,13 +419,15 @@ class SMTPServer:
                     await reply("354 go ahead")
                     if b.on_data:
                         b.on_data()
+                    if b.hang_up_after_354:
+                        break
                     data = await self._body(reader, b)
                     if b.file_in_sent:
                         await asyncio.to_thread(self.dovecot.append, "Sent", data, seen=True)
                     self.accepted.append(Accepted(mail_from, list(rcpts), data))
                     if b.reply_delay_s:
                         await asyncio.sleep(b.reply_delay_s)
-                    await reply("250 2.0.0 ok queued")
+                    await reply(b.final_reply)
                     mail_from, rcpts = None, []
                 elif verb == "RSET":
                     mail_from, rcpts = None, []
@@ -499,8 +511,6 @@ class Mail:
             "imap_password": PASSWORD,
             "smtp_password": PASSWORD,
             "cafile": self.cafile,
-            "poll_s": 1.0,
-            "imap_timeout_s": 10.0,
         }
         values.update(overrides)
         return Config(**values)
@@ -508,6 +518,7 @@ class Mail:
     def reset(self) -> None:
         self.smtp.reset()
         self.dovecot.clear()
+        self.imap.idling.clear()
         if self.imap.server is None:
             self.imap.start()
 

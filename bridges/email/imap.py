@@ -1,4 +1,5 @@
-"""The poll: owned senders' unseen mail in INBOX, received once each.
+"""The watch: owned senders' unseen mail in INBOX, received once each,
+on one IMAP connection that waits in IDLE (RFC 2177) for new mail.
 
 Adapted from `_poll_imap` and `_build_imap_sender_query`
 (`bridge/email_bridge.py`) on `main`. Blocking IMAP calls run in
@@ -10,6 +11,7 @@ import email
 import imaplib
 import logging
 import re
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +22,10 @@ from . import parse, smtp
 from .config import Config
 
 log = logging.getLogger("valor.email")
+
+# RFC 3501 5.4: a server may log out a client idle for 30 minutes, so
+# RFC 2177 has the client end IDLE and issue it again within 29.
+IDLE_REISSUE_S = 29 * 60
 
 _UID = re.compile(rb"UID (\d+)")
 _SAFE = re.compile(r"[^A-Za-z0-9@._+-]")
@@ -111,57 +117,99 @@ def logout(conn: imaplib.IMAP4) -> None:
         pass
 
 
+def idle(conn: imaplib.IMAP4) -> bool:
+    """IDLE on the selected INBOX until the server reports a new message
+    (`EXISTS`, True) or `IDLE_REISSUE_S` passes (False). The re-issue
+    time is the only read bound while idling; the connection has none."""
+    with conn.idle(duration=IDLE_REISSUE_S) as idler:
+        for typ, data in idler:
+            if typ == "BYE":
+                raise imaplib.IMAP4.abort(f"the server ended the session: {data}")
+            if typ == "EXISTS":
+                return True
+    return False
+
+
+def drop(conn: imaplib.IMAP4) -> None:
+    """Ends the connection, waking any call blocked on it in another
+    thread before its buffers are closed."""
+    try:
+        conn.sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        conn.shutdown()
+    except OSError:
+        pass
+
+
 def inbound(parsed: parse.Parsed, uid: bytes, uidvalidity: str):
     fields = dict(parsed.fields)
     fields["headers"] = {**fields["headers"], "uid": uid.decode(), "uidvalidity": uidvalidity}
     return intake.Inbound(**fields)
 
 
-async def poll(cfg: Config, db) -> int:
-    """One poll on the bridge's connection `db`. Returns how many messages
-    were received. A failed login or connection raises; a message that
-    fails is logged with its UID and left unseen."""
+async def watch(cfg: Config, db, retry: asyncio.Event) -> None:
+    """Receives what is unseen, then IDLEs until new mail or the re-issue
+    time, then again, on one IMAP connection. A failure is one line in the
+    log; the watch reconnects when `retry` is next set (the bridge's
+    `tick`, on each outbox wake)."""
+    while True:
+        conn = None
+        try:
+            conn = await asyncio.to_thread(connect, cfg)
+            while True:
+                await poll(cfg, conn, db)
+                await asyncio.to_thread(idle, conn)
+        except Exception:
+            log.exception("email watch failed; it reconnects on the next tick")
+        finally:
+            if conn is not None:
+                drop(conn)
+        retry.clear()
+        await retry.wait()
+
+
+async def poll(cfg: Config, conn: imaplib.IMAP4, db) -> int:
+    """Receives INBOX's unseen mail from owned senders over `conn`, into
+    the bridge's database connection `db`, and leaves INBOX selected.
+    Returns how many messages were received. A failed connection raises;
+    a message that fails is logged with its UID and left unseen."""
+    uidvalidity = await asyncio.to_thread(select_inbox, conn)
     owned = list(intake.owned("email"))
     if not owned:
         return 0
-    conn = await asyncio.to_thread(connect, cfg)
-    try:
-        uidvalidity = await asyncio.to_thread(select_inbox, conn)
-        uids = await asyncio.to_thread(search, conn, cfg.since, owned)
-        heads = await asyncio.to_thread(headers, conn, uids)
-        mine = [u for u in uids if u in heads and intake.owns("email", heads[u]["sender"])]
+    uids = await asyncio.to_thread(search, conn, cfg.since, owned)
+    heads = await asyncio.to_thread(headers, conn, uids)
+    mine = [u for u in uids if u in heads and intake.owns("email", heads[u]["sender"])]
 
-        seen: set[bytes] = set()
-        by_root: dict[str, list[bytes]] = {}
-        for u in mine:
-            if heads[u]["message_id"]:
-                by_root.setdefault(heads[u]["chat_id"], []).append(u)
-        for root, group in by_root.items():
-            done = await intake.recorded(db, "email", root, [heads[u]["message_id"] for u in group])
-            for u in group:
-                if heads[u]["message_id"] in done:
-                    await asyncio.to_thread(mark_seen, conn, u)
-                    seen.add(u)
+    seen: set[bytes] = set()
+    by_root: dict[str, list[bytes]] = {}
+    for u in mine:
+        if heads[u]["message_id"]:
+            by_root.setdefault(heads[u]["chat_id"], []).append(u)
+    for root, group in by_root.items():
+        done = await intake.recorded(db, "email", root, [heads[u]["message_id"] for u in group])
+        for u in group:
+            if heads[u]["message_id"] in done:
+                await asyncio.to_thread(mark_seen, conn, u)
+                seen.add(u)
 
-        received = 0
-        directory = Path(settings.inbound_dir) / "email"
-        for u in mine:
-            if u in seen:
-                continue
-            try:
-                raw, internal = await asyncio.to_thread(fetch, conn, u)
-                parsed = parse.parse_email_message(raw, internal)
-                parse.persist(parsed, directory)
-                result = await intake.receive(db, inbound(parsed, u, uidvalidity))
-            except imaplib.IMAP4.abort:
-                raise
-            except Exception:
-                log.exception(
-                    "email uid %s (uidvalidity %s) not received; left unseen", u.decode(), uidvalidity
-                )
-                continue
-            await asyncio.to_thread(mark_seen, conn, u)
-            received += 0 if getattr(result, "duplicate", False) else 1
-        return received
-    finally:
-        await asyncio.to_thread(logout, conn)
+    received = 0
+    directory = Path(settings.inbound_dir) / "email"
+    for u in mine:
+        if u in seen:
+            continue
+        try:
+            raw, internal = await asyncio.to_thread(fetch, conn, u)
+            parsed = parse.parse_email_message(raw, internal)
+            parse.persist(parsed, directory)
+            result = await intake.receive(db, inbound(parsed, u, uidvalidity))
+        except imaplib.IMAP4.abort:
+            raise
+        except Exception:
+            log.exception("email uid %s (uidvalidity %s) not received; left unseen", u.decode(), uidvalidity)
+            continue
+        await asyncio.to_thread(mark_seen, conn, u)
+        received += 0 if getattr(result, "duplicate", False) else 1
+    return received

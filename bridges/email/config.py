@@ -19,11 +19,10 @@ class SMTPTimeouts:
     4.5.3.2 gives, which an SMTP client sets per command and per TCP send
     of the body rather than on the whole transaction, so a large message is
     never cut off for its size. EHLO, STARTTLS, AUTH, and QUIT have no value
-    of their own there; they take `command`, the value it gives the other
-    commands that wait on one reply (MAIL, RCPT)."""
+    there and wait with no timer."""
 
     greeting: float = 300.0  # 4.5.3.2.1, the initial 220
-    command: float = 300.0  # 4.5.3.2.2 and 4.5.3.2.3, MAIL and RCPT
+    mail_rcpt: float = 300.0  # 4.5.3.2.2 and 4.5.3.2.3, MAIL and RCPT
     data_start: float = 120.0  # 4.5.3.2.4, awaiting DATA's 354
     data_block: float = 180.0  # 4.5.3.2.5, each TCP send of the body
     data_end: float = 600.0  # 4.5.3.2.6, awaiting the final 250
@@ -42,8 +41,6 @@ class Config:
     imap_password: str = field(repr=False)
     smtp_password: str = field(repr=False)
     cafile: str = ""
-    poll_s: float = 30.0
-    imap_timeout_s: float = 30.0
     smtp_timeouts: SMTPTimeouts = SMTPTimeouts()
 
     def context(self) -> ssl.SSLContext:
@@ -71,6 +68,4 @@ class Config:
             imap_password=keys["IMAP_PASSWORD"],
             smtp_password=keys["SMTP_PASSWORD"],
             cafile=settings.mail_cafile,
-            poll_s=settings.email_poll_s,
-            imap_timeout_s=settings.imap_timeout_s,
         )

@@ -3,9 +3,11 @@
 Adapted from `_build_reply_mime` and `_send_smtp` (`bridge/email_bridge.py`)
 and `_send_smtp_sync` (`bridge/email_relay.py`) on `main`. One attempt per
 perform, under RFC 5321's per-command timeouts (`config.SMTPTimeouts`). A
-send that ends before its end of data line has gone out is definite; once
-that line has gone, anything that ends the send without a final reply is in
-doubt and raises `broker.Unknown`, and the effect is settled from Sent Mail.
+send that ends before its end of data line has gone out, or that the
+server answers with a 4xx or 5xx reply, is definite and raises
+`SendRefused` (a `broker.Failed`): no lookup. Once that line has gone,
+anything that ends the send without a well-formed final reply is in doubt
+and raises `broker.Unknown`, and the effect is settled from Sent Mail.
 """
 
 import hashlib
@@ -24,7 +26,7 @@ from .config import Config
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-class SendRefused(RuntimeError):
+class SendRefused(broker.Failed):
     """A send the server or the payload definitely refused; nothing was
     stored."""
 
@@ -101,78 +103,104 @@ def perform(cfg: Config, action: broker.Action, key: str) -> dict[str, Any]:
     The server accepts a message only on the end of data line (RFC 5321
     4.1.1.4: either it accepts with a 250 or it does not accept), so
     anything that ends the send before that line has gone out in full is a
-    definite `SendRefused`. Once it has gone and no final reply is read,
-    the send is in doubt and raises `broker.Unknown`."""
-    payload = action.payload
-    t = cfg.smtp_timeouts
-    blobs = _blobs(payload)
+    definite `SendRefused`, as is a 4xx or 5xx reply to it (4.2.1: the
+    action did not occur). Once it has gone, an end with no reply, or any
+    reply but a 250 or a refusal (a garbled line, which `smtplib` reads as
+    code -1, or a line too long for it to read), leaves the send in doubt:
+    `broker.Unknown`."""
+    payload, t = action.payload, cfg.smtp_timeouts
     message_id = bridge.email_message_id(key, cfg.address)
-    msg = bridge.email_message(
-        payload, blobs, message_id=message_id, sender=cfg.address, date=datetime.now(UTC)
-    )
-    data = bridge.email_serialized(msg)
-    smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=t.greeting)
-    ended = False
+    smtp, ended = None, False
     try:
-        smtp.sock.settimeout(t.command)
-        smtp.ehlo()
-        smtp.starttls(context=cfg.context())
-        smtp.sock.settimeout(t.command)
-        smtp.ehlo()
-        smtp.login(cfg.smtp_user, cfg.smtp_password)
-        options = [f"SIZE={len(data)}"] if smtp.has_extn("size") else []
-        code, reply = smtp.mail(cfg.address, options)
-        if code != 250:
-            raise SendRefused(f"MAIL refused: {code} {reply.decode(errors='replace')}")
-        accepted, refused = [], {}
-        for rcpt in _recipients(payload):
-            code, reply = smtp.rcpt(rcpt)
-            if code in (250, 251):
-                accepted.append(rcpt)
-            else:
-                refused[rcpt] = f"{code} {reply.decode(errors='replace')}"
-        if not accepted:
-            raise SendRefused(f"every recipient refused: {refused}")
-        smtp.sock.settimeout(t.data_start)
-        code, reply = smtp.docmd("DATA")
-        if code != 354:
-            raise SendRefused(f"DATA refused: {code} {reply.decode(errors='replace')}")
-        smtp.sock.settimeout(t.data_block)
         try:
+            blobs = _blobs(payload)
+            msg = bridge.email_message(
+                payload, blobs, message_id=message_id, sender=cfg.address, date=datetime.now(UTC)
+            )
+            data = bridge.email_serialized(msg)
+            smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=t.greeting)
+            accepted, refused = _envelope(cfg, smtp, payload, data)
+            smtp.sock.settimeout(t.data_block)
             _send_all(smtp.sock, _dot_stuffed(data))
             _send_all(smtp.sock, END_OF_DATA)
-        except OSError as e:
+        except SendRefused:
+            raise
+        except Exception as e:
             raise SendRefused(
-                f"the send of {message_id} ended before the end of data line, so nothing was accepted: {e!r}"
+                f"the send of {message_id} ended before the end of data line went, so nothing was "
+                f"accepted: {e!r}"
             ) from e
         smtp.sock.settimeout(t.data_end)
         try:
             code, reply = smtp.getreply()
-        except (smtplib.SMTPServerDisconnected, OSError) as e:
+        except (smtplib.SMTPException, OSError) as e:
             cause = e.__context__ or e
             raise broker.Unknown(
-                f"the send of {message_id} is in doubt: the end of data line went and no reply came: "
+                f"the send of {message_id} is in doubt: the end of data line went and no reply was read: "
                 f"{e} (from {cause!r})"
             ) from e
+        text = reply.decode(errors="replace")
+        if 400 <= code < 600:
+            raise SendRefused(f"the message was refused: {code} {text}")
         if code != 250:
-            raise SendRefused(f"the message was refused: {code} {reply.decode(errors='replace')}")
+            raise broker.Unknown(
+                f"the send of {message_id} is in doubt: the end of data line went and the reply is "
+                f"neither 250 nor a refusal: {code} {text}"
+            )
         ended = True
     finally:
-        try:
-            if ended:
-                smtp.sock.settimeout(t.command)
-                smtp.quit()
-            else:
-                smtp.close()
-        except smtplib.SMTPException, OSError:
-            smtp.close()
+        if smtp is not None:
+            _close(smtp, ended)
     return _result(payload, message_id, accepted=accepted, refused=refused)
 
 
+def _envelope(cfg: Config, smtp: smtplib.SMTP, payload: dict[str, Any], data: bytes):
+    """EHLO, STARTTLS, AUTH, MAIL, every RCPT, and DATA up to its 354.
+    Returns the accepted and refused recipients. EHLO, STARTTLS, and AUTH
+    wait with no timer: RFC 5321 4.5.3.2 gives them no value, and nothing
+    has been sent that the server could store."""
+    t = cfg.smtp_timeouts
+    smtp.sock.settimeout(None)
+    smtp.ehlo()
+    smtp.starttls(context=cfg.context())
+    smtp.sock.settimeout(None)
+    smtp.ehlo()
+    smtp.login(cfg.smtp_user, cfg.smtp_password)
+    smtp.sock.settimeout(t.mail_rcpt)
+    options = [f"SIZE={len(data)}"] if smtp.has_extn("size") else []
+    code, reply = smtp.mail(cfg.address, options)
+    if code != 250:
+        raise SendRefused(f"MAIL refused: {code} {reply.decode(errors='replace')}")
+    accepted, refused = [], {}
+    for rcpt in _recipients(payload):
+        code, reply = smtp.rcpt(rcpt)
+        if code in (250, 251):
+            accepted.append(rcpt)
+        else:
+            refused[rcpt] = f"{code} {reply.decode(errors='replace')}"
+    if not accepted:
+        raise SendRefused(f"every recipient refused: {refused}")
+    smtp.sock.settimeout(t.data_start)
+    code, reply = smtp.docmd("DATA")
+    if code != 354:
+        raise SendRefused(f"DATA refused: {code} {reply.decode(errors='replace')}")
+    return accepted, refused
+
+
+def _close(smtp: smtplib.SMTP, ended: bool) -> None:
+    """After a 250 the send is done: `QUIT` goes and its reply is not
+    awaited (RFC 5321 4.5.3.2 gives QUIT no timer). Otherwise the
+    connection is dropped."""
+    try:
+        if ended:
+            smtp.putcmd("quit")
+    except OSError:
+        pass
+    smtp.close()
+
+
 def imap_connect(cfg: Config) -> imaplib.IMAP4_SSL:
-    conn = imaplib.IMAP4_SSL(
-        cfg.imap_host, cfg.imap_port, ssl_context=cfg.context(), timeout=cfg.imap_timeout_s
-    )
+    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, ssl_context=cfg.context())
     try:
         conn.login(cfg.imap_user, cfg.imap_password)
     except BaseException:
@@ -196,10 +224,12 @@ def sent_folder(conn: imaplib.IMAP4) -> str:
     raise broker.Unknown("no folder is flagged \\Sent")
 
 
-def lookup(cfg: Config, action: broker.Action, key: str, since: str) -> dict[str, Any] | None:
+def lookup(cfg: Config, action: broker.Action, key: str, since: str) -> dict[str, Any]:
     """The send under `key`, found in Sent Mail by its exact Message-ID among
-    messages dated from the day before `since` (the intent's time), or None.
-    Raises `broker.Unknown` when the mailbox cannot be read."""
+    messages dated from the day before `since` (the intent's time). Raises
+    `broker.Unknown` when the mailbox cannot be read, and when the message
+    is not there: Gmail may file an accepted message late, so a miss does
+    not show the send failed, and the outbox asks again on its next wake."""
     message_id = bridge.email_message_id(key, cfg.address)
     day = datetime.fromisoformat(since).astimezone(UTC).date() - timedelta(days=1)
     try:
@@ -225,5 +255,5 @@ def lookup(cfg: Config, action: broker.Action, key: str, since: str) -> dict[str
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as e:
         raise broker.Unknown(f"Sent Mail could not be read: {e}") from e
     if not (data and data[0] and data[0].split()):
-        return None
+        raise broker.Unknown(f"{message_id} is not in {folder}")
     return _result(action.payload, message_id, found_in=folder)

@@ -30,8 +30,13 @@ certificates verified. The bridge signs in with an app password that
 with `written`, `kept`, or `missing` and never a value. Every message Valor
 sends leaves from this address, as Valor.
 
-**Polling.** Every `email_poll_s` seconds (30) the bridge opens one IMAP
-connection, with a socket timeout of `imap_timeout_s` (30), and:
+**The watch.** The bridge holds one IMAP connection, with no socket
+timeout, and waits on it with IDLE (RFC 2177), so new mail arrives as an
+event: the server's `EXISTS` response ends the wait. RFC 3501 section 5.4
+lets a server log out a client idle for 30 minutes, so the bridge ends
+IDLE and issues it again every 29 minutes (`imap.IDLE_REISSUE_S`), as RFC
+2177 advises; that is the only read bound while idling. After each wait,
+and once on connecting, the bridge:
 
 1. selects `INBOX` and reads its `UIDVALIDITY`;
 2. searches `UNSEEN SINCE <email_since>` with an `OR` tree of `FROM` terms
@@ -44,12 +49,14 @@ connection, with a socket timeout of `imap_timeout_s` (30), and:
    `intake.receive`, and sets `\Seen` only after `receive` returns.
 
 A crash between `receive` and `\Seen` leaves the message unseen; the next
-poll finds it recorded and marks it, and the receipt index on `(channel,
+search finds it recorded and marks it, and the receipt index on `(channel,
 chat_id, message_id)` lands it once in any case. A message whose parse,
 save, or receive raises is logged with its UID and left unseen, and the
-poll goes on. A failed login or connection is one failed poll in the log;
-the next runs on schedule. Mail Gmail files as spam never reaches `INBOX`,
-and mail opened in webmail before a poll is seen already and is not
+search goes on; it is tried again after the next wait. A failed login or
+connection, or a dropped one, is one line in the log; the bridge connects
+again on the outbox's next wake (`Bridge.tick()`, every `serve_tick_s` or
+on a ledger row). Mail Gmail files as spam never reaches `INBOX`, and mail
+opened in webmail before the bridge searches is seen already and is not
 received until it is marked unread.
 
 **The record.** Email fills the port's fields this way:
@@ -157,28 +164,37 @@ effects never share one. `lookup(action, key, since)` opens the folder
 whose `LIST` flags include `\Sent` and searches for that exact id among
 messages from the day before `since` (the intent's time): with Gmail's
 `X-GM-RAW "rfc822msgid:"` when the server offers it, else `HEADER
-Message-ID`. Found, it returns the result; not found, `None`; a mailbox it
-cannot read raises `broker.Unknown`. Gmail copies mail sent over SMTP into
+Message-ID`. Found, it returns the result. Not found, or a mailbox it
+cannot read, raises `broker.Unknown`: Gmail copies mail sent over SMTP into
 Sent Mail ("Choose your IMAP email client settings for Gmail", Gmail
-Help); no document gives how long that takes, so the bridge waits for
-nothing and reads Sent Mail only for a send in doubt (below).
+Help), and no document gives how long that takes, so a miss does not show
+the send failed. The bridge reads Sent Mail only for a send in doubt
+(below).
 The result's `sent` entry carries the `Message-ID` and the thread root, which
 is how a reply from any recipient binds back to its task.
 
-**One attempt.** `perform` submits once over SMTP with STARTTLS. Each step
-waits under the minimum timeout RFC 5321 section 4.5.3.2 gives a client:
-the greeting, `MAIL`, and `RCPT` 5 minutes (EHLO, STARTTLS, AUTH, and QUIT
-too), `DATA`'s reply 2 minutes, each send call of the body 3 minutes, at
-most one TLS record (16,384 bytes) per call, and the final reply 10
-minutes. No timer spans the upload, so a large message takes the time its
-size takes. A server accepts a message only on the end of data line, with
-a 250 (RFC 5321 section 4.1.1.4): the 250 is `done`, and a refused
-connection, login, `MAIL`, every recipient, or `DATA`, or any end before
-that line has gone, is `failed` with the reason. Once the line has gone,
-an end with no reply (a lost connection, the 10 minute timeout) raises
-`broker.Unknown`: the server may have stored the message, so `reconcile`
-reads Sent Mail by its Message-ID once no process performs the send, and
-writes `done` or `failed` at once. When the server accepts
+**One attempt.** `perform` submits once over SMTP with STARTTLS. The steps
+RFC 5321 section 4.5.3.2 gives a client timeout wait under it: the
+greeting, `MAIL`, and `RCPT` 5 minutes, `DATA`'s reply 2 minutes, each
+send call of the body 3 minutes, at most one TLS record (16,384 bytes,
+RFC 8446 section 5.1) per call, and the final reply 10 minutes. EHLO,
+STARTTLS, and AUTH have no value there and wait with no timer. No timer
+spans the upload, so a large message takes the time its size takes. A
+server accepts a message only on the end of data line (RFC 5321 section
+4.1.1.4). Before that line has gone out in full, any end (a refused
+connection or login, a refused `MAIL`, every recipient refused, a refused
+`DATA`, a write that fails or stalls) is definite: the outcome is `failed`
+with the reason, and Sent Mail is not read. After it, a 250 is `done`, and
+a 4xx or 5xx reply is `failed` (section 4.2.1: the action did not occur).
+Any other end (no reply, the 10 minute timeout, a garbled reply, a reply
+line too long to read, another code) raises `broker.Unknown`: the server
+may have stored the message. The intent stays in flight with no outcome,
+and the outbox reconciles it on each wake (every `serve_tick_s` or ledger
+row) by reading Sent Mail for its Message-ID once no process performs the
+send: found is `done`; not found leaves it in flight for the next wake,
+and `tasks.audit` lists it. After the 250,
+`QUIT` is sent and its reply is not awaited, since the send is already
+done. When the server accepts
 the message for some recipients and refuses others, the outcome is `done`
 with `refused` listing each address and its reply; reaching them is a new
 request and a new approval. The bridge keeps no retry loop, backoff
@@ -209,18 +225,18 @@ it exits.
   cache, or queue outside the ledger. Its only local state is the inbound
   directory.
 - **Alerts.** It raises no operator alerts of its own. A login that fails is
-  a failed poll in its log and, for a send, a failed outcome on the ledger;
+  a line in its log and, for a send, a failed outcome on the ledger;
   telling Tom is `core/`'s job.
 
 ## The implementation
 
 | Module | Holds |
 |---|---|
-| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the poll beside each released send |
+| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send, reconnected on `tick()` |
 | `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`) |
 | `bridges/email/config.py` | `Config`, from settings and `mail-keys`, and the SMTP timeouts (`SMTPTimeouts`); the passwords are held here only |
 | `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |
-| `bridges/email/imap.py` | The poll |
+| `bridges/email/imap.py` | The watch: search, receive, and IDLE (`IDLE_REISSUE_S`) |
 | `bridges/email/smtp.py` | `perform` and `lookup` |
 | `core/mail.py` | `reply_all`, the message builder, and its encoded size |
 | `core/session.py` | A `reply_to` request filled in as reply-all |
@@ -233,10 +249,14 @@ Telegram bridge. Its tests run against Dovecot and a local SMTP server
 ## Gaps
 
 - **The sent folder.** `lookup` relies on Gmail filing mail submitted over
-  SMTP into the folder flagged `\Sent`. A send in doubt that Gmail has
-  not yet filed when `reconcile` reads is recorded `failed` though
-  delivered; nothing resends it, so no copy is doubled. On a provider
-  that does not file sent mail, every send in doubt reads `failed`.
+  SMTP into the folder flagged `\Sent`. A send in doubt that is never
+  filed (a send the server never stored, or a provider that does not file
+  sent mail) stays in flight with no outcome, and each outbox wake reads
+  Sent Mail for it again over a new IMAP connection.
+- **Waits with no timer.** EHLO, STARTTLS, AUTH, and every IMAP command
+  outside IDLE wait as long as the server takes. A server that accepts a
+  connection and then never answers holds that send or lookup, and the
+  outbox behind it, until the connection drops.
 - **Email starts nothing.** No email record is verified, so mail from Tom
   is recorded and binds as nothing.
 - **Approving every send.** As on Telegram, each send to anyone but Tom

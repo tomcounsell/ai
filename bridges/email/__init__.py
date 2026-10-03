@@ -1,6 +1,6 @@
 """The email bridge: Valor's Gmail mailbox over IMAP and SMTP.
 
-`run` polls INBOX for owned senders' mail and performs each `email.send`
+`run` watches INBOX for owned senders' mail and performs each `email.send`
 the outbox releases. Governed by `docs/bridges/email.md`.
 """
 
@@ -28,10 +28,11 @@ class EmailBridge:
     limits = bridge.LIMITS["email"]
 
     def __init__(self, cfg: Config | None = None, dsn: str | None = None):
-        """`dsn` is the database the poll records into: the one `serve`
+        """`dsn` is the database the watch records into: the one `serve`
         is given, the kernel's when both are None."""
         self.cfg = cfg or Config.from_settings()
         self.dsn = dsn
+        self._retry = asyncio.Event()
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:
         return await in_thread(smtp.perform, self.cfg, action, key)
@@ -42,28 +43,23 @@ class EmailBridge:
     def performers(self):
         return {"email.send": (self.perform, self.lookup)}
 
-    async def polls(self) -> None:
-        """A poll every `poll_s` seconds on its own connection. A failed
-        poll is one line in the log; the next runs on schedule."""
-        conn = await db.connect(self.dsn, application_name="valor-email-poll")
+    async def watches(self) -> None:
+        """The IMAP watch (`imap.watch`) on its own database connection."""
+        conn = await db.connect(self.dsn, application_name="valor-email-watch")
         try:
-            while True:
-                try:
-                    await imap.poll(self.cfg, conn)
-                except Exception:
-                    log.exception("email poll failed")
-                await asyncio.sleep(self.cfg.poll_s)
+            await imap.watch(self.cfg, conn, self._retry)
         finally:
             await conn.close()
 
     async def run(self, outbox) -> None:
-        """The poll beside the outbox: each `Release` performed; notices
+        """The watch beside the outbox: each `Release` performed; notices
         are Telegram's (`operator_channel`), so email ignores them."""
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(self.polls())
+            tg.create_task(self.watches())
             async for item in outbox:
                 if isinstance(item, bridge.Release):
                     await outbox.perform(item)
 
     async def tick(self) -> None:
-        return None
+        """Each outbox wake: a watch that failed reconnects."""
+        self._retry.set()

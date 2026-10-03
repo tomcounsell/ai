@@ -163,13 +163,16 @@ server's `INTERNALDATE` when `Date` does not parse. `headers` carries
 lists of the raw header values as received, topmost first, `to` and `cc`
 as address lists, and `uid` and `uidvalidity`.
 
-### `bridges/email/imap.py`: the poll, adapted from `_poll_imap`
+### `bridges/email/imap.py`: the watch, adapted from `_poll_imap`
 
-One connection per poll, every `email_poll_s` seconds (30, main's value),
-under `imaplib.IMAP4_SSL` with `ssl.create_default_context()` (main
-passes no context, so certificates go unverified there) and a socket
-timeout of `imap_timeout_s` (30, main's `IMAP_SOCKET_TIMEOUT`): a hung
-server ends one poll.
+One held connection under `imaplib.IMAP4_SSL` with
+`ssl.create_default_context()` (main passes no context, so certificates go
+unverified there) and no socket timeout. On connecting, and after each
+wait, the steps below run; then the connection waits in IDLE (RFC 2177)
+until the server's `EXISTS` reports new mail, so mail arrives as an event.
+RFC 3501 section 5.4 lets a server log out a client idle for 30 minutes,
+so IDLE is ended and issued again every 29 minutes (`IDLE_REISSUE_S`, RFC
+2177's advice), the only read bound while idling.
 
 1. `SELECT INBOX`; read `UIDVALIDITY`.
 2. `UID SEARCH UNSEEN SINCE <email_since>` with an `OR` tree of `FROM`
@@ -188,11 +191,11 @@ server ends one poll.
    (\Seen)`.
 
 A duplicate is marked seen too. A message whose parse, persist, or
-receive raises is logged with its UID and stays unseen, and the poll goes
-on, so one bad message never blocks later mail. A failed login
-or connection is one failed poll in the log, and the next poll runs on
-schedule; there is no backoff, alert key, or retry state. Main's batch
-cap of 20 goes.
+receive raises is logged with its UID and stays unseen, and the search goes
+on, so one bad message never blocks later mail. A failed login, a failed
+or dropped connection, is one line in the log, and the watch connects
+again on the outbox's next wake (`Bridge.tick()`); there is no backoff,
+alert key, or retry state. Main's batch cap of 20 goes.
 
 ### `bridges/email/smtp.py`: the performer
 
@@ -213,11 +216,11 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
 - **Send.** `smtplib.SMTP`, `starttls` with the default context, login,
   `MAIL FROM` with `SIZE`, `RCPT` for each address, `DATA`, the
   dot-stuffed body, then the end of data line `.` on its own, sent apart.
-  One attempt. Each step waits under its own timeout, the minimums RFC
-  5321 section 4.5.3.2 gives a client (`config.SMTPTimeouts`): the 220
-  greeting 5 minutes; `MAIL` and `RCPT` 5 minutes, which EHLO, STARTTLS,
-  AUTH, and QUIT also take, since the section gives them no value of
-  their own; `DATA`'s 354 2 minutes; each send call of the body 3
+  One attempt. Each step the section names waits under its timeout, the
+  minimums RFC 5321 section 4.5.3.2 gives a client (`config.SMTPTimeouts`):
+  the 220 greeting 5 minutes; `MAIL` and `RCPT` 5 minutes; EHLO,
+  STARTTLS, and AUTH, which it gives no value, wait with no timer; after
+  the 250, `QUIT` is sent and its reply not awaited; `DATA`'s 354 2 minutes; each send call of the body 3
   minutes; the final 250 10 minutes. The body goes in send calls of at
   most one TLS record, 16,384 bytes (RFC 8446 section 5.1), since a TLS
   socket writes all it is handed in one call and the timer must apply to
@@ -228,12 +231,15 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
   of data line, with a 250, or refuses it (RFC 5321 section 4.1.1.4). So
   a refused login, every recipient refused, a refusal at `MAIL` (an
   over-`SIZE` message included), `RCPT`, or the reply to `DATA`'s start,
-  and any error or timeout before the end of data line has gone in full,
-  raise a definite refusal, and the effect is `failed`. Once that line
-  has gone, anything that ends the send without a final reply (a lost
-  connection, the 10 minute timeout) raises `broker.Unknown`, naming the
-  exception's `__context__`; the server may have stored the message
-  (RFC 5321 section 6.1), so this is never `failed` on its own. Some
+  and any error, timeout, or failed write (EPIPE) before the end of data
+  line has gone in full, raise a definite refusal (`broker.Failed`), and
+  the effect is `failed` with no lookup. After it, a 4xx or 5xx reply is
+  also definite (section 4.2.1). Anything else that ends the send (no
+  reply, the 10 minute timeout, a garbled reply `smtplib` reads as code
+  -1, a reply line too long to read, another code) raises
+  `broker.Unknown`, naming the exception's `__context__`; the server may
+  have stored the message (RFC 5321 section 6.1), so this is never
+  `failed` on its own. Some
   recipients refused: `done`, with `refused` listing each address and its
   reply.
 - **Result.** `message_id`, `accepted`, `refused`, and one `sent` entry
@@ -245,22 +251,18 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
   `X-GM-EXT-1`, `UID SEARCH X-GM-RAW "rfc822msgid:<id> after:<that
   date>"`; the day covers the clock margin and IMAP's date-only `SINCE`.
   The key-derived Message-ID needs no scan, so `intake.claimed` is not
-  consulted. Found: the result rebuilt with `sent`. Not found: `None`. A
-  connection or login failure raises `broker.Unknown`.
-- **Settle time.** None of email's own. A 250 settles `done` in
-  `perform`, and a send that ends before its end of data line settles
-  `failed`; neither reads Sent Mail. Only a send whose end of data line
-  went with no reply read, or whose process died, is settled from Sent
-  Mail: reconcile runs once the effect's performing lock is free (every
-  process and thread performing it has exited), reads Sent Mail by
-  Message-ID, and writes `done` or `failed` at once. Gmail copies a
-  message sent through SMTP into Sent Mail ("Choose your IMAP email
-  client settings for Gmail", Gmail Help, answer 78892); no document
-  gives the time that filing takes. A receiver is to answer the end of
-  data line at once (RFC 5321 section 4.5.3.2.6, RFC 1047), so the case
-  that reads Sent Mail is narrow; in it, a filing slower than the
-  reconcile reads a delivered message as `failed`, nothing resends it, so
-  no copy is doubled, and the window measures the filing time.
+  consulted. Found: the result rebuilt with `sent`. Not found, or a
+  connection or login failure, raises `broker.Unknown`.
+- **Settle time.** None. A 250 settles `done` in `perform`, and a
+  definite refusal settles `failed`; neither reads Sent Mail. Only a send
+  in doubt, or one whose process died, is settled from Sent Mail:
+  reconcile runs on each outbox wake once the effect's performing lock is
+  free, reads Sent Mail by Message-ID, and writes `done` when it is
+  there. Gmail copies a message sent through SMTP into Sent Mail ("Choose
+  your IMAP email client settings for Gmail", Gmail Help, answer 78892);
+  no document gives the time that filing takes, so a miss is `Unknown`
+  (the port's contract: the intent stays in flight and a later wake
+  settles it), never `failed`, and no wait is added.
 - **limits.** Email's entry in `core/bridge.py`'s channel table:
   `max_text` `None`; `max_message_bytes` 25,000,000, Gmail's limit on the
   whole encoded message ("Gmail sending limits in Google Workspace",
@@ -280,8 +282,8 @@ are not carried.
 ### `bridges/email/__init__.py` and `__main__.py`
 
 `EmailBridge`: `channel = "email"`, `limits`, `performers()` returning
-`{"email.send": (perform, lookup)}`, and `run(outbox)`: the poll on its
-own connection beside `await outbox.perform(item)` for each `Release`.
+`{"email.send": (perform, lookup)}`, `tick()`, which lets a failed watch
+reconnect, and `run(outbox)`: the watch on its own connection beside `await outbox.perform(item)` for each `Release`.
 Blocking IMAP and SMTP calls run in a worker thread through the
 module's `in_thread`, the performing lock's thread runner where the
 kernel has one (1.4d's `performing.in_thread`, which holds the effect's
@@ -355,10 +357,8 @@ email starts nothing. That is Tom's tap, and the window notes say so.
 
 `core/settings.py` gains: `email_address` (Valor's), `email_since` (a
 date), `email_authserv_id` (`mx.google.com`), `imap_host`, `imap_port`
-(993), `smtp_host`, `smtp_port` (587), `email_poll_s` (30) and
-`imap_timeout_s` (30), `main`'s `IMAP_POLL_INTERVAL` and
-`IMAP_SOCKET_TIMEOUT` (`bridge/email_bridge.py`), and `mail_cafile`
-(unset; tests point it at their CA). The SMTP timeouts are RFC 5321's,
+(993), `smtp_host`, `smtp_port` (587), and `mail_cafile` (unset; tests
+point it at their CA). There is no poll interval and no IMAP timeout. The SMTP timeouts are RFC 5321's,
 in `bridges/email/config.py`, not settings. Tom's address is 2.1's `operator_email`.
 
 `python -m bridges.email keys` copies `IMAP_USER`, `IMAP_PASSWORD`,
@@ -384,14 +384,14 @@ IMAP and SMTP config objects only.
 
 ## Left out
 
-- Mail someone opens in Valor's webmail before a poll is not received.
-  Marking it unread brings it in on the next poll.
+- Mail someone opens in Valor's webmail before the watch searches is not
+  received. Marking it unread brings it in after the next wait.
 - Mail from senders this machine does not own is never received, so
   replies to Valor's mail from anyone else are not recorded as thread
   context. email.md says so.
 - Inbound attachment caps (main's 25 MiB and 50 parts): Gmail bounds
   inbound size, and a kernel cap has no incident.
-- Operator notices, approvals, and stops by email; IMAP IDLE; alerts,
+- Operator notices, approvals, and stops by email; alerts,
   backoff, and a health key; subject coalescing, the vault mirror, the
   Redis history and dead letters, the relay's retries, per-sender
   project routing, the customer-service handler, the drafter, `gws`
@@ -437,9 +437,9 @@ for the first case:
 
 **The bridge** (`tests/test_email_bridge.py`):
 
-- One mail lands as one row, then is `\Seen`; a second poll records
+- One mail lands as one row, then is `\Seen`; a second search records
   nothing. Receive without the `\Seen` store (as a crash would leave
-  it), then a full poll: one row, no body fetch (`intake.recorded`),
+  it), then a full search: one row, no body fetch (`intake.recorded`),
   then seen.
 - UIDVALIDITY change (`doveadm mailbox update --uid-validity`): mail
   received and seen before is not received again; mail received but not
@@ -453,7 +453,10 @@ for the first case:
   before `email_since` is not received.
 - A message whose persist raises (the inbound directory made read-only
   for that one key): logged, left unseen, and the next message in the
-  same poll is received.
+  same search is received.
+- Mail delivered while the watch is in IDLE is received; IDLE returns on
+  `EXISTS`; a connection dropped under IDLE ends it; a watch that cannot
+  connect connects on the next tick.
 - A mail from Tom passing the test, in no chat a spec lists, starts one
   task under `valor`. Tom's reply to a mail Valor sent binds to that task
   as a steer, through the sent entry's thread root; a reply whose text is
@@ -467,15 +470,19 @@ for the first case:
   A stopped task's held send: release refused, nothing sent.
 - Crash between SMTP and outcome, the bridge process killed by PID:
   after the message is stored, `done` with `reconciled: true`, one copy;
-  mid-body, `failed`, nothing stored.
+  before the server took the body, nothing stored and the effect still
+  in flight (Sent Mail does not hold it, which is `Unknown`).
 - The 250 reply later than its timeout, the message stored: the
   performer raises `Unknown`, and the lookup finds the message.
 - Crash after the intent, before the server's greeting (a port that
-  accepts and never greets): `failed`, and nothing is sent.
+  accepts and never greets): in flight, and nothing is sent.
 - Lookup with the IMAP server down: `Unknown`, nothing written.
 - 9 MB send through the held reading rate: done, attachment byte-equal.
   A server that stops reading mid-body: a definite refusal before the
-  end of data line, nothing stored, and the lookup finds nothing.
+  end of data line, nothing stored. A server that hangs up after `354`
+  (EPIPE before the end of data line): a definite refusal, no lookup.
+  After the end of data line: `554` is a definite refusal; a garbled
+  reply, a `251`, or a line too long is `Unknown`.
 - `email_encoded_bytes` equals the length of the message the performer
   serializes, for no files, one, and three of odd sizes; a request just
   over 25,000,000 encoded is refused, one of exactly 25,000,000 is held.

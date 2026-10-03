@@ -154,6 +154,24 @@ def test_unknown_leaves_intent(dsn, op, how):
     run(go())
 
 
+def test_a_definite_failure_is_failed_and_asks_no_lookup(dsn, op):
+    async def go():
+        task = await new_task(dsn)
+        effect = await held(dsn, task, send())
+        await approved(dsn, task, effect)
+        bridge = FakeBridge()
+        bridge.fail = broker.Failed("refused")
+        bridge.lookup_fail = AssertionError("a definite failure asks no lookup")
+        async with bridges.outbox(dsn, bridge) as box:
+            (item,) = [i for i in await box.due() if isinstance(i, Release) and i.effect_id == effect]
+            out = await box.perform(item)
+        (row,) = await of_type(dsn, "effect.outcome", effect_id=effect)
+        return out, row
+
+    out, row = run(go())
+    assert out.kind == "failed" and row["kind"] == "failed" and "refused" in row["error"]
+
+
 def test_two_identical_sends(dsn, op):
     async def go():
         task = await new_task(dsn)

@@ -257,7 +257,10 @@ its question or delivery commit together. Connections are autocommit
 ### Intent before outcome
 
 An effect's `effect.intent` row commits before its performer runs, and its
-`effect.outcome` row after. A kill between the two leaves an intent with no
+`effect.outcome` row after. A performer that raises `broker.Failed` knows
+the effect did not happen: the outcome is `failed` with no `lookup`; any
+other exception asks `lookup`, and `broker.Unknown` leaves the intent in
+flight. A kill between the two leaves an intent with no
 outcome. The process performing an effect holds a session advisory lock on
 it from before the intent to the outcome, so the lock is free only when
 that process died. `broker.reconcile`
@@ -268,7 +271,7 @@ Absent is written `failed` only once the intent is older than
 `reconcile_after_s` (at least twice `git_timeout_s`, the one deadline on a
 perform's git calls; settings refuse less), since a
 performer whose database connection dropped frees the lock while its push
-may still run. Unknown writes nothing, and the effect stays in flight. Either outcome is marked `reconciled`. The router does this for a
+may still run. Unknown writes nothing, and the effect stays in flight. For `email.send` the target is Sent Mail: present is a message there with the effect's `Message-ID`; absent, or a mailbox that cannot be read, is unknown, since Gmail files a sent message after a delay no document gives, so an `email.send` in doubt is never written `failed` by reconcile. Either outcome is marked `reconciled`. The router does this for a
 task's merge on its next run; other dangling intents stay listed by
 `tasks.audit` (`docs/architecture.md`, the broker).
 

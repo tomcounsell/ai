@@ -529,8 +529,8 @@ by email. The kernel side of the port is built (`core/intake.py`,
 `core/notices.py`, `core/bridge.py`): one `message.received` row per
 inbound message, bound by the kernel to start, steer, answer, feedback,
 approve, stop, or none; notices owed by the fold; and an outbox that hands
-each bridge its sends after Tom's approval. The bridges themselves are
-[bridges/telegram.md](bridges/telegram.md) and [bridges/email.md](bridges/email.md).
+each bridge its sends after Tom's approval. Email is built in `bridges/email/`, a process of its own ([bridges/email.md](bridges/email.md));
+Telegram is not built ([bridges/telegram.md](bridges/telegram.md)).
 
 ## How a task flows from request to merge
 
