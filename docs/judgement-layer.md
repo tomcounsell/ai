@@ -17,8 +17,8 @@ Status. Built: the port, router, and gate (`core/judgement.py`); the legs
 (`tools/jev.py`, `tools/open_weight.py`); the three tasks
 (`core/judgement_tasks.py`); the judge runner and the breadth and
 governance calls (`core/judgement_sites.py`); metering; and `python -m core
-calibrate`. No runner calls breadth or governance; the test, review, and
-docs runners that do are 1.4's. The images leg, live scoring, and use shapes 2 to 5, 7, 9, and 10
+calibrate`. The test runner calls breadth, and the review and docs
+runners call governance. The images leg, live scoring, and use shapes 2 to 5, 7, 9, and 10
 are design, and each section says which.
 
 ## Terms
@@ -72,9 +72,8 @@ computes a merge's `adds_governance` from the review and docs verdicts,
 never from the requester, treats such a merge as `act`, and refuses it while
 any instance lacks Tom's tap. The other half is use shape 6:
 `judgement_sites.governance` asks the governance boolean once per hunk of
-the diff, and `record_check` takes the instances from those rows. Until
-1.4's review and docs runners call it, a person records those verdicts by
-hand.
+the diff, and `record_check` takes the instances from those rows. The
+review and docs runners call it, and no verdict is recorded by hand.
 
 ## Task taxonomy
 

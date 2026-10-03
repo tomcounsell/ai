@@ -186,8 +186,11 @@ critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
 verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
-`.valor/verdict.json`, read without following links or blocking. Review and
-docs follow in milestone 1.4.
+`.valor/verdict.json`, read without following links or blocking. Docs runs
+the same way in its own clone (`fresh.docs_runner`). Review
+(`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
+Redis, the kernel's own suite and lint run (`verify.ran`) among its inputs.
+Every seat runs in Claude Code today.
 
 Each prompt is followed by what did not count from the previous turn
 (`errors` on its `turn.collected`) and what became of the effects it

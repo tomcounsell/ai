@@ -155,11 +155,11 @@ keys in the kernel key directory.
 | `failed` | more than two runs of the task failed |
 | `run cap` | sixteen `core run` calls without an outcome |
 | `an effect other than a local push is held for Tom` | any held effect the driver may not release |
-| `NO RUNNER ...` | the router reached a stage with no runner (the checks, until milestone 1.4); the driver records no verdict for them |
+| `NO RUNNER ...` | the router reached a stage with no registered runner; the driver records no verdict for it |
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
-Until the check runners exist, a replay whose build writes a candidate ends
-with `NO RUNNER`, and no replay reaches a delivery.
+Test, review, and docs run as the kernel's own runners, so a replay whose
+build writes a candidate reaches a delivery.
 
 The driver approves and releases a held `push_branch` only when the
 workspace's push URL is exactly the run's own bare origin, and a held
