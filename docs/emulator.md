@@ -294,7 +294,7 @@ Each run writes `results/<run>.json`, atomically, after every step:
 - `final_rev`, the held merge's head or the candidate, `merge_effect_id`,
   and the diff stat against the base, from the mirror;
 - `judge_model`, and `judge`: scores, divergences, rationale, the diff's
-  size, exclusion, and truncation, every verification command's exit code
+  size and truncation, every verification command's exit code
   and output tail, and reaped processes;
 - the leak check's fields.
 
@@ -390,10 +390,14 @@ training-data contamination of replayed tasks, and no check in the emulator
 detects it. Private repositories and requests newer than the model's
 training data are the mitigation available today.
 
-**`/tmp` is shared between runs.** Common file names recurred across items.
-The leak check lists `/tmp` paths a run shares with other runs, and files
-from earlier runs of the same item are deleted before each run. A per-run
-temporary directory inside the sandbox closes this; it is not built.
+**The verification shares the temp directories.** A working turn's profile
+denies `/private/tmp`, `/private/var/tmp`, and `/private/var/folders`, so
+turns of different runs share no temp directory (docs/harnesses.md, The turn
+sandbox). The judge's verification commands run as the baseline ran them,
+with those directories shared and `TMPDIR` inside their own tree, so a
+command that writes `/tmp` directly can still meet another run's files. The
+leak check lists the `/tmp` paths a run's transcripts share with other
+runs'.
 
 **n = 1.** One run per item and arm. A difference of one judge point is
 noise. The baseline's aggregate (fidelity 3.67 bare, 3.83 clarify, summed
