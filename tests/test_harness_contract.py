@@ -15,6 +15,7 @@ Live spend: none.
 import asyncio
 import contextlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,34 +164,49 @@ def test_signals_a_turn_writes_are_collected(harness, dsn, tmp_path):
     assert found.question == "which port?"
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def test_a_stop_mid_call_kills_and_reaps_the_group(harness, dsn, tmp_path):
+    spawn = "sleep 300 >/dev/null 2>&1 & echo $! > .sleeppid"
+
     async def go():
-        async with world(harness, dsn, tmp_path, [Hang(120)]) as w:
+        async with world(harness, dsn, tmp_path, [Run(spawn), Hang(120)]) as w:
             turn = asyncio.create_task(w.turn("Keep working."))
+            pidfile = Path(w.brief.workspace) / ".sleeppid"
+            while not (pidfile.exists() and pidfile.read_text().strip()):
+                await asyncio.sleep(0.1)
             async with await db.connect(dsn) as conn:
-                while not await (
-                    await conn.execute(
-                        "SELECT 1 FROM events WHERE task_id = %s AND type = 'gateway.opened'", (w.task_id,)
-                    )
-                ).fetchone():
-                    await asyncio.sleep(0.1)
                 await asyncio.sleep(1)
+                child = int(pidfile.read_text())
+                group = int(
+                    subprocess.run(
+                        ["ps", "-o", "pgid=", "-p", str(child)], capture_output=True, text=True, check=True
+                    ).stdout
+                )
+                assert _alive(child) and _group(group), "the sleep the turn started is running"
                 await tasks.stop(conn, w.task_id, reason="test")
             ended = await asyncio.wait_for(turn, 60)
-            started = (await w.events("turn.started"))[0]["turn_id"]
-            alive = await asyncio.to_thread(
-                lambda: subprocess.run(
-                    ["pgrep", "-f", f"VALOR_TURN={started}"], capture_output=True, text=True, check=False
-                ).stdout.split()
-            )
             async with await db.connect(dsn) as conn:
                 state = await tasks.status(conn, w.task_id)
-            return ended, alive, state
+            return ended, child, group, state
 
-    ended, alive, state = run(go())
+    ended, child, group, state = run(go())
     assert ended["outcome"] == "stopped"
-    assert alive == []
+    assert not _alive(child), "the sleep the turn started is gone"
+    assert _group(group) == [], "no process of the turn's group is left"
     assert state["spent_usd_micros"] > 0 and tasks.audit(state) == []
+
+
+def _group(pgid: int) -> list[str]:
+    return subprocess.run(
+        ["pgrep", "-g", str(pgid)], capture_output=True, text=True, check=False
+    ).stdout.split()
 
 
 def test_every_call_is_metered(harness, dsn, tmp_path):
@@ -207,6 +223,8 @@ def test_every_call_is_metered(harness, dsn, tmp_path):
     assert len(calls) == 3, "the script's three replies were three model calls"
     assert len(opened) == len(calls), "every call the provider received was metered"
     assert len(charged) == len(calls)
+    for call in calls:
+        assert TURN_TOKEN in (call.headers.get("Authorization", "") + call.headers.get("x-api-key", ""))
     assert ended["metered_usd_micros"] > 0
     assert ended["result"]["num_turns"] >= 3 or harness.name == "claude_code"
 
@@ -233,11 +251,12 @@ def test_a_stray_credential_is_never_used(harness, dsn, tmp_path, monkeypatch):
         assert TURN_TOKEN in (call.headers.get("Authorization", "") + call.headers.get("x-api-key", ""))
 
 
-def test_the_machine_users_pi_credentials_are_unreadable_inside_a_turn(dsn, tmp_path):
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "workspace"])
+def test_the_machine_users_pi_credentials_are_unreadable_inside_a_turn(dsn, tmp_path, fresh):
     home = tmp_path / "home"
     (home / ".pi" / "agent").mkdir(parents=True)
     (home / ".pi" / "agent" / "auth.json").write_text(FAKE_KEY)
-    profile = scripted.kws.profile(rw=[tmp_path / "work"], home=home, fresh=True)
+    profile = scripted.kws.profile(rw=[tmp_path / "work"], home=home, fresh=fresh)
     path = tmp_path / "p.sb"
     path.write_text(profile)
     out = subprocess.run(

@@ -313,8 +313,7 @@ The existing suite runs and passes, Claude Code's turns unchanged.
   provisioning and for a fresh session).
 - `tests/test_harness_contract.py`, `tests/scripted_upstream.py`,
   `tests/test_pi.py`, `tests/test_compaction_live.py`,
-  `tests/fixtures/pi/` (recorded JSONL streams), `tests/test_session.py`
-  (the moved test).
+  `tests/fixtures/pi/` (recorded JSONL streams).
 - `docs/harnesses.md`, `docs/architecture.md`, `docs/persona.md`,
   `docs/data.md`, `docs/machine.md` (Pi's install and pin).
 
@@ -413,3 +412,28 @@ not yet merged).
   window): metered by the gateway, nothing else.
 - **Not run.** Rollout steps 3 and 4 (the pair of reviews after 1.4c, popoto
   #633 after 1.5).
+
+### Patch round 1
+
+From the review (`changes`) and the test check (`gaps`):
+
+- **Blind checkout.** The sparse pattern is `!/.pi`, so a committed `.pi`
+  link is left out as well as a directory; a test commits `.pi` as a link
+  to a directory.
+- **Pi install.** `settings.pi` defaults to `/opt/homebrew/bin/pi`, not a
+  PATH lookup. Every turn profile denies writing the directory above the
+  first `node_modules` of the resolved `VALOR_PI` (`workspace.pi_install`),
+  with a test. `docs/pi.md` says both. The machine's own Pi (0.66.1) is
+  not upgraded here; that is rollout step 1.
+- **Stop and reap.** The case runs a `sleep` the turn backgrounds, records
+  its PID and process group before the stop, and asserts after it that the
+  PID and every process of the group are gone.
+- **Docs.** An unknown session exits 1 (`docs/pi.md`, `parse`). The Files
+  list no longer names a moved `test_session.py` test.
+- **Test gaps.** The `~/.pi` denial is tested under the workspace profile
+  too; the metered case asserts the turn token header. `docs/pi.md` says
+  how to run the Pi cases (`VALOR_PI`).
+- **Evidence.** The Pi cases ran with `VALOR_PI` set to
+  `~/.cache/valor-pi-0.73.1/node_modules/.bin/pi`: `tests/test_pi.py` and
+  `tests/test_harness_contract.py` 62 passed, 1 skipped (Pi has no
+  subagents).

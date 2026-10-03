@@ -111,6 +111,15 @@ HOME_WRITE_DENIED_FILES = (
 SYSTEM_WRITE_DENIED = ("/opt/homebrew",)
 
 
+def pi_install() -> list[str]:
+    """The directory Pi's package and its dependencies are installed in (the
+    path above the first `node_modules` of the resolved `cli.js`), which
+    every turn profile denies writing wherever `VALOR_PI` puts it: the
+    next turn, and a reviewer's, runs what is there."""
+    parts = Path(os.path.realpath(settings.pi)).parts
+    return [str(Path(*parts[:i])) for i, name in enumerate(parts) if name == "node_modules"][:1]
+
+
 class Refused(ValueError):
     """A project or a provisioning step the kernel will not take."""
 
@@ -310,7 +319,7 @@ def profile(
         "(deny file-write*",
         *_paths("subpath", [home / d for d in HOME_WRITE_DENIED]),
         *_paths("literal", [home / f for f in HOME_WRITE_DENIED_FILES]),
-        *_paths("subpath", SYSTEM_WRITE_DENIED),
+        *_paths("subpath", [*SYSTEM_WRITE_DENIED, *pi_install()]),
         ")",
         "(allow file-read* file-write*",
         *_paths("subpath", rw),
@@ -1124,8 +1133,8 @@ def fresh_dir(check_dir: Path) -> Path:
     return check_dir
 
 
-# Directories a blind checkout leaves out of the working tree, for every
-# harness: Pi reads `<cwd>/.pi/settings.json` whatever flags it is given, and
+# Paths (a directory or a link) a blind checkout leaves out of the working
+# tree, for every harness: Pi reads `<cwd>/.pi/settings.json` whatever flags it is given, and
 # a candidate must not set what the verifier's session runs with.
 BLIND_LEFT_OUT = (".pi",)
 
@@ -1156,7 +1165,7 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
     git.trusted(dest, "config", "core.sparseCheckoutCone", "false")
     (dest / ".git" / "info").mkdir(exist_ok=True)
     (dest / ".git" / "info" / "sparse-checkout").write_text(
-        "/*\n" + "".join(f"!/{d}/\n" for d in BLIND_LEFT_OUT)
+        "/*\n" + "".join(f"!/{d}\n" for d in BLIND_LEFT_OUT)
     )
     git.trusted(dest, "checkout", "-q", "-f", "main")
     with (dest / ".git" / "info" / "exclude").open("a") as f:

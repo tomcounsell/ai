@@ -41,7 +41,9 @@ def _claude() -> str:
 
 
 def _pi() -> str:
-    return shutil.which("pi") or "/opt/homebrew/bin/pi"
+    # Homebrew's prefix, which every turn profile denies writing: a PATH
+    # lookup could land on a directory a turn can write.
+    return "/opt/homebrew/bin/pi"
 
 
 def _node() -> str:

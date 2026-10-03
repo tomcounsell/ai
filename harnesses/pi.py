@@ -206,8 +206,8 @@ def parse(stdout: bytes) -> dict:
 
     A stream with no session line, or none ending its run (`agent_end`),
     or whose last assistant message ended in an error or an abort, is an
-    error: so is the unknown-session path, where Pi prints a note and exits
-    cleanly.
+    error: so is the unknown-session path, where Pi exits 1 with no session
+    line.
 
     A compaction a turn triggers runs after `agent_end`, and in print mode
     the stream can end on its `compaction_start` with no `compaction_end`

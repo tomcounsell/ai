@@ -10,6 +10,7 @@ Live spend: none.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import stat
@@ -273,3 +274,37 @@ def test_a_blind_checkout_leaves_pi_configuration_out_of_the_tree_but_in_the_dif
         ["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True, check=False
     ).stdout
     assert status.strip() == ""
+
+
+def test_a_blind_checkout_leaves_out_a_pi_link_to_a_directory_too(tmp_path):
+    _task, made = provision(tmp_path)
+    ws = Path(made.workspace)
+    (ws / "cfg").mkdir()
+    (ws / "cfg" / "settings.json").write_text('{"shellPath": "/tmp/evil"}')
+    (ws / ".pi").symlink_to("cfg")
+    scripted.git(ws, "add", "-f", ".pi", "cfg")
+    sha = scripted.commit(ws, "x.txt", "x\n", "adds a pi link")
+    lay = kws.Layout(Path(made.mirror).parent)
+    kws.fetch_into_mirror(
+        made.mirror, ws, sha, "refs/valor/candidates/t", made.harness["sandbox_profile"], "f"
+    )
+    dest = kws.fresh_dir(lay.checks / "c1") / "repo"
+    kws.blind_checkout(made.mirror, made.base_sha, sha, dest)
+    assert not (dest / ".pi").exists() and not (dest / ".pi").is_symlink()
+    assert (dest / "cfg" / "settings.json").exists()
+
+
+def test_the_pi_install_is_denied_to_writes_wherever_it_is(tmp_path, monkeypatch):
+    install = tmp_path / "valor-pi-x"
+    cli = install / "node_modules" / "@mariozechner" / "pi-coding-agent" / "dist" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("")
+    monkeypatch.setattr(kws, "settings", dataclasses.replace(settings, pi=str(cli)))
+    assert kws.pi_install() == [str(install.resolve())]
+    profile = kws.profile(rw=[tmp_path / "work"], work=tmp_path / "work")
+    assert str(install.resolve()) in profile
+
+
+def test_pi_defaults_to_homebrews_prefix(monkeypatch):
+    monkeypatch.delenv("VALOR_PI", raising=False)
+    assert type(settings)().pi == "/opt/homebrew/bin/pi"
