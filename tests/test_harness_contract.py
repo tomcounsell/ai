@@ -184,11 +184,7 @@ def test_a_stop_mid_call_kills_and_reaps_the_group(harness, dsn, tmp_path):
             async with await db.connect(dsn) as conn:
                 await asyncio.sleep(1)
                 child = int(pidfile.read_text())
-                group = int(
-                    subprocess.run(
-                        ["ps", "-o", "pgid=", "-p", str(child)], capture_output=True, text=True, check=True
-                    ).stdout
-                )
+                group = os.getpgid(child)
                 assert _alive(child) and _group(group), "the sleep the turn started is running"
                 await tasks.stop(conn, w.task_id, reason="test")
             ended = await asyncio.wait_for(turn, 60)
