@@ -12,14 +12,14 @@ import os
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from bridges.telegram.bridge import TelegramBridge
-from bridges.telegram.kernel import session_path
+from bridges.telegram.kernel import from_core, session_path
 from bridges.telegram.wire import TelethonWire
-from tests.telegram_kernel import Action, StandIn
+from core.broker import Action
 
 pytestmark = [
     pytest.mark.spend(usd=0),
@@ -27,13 +27,13 @@ pytestmark = [
 ]
 
 
-def test_killed_after_telegram_accepted_a_real_send(tmp_path):
+def test_killed_after_telegram_accepted_a_real_send(dsn, tmp_path):
     from bridges.telegram.__main__ import credentials
 
     chat = os.environ["VALOR_TELEGRAM_WINDOW_CHAT"]
     stamp = datetime.now(UTC).isoformat()
     text, key, mark = f"window check {stamp}", f"window:{stamp}", tmp_path / "mark"
-    at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    at = datetime.now(UTC).isoformat()
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -41,6 +41,8 @@ def test_killed_after_telegram_accepted_a_real_send(tmp_path):
             "tests.telegram_child",
             "perform-live",
             str(session_path()),
+            dsn,
+            str(tmp_path),
             chat,
             text,
             key,
@@ -59,9 +61,8 @@ def test_killed_after_telegram_accepted_a_real_send(tmp_path):
         w = TelethonWire(session_path(), api_id, api_hash)
         await w.connect()
         try:
-            _, lookup = TelegramBridge(w, StandIn(owned=[chat]).kernel()).performers()[
-                "telegram.send_message"
-            ]
+            bridge = TelegramBridge(w, from_core(dsn), sends=tmp_path / "telegram-sends.json")
+            _, lookup = bridge.performers()["telegram.send_message"]
             return await lookup(Action("telegram.send_message", chat, {"text": text}), key, at)
         finally:
             await w.disconnect()

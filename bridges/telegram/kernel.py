@@ -2,8 +2,7 @@
 
 The bridge reaches the kernel only through this one object, built from the
 modules item 30 allows (`core.bridge`, `core.intake`, `core.broker`,
-`core.settings`, `core.db`, `core.credentials`). The tests build the same shape over their own
-store.
+`core.settings`, `core.db`, `core.credentials`). The tests build it over the test database.
 """
 
 from __future__ import annotations
@@ -32,13 +31,14 @@ class Kernel:
     serve_tick_s: float
 
 
-def from_core() -> Kernel:
+def from_core(dsn: str | None = None) -> Kernel:
+    """The port; `dsn` names the database, the ledger when none."""
     from core import bridge, broker, db, intake
     from core.settings import settings
 
     @asynccontextmanager
     async def conn():
-        c = await db.connect()
+        c = await db.connect(dsn)
         try:
             yield c
         finally:
@@ -77,6 +77,11 @@ def session_path() -> Path:
 def seen_path() -> Path:
     """The newest message id each chat's last gap-fill pass saw."""
     return key_dir() / "telegram-seen.json"
+
+
+def sends_path() -> Path:
+    """For each send's key, the chat and its newest message id before the send."""
+    return key_dir() / "telegram-sends.json"
 
 
 def keyfile() -> Path:

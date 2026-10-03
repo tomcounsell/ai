@@ -183,9 +183,8 @@ def make_app() -> web.Application:
     async def own(request):
         guard()
         b = await body(request)
-        since = datetime.fromisoformat(b["since"])
         msgs = sorted(s.chat(b["chat"])["msgs"].values(), key=lambda m: -m["id"])
-        return ok([_public(m) for m in msgs if m.get("out") and datetime.fromisoformat(m["date"]) >= since])
+        return ok([_public(m) for m in msgs if m.get("out") and m["id"] > b["after_id"]])
 
     async def get(request):
         guard()
@@ -400,8 +399,8 @@ class EmulatorWire:
             for m in await self._post("history", {"chat": chat_id, "offset_id": offset_id, "limit": limit})
         ]
 
-    async def own(self, chat_id: int, *, since: datetime) -> list[Msg]:
-        return [to_msg(m) for m in await self._post("own", {"chat": chat_id, "since": since.isoformat()})]
+    async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
+        return [to_msg(m) for m in await self._post("own", {"chat": chat_id, "after_id": after_id})]
 
     async def get(self, chat_id: int, ids: list[int]) -> list[Msg | None]:
         return [to_msg(m) for m in await self._post("get", {"chat": chat_id, "ids": ids})]

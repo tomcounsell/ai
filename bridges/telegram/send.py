@@ -12,7 +12,12 @@ What a failure means, as the broker reads it:
   is: the broker asks `lookup`, finds nothing, and writes `failed`;
 - a send in doubt (`InDoubt`, `DuplicateRandomId`) raises `broker.Unknown`:
   no outcome is written and the outbox's reconcile settles it through
-  `lookup`, which knows the intent's time.
+  `lookup`.
+
+Before a key's first send, the chat's newest message id is recorded in
+`telegram-sends.json`. `lookup` scans the account's own messages above
+that id: message ids within a chat only grow, so the send is there
+whatever the Mac's clock and Telegram's dates say.
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,19 +42,11 @@ from bridges.telegram.wire import (
 
 log = logging.getLogger("valor.telegram")
 
-# Skew between this Mac's clock and Telegram's message dates. It widens a
-# lookup's scan; it stops nothing.
-CLOCK_MARGIN = timedelta(seconds=60)
-
 
 def random_id(key: str, n: int) -> int:
     """A signed 64-bit id from SHA-256 of `key:n`; never zero."""
     value = int.from_bytes(hashlib.sha256(f"{key}:{n}".encode()).digest()[:8], "big", signed=True)
     return value or 1
-
-
-def at(text: str) -> datetime:
-    return datetime.fromisoformat(text)
 
 
 class Flood:
@@ -92,9 +88,11 @@ def read_file(entry: dict[str, str]) -> tuple[str, bytes]:
 
 
 class Sender:
-    def __init__(self, wire: Wire, kernel):
+    def __init__(self, wire: Wire, kernel, starts):
         self.wire = wire
         self.kernel = kernel
+        # key -> [chat, the newest message id in it before the key's first send]
+        self.starts = starts
         self.split = kernel.split_text
         self.flood = Flood()
         self._attempts: dict[str, int] = {}
@@ -111,6 +109,7 @@ class Sender:
         sent = []
         n = 0
         try:
+            await self._start(key, chat)
             for part in self.split(p.get("text") or ""):
                 await self.flood.wait()
                 mid = await self.wire.send_text(
@@ -142,12 +141,17 @@ class Sender:
         return {"sent": sent}
 
     async def lookup(self, action, key: str, since: str) -> dict[str, Any] | None:
+        """The send under `key`, found by message id. `since` is not
+        needed: ids within a chat only grow, so the scan starts above the
+        newest id recorded before the key's first send, whatever the
+        clocks say. No record: nothing was sent under the key, because
+        the record is written before the first send."""
         p = action.payload
         expected = self._expected(
             p.get("text") or "", p.get("files") or [], p.get("reply_to"), p.get("topic_id")
         )
         try:
-            return await self._scan(int(action.target), expected, at(since))
+            return await self._scan_key(key, expected)
         except WireError as e:
             raise self.kernel.Unknown(f"lookup could not read Telegram: {e}") from None
 
@@ -160,7 +164,7 @@ class Sender:
         reply = item.reply_to
         expected = self._expected(item.text, [], reply, None)
         try:
-            found = await self._scan(chat, expected, at(item.at))
+            found = await self._scan_key(self._notice_key(item), expected)
             if found is None:
                 found = await self._send_notice(item, chat, reply, expected)
         except self.kernel.Unknown as e:
@@ -174,7 +178,11 @@ class Sender:
         await outbox.sent(item, found["sent"])
         self._attempts.pop(item.notice_id, None)
 
+    def _notice_key(self, item) -> str:
+        return f"notice:{item.notice_id}"
+
     async def _send_notice(self, item, chat: int, reply, expected) -> dict[str, Any]:
+        await self._start(self._notice_key(item), chat)
         while True:
             attempt = self._attempts.get(item.notice_id, 0)
             key = f"notice:{item.notice_id}" if attempt == 0 else f"notice:{item.notice_id}:{attempt}"
@@ -191,7 +199,7 @@ class Sender:
                     )
                     sent.append(self._entry(chat, mid))
             except DuplicateRandomId:
-                found = await self._scan(chat, expected, at(item.at))
+                found = await self._scan_key(self._notice_key(item), expected)
                 if found is not None:
                     return found
                 # Telegram holds the id but the notice is not on screen: send
@@ -222,13 +230,25 @@ class Sender:
             )
         return out
 
-    async def _scan(self, chat: int, expected: list[Expected], since: datetime) -> dict[str, Any] | None:
+    async def _start(self, key: str, chat: int) -> None:
+        """Record the chat's newest message id before the key's first send."""
+        if self.starts.get(key) is None:
+            page = await self.wire.history(chat, limit=1)
+            self.starts.set(key, [chat, page[0].id if page else 0])
+
+    async def _scan_key(self, key: str, expected: list[Expected]) -> dict[str, Any] | None:
+        start = self.starts.get(key)
+        if start is None:
+            return None
+        chat, after_id = start
+        return await self._scan(chat, expected, after_id)
+
+    async def _scan(self, chat: int, expected: list[Expected], after_id: int) -> dict[str, Any] | None:
         """The messages that carry `expected`, found among the account's own
-        messages dated at or after `since` less the clock margin and not
-        already claimed by a recorded send. One match each: found. None at
-        all: None. Two matches for one, or some found and some not:
-        `broker.Unknown`."""
-        own = await self.wire.own(chat, since=since - CLOCK_MARGIN)
+        messages with ids above `after_id` and not already claimed by a
+        recorded send. One match each: found. None at all: None. Two
+        matches for one, or some found and some not: `broker.Unknown`."""
+        own = await self.wire.own(chat, after_id=after_id)
         async with self.kernel.conn() as conn:
             claimed = await self.kernel.claimed(conn, "telegram", str(chat))
         pool = [m for m in reversed(own) if str(m.id) not in claimed]  # oldest first

@@ -291,10 +291,14 @@ is refused when it is requested.
 uses to detect a repeated send. The performer derives it from the broker's
 idempotency key and the message's place in the send, so a resend of the
 same effect is refused by Telegram as a duplicate rather than delivered
-twice. `lookup` reconciles a dangling intent by scanning the account's own
-messages in the target chat dated from the intent on (less a minute for
-clock skew), skipping ids already recorded as sent, for that send's text,
-files, reply target, and topic. Two matches, or part of a split send
+twice. Before a key's first send, the bridge records the chat's newest
+message id under the key in `telegram-sends.json` in the key directory.
+`lookup` reconciles a dangling intent by scanning the account's own
+messages in the target chat with ids above that one, since message ids in
+a chat only grow, skipping ids already recorded as sent, for that send's
+text, files, reply target, and topic. Clock skew between the Mac and
+Telegram cannot hide a message, since no date is read. A key with no
+record was never sent, so its lookup finds nothing. Two matches, or part of a split send
 found, is `broker.Unknown`: nothing is concluded. The outcome records `chat_id` and `message_id`,
 which is how a later reply to the sent message binds back to its task.
 
@@ -392,6 +396,7 @@ job `com.valor.kernel.telegram` that `--plist` prints.
 | `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain (20 hops), files by sha256 with a download timeout of ten seconds or five plus one per MB, tried once more at twice that |
 | `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message; the outbox loop; SIGTERM lets an in-flight send and its outcome finish |
 | `send.py` | `telegram.send_message` perform and lookup, and the notice send to the row's `chat_id`, marked through `outbox.sent` |
+| `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send key's chat and the newest id before its first send), each written whole and renamed into place |
 | `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
 | `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |
 

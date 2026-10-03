@@ -102,9 +102,9 @@ class Wire(Protocol):
     async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100) -> list[Msg]:
         """Newest first; with `offset_id`, only ids below it."""
 
-    async def own(self, chat_id: int, *, since: datetime) -> list[Msg]:
-        """The account's own messages in the chat dated at or after
-        `since`, newest first."""
+    async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
+        """The account's own messages in the chat with ids above
+        `after_id`, newest first."""
 
     async def get(self, chat_id: int, ids: list[int]) -> list[Msg | None]: ...
     async def send_text(
@@ -189,13 +189,11 @@ class TelethonWire:
         found = await self._call(self.client.get_messages(chat_id, limit=limit, offset_id=offset_id))
         return [await self._msg(m) for m in found if m is not None]
 
-    async def own(self, chat_id: int, *, since: datetime) -> list[Msg]:
+    async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
         out = []
 
         async def scan():
-            async for m in self.client.iter_messages(chat_id, from_user="me"):
-                if m.date < since:
-                    break
+            async for m in self.client.iter_messages(chat_id, from_user="me", min_id=after_id):
                 out.append(await self._msg(m))
 
         await self._call(scan())

@@ -55,7 +55,7 @@ item:
 | 29 | Connections named `valor-telegram` and `valor-telegram-perform`, by `serve` |
 | 30 | Imports `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, `core.credentials`, nothing else |
 | 31 | `--plist` prints the job for Tom to load |
-| 33, 34, 34a | `lookup(action, key, since)`: `since` is the intent's `at`, which `bridge.serve` passes on a `Release` and on reconcile alike. The scan covers own messages dated at or after `since` less the clock margin, skipping `intake.claimed` ids |
+| 33, 34, 34a | `lookup(action, key, since)`: the scan covers own messages with ids above the chat's newest id recorded before the key's first send, skipping `intake.claimed` ids; `since` is not read |
 | 35 | A notice lookup matches the notice's short id in its text |
 | 36 | Flood waits are held in memory for the process |
 
@@ -214,19 +214,20 @@ result is `{"sent": [...]}`, one entry per message, in order.
 effect twice. It is the main mechanism for notices, which the outbox
 yields again until marked sent.
 
-**Lookup** (`lookup(action, key, since)`, `since` the intent's `at` from
-`bridge.serve`, on a release and on reconcile alike). Scan the account's own messages
-in the target chat, newest first, down to those dated before `since` less
-a clock margin of 60 seconds, for skew between this Mac's clock and
-Telegram's dates. Skip ids in `intake.claimed`. Compare texts after
+**Lookup** (`lookup(action, key, since)`). Before a key's first send, the
+bridge records the chat and its newest message id under the key in
+`telegram-sends.json` beside the session. Lookup scans the account's own
+messages in that chat with ids above the recorded one, since ids in a chat
+only grow; no date is read, so clock skew cannot hide a message. A key
+with no record was never sent: None. Skip ids in `intake.claimed`. Compare texts after
 Telegram's trim of leading and trailing whitespace, with the same reply
 target and topic; a file by its document name and size. Every part found
 once: the result. None: None. Any part with two matches, or some parts
 found and others not: `broker.Unknown`, so nothing is concluded and the
 effect stays in flight for Tom to see.
 
-**Notices.** For each `NoticeDue`, first scan as above from `item.at` for
-a message carrying the notice's short id; if found, `outbox.sent`.
+**Notices.** For each `NoticeDue`, first scan as above, under the key
+`notice:<notice id>`, for a message carrying the notice's text; if found, `outbox.sent`.
 Otherwise send to `item.chat_id` with the reply target, `random_id` from
 the notice id, and on success `outbox.sent`. On `RandomIdDuplicate` with
 no message found by the scan, the notice is not on screen; it is sent
@@ -288,15 +289,11 @@ request with the remaining wait.
 
 The emulator runs as its own process; the bridge runs in-process or in
 `tests/telegram_child.py`, a child process the test starts and kills by
-its pid. No mocks inside the bridge. Until 2.1's port is in the tree, the
-bridge runs over `tests/telegram_kernel.py`, a stand-in with the port's
-names and shapes: records in memory or a file, `recorded`, `highest`,
-`claimed`, `owns`, `owned`, `split_text` counting UTF-16 units, and an
-outbox that performs, asks `lookup` with the intent's `at` on an error,
-and leaves an effect in flight on `broker.Unknown`.
-`tests/test_telegram_pipeline.py` runs the bridge over the real port and
-the test database (never `valor_rebuild`), and skips until `core.intake`
-and `core.bridge` exist.
+its pid. No mocks inside the bridge. Every test runs the bridge over the
+real port (`core/bridge.py`, `core/intake.py`, `core/broker.py`) and the
+test database, never `valor_rebuild`; `tests/telegram_port.py` gives each
+test chat ids no other test uses, makes this machine own them, and puts
+an approved send in the ledger for the outbox to yield.
 
 `tests/test_telegram_inbound.py`
 - `message.message` with Markdown-looking characters and entities arrives
@@ -335,10 +332,8 @@ and `core.bridge` exist.
 - Sent text carries no parse mode and no link preview; the reply target
   and topic are honored; the result carries one `sent` entry per message.
 - 4,096 units go as one message; a longer text goes as the parts
-  `split_text` gives, one message each. The stand-in's `split_text`
-  counts as the port's does: 4,097 as two whose joined text is the
-  payload, 2,049 astral-plane emoji as two, a split on a newline when
-  there is one.
+  `split_text` gives, one message each: 2,049 astral-plane emoji, two
+  UTF-16 units each, go as two.
 - A file whose bytes changed after approval raises before anything is
   sent; a file is sent from the bytes hashed.
 - A flood wait on send writes `failed` carrying the seconds, and the next
@@ -348,7 +343,9 @@ and `core.bridge` exist.
   with one message on screen.
 - `RandomIdDuplicate` on an effect: `broker.Unknown`, no outcome, and the
   reconcile's lookup writes `done` with the message already on screen.
-- Lookup: a match dated before `since` less the margin is not adopted; a
+- Lookup: a key with no record finds nothing; the same text sent before
+  the key's first send is not adopted; a message dated before the
+  intent's `at` (the Mac's clock ahead of Telegram's) is found; a
   claimed id is skipped; a payload with a trailing newline matches the
   trimmed message; a sent message older than a later claimed one is found;
   two unclaimed matches, or a split send half found, give `broker.Unknown`
@@ -396,9 +393,9 @@ and `core.bridge` exist.
   `status` shows metered spending.
 - A question notice, Tom's emulated reply, `question.answered` with
   `via: "telegram"` and `role_played: false`; the next run resumes.
-- A held `push_branch` effect notice: `Approve.` binds as a steer with its
-  notice; `approve` records `approval.granted` and the push reaches the
-  local bare origin, with no `release.requested`.
+- A held send's effect notice: `Approve.` binds as a steer with its
+  notice; `approve` records `approval.granted` with `via: "telegram"` and
+  `release.requested`, and the bridge sends it.
 - `approve` in reply to the delivered notice binds as feedback.
 - A second `approve` to the same notice binds `none` and owes a notice;
   the next message from Tom still binds.
@@ -415,11 +412,14 @@ only the test child has.
 ## Files it changes
 
 - New: `bridges/telegram/__init__.py`, `__main__.py`, `wire.py`,
-  `inbound.py`, `gap.py`, `send.py`, `bridge.py`, `kernel.py` (the port
-  gathered into one object), `login.py`; `bridges/__init__.py`.
-- New: `tests/telegram_emulator.py`, `tests/telegram_kernel.py`,
+  `inbound.py`, `gap.py`, `send.py`, `bridge.py`, `state.py` (the
+  bridge's own files beside the session), `kernel.py` (the port gathered
+  into one object), `login.py`; `bridges/__init__.py`.
+- New: `tests/telegram_emulator.py`, `tests/telegram_port.py`,
   `tests/telegram_child.py`, and the test files above.
-- `pyproject.toml`, `uv.lock`: `telethon`, pinned.
+- `pyproject.toml`, `uv.lock`: `telethon`, pinned; pytest's
+  `--import-mode=importlib`, so `tests/bridges.py` and the `bridges`
+  package both import.
 - `docs/bridges/telegram.md`: status, polls removed, secrets in the kernel
   key directory, sends, lookup, notices, and gap fill as built, the
   conformance tests naming the emulator and the test servers.
@@ -505,8 +505,8 @@ The test window, on the build Mac:
   commit a later one first.
 - **No connect attempt count.** launchd restarts a process that exits; the
   backoff stays.
-- **The clock margin is 60 seconds**, for skew between the Mac's clock and
-  Telegram's message dates; it widens a scan and stops nothing.
+- **Lookup by message id**, recorded before a key's first send: ids in a
+  chat only grow, so no date and no clock margin is read.
 - **Split at a newline or space before the limit**, so a split message
   reads whole.
 - **Files after text**, as documents with no caption.

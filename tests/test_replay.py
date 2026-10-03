@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import TEST_DB
+from tests.conftest import TEST_DB
 
 from core import broker, db, tasks
 

@@ -10,14 +10,14 @@ only. Never Valor's session, never the ledger.
 import asyncio
 import hashlib
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from bridges.telegram.bridge import TelegramBridge
+from bridges.telegram.kernel import from_core
 from bridges.telegram.wire import DuplicateRandomId, TelethonWire
-from core.broker import Unknown
-from tests.telegram_kernel import Action, StandIn
+from core.broker import Action, Unknown
 
 pytestmark = [
     pytest.mark.spend(usd=0),
@@ -35,17 +35,16 @@ def wire() -> TelethonWire:
     return TelethonWire(os.environ["VALOR_TELEGRAM_TEST_SESSION"], api_id, api_hash, test_dc=True)
 
 
-def test_send_split_file_lookup_and_duplicate_on_the_test_servers(tmp_path):
+def test_send_split_file_lookup_and_duplicate_on_the_test_servers(dsn, tmp_path):
     async def go():
         w = wire()
         await w.connect()
         try:
             me = (await w.client.get_me()).id
             chat = str(me)
-            store = StandIn(owned=[chat], inbound_dir=str(tmp_path))
-            bridge = TelegramBridge(w, store.kernel())
+            bridge = TelegramBridge(w, from_core(dsn), sends=tmp_path / "telegram-sends.json")
             perform, lookup = bridge.performers()["telegram.send_message"]
-            at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+            at = datetime.now(UTC).isoformat()
             stamp = datetime.now(UTC).isoformat()
 
             f = tmp_path / "evidence.txt"
