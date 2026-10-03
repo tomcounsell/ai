@@ -119,7 +119,9 @@ the addresses in the payload and to no others.
 **Idempotency.** The performer derives the `Message-ID` from the broker's
 idempotency key, so the same effect always carries the same id. `lookup`
 reconciles a dangling intent by searching the mailbox's sent folder for that
-`Message-ID` header. The outcome records the `Message-ID`, which is how a
+`Message-ID` header. A search that finds nothing is read as never sent only
+after `reconcile_after_s` (`core/settings.py`) has passed since the intent;
+until the bridge ships its own settle function, that is the rule. The outcome records the `Message-ID`, which is how a
 reply to the sent message binds back to its task.
 
 **One attempt.** `perform` submits once over SMTP with STARTTLS. A refused
