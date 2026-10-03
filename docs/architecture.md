@@ -95,9 +95,8 @@ The gateway is a local HTTP proxy with two routes, Anthropic's Messages API
 openai`), reached with a per-turn token in the path. For every call it:
 
 1. prices the model from the table in `core/settings.py`, each price
-   carrying the day it was checked against the provider's page (an
-   unpriced model is refused, since it cannot be metered; the charge row
-   records `price_checked`);
+   carrying the day it was checked against the provider's page; an unpriced
+   model is refused, and the charge row records `price_checked`;
 2. opens the call with a `gateway.opened` row (call id, turn id, model,
    route, and an estimate), refusing with a `gateway.refused` row of reason
    `stopped` if the task is stopped; nothing else refuses a call;
@@ -116,7 +115,8 @@ turn's own (`credential: turn`) when the kernel holds none, only to
 cache-write, long-context, and per-search rates; an unpriced model, tier, tool,
 or stored prompt is a 400 with no row. Content referenced by id or URL, or a
 hosted tool with no `max_tool_calls`, can leave a cut call short of the bill
-(`referenced`, `bounded: false`). Anthropic searches are charged per search.
+(`referenced`, `bounded: false`). Anthropic searches are charged per search;
+its code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
 (`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of
