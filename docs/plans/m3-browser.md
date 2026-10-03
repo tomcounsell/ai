@@ -13,7 +13,7 @@ Task 3c of milestone 3 of [valor-rebuild.md](valor-rebuild.md). It gives a
 workspace turn a way to open the app it built in a headless browser and
 keep what it saw: a screenshot and the page's rendered HTML, written under
 `.valor/screens/` and named in `done.md`, with the kernel recording each
-file's digest when it collects the turn. It serves Mission item 1
+file's name and size when it collects the turn. It serves Mission item 1
 ("testing actual use") and is a capability for the turn, never a gate: no
 stage requires a screenshot and no check reads one.
 
@@ -38,8 +38,8 @@ app it built and records what it saw".
 - **A turn opens its app and records what it saw.** Evidence: one live
   build turn (`VALOR_LIVE=1`) on a provisioned Django workspace that
   starts the dev server on a dev port, runs `look`, and names the
-  screenshot in `done.md`; `turn.collected` holds the screenshot's name,
-  size, and SHA-256; the build report includes the image, saved at `<scratchpad>/screens/<name>.png` and named in the report.
+  screenshot in `done.md`; `turn.collected` holds the screenshot's name
+  and size; the build report includes the image, saved at `<scratchpad>/screens/<name>.png` and named in the report.
 - **It runs under the turn's sandbox.** Evidence: the offline test below,
   under the real turn profile, and the build report stating whether
   Chromium's own sandbox runs nested inside `sandbox-exec` or needed
@@ -74,8 +74,10 @@ app it built and records what it saw".
   gateway, and service ports. The turn already loads any page it likes with
   its own tools. No profile line changes for the browser.
 - A screenshot is the turn's own account of what it saw, as editable as
-  `done.md`. The digest on `turn.collected` makes a later edit visible; it
-  does not make the image true. A verifier who needs to see the page
+  `done.md`. `look` prints a SHA-256 of what it wrote for the turn to quote in
+  `done.md`; the kernel records only the size and never reads a screen's
+  contents, which the turn chooses and may make arbitrarily long (a sparse
+  file). It does not make the image true. A verifier who needs to see the page
   opens it again.
 
 ## Design
@@ -130,7 +132,7 @@ Interaction (clicks, forms, a login) is left out; see below.
 ### What the kernel records (`core/signals.py`, `core/session.py`)
 
 When it collects a build or patch turn, the kernel lists `.valor/screens/`
-and adds `screens: [{name, bytes, sha256} | {name, refused}]` to the
+and adds `screens: [{name, bytes} | {name, refused}]` to the
 `turn.collected` payload that `core/session.py` builds. `core/signals.py`
 reads it into `Signals.screens`.
 
@@ -140,8 +142,8 @@ fixes those and builds a shared safe-read helper. The screens reader here
 is a small self-contained function (`read_screens`) written the same way
 `workspace.read_verdict` reads: `.valor`, then `screens`, then each entry
 opened relative to the directory descriptor with `O_NOFOLLOW | O_NONBLOCK`,
-required to be a regular file with `st_nlink == 1`, hashed from the open
-descriptor. Anything else (a link, a FIFO, a directory, a hard-linked file)
+required to be a regular file with `st_nlink == 1`, sized from `fstat` and
+never read. Anything else (a link, a FIFO, a directory, a hard-linked file)
 is recorded as `{name, refused: reason}` and never read. At merge the shared
 helper replaces the function's body. Each recorded or refused screen is
 moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
@@ -198,8 +200,9 @@ what the tool is for; no check reads whether it was used.
 - With `VALOR_BROWSER` pointing at a missing path, `look` exits non-zero
   with the reason.
 - Collection: a scripted turn (`tests/scripted.py`) that runs `look` and
-  writes `done.md` produces `turn.collected` with one screens entry whose
-  digest matches the file; a screen that is a symlink to a file outside the
+  writes `done.md` produces `turn.collected` with a screens entry whose
+  size matches the file; a sparse screen of a petabyte is sized and returns
+  at once; a screen that is a symlink to a file outside the
   clone, a hard link, and a FIFO are each recorded as refused, never read
   and never blocking; recorded screens are moved to
   `handled/<turn_id>/screens/` and the next turn records none.
@@ -256,8 +259,7 @@ None. The task touches no identity or credential.
 - **Screens in `.valor/screens/`.** It is the turn's existing channel to
   the kernel, excluded from commits, and readable by the kernel at
   collection.
-- **Digests recorded, images not copied.** The digest shows whether a
-  screen changed; copying waits for the document store's session copy.
+- **Sizes recorded, images not copied.** Copying waits for the document store's session copy.
 - **The stage text mentions `look` without requiring it.** A screenshot is
   evidence the turn chooses to give.
 
@@ -320,7 +322,12 @@ built in.
   screens reader has no size or count cap. The `--wait` default of 3000 ms
   is the plan's own and sets how long scripts get to settle.
 - **No 5xx refusal.** `look` first refused a 5xx without rendering; that had no source, so it renders, prints the status, and exits non-zero.
-- **Live turn run.** `VALOR_LIVE=1 pytest tests/test_look.py -k live`
+- **Patch round after the first review.** The kernel records `{name,
+  bytes}` from `fstat` and no longer reads a screen (a sparse file stalled
+  the router). `look` writes to the clone's root, prints a `shasum -a 256`
+  of each file for the turn to quote, and accepts `--size` only as two
+  integers. The gap cases from the test check are in `tests/test_look.py`.
+- **Live turn run (an earlier version used a static page; the Django run below replaces it).** `VALOR_LIVE=1 pytest tests/test_look.py -k live`
   passed in 87 seconds: a real build turn served a page on a dev port, ran
   `look`, and `turn.collected` held the screenshot's name, size, and digest,
   named in `done.md`.
@@ -329,3 +336,11 @@ built in.
   raised `Refused` in a provisioning step while other builds ran on the
   machine, and passed alone on the rerun at the same head; it does not touch
   code this task changed.
+- **Live turn on a provisioned Django workspace.** The live test now
+  provisions a `kind = "django"` workspace (Django from `uv sync`, one
+  template), and `VALOR_LIVE=1 pytest tests/test_look.py -k live` passed in
+  147 seconds: the build turn served the app on port 8003, ran `look`, and
+  `turn.collected` held the screenshot's name and size, named in
+  `.valor/done.md`. Earlier tries failed on how the test worded the task
+  (the model did the work in the plan stage, or wrote `done.md` in the
+  repo), not on `look` or the recording.

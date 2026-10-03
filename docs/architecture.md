@@ -264,7 +264,7 @@ Critique, review, and docs run in fresh sessions. Prompts per state are in
 plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
 layout. `turn.collected` records what the turn left, its state, its
-verdict, and the screens `look` kept (name, size, and SHA-256 each, or the
+verdict, and the screens `look` kept (name and size each, or the
 reason one was refused); `task.delivered` waits for the checks
 ([sdlc-state-machine.md](sdlc-state-machine.md)).
 

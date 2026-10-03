@@ -28,8 +28,9 @@ case "$name" in
   ""|.*|*/*|*..*) die "NAME must be a plain file name: $name" ;;
 esac
 case "$size" in
-  [0-9]*x[0-9]*) ;;
-  *) die "--size must be WxH" ;;
+  *[!0-9x]*|x*|*x|*x*x*|"") die "--size must be WxH (two integers)" ;;
+  *x*) ;;
+  *) die "--size must be WxH (two integers)" ;;
 esac
 case "$wait_ms" in
   ""|*[!0-9]*) die "--wait must be a number of milliseconds" ;;
@@ -44,7 +45,9 @@ case "$status" in
   000) die "nothing answered at $url" 3 ;;
 esac
 
-dir=".valor/screens"
+# Screens go to the clone's root, where the kernel reads them, wherever look runs.
+root=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git clone"
+dir="$root/.valor/screens"
 mkdir -p "$dir" || die "cannot make $dir"
 data="${TMPDIR:-/tmp}/look-profile.$$"
 trap 'rm -rf "$data"' EXIT
@@ -64,5 +67,7 @@ rm -f "$data.err"
 echo "$dir/$name.png"
 echo "$dir/$name.html"
 echo "status $status"
+# The turn's own record of what it kept, for done.md.
+/usr/bin/shasum -a 256 "$dir/$name.png" "$dir/$name.html"
 # A 5xx page is rendered and kept like any other; the exit code tells the turn.
 case "$status" in 5??) exit 3 ;; esac

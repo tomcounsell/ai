@@ -8,7 +8,6 @@ memory of the browser's process tree.
 """
 
 import asyncio
-import hashlib
 import http.server
 import json
 import os
@@ -214,6 +213,7 @@ def test_look_under_the_fresh_sessions_profile_runs_with_its_own_tmp(tmp_path):
         check_dir = kws.fresh_dir(lay.checks / "look")
         harness = kws.check_harness(lay, check_dir, [server.port], {"PATH": "/usr/bin:/bin"}, services=True)
         (check_dir / "checkout").mkdir()
+        subprocess.run(["git", "init", "-q", str(check_dir / "checkout")], check=True)
         done = look_under(
             Path(harness["sandbox_profile"]), check_dir / "checkout", Path(harness["tmpdir"]),
             lay.root.parent / "bin" / "look", server.url + "/", "fresh",
@@ -275,17 +275,14 @@ def plant(root: Path) -> Path:
     return screens
 
 
-def test_screens_are_recorded_with_their_digest_and_moved_aside(tmp_path):
+def test_screens_are_recorded_with_their_size_and_moved_aside(tmp_path):
     screens = plant(tmp_path)
     (screens / "a.png").write_bytes(b"png bytes")
     (screens / "a.html").write_text("<p>a</p>")
     found = signals.collect(tmp_path, "t1")
     by_name = {e["name"]: e for e in found.screens}
-    assert by_name["a.png"] == {
-        "name": "a.png",
-        "bytes": 9,
-        "sha256": hashlib.sha256(b"png bytes").hexdigest(),
-    }
+    assert by_name["a.png"] == {"name": "a.png", "bytes": 9}
+    assert by_name["a.html"] == {"name": "a.html", "bytes": 8}
     assert set(by_name) == {"a.png", "a.html"}
     assert list(screens.iterdir()) == []
     assert (tmp_path / ".valor" / "handled" / "t1" / "screens" / "a.png").read_bytes() == b"png bytes"
@@ -328,7 +325,16 @@ def test_a_link_a_hard_link_a_fifo_and_a_directory_are_refused_unread(tmp_path):
     assert by_name["ok.png"]["bytes"] == 4
     assert outside.read_text() == "secret"
     assert "secret" not in json.dumps(found.screens)
-    assert hashlib.sha256(b"secret").hexdigest() not in json.dumps(found.screens)
+
+
+def test_a_sparse_screen_is_sized_without_being_read(tmp_path):
+    screens = plant(tmp_path)
+    with open(screens / "huge.png", "wb") as f:
+        f.truncate(1 << 50)
+    started = time.monotonic()
+    found = signals.collect(tmp_path, "t1")
+    assert time.monotonic() - started < 5
+    assert found.screens == [{"name": "huge.png", "bytes": 1 << 50}]
 
 
 def test_a_screens_directory_that_is_a_link_is_not_followed(tmp_path):
@@ -371,7 +377,6 @@ def test_a_scripted_turn_that_runs_look_has_its_screen_on_turn_collected(dsn, tm
     assert builds, [e["type"] for e in events]
     screens = {s["name"]: s for s in builds[0]["screens"]}
     handled = next((ws / ".valor" / "handled").glob("*/screens/shot.png"))
-    assert screens["shot.png"]["sha256"] == hashlib.sha256(handled.read_bytes()).hexdigest()
     assert screens["shot.png"]["bytes"] == handled.stat().st_size
     assert set(screens["escape.png"]) == {"name", "refused"}
 
@@ -425,33 +430,53 @@ def test_memory(tmp_path):
 
 # -- live: a real build turn ----------------------------------------------------------------
 
+DJANGO_FILES = {
+    "pyproject.toml": '[project]\nname = "site"\nversion = "0"\nrequires-python = ">=3.10"\n'
+    'dependencies = ["django>=5,<6"]\n[tool.uv]\npackage = false\n',
+    "manage.py": "import os, sys\nfrom django.core.management import execute_from_command_line\n"
+    "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mysite.settings')\n"
+    "execute_from_command_line(sys.argv)\n",
+    "mysite/__init__.py": "",
+    "mysite/settings.py": "from pathlib import Path\nBASE_DIR = Path(__file__).resolve().parent.parent\n"
+    "SECRET_KEY = 'x'\nDEBUG = True\nALLOWED_HOSTS = ['*']\nROOT_URLCONF = 'mysite.urls'\n"
+    "INSTALLED_APPS = []\nMIDDLEWARE = []\n"
+    "TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates',"
+    " 'DIRS': [BASE_DIR / 'templates']}]\n",
+    "mysite/urls.py": "from django.urls import path\nfrom django.views.generic import TemplateView\n"
+    "urlpatterns = [path('', TemplateView.as_view(template_name='home.html'))]\n",
+    "templates/home.html": "<html><body><h1>Hello</h1></body></html>\n",
+}
+
 
 @pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1")
 @pytest.mark.spend(usd=1.00)
 def test_a_live_build_turn_opens_its_page_and_names_the_screenshot(dsn, tmp_path):
-    """A provisioned workspace whose plan is a one-line page change: the turn
-    serves the page on a dev port, runs `look`, and names the screenshot in
-    `done.md`; `turn.collected` holds its name, size, and digest."""
+    """A provisioned Django workspace whose plan is a one-line template change:
+    the turn serves the app on a dev port, runs `look`, and names the
+    screenshot in `done.md`; `turn.collected` holds its name and size."""
     from tests.test_live_session import core, sh
 
     root = tmp_path.resolve()
     src = root / "src" / "toy"
     sh("git", "init", "-q", "-b", "main", str(src))
-    (src / "index.html").write_text("<html><body><h1>Hello</h1></body></html>\n")
+    for name, text in DJANGO_FILES.items():
+        (src / name).parent.mkdir(parents=True, exist_ok=True)
+        (src / name).write_text(text)
     git = ["git", "-c", "user.name=Tom", "-c", "user.email=tom@example.com"]
-    sh(*git, "add", "index.html", cwd=src)
+    sh(*git, "add", ".", cwd=src)
     sh(*git, "commit", "-qm", "base", cwd=src)
     spec = root / "toy.toml"
     spec.write_text(
-        f'name = "toy"\nrepo = "{src}"\nkind = "plain"\nsuite = "true"\ntarget_branch = "main"\n'
-        "max_output_tokens = 2048\n"
+        f'name = "toy"\nrepo = "{src}"\nkind = "django"\nsuite = "true"\ntarget_branch = "main"\n'
+        'setup = ["uv sync"]\nmax_output_tokens = 2048\n'
     )
     task = core(
         "start",
-        "Change the heading in index.html to 'Hello, Tom'. Serve the directory with "
-        "`python3 -m http.server 8003 --bind 127.0.0.1` in the background, run `look` on "
-        "http://127.0.0.1:8003/, look at the screenshot, name it in done.md, commit the change, "
-        "and stop the server.",
+        "Change the heading in templates/home.html to 'Hello, Tom' and commit it. The change is only "
+        "checked by looking at the page: when you build, start the app with `uv run python manage.py "
+        "runserver 127.0.0.1:8003 --noreload` in the background, run `look` on http://127.0.0.1:8003/, "
+        "open the screenshot, stop the server, and name the screenshot in .valor/done.md with what "
+        "you saw. The plan stage only writes the plan.",
         "--ceiling", "act", "--project", str(spec), "--model", "light",
     )  # fmt: skip
     core("run", task)
@@ -464,6 +489,9 @@ def test_a_live_build_turn_opens_its_page_and_names_the_screenshot(dsn, tmp_path
         ]
 
     builds = asyncio.run(collected())
+    assert builds, "no build turn was collected"
     shots = [s for b in builds for s in b["screens"] if s["name"].endswith(".png")]
-    assert shots and all(len(s["sha256"]) == 64 and s["bytes"] > 0 for s in shots)
+    assert shots and all(s["bytes"] > 0 for s in shots), [
+        {k: b.get(k) for k in ("state", "verdict", "question", "errors", "done")} for b in builds
+    ]
     assert any(s["name"] in (b["done"] or "") for b in builds for s in b["screens"])
