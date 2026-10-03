@@ -348,7 +348,7 @@ gateway's Anthropic prices.
 
 A turn is one `claude -p` subprocess (`harnesses/claude_code.py`). A
 workspace turn keeps Claude Code's own system prompt and tools, appends the
-persona and the dispatched Brief re-rendered every turn
+dispatched text (persona, then Brief) re-rendered every turn
 (`--system-prompt-snapshot off`), resumes the task's session, and runs with:
 
 - `--safe-mode` and `--strict-mcp-config`: no hooks, skills, plugins,
