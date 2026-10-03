@@ -362,9 +362,9 @@ a turn must not reach. It runs as Tom's user.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
   clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config); for
   a fresh session, only its own check directory, with `/private/tmp`,
-  `/private/var/tmp`, `/private/var/folders`, and `~/.claude*` denied. Its `UV_CACHE_DIR` is
-  `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python` in that directory,
-  since `~/.cache/uv` and `~/.local/share/uv` are write-denied.
+  `/private/var/tmp`, `/private/var/folders`, and `~/.claude*` denied. Its
+  `UV_CACHE_DIR` is `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python`
+  in that directory, since `~/.cache/uv` and `~/.local/share/uv` are write-denied.
 - **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
   working session, its task's `home/` and bare origin. **Stat only:** the
   allowed directories' ancestors (not listable), so real paths resolve.
@@ -373,8 +373,7 @@ a turn must not reach. It runs as Tom's user.
   (`pg_data_dir`), and the backup disk (`backup_dir`).
 - **Above every denied path:** each directory above a path any rule denies,
   up to but not including `/`, is denied as itself (not its entries), as
-  written and with symlinks resolved. Otherwise
-  renaming `~/.config` would move the kernel key directory to a name no rule
+  written and with symlinks resolved. Otherwise renaming `~/.config` would move the kernel key directory to a name no rule
   covers, where a turn could read it, and renaming `~/.local` would let a turn
   put its own `bin/claude` in its place; a disk image mounted over a denied
   directory would do the same. Entries inside those directories stay writable

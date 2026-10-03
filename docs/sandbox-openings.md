@@ -30,8 +30,8 @@ Stated so the boundary is drawn where it is [4]:
   (`~/.cache/uv`, from which the user's `uv sync` fills the kernel's own
   environment without rehashing what is there) and managed Pythons and tools
   (`~/.local/share/uv`, whose interpreters that `uv sync` runs; a fresh
-  session gets its own uv cache and Python directory), and Homebrew's prefix, and every turn runs with
-  `DISABLE_AUTOUPDATER=1`. The demonstration's profile denies none of these,
+  session gets its own uv cache and Python directory), and Homebrew's prefix,
+  and every turn runs with `DISABLE_AUTOUPDATER=1`. The demonstration's profile denies none of these,
   and other places remain where a turn could leave a program a later
   unsandboxed process of the user runs, such as the caches under
   `/var/folders` that Apple's `/usr/bin` shims read (`/usr/bin/git` is the
@@ -43,8 +43,7 @@ Stated so the boundary is drawn where it is [4]:
   managed one does (none does on this Mac), so a `python3.14` a turn left in
   one of those directories becomes the kernel's `.venv` interpreter, which
   runs outside the sandbox. Apart from that, the kernel runs nothing from
-  that reach outside the sandbox and never
-  looks a program up on PATH: its git is the Command Line Tools' install,
+  that reach outside the sandbox and never looks a program up on PATH: its git is the Command Line Tools' install,
   its `ps` is `/bin/ps`, and the sandbox's own launcher is
   `/usr/bin/sandbox-exec`, each checked before it runs to be root's alone,
   file and every directory above it (`core/binaries.py`), with a PATH of
