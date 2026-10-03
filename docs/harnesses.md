@@ -260,9 +260,7 @@ one is a deliberate tool call that survives whatever prose follows it, and a
 turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
 workspace turn's Brief; it lists the effects the registered performers
 offer (each performer's `usage` line; the merge offers none) and says
-pushing any other way is unavailable, which the sandbox makes true.
-
-The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
+pushing any other way is unavailable, which the sandbox makes true. The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is
