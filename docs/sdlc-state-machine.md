@@ -89,8 +89,8 @@ file for its state from `skills/sdlc/`.
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
 `build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
 workspace the kernel provisioned), `checks.test` (`core/checks.py`), and
-`checks.docs` (`fresh.docs_runner`). `checks.review` has none. Where a stage has no runner the router stops there and
-says so, and a person records the verdict with `python -m core verdict TASK
+`checks.docs` (`fresh.docs_runner`). `checks.review` has none. Where a
+stage has no runner the router stops there and says so, and a person records the verdict with `python -m core verdict TASK
 STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
 has a runner.
 
@@ -584,25 +584,7 @@ not in the model's incentives [8, 9, 10]; the demonstration's failed resume
 failed cleanly and metered $0 (rebuild-demonstration.md, Kernel findings,
 3). **Exists in the kernel.**
 
-## Metered spending
+## Spending and attention
 
-Not a state. Every model call in every state is metered by the gateway and
-its price recorded on the task, shown in `status` as `Metered spending`.
-Money never refuses a call, ends a run, or changes the task's state; only
-stop refuses calls. A turn that deliberately called the provider with the
-machine's Claude login would spend outside the meter; Tom accepted that on
-2026-10-01 (see [architecture.md](architecture.md), Limits).
-
-## Attention in the ledger
-
-Mission item 6 makes attention a ledger item. Every point where Tom acts on
-a task is a row with provenance: `question.asked` and `question.answered`
-(from `clarify`, `plan`, `build`, `patch`) and `feedback.given` (from
-`merge`, `merged`) carry `by`, `via`, `at`, and `role_played`;
-`approval.granted` carries Tom's literal message and the same provenance,
-so a push approved under his standing permission records
-`role_played: true`; a guard grant carries his message, the incident, the
-mission item, and the expiry. Questions and feedback rounds count as
-interruptions, approvals separately (`attention_counts`); both are shown on
-the delivery and never block (Tom, 2026-10-01). The attention log's format
-is specified in [mission.md](mission.md).
+Metered spending and the attention rows Tom's actions leave are in
+[spending-and-attention.md](spending-and-attention.md).
