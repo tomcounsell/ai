@@ -9,7 +9,11 @@ Markdown files, never a `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, or
 them is the builder's work, under review. Your commits sit on
 top of the candidate.
 
-**Exit evidence.** A verdict: `updated` (with your commits), `no_change`,
-or `changes` (a doc states something the code should still honor and the
-candidate breaks it, or a doc cannot be made true without a code change),
-and the governance answer over your own diff, since a doc can add a rule.
+**Exit evidence.** `.valor/verdict.json` with a verdict: `updated` (with
+your commits), `no_change`, or `changes` (a doc states something the code
+should still honor and the candidate breaks it, or a doc cannot be made
+true without a code change), your findings, and `head`, the full commit id
+your clone ends at. The kernel keeps your commits on top of the candidate
+only while each touches doc paths alone, with regular file modes, and
+judges governance itself over the diff it kept, since a doc can add a
+rule. A commit it drops is a finding of kind `changes`.

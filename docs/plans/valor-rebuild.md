@@ -248,7 +248,7 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   stopped leaves no verdict, and the next run reruns that branch and only
   that one; the docs session works in its own checkout, so docs commits
   do not ride into the next candidate after a send-back.
-- `checks.test` runs the suite at head and base, then the breadth call;
+- `checks.test` runs the breadth call, then the suite at base and at head;
   `test.decided` carries the command, the failures at head that do not
   fail at base, the listed behaviors, and the breadth call's model,
   confidence, cost, and guard id.
@@ -263,8 +263,8 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   GitHub.
 - Transcript copies kept in the store with a digest.
 - The review and docs runners always pass `governance_from` (one
-  governance judgement per hunk, asked before the reviewer's or docs
-  turn), and the test runner always passes `breadth`: `record_check`
+  governance judgement per hunk, asked before the reviewer's turn and
+  after the docs turn), and the test runner always passes `breadth`: `record_check`
   accepts neither as optional from a runner. The order of the breadth
   call and the suite is settled here.
 - Breadth and governance route on the entry check (both legs right on

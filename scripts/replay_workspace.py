@@ -91,9 +91,15 @@ def build(
     *,
     max_output_tokens: int | None = None,
     rebuild: bool = False,
+    kind: str = "plain",
+    setup: list[str] | None = None,
+    suite: str = "true",
+    env: dict[str, str] | None = None,
 ) -> dict:
     """The run's cache and project spec; the kernel provisions the rest at
-    `core start --project`. Returns its replay.json."""
+    `core start --project`. `kind`, `setup`, `suite`, and `env` come from
+    the item's `project` key; without one the suite is `true`, so a delivery
+    says the suite was not run. Returns its replay.json."""
     unknown = set(services) - set(SERVICES)
     if unknown:
         raise SystemExit(f"unknown services {sorted(unknown)}; known: {', '.join(SERVICES)}")
@@ -107,11 +113,15 @@ def build(
     lines = [
         f"name = {json.dumps(run_name)}",
         f"repo = {json.dumps(str(cache))}",
-        'kind = "plain"',
-        'suite = "true"',
+        f"kind = {json.dumps(kind)}",
+        f"suite = {json.dumps(suite)}",
         f"services = {json.dumps(services)}",
         'target_branch = "main"',
     ]
+    if setup:
+        lines.append(f"setup = {json.dumps(list(setup))}")
+    if env:
+        lines.append("env = { " + ", ".join(f"{k} = {json.dumps(v)}" for k, v in env.items()) + " }")
     if max_output_tokens:
         lines.append(f"max_output_tokens = {int(max_output_tokens)}")
     spec.write_text("\n".join(lines) + "\n")

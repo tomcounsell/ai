@@ -26,7 +26,6 @@ from core import broker, git, judgement, judgement_sites, judgement_tasks, ledge
 from core.machine import Check, State
 
 MANUAL_STAGES: dict[str, State | Check] = {
-    "test": Check.TEST,
     "review": Check.REVIEW,
     "docs": Check.DOCS,
 }
@@ -202,7 +201,7 @@ async def record_check(
     role_played: bool = False, breadth: str | None = None, governance_from: Iterable[str] | None = None,
     notes: Mapping[str, Mapping[str, Any]] | None = None, turn_id: str | None = None,
     deleted_at_head: Iterable[str] = (), failing_at_base: Iterable[str] = (),
-    suites: Iterable[int] | None = None,
+    suites: Iterable[int] | None = None, dropped: Iterable[Mapping[str, Any]] = (),
 ) -> machine.Fold:  # fmt: skip
     """Record one branch's verdict on the current candidate. Returns the
     fold after it; when it completes a join to `merge`, `task.delivered` is
@@ -217,6 +216,9 @@ async def record_check(
     information only: listed under `breadth.information` and in the
     delivery, never `gaps`. A test, review, or docs verdict not recorded by
     hand must name its judgements (`breadth`, `governance_from`).
+    A docs head not recorded by hand must already sit in the mirror under
+    a `refs/valor/docs/` ref (the docs runner fetched it and cut it to the
+    commits it keeps; `dropped` lists the rest); nothing is fetched here.
     `governance_from` (review and docs) names one
     governance judgement per hunk of the check's diff: the instances are the
     hunks the kernel's table makes instances, together with any `governance`
@@ -295,13 +297,20 @@ async def record_check(
             if check is Check.DOCS:
                 head = head or c.sha
                 if head != c.sha:
-                    if b.mirror:
+                    if leg != "manual":
+                        # The docs runner fetched and cut the head; it must sit under a docs ref.
+                        if not re_sha(head) or not git.trusted(
+                            repo, "for-each-ref", "--points-at", head, "refs/valor/docs/"
+                        ):
+                            raise VerdictRefused(f"{head} is not a docs head the kernel kept in the mirror")
+                    elif b.mirror:
                         _docs_into_mirror(b, head, task_id)
                     if not git.is_ancestor(repo, c.sha, head):
                         raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
                     if git.merges_between(repo, c.sha, head):
                         raise VerdictRefused("the docs commits hold a merge commit")
                 payload["head"] = head
+                payload["dropped"] = [dict(d) for d in dropped]
                 payload["paths"] = git.diff_paths(repo, c.sha, head) if head != c.sha else []
             judged: dict[str, Any] | None = None
             if check in (Check.REVIEW, Check.DOCS):

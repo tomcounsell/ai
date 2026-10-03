@@ -204,3 +204,32 @@ def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_s
 
     rows = asyncio.run(removed())
     assert "task.stopped" in rows and "workspace.removed" in rows
+
+
+def test_a_replay_spec_carries_the_items_setup_suite_and_env(tmp_path, monkeypatch):
+    import tomllib
+
+    import replay_workspace
+
+    from core import workspace
+    from tests import scripted
+
+    monkeypatch.setattr(replay_workspace, "DEMO", tmp_path / "demo")
+    src = scripted.toy_repo(tmp_path)
+    base = git(src, "rev-parse", "HEAD")
+    spec_of = lambda run: workspace.Spec.from_dict(
+        tomllib.loads((tmp_path / "demo" / "runs" / run / "project.toml").read_text())
+    )
+    replay_workspace.build(str(src), base, "bare", [])
+    bare = spec_of("bare")
+    assert (bare.kind, bare.suite, bare.setup, bare.env) == ("plain", "true", (), {})
+    suite = "uv run pytest -q --junitxml={junit} tests"
+    replay_workspace.build(str(src), base, "full", [], kind="python-uv", setup=["uv sync --frozen --extra dev"],
+                           suite=suite, env={"UV_PYTHON": "3.12"})  # fmt: skip
+    full = spec_of("full")
+    assert (full.kind, full.suite, full.setup, full.env) == (
+        "python-uv",
+        suite,
+        ("uv sync --frozen --extra dev",),
+        {"UV_PYTHON": "3.12"},
+    )

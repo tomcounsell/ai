@@ -3,7 +3,8 @@ toy repository the kernel provisions (`start --project`): start; the judge
 says precise (through the local judgement upstream, the way the emulator
 forces an arm); run until Valor asks Tom a question; answer; run through the
 plan, the fresh critique session, and the build until Valor builds a
-candidate and requests a push; the three checks by hand; approve and release
+candidate and requests a push; the test runner over the spec's suite
+(`true`, so the suite was not run); review and docs by hand; approve and release
 the push and the merge; the bare origin gets both; every turn's Brief
 carried the corrections and its stage.
 
@@ -84,16 +85,18 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     core("answer", task, "Say exactly: Morning, Tom.")
     # The plan is written, the fresh critique session reads it (sending it
     # back at most as often as the plan's counts allow), and the build runs:
-    # the candidate waits on its checks.
+    # the test runner records its verdict, and the candidate waits on review
+    # and docs.
     assert core("run", task).startswith("NO RUNNER")
     state = json.loads(core("status", task))
     candidate = state["candidate"]["sha"]
-    for stage, verdict in (("test", "pass"), ("review", "pass"), ("docs", "no_change")):
+    for stage, verdict in (("review", "pass"), ("docs", "no_change")):
         core("verdict", task, stage, verdict, *who)
     state = json.loads(core("status", task))
     assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
     held = [e for e, s in state["effects"].items() if s == "pending"]
-    assert len(held) == 2, "expected a push_branch and the merge held for Tom"
+    # The session may request its push more than once; each is held.
+    assert len(held) >= 2, "expected a push_branch and the merge held for Tom"
     for effect in held:
         core("approve", effect, "--note", "yes")
         core("release", effect)
@@ -102,11 +105,14 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     assert "Morning, Tom." in sh("git", "show", f"{pushed}:greeting.txt", cwd=origin)
     assert json.loads(core("status", task))["state"] == "merged"
 
-    async def turns():
+    async def read():
         async with await db.connect(dsn) as conn:
-            return [r["payload"] for r in await ledger.read(conn, task) if r["type"] == "turn.started"]
+            return await ledger.read(conn, task)
 
-    started = asyncio.run(turns())
+    got = asyncio.run(read())
+    tested = next(r["payload"] for r in got if r["type"] == "test.decided")
+    assert tested["leg"] == "kernel" and tested["command"] == "true" and tested["verdict"] == "pass"
+    started = [r["payload"] for r in got if r["type"] == "turn.started"]
     assert len(started) >= 3
     assert "# Stage: plan" in started[0]["brief"]
     for t in started:
@@ -121,4 +127,4 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     assert all("--resume" not in t["argv"] for t in started if t.get("fresh"))
     state = json.loads(core("status", task))
     assert state["attention_counts"]["question"]["total"] == 1
-    assert state["attention_counts"]["approval"]["total"] == 2
+    assert state["attention_counts"]["approval"]["total"] == len(held)

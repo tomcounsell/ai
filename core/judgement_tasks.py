@@ -112,7 +112,8 @@ BREADTH = JudgementTask(
         "tests": "base to candidate, the test paths",
     },
     error_cost="medium",
-    floor={"primary": 0.70, "fallback": 0.75},  # provisional: set by 1.4's calibration record
+    # Floors set from human labels once real tasks have produced thirty or more rows.
+    floor={"primary": 0.70, "fallback": 0.75},
     on_abstain="caution",
     on_failure="no_verdict",
     consumer={
@@ -147,7 +148,8 @@ GOVERNANCE = JudgementTask(
         "paths": "every path the diff changes",
     },
     error_cost="high",
-    floor={"primary": 0.65, "fallback": 0.70},  # provisional: set by 1.4's calibration record
+    # Floors set from human labels once real tasks have produced thirty or more rows.
+    floor={"primary": 0.65, "fallback": 0.70},
     on_abstain="caution",
     on_failure="no_verdict",
     consumer={"proceed": "no instance", "caution": "a governance instance at the hunk, awaiting Tom's tap"},

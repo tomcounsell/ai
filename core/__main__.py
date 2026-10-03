@@ -45,11 +45,10 @@ feedback TASK_ID TEXT [--by B] [--role-played]
                                marks a stand-in speaking for Tom
 verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]...
       [--governance PATH:LINE]... [--incident T]
-      [--mission-item N] [--head SHA] [--suite-command C] [--failure T]...
-      [--behavior T]... [--by B] [--via V] [--role-played]
+      [--mission-item N] [--head SHA] [--by B] [--via V] [--role-played]
                                record by hand the verdict of a stage that has
-                               no runner yet (test, review, docs), `leg:
-                               manual`; critique has its runner
+                               no runner (review, docs), `leg: manual`;
+                               critique and test have their runners
 grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
@@ -86,6 +85,7 @@ from pathlib import Path
 from core import (
     backup,
     broker,
+    checks,
     corrections,
     credentials,
     db,
@@ -101,7 +101,7 @@ from core import (
     workspace,
 )
 from core import verdicts as verdicts_
-from core.machine import State
+from core.machine import Check, State
 from core.settings import JEV_KEY, JEV_URL, OPEN_WEIGHT_KEY, OPEN_WEIGHT_URL, resolve_model, settings
 
 
@@ -155,8 +155,8 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
-    """The runner for each state this kernel can run. The check runners
-    (1.4b, 1.4c) are added here."""
+    """The runner for each state and check this kernel can run. Review and
+    docs have none: their verdicts are recorded by hand (`verdict`)."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
@@ -164,6 +164,7 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         State.BUILD: _working,
         State.PATCH: _working,
         State.CRITIQUE: fresh.critique_runner(_fresh_for),
+        Check.TEST: checks.test_runner(judgement_port),
     }
 
 
@@ -396,9 +397,6 @@ async def _verdict(conn, args) -> str:
         findings=args.finding,
         governance=[_instance(g, args) for g in args.governance],
         head=args.head,
-        command=args.suite_command,
-        failures=args.failure,
-        behaviors=args.behavior,
         **who,
     )
     await verdicts_.ensure_merge(conn, args.task_id)
@@ -636,9 +634,6 @@ def main() -> None:
     verdict.add_argument("--incident")
     verdict.add_argument("--mission-item")
     verdict.add_argument("--head")
-    verdict.add_argument("--suite-command", dest="suite_command")
-    verdict.add_argument("--failure", action="append", default=[])
-    verdict.add_argument("--behavior", action="append", default=[])
     verdict.add_argument("--by", default="tom")
     verdict.add_argument("--via", default="the command line")
     verdict.add_argument("--role-played", action="store_true")
