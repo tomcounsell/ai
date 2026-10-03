@@ -309,3 +309,7 @@ route estimates input with the same `settings.bytes_per_token`, which is
    the builder's clone, holds `.valor`), so this is reached only when the
    clone hides the entry from that read. Test: a candidate with `.VALOR/x`
    whose clone-side read is hidden is red with the finding and not rerun.
+
+Suite on `ca620a91f` plus this round: 798 passed, 13 skipped (build
+database, ports 6450 to 6459). `ruff check` clean; `ruff format --check`
+flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
