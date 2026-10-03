@@ -104,7 +104,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/spending.py` | `gateway.opened` | `call_id`, `turn_id`, model, `route`, estimate (`usd_micros` worst case, estimated input, `max_tokens`). A judgement call's (written through `core/judgement.py`) has `turn_id` null and `route: judgement`, and adds `judgement_id`, site, leg. Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the folds read as this row | Metered spending: every call is on the ledger |
 | `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
 | `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |
-| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched text whole, `brief_sha256`, `persona_sha256`, `persona_bytes`, correction numbers | Corrections reach every turn; legibility |
+| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, `harness_version` (the installed release), argv, the dispatched text whole, `brief_sha256`, `persona_sha256`, `persona_bytes`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), the paths of its stdout and stderr files, metered spend (the numeric sum of the turn's charges) | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
 | `core/runs.py` | `turn.started` (fresh) | as any `turn.started`, plus `fresh: true` and the stage; the fold never resumes its session | Independent checks |
@@ -318,7 +318,7 @@ the recorded Brief and in the system prompt argument that reached
 `claude -p` (rebuild-demonstration.md, Correction 1 rendering, verified).
 The same store state renders a byte-identical Brief, which is why the four
 turns shared one digest and why the prompt cache can hold across turns.
-Subagents a harness starts inside a turn were not checked; that gap is
+Subagents Claude Code starts inside a turn do not get the Brief; that gap is
 `docs/architecture.md`'s.
 
 Rendering is the one place stored data becomes prompt text. Memory, when

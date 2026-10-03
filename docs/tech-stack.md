@@ -51,10 +51,10 @@ outside the model is AI Control [4].
 | Memory | popoto over Postgres | chosen, not built |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
-| Model seats | a pinned registry in `core/settings.py`: frontier, reviewer, light; the judgement legs pinned beside it | in use |
+| Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
 | Frontier provider | Anthropic; OpenAI through the gateway's second route | in use |
 | Judgement tier | Jev (`jev-1.13.0`), with the open-weight fallback Qwen3-235B-A22B Instruct 2507 on Parasail fp8 through OpenRouter behind the same port; OpenAI's Decisions API for judgements that need images | in use; the images leg chosen, not built |
-| Harness | the `claude` CLI, one `claude -p` per turn | in use |
+| Harness | the `claude` CLI, one `claude -p` per turn; Pi (`docs/pi.md`) as the second | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
 | Sandbox for the verifier | Apple `container` (hypervisor-isolated Linux VMs) | chosen, not built |
@@ -254,9 +254,10 @@ route. Status: **in use**. Another arrives when Tom asks, metered first.
 
 Model choice is data the kernel reads, not code: a small registry of pinned
 model ids with their prices and the seats they fill (`core/settings.py`,
-`SEATS`). `python -m core start --model` takes a seat name or a model id
-and records the pinned id in the Brief. Status: **in use** for frontier,
-reviewer, and light; the judgement legs are pinned beside the seats.
+`SEATS`): each seat is a harness and a pinned id. `python -m core start
+--model` takes a seat name or a model id (run on Claude Code), and
+`--harness` overrides the harness; the Brief records both. Status: **in use** for frontier, reviewer, light, and
+reviewer_openai; the judgement legs are pinned beside the seats.
 
 - **Frontier**: the newest model, for turns.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
@@ -265,6 +266,8 @@ reviewer, and light; the judgement legs are pinned beside the seats.
   [18]; the baseline's Sonnet reviewer accepted #191 at fidelity 1. A
   model's preference for its own output [16] is countered by blindness when
   the reviewer shares the builder's model.
+- **Reviewer_openai**: the reviewer's second seat, GPT-6.1 on Pi through
+  the gateway's OpenAI route ([pi.md](pi.md)).
 - **Judgement**: the Jev-class seat (section 5).
 
 Ids are pinned, never floating aliases, because a ledger row has to describe a fixed thing. Editing
@@ -365,12 +368,12 @@ resume cost, and the `.valor/` signal files are
 [harnesses.md](harnesses.md).
 
 **Harness version.** The `claude` CLI is installed per machine and not
-pinned by the repository. Status: **open**. A replay compared across months
-is only comparable if the harness version is recorded in `turn.started`;
-that record is the cheap first step.
+pinned by the repository; the version it runs as is recorded in
+`turn.started`, so a replay compared across months says which release
+produced each turn. Pi is pinned in `harnesses/pi.py`. Status: **in use**.
 
-**Other harnesses.** Codex and Pi behind the same port. Status: **open**,
-added on a second real need (Mission item 5).
+**Other harnesses.** Pi runs behind the same port on GPT-6.1 through the
+gateway's OpenAI route ([pi.md](pi.md)): **in use**. Codex is **open**.
 
 ### Sandbox: what runs today
 

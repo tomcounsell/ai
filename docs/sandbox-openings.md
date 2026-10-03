@@ -30,7 +30,9 @@ Stated so the boundary is drawn where it is [4]:
   (`~/.cache/uv`, from which the user's `uv sync` fills the kernel's own
   environment without rehashing what is there) and managed Pythons and tools
   (`~/.local/share/uv`, whose interpreters that `uv sync` runs; a fresh
-  session gets its own uv cache and Python directory), and Homebrew's prefix,
+  session gets its own uv cache and Python directory), Homebrew's prefix, and
+  Pi's install and the node that runs it, with every symlink on the way to
+  each and the ancestors of those (`workspace.pi_install`, `docs/pi.md`),
   and every turn runs with `DISABLE_AUTOUPDATER=1`. The demonstration's profile denies none of these,
   and other places remain where a turn could leave a program a later
   unsandboxed process of the user runs, such as the caches under

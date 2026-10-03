@@ -469,3 +469,99 @@ install with no `node_modules` and the resolved target of `VALOR_PI`; the
 Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
 
 Scope: the Delivery's recommendation (`node` at a fixed path, after 1.4v; `pi_install()` covering no `node_modules` and the resolved `VALOR_PI` target; the `~/.pi` test given its `-D` flags). Pi 0.73.1 is installed by the build session at rollout, as planned.
+
+### Patch round 2
+
+Rebased onto `valor-cori-rebuild` at ca620a91f with 3a's commits dropped
+(3a is merged there under other SHAs); the conflicts in `core/runs.py`
+(`harness_version` added to the merged `turn.started`), `docs/README.md`,
+and `docs/architecture.md` were resolved onto the merged text.
+
+- **`node` at a fixed path.** `settings.node` defaults to
+  `/opt/homebrew/bin/node`, inside the prefix every turn profile denies
+  writing; `VALOR_NODE` overrides it. The `shutil.which("node")` lookup is
+  gone, so a `node` planted ahead on the kernel's PATH is never run. A
+  missing `node` fails at exec. Test: the default holds with a fake `node`
+  first on PATH, and `VALOR_NODE` wins.
+- **`pi_install()`.** It returns the directory above the first
+  `node_modules` of the resolved `VALOR_PI`, or the resolved target's own
+  directory when there is none, plus the directory that holds `VALOR_PI`
+  itself (where a link could be replaced). Tests: no `node_modules`, and a
+  link whose target sits in another install.
+- **The `~/.pi` test.** It runs `sandbox-exec` with `-D GATEWAY_PORT` and
+  `-D VALOR_TURN`, reads a file in the work directory first to show the
+  profile loads, then asserts the refusal is "Operation not permitted".
+- **Docs.** `docs/pi.md` says all three; `docs/architecture.md` stays under
+  600 lines.
+- **Checks.** `tests/test_pi.py` and `tests/test_harness_contract.py` with
+  Pi 0.73.1 installed: 65 passed, 1 skipped. Full suite: 767 passed, 17
+  skipped. `ruff check` clean; `ruff format --check` flags only
+  `docs/bridges/telegram.md` and one `docs/plans/m2-1-*.md`.
+
+### Patch round 3
+
+The lead's decision after the round 2 review and test: three fixes, each
+reproduced first under the real turn profile (`kws.profile`, `sandbox-exec`)
+and then covered by a test.
+
+- **Ancestors of the install.** With the layout `docs/pi.md` names under a
+  turn-writable parent, a turn renamed the parent away and put its own tree
+  there, so `pi._entry()` pointed at the turn's `cli.js`. The profile now
+  also denies writing, as `literal`, every ancestor of each denied
+  directory and each symlink component of `VALOR_PI` and `VALOR_NODE`
+  (`workspace.pi_install_held`). Creating entries beside them still works.
+  The denies close a read of turn-owned state the threat model names; they
+  are not a new check.
+- **The link's directory.** `pi_install` takes it with `os.path.realpath`
+  on the directory only, not on the link, because Seatbelt matches resolved
+  paths. Test: a `VALOR_PI` spelled through a symlinked parent.
+- **`VALOR_NODE`** stays as an override (the lead's decision). Its resolved
+  interpreter goes through the same denials as Pi's install: its directory,
+  the ancestors, the symlink components. `docs/pi.md` says so.
+- **Tests** (`tests/test_pi.py`): ancestor rename refused with the docs
+  layout, the symlinked parent, and a node outside Homebrew, each under
+  `sandbox-exec`.
+- **Checks.** Each new test fails on the round 2 code and passes now. Full
+  suite with `VALOR_PI` set: 770 passed, 17 skipped. With it unset: 769
+  passed, 17 skipped, and one "the task's Postgres did not start" port
+  flake that passes alone. `ruff check` clean; `ruff format --check` flags
+  only `docs/bridges/telegram.md` and one `docs/plans/m2-1-*.md`.
+
+### Patch round 4
+
+The lead's decision after the round 3 review: links reached through other
+links were not held. Reproduced under the real turn profile with temp trees:
+a two-hop chain whose middle link sits in a writable directory, and a
+symlinked directory inside the link's target replaced by the turn.
+
+- **Fix.** `workspace.pi_install_held` follows `VALOR_PI` and `VALOR_NODE`
+  hop by hop (`_links_on_the_way`): each symlink among a path's components,
+  then the components of its target, and so on. Every link found, by its
+  spelling and by its resolved directory, goes in as a `literal` write deny
+  with all of its ancestors, so the middle directory cannot be renamed
+  either. No new check; the same deny read.
+- **Tests** (`tests/test_pi.py`), each for `VALOR_PI` and `VALOR_NODE`
+  under `sandbox-exec` on temp trees: the two-hop chain, and the symlinked
+  directory inside the target. Each fails on the round 3 code.
+- **Not changed.** The `~/.node_modules` note stays, as the lead said.
+
+### Patch round 5
+
+The round 4 review found `_links_on_the_way` resolved `..` by text while the
+kernel follows a link first and goes up from where it points: a middle link
+whose target is `sub/../inst/node_modules/p/cli.js`, with `sub` a symlink,
+left `sub` unheld.
+
+- **Fix.** The walk is one component at a time from `/`: `..` goes to the
+  parent of the directory already reached, a link is recorded and its
+  target's components go in front of the rest, and it stops after 32 hops
+  (`MAXSYMLINKS`, macOS's limit, a protocol fact). No normpath or abspath.
+  `_program_dirs` joins the working directory instead of `abspath`, so the
+  operator's spelling is not normalized either.
+- **Test** (`tests/test_pi.py`), for `VALOR_PI` and `VALOR_NODE` under
+  `sandbox-exec`: the `sub/../inst/...` shape; replacing `sub` is refused.
+- **Docs.** `docs/pi.md` says exactly what is held (the path to the
+  program and every link on it with their ancestors, and the install
+  directory) and that an install whose other directories are symlinks
+  (pnpm, `npm link`) is not held, so Pi is installed by Homebrew or plain
+  npm. Lead decision: those layouts are not covered in code.

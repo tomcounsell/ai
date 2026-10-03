@@ -45,10 +45,11 @@ from typing import Any
 
 from core import db, git, judgement_sites, ledger, machine, runs, tasks, verdicts, workspace
 from core.machine import State
-from core.settings import resolve_model
+from core.settings import resolve_seat
 
-# Builds one fresh turn: (prompt, checkout, model, harness) -> builder.
-FreshFor = Callable[[str, str, str, dict[str, Any]], Callable[[str, str, str], runs.TurnCommand]]
+# Builds one fresh turn: (prompt, checkout, model, harness settings, harness
+# name) -> builder.
+FreshFor = Callable[[str, str, str, dict[str, Any], str], Callable[[str, str, str], runs.TurnCommand]]
 
 SEATS = {"critique": "frontier", "docs": "frontier", "review": "reviewer"}
 
@@ -143,8 +144,9 @@ def _verdict_fields(data: dict[str, Any]) -> tuple[str, list, dict[str, int]]:
     return verdict, findings, raised
 
 
-def critique_runner(fresh_for: FreshFor, model: str | None = None):
-    """The runner for `State.CRITIQUE`. `model` overrides the seat's pinned
+def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | None = None):
+    """The runner for `State.CRITIQUE`, at `seat` (default: critique's own,
+    which names a harness and a model). `model` overrides the seat's pinned
     model (the live test runs a light model to keep its spend small)."""
 
     model_ = model
@@ -198,14 +200,15 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None):
         except (OSError, ValueError) as exc:
             return {"status": "failed", "state": state, "turn": {"result": f"critique inputs: {exc}"}}
         harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
-        model = model_ or resolve_model(SEATS["critique"])
+        harness_name, seat_model = resolve_seat(seat or SEATS["critique"])
+        model = model_ or seat_model
         if not await ctx.alive():
             return {"status": "lock lost"}
         try:
             ended = await runs.run_turn(
                 ctx.gateway,
                 ctx.task_id,
-                fresh_for(prompt(files), str(checkout), model, harness),
+                fresh_for(prompt(files), str(checkout), model, harness, harness_name),
                 dsn=ctx.dsn,
                 state=State.CRITIQUE.value,
                 fresh="critique",
@@ -430,7 +433,8 @@ def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
         c = f.candidate
         kept_row = _kept_row(rows, c.sha, b.mirror)
         if kept_row is None:
-            out = await _docs_turn(ctx, fresh_for, rows, f, b, state, model_ or resolve_model(SEATS["docs"]))
+            harness_name, seat_model = resolve_seat(SEATS["docs"])
+            out = await _docs_turn(ctx, fresh_for, rows, f, b, state, model_ or seat_model, harness_name)
             if "status" in out:
                 return out
             kept_row = out["kept"]
@@ -473,7 +477,7 @@ def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
 
 
 async def _docs_turn(
-    ctx, fresh_for: FreshFor, rows, f: machine.Fold, b: tasks.Brief, state, model: str
+    ctx, fresh_for: FreshFor, rows, f: machine.Fold, b: tasks.Brief, state, model: str, harness_name: str
 ) -> dict[str, Any]:
     """The docs turn and what the kernel keeps of its commits, written as a
     `docs.kept` row. Returns {"kept": payload}, or the runner's result when
@@ -510,7 +514,7 @@ async def _docs_turn(
         ended = await runs.run_turn(
             ctx.gateway,
             ctx.task_id,
-            fresh_for(prompt(files), str(checkout), model, harness),
+            fresh_for(prompt(files), str(checkout), model, harness, harness_name),
             dsn=ctx.dsn,
             state=State.CHECKS.value,
             fresh="docs",

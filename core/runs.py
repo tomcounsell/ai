@@ -67,6 +67,10 @@ class TurnCommand:
     cwd: str
     harness: str
     parse: Callable[[bytes], dict[str, Any]] = field(default=lambda out: {})
+    harness_version: str | None = None
+    # What the harness reads on standard input, when the prompt travels
+    # there; None closes stdin with nothing in it.
+    stdin: bytes | None = None
 
 
 async def run_turn(
@@ -111,6 +115,7 @@ async def run_turn(
                         "state": state,
                         **({"fresh": True, "stage": fresh} if fresh else {}),
                         "harness": command.harness,
+                        "harness_version": command.harness_version,
                         "argv": command.argv,
                         "brief": dispatched["text"],
                         "brief_sha256": dispatched["sha256"],
@@ -129,12 +134,12 @@ async def run_turn(
                 *command.argv,
                 env={**command.env, TURN_ENV: turn_id},
                 cwd=command.cwd,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL if command.stdin is None else asyncio.subprocess.PIPE,
                 stdout=out,
                 stderr=err,
                 start_new_session=True,
             )
-        finished = asyncio.create_task(proc.wait())
+        finished = asyncio.create_task(proc.communicate(command.stdin))
         stopped = asyncio.create_task(_stop_heard(listener, task_id))
         done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
         if stopped in done:

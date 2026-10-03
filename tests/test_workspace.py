@@ -1261,7 +1261,7 @@ def test_fresh_dir_removes_a_directory_with_no_read_bit(tmp_path, mode, where):
     (stuck / "y").chmod(mode)
     stuck.chmod(mode)
     assert kws.fresh_dir(check) == check
-    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "pi", "tmp"]
 
 
 def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
@@ -1272,7 +1272,7 @@ def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
     stuck.chmod(0o555)
     (check / "repo" / "x").chmod(0o555)
     assert kws.fresh_dir(check) == check
-    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "pi", "tmp"]
 
 
 def _chain(top: Path, depth: int, name: str, mode: int, bottom: int | None = None) -> None:
@@ -1322,7 +1322,7 @@ def test_rmtree_removes_a_directory_that_can_be_listed_but_not_searched(tmp_path
     (check / "repo" / "a" / "b" / "f").write_text("x")
     (check / "repo" / "a").chmod(0o444)
     assert kws.fresh_dir(check) == check
-    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "pi", "tmp"]
 
 
 def test_rmtree_unlinks_a_link_and_never_touches_its_target(tmp_path):

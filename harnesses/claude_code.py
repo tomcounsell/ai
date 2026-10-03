@@ -27,8 +27,10 @@ channel and the stage, rendered by `core.tasks.dispatch`) is the whole
 system prompt the kernel adds, byte for byte what `turn.started` records.
 """
 
+import functools
 import json
 import os
+from pathlib import Path
 from urllib.parse import urlparse
 
 from core import binaries
@@ -38,6 +40,15 @@ from core.settings import settings
 
 # What `turn` leaves out of the environment it copies.
 DROP_ENV = ("CLAUDE", "ANTHROPIC", "PG", "VALOR_PG")
+
+
+@functools.cache
+def version(path: str) -> str | None:
+    """The installed release, from the versioned install directory the
+    resolved `claude` path names (`.../versions/2.1.288`), never by running
+    the binary. None for a layout this does not recognise."""
+    real = Path(os.path.realpath(path))
+    return real.name if real.parent.name == "versions" else None
 
 
 class Unsandboxed(ValueError):
@@ -78,7 +89,14 @@ def turn(
             "--",
             prompt,
         ]
-        return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
+        return TurnCommand(
+            argv=argv,
+            env=env,
+            cwd=cwd,
+            harness="claude_code",
+            parse=parse,
+            harness_version=version(settings.claude),
+        )
 
     return build
 
@@ -213,6 +231,13 @@ def workspace_turn(
             harness["sandbox_profile"],
             *argv,
         ]
-        return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
+        return TurnCommand(
+            argv=argv,
+            env=env,
+            cwd=cwd,
+            harness="claude_code",
+            parse=parse,
+            harness_version=version(settings.claude),
+        )
 
     return build

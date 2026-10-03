@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, router, session, signals, tasks
+from core import broker, db, fresh, ledger, machine, router, session, signals, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import State
@@ -537,3 +537,17 @@ def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
                 )
 
     run(go())
+
+
+def test_a_critique_at_the_openai_seat_builds_its_turn_for_pi(dsn, tmp_path):
+    task, _b, ws = planned(dsn, tmp_path, critique="sound")
+    inner = scripted.fresh_for(ws / ".git")
+    seen = []
+
+    def spy(prompt, checkout, model, harness, harness_name="claude_code"):
+        seen.append((model, harness_name))
+        return inner(prompt, checkout, model, harness, harness_name)
+
+    runners = {**scripted.RUNNERS, State.CRITIQUE: fresh.critique_runner(spy, seat="reviewer_openai")}
+    run(drive(dsn, task, runners))
+    assert seen == [("gpt-6.1-sol", "pi")]

@@ -52,7 +52,7 @@ def test_a_live_test_runner_runs_both_suites_and_reports_breadth_as_information(
     assert any(r["type"] == "gateway.charged" for r in got)
 
 
-def fresh_for(prompt, checkout, model, harness):
+def fresh_for(prompt, checkout, model, harness, harness_name="claude_code"):
     return claude_code.workspace_turn(
         prompt, cwd=checkout, model=model, harness={**harness, "max_output_tokens": 4096}
     )

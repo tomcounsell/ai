@@ -390,10 +390,10 @@ ledger shows which persona version every turn ran under (property:
 Legible).
 
 **Gap: subagents.** Corrections and persona reach every Brief the kernel
-sends. Subagents that Claude Code starts inside a turn were not checked in
-the demonstration, and the constraint says corrections reach every agent.
-Whether the appended system prompt reaches them is unverified (see
-`docs/harnesses.md`).
+sends, and Pi's session gets the Brief appended to its system prompt. A
+subagent that Claude Code starts inside a turn gets neither: it has its own
+system prompt and only the prompt its parent wrote, so the constraint that
+corrections reach every agent does not hold for it (see `docs/harnesses.md`).
 
 ## What the persona holds and what it leaves out
 

@@ -65,7 +65,7 @@ the task starts:
 | `max_effect_class` | `read`, `propose`, or `act`; no effect under the task may exceed it |
 | `governance_grant` | Tom's grant for this task to add governance; default none |
 | `workspace` | the directory the task's turns work in |
-| `model` | the model its turns run |
+| `model`, `harness_name` | the model its turns run, and the harness (`claude_code` or `pi`) that runs it |
 | `harness` | the harness's settings for the task, its isolation included |
 | `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
@@ -210,8 +210,8 @@ refuse any request carrying an old one.
 stoppable at any instant. `core/runs.py` defines the harness port,
 `TurnCommand`: the argv, environment, and working directory for one turn,
 given the gateway URL, the dispatched Brief, and the turn's id, plus how to
-read the result. The kernel never knows which harness it runs; the Claude
-Code wrapper and its flags are in [harnesses.md](harnesses.md).
+read the result. The kernel never knows which harness it runs; see
+[harnesses.md](harnesses.md) (Claude Code) and [pi.md](pi.md).
 
 A task's clarify, plan, build, and patch turns resume one working session,
 so Valor keeps its context across a question, a send-back, and feedback; a
@@ -251,7 +251,7 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway (`route: gateway` or `openai`); the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage; on the OpenAI route the credential, tier, tool calls, and request id | yes |
-| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, the paths of its stdout and stderr files, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness and its release, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, the paths of its stdout and stderr files, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record, but
@@ -336,8 +336,8 @@ mistakes and never what excellent looks like. Serves: Evidence, "Tom's
 feedback, both directions"; Mission item 2; and corrections that are
 first-class, carry provenance, and reach every session and agent.
 
-**Design.** Corrections reaching subagents is unverified, a gap
-(rebuild-demonstration.md, Correction 1 rendering, last line). A later row
+**Design.** Corrections do not reach the subagents Claude Code starts
+inside a turn, a gap (`docs/harnesses.md`); Pi starts none. A later row
 naming a correction withdraws or replaces it. A scope beyond `global`, and
 rendering by relevance, arrive when one is needed or length measurably
 costs a turn.
@@ -554,8 +554,8 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
   Setup, Isolation), and the public internet is reachable, so a turn set
   on it could reach the provider with the machine's Claude login and
   bypass the meter. Tom accepted this on 2026-10-01 and chose no separate
-  macOS user for turns: the gateway gives visibility and honest metering, not a
-  hard wall. Effects on shared targets still leave only through the
+  macOS user for turns: the gateway gives visibility and honest metering,
+  not a hard wall. Effects on shared targets still leave only through the
   broker, which runs outside the sandbox.
-- **One harness today.** The reviewer is the builder's model in a blind
-  fresh session, so the audit sample carries more weight.
+- **One provider by default.** The reviewer is the builder's model in a
+  blind fresh session; `reviewer_openai` runs it on a second vendor.

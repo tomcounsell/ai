@@ -41,6 +41,12 @@ def _git() -> str:
     return binaries.git() or ""
 
 
+def _pi() -> str:
+    # Homebrew's prefix, which every turn profile denies writing: a PATH
+    # lookup could land on a directory a turn can write.
+    return "/opt/homebrew/bin/pi"
+
+
 @dataclass(frozen=True)
 class Price:
     """US dollars per million tokens, as the provider's pricing page lists
@@ -142,13 +148,16 @@ OPENAI_TOKEN_TOOLS = frozenset({"function", "custom", "mcp", "computer_use_previ
 OPENAI_LOOPING_TOOLS = frozenset({"web_search", "file_search", "mcp"})
 
 
-# The seats a model fills, by pinned id, never a floating alias: a ledger row
-# has to describe a fixed thing. Editing this is a change inside the trust
-# boundary, reviewed like kernel code.
-SEATS: dict[str, str] = {
-    "frontier": "claude-opus-5-5",
-    "reviewer": "claude-opus-5-5",
-    "light": "claude-haiku-4-5",
+# The seats a model fills: the harness that runs it and its pinned id, never
+# a floating alias, since a ledger row has to describe a fixed thing.
+# `reviewer_openai` is the blind verifier's second seat, on Pi; the id is the
+# one the gateway's OpenAI price table pins (m3-openai-route.md). Editing
+# this is a change inside the trust boundary, reviewed like kernel code.
+SEATS: dict[str, tuple[str, str]] = {
+    "frontier": ("claude_code", "claude-opus-5-5"),
+    "reviewer": ("claude_code", "claude-opus-5-5"),
+    "light": ("claude_code", "claude-haiku-4-5"),
+    "reviewer_openai": ("pi", "gpt-6.1-sol"),
 }
 
 
@@ -202,9 +211,15 @@ JEV_KEY = "TYPESAFE_API_KEY"
 OPEN_WEIGHT_KEY = "OPENROUTER_API_KEY"
 
 
+def resolve_seat(name: str) -> tuple[str, str]:
+    """A seat name's harness and pinned model id. A name that is no seat is
+    a model id, run on Claude Code."""
+    return SEATS.get(name, ("claude_code", name))
+
+
 def resolve_model(name: str) -> str:
     """A seat name's pinned id, or the name itself."""
-    return SEATS.get(name, name)
+    return resolve_seat(name)[1]
 
 
 @dataclass(frozen=True)
@@ -237,6 +252,11 @@ class Settings:
         default_factory=lambda: _env("VALOR_OPENAI_UPSTREAM", "https://api.openai.com")
     )
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", str(Path.home() / ".local/bin/claude")))
+    # Pi, and the node that runs it: both run inside the turn's sandbox, and
+    # `node` is named by an absolute path inside Homebrew's prefix, which every
+    # turn profile denies writing, and is never looked up on a PATH.
+    pi: str = field(default_factory=lambda: _env("VALOR_PI", _pi()))
+    node: str = field(default_factory=lambda: _env("VALOR_NODE", "/opt/homebrew/bin/node"))
 
     # -- the headless browser `look` runs: one fixed Playwright build, never
     # the newest in the cache (a turn cannot write that cache) ---------------

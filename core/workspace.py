@@ -90,6 +90,7 @@ HOME_DENIED = (
     "Library/Messages",
     ".ssh",
     ".config/gh",
+    ".pi",
 )
 # Writes denied to every workspace sandbox: where a later unsandboxed
 # process of the user would run what a turn left.
@@ -115,6 +116,77 @@ HOME_WRITE_DENIED_FILES = (
     ".gitconfig",
 )
 SYSTEM_WRITE_DENIED = ("/opt/homebrew",)
+
+
+def _program_dirs(spelled: str) -> list[Path]:
+    """The directories that hold a program's code: the directory above the
+    first `node_modules` of the resolved target (the target's own directory
+    when it has none), and the directory that holds the program as spelled,
+    with its symlinked components resolved but not the link itself."""
+    resolved = Path(os.path.realpath(spelled))
+    parts = resolved.parts
+    above = [Path(*parts[:i]) for i, name in enumerate(parts) if name == "node_modules"][:1]
+    held = Path(os.path.realpath(os.path.dirname(os.path.join(os.getcwd(), spelled))))
+    return [*(above or [resolved.parent]), held]
+
+
+def pi_install() -> list[str]:
+    """The directories every turn profile denies writing wherever `VALOR_PI`
+    and `VALOR_NODE` put Pi and the interpreter that runs it, because the
+    next turn, and a reviewer's, runs what is there."""
+    dirs = [*_program_dirs(settings.pi), *_program_dirs(settings.node)]
+    return list(dict.fromkeys(str(p) for p in dirs))
+
+
+# macOS follows at most 32 symlinks in one path lookup (MAXSYMLINKS in
+# <sys/param.h>); past that the kernel itself answers ELOOP.
+MAXSYMLINKS = 32
+
+
+def _links_on_the_way(spelled: str) -> set[str]:
+    """Every symlink the kernel follows to reach `spelled`, by its physical
+    spelling. The path is walked one component at a time as the kernel does:
+    from `/`, `..` goes to the parent of the directory already reached, and a
+    link is recorded and its target's components put in front of the rest."""
+    found: set[str] = set()
+    cur = Path("/")
+    rest = list(reversed(Path(os.path.join(os.getcwd(), spelled)).parts[1:]))
+    hops = 0
+    while rest:
+        name = rest.pop()
+        if name == "..":
+            cur = cur.parent
+            continue
+        nxt = cur / name
+        if not nxt.is_symlink():
+            cur = nxt
+            continue
+        found.add(str(nxt))
+        hops += 1
+        if hops > MAXSYMLINKS:
+            break
+        target = Path(os.readlink(nxt))
+        if target.is_absolute():
+            cur = Path("/")
+        rest.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    return found
+
+
+def pi_install_held() -> list[str]:
+    """The paths whose own entry a turn must not rename or replace, or it
+    could put its own tree where the install was: every ancestor of each
+    directory `pi_install` denies, and every symlink on the way from
+    `VALOR_PI` and `VALOR_NODE` to the program, hop by hop, with each such
+    link's ancestors. Denied as `literal`, so a turn still creates entries
+    inside an ancestor."""
+    held: set[str] = set()
+    for d in pi_install():
+        held.update(str(a) for a in Path(d).parents)
+    for spelled in (settings.pi, settings.node):
+        for link in _links_on_the_way(spelled):
+            held.add(link)
+            held.update(str(a) for a in Path(link).parents)
+    return sorted(held - {"/"})
 
 
 class Refused(ValueError):
@@ -336,7 +408,8 @@ def profile(
         "(deny file-write*",
         *_paths("subpath", [home / d for d in HOME_WRITE_DENIED]),
         *_paths("literal", [home / f for f in HOME_WRITE_DENIED_FILES]),
-        *_paths("subpath", SYSTEM_WRITE_DENIED),
+        *_paths("subpath", [*SYSTEM_WRITE_DENIED, *pi_install()]),
+        *_paths("literal", pi_install_held()),
         ")",
         "(allow file-read* file-write*",
         *_paths("subpath", rw),
@@ -704,7 +777,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
-              lay.work_state / "claude", lay.checks):  # fmt: skip
+              lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
     (lay.root.parent / "bin").mkdir(exist_ok=True)
     _install_tools(lay.root.parent / "bin")
@@ -758,6 +831,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "gh_config_dir": str(lay.home / "gh"),
         "tmpdir": str(lay.work_state / "tmp"),
         "claude_config_dir": str(lay.work_state / "claude"),
+        "pi_agent_dir": str(lay.work_state / "pi"),
         "env": env,
         **({"max_output_tokens": spec.max_output_tokens} if spec.max_output_tokens else {}),
     }
@@ -1271,7 +1345,7 @@ def fresh_dir(check_dir: Path) -> Path:
     """Remove and make a fresh session's directory with `rmtree`, so a
     read-only entry a sandboxed run left goes too, never following a link."""
     rmtree(check_dir)
-    for d in (check_dir / "tmp", check_dir / "claude"):
+    for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi"):
         d.mkdir(parents=True)
     return check_dir
 
@@ -1283,6 +1357,12 @@ class ValorInTree(git.GitError):
     def __init__(self, rev: str):
         super().__init__(f"{rev[:12]}'s tree holds a .valor entry")
         self.rev = rev
+
+
+# Paths (a directory or a link) a blind checkout leaves out of the working
+# tree, for every harness: Pi reads `<cwd>/.pi/settings.json` whatever flags it is given, and
+# a candidate must not set what the verifier's session runs with.
+BLIND_LEFT_OUT = (".pi",)
 
 
 def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[str, str]:
@@ -1304,6 +1384,16 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
     second = git.trusted(dest, "commit-tree", rev_tree, "-p", first, "-m", "candidate", extra_env=borrow)
     git.trusted(dest, "update-ref", "refs/heads/main", second, extra_env=borrow)
     git.trusted(dest, "repack", "-a", "-d", "-q", extra_env=borrow)
+    # What a harness reads from the project, to steer the session it runs
+    # there (Pi's `.pi/settings.json` has no flag against it), is left out of
+    # the working tree. Both commits keep it, so the diff the reviewer is
+    # given still shows a candidate's change to it.
+    git.trusted(dest, "config", "core.sparseCheckout", "true")
+    git.trusted(dest, "config", "core.sparseCheckoutCone", "false")
+    (dest / ".git" / "info").mkdir(exist_ok=True)
+    (dest / ".git" / "info" / "sparse-checkout").write_text(
+        "/*\n" + "".join(f"!/{d}\n" for d in BLIND_LEFT_OUT)
+    )
     git.trusted(dest, "checkout", "-q", "-f", "main")
     with (dest / ".git" / "info" / "exclude").open("a") as f:
         f.write(".valor/\n")
@@ -1346,6 +1436,7 @@ def check_harness(
         "sandbox_profile": str(path),
         "tmpdir": str(check_dir / "tmp"),
         "claude_config_dir": str(check_dir / "claude"),
+        "pi_agent_dir": str(check_dir / "pi"),
         "env": fresh_env,
     }
 

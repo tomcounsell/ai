@@ -361,7 +361,7 @@ def fresh_for(script_dir: Path):
     """A fresh session played by a Python subprocess in its checkout, steered
     by the builder workspace's script file."""
 
-    def make(prompt, checkout, model, harness):
+    def make(prompt, checkout, model, harness, harness_name="claude_code"):
         def build(url, brief, turn_id):
             env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"],
                    "VALOR_SCRIPT": str(script_dir / "valor-script.json")}  # fmt: skip
