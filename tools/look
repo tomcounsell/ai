@@ -32,6 +32,9 @@ case "$size" in
   *x*) ;;
   *) die "--size must be WxH (two integers)" ;;
 esac
+# A zero-width or zero-height viewport is not a size; the browser would hang on it.
+case "${size%x*}" in *[!0]*) ;; *) die "--size must be positive: $size" ;; esac
+case "${size#*x}" in *[!0]*) ;; *) die "--size must be positive: $size" ;; esac
 case "$wait_ms" in
   ""|*[!0-9]*) die "--wait must be a number of milliseconds" ;;
 esac
