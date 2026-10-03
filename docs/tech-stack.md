@@ -61,7 +61,7 @@ enforcing outside the model is AI Control [4].
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
 | Sandbox for the verifier | Apple `container` (hypervisor-isolated Linux VMs) | chosen, not built |
-| Which sandbox for which work | owned by [architecture.md](architecture.md); containers for turns | open |
+| Which sandbox for which work | owned by [sandbox.md](sandbox.md); containers for turns | open |
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |

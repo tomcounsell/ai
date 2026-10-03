@@ -106,16 +106,19 @@ The Telegram connection belongs to one process: an MTProto session cannot be
 shared safely between two. So performers for a channel run inside that
 channel's bridge process, not in whichever process ran `core release`.
 
-The outbox is a query over the ledger, not a separate queue: held effects
-of the bridge's action types that carry an unused `approval.granted` and no
-`effect.intent` yet. Where [architecture.md](../architecture.md) separates
-release from approval, the query also requires the release.
+The outbox is a query over the ledger, not a separate queue: every
+`release.requested` row whose `owner` is the bridge's channel and whose
+effect has no intent, outcome, or `effect.refused`, then every
+`notice.requested` with no `notice.sent`.
 
-The bridge listens on a Postgres notification channel (`valor_events`, notified by every new row), and on each wake it calls
-`broker.release` for each such effect in its own process. Release reads the
-`task.stopped` fence, binds the unused approval, writes the intent, calls the
-performer, and writes the outcome. The bridge performs nothing the broker
-has not passed to it.
+The kernel writes `release.requested` when Tom approves a send, after
+the release checks. The bridge listens on a Postgres notification channel
+(`valor_events`, notified by every new row) and on each wake the outbox
+yields what is due and reconciles its own dangling intents. `Outbox.perform`
+calls `broker.release` in the bridge's process: it reads the `task.stopped`
+fence, binds the unused approval, writes the intent, calls the performer,
+and writes the outcome. A refused release writes `effect.refused` once and
+is not yielded again. The bridge calls nothing the outbox did not yield.
 
 ### Operator notices
 

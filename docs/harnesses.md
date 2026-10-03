@@ -463,7 +463,7 @@ Stated so the boundary is drawn where it is [4]:
   profiles reach only its own ports.
 - sandbox-exec is marked deprecated by Apple. The plan names Apple
   containers for sandboxes; which one runs which work is
-  `docs/architecture.md`'s (The turn sandbox and reaping). A container closes
+  `docs/sandbox.md`. A container closes
   the keychain, internet, and `/tmp` openings by construction and costs RAM the 16 GB machine
   has to find.
 

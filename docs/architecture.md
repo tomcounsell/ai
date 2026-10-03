@@ -152,7 +152,8 @@ the requester never names a class. For each request the broker, under the
 task's lock:
 
 - derives the idempotency key from the action (type, target, payload
-  digest) and returns the earlier outcome for a repeat;
+  digest) and the effect's id, so two identical sends are two effects; a
+  repeated request from one turn file returns the first by `request_id`;
 - refuses, with an `effect.refused` row, an action with no performer, on a
   stopped task, above the task's ceiling, adding governance without Tom's
   grant, or one its performer's `refuse` declines;
@@ -162,9 +163,11 @@ task's lock:
 Performing writes `effect.intent` and commits it before the performer runs,
 then `effect.outcome`, holding a session lock on the effect throughout. A
 kill between the two leaves a dangling intent, never a silent effect, and
-frees the lock. For a task's merge the router's next run settles it from
-the target (`broker.reconcile`, never on an unanswered lookup; the rule is
-in [data.md](data.md)); other dangling intents stay listed by `tasks.audit`.
+frees the lock. The resident kernel settles a dangling `push_branch` or
+`merge` from the target on restart (`broker.reconcile`, never on an
+unanswered lookup; the rule is in [data.md](data.md)), and a bridge's
+outbox settles its own sends; the intent carries the action, so any
+dangling intent can be reconciled.
 
 A `merge` adds governance when the review or docs verdict on its
 candidate answered the governance boolean yes, computed by the broker and
@@ -204,6 +207,8 @@ separate records:
    the predicate is checked in the same transaction. A unique index makes
    each approval good for one intent: one tap, one effect. An effect whose
    payload changed after approval has no matching approval and is refused.
+   For a bridge's send type the kernel's release writes `release.requested`
+   instead, and the owning bridge's outbox performs it through the broker.
 
 **Design.** On a bridge, an approval is a typed card the kernel renders
 from structured fields: the action, its target, a summary of the payload,
@@ -295,55 +300,9 @@ process to reap and which directory a resume belongs to.
 
 ## The turn sandbox and reaping
 
-**Built.** A task's `harness` settings name the sandbox-exec profile every
-workspace turn runs under (`workspace_turn` refuses a task without one);
-[harnesses.md](harnesses.md) has its rules and the reaper's marks in full,
-and this section states what they guarantee. The first demonstration and
-the baseline ran every turn under one (rebuild-demonstration.md, Setup,
-Isolation). The profile confines reads and writes to the workspace and
-what the toolchain needs, away from Tom's other checkouts, notes,
-transcripts, and keys; denies writes to the bare `origin`, so a push leaves
-only through the broker's `push_branch` or `merge`; on loopback reaches
-only the gateway, the workspace's own Postgres, and the app's dev ports,
-never the kernel's database; and puts denies before allows, because
-sandbox-exec refused allowed ports at random when a network rule followed
-the allows (rebuild-demonstration.md, Kernel findings 3).
-
-The environment is an allowlist carrying no tokens or agent sockets, with
-an empty gh config and a git config without a credential helper. Web fetch
-and web search are off. The public internet is reachable, so package
-installs work.
-
-**Reaping.** A turn's processes do not outlive it. When the turn ends,
-every process of this user in its process group, carrying `VALOR_TURN=<id>`
-in its environment, or under a sandbox denying the mach name
-`valor.turn.<id>` receives `SIGTERM`, then `SIGKILL` two seconds later, and
-`turn.reaped` lists them. The sandbox mark is the
-one a daemon cannot shed: it survives `setsid`, re-parenting to launchd, and
-a process overwriting its own environment. Serves: reliable stop; and the
-16 GB machine, where a leaked test server holds memory a later turn needs.
-
-**Workspace provisioning.** Built (`core/workspace.py`): `python -m core start
---project NAME` provisions a task's workspace from a project spec
-(`projects/`) before the task starts: a clone holding history only up to the
-base; a local bare origin as its only remote, where `push_branch` goes and,
-until the GitHub credential, the merge; the kernel mirror, a bare repository
-only the kernel writes, into which plan commits, candidates, and docs heads
-are fetched and from which the merge predicate and the merge read; a Postgres
-cluster of the task's own (and a Redis when the project asks) on its own
-ports, under a service sandbox; and the project's setup, run once under the
-turn's sandbox. Services run only while a run of the task lasts; every run
-first stops those a killed kernel left up whose run or provisioning is not
-live. The disk is kept until `python -m core workspace remove`. The mirror's
-fetch treats the builder's clone as hostile (harnesses.md, The workspace).
-Serves Mission item 1 and bounded authority.
-
-**Design, the sandbox split.** This doc owns which work runs under which
-sandbox. Turns run under sandbox-exec on the host, as built and as both
-experiments ran. The verifier re-executes in an Apple container started
-fresh from a kernel-built image, because its value is an environment the
-executor never touched. The runtime's status is in [tech-stack.md](tech-stack.md),
-its memory cost in [machine.md](machine.md).
+Each workspace turn runs under a sandbox-exec profile the task names, and the
+verifier reruns in a fresh container; both, and how a turn is reaped, are in
+[sandbox.md](sandbox.md).
 
 ## Corrections and exemplars
 
