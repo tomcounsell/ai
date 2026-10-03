@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4b-runners
 type: build
-status: planned; revised after critique round 1, awaiting round 2
+status: critique round 2 of 2 said revise; its findings built in; in build
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -35,7 +35,7 @@ From valor-rebuild.md, 1.4:
 
 | Done item | What closes it here |
 |---|---|
-| Fresh sessions for critique, review, and docs as runners in `RUNNERS`; each stage removed from `verdict` as its runner lands | the docs runner (`fresh.docs_runner`) and the test runner (`checks.test_runner`) land; each is registered, and its stage leaves `verdicts.MANUAL_STAGES`, in the commit that lands its site's passing calibration record; a site whose entry check fails keeps its stage manual (see Landing) |
+| Fresh sessions for critique, review, and docs as runners in `RUNNERS`; each stage removed from `verdict` as its runner lands | the test runner (`checks.test_runner`) is registered and `test` leaves `verdicts.MANUAL_STAGES`, whatever breadth's entry check says; the docs runner (`fresh.docs_runner`) is registered, and `docs` leaves the manual path, in the commit that lands governance's passing calibration record, and until then `docs` stays manual (see Landing) |
 | Through the router: docs commits outside `machine.is_doc_path` dropped at turn end and recorded as a `changes` finding; a failed or stopped branch leaves no verdict and the next run reruns only it; docs commits do not ride into the next candidate | the docs runner's kept prefix, router tests with the scripted session |
 | `checks.test` runs the suite at head and base and the breadth call; `test.decided` carries the command, the failures at head that do not fail at base, the behaviors, and breadth's model, confidence, cost, and guard id; the order settled | the test runner; order settled as breadth, then base, then head (the build fixes the Done line's "then the breadth call" to match) |
 | The review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | `record_check` refuses a kernel-leg test verdict without `breadth` and a session-leg review or docs verdict without `governance_from` (review's runner is 1.4c's) |
@@ -51,12 +51,16 @@ What the turns control:
 
 - **The test check.** The candidate's code runs at head: its setup, its
   `conftest.py`, its exit code, its JUnit file, everything it writes in its
-  checkout, its cache copy, and its own service instances. The builder's
-  working session also controls its clone and the contents of the task's
-  live Postgres and Redis.
+  checkout, its cache copy, and its own service instances.
 - **The docs turn.** All of its checkout: `.git/config`, hooks, refs,
   objects, `HEAD`, the commits it makes, `.valor/verdict.json`, its `tmp/`,
   and any link it plants anywhere in the checkout.
+
+This threat model covers the check and docs checkouts only. The builder's
+clone, and what the builder's session leaves in the task's live Postgres,
+are out of 1.4b's scope: 1.4b reads nothing from the clone (breadth and
+governance read the mirror) and gives a check fresh services, so nothing
+in them reaches a check.
 
 What the kernel must never do with any of it:
 
@@ -66,8 +70,7 @@ What the kernel must never do with any of it:
   for docs): the hostile-config read (`git.hostile`, `git config --list
   --show-scope --includes`), and `upload-pack`, which runs only when that
   read finds nothing hostile. Every later read (ancestry, paths,
-  diffs, `.valor` in a tree) runs in the kernel mirror. Breadth and
-  governance read the mirror, never `b.workspace`.
+  diffs, `.valor` in a tree) runs in the kernel mirror.
 - Follow a link or block on a file a turn could plant. `verdict.json` and
   the JUnit file are read by the same walk: each path component opened
   relative to its parent's descriptor with `O_NOFOLLOW`, the file with
@@ -173,48 +176,37 @@ amends the Done line to say so.
 - `checks.test.breadth.json`. Hidden reference tests exist under
   `~/src/valor-demo/items/ref/` for cut-a, pop-a (popoto #633), pop-b
   (popoto #191), and pso-a and pso-a2 (psyoptimal #872). The takeover gate
-  scores #191, #872, and #633, so they are excluded, which leaves cut-a's
-  two runs (`results/cut-a-bare.json`, `results/cut-a-clarify.json`). Their
-  workspaces lived under `/Users/tomcounsell/`, not on this Mac, and the
-  results files hold only `workspace_head` and a diff stat. So the set is:
-  - cut-a, both runs, recovered by replaying the item at its base with the
-    same arm (`scripts/replay.py cut-a.json --arm bare` and `--arm
-    clarify`) into a build database; the replayed candidates are new
-    diffs, and their labels come from running `ref/cut-a.hidden_test.py`
-    on them. A kind gets a `reference` label `true` only where a hidden
-    test fails on the candidate and that test exercises exactly that kind;
-    every other label is `drafted`. "Every hidden test passed" says
-    nothing about coverage, so it labels nothing `false`.
-  - the popoto #191 trial's two breadth rounds, candidates `543c1395` and
-    `aeb94f19`, read from `/Users/valorengels/valor-tasks/75c0902b6e25/
-    kernel.git`, with the behaviors the hand-played test checker listed
-    as evidence. #191 is a gate item, so these are labelled `drafted`
-    unless Tom labels them, and they are excluded from the entry check
-    until he does.
-  With only these cases, every breadth question is expected to lack a
-  non-drafted `false` label, so breadth's entry check is expected to be
-  false and `checks.test` to stay manual (Landing, below) until labels
-  from Tom or from new reference-tested items fill both directions.
-- `governance.adds.json`, at most 50 hunks, labelled by hunk, never by
-  commit:
-  - positives, source `tom`: only the hunks that add or register a check,
-    gate, hook, or validator. From `b9e4e17da` (milestone 1.2), the hunks
-    of `core/guards.py` that seed the granted guards; from `337aba233`
-    (milestone 1.3), the hunks that route breadth and governance through
-    their guards (`core/guards.py`, the guard ids in
-    `core/judgement_tasks.py`); from `origin/main`, the hunk that adds the
-    validator file and, where the commit has one, the hunk that registers it in `.claude/settings.json`
-    in `920b6f392`, `8bb12c001`, `e2a623a44`, `1b8c9a27e`, `315ff6ef2`,
-    and `c472e875f` (each adds a file under `.claude/hooks/validators/`).
-    Every other hunk of these commits (tests, docs, refactors) is
-    `drafted`.
-  - negatives, source `tom`: hunks under `tests/` of `b9e4e17da`,
-    `337aba233`, and `a30c03350` (1.4a), by his paragraph's "Tests are not
-    governance", five per commit in diff order.
-  - negatives, source `drafted`: the hunks of the dependency bumps and
-    plan commits on `origin/main` before 2026-10-01 (`b4251b748`,
-    `d950ca9e7`, `d14ba954e`, `c170d81da`, `7396b10f3`, `5368faebe`).
-  Five hunks per commit in diff order, until 50.
+  scores #191, #872, and #633, so they are excluded, which leaves cut-a.
+  cut-a's only failing hidden test checks a log message's wording, which
+  is none of breadth's three gap kinds, so replaying it would add no label
+  (Decided by default, 7). The set holds the popoto #191 trial's two
+  breadth rounds, candidates `543c1395` and `aeb94f19`, read from
+  `/Users/valorengels/valor-tasks/75c0902b6e25/kernel.git`, with the
+  behaviors the hand-played test checker listed as evidence, labelled
+  `drafted` (#191 is a gate item) unless Tom labels them. So every breadth
+  question lacks a non-drafted label, breadth's entry check is false, and
+  breadth's behaviors are information only until a record passes (Landing,
+  below). No labels are asked of Tom: they come from his recorded
+  decisions and the attention ledger as real tasks run
+  (judgement-layer.md, "Where labels come from").
+- `governance.adds.json`, 50 hunks, labelled by hunk, never by commit,
+  in diff order:
+  - positives, source `tom` (10): the hunks that add or register a check,
+    gate, hook, or validator. `b9e4e17da` (1.2): the hunk adding
+    `core/guards.py` (1). `337aba233` (1.3): the `core/guards.py` hunk that
+    refuses a grant on a calibration task (1). On `origin/main`, the hunk
+    adding the validator file in `920b6f392`, `8bb12c001`, `e2a623a44`, and
+    `1b8c9a27e` (`validate_no_destructive_git_in_shared_checkout.py`) (4),
+    and the validator file's hunk plus its `.claude/settings.json`
+    registration hunk in `315ff6ef2` and `c472e875f` (4). Every other hunk
+    of these commits is left out of the set.
+  - negatives, source `tom` (22): hunks under `tests/` ("Tests are not
+    governance"), five per commit from `b9e4e17da`, `337aba233`,
+    `db2241e95`, and `276e7d79a`, and both of `58b32cdd9` (1.4a's tests
+    live in these three commits).
+  - negatives, source `drafted` (18): the dependency bumps on `origin/main`,
+    `b4251b748` (5), `d950ca9e7` (4), `d14ba954e` (4), and `c170d81da`
+    (5 of 6). Counted as information only.
 
 The case files' SHA-256 digests go into the build record before the first
 run. After run 1 no case is added, removed, or relabelled; between runs
@@ -226,14 +218,22 @@ not a stop. A new case set (new labels from Tom, new reference-tested
 items) is a new frozen set, with its own digest and its own five runs.
 
 **Landing.** Registration is a code change made by the build, never a
-read at run time. A site whose record passes its entry check lands with
-`BREADTH.calibrated` or `GOVERNANCE.calibrated` set to the record's
-`task_sha256`, and its runner registered in `core/__main__.runners`. The floors keep their values;
+read at run time. The test runner is registered whatever breadth's entry
+check says: running the suite needs no calibration. While
+`BREADTH.calibrated` is `None`, breadth is still asked and its row logged,
+but the behaviors it lists go on `test.decided` under
+`breadth.information` and into the delivery as information only; the
+verdict comes from the failures alone (`red` or `pass`, never `gaps`), so
+an uncalibrated breadth never routes a candidate to repair. A site whose
+record passes its entry check lands with `BREADTH.calibrated` or
+`GOVERNANCE.calibrated` set to the record's `task_sha256`; from then
+breadth's behaviors route as `gaps`, and the docs runner is registered in
+`core/__main__.runners`. The floors keep their values;
 the comment "provisional: set by 1.4's calibration record" becomes "set
 from human labels once real tasks have produced thirty or more rows",
-which is the Done item. A site whose entry check fails still lands its
-runner code, but the runner is not registered and its stage stays on the
-manual `verdict` path until a record of its passes the entry check and a
+which is the Done item. If governance's entry check fails, the docs
+runner's code still lands, but it is not registered and `docs` stays on
+the manual `verdict` path until a record passes the entry check and a
 later commit registers it. The failure is recorded in the build record;
 the build does not stop or ask Tom. Nothing in the kernel reads a record
 at run time.
@@ -262,7 +262,11 @@ check_dir, project, task_id)`, a context manager:
    fresh instances.
 4. On exit: `stop_services(task_id, svc_layout)`, the `-svc` directory
    removed, and `start_services(task_id, lay, ...)` again, so the router's
-   view of the task's services holds for the next runner.
+   view of the task's services holds for the next runner. The task's
+   Postgres keeps its data directory, so the builder's tables survive.
+   The task's Redis runs with `--save "" --appendonly no`, so it starts
+   empty after a check, as after any restart; a key the builder wrote is
+   gone, and no key a suite wrote ever reaches it.
 
 **Paths are passed, never derived from the layout's root** (critique
 finding 7). Today `harness_env` takes `bin_dir = lay.root.parent / "bin"`
@@ -332,7 +336,9 @@ base's setup runs again to make it, without the suite.
    suite each run as `asyncio.create_subprocess_exec(...,
    start_new_session=True)`, and `asyncio.wait` races the process against
    `runs._stop_heard(listener, task)` on `tasks.STOP_CHANNEL` and the
-   timeout, as `runs.run_turn` does for a turn. On a stop, `os.killpg`
+   timeout, as `runs.run_turn` does for a turn. A failed setup runs once
+   more in the same run, in the same checkout, before it counts as the
+   commit's. On a stop, `os.killpg`
    kills the group, `runs.reap(mark)` takes anything that left it, nothing
    is recorded, and the runner returns `stopped`.
 3. Each run appends `suite.ran`: commit, role, command, environment
@@ -347,15 +353,15 @@ base's setup runs again to make it, without the suite.
    the exit code says the runner itself failed. At head, with the base
    run usable, that is `red` with the failure as a finding (the
    candidate's setup or suite is broken, which is what the check exists to
-   say). At base it is recorded and reused as a base run with no per-test
-   results, so the exit-code rule in step 5 decides. A commit's own fault
-   never sends the branch round again, so no failure loops and no retry
-   limit is needed.
+   say). At base it is recorded and decides the current run as a base
+   run with no per-test results, by the exit-code rule in step 5; it is
+   never reused, so the next run sets up the base again. A commit's own
+   fault never sends the branch round again, so no failure loops and no
+   retry limit is needed.
    The environment digest covers the lockfiles at that commit (read with
    `git show` in the mirror), the setup commands, the spec's `env`, and the
    bytes of each file in the work directory's `bin/`. A `suite.ran` with
-   the same commit, command, and digest and `cause` other than `kernel` is
-   reused, so the base runs once per task and a crash after a suite does
+   the same commit, command, and digest, and no `cause`, is reused, so the base runs once per task and a crash after a suite does
    not rerun it.
 4. `read_junit(check_dir)` reads the file through the same walk as
    `read_verdict` (critique finding 8), lifted into a shared
@@ -383,6 +389,9 @@ base's setup runs again to make it, without the suite.
      They are not counted at head and are listed for the reviewer and Tom,
      so a test that cannot pass in the sandbox (the rebuild's own `/bin/ps`
      tests, popoto's `test_connection.py`) is shown, never hidden.
+   With per-test results at base and none at head, every id that passed
+   at base counts as absent at head, so the verdict is `red` (a
+   `conftest.py` that calls `os._exit(0)` writes no report).
    With no per-test result on either side, the exit codes decide: red when
    head fails and base passes; red with the note "the suite fails at base
    too, and without per-test results no failure at head can be told apart"
@@ -391,8 +400,8 @@ base's setup runs again to make it, without the suite.
 6. `record_check(conn, task_id, Check.TEST, None, breadth=breadth_id,
    command=..., failures=..., deleted_at_head=..., failing_at_base=...,
    suites=[base_event, head_event], head=candidate, leg="kernel")`. The
-   kernel computes the verdict as today: red if any failure, else gaps if
-   breadth lists a behavior, else pass. A `kernel` failure records nothing
+   kernel computes the verdict: red if any failure; else, when breadth is
+   calibrated, gaps if it lists a behavior; else pass. A `kernel` failure records nothing
    and returns `failed`, so the branch reruns; a `commit` failure at head
    is recorded `red` here like any other failure.
 
@@ -426,6 +435,11 @@ the breadth row inside `record_check`, as today.
    through `runs.run_turn(..., state=State.CHECKS.value, fresh="docs")`,
    seat `frontier`. `read_verdict` gives `verdict`, `findings`, and `head`
    (a full commit id, or absent when nothing was committed).
+   Before the checkout, a `docs.kept` row for the current candidate
+   (written in step 3, naming the turn, the kept head, and the dropped
+   commits) whose `refs/valor/docs/<turn>` still resolves in the mirror is
+   reused: no checkout and no turn, straight to step 4, so a run that died
+   after the turn asks only governance again.
 3. When `head` differs from the candidate: `fetch_into_mirror(b.mirror,
    checkout, head, f"refs/valor/docs-raw/{turn_id}", check profile, mark)`
    (finding 6: the head is fetched from where the session committed, with
@@ -437,13 +451,16 @@ the breadth row inside `record_check`, as today.
    model's claim holds for both commands. Then, in the mirror only:
    - the candidate must be an ancestor of the head, and `rev-list --merges
      candidate..head` must be empty;
-   - walking `rev-list --reverse candidate..head`, each commit's paths
-     (`diff-tree --no-renames -r --name-only`) and its tree's `.valor`
-     (`tree_has_valor`, trusted, in the mirror) are read; the kept head is
-     the last commit before the first one that touches a path outside
-     `machine.is_doc_path` or adds `.valor`;
+   - walking `rev-list --reverse candidate..head`, each commit's entries
+     (`diff-tree --no-renames -r` raw output: modes and paths) and its
+     tree's `.valor` (`tree_has_valor`, trusted, in the mirror) are read;
+     the kept head is the last commit before the first one that touches a
+     path outside `machine.is_doc_path`, adds `.valor`, or has an entry
+     whose new mode is not a regular file (`100644` or `100755`; a symlink
+     `120000` or a gitlink `160000` is dropped; a deletion's new mode is
+     `000000` and is kept when its old mode was a regular file);
    - `refs/valor/docs/<turn_id>` is set to the kept head with `update-ref`,
-     and the raw ref deleted.
+     the raw ref deleted, and a `docs.kept` row appended.
    A refused fetch, a head that does not descend, or a merge commit keeps
    nothing: the kept head is the candidate, and the reason is a `changes`
    finding. Each dropped commit is a `changes` finding naming its paths.
@@ -465,13 +482,12 @@ path.
 
 ### Registration and the manual path (`core/__main__.py`, `core/verdicts.py`)
 
-When both sites' records pass, `runners(judgement_port)` adds `Check.TEST:
-checks.test_runner(port)` and `Check.DOCS: fresh.docs_runner(_fresh_for,
-port)`, and `MANUAL_STAGES` becomes `{"review": Check.REVIEW}`; the
-parser's `--suite-command`, `--failure`, `--behavior`, and `--head`
-options go with the test and docs paths. Each runner is registered, and
-its stage and options leave the manual path, only in the commit that lands
-its own site's passing record (breadth for test, governance for docs).
+`runners(judgement_port)` adds `Check.TEST: checks.test_runner(port)`,
+`test` leaves `MANUAL_STAGES`, and the parser's `--suite-command`,
+`--failure`, and `--behavior` options go. `Check.DOCS:
+fresh.docs_runner(_fresh_for, port)` is added, `MANUAL_STAGES` becomes
+`{"review": Check.REVIEW}`, and `--head` goes, in the commit that lands
+governance's passing record.
 `record_check` raises `VerdictRefused` for a non-manual TEST without
 `breadth` and a non-manual REVIEW or DOCS without `governance_from`.
 
@@ -572,22 +588,23 @@ The check environment:
   task's Redis port reaches the fresh instance, which does not hold a key
   the builder wrote to the task's Redis; a table the builder made in the
   task's Postgres is absent from the fresh database.
-- After the runner, the task's own services are up on their ports with the
-  builder's data intact.
+- After the runner, the task's own services are up on their ports, a table
+  the builder made in the task's Postgres is still there, and the task's
+  Redis holds no key the suite wrote.
 - `PGPASSFILE` names `<check_dir>/tmp/pgpass`; a link planted at that path
   before the copy is refused.
 - Setup runs in each check checkout.
 - Failures classed by who controls them: a head setup failure, a head
   suite past its timeout, and a head with no JUnit file and a runner
   failure exit, each with a usable base, record `red` with the failure as
-  a finding, and the next run does not rerun the test branch. A base
-  setup failure is recorded once, reused by the next candidate's run
-  without running again, and decided by the exit codes. A service that
-  will not start records nothing and returns `failed`.
+  a finding, and the next run does not rerun the test branch. A setup
+  that fails once and then succeeds runs the suite (a marker file counts
+  two setup runs). A base setup failure decides its run by the exit codes
+  and is set up again by the next run, never reused. A service that will
+  not start records nothing and returns `failed`.
 - A kernel SIGKILLed mid-suite (the test sends `SIGKILL` to a kernel
   subprocess while the check's Redis is up): on the next run the task's
-  Redis on its port holds the key the builder wrote and not the key the
-  suite wrote, no process under `valor.service.<task>` from the check
+  Redis on its port holds no key the suite wrote, no process under `valor.service.<task>` from the check
   layout is alive, and no `checks/*-svc/` directory is left.
 - The check layout's `service.sb` sits at `<svc>/home/profiles/service.sb`
   and names the task's work directory and `bin/`; the suite's `PATH`
@@ -608,8 +625,8 @@ The test runner:
 - A stop published while the suite sleeps: the suite's process group is
   gone (a child it forked included), no `suite.ran` is written for that
   run, and the runner returns `stopped` well before the suite's timeout.
-- A candidate whose `conftest.py` exits 0 before collecting is red (every
-  base test absent at head).
+- A candidate whose `conftest.py` calls `os._exit(0)` before collecting is
+  red, with every base test id counted as absent at head.
 - One that marks a failing test `skip` is red.
 - One that deletes a test's definition is not red and lists it under
   `deleted_at_head`; one that deletes a test's file but keeps the function
@@ -619,6 +636,10 @@ The test runner:
   does not make the verdict red.
 - Both sides with no JUnit file: head fails, base passes is red; both fail
   is red with the note.
+- With `BREADTH.calibrated` `None`, a breadth answer listing a behavior on
+  a candidate with no failures records `pass`, the behavior under
+  `breadth.information` and in the delivery, and the join goes to merge,
+  not repair; with `calibrated` set, the same records `gaps`.
 - `record_check` refuses a kernel leg test verdict without
   `breadth`, and a docs verdict without `governance_from`; `verdict
   test` and `verdict docs` are refused at the command line.
@@ -636,6 +657,10 @@ The docs runner, through the router:
   id, is malformed: no verdict, and the next run reruns docs only.
 - The builder's clone has the same refs and objects before and after the
   docs runner.
+- A docs commit adding a symlink, and one adding a gitlink, are dropped
+  with their paths as `changes` findings, even under `docs/`.
+- A docs run that dies after `docs.kept` reruns governance only: no
+  second turn, the same kept head, and a verdict.
 - The docs clone shares no inode with the mirror: no file under the
   clone's `.git/objects` has the same `(st_dev, st_ino)` as any file under
   the mirror's `objects`, and the temporary `valor-docs/<turn>` ref is gone
@@ -672,14 +697,16 @@ refuses or pauses on money.
 
 1. Add the `project` key to the items under `~/src/valor-demo/items/`
    that have a suite (outside the repo).
-2. The two calibration runs against the real ledger, one per site:
+2. The calibration runs against the real ledger, one per site:
    `python -m core calibrate <cases>` for `checks.test.breadth.json` and
    `governance.adds.json`. Each record's `task_sha256` is compared by hand
-   with the landed `calibrated` digest, and its `entry_check` must be true.
-3. If a real-ledger record fails its entry check, the site's runner is
-   unregistered in a commit that restores its stage to `MANUAL_STAGES`, so
-   the stage stays manual until its entry check passes, and the failure is
-   recorded in this plan file.
+   with the landed `calibrated` digest.
+3. If governance's real-ledger record fails its entry check, the docs
+   runner is unregistered in a commit that restores `docs` to
+   `MANUAL_STAGES`, so the stage stays manual until its entry check
+   passes, and the failure is recorded in this plan file. Breadth's
+   record changes nothing about registration: the test runner stays
+   registered, with breadth's behaviors as information until it passes.
 4. Restart the kernel so `RUNNERS` holds the new runners.
 
 ## Decided by default
@@ -709,6 +736,11 @@ Reversible calls made by the build session, not questions for Tom.
 6. **The kernel computes the docs verdict from the commits it kept, and
    the session's own `changes` stands.** The turn's verdict file is
    turn-owned and only adds caution; it never removes it.
+7. **No breadth replays of cut-a.** Its only failing hidden test checks a
+   log message's wording, which is none of breadth's gap kinds (states,
+   enumeration members, old bounds), so the replays would most likely add
+   no label and cost two build turns. The breadth set is the #191 trial's
+   two drafted rounds.
 
 ## Critique round 1 (of 2)
 
@@ -751,3 +783,39 @@ Reversible calls made by the build session, not questions for Tom.
 11. The threat model's git claim was false while `git.hostile` ran
     unsandboxed: it takes the caller's profile, and the claim is restated
     for both commands (Threat model, The docs runner, step 3).
+
+## Critique round 2 (of 2): revise
+
+The rounds are spent; each finding is built in.
+
+1. The test runner waited on breadth's entry check: it is registered
+   regardless, and an uncalibrated breadth's behaviors are information on
+   `test.decided` and the delivery, never `gaps` (Landing, Registration).
+2. The task's Redis keeps nothing across a restart (`--save ""
+   --appendonly no`): the "builder's data intact" assertions are for
+   Postgres only; for Redis the tests assert no key the suite wrote
+   survives (The check environment, Tests).
+3. A base setup failure was reused: it decides only its own run, and a
+   failed setup runs once more in the same run before it counts as the
+   commit's (The test runner, steps 2 and 3).
+4. Per-test results at base and none at head: `red`, every base id
+   absent, tested with `os._exit(0)` in `conftest.py` (The test runner,
+   step 5).
+5. A docs run that died after the turn redid the turn: a `docs.kept` row
+   is reused and only governance is asked again, with a test (The docs
+   runner, steps 2 and 3).
+6. The governance set named commits without the hunks it claimed: 1.4a's
+   tests come from `db2241e95`, `276e7d79a`, and `58b32cdd9`; `a30c03350`
+   and `5368faebe` are gone; the counts are 10 positives and 22 negatives
+   from `tom`, 18 drafted (Calibration).
+7. The cut-a replays would add no label: dropped (Decided by default, 7).
+8. The kept prefix read only paths: it reads `diff-tree -r` raw modes and
+   keeps a commit only when every entry is a regular file, with a symlink
+   and a gitlink test (The docs runner, step 3).
+9. The threat model reached into the builder's clone: narrowed to the
+   check and docs checkouts, the builder's clone named as out of scope
+   (Threat model).
+10. m1-4-checks.md said 1.4b had questions for Tom: it now says Decided by
+    default, and its status line says `verdict` keeps `review` until 1.4c.
+
+The five-runs-per-site limit stays: it was judged not governance.

@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b planned (m1-4b-runners.md), awaiting critique round 1 of 2; then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; then 1.4c after takeover, which deletes `verdict` (it keeps `review` until then)
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -748,8 +748,8 @@ route on, the test runner (breadth, then the suite at base and at head,
 each in a fresh checkout with setup from the lock and fresh services on
 the task's ports), the docs runner (its own clone, the head fetched from
 it into the mirror, the doc-path prefix kept, governance after the turn),
-the answers to the popoto #191 trial's findings, tests, rollout, and
-questions for Tom.
+the answers to the popoto #191 trial's findings, tests, rollout, and what
+was decided by default. It has no questions for Tom.
 
 ## 1.4d outline: the GitHub credential, transcripts, the performer registry
 
