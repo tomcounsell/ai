@@ -6,8 +6,9 @@ starts, from a project spec the kernel reads (never the candidate).
       bin/                 shared tools (uv), read-only to every sandbox
       <task_id>/
         repo/              the builder's clone: the working session's cwd
-        origin.git/        local bare origin: push_branch's target (and, until
-                           1.4d, the merge's); no turn writes it
+        origin.git/        local bare origin: push_branch's target, and the
+                           merge's when the spec has no merge_url; no turn
+                           writes it
         kernel.git/        the kernel mirror: the base, plan commits,
                            candidates, docs heads; no turn writes it
         home/              gitconfig, empty gh config, pgpass, profiles/*.sb
@@ -46,6 +47,7 @@ fsck, one pack file under a file-size limit, and a footprint watchdog.
 """
 
 import ctypes
+import errno
 import functools
 import hashlib
 import json
@@ -64,7 +66,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, git, runs
+from core import binaries, git, runs, targets
 from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
@@ -490,8 +492,8 @@ def choose_port(span: tuple[int, int], taken: set[int]) -> int:
 
 def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     """The kernel's bare clone of the repository, fetched by its trusted git:
-    a local path, or a public HTTPS URL fetched anonymously. A private
-    repository needs the credential, which is 1.4d's."""
+    a local path, or a public HTTPS URL fetched anonymously. A repository
+    that needs a credential to fetch is refused."""
     origin = source or spec.repo
     local = Path(origin).expanduser()
     url = str(local.resolve()) if local.exists() else origin
@@ -518,7 +520,7 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     except git.GitError as exc:
         if needs_credential(str(exc)):
             raise Refused(
-                f"{origin} needs a credential to fetch; private repositories wait for 1.4d"
+                f"{origin} needs a credential to fetch; private repositories are not fetched"
             ) from None
         raise Refused(f"fetching {origin}: {exc}") from None
     listed = git.trusted(cache, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
@@ -529,8 +531,8 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
 
 
 def needs_credential(error: str) -> bool:
-    """Whether git's error says the remote wants a credential, which the
-    kernel has none of until 1.4d."""
+    """Whether git's error says the remote wants a credential: the kernel
+    fetches no private repository."""
     return "Authentication" in error or "could not read Username" in error
 
 
@@ -625,6 +627,8 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
+    if spec.merge_url and not targets.local(spec.merge_url):
+        _not_default(cache, spec.merge_url, target)
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
               lay.work_state / "claude", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
@@ -699,14 +703,28 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     return Provisioned(
         workspace=str(lay.repo),
         mirror=str(lay.mirror),
+        # push_branch lands on the task's own bare origin; the merge lands on
+        # the spec's merge_url when it has one (granted, checked at start).
         push_url=str(lay.origin),
-        # Until 1.4d every merge lands on the task's own bare origin.
-        origin_url=str(lay.origin),
+        origin_url=spec.merge_url or str(lay.origin),
         target_branch=target,
         base_sha=base_sha,
         harness=harness,
         project=project,
     )
+
+
+def _not_default(cache: Path, url: str, target: str) -> None:
+    """Refuse a merge target that is the remote's default branch, read
+    anonymously now, from the kernel's cache clone."""
+    try:
+        named = git.remote_head(cache, url)
+    except git.GitError as exc:
+        raise Refused(f"cannot read the remote's HEAD: {exc}") from None
+    if named is None:
+        raise Refused("the remote's HEAD names no branch")
+    if named == target:
+        raise Refused(f"{target} is the default branch of {url}; a merge never lands there")
 
 
 def _remote_head(cache: Path) -> str:
@@ -1219,6 +1237,99 @@ def write_files(dir_fd: int, files: dict[str, str]) -> None:
                      dir_fd=dir_fd)  # fmt: skip
         with os.fdopen(fd, "w") as f:
             f.write(text)
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _parts(relpath: str) -> list[str] | None:
+    parts = relpath.split("/")
+    if relpath.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        return None
+    return parts
+
+
+def _why(name: str, exc: OSError) -> str:
+    if exc.errno == errno.ELOOP:
+        return f"{name} is a link"
+    if exc.errno == errno.ENOTDIR:
+        return f"{name} is not a directory"
+    if exc.errno == errno.ENOENT:
+        return f"{name} does not exist"
+    return f"{name} cannot be opened ({exc.strerror})"
+
+
+def _is_link(name: str, dir_fd: int) -> bool:
+    """Whether `name` in `dir_fd` is a link: a directory opened without
+    following one fails with ENOTDIR on a link to a directory."""
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def open_turn_dir(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
+    """A directory a turn can write, opened component by component from
+    `dir_fd` without following a link at any step. Returns (fd, None), the
+    caller closing fd, or (None, why)."""
+    parts = _parts(relpath)
+    if parts is None:
+        return None, f"{relpath!r} is not a plain relative path"
+    fd = dir_fd
+    try:
+        for part in parts:
+            try:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno == errno.ENOTDIR and _is_link(part, fd):
+                    return None, f"{part} is a link"
+                return None, _why(part, exc)
+            if fd != dir_fd:
+                os.close(fd)
+            fd = nxt
+        opened, fd = fd, dir_fd
+        return opened, None
+    finally:
+        if fd != dir_fd:
+            os.close(fd)
+
+
+def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
+    """A file a turn can write, read whole: each directory opened without
+    following a link, the file opened without following one or blocking,
+    and read only when it is a regular file with one link (a hard link
+    would let a turn name a file it cannot read itself). Returns (bytes,
+    None) or (None, why)."""
+    parts = _parts(relpath)
+    if parts is None:
+        return None, f"{relpath!r} is not a plain relative path"
+    parent = dir_fd
+    if len(parts) > 1:
+        parent, why = open_turn_dir(dir_fd, "/".join(parts[:-1]))
+        if parent is None:
+            return None, why
+    name = parts[-1]
+    try:
+        try:
+            fd = os.open(name, _FILE_FLAGS, dir_fd=parent)
+        except OSError as exc:
+            return None, _why(name, exc)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None, f"{name} is not a regular file"
+            if st.st_nlink != 1:
+                return None, f"{name} has {st.st_nlink} links"
+            chunks = []
+            while chunk := os.read(fd, 1 << 20):
+                chunks.append(chunk)
+            return b"".join(chunks), None
+        finally:
+            os.close(fd)
+    finally:
+        if parent != dir_fd:
+            os.close(parent)
 
 
 def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:

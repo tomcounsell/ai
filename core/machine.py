@@ -14,6 +14,7 @@ Pure code: the standard library only, no I/O.
 """
 
 import hashlib
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath as Path
@@ -100,6 +101,15 @@ GUARD_JUDGE = "intake.underspecified"
 GUARD_BREADTH = "checks.test.breadth"
 GUARD_CRITIQUE = "critique.loop"
 GUARD_REVIEW = "review.loop"
+
+
+def _session_id(value: Any) -> str | None:
+    """A session id the next turn may resume: a UUID, or None. The kernel
+    passes it to `--resume` and names a transcript file by it."""
+    try:
+        return value if isinstance(value, str) and str(uuid.UUID(value)) == value else None
+    except ValueError:
+        return None
 
 
 def _in(expr: str, values) -> str:
@@ -380,7 +390,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         # Only the working session's turns name the session the next
         # clarify, plan, build, or patch turn resumes; a fresh session's
         # (critique, review, docs) never does.
-        if result.get("session_id") and f.turn_states.get(turn_id) != FRESH:
+        if _session_id(result.get("session_id")) and f.turn_states.get(turn_id) != FRESH:
             f.session = result["session_id"]
         if (
             p.get("outcome") == "done"
@@ -577,7 +587,7 @@ def _legacy(rows: list[dict[str, Any]]) -> Fold:
             elif kind == "turn.ended":
                 result = p.get("result") or {}
                 if str(p["turn_id"]) not in fresh:
-                    f.session = result.get("session_id") or f.session
+                    f.session = _session_id(result.get("session_id")) or f.session
         except (KeyError, TypeError, AttributeError) as exc:
             f.ignored.append({"id": row.get("id"), "type": row.get("type"), "why": f"malformed: {exc!r}"})
     if stopped:

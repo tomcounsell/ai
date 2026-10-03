@@ -256,7 +256,17 @@ authority, and a turn holds none.
 | The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run` or `calibrate` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
 | Mail credentials | The email bridge | Not built |
-| Git hosting tokens | The broker's performer for a released push, never the turn | Not needed yet: pushes go to a local bare origin |
+| The GitHub push token, `GITHUB_PUSH_TOKEN` | The merge performer of a task the kernel provisioned, for a released merge to a granted remote, never the turn and never `push_branch` | `github-keys` in the kernel key directory (mode 600), written only by `python -m core github-key`, which copies it from the vault `.env` and prints `written`, `kept`, or `missing`. For each git call against the remote the kernel writes a config file of its own, mode 600, in the same directory, holding one header (`Authorization: Basic`, user `x-access-token`) scoped to that exact URL, gives git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits; a file a crash left is removed by the next merge once it is older than twice `git_timeout_s`. GitHub's refusal of the token fails the merge saying to rotate it |
+
+**Where a merge lands.** A merge to a remote lands only on a (URL,
+branch) pair on the merge-target list, which Tom grants with `python -m
+core merge-target add URL BRANCH --note TEXT` and anyone removes with
+`merge-target remove`; `merge-target list` shows it. The URL is plain
+`https://host/path`, with no user, port, query, or quoting. `start
+--project` refuses a spec whose `merge_url` and branch are not granted,
+and refuses the branch the remote's HEAD names (its default branch), read
+at start and again before each push. A merge to a local origin needs no
+grant and no token; a `--workspace` task merges with no token.
 
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is

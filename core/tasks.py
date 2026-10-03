@@ -6,6 +6,7 @@ stored field, so a stop at any instant leaves nothing to reconcile between
 the two.
 """
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,7 +109,10 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
         url = git.push_url(workspace)
     except git.GitError:
         return found
-    target = target_branch or git.remote_head(workspace, url)
+    try:
+        target = target_branch or git.remote_head(workspace, url)
+    except git.GitError as exc:
+        raise WorkspaceRefused(f"cannot read origin's HEAD ({url}): {exc}") from None
     if target is None:
         raise WorkspaceRefused(f"origin ({url}) has no HEAD branch; pass --target-branch")
     return {**found, "origin_url": url, "target_branch": target}
@@ -206,20 +210,23 @@ def verdict_text() -> str:
 
 
 async def dispatch(
-    conn, task_id: str, state: machine.State | None = None, *, fresh: str | None = None
+    conn,
+    task_id: str,
+    state: machine.State | None = None,
+    *,
+    fresh: str | None = None,
+    offered: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The Brief as a turn receives it: the task's commitments plus every
     correction in force, rendered from the ledger now, never from a copy
     made when the task started, and for a task with a workspace, how the
-    turn reaches Tom (`skills/sdlc/channel.md`, listing the effects the
-    registered performers offer) and the stage file for the state the task
+    turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
+    usage lines of the task's own performers) and the stage file for the state the task
     is in (`skills/sdlc/<state>.md`). A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file. Returns the text, the
     correction numbers it carries, and the text's digest."""
-    from core import broker
-
     b = await brief(conn, task_id)
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
@@ -243,7 +250,7 @@ async def dispatch(
         if stage:
             sections.append(stage)
     elif b.workspace:
-        sections.append(channel_text(broker.offered()))
+        sections.append(channel_text(list(offered)))
         stage = stage_text(state)
         if stage:
             sections.append(stage)

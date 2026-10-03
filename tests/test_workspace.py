@@ -21,7 +21,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from core import db, ledger, router, runs, tasks
+from core import db, ledger, runs, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from tests import scripted
@@ -118,7 +118,7 @@ def test_a_provisioned_clone_holds_nothing_after_the_base_and_pushes_only_to_its
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert refused.returncode != 0  # non-fast-forward refused
-    assert made.origin_url == made.push_url  # until 1.4d the merge lands on the task's own origin
+    assert made.origin_url == made.push_url  # without merge_url the merge lands on the task's own origin
     for key in ("sandbox_profile", "gitconfig", "gh_config_dir", "tmpdir", "claude_config_dir"):
         assert Path(made.harness[key]).exists()
 
@@ -535,7 +535,7 @@ def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(d
             gateway = Gateway(dsn)
             await gateway.start()
             try:
-                return await router.run(gateway, b, scripted.RUNNERS, dsn=dsn)
+                return await scripted.route(gateway, b, scripted.RUNNERS, dsn=dsn)
             finally:
                 await gateway.close()
         finally:
@@ -752,7 +752,7 @@ def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_s
         gateway = Gateway(dsn)
         await gateway.start()
         try:
-            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+            return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
             await gateway.close()
 
@@ -770,7 +770,7 @@ def test_the_tasks_postgres_is_up_while_a_runners_turn_runs_and_down_after(dsn, 
         gateway = Gateway(dsn)
         await gateway.start()
         try:
-            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+            return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
             await gateway.close()
 

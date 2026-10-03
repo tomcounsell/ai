@@ -18,6 +18,7 @@ the rules leave alone, so a lost file never locks the owner out.
 """
 
 import base64
+import contextlib
 import fcntl
 import hashlib
 import hmac
@@ -25,10 +26,13 @@ import os
 import secrets
 import shutil
 import stat
+import time
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
+
+from core.settings import settings
 
 MARK_BEGIN = (
     "# valor-kernel: every role needs a password on the kernel databases (python -m core secure-login)"
@@ -223,19 +227,75 @@ def _parse_env(text: str) -> dict[str, str]:
     return out
 
 
-def read_key(keyfile: str | Path, name: str) -> str:
-    """One key from the kernel's key file, or `MissingKey` naming it."""
+def read_key(keyfile: str | Path, name: str, command: str = "judgement-keys") -> str:
+    """One key from the kernel's key file, or `MissingKey` naming it and the
+    command that writes it."""
     path = Path(keyfile)
     try:
         found = _parse_env(path.read_text())
     except FileNotFoundError:
         raise MissingKey(
-            f"{name}: the key file {path} does not exist; run `python -m core judgement-keys`"
+            f"{name}: the key file {path} does not exist; run `python -m core {command}`"
         ) from None
     value = found.get(name)
     if not value:
-        raise MissingKey(f"{name} is not in {path}; run `python -m core judgement-keys`")
+        raise MissingKey(f"{name} is not in {path}; run `python -m core {command}`")
     return value
+
+
+# The merge's GitHub credential. The token sits in `settings.github_keyfile`;
+# for each git call the merge performer makes against a granted remote, the
+# kernel writes a config file holding one pinned header scoped to that URL,
+# hands git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits.
+
+GITHUB_KEY = "GITHUB_PUSH_TOKEN"
+HEADER_PREFIX = "github-push-"
+HEADER_SUFFIX = ".gitconfig"
+
+
+@contextlib.contextmanager
+def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
+    """A config file, mode 600, in the key file's directory, carrying the
+    token as `http.<url>.extraHeader` and nothing else; yields its path and
+    removes it on exit. Refuses a URL `targets.url_ok` refuses, so nothing
+    the URL holds can add a line. Leftovers a crashed call left, older than
+    twice `git_timeout_s`, are removed first: every kernel git call is
+    killed by then, so none belongs to a live call."""
+    from core import targets
+
+    if not targets.url_ok(url, loopback=loopback):
+        raise CredentialError(f"{url} is not an https://host/path URL the kernel writes into config")
+    token = read_key(keyfile, GITHUB_KEY, "github-key")
+    directory = Path(keyfile).parent
+    sweep_headers(directory)
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    path = directory / f"{HEADER_PREFIX}{secrets.token_hex(16)}{HEADER_SUFFIX}"
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(f'[http "{url}"]\n\textraHeader = Authorization: Basic {basic}\n')
+        yield path
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
+
+def sweep_headers(directory: str | Path, older_than_s: float | None = None) -> list[str]:
+    """Remove header files older than twice `git_timeout_s`; returns the
+    names removed."""
+    limit = 2 * settings.git_timeout_s if older_than_s is None else older_than_s
+    now = time.time()
+    removed = []
+    for entry in os.scandir(directory):
+        if not (entry.name.startswith(HEADER_PREFIX) and entry.name.endswith(HEADER_SUFFIX)):
+            continue
+        try:
+            if now - entry.stat(follow_symlinks=False).st_mtime > limit:
+                os.unlink(entry.path)
+                removed.append(entry.name)
+        except FileNotFoundError:
+            continue
+    return removed
 
 
 def copy_keys(vault_env: str | Path, keyfile: str | Path, names: list[str]) -> dict[str, str]:

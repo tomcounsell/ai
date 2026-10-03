@@ -39,7 +39,7 @@ verdict enum, is generated from `core/machine.py` (`VERDICTS`) and applied by
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | `bigint` identity | The order of the ledger. Every reader orders by it |
-| `task_id` | `text` | The stream the row belongs to: a task's id, or a named stream (`corrections`, `guards`, `judgement`) |
+| `task_id` | `text` | The stream the row belongs to: a task's id, or a named stream (`corrections`, `guards`, `judgement`, `merge_targets`) |
 | `type` | `text` | The event type, `noun.verb` (`turn.started`, `effect.held`) |
 | `payload` | `jsonb` | The event's fields. Ids of what the row regards live here |
 | `at` | `timestamptz` | `clock_timestamp()`, the wall time of the insert |
@@ -61,7 +61,7 @@ every calibration record.
 
 | Column | Type | Meaning |
 |---|---|---|
-| `kind` | `text` | What the document is. The current kernel writes one kind, `task` |
+| `kind` | `text` | What the document is: `task` or `transcript` |
 | `id` | `text` | Its id within the kind |
 | `body` | `jsonb` | The document |
 | `created_at` | `timestamptz` | When it was written |
@@ -70,7 +70,8 @@ The primary key is `(kind, id)`. A document is what the kernel commits to
 once and never changes. The `task` document is the Brief as the task
 started: instruction, effect ceiling,
 `governance_grant`, workspace, model, harness settings, and where a merge
-goes: the target branch, origin's push URL as an absolute path, and the
+goes: the target branch, the merge's URL (`origin_url`: the project's
+`merge_url` when the spec names one, else the task's own origin), and the
 workspace's head at start (`core/tasks.py`, `Brief`); for a task the kernel
 provisioned, also the kernel mirror's path (`mirror`), where
 `push_branch` goes (`push_url`), and the project spec as it was at start
@@ -82,6 +83,15 @@ stream, never an edit to its Brief. Tom's feedback that widened the
 demonstration's scope from one profile item to seven was two
 `feedback.given` rows; the Brief stayed as written
 (rebuild-demonstration.md, Attention log).
+
+A `transcript` document holds part of one turn's Claude Code transcript
+(`core/transcripts.py`): id `<turn_id>/<name>/<n>`, body `turn_id`, name
+(the file's path under the session's project directory: `<session_id>.jsonl`,
+or `<session_id>/subagents/agent-*.jsonl`), `offset` (where in the file
+these bytes start), `chunk` (`n`), and `base64`, the raw bytes, at most
+64 MiB per document. A file the task's last copy covers is stored from
+where that copy ended; joining a name's documents from its last whole copy
+gives the file, whose digest `turn.ended` records.
 
 A new kind of document is a new value of `kind` and needs no migration. The
 objective tree's nodes are the next kind the design names
@@ -105,7 +115,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
 | `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |
 | `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
-| `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
+| `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend; `transcript` (per file: name, `documents`, `sha256` and `bytes` of the whole file, `offset`, `prefix_changed`; and the files skipped, with why), or `no_transcript` with the reason the copy failed | Lossless stop; legibility |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
 | `core/runs.py` | `turn.started` (fresh) | as any `turn.started`, plus `fresh: true` and the stage; the fold never resumes its session | Independent checks |
 | `core/session.py` | `turn.collected` | `turn_id`, the state it ran in and its verdict, what the turn left under `.valor/` (question, no-question statement, plan signal, delivery note, effect requests), the candidate (head sha and turn id) when the verdict is `candidate`, and `errors`: the signals that did not count and why | Legibility; the state machine |
@@ -119,6 +129,8 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
 | `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`, `governance_refused`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions, the instances awaiting Tom's tap. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
 | `core/guards.py` | `guard.granted` | `guard_id`, name, incident, mission items, `granted_at`, `expires` (ninety days on), Tom's note, provenance; on a task also `instance_id`, path, and the candidate it was granted on. The seeded guards sit on the `guards` stream | The governing constraint |
+| `core/targets.py` | `merge_target.granted` | on the `merge_targets` stream: url, branch, Tom's note, provenance (`by` always tom). A merge to a remote lands only on a pair whose latest row is this | Bounded authority |
+| `core/targets.py` | `merge_target.revoked` | url, branch, note, provenance (`by` anyone) | Bounded authority |
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |

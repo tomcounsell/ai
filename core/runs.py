@@ -26,6 +26,12 @@ Sandbox denies too) gets SIGTERM, then SIGKILL after `reap_grace_s` (settings), 
 it survives setsid, re-parenting to launchd, and a process retitling
 itself over its environment (redis-server does), and platform binaries hide
 their environment from other processes altogether.
+
+A turn with its own Claude Code config directory names its session
+(`TurnCommand.transcript`); once its processes are reaped, its transcript
+is copied into the store (`core.transcripts`) and `turn.ended` records the
+copy, or why there is none. A resumed or new session's id is the kernel's,
+so `turn.ended` records it in place of the one stdout names.
 """
 
 import asyncio
@@ -37,15 +43,16 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from core import binaries, db, ledger, machine, tasks
+from core import binaries, db, ledger, machine, tasks, transcripts
 from core.gateway import Gateway
 from core.settings import settings
 
 TURN_ENV = "VALOR_TURN"
+Transcript = transcripts.Transcript
 
 
 @dataclass
@@ -55,6 +62,7 @@ class TurnCommand:
     cwd: str
     harness: str
     parse: Callable[[bytes], dict[str, Any]] = field(default=lambda out: {})
+    transcript: Transcript | None = None
 
 
 async def run_turn(
@@ -64,13 +72,15 @@ async def run_turn(
     dsn: str | None = None,
     state: str | None = None,
     fresh: str | None = None,
+    offered: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Run one turn of the task to its end or its stop, in `state` (the
     state machine's state the turn works in, recorded on `turn.started`;
     None for a turn outside the machine). `fresh` names the stage of a fresh
     session (critique, review, docs): its Brief carries the verdict channel,
     and `turn.started` says `fresh: true`, so the fold never resumes its
-    session. Returns the `turn.ended` payload."""
+    session. `offered` is the usage lines of the task's performers, which
+    the working session's Brief lists. Returns the `turn.ended` payload."""
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -86,7 +96,7 @@ async def run_turn(
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)
             dispatched = await tasks.dispatch(
-                conn, task_id, state=machine.State(state) if state else None, fresh=fresh
+                conn, task_id, state=machine.State(state) if state else None, fresh=fresh, offered=offered
             )
             command = build(base_url, dispatched["text"], turn_id)
             await ledger.append(
@@ -138,7 +148,11 @@ async def run_turn(
         "result": command.parse(stdout) if outcome != "stopped" else {},
         "stderr_tail": stderr.decode(errors="replace")[-400:],
     }
+    if command.transcript is not None and ended["result"].get("session_id"):
+        ended["result"]["session_id"] = command.transcript.session_id
     async with await db.connect(dsn) as conn:
+        if command.transcript is not None:
+            ended.update(await transcripts.copy(conn, task_id, turn_id, command.transcript))
         row = await (
             await conn.execute(
                 "SELECT COALESCE(sum((payload->>'usd_micros')::bigint), 0) FROM events "

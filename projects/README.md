@@ -12,9 +12,11 @@ workspaces for (`python -m core start ... --project NAME`).
 - The suite command is the kernel's, never the candidate's: a command the
   candidate chose could be `true`. A spec is read once at start and copied
   into the task's Brief, so editing it never changes a running task.
-- A spec never decides where a merge may land beyond the task's own bare
-  origin. From 1.4d, `merge_url` is honoured only for targets Tom has
-  granted in the ledger, and never for the repository's default branch.
+- A spec never decides by itself where a merge may land. Without
+  `merge_url` the merge lands on the task's own bare origin. With it, the
+  merge lands on that URL only when Tom has granted the (URL, branch) pair
+  (`python -m core merge-target add`), and never on the remote's default
+  branch; `start` refuses otherwise.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

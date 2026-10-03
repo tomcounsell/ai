@@ -224,9 +224,13 @@ def hostile(workspace: str | Path) -> list[str]:
     return found
 
 
-def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+def run(
+    workspace: str | Path, *args: str, text: bool = True, credential: Path | None = None
+) -> subprocess.CompletedProcess:
     """One git call in the workspace, refused before it runs when the
-    workspace's config is hostile."""
+    workspace's config is hostile. With `credential`, the per-call config
+    file `core.credentials.header_file` wrote, git reads it as its global
+    config, which carries the merge's pinned header and nothing else."""
     found = hostile(workspace)
     if found:
         raise GitError(
@@ -234,7 +238,11 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
             "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
             "key is refused): " + "; ".join(found)
         )
-    return _git(workspace, *args, text=text)
+    return _git(workspace, *args, text=text, extra_env=_credential_env(credential))
+
+
+def _credential_env(credential: Path | None) -> dict[str, str] | None:
+    return {"GIT_CONFIG_GLOBAL": str(credential)} if credential is not None else None
 
 
 def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None) -> str:
@@ -248,8 +256,8 @@ def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None
     return done.stdout.strip()
 
 
-def out(workspace: str | Path, *args: str) -> str:
-    done = run(workspace, *args)
+def out(workspace: str | Path, *args: str, credential: Path | None = None) -> str:
+    done = run(workspace, *args, credential=credential)
     if done.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {done.stderr.strip()}")
     return done.stdout.strip()
@@ -319,17 +327,28 @@ def push_url(workspace: str | Path, remote: str = "origin") -> str:
     return url
 
 
-def remote_head(workspace: str | Path, url: str) -> str | None:
+def remote_head(workspace: str | Path, url: str, credential: Path | None = None) -> str | None:
     """The branch a remote's HEAD names, or None when it names none (an
-    unborn HEAD lists nothing)."""
-    listed = run(workspace, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
+    unborn HEAD lists nothing). A remote that does not answer raises
+    `GitError` carrying git's stderr."""
+    listed = run(
+        workspace,
+        "ls-remote",
+        "--symref",
+        "--upload-pack=git-upload-pack",
+        url,
+        "HEAD",
+        credential=credential,
+    )
+    if listed.returncode != 0:
+        raise GitError(listed.stderr.strip()[:300])
     for line in listed.stdout.splitlines():
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             return line[len("ref: refs/heads/") : -len("\tHEAD")]
     return None
 
 
-def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
+def push(workspace: str | Path, url: str, sha: str, branch_name: str, credential: Path | None = None) -> None:
     """Push one commit to one branch at an explicit URL, never with force.
     `run` refuses a workspace whose config could rewrite where it lands."""
     if run(workspace, "check-ref-format", "--branch", branch_name).returncode != 0:
@@ -346,14 +365,24 @@ def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
         "--receive-pack=git-receive-pack",
         url,
         f"{sha}:refs/heads/{branch_name}",
+        credential=credential,
     )
 
 
-def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
+def remote_sha(
+    workspace: str | Path, url: str, branch_name: str, credential: Path | None = None
+) -> str | None:
     """The branch's tip at the remote, or None when the remote answered and
     holds no such branch. A remote that does not answer raises `GitError`:
     unreachable is not the same as absent."""
-    listed = run(workspace, "ls-remote", "--upload-pack=git-upload-pack", url, f"refs/heads/{branch_name}")
+    listed = run(
+        workspace,
+        "ls-remote",
+        "--upload-pack=git-upload-pack",
+        url,
+        f"refs/heads/{branch_name}",
+        credential=credential,
+    )
     if listed.returncode != 0:
         raise GitError(f"ls-remote {url}: {listed.stderr.strip()[:200]}")
     fields = listed.stdout.split()
@@ -363,13 +392,15 @@ def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
 LOOKUP_REF = "refs/valor-kernel/lookup"
 
 
-def holds(workspace: str | Path, url: str, branch_name: str, sha: str) -> bool | None:
+def holds(
+    workspace: str | Path, url: str, branch_name: str, sha: str, credential: Path | None = None
+) -> bool | None:
     """Whether the remote branch holds `sha`: its tip, or a commit the tip
     descends from (the branch may have moved on since). None when the
     remote holds no such branch. The tip is fetched into the kernel's own
     ref (`LOOKUP_REF`), so ancestry is read from objects the remote sent
     now. Raises `GitError` when the remote cannot be read."""
-    tip = remote_sha(workspace, url, branch_name)
+    tip = remote_sha(workspace, url, branch_name, credential)
     if tip is None:
         return None
     if tip == sha:
@@ -378,6 +409,7 @@ def holds(workspace: str | Path, url: str, branch_name: str, sha: str) -> bool |
         workspace,
         "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
         "--upload-pack=git-upload-pack", url, f"+refs/heads/{branch_name}:{LOOKUP_REF}",
+        credential=credential,
     )  # fmt: skip
     return is_ancestor(workspace, sha, LOOKUP_REF)
 

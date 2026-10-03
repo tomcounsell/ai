@@ -243,6 +243,14 @@ class Settings:
         return str(Path(self.pg_passfile).parent / "judgement-keys")
 
     @property
+    def github_keyfile(self) -> str:
+        """The GitHub push token (`GITHUB_PUSH_TOKEN`), in the kernel key
+        directory, written by `python -m core github-key` and read only by
+        the merge performer. Derived from `pg_passfile` as the judgement
+        keys are."""
+        return str(Path(self.pg_passfile).parent / "github-keys")
+
+    @property
     def claude_token_file(self) -> str:
         """A long-lived Claude token (`claude setup-token`), in the kernel key
         directory, which the gateway sends upstream in place of the dummy a

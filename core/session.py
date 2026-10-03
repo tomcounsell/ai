@@ -50,13 +50,19 @@ async def _always() -> bool:
 
 
 async def run(
-    gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None = None, alive: Alive = _always
+    gateway: Gateway,
+    task_id: str,
+    turn_for: TurnFor,
+    dsn: str | None = None,
+    alive: Alive = _always,
+    performers: broker.Performers | None = None,
 ) -> dict[str, Any]:
     """Run turns in the task's current working state until it leaves it.
     Returns `status`: `moved` (the fold left the state), `failed`, `idle`,
     `stopped`, or `lock lost` (the router's run lock died), with the task's
     `state` from `tasks.status`."""
     dsn = dsn or gateway.dsn
+    performers = performers or broker.Performers()
     idle = 0
     async with await db.connect(dsn) as conn:
         state = machine.fold(await ledger.read(conn, task_id)).state
@@ -72,7 +78,14 @@ async def run(
             b = await tasks.brief(conn, task_id)
             prompt, resume = await next_prompt(conn, task_id)
         try:
-            ended = await runs.run_turn(gateway, task_id, turn_for(prompt, resume, b), dsn=dsn, state=state)
+            ended = await runs.run_turn(
+                gateway,
+                task_id,
+                turn_for(prompt, resume, b),
+                dsn=dsn,
+                state=state,
+                offered=performers.offered(),
+            )
         except tasks.TaskStopped:
             return {"status": "stopped"}
         found = signals.collect(b.workspace, ended["turn_id"]) if b.workspace else signals.Signals()
@@ -89,6 +102,7 @@ async def run(
                 workspace=b.workspace,
                 finished=ok,
                 brief=b,
+                performers=performers,
             )
             now = await tasks.status(conn, task_id)
         if now["state"] == State.STOPPED.value:
@@ -229,6 +243,7 @@ async def record(
     workspace: str | None,
     finished: bool = True,
     brief: tasks.Brief | None = None,
+    performers: broker.Performers | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
     the broker. Returns the verdict. For a task with a kernel mirror, a plan
@@ -241,7 +256,10 @@ async def record(
         elif "request" in entry:
             r = entry["request"]
             outcome = await broker.request(
-                conn, task_id, broker.Action(r["action_type"], r["target"], r["payload"])
+                conn,
+                performers or broker.Performers(),
+                task_id,
+                broker.Action(r["action_type"], r["target"], r["payload"]),
             )
             entry = {**entry, "effect_id": outcome.effect_id, "kind": outcome.kind, "error": outcome.error}
         effects.append(entry)

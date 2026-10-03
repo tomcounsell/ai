@@ -54,6 +54,8 @@ def _run(tmp_path: Path, name: str) -> dict:
 
 
 async def _held_push(dsn: str, ws: dict) -> str:
+    from tools.push_branch import PushBranch
+
     async with await db.connect(dsn) as conn:
         task = await tasks.start(
             conn,
@@ -61,6 +63,7 @@ async def _held_push(dsn: str, ws: dict) -> str:
         )
         held = await broker.request(
             conn,
+            broker.Performers(PushBranch(ws["workdir"])),
             task,
             broker.Action("push_branch", "valor/work", {"head_sha": git(ws["workdir"], "rev-parse", "HEAD")}),
         )
@@ -69,13 +72,9 @@ async def _held_push(dsn: str, ws: dict) -> str:
 
 
 def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_path, monkeypatch):
-    from tools.push_branch import PushBranch
-
     monkeypatch.setenv("VALOR_DB", TEST_DB)
     local, elsewhere = _run(tmp_path, "local"), _run(tmp_path, "elsewhere")
-    broker.register(PushBranch(local["workdir"]))
     local_task = asyncio.run(_held_push(dsn, local))
-    broker.register(PushBranch(elsewhere["workdir"]))
     other_task = asyncio.run(_held_push(dsn, elsewhere))
     # The workspace's config is rewritten after the push was held, as a turn
     # could rewrite it.

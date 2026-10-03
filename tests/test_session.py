@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, router, session, signals, spending, tasks
+from core import broker, db, ledger, session, signals, spending, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
 from tests import judgement_upstream, scripted
@@ -39,7 +39,7 @@ async def drive(dsn, task) -> dict:
     gateway = Gateway(dsn)
     await gateway.start()
     try:
-        return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+        return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
     finally:
         await gateway.close()
 
@@ -69,8 +69,8 @@ def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, 
     t = scripted.turns(ws)
     assert [x["stage"] for x in t] == ["clarify", "clarify", "plan"]
     assert t[0]["prompt"] == "Write Tom a greeting." and t[0]["resume"] == ""
-    assert t[1]["prompt"] == "# Tom's answer\n\nMorning, Tom." and t[1]["resume"] == "session-1"
-    assert t[2]["prompt"].startswith("# No material question") and t[2]["resume"] == "session-1"
+    assert t[1]["prompt"] == "# Tom's answer\n\nMorning, Tom." and t[1]["resume"] == scripted.SESSION
+    assert t[2]["prompt"].startswith("# No material question") and t[2]["resume"] == scripted.SESSION
     for x in t:
         assert "# Corrections from Tom" in x["brief"] and "# How this task reaches Tom" in x["brief"]
     assert "push_branch" in t[0]["brief"] and "`merge`" not in t[0]["brief"]
@@ -96,9 +96,9 @@ def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(d
         push = next(e for e, s in st["effects"].items() if s == "pending" and e != merge)
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, push, note="push it")
-            await broker.release(conn, push)
+            await scripted.release(conn, push)
             await broker.approve(conn, merge, note="merge it")
-            merged = await broker.release(conn, merge)
+            merged = await scripted.release(conn, merge)
             await session.feedback(conn, task, "Greet him by name.")
         patched = await drive(dsn, task)
         return task, planned, built, delivered, merged, patched
@@ -116,7 +116,7 @@ def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(d
     assert [x["stage"] for x in t] == ["plan", "build", "patch"]
     assert t[1]["prompt"].startswith("# Critique: sound")
     assert t[2]["prompt"].startswith("# Tom's feedback on the delivery\n\nGreet him by name.")
-    assert all(x["resume"] == "session-1" for x in t[1:])
+    assert all(x["resume"] == scripted.SESSION for x in t[1:])
     assert "Plan: docs/plan.md" in t[1]["brief"] and "# Stage: build" in t[1]["brief"]
 
 
@@ -199,14 +199,14 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
                 conn,
                 task,
                 "turn.ended",
-                {"turn_id": "turn-1", "outcome": "done", "result": {"session_id": "s"}},
+                {"turn_id": "turn-1", "outcome": "done", "result": {"session_id": scripted.SESSION}},
             )
             verdict = await session.record(conn, task, "turn-1", found, state=tasks.machine.State.PLAN,
                                            workspace=str(ws))  # fmt: skip
             return verdict, await session.next_prompt(conn, task), await tasks.status(conn, task)
 
     verdict, (prompt, resume), state = run(go())
-    assert verdict == "idle" and resume == "s" and prompt.startswith("Continue.")
+    assert verdict == "idle" and resume == scripted.SESSION and prompt.startswith("Continue.")
     assert "bad.json: unreadable request" in prompt
     assert "no_such_action -> tom" in prompt and "refused: no performer" in prompt
     assert "merge.json: the merge is the kernel's to request" in prompt
@@ -310,12 +310,16 @@ def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(tmp_path):
 
     # A hook in the default directory is pinned off; a hooks path or a
     # receive program in the workspace's config refuses the push outright.
-    pushed = PushBranch(ws).perform(broker.Action("push_branch", "valor/x", {"head_sha": head}), "key")
+    pushed = asyncio.run(
+        PushBranch(ws).perform(broker.Action("push_branch", "valor/x", {"head_sha": head}), "key")
+    )
     assert pushed["sha"] == head and git(origin, "rev-parse", "valor/x").strip() == head
     git(ws, "config", "core.hooksPath", str(tmp_path / "hooks"))
     git(ws, "config", "remote.origin.receivepack", str(receive))
     with pytest.raises(ValueError, match="core.hookspath"):
-        PushBranch(ws).perform(broker.Action("push_branch", "valor/y", {"head_sha": head}), "key")
+        asyncio.run(
+            PushBranch(ws).perform(broker.Action("push_branch", "valor/y", {"head_sha": head}), "key")
+        )
     assert not marker.exists()
 
 

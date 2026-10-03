@@ -813,15 +813,16 @@ was decided by default. It has no questions for Tom.
   without the expected header): a released merge lands with the file, is
   refused without it, `push_branch` never sends the header, and a
   workspace or mirror holding any `http.*` key is still refused; a merge
-  to a pair missing from the merge-target list, or to the remote's default
-  branch (the local server's `HEAD`), is refused at request and at
-  release, with an edited `projects/valor.toml` naming it. Live, at
+  to a pair missing from the merge-target list is refused at start, at
+  request, and at release, with an edited `projects/valor.toml` naming it;
+  the remote's default branch (the local server's `HEAD`) is refused at
+  start and before the push. Live, at
   rollout, with the chosen token: one released merge to a scratch branch
   on `tomcounsell/ai`.
 
 ### Transcripts
 
-When any turn ends (working or fresh), the kernel copies its Claude Code
+When any turn with its own config directory ends (working or fresh), the kernel copies its Claude Code
 session file into `transcript` documents (one per file per chunk) and
 records `transcript: {files: [{name, documents, sha256, bytes, offset,
 prefix_changed}]}` on `turn.ended`. The kernel chooses the session id

@@ -94,7 +94,7 @@ what a real task runs. Its arguments:
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--disallowedTools WebFetch WebSearch` | no web tools | independent checks: a replay cannot fetch its own answer (rebuild-baseline.md, Caveats); retrieved pages carry no instructions into the turn [7] |
 | `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the persona and the Brief, re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
-| `--resume SESSION` | continues the task's session | Mission item 1 (see below) |
+| `--session-id ID` or `--resume SESSION` | a new session under an id the kernel chose, or the task's session continued | Mission item 1 (see below); the kernel knows which transcript is the turn's |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
 
 The demonstration checked the system-prompt row: every `turn.started` row
@@ -292,12 +292,12 @@ The session file lives in a directory the turn must write to keep its
 session, so it is the turn's own account, as editable by the turn as
 `done.md`. It is evidence for a verifier and a debugger, never a ledger.
 
-**Design, beyond the current kernel.** When a turn ends, the kernel copies
-the session file into the document store with its SHA-256 recorded in the
-ledger, so a later edit is detectable and the transcript survives Claude
-Code's own housekeeping. The current kernel records the session id and
-leaves the file where Claude Code wrote it. The copy is a new document
-kind, which needs no migration (`docs/data.md`, documents).
+When a turn with its own config directory ends, stopped or not, the
+kernel copies the session file and its subagents' files into the store as
+`transcript` documents (`core/transcripts.py`, `docs/data.md`), each
+file's SHA-256 on `turn.ended`, so an edit is detectable and the copy
+outlives Claude Code's housekeeping. It follows no link, skips a file not
+regular or with more than one link, and a failed copy says `no_transcript`.
 
 ## Metering through the gateway
 

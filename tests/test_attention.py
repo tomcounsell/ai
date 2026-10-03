@@ -46,10 +46,10 @@ def cli(*args) -> subprocess.CompletedProcess:
 
 
 async def _held(dsn, task, tmp_path, text) -> str:
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
     async with await db.connect(dsn) as conn:
         return (
-            await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": text}))
+            await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": text}))
         ).effect_id
 
 
@@ -69,8 +69,9 @@ def test_an_approval_carries_provenance_and_counts_apart_from_questions_and_feed
     assert cli("approve", live, "--note", "yes, send it").returncode == 0
 
     async def after():
+        perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
         async with await db.connect(dsn) as conn:
-            released = await broker.release(conn, played)
+            released = await broker.release(conn, perf, played)
             return released, await tasks.status(conn, task)
 
     released, state = run(after())

@@ -340,7 +340,9 @@ same task sends no header and lands on the local origin; a `--workspace`
 task whose origin is a granted loopback URL merges with no header (401),
 and its `push_branch` sends none; a mirror holding an `http.` or `url.` key
 is refused before any request; on a redirect the second server never
-receives the header (git's own behaviour); no leak: while the server holds
+receives the header (git 2.39.5 sends it to the first redirect's target,
+`http.followRedirects=initial`, so the test is marked expected to fail;
+pinning `followRedirects=false` is a guard and waits on a grant); no leak: while the server holds
 a push open, `ps -E -ww` from the kernel and `pgrep -lf` and `ps -E -ww`
 from a probe under `turn.sb` show no process whose arguments or environment
 contain the token, its base64 form, or the file's contents, and the probe

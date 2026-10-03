@@ -23,7 +23,7 @@ since it does not keep a session; the kernel connects directly.
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ class Context:
     dsn: str
     alive: Callable[[], Awaitable[bool]]
     check: Check | None = None
+    performers: broker.Performers = field(default_factory=broker.Performers)
 
 
 Runner = Callable[[Context], Awaitable[dict[str, Any]]]
@@ -46,9 +47,16 @@ SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.STOPPED: "sto
 
 
 async def run(
-    gateway: Gateway, task_id: str, runners: Mapping[State | Check, Runner], dsn: str | None = None
+    gateway: Gateway,
+    task_id: str,
+    runners: Mapping[State | Check, Runner],
+    dsn: str | None = None,
+    performers: broker.Performers | None = None,
 ) -> dict[str, Any]:
     """Run the task until it needs Tom or a runner that does not exist.
+    `performers` are the task's own, built by the composition root from its
+    Brief; every runner gets them in its `Context`, and the merge and its
+    reconcile use them.
     Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
     runner`, `legacy`, `calibration task`, `already running`, `lock lost`, or what a runner
     returned: `failed`, `idle`) and the task's state."""
@@ -72,7 +80,9 @@ async def run(
         services = await _Services.open(dsn, task_id)
         await services.sweep()
         try:
-            return await _loop(gateway, task_id, runners, dsn, alive, services)
+            return await _loop(
+                gateway, task_id, runners, dsn, alive, services, performers or broker.Performers()
+            )
         finally:
             await asyncio.to_thread(services.down)
     finally:
@@ -125,7 +135,9 @@ class _Services:
             self.started = False
 
 
-async def _loop(gateway, task_id, runners, dsn, alive, services: _Services) -> dict[str, Any]:
+async def _loop(
+    gateway, task_id, runners, dsn, alive, services: _Services, performers: broker.Performers
+) -> dict[str, Any]:
     while True:
         if not await alive():
             return {"status": "lock lost"}
@@ -140,11 +152,14 @@ async def _loop(gateway, task_id, runners, dsn, alive, services: _Services) -> d
             if f.state is State.MERGE:
                 # A release that died mid-merge: settle it from the target, then fold again.
                 dangling = f.merge_effect and f.merge_effect["state"] == "in_flight"
-                if dangling and await broker.reconcile(conn, f.merge_effect["effect_id"]) is not None:
+                if (
+                    dangling
+                    and await broker.reconcile(conn, performers, f.merge_effect["effect_id"]) is not None
+                ):
                     continue
-                await verdicts.ensure_merge(conn, task_id)
+                await verdicts.ensure_merge(conn, performers, task_id)
                 return {"status": "delivered", "state": await tasks.status(conn, task_id)}
-        ctx = Context(gateway, task_id, dsn, alive)
+        ctx = Context(gateway, task_id, dsn, alive, performers=performers)
         if runners.get(f.state) is not None or (
             f.state is State.CHECKS and any(c in runners for c in Check if c not in f.checks)
         ):
@@ -158,7 +173,7 @@ async def _loop(gateway, task_id, runners, dsn, alive, services: _Services) -> d
             ran = False
             for check in missing:
                 if check in runners:
-                    out = await runners[check](Context(gateway, task_id, dsn, alive, check))
+                    out = await runners[check](Context(gateway, task_id, dsn, alive, check, performers))
                     if out.get("status") != "moved":
                         return out
                     ran = True

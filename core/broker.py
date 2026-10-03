@@ -33,6 +33,12 @@ never a silent effect. The performing process holds a session lock on the
 effect from before its intent to its outcome; `reconcile` settles an intent
 whose lock is free (its process died) by asking the target through the
 performer's `lookup`, and the router does so for a task's merge.
+
+Performers are the task's own: the composition root builds a `Performers`
+from the task's Brief and passes it to every call here, so one task's
+performer never acts for another. Every performer method is a coroutine;
+one that runs git runs it in a worker thread, so the event loop the
+gateway's streams run on never waits on a push.
 """
 
 from contextlib import asynccontextmanager
@@ -48,16 +54,17 @@ from core.tasks import EFFECT_RANK
 
 class Performer(Protocol):
     """`usage` is the line a turn's Brief lists for this action, or None
-    when turns are not offered it. A performer may define `refuse(action)`,
-    returning why it will not take an action, checked at request."""
+    when turns are not offered it. A performer may define
+    `async refuse(conn, action)`, returning why it will not take an action,
+    checked at request and at release inside their transaction."""
 
     action_type: str
     effect_class: str
     usage: str | None
 
-    def perform(self, action: Action, key: str) -> dict[str, Any]: ...
+    async def perform(self, action: Action, key: str) -> dict[str, Any]: ...
 
-    def lookup(self, action: Action, key: str) -> dict[str, Any] | None: ...
+    async def lookup(self, action: Action, key: str) -> dict[str, Any] | None: ...
 
 
 @dataclass(frozen=True)
@@ -112,18 +119,22 @@ class MergeRefused(Refused):
         self.terms = terms
 
 
-PERFORMERS: dict[str, Performer] = {}
+class Performers:
+    """One task's performers, by action type."""
 
+    def __init__(self, *performers: Performer):
+        self._by_type: dict[str, Performer] = {}
+        for p in performers:
+            if p.effect_class not in EFFECT_RANK:
+                raise ValueError(f"unknown effect class {p.effect_class!r}")
+            self._by_type[p.action_type] = p
 
-def register(performer: Performer) -> None:
-    if performer.effect_class not in EFFECT_RANK:
-        raise ValueError(f"unknown effect class {performer.effect_class!r}")
-    PERFORMERS[performer.action_type] = performer
+    def get(self, action_type: str) -> Performer | None:
+        return self._by_type.get(action_type)
 
-
-def offered() -> list[str]:
-    """The usage line of every registered performer a turn may request."""
-    return [p.usage for _, p in sorted(PERFORMERS.items()) if getattr(p, "usage", None)]
+    def offered(self) -> list[str]:
+        """The usage line of every performer a turn may request."""
+        return [p.usage for _, p in sorted(self._by_type.items()) if getattr(p, "usage", None)]
 
 
 def _governance(f: machine.Fold, action: Action) -> tuple[bool, list[machine.Instance]]:
@@ -168,14 +179,14 @@ async def _unlock(conn, key: str) -> None:
         pass
 
 
-async def request(conn, task_id: str, action: Action) -> Outcome:
+async def request(conn, performers: Performers, task_id: str, action: Action) -> Outcome:
     effect_id = ledger.new_id()
     async with _performing(conn, effect_id):
-        return await _request(conn, task_id, action, effect_id)
+        return await _request(conn, performers, task_id, action, effect_id)
 
 
-async def _request(conn, task_id: str, action: Action, effect_id: str) -> Outcome:
-    performer = PERFORMERS.get(action.action_type)
+async def _request(conn, performers: Performers, task_id: str, action: Action, effect_id: str) -> Outcome:
+    performer = performers.get(action.action_type)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         brief = await tasks.brief(conn, task_id)
@@ -197,7 +208,7 @@ async def _request(conn, task_id: str, action: Action, effect_id: str) -> Outcom
             reason = "adds governance with no grant from Tom for instance " + ", ".join(
                 f"{i.id} ({i.path})" for i in ungranted
             )
-        elif refuse is not None and (said := refuse(action)):
+        elif refuse is not None and (said := await refuse(conn, action)):
             reason = said
         if reason is not None:
             await ledger.append(
@@ -208,7 +219,7 @@ async def _request(conn, task_id: str, action: Action, effect_id: str) -> Outcom
             await ledger.append(conn, task_id, "effect.held", {"effect_id": effect_id, **described})
             return Outcome(effect_id, "pending")
         await _intent(conn, task_id, effect_id, described, approval_id=None)
-    return await _perform(conn, task_id, effect_id, action, described)
+    return await _perform(conn, performers, task_id, effect_id, action, described)
 
 
 async def approve(
@@ -242,17 +253,25 @@ async def approve(
     return approval_id
 
 
-async def release(conn, effect_id: str) -> Outcome:
+async def release(conn, performers: Performers, effect_id: str) -> Outcome:
     """Perform a held `act` effect that Tom approved. Raises `NotApproved`
     when no unused approval matches it, and for a `merge`, `MergeRefused`
     naming every predicate term that does not hold. The checks and the
     intent row are one transaction under the task's lock; nothing is
     written when either refuses, and the approval stays unused."""
     async with _performing(conn, effect_id):
-        return await _release(conn, effect_id)
+        return await _release(conn, performers, effect_id)
 
 
-async def reconcile(conn, effect_id: str, settle_after_s: float | None = None) -> Outcome | None:
+async def held_task(conn, effect_id: str) -> str:
+    """The task a held effect belongs to, so the caller can build its
+    performers before `release`."""
+    return (await _held(conn, effect_id))["task_id"]
+
+
+async def reconcile(
+    conn, performers: Performers, effect_id: str, settle_after_s: float | None = None
+) -> Outcome | None:
     """Settle a held effect whose intent has no outcome because the process
     performing it died: ask the target through the performer's `lookup`.
     Present: `done`. Absent: `failed`, but only once the intent is older
@@ -282,12 +301,12 @@ async def reconcile(conn, effect_id: str, settle_after_s: float | None = None) -
                 )
             ).fetchall()
         }
-        performer = PERFORMERS.get(described["action_type"])
+        performer = performers.get(described["action_type"])
         if kinds != {"effect.intent"} or performer is None:
             return None
         action = Action(described["action_type"], described["target"], described["payload"])
         try:
-            found = performer.lookup(action, described["idempotency_key"])
+            found = await performer.lookup(action, described["idempotency_key"])
         except Exception:  # noqa: BLE001  unknown: conclude nothing
             return None
         if not found:
@@ -323,7 +342,7 @@ async def reconcile(conn, effect_id: str, settle_after_s: float | None = None) -
         await _unlock(conn, key)
 
 
-async def _release(conn, effect_id: str) -> Outcome:
+async def _release(conn, performers: Performers, effect_id: str) -> Outcome:
     async with conn.transaction():
         held = await _held(conn, effect_id)
         task_id, described = held["task_id"], held["payload"]
@@ -345,8 +364,11 @@ async def _release(conn, effect_id: str) -> Outcome:
             )
         ).fetchone()
         action = Action(described["action_type"], described["target"], described["payload"])
-        refuse = getattr(PERFORMERS.get(action.action_type), "refuse", None)
-        if refuse is not None and (said := refuse(action)):
+        performer = performers.get(action.action_type)
+        if performer is None:
+            raise Refused(f"no performer for {action.action_type}")
+        refuse = getattr(performer, "refuse", None)
+        if refuse is not None and (said := await refuse(conn, action)):
             raise Refused(said)
         if described["action_type"] == "merge":
             f = machine.fold(await ledger.read(conn, task_id))
@@ -362,7 +384,7 @@ async def _release(conn, effect_id: str) -> Outcome:
         if row is None:
             raise NotApproved(f"effect {effect_id} has no approval from Tom")
         await _intent(conn, task_id, effect_id, described, approval_id=row[0])
-    return await _perform(conn, task_id, effect_id, action, described)
+    return await _perform(conn, performers, task_id, effect_id, action, described)
 
 
 def _git_facts(workspace: str | None, f: machine.Fold, payload: dict[str, Any]) -> machine.GitFacts | None:
@@ -406,15 +428,15 @@ async def _intent(conn, task_id, effect_id, described, *, approval_id) -> None:
     )
 
 
-async def _perform(conn, task_id, effect_id, action, described) -> Outcome:
+async def _perform(conn, performers, task_id, effect_id, action, described) -> Outcome:
     """Run the performer after its intent committed, then write the outcome."""
-    performer = PERFORMERS[action.action_type]
+    performer = performers.get(action.action_type)
     key = described["idempotency_key"]
     try:
-        result, kind, error = performer.perform(action, key), "done", None
+        result, kind, error = await performer.perform(action, key), "done", None
     except Exception as exc:  # noqa: BLE001  the target said no, or its state is in doubt
         try:
-            found = performer.lookup(action, key)
+            found = await performer.lookup(action, key)
         except Exception as unknown:  # noqa: BLE001
             found, exc = None, RuntimeError(f"{exc!r}; and whether it happened is unknown: {unknown}")
         result, kind, error = found or {}, ("done" if found else "failed"), repr(exc)

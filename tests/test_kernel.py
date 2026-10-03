@@ -105,21 +105,24 @@ def test_prices_round_up_and_match_dated_ids():
 
 
 def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_path):
-    broker.register(WorkspaceWrite(tmp_path))
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
         task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            wrote = await broker.request(conn, task, broker.Action("workspace_write", "a.txt", {"text": "a"}))
-            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
-            again = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            wrote = await broker.request(
+                conn, perf, task, broker.Action("workspace_write", "a.txt", {"text": "a"})
+            )
+            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            again = await broker.request(
+                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"})
+            )
             with pytest.raises(broker.NotApproved):
-                await broker.release(conn, held.effect_id)
+                await broker.release(conn, perf, held.effect_id)
             lines_before = _lines(tmp_path / "outbox.jsonl")
             await broker.approve(conn, held.effect_id, note="send it")
-            sent = await broker.release(conn, held.effect_id)
-            repeat = await broker.release(conn, held.effect_id)
+            sent = await broker.release(conn, perf, held.effect_id)
+            repeat = await broker.release(conn, perf, held.effect_id)
             state = await tasks.status(conn, task)
         return wrote, held, again, lines_before, sent, repeat, state
 
@@ -133,16 +136,15 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
 
 
 def test_ceiling_and_stop_refuse_effects(dsn, tmp_path):
-    broker.register(WorkspaceWrite(tmp_path))
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
         low = await new_task(dsn, max_effect_class="propose")
         async with await db.connect(dsn) as conn:
-            above = await broker.request(conn, low, broker.Action("outbox_send", "tom", {"text": "x"}))
+            above = await broker.request(conn, perf, low, broker.Action("outbox_send", "tom", {"text": "x"}))
             await tasks.stop(conn, low, reason="test")
             after_stop = await broker.request(
-                conn, low, broker.Action("workspace_write", "b.txt", {"text": "b"})
+                conn, perf, low, broker.Action("workspace_write", "b.txt", {"text": "b"})
             )
         return above, after_stop
 
@@ -156,14 +158,14 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
     """The flag is the broker's to compute from the review and docs verdicts
     (tests/test_pipeline.py has the merge cases); no requester can set it,
     and what the broker computed is what the ledger records."""
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
     with pytest.raises(TypeError):
         broker.Action("outbox_send", "tom", {"text": "x"}, adds_governance=True)
 
     async def go():
         task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "x"}))
+            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "x"}))
             rows = await ledger.read(conn, task)
         return held, rows
 

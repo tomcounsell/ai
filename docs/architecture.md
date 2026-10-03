@@ -178,7 +178,8 @@ Two performers run in the kernel's process, never forcing: `push_branch`
 (`act`) pushes one commit to one branch, never the target branch, to `push_url`
 or else the origin URL recorded at start; `merge` (`act`, offered to no turn)
 pushes a passed candidate onto the target branch at the recorded origin URL,
-from the kernel mirror when there is one. The kernel runs no program a turn
+from the kernel mirror with the GitHub token when there is one, only to a
+(URL, branch) pair Tom granted and never to the remote's default branch. The kernel runs no program a turn
 chose: its git (the Command Line Tools' install), `ps`, and `sandbox-exec` are
 checked before each run to be root's alone (`core/binaries.py`), and its git
 refuses a workspace whose config names a program, redirects a push, sets any
@@ -280,12 +281,12 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage | yes |
-| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend, the transcript copy's digests) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
-The harness's transcript of tool calls and results is a fourth record, but
-it is the agent's own account written inside the sandbox, so nothing that
-decides anything trusts it. The verifier re-executes rather than reading it.
+The harness's transcript of tool calls and results is a fourth record,
+copied into the store when the turn ends, but it is the agent's own account
+written inside the sandbox, so nothing that decides anything trusts it. The verifier re-executes rather than reading it.
 
 These serve legibility: a turn is reconstructable from rows the system
 wrote. **Design:** the turn record gains the harness's pid with its
@@ -327,7 +328,7 @@ a process overwriting its own environment. Serves: reliable stop; and the
 --project NAME` provisions a task's workspace from a project spec
 (`projects/`) before the task starts: a clone holding history only up to the
 base; a local bare origin as its only remote, where `push_branch` goes and,
-until the GitHub credential, the merge; the kernel mirror, a bare repository
+when the spec names no `merge_url`, the merge; the kernel mirror, a bare repository
 only the kernel writes, into which plan commits, candidates, and docs heads
 are fetched and from which the merge predicate and the merge read; a Postgres
 cluster of the task's own (and a Redis when the project asks) on its own
