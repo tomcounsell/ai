@@ -95,6 +95,12 @@ OPEN_WEIGHT_MODEL = "qwen/qwen3-235b-a22b-2507"
 OPEN_WEIGHT_PROVIDER = "parasail/fp8"  # OpenRouter's endpoint tag
 OPEN_WEIGHT_PROVIDER_NAME = "Parasail"  # what OpenRouter names on the response
 OPEN_WEIGHT_PIN = f"{OPEN_WEIGHT_MODEL}@{OPEN_WEIGHT_PROVIDER}"
+# The pinned endpoint's context and the most it answers, in tokens, as
+# OpenRouter lists them (https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints,
+# checked 2026-10-03): an input past the context is one the host refuses,
+# and no call is billed more output than the completion figure.
+OPEN_WEIGHT_CONTEXT = 131_072
+OPEN_WEIGHT_MAX_COMPLETION = 117_964
 
 # Kept apart from `PRICES`, so the gateway never prices a model it would
 # forward to Anthropic.
@@ -162,13 +168,10 @@ class Settings:
     jev_timeout_s: float = 10.0
     open_weight_timeout_s: float = 30.0
     # Estimated input tokens a leg is sent at most (Jev documents 32k for
-    # the state plus the longest question; the fallback's context is 262k
-    # and the cap bounds a call's worst case).
+    # the state plus the longest question; the fallback's endpoint holds
+    # `OPEN_WEIGHT_CONTEXT`).
     jev_max_input_tokens: int = 30_000
-    open_weight_max_input_tokens: int = 100_000
-    open_weight_max_tokens: int = 400
-    # Judgement calls in flight at once for one diff's governance hunks.
-    judgement_concurrency: int = 8
+    open_weight_max_input_tokens: int = OPEN_WEIGHT_CONTEXT
     # Where `python -m core judgement-keys` copies the keys from.
     vault_env: str = field(
         default_factory=lambda: _env("VALOR_VAULT_ENV", str(Path.home() / "Desktop" / "Valor" / ".env"))
@@ -201,8 +204,6 @@ class Settings:
     )
     pg_ports: tuple[int, int] = (5440, 5599)
     redis_ports: tuple[int, int] = (6400, 6499)
-    # How long one `setup` command may run at provisioning.
-    setup_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_SETUP_TIMEOUT_S", "1200")))
     # The kernel mirror's fetch from a builder's clone: the largest file the
     # receiving git may write, and the footprint past which it is killed
     # (macOS enforces no memory limit on a process).

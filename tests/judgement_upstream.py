@@ -13,7 +13,7 @@ Two kinds of path, each ending in the leg (`jev` or `open_weight`):
   `precise` or `thin` for the request judge (thin is `one_line_ask`),
   `true` or `false` for a boolean. The emulator's forced arms use this.
 - `/s/<script>/<leg>`: the next reply a test queued for that script (or its
-  default): `{"probs": {question: {label: p}}}`, or `{"status": 500}`,
+  default): `{"probs": {question: {label: p}}}`, or `{"status": 500}` (with `"headers"`, sent with it),
   `{"delay": seconds}`, `{"body": "raw text"}`, `{"model": "other"}`,
   `{"provider": "other"}`, `{"usage": None}`, `{"cost": 0.001}`,
   `{"drop_label": "label"}`, `{"choice": "label"}`, and `{"by_path": {path:
@@ -168,7 +168,9 @@ class Upstream:
             return web.Response(status=503, text="down")
         if "status" in spec:
             return web.Response(
-                status=spec["status"], text=spec.get("text", '{"detail": {"message": "nope"}}')
+                status=spec["status"],
+                text=spec.get("text", '{"detail": {"message": "nope"}}'),
+                headers=spec.get("headers"),
             )
         if "body" in spec:
             return web.Response(status=200, text=spec["body"], content_type="application/json")

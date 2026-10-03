@@ -531,11 +531,6 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
     assert [c["case"] for c in first["cases"]] == ["one-liner", "precise"]
 
 
-def test_calibrate_refuses_too_many_cases(dsn, tmp_path):
-    with pytest.raises(ValueError, match="at most 50"):
-        run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, _cases(tmp_path, n=51)))
-
-
 def test_an_old_task_document_carrying_mode_still_loads(dsn):
     async def go():
         b = tasks.Brief(instruction="old")
@@ -839,3 +834,123 @@ def test_a_test_verdict_reads_failures_given_as_a_generator_once(dsn, tmp_path):
 
     decided = run(go())
     assert decided["verdict"] == "red" and decided["failures"] == ["test_x failed"]
+
+
+# -- the fan-out: every hunk at once, through one connection ---------------------------
+
+
+class _Stub:
+    """A leg that answers `NO` once `need` of its calls are in flight
+    together, without a provider."""
+
+    def __init__(self, leg, need: int = 1):
+        self._leg, self.need, self.in_flight, self.most = leg, need, 0, 0
+        self._all_in: asyncio.Event | None = None
+
+    def __getattr__(self, name):
+        return getattr(self._leg, name)  # the real leg's name, model, limits, and estimate
+
+    async def ask(self, task, inputs):
+        self._all_in = self._all_in or asyncio.Event()
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        if self.in_flight >= self.need:
+            self._all_in.set()
+        await asyncio.wait_for(self._all_in.wait(), 30)
+        usage = {"input_tokens": 10, "output_tokens": 0, "reported_usd": None}
+        return judgement.LegAnswer(dict(NO), {"adds": None}, usage, self.model)
+
+
+def _stub_port(need: int = 1) -> judgement.JudgementPort:
+    legs = UP.port(fixed="false").legs
+    return judgement.JudgementPort(
+        {"jev": _Stub(legs["jev"], need), "open_weight": _Stub(legs["open_weight"])}
+    )
+
+
+async def _many_hunks(dsn, ws, n: int) -> str:
+    """A task whose candidate changes `n` lines of one file, each far
+    enough from the next to be its own hunk."""
+    commit(ws, "data/many.txt", "".join(f"line {i}\n" for i in range(n * 10)), "many lines")
+    task = await scripted.start(dsn, ws)
+    await drive(dsn, task)
+    await scripted.critique(dsn, task)
+    changed = "".join(f"line {i}{' changed' if i % 10 == 5 else ''}\n" for i in range(n * 10))
+    commit(ws, "data/many.txt", changed, "change many lines")
+    scripted.steer(ws, build="reasons")
+    await drive(dsn, task)
+    return task
+
+
+def test_governance_fan_out_runs_past_eight_at_once(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 12)
+        older, newer = await candidate_range(dsn, task)
+        hunks = judgement_sites.diff_hunks(str(ws), older, newer)
+        port = _stub_port(need=len(hunks))
+        ids = await judgement_sites.governance(port, dsn, task, older, newer)
+        return hunks, ids, port.legs["jev"].most
+
+    hunks, ids, most = run(go())
+    assert len(hunks) >= 12 and len(ids) == len(hunks) and most == len(hunks)
+
+
+def test_a_300_hunk_fan_out_opens_one_connection(dsn, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+    real = db.connect
+    opened = []
+
+    async def counted(*args, **kwargs):
+        opened.append(1)
+        return await real(*args, **kwargs)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 300)
+        older, newer = await candidate_range(dsn, task)
+        monkeypatch.setattr(db, "connect", counted)
+        ids = await judgement_sites.governance(_stub_port(), dsn, task, older, newer)
+        monkeypatch.setattr(db, "connect", real)
+        answered = await rows(dsn, task, "judgement.answered")
+        return ids, answered, await tasks_status(dsn, task)
+
+    ids, answered, state = run(go())
+    assert len(ids) >= 300 and len(opened) == 1
+    governed = {r["payload"]["judgement_id"] for r in answered if r["payload"]["site"] == GOVERNANCE.site}
+    assert governed == set(ids)
+    assert not state["open_calls"] and tasks.audit(state) == []
+
+
+def test_a_stop_between_two_hunks_opens_leaves_every_opened_call_charged(dsn, tmp_path, monkeypatch):
+    from core import spending
+
+    ws, _ = scripted.workspace(tmp_path)
+    real = spending.open_call
+    seen = []
+
+    async def stop():
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, seen[0], reason="test")
+
+    async def stopping(conn, task_id, call):
+        seen.append(task_id)
+        if len(seen) == 3:  # the second hunk's first call: a stop queues behind it
+            asyncio.get_running_loop().create_task(stop())
+            await asyncio.sleep(0.3)
+        return await real(conn, task_id, call)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 6)
+        older, newer = await candidate_range(dsn, task)
+        monkeypatch.setattr(spending, "open_call", stopping)
+        with pytest.raises(tasks.TaskStopped):
+            await judgement_sites.governance(_stub_port(), dsn, task, older, newer)
+        monkeypatch.setattr(spending, "open_call", real)
+        return await rows(dsn, task, "gateway.opened"), await rows(dsn, task, "gateway.charged"), task
+
+    opened, charged, task = run(go())
+    assert len(opened) >= 2
+    assert sorted(r["payload"]["call_id"] for r in opened) == sorted(r["payload"]["call_id"] for r in charged)
+    state = run(tasks_status(dsn, task))
+    assert state["state"] == "stopped" and not state["open_calls"] and tasks.audit(state) == []

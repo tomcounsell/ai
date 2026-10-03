@@ -124,6 +124,7 @@ async def run_turn(
         else:
             stopped.cancel()
             gateway.retire(task_id)
+            gateway.cut(task_id)  # its process has exited: no client is left
             stdout, stderr = finished.result()
             outcome = "done" if proc.returncode == 0 else "failed"
         await gateway.drain(task_id)

@@ -247,9 +247,157 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
         await pending
         await gateway.close()
         async with await db.connect(dsn) as conn:
-            return elapsed, await tasks.status(conn, task)
+            charged = [r for r in await ledger.read(conn, task) if r["type"] == "gateway.charged"]
+            return elapsed, await tasks.status(conn, task), charged
 
-    elapsed, state = run(go())
+    elapsed, state, charged = run(go())
     assert elapsed < 1
-    assert not state["open_calls"]
+    assert not state["open_calls"] and len(charged) == 1
     assert state["spent_usd_micros"] > 0  # sent or not is unknown: charged its worst case
+
+
+def test_a_turn_that_exits_cuts_its_silent_calls(dsn, tmp_path):
+    """A turn leaves a child holding a call to an upstream that never
+    answers, then exits: the run still ends, the call is charged its worst
+    case, and the run's lock is free."""
+    from core import router
+    from core.machine import State
+
+    go_on = tmp_path / "go-on"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import json, os, urllib.request\n"
+        "body = json.dumps({'model': 'claude-haiku-4-5', 'max_tokens': 50, 'messages': []}).encode()\n"
+        "url = os.environ['ANTHROPIC_BASE_URL'] + '/v1/messages'\n"
+        "urllib.request.urlopen(urllib.request.Request(url, data=body))\n"
+    )
+    turn = (
+        "import os, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(child)!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"while not os.path.exists({str(go_on)!r}): time.sleep(0.05)\n"
+    )
+
+    async def go():
+        seen = asyncio.Event()
+
+        async def on(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            seen.set()
+            while await reader.read(65536):
+                pass
+            writer.close()
+
+        server = await asyncio.start_server(on, "127.0.0.1", 0)
+        task = await new_task(dsn)
+        gateway = Gateway(dsn, upstream=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        await gateway.start()
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", turn], env={"ANTHROPIC_BASE_URL": url}, cwd=str(tmp_path), harness="t"
+        )
+
+        async def one_turn(ctx):
+            return {
+                "status": "failed",
+                "turn": await runs.run_turn(ctx.gateway, ctx.task_id, build, dsn=ctx.dsn),
+            }
+
+        running = asyncio.create_task(router.run(gateway, task, {State.JUDGE: one_turn}, dsn=dsn))
+        await asyncio.wait_for(seen.wait(), 20)
+        go_on.touch()
+        out = await asyncio.wait_for(running, 20)
+        await gateway.close()
+        server.close()
+        async with await db.connect(dsn) as conn:
+            rows = await ledger.read(conn, task)
+            free = await (
+                await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (f"run:{task}",))
+            ).fetchone()
+        return out, rows, free[0], gateway
+
+    out, rows, free, gateway = run(go())
+    assert out["status"] == "failed" and out["turn"]["outcome"] == "done"
+    opened = [r["payload"] for r in rows if r["type"] == "gateway.opened"]
+    charged = [r["payload"] for r in rows if r["type"] == "gateway.charged"]
+    assert [r["type"] for r in rows].count("turn.ended") == 1 and free is True
+    assert len(opened) == 1 and len(charged) == 1 and charged[0]["cut"] is True
+    assert charged[0]["usd_micros"] == opened[0]["estimate_usd_micros"]
+    assert not any(gateway.calls.values())
+
+
+# -- no invented output or file limit ----------------------------------------------------
+
+
+def test_workspace_turn_sets_no_output_limit_by_default(tmp_path):
+    from harnesses import claude_code
+
+    built = claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"})
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in built("http://127.0.0.1:1/t/x", "brief", "t1").env
+
+
+def test_a_spec_output_limit_reaches_the_turn(tmp_path):
+    from harnesses import claude_code
+
+    harness = {"sandbox_profile": "/p.sb", "max_output_tokens": 4096}
+    built = claude_code.workspace_turn("hi", cwd=str(tmp_path), harness=harness)
+    assert built("http://127.0.0.1:1/t/x", "brief", "t1").env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+
+
+@pytest.mark.parametrize("soft", [256, None])
+def test_start_raises_the_open_file_limit_and_never_lowers_it(soft):
+    """From a lowered soft limit it rises to the hard limit (or
+    `min(OPEN_MAX, hard)` where the hard limit is refused); from the soft
+    limit the process already has, it never falls."""
+    import json
+    import subprocess
+
+    script = (
+        "import json, resource\n"
+        "from core.__main__ import OPEN_MAX, _raise_open_files\n"
+        "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+        f"if {soft!r} is not None: resource.setrlimit(resource.RLIMIT_NOFILE, ({soft!r}, hard))\n"
+        "before = resource.getrlimit(resource.RLIMIT_NOFILE)[0]\n"
+        "_raise_open_files()\n"
+        "after, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+        "print(json.dumps([before, after, hard, OPEN_MAX]))\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    before, after, hard, open_max = json.loads(done.stdout)
+    assert after >= before
+    assert after == hard or after == min(open_max, hard) or after == before
+
+
+def test_a_term_or_hangup_of_the_kernel_interrupts_provisioning(monkeypatch):
+    """`_provision` turns SIGTERM and SIGHUP into the interrupt: the thread's
+    work sees it, and the start is cancelled."""
+    import os
+    import signal
+    import threading
+    import time
+
+    from core import __main__ as kernel
+    from core import git
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        seen = {}
+
+        entered = threading.Event()
+
+        def provision(task_id, spec, ports, *, base=None, seen=seen, entered=entered):
+            held = git.watch()
+            entered.set()  # the handlers are in place before the thread starts
+            while not held.interrupted:
+                time.sleep(0.01)
+            seen["interrupted"] = True
+            raise git.Interrupted()
+
+        monkeypatch.setattr(kernel.workspace, "provision", provision)
+
+        async def go(sig=sig, entered=entered):
+            job = asyncio.create_task(kernel._provision("t", None, {}, None))
+            assert await asyncio.to_thread(entered.wait, 20)
+            os.kill(os.getpid(), sig)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(job, 20)
+
+        run(go())
+        assert seen == {"interrupted": True}

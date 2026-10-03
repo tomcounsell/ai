@@ -58,6 +58,7 @@ import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -154,7 +155,7 @@ class Spec:
             raise Refused(f"unknown services {bad}; known: {', '.join(SERVICES)}")
         roles = tuple(raw.get("roles") or ())
         for r in roles:
-            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", r) or r in ("app", "postgres"):
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", r) or r in ("app", "postgres"):
                 raise Refused(f"role name {r!r} is not allowed")
         if roles and "postgres" not in services:
             raise Refused("roles need the postgres service")
@@ -636,7 +637,8 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         git.trusted(lay.root, "clone", "-q", "--no-tags", "--single-branch", "--branch",
                     f"valor-base/{task_id}", f"file://{cache}", str(lay.repo))  # fmt: skip
     finally:
-        git.trusted(cache, "update-ref", "-d", ref)
+        with git.uninterrupted():  # the shared cache keeps no ref of an interrupted task
+            git.trusted(cache, "update-ref", "-d", ref)
     work_branch = f"valor/{task_id[:8]}"
     git.trusted(lay.repo, "checkout", "-q", "-b", work_branch)
     git.trusted(lay.repo, "branch", "-q", "-D", f"valor-base/{task_id}")
@@ -718,21 +720,32 @@ def _remote_head(cache: Path) -> str:
 
 def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
     """Each setup command once, in the clone, under the turn's profile, with
-    the turn's environment; a failure is recorded, never fatal."""
+    the turn's environment; a failure is recorded, never fatal. A command
+    ends when its own process ends: its output goes to a file the kernel
+    holds open, not a pipe, so a child it leaves running cannot hold the
+    step open, and the child is reaped by the command's mark. There is no
+    time limit; provisioning under `git.interruptible()` ends it when
+    interrupted."""
     out: list[dict[str, Any]] = []
     env = turn_environment(harness)
     for command in spec.setup:
         mark = f"setup-{task_id}-{len(out)}"
         argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
-        try:
-            ran = subprocess.run(
-                argv, cwd=lay.repo, env={**env, runs.TURN_ENV: mark}, capture_output=True, text=True,
-                timeout=settings.setup_timeout_s, check=False,
-            )  # fmt: skip
-            code, text = ran.returncode, ran.stdout + ran.stderr
-        except subprocess.TimeoutExpired as exc:
-            code, text = "timeout", str(exc)
-        runs.reap(mark)
+        held = git.watch()
+        with tempfile.TemporaryFile() as log:
+            kwargs = {"cwd": lay.repo, "env": {**env, runs.TURN_ENV: mark}, "stdin": subprocess.DEVNULL,
+                      "stdout": log, "stderr": subprocess.STDOUT}  # fmt: skip
+            proc = git.start(argv, **kwargs)
+            try:
+                code = proc.wait()
+            finally:
+                if held:
+                    held.finished(proc)
+                runs.reap(mark)
+            if held and held.interrupted:
+                raise git.Interrupted()
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 6000))
+            text = log.read().decode(errors="replace")
         out.append({"command": command, "exit": code, "tail": text[-1500:]})
         if code != 0:
             return {"ok": False, "commands": out}
@@ -766,14 +779,17 @@ def _pg(name: str) -> str:
 def _service_run(lay: Layout, task_id: str, *argv: str, timeout: float = 120) -> subprocess.CompletedProcess:
     """A service program under the service profile."""
     full = [binaries.require(binaries.SANDBOX_EXEC), "-f", str(lay.profiles / "service.sb"), *argv]
-    return subprocess.run(
-        full,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
-    )
+    try:
+        return subprocess.run(
+            full,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired:
+        raise Refused(f"{Path(argv[0]).name} did not finish in {timeout:.0f} s") from None
 
 
 def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str, str]:
@@ -923,7 +939,7 @@ def stop_services(task_id: str, lay: Layout | None = None) -> list[dict[str, Any
     if (lay.profiles / "service.sb").exists():
         try:
             _stop_postgres(lay, task_id)
-        except subprocess.TimeoutExpired:
+        except Refused:
             pass
     reaped = runs.reap_sandboxed(mark, "valor.service.none")
     killed = {r["pid"] for r in reaped}

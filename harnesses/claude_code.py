@@ -13,8 +13,10 @@ without one.
 A `turn` runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
 from this machine), no session persistence, and `ANTHROPIC_BASE_URL` set to
 the gateway, so every model call it makes is metered against the task.
-`CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output, which keeps the
-gateway's worst-case reservation close to what a call can really cost.
+A test `turn` sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS`; a workspace turn sets
+it only when its project names one, and otherwise Claude Code's own
+default applies. The gateway charges a call from the `max_tokens` in its
+request either way.
 Claude Code's own session variables are dropped from the environment, so a
 turn started from inside a Claude Code session is still a fresh process,
 and so is every libpq variable (`PG*`, including a `PGPASSFILE` naming the
@@ -110,7 +112,7 @@ def workspace_turn(
     model: str = "haiku",
     harness: dict | None = None,
     system_prompt: str = "You are Valor.",
-    max_output_tokens: int = 32000,
+    max_output_tokens: int | None = None,
 ):
     """A builder for one turn of a task that works in `cwd`.
 
@@ -131,8 +133,8 @@ def workspace_turn(
     config with the system config ignored; `gh_config_dir`, gh's
     config directory; `env`, variables added to the turn's environment (the
     workspace's own settings, such as where its test database listens);
-    `max_output_tokens`, the per-call output cap, which sets the gateway's
-    worst-case reservation for each call; `tmpdir`, the turn's own
+    `max_output_tokens`, set as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when given
+    (otherwise Claude Code's own default applies); `tmpdir`, the turn's own
     `TMPDIR`; `claude_config_dir`, its own Claude Code config directory,
     with the gateway supplying the credential. The rest are optional. A
     fresh session (critique, review, docs) is this with no `resume`.
@@ -149,7 +151,8 @@ def workspace_turn(
         env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
         env.update(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
-        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
+        if max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
         env["GIT_TERMINAL_PROMPT"] = "0"
         # A `-p` turn ends when the model stops, killing anything it left
         # running in the background; so a turn runs its commands in the

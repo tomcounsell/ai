@@ -122,24 +122,31 @@ connections that queue on that lock, and the first burst can pass
 `max_connections` ("too many clients", Postgres docs, Connections and
 Authentication).
 
-- `governance` opens one connection and an `asyncio.Lock`, and passes both
-  to `judge` (`conn=`, `conn_lock=`, beside `dsn`). Each step, when
-  given them, uses the shared connection under the lock in place of
-  `db.connect`; with neither it connects as now, so the other sites and
-  calibration are unchanged. The steps serialize exactly as the advisory
-  lock already serializes them; the provider calls all run at once.
-- Every hunk is gathered at once. `settings.judgement_concurrency` and the
-  semaphore are removed.
+- `governance` opens one connection and passes it to `judge` as
+  `shared=judgement.Shared(conn)`, which pairs the connection with an
+  `asyncio.Lock`. Each step's database block, when given it, uses the
+  shared connection under the lock in place of `db.connect`; with none it
+  connects as now, so the other sites and calibration are unchanged. The
+  lock covers the database blocks only, never a leg's `ask`, so the
+  steps serialize exactly as the advisory lock already serializes them and
+  the provider calls all run at once.
+- Every hunk is gathered at once, with `return_exceptions=True`, inside
+  the connection's block. A stop that one hunk meets (`TaskStopped` from
+  its `_open`) never cuts another hunk short: every hunk runs to its end,
+  so each opened call is charged, and only then is the first failure
+  raised. `settings.judgement_concurrency` and the semaphore are removed.
 - **File descriptors.** Each provider call opens its own aiohttp session
   and socket (`judgement.py:600`). Under launchd the soft open-file limit
   is 256 (`launchctl limit maxfiles`: `256 unlimited` on this machine),
   and 2.1 runs the kernel under launchd, so a few hundred hunks at once
   fail with EMFILE. `core/__main__.py`'s `main` raises the soft
-  `RLIMIT_NOFILE` to the hard limit before anything else. When the hard
-  limit is unlimited, macOS refuses `RLIM_INFINITY` for this limit and
-  setrlimit(2)'s COMPATIBILITY section names the value to use:
-  `min(OPEN_MAX, rlim_max)`, with `OPEN_MAX` 10240 (`sys/syslimits.h`).
-  That number is the operating system's, a scheduling fact, not Valor's.
+  `RLIMIT_NOFILE` before anything else: it tries the hard limit first,
+  and if that is refused, `min(OPEN_MAX, hard)`, the value setrlimit(2)'s
+  COMPATIBILITY section names, with `OPEN_MAX` 10240
+  (`sys/syslimits.h:100`). It never sets a value at or below the current
+  soft limit: a terminal's soft limit on this machine is 1,048,576, above
+  `OPEN_MAX`, and Darwin 25 accepts an unlimited soft limit. Those
+  numbers are the operating system's, a scheduling fact, not Valor's.
 
 **429.** `judgement.post` (`core/judgement.py:592-609`) returns
 `LegError("rate_limited", "none", status=429)` on a 429, and the reason
@@ -180,9 +187,19 @@ call when no client waits for it, with no number:
 - **The client disconnects.** `handler_cancellation=True`. When the
   downstream connection closes, aiohttp cancels `handle`; the `shield`
   keeps the metered call from being cancelled with it, and `handle`
-  catches the cancellation, cancels the call, awaits it so its charge
-  lands, and re-raises. `_forward` is cancelled with `handle`, which
-  closes its upstream request.
+  catches the cancellation, awaits the call so its charge lands, and
+  re-raises. `_forward` is cancelled with `handle`, which closes its
+  upstream request.
+- **Only a registered call is cancelled.** A cancel that lands while a
+  call is opening its ledger row or writing its charge would lose the
+  charge. So `cut`, `revoke`, and a leaving client cancel a call only
+  while it is in `upstream_calls`: it joins that set after its
+  `gateway.opened` row and leaves it before `_close`. A client that
+  leaves before then marks the call `abandoned`. Right after joining,
+  `_metered` checks that mark and that its token's grant is still the one
+  it was issued; if either fails, the call is not sent, is charged 0
+  (`unsent`), and answers 403. A turn whose token was retired while one of
+  its calls opened is therefore never waited on.
 - **The charge.** Unchanged: `_metered`'s `CancelledError` branch marks
   the call `cut` and `_close` charges by the existing rules (started:
   every allowed output token; not started: the worst case). Its comment
@@ -194,6 +211,11 @@ call when no client waits for it, with no number:
   connection ended before it answered (<exception type>)" otherwise.
   `_forward` does the same. Only the exception's type goes in the
   message; aiohttp's text can carry headers.
+- **A 401 rereads the login where it is seen.** With
+  `handler_cancellation=True` a client that has read a whole 401 can
+  leave before `handle` resumes, so the login cache is invalidated in
+  `_metered` and `_forward` as soon as the status arrives, not after
+  `handle`'s await.
 
 ### Provisioning (row 7)
 
@@ -207,28 +229,38 @@ provisioning runs in a worker thread under `provision:<task>`
 make provisioning interruptible, not a number. So:
 
 - `setup_timeout_s` is removed, with `VALOR_SETUP_TIMEOUT_S`.
-- `git._git` and `git.trusted` take `limit: float | None`, default
-  `settings.git_timeout_s`; `None` is no limit. A caller's `deadline` still
-  lowers it. Provisioning's `fetch`, `ls-remote`, `clone`, `reflog expire`,
-  and `gc` pass `limit=None`.
-- `git` gains `Interruptible`: a set of child process groups and an
-  interrupted flag, held in a context variable. `asyncio.to_thread`
-  copies the context, so `start` makes one, provisions in the thread, and
-  on `CancelledError` or `KeyboardInterrupt` calls its `interrupt()`,
-  which sets the flag and kills each recorded process group, then
-  re-raises. `_git` records its process group while it runs, and starts no
-  new one once the flag is set (it raises `GitError("interrupted")`).
-- `_setup` starts each command with `start_new_session=True` and records
-  it the same way, with no timeout; after an interrupt `runs.reap(mark)`
-  still sweeps what the command left, as now. An interrupted provision
-  ends in `Refused("provisioning failed: interrupted")`, and the worker
-  thread returns.
+- `git` gains `Interruptible`, held in a context variable that
+  `git.interruptible()` sets for a block; `asyncio.to_thread` copies the
+  context, so the provisioning thread runs under it. Under a watch, `_git`
+  sets no time limit of its own (a caller's `deadline` still applies);
+  outside one it keeps `git_timeout_s`, so performs are unchanged.
+- `git.start` starts a process in its own process group and, under a
+  watch, records the group. One lock spans the interrupted flag, the
+  `Popen`, and the record, so no process starts unseen; once the flag is
+  set, `start` raises `git.Interrupted`. `interrupt()` sets the flag,
+  sends TERM to every recorded group, waits `reap_grace_s` (the existing
+  setting; git removes its lock files on TERM), then sends KILL to the
+  groups still recorded. A git call that ran under an interrupted watch
+  raises `git.Interrupted`.
+- The clone's temporary ref in the shared cache is removed in a `finally`
+  under `git.uninterrupted()`, so an interrupt mid-clone leaves no ref.
+- `_setup` starts each command through `git.start`, with its output to a
+  temporary file the kernel holds open, not a pipe, and `wait()`s on the
+  process, with no timeout. A child the command leaves holding its output
+  cannot hold the step open; `runs.reap(mark)` then sweeps it, as now. An
+  interrupted provision ends in `Refused("provisioning failed:
+  interrupted")`.
+- `core/__main__.py`'s `_provision` runs `workspace.provision` in a thread
+  under a watch. Ctrl-C, SIGTERM, and SIGHUP of the kernel (the last two
+  through `loop.add_signal_handler`) cancel it; on that cancel it calls
+  `interrupt()` and awaits the thread before it re-raises, so
+  `provision:<task>` is held until the cleanup is done.
 - 2.1's provision job ("the task stays stoppable", m2-1-resident-kernel.md)
   hooks the task's stop into the same `interrupt()`.
-- 1.4c plans `setup_timeout_s` for image builds, raced with
-  `runs._stop_heard` (m1-4c-verifier.md:169-170, :221). With the setting
-  gone, its build races the stop alone, and those two lines change. The
-  lead relays this.
+- 1.4c already races its build against the stop and interrupt alone
+  (m1-4c-verifier.md:171, :549). Its setup in the VM has the same pipe
+  question as `_setup`: a child left holding the output pipe holds the
+  read open. The lead relays this.
 - 1.4d's leftover-file sweep relies on every git call that carries a
   credential ending at `git_timeout_s` (m1-4d-credential.md:126-129).
   Provisioning's git calls carry no credential, so that holds.
@@ -240,21 +272,26 @@ make provisioning interruptible, not a number. So:
   `judgement_concurrency`, and `setup_timeout_s` removed;
   `open_weight_max_input_tokens` set from the context; the comment on the
   legs rewritten to the facts.
-- `core/judgement.py`: steps take `conn`/`conn_lock`; `post` returns
-  `rate_limited`, parses `Retry-After`, and refuses inside a hold.
+- `core/judgement.py`: `Shared` and `_connect`; `judge` takes `shared`;
+  `post` returns `rate_limited`, parses `Retry-After`, and refuses inside
+  a hold.
 - `core/judgement_sites.py`: `MAX_CASES` removed; `governance` shares one
-  connection and gathers every hunk.
+  connection and gathers every hunk with `return_exceptions=True`.
 - `tools/open_weight.py`: no `max_tokens` in the body; the leg's input and
   output figures from the endpoint's.
-- `core/__main__.py`: the open-file limit raised in `main`; provisioning
-  under an `Interruptible`.
-- `core/gateway.py`: `cut`; `handler_cancellation=True` with the
-  cancellation handled in `handle`; `ClientTimeout(total=None)`; the
-  honest 502s; the Keychain comparison with no margin.
+- `core/__main__.py`: the open-file limit raised in `main`; `_provision`
+  under an `Interruptible`, with SIGTERM and SIGHUP handled.
+- `core/gateway.py`: `cut`; `abandoned`; `handler_cancellation=True` with
+  the cancellation handled in `handle`; the registration check in
+  `_metered`; `ClientTimeout(total=None)`; the honest 502s; the Keychain
+  comparison with no margin.
 - `core/runs.py`: `gateway.cut` before `drain` on a normal exit.
-- `core/git.py`: the `limit` argument and `Interruptible`.
-- `core/workspace.py`: provisioning's git calls with `limit=None`; setup
-  commands in their own session, recorded, with no timeout; role regex
+- `core/git.py`: `Interruptible`, `Interrupted`, `interruptible()`,
+  `uninterrupted()`, `watch()`, `start()`; `_git` with no limit under a
+  watch.
+- `core/workspace.py`: the clone's ref removed under `uninterrupted()`;
+  setup commands through `git.start`, output to a file, waited on, with no
+  timeout; role regex
   `{0,62}`; `_service_run` raises `Refused` on timeout; `stop_services`
   catches `Refused`.
 - `harnesses/claude_code.py`: `workspace_turn`'s `max_output_tokens`
@@ -282,10 +319,10 @@ New, each of a removed cap's unbounded or honest behavior:
 6. `test_a_300_hunk_fan_out_opens_one_connection`: `db.connect` counted
    across a 300-hunk governance run with stub legs: the run's own
    connection only; every judgement row is written.
-7. `test_start_raises_the_open_file_limit_to_the_hard_limit`: run in a
-   subprocess with a lowered soft limit; after `main`'s first step the
-   soft limit is the hard limit, or `min(OPEN_MAX, hard)` when the hard
-   limit is unlimited.
+7. `test_start_raises_the_open_file_limit_and_never_lowers_it`: run in a
+   subprocess, from a lowered soft limit and from the one it has; after
+   `_raise_open_files` the soft limit is at least what it was, and is the
+   hard limit, `min(OPEN_MAX, hard)`, or the limit it already had.
 8. `test_a_429_holds_its_endpoint_and_the_next_call_goes_to_the_fallback`:
    the local upstream answers 429 with `Retry-After: 60`; the attempt's
    reason is `rate_limited`; the next judgement within the hold sends
@@ -299,27 +336,34 @@ New, each of a removed cap's unbounded or honest behavior:
 12. `test_the_gateway_sets_no_upstream_timeout_of_its_own`: the session's
     `ClientTimeout` has no total, connect, or read limit.
 13. `test_a_turn_that_exits_cuts_its_silent_calls`: a local upstream that
-    accepts a metered request and never answers; a turn process that
-    sends one call through the gateway and exits; `run_turn` returns, the
-    call is charged its worst case, and `drain` is empty.
+    accepts a metered request and never answers; a turn whose child holds
+    one call through the gateway while the turn exits; the router's run
+    returns, `turn.ended` is written, the run lock is free, the call is
+    charged its worst case, and `drain` is empty.
 14. `test_a_client_that_disconnects_cuts_its_call`: the same silent
     upstream; the test's client closes its connection; the call is
-    cancelled and charged, and the upstream sees its request closed.
+    cancelled and charged once, and the upstream sees its request closed.
+    `test_a_started_stream_whose_client_leaves_is_charged_once`: a stream
+    that has started, then the client leaves; one `gateway.charged` per
+    opened call, every allowed output token.
 15. `test_an_unreachable_upstream_is_a_502_naming_it`: the gateway pointed
     at a closed port in 6561-6569; 502, the message says the provider
     could not be reached, `unsent: true`, charged 0.
 16. `test_an_upstream_that_closes_before_answering_is_a_502_naming_it`.
 17. `test_provisioning_runs_past_the_git_timeout`: with `git_timeout_s`
-    patched to a value shorter than a local repository's clone takes,
-    provisioning that repository succeeds, and each provisioning call ran
-    with no limit.
-18. `test_interrupting_start_kills_provisioning_git`: provisioning in a
-    thread under an `Interruptible`, with git replaced by a trusted
-    stand-in that sleeps; `interrupt()` kills its process group, the
-    provision ends `Refused` "interrupted", and the thread returns.
-19. `test_interrupting_start_kills_a_setup_command`: a setup command
-    `sleep` that starts a child; after `interrupt()` neither process is
-    left, and provisioning refuses as above.
+    patched to 0.001 s, provisioning outside a watch is refused; under
+    `git.interruptible()` every provisioning git call runs with no limit,
+    except the ref removal, which keeps `git_timeout_s`.
+18. `test_interrupting_start_kills_provisioning_git`: a trusted git call
+    whose alias sleeps, in a thread under a watch; `interrupt()` ends it
+    with `git.Interrupted`, its process is gone, and a later `start` is
+    refused. `test_a_call_marked_uninterrupted_runs_after_an_interrupt`.
+19. `test_interrupting_start_kills_a_setup_command`: a setup command that
+    sleeps beside a child of its own; after `interrupt()` neither process
+    is left, and provisioning is refused "interrupted".
+    `test_a_setup_command_whose_child_holds_its_output_still_ends`: a
+    command that leaves a child holding its output returns, its tail is
+    kept, and the child is reaped.
 20. `test_a_hung_service_program_is_refused_by_name`: `_service_run` on
     `/bin/sleep` with a short timeout raises `Refused` naming `sleep`.
 21. `test_a_run_whose_services_hang_returns_the_reason`: `_Services.up`
@@ -328,6 +372,19 @@ New, each of a removed cap's unbounded or honest behavior:
     seconds out is served.
 23. `test_a_63_character_role_is_accepted_and_created`: provisioning with
     it, then a login as that role; `test_a_64_character_role_is_refused`.
+24. `test_a_call_revoked_while_it_opens_is_not_sent_and_is_charged_nothing`
+    and `test_a_call_whose_client_leaves_while_it_opens_is_not_sent_and_is_charged_nothing`:
+    the open held inside its ledger write; the upstream sees nothing; one
+    charge of 0, `unsent`.
+25. `test_a_revoke_while_a_call_is_being_charged_leaves_one_charge`: the
+    charge held inside its write while the task is revoked; one charge row,
+    the full one.
+26. `test_a_stop_between_two_hunks_opens_leaves_every_opened_call_charged`:
+    a stop queued behind the second hunk's open; governance raises
+    `TaskStopped`, and every `gateway.opened` row has its `gateway.charged`.
+27. `test_a_term_or_hangup_of_the_kernel_interrupts_provisioning`: SIGTERM
+    and SIGHUP during `_provision` reach the thread's watch and cancel the
+    start.
 
 Changed, since they enshrine a cap:
 
@@ -337,6 +394,8 @@ Changed, since they enshrine a cap:
   times `bytes_per_token`, plus one, so they follow the settings.
 - Any test reading `open_weight_max_tokens`, `judgement_concurrency`, or
   `setup_timeout_s`: reads the replacement or is removed with it.
+- `test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it`
+  also asserts one charge row.
 
 Non-obvious cases covered above: a turn whose call is silent after the
 stop listener is gone (13); a `Retry-After` on one endpoint never holds

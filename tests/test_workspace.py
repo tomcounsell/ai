@@ -990,3 +990,174 @@ def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
         with pytest.raises((kgit.GitError, kws.FetchRefused), match="deadline"):
             fetch(made, sha)
     assert kgit.remaining(5.0) == 5.0  # outside a deadline, the limit stands
+
+
+# -- provisioning has no time limit; an interrupt ends it ---------------------------------
+
+
+def _running(marker: str) -> list[str]:
+    """Commands of this user's processes whose command line carries `marker`."""
+    listing = subprocess.run(["/bin/ps", "-A", "-o", "command="], capture_output=True, text=True, check=True)
+    return [line for line in listing.stdout.splitlines() if marker in line and "/bin/ps" not in line]
+
+
+def _in_thread(held, work):
+    """`work()` on a thread that carries the current context (and so the
+    watch); returns the thread and a dict that gets its result or error."""
+    import contextvars
+    import threading
+
+    out: dict = {}
+    ctx = contextvars.copy_context()
+
+    def body():
+        try:
+            out["value"] = ctx.run(work)
+        except BaseException as exc:  # noqa: BLE001  handed back to the test
+            out["error"] = exc
+
+    thread = threading.Thread(target=body)
+    thread.start()
+    return thread, out
+
+
+def _wait_for(check, seconds: float = 20) -> None:
+    import time
+
+    ends = time.monotonic() + seconds
+    while not check():
+        assert time.monotonic() < ends, "timed out"
+        time.sleep(0.05)
+
+
+def test_provisioning_runs_past_the_git_timeout(tmp_path, monkeypatch):
+    """Outside a watch a git call keeps `git_timeout_s`; under one,
+    provisioning's git calls run with no limit, except removing the clone's
+    temporary ref, which runs uninterrupted with the usual limit."""
+    import dataclasses
+
+    from core import git
+    from core.settings import settings
+
+    scripted.toy_repo(tmp_path)
+    monkeypatch.setattr(git, "settings", dataclasses.replace(settings, git_timeout_s=0.001))
+    with pytest.raises(kws.Refused, match="did not finish"):
+        provision(tmp_path)
+    monkeypatch.setattr(git, "settings", settings)
+    limits = []
+    real = subprocess.Popen.communicate
+
+    def spy(self, input=None, timeout=None):
+        if self.args[0] == git.binary():
+            limits.append((self.args[self.args.index("-C") + 2 + len(git.PINNED)], timeout))
+        return real(self, input, timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", spy)
+    with git.interruptible():
+        _task, made = provision(tmp_path)
+    assert Path(made.workspace).is_dir() and len(limits) > 5
+    assert all(t is None for cmd, t in limits if cmd != "update-ref") and ("clone", None) in limits
+    assert [t for cmd, t in limits if cmd == "update-ref"][-1] == settings.git_timeout_s
+
+
+def test_interrupting_start_kills_provisioning_git(tmp_path):
+    from core import git
+
+    repo = scripted.toy_repo(tmp_path)
+    marker = f"sleep 61.{uuid.uuid4().int % 10**6}"
+    with git.interruptible() as held:
+        thread, out = _in_thread(held, lambda: git.trusted(repo, "-c", f"alias.hang=!{marker}", "hang"))
+    _wait_for(lambda: _running(marker))
+    held.interrupt()
+    thread.join(20)
+    assert not thread.is_alive() and isinstance(out.get("error"), git.Interrupted)
+    assert _running(marker) == []
+    with pytest.raises(git.Interrupted):  # nothing starts once interrupted
+        held.start(["/usr/bin/true"])
+
+
+def test_a_call_marked_uninterrupted_runs_after_an_interrupt(tmp_path):
+    from core import git
+
+    repo = scripted.toy_repo(tmp_path)
+    with git.interruptible() as held:
+        held.interrupt()
+        with pytest.raises(git.Interrupted):
+            git.trusted(repo, "rev-parse", "HEAD")
+        with git.uninterrupted():
+            assert len(git.trusted(repo, "rev-parse", "HEAD")) == 40
+
+
+def test_interrupting_start_kills_a_setup_command(tmp_path):
+    from core import git
+
+    scripted.toy_repo(tmp_path)
+    marker = f"sleep 62.{uuid.uuid4().int % 10**6}"
+    with git.interruptible() as held:
+        thread, out = _in_thread(held, lambda: provision(tmp_path, setup=[f"{marker} & {marker}"]))
+    _wait_for(lambda: len(_running(marker)) >= 2, 60)
+    held.interrupt()
+    thread.join(30)
+    assert not thread.is_alive()
+    assert isinstance(out.get("error"), kws.Refused) and "interrupted" in str(out["error"])
+    assert _running(marker) == []
+
+
+def test_a_setup_command_whose_child_holds_its_output_still_ends(tmp_path):
+    import time
+
+    marker = f"sleep 63.{uuid.uuid4().int % 10**6}"
+    started = time.monotonic()
+    _task, made = provision(tmp_path, setup=[f"({marker} &); echo done"])
+    assert time.monotonic() - started < 30
+    result = made.project["setup_result"]
+    assert result["ok"] is True and "done" in result["commands"][0]["tail"]
+    assert _running(marker) == []  # reaped by its mark
+
+
+def test_a_hung_service_program_is_refused_by_name(tmp_path):
+    lay = kws.Layout(tmp_path / "task")
+    lay.profiles.mkdir(parents=True)
+    (lay.profiles / "service.sb").write_text("(version 1)\n(allow default)\n")
+    with pytest.raises(kws.Refused, match="sleep did not finish in 1 s"):
+        kws._service_run(lay, "t", "/bin/sleep", "30", timeout=1.0)
+
+
+def test_a_run_whose_services_hang_returns_the_reason(dsn, monkeypatch):
+    def hung(*args):
+        raise kws.Refused("pg_ctl did not finish in 120 s")
+
+    monkeypatch.setattr(kws, "start_services", hung)
+    services = router._Services("t", dsn, ["postgres"], {"postgres": 5540}, kws.Layout(Path("/nonexistent")))
+    assert run(services.up()) == "pg_ctl did not finish in 120 s" and services.started is False
+
+
+def test_a_63_character_role_is_accepted_and_created(tmp_path):
+    role = "r" * 63
+    task, made = provision(tmp_path, services=["postgres"], roles=[role])
+    lay = kws.Layout(Path(made.mirror).parent)
+    port = made.project["ports"]["postgres"]
+    passwords = {
+        line.split(":")[3]: line.split(":")[4] for line in (lay.home / "pgpass").read_text().splitlines()
+    }
+    kws.start_services(task, lay, ["postgres"], {"postgres": port})
+    try:
+        with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user=role,
+                             password=passwords[role]) as conn:  # fmt: skip
+            assert conn.execute("SELECT current_user").fetchone()[0] == role
+    finally:
+        kws.stop_services(task, lay)
+
+
+def test_a_64_character_role_is_refused():
+    with pytest.raises(kws.Refused):
+        kws.Spec.from_dict(
+            {
+                "name": "x",
+                "repo": "r",
+                "kind": "plain",
+                "suite": "true",
+                "services": ["postgres"],
+                "roles": ["r" * 64],
+            }
+        )

@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from core import judgement, spending
 from core.judgement import DATA_ONLY, JudgementTask, LegAnswer, LegError
 from core.settings import (
+    OPEN_WEIGHT_MAX_COMPLETION,
     OPEN_WEIGHT_MODEL,
     OPEN_WEIGHT_PIN,
     OPEN_WEIGHT_PROVIDER,
@@ -49,7 +50,8 @@ class OpenWeight:
         self.model = OPEN_WEIGHT_PIN
         self.timeout_s = timeout_s or settings.open_weight_timeout_s
         self.max_input_tokens = settings.open_weight_max_input_tokens
-        self.max_output_tokens = settings.open_weight_max_tokens
+        # No output limit is sent; the endpoint's own is the worst case.
+        self.max_output_tokens = OPEN_WEIGHT_MAX_COMPLETION
 
     def body(self, task: JudgementTask, inputs: Mapping[str, str]) -> dict:
         lines = [SYSTEM, ""]
@@ -90,15 +92,12 @@ class OpenWeight:
                 "require_parameters": True,
             },
             "temperature": 0,
-            "max_tokens": self.max_output_tokens,
             "usage": {"include": True},
         }
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
         """Input tokens as bytes / 3. Over its 35 calibration calls of
-        2026-10-02 the host billed 0.39 to 0.62 of it, and at most 219 of
-        the 400 output tokens a call allows. All 35 were
-        single-question judge calls of at most 1,406 estimated tokens."""
+        2026-10-02 the host billed 0.39 to 0.62 of it."""
         return judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
 
     async def ask(self, task: JudgementTask, inputs: Mapping[str, str]) -> LegAnswer | LegError:
