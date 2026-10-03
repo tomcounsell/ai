@@ -117,6 +117,19 @@ async def highest(conn, channel: str, chat_id: str) -> int | None:
     return None if row[0] is None else int(row[0])
 
 
+async def lowest(conn, channel: str, chat_id: str) -> int | None:
+    """The smallest integer message id recorded for the chat: where a gap
+    fill of a chat with no seen entry stops."""
+    row = await (
+        await conn.execute(
+            "SELECT min((payload->>'message_id')::bigint) FROM events WHERE type = 'message.received' "
+            "AND task_id = %s AND payload->>'chat_id' = %s AND payload->>'message_id' ~ '^[0-9]+$'",
+            (channel, chat_id),
+        )
+    ).fetchone()
+    return None if row[0] is None else int(row[0])
+
+
 async def recorded(conn, channel: str, chat_id: str, ids: list[str]) -> set[str]:
     """Which of `ids` are already received in the chat."""
     rows = await (

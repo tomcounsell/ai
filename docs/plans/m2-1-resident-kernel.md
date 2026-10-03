@@ -229,8 +229,9 @@ notification is delivered at commit. The trigger refuses nothing;
   too. 1.4d builds to this shape.
 - **Settle time.** `Declared.settle_after_s` is a number or a function of
   the action; `bridge.serve` resolves it against the intent's action and
-  passes the number to `reconcile`. 2.1 sets email's settle time to `reconcile_after_s` and no
-  email size function; 2.3 sets both.
+  passes the number to `reconcile`. Reconcile runs once the effect's
+  performing lock is free, then reads the remote; it waits on no age.
+  2.3 sets email's settle function and size function.
 - **`broker.Unknown` after a failed perform** (raised by `perform`, or by
   the `lookup` the broker asks next) leaves the intent in flight with no
   outcome, for reconcile. 2.2 relies on this (port item 24).
@@ -343,7 +344,7 @@ bridge performers.
   charge lands.
 - `test_kill_between_intent_and_outcome`: a push hangs after its intent;
   SIGKILL; restart: `done` when the target holds the commit, nothing while
-  `lookup` raises `Unknown`, `failed` only after `reconcile_after_s`.
+  `lookup` raises `Unknown`, `failed` when the target answers without it.
 - `test_merge_restarts_its_kernel`: SIGTERM after a merge's intent;
   restart; `lookup` finds the merge; the outcome is written.
 - `test_dangling_propose_intent`: a propose-class intent with no outcome
@@ -617,3 +618,8 @@ Review round 1 said `changes`, the test check `gaps`. Retries ride the
    port said so; m2-2-telegram.md's row 11 is corrected.
 9. Tests: `recorded`, `claimed`, one bridge per channel and machine,
    `core run` refusing while `services:<task>` is held.
+10. `intake.lowest(channel, chat)`, the smallest integer id recorded for
+    the chat or None, so 2.2's gap fill of a chat with no seen entry
+    stops there by membership (D32). Test with `highest`.
+11. The plan and the port describe reconcile as waiting on the
+    effect's performing lock, then reading the remote; no age.

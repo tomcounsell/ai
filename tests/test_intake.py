@@ -640,3 +640,26 @@ def test_claimed_reads_notices_and_sends_in_the_chat(dsn, op):
     assert {noticed, sent} <= here and not {elsewhere, by_email} & here
     assert elsewhere in other_chat and not {noticed, sent, by_email} & other_chat
     assert by_email in other_channel and not {noticed, sent, elsewhere} & other_channel
+
+
+def test_highest_and_lowest_are_scoped_by_chat(dsn, op):
+    chat = uuid.uuid4().hex
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            empty = (
+                await intake.lowest(conn, "telegram", chat),
+                await intake.highest(conn, "telegram", chat),
+            )
+            for mid in ("90", "7", "300", "not-a-number"):
+                await intake.receive(conn, msg("x", mid=mid, chat=chat))
+            await intake.receive(conn, msg("y", mid="1", chat=uuid.uuid4().hex))
+            await intake.receive(conn, msg("z", mid="2", channel="email", sender=OPERATOR_EMAIL, chat=chat))
+            return empty, (
+                await intake.lowest(conn, "telegram", chat),
+                await intake.highest(conn, "telegram", chat),
+            )
+
+    empty, found = run(go())
+    assert empty == (None, None)
+    assert found == (7, 300)

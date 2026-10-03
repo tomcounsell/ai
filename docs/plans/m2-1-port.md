@@ -50,6 +50,7 @@ class Received:
 
 async def receive(conn, inbound: Inbound) -> Received: ...
 async def highest(conn, channel: str, chat_id: str) -> int | None: ...
+async def lowest(conn, channel: str, chat_id: str) -> int | None: ...
 async def recorded(conn, channel: str, chat_id: str, ids: list[str]) -> set[str]: ...
 async def claimed(conn, channel: str, chat_id: str) -> set[str]: ...
 def owns(channel: str, id: str) -> bool: ...
@@ -87,6 +88,9 @@ def owned(channel: str) -> list[str]: ...
 - **`highest` (D3)** is the largest `message_id` recorded for the chat,
   compared as an integer, for channels with integer ids; a paging hint
   only. Email has no cursor; it polls UNSEEN SINCE for owned senders.
+- **`lowest` (D32)** is the smallest integer `message_id` recorded for
+  the chat, or None: a gap fill of a chat with no seen entry stops there,
+  by membership, not at the high-water mark.
 - **`recorded` (D32)** returns which of `ids` are already received. Gap
   fill checks membership over a recent window on connect and in
   `Bridge.tick()` (D38), never a high-water mark alone (Telethon drops
@@ -213,10 +217,9 @@ def declared_performers() -> list[Declared]: ...
 
 `refuse` has 1.4d's shape, `async (conn, action)`. `settle_after_s`
 (D22, D37) is a number or a function of the action, resolved against the intent's action before
-`broker.reconcile`; unset, reconcile waits `reconcile_after_s`. 2.1
-sets email's to `reconcile_after_s`; 2.3 sets email's with its own cited basis. Every
-task's
-Performers holds `declared_performers()`, so `request` holds a send for
+`broker.reconcile`. Reconcile runs once the effect's performing lock
+is free, then reads the remote; it waits on no age. 2.3 sets email's
+with its own cited basis. Every task's Performers holds `declared_performers()`, so `request` holds a send for
 Tom and `dispatch(offered=...)` tells the turn the send exists.
 
 - `telegram.send_message`, `act`. Target: the chat id as text. Payload
