@@ -83,6 +83,14 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     shown = json.loads(core("workspace", "show", task))
     origin = Path(shown["push_url"])
     who = ["--by", "live test", "--role-played"]
+
+    def rows(kind: str) -> list[dict]:
+        async def read():
+            async with await db.connect(dsn) as conn:
+                return [r["payload"] for r in await ledger.read(conn, task) if r["type"] == kind]
+
+        return asyncio.run(read())
+
     assert core("run", task).startswith("QUESTION")
     core("answer", task, "Say exactly: Morning, Tom.")
     # The plan is written, the fresh critique session reads it (sending it
@@ -96,27 +104,33 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     core("run", task)
     state = json.loads(core("status", task))
     assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
-    held = [e for e, s in state["effects"].items() if s == "pending"]
-    # The session may request its push more than once; each is held.
-    assert len(held) >= 2, "expected a push_branch and the merge held for Tom"
-    for effect in held:
+    # The plan and the build stages may each push their own commits; every
+    # push is held for Tom, and the merge is held for Tom.
+    pending = {e for e, s in state["effects"].items() if s == "pending"}
+    held = [r for r in rows("effect.held") if r["effect_id"] in pending]
+    assert len(held) == len(pending)
+    assert [r["action_type"] for r in held].count("merge") == 1
+    pushes = [r for r in held if r["action_type"] == "push_branch"]
+    assert pushes, "expected at least one push_branch held for Tom"
+    assert not rows("effect.outcome"), "nothing leaves before Tom's tap"
+    for effect in [r["effect_id"] for r in pushes] + [state["merge_effect"]["effect_id"]]:
         core("approve", effect, "--note", "yes")
         core("release", effect)
+    granted = {r["effect_id"] for r in rows("approval.granted")}
+    assert {r["effect_id"] for r in rows("effect.outcome")} <= granted
     assert sh("git", "rev-parse", "main", cwd=origin) == candidate
     pushed = sh("git", "rev-parse", "valor/greeting", cwd=origin)
+    assert pushed == pushes[-1]["payload"]["head_sha"]
     assert "Morning, Tom." in sh("git", "show", f"{pushed}:greeting.txt", cwd=origin)
+    # What Tom approved to push is in what was merged.
+    sh("git", "merge-base", "--is-ancestor", pushed, candidate, cwd=origin)
     assert json.loads(core("status", task))["state"] == "merged"
 
-    async def read():
-        async with await db.connect(dsn) as conn:
-            return await ledger.read(conn, task)
-
-    got = asyncio.run(read())
-    tested = next(r["payload"] for r in got if r["type"] == "test.decided")
+    tested = rows("test.decided")[0]
     assert tested["leg"] == "kernel" and tested["command"] == "true" and tested["verdict"] == "pass"
-    documented = next(r["payload"] for r in got if r["type"] == "docs.decided")
+    documented = rows("docs.decided")[0]
     assert documented["leg"] == "session" and documented["usd_micros"] > 0
-    started = [r["payload"] for r in got if r["type"] == "turn.started"]
+    started = rows("turn.started")
     assert len(started) >= 3
     assert "# Stage: plan" in started[0]["brief"]
     for t in started:

@@ -889,3 +889,9 @@ directory's name, and the `suite.ran` reuse key includes the role
 test check's. The suite's output already goes to a file and the kernel
 waits on the process, then reaps the group. The governance question's text
 and the calibrated digest are unchanged.
+
+The live session test asserts the held effects as 4.2's does: exactly one
+merge held, at least one `push_branch` held, no outcome before approval,
+every outcome granted, and the origin's branch at the last approved push,
+an ancestor of the merged candidate. Each stage may push its own new
+commits; an identical request already returns the existing effect.
