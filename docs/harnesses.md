@@ -556,7 +556,9 @@ merged only) stops the services, deletes the directory, and frees the ports.
 instances on the task's own ports (`workspace.check_services`): the task's
 own are stopped first, the check's cluster gets the project's roles with new
 passwords, its Redis starts empty, and on exit the check's instances are
-stopped and removed and the task's own started again. No run sees what
+stopped and removed (the removal clears the user flags `uchg` and `uappnd`
+and the ACL of each entry the suite wrote, so none blocks it) and the task's
+own started again, even when the stop or the removal fails. No run sees what
 another run, or the working session, wrote.
 
 ## Testing actual use: a browser
