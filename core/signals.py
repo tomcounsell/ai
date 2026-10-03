@@ -9,7 +9,7 @@ task's workspace, read when the turn ends.
 - `.valor/done.md`: from a build or patch turn, a candidate: what was
   delivered and how it was verified.
 - `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
-  as evidence (name, size, SHA-256) and never as a signal.
+  as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
   workspace, `{"action_type", "target", "payload"}`. The kernel passes each
   to the broker, which decides what it may do.
@@ -24,7 +24,6 @@ killed mid-way leaves whatever it wrote readable. Each file is moved to
 `.valor/handled/<turn_id>/` once read, so no signal is read twice.
 """
 
-import hashlib
 import json
 import os
 import stat
@@ -90,7 +89,7 @@ def collect(workspace: str | Path, turn_id: str) -> Signals:
 
 
 def read_screens(workspace: str | Path, turn_id: str) -> list[dict[str, Any]]:
-    """The files in `.valor/screens/` as `{name, bytes, sha256}`, each opened
+    """The files in `.valor/screens/` as `{name, bytes}`, each opened
     relative to a directory descriptor without following links or blocking,
     and recorded only when a regular file with one link; anything else is
     `{name, refused: reason}` and is never read. Each entry is then moved to
@@ -123,15 +122,11 @@ def read_screens(workspace: str | Path, turn_id: str) -> list[dict[str, Any]]:
                     fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=screens)
                     try:
                         after = os.fstat(fd)
-                        if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
-                            raise OSError("changed while read")
-                        digest, size = hashlib.sha256(), 0
-                        while chunk := os.read(fd, 1 << 20):
-                            digest.update(chunk)
-                            size += len(chunk)
                     finally:
                         os.close(fd)
-                    entry.update({"bytes": size, "sha256": digest.hexdigest()})
+                    if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
+                        raise OSError("changed while read")
+                    entry["bytes"] = after.st_size
             except OSError as exc:
                 entry["refused"] = exc.strerror or str(exc)
             if dest is None:

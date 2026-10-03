@@ -34,12 +34,13 @@ session's own tmp.
 
 **What the kernel records.** When it collects a turn, the kernel opens
 `.valor/screens/` and each file in it by directory descriptor, never following
-a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes,
-sha256}` for a regular file with one link, `{name, refused}` for anything else
+a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes}`
+(the size from `fstat`; the kernel never reads a screen's contents) for a regular file with one link, `{name, refused}` for anything else
 (a link, a hard link, a FIFO, a directory), which it never reads. Each entry
 is then moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
-record it again. An entry that cannot be moved is removed and recorded as `{name, refused}`. `done.md` names a screen by its original name. The digest
-shows whether a screen is edited afterward; it does not make the image true.
+record it again. An entry that cannot be moved is removed and recorded as `{name, refused}`. `done.md` names a screen by its original name. `look` prints a
+`shasum -a 256` of each file it writes, for the turn to quote in `done.md`; the
+kernel records no digest, and a screen is as editable as `done.md`.
 Screens are evidence, never a gate: nothing requires one and no check reads
 one.
 
