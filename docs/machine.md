@@ -141,7 +141,7 @@ itself, so a check adds no service to the memory budget; its copy of the
 package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
 
 The current kernel runs turns one after another within a task and has no
-cross-task scheduler. The replay scripts held a lock-file slot per run; a
+cross-task scheduler. The emulator's replay driver holds a lock-file slot per run; a
 kernel-held turn slot in Postgres is the design.
 
 **What runs beside the turn.** Bridges keep receiving and delivering

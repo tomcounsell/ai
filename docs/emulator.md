@@ -182,9 +182,9 @@ pre-authorized.
 A run whose result file has no outcome resumes its task; one with an
 outcome is refused unless `--rebuild` is given. Each driver holds one of
 `VALOR_DEMO_SLOTS` lock files for its whole invocation, so at most that many
-replays run turns at once. The experiments ran three on a 64 GB machine; on
-the 16 GB M4 Air the slot count is one, matching the constraint of one
-`claude -p` at a time.
+replays run turns at once. The default is three, which the experiments ran on
+a 64 GB machine; on the 16 GB M4 Air set it to one, matching the constraint
+of one `claude -p` at a time.
 
 ### The stand-in: `tests/emulator/stand_in.py`
 
