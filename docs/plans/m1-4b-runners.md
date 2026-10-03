@@ -361,14 +361,15 @@ base's setup runs again to make it, without the suite.
    The environment digest covers the lockfiles at that commit (read with
    `git show` in the mirror), the setup commands, the spec's `env`, and the
    bytes of each file in the work directory's `bin/`. A `suite.ran` with
-   the same commit, command, and digest, and no `cause`, is reused, so the base runs once per task and a crash after a suite does
+   the same commit, role, command, and digest, and no `cause`, is reused, so the base runs once per task and a crash after a suite does
    not rerun it.
-4. `read_junit(check_dir)` reads the file through the same walk as
+4. `read_junit(lay.checks, name)` reads the file through the same walk as
    `read_verdict` (critique finding 8), lifted into a shared
-   `read_turn_file(dir_fd, relpath, max_bytes)`: each component opened with
-   `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`, `fstat` must
-   say `S_ISREG`, at most `settings.junit_max_bytes` (default 50 MB). So a
-   FIFO, a socket, a link, or a device at the path is refused without
+   `read_turn_file(dir_fd, relpath)`: the checks directory and the check
+   directory each opened with `O_NOFOLLOW | O_DIRECTORY`, each component
+   below with `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`,
+   `fstat` must say `S_ISREG`, and the whole file read. So a linked check
+   directory, a FIFO, a socket, a link, or a device at the path is refused without
    blocking. A file holding a `DOCTYPE` is refused; the rest is parsed
    with `xml.etree.ElementTree`. Any refusal is "no per-test result",
    never a crash or a hang. Test ids are `classname::name`.
@@ -876,3 +877,15 @@ all 32 `tom` cases and all 18 drafted ones, no error, no abstain; largest
 estimate ratio 0.86 (Jev) and 0.89 (open-weight). Spend $0.0205.
 `GOVERNANCE.calibrated` is that digest, the docs runner is registered, and
 `MANUAL_STAGES` holds `review` alone.
+
+**Rebase onto `e4b30b78c`** (1.4c part two, 1.4u's planning): no
+conflicts. Built to the plans now on the base: `read_turn_file(dir_fd,
+relpath)` keeps 1.4s's signature (no `max_bytes`, no `then=`;
+`read_verdict` calls `_file_away` itself), `settings.junit_max_bytes` and
+`settings.verdict_max_bytes` are gone and a report or verdict of any size
+is read whole, `read_junit` walks from `lay.checks` by the check
+directory's name, and the `suite.ran` reuse key includes the role
+(m1-4c-review.md, step 2), so a review head run never stands in for the
+test check's. The suite's output already goes to a file and the kernel
+waits on the process, then reaps the group. The governance question's text
+and the calibrated digest are unchanged.

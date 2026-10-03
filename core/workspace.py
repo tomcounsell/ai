@@ -61,7 +61,7 @@ import stat
 import subprocess
 import time
 import tomllib
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1262,16 +1262,13 @@ def write_files(dir_fd: int, files: dict[str, str]) -> None:
             f.write(text)
 
 
-def read_turn_file(
-    dir_fd: int, relpath: str, max_bytes: int, *, then: Callable[[int, str], str | None] | None = None
-) -> tuple[bytes | None, str | None]:
+def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
     """A file a turn may have written, at `relpath` under the directory
     `dir_fd`: each directory opened relative to its parent with
     `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`, `fstat` required
-    to say a regular file, at most `max_bytes`. So a link, a FIFO, a socket,
-    or a device at the path is refused without blocking. `then(parent_fd,
-    name)`, when given, runs after the read with the file's directory open
-    and may refuse it. Returns (bytes, why not)."""
+    to say a regular file, and the whole file read. So a link, a FIFO, a
+    socket, or a device at the path is refused without blocking. Returns
+    (bytes, why not)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     *dirs, name = relpath.split("/")
     fds: list[int] = []
@@ -1292,21 +1289,14 @@ def read_turn_file(
         except OSError as exc:
             return None, f"{name} is not a plain file ({exc.strerror})"
         try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return None, f"{name} is not a regular file"
-            if st.st_size > max_bytes:
-                return None, f"{name} is over {max_bytes} bytes"
-            body = os.read(fd, max_bytes + 1)
-            if len(body) > max_bytes:
-                return None, f"{name} is over {max_bytes} bytes"
+            chunks = []
+            while chunk := os.read(fd, 1 << 20):
+                chunks.append(chunk)
         finally:
             os.close(fd)
-        if then is not None:
-            why = then(parent, name)
-            if why:
-                return None, why
-        return body, None
+        return b"".join(chunks), None
     finally:
         for fd in reversed(fds):
             os.close(fd)
@@ -1316,20 +1306,29 @@ def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, s
     """The verdict a fresh session left at `.valor/verdict.json`, read with
     `read_turn_file`, then moved to `.valor/handled/<turn_id>/`. Returns
     (verdict, why not)."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY
     try:
-        root = os.open(checkout, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY)
+        root = os.open(checkout, flags)
     except OSError as exc:
         return None, f"the checkout cannot be opened: {exc.strerror}"
     try:
-        body, why = read_turn_file(
-            root,
-            ".valor/verdict.json",
-            settings.verdict_max_bytes,
-            then=lambda valor, name: _file_away(valor, name, turn_id),
-        )
+        try:
+            valor = os.open(".valor", flags, dir_fd=root)
+        except FileNotFoundError:
+            return None, "no .valor/verdict.json"
+        except OSError as exc:
+            return None, f".valor is not a plain directory ({exc.strerror})"
+        try:
+            body, why = read_turn_file(valor, "verdict.json")
+            if why == "no verdict.json":
+                why = "no .valor/verdict.json"
+            if body is not None:
+                why = _file_away(valor, "verdict.json", turn_id)
+        finally:
+            os.close(valor)
     finally:
         os.close(root)
-    if body is None:
+    if why:
         return None, why
     try:
         data = json.loads(body)

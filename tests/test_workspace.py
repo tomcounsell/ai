@@ -991,3 +991,18 @@ def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
         with pytest.raises((kgit.GitError, kws.FetchRefused), match="deadline"):
             fetch(made, sha)
     assert kgit.remaining(5.0) == 5.0  # outside a deadline, the limit stands
+
+
+def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_path):
+    valor = tmp_path / ".valor"
+    valor.mkdir()
+    big = {"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 400_000}]}
+    (valor / "verdict.json").write_text(json.dumps(big))
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        body, why = kws.read_turn_file(fd, ".valor/verdict.json")
+    finally:
+        os.close(fd)
+    assert why is None and json.loads(body) == big
+    assert kws.read_verdict(tmp_path, "t1") == (big, None)
+    assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
