@@ -285,7 +285,7 @@ registering commit. In it:
 | The governance judge is down | step 1 fails before any run; `failed`, no verdict, retried |
 | Both governance legs failed, reruns left | `record_check` refuses as unanswered; `failed`, retried |
 | A fresh service will not start, or a stop | `cause: kernel`; `failed` or `stopped`, nothing recorded |
-| The candidate's suite hangs or its setup fails | `cause: commit`; the reviewer sees it in `verify.json` |
+| The candidate's suite or its setup fails | `cause: commit`; the reviewer sees it in `verify.json` |
 | The reviewer checkout's setup fails | `reviewer_setup_exit` says so; the turn runs |
 | A forged JUnit file or exit 0 from `conftest.py` | recorded as the candidate's claim; the reviewer reads the diff |
 | `verdict.json` missing, malformed, or with another verdict value | `Malformed`, no verdict, the branch reruns |

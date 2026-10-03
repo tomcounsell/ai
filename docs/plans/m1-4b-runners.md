@@ -74,7 +74,7 @@ What the kernel must never do with any of it:
 - Follow a link or block on a file a turn could plant. `verdict.json` and
   the JUnit file are read by the same walk: each path component opened
   relative to its parent's descriptor with `O_NOFOLLOW`, the file with
-  `O_NONBLOCK`, `fstat` required to say a regular file, bounded in size. A
+  `O_NONBLOCK`, `fstat` required to say a regular file, read whole. A
   FIFO, a link, or a JUnit file with a `DOCTYPE` is a suite with no
   per-test result.
 - Run candidate code outside the check profile, or past a stop. Setup and

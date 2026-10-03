@@ -261,8 +261,8 @@ marker, and `cause`:
 - `kernel`: the runtime will not start, an image build failed on the
   network, a digest mismatch, a stop, a killed kernel. No verdict; the
   branch reruns.
-- `commit`: the candidate's manifests will not install, setup fails, the
-  suite times out, no JUnit file. Goes to the reviewer.
+- `commit`: the candidate's manifests will not install, setup fails, no
+  JUnit file. Goes to the reviewer.
 - `memory`: `oom_kill` above zero, or `peak_mb` reached `memory_mb`. Goes
   to the reviewer as "the VM ran out of memory at N MB", not as a
   failure of the candidate, and is shown in the attention log so the
