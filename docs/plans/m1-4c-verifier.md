@@ -212,8 +212,7 @@ in `container delete --force`.
 
 ### Reading the result and `verify.ran`
 
-`read_turn_file` reads `out/result.json` and `out/junit.xml` (1.4b's walk
-and bounds); `read_junit` parses the JUnit file; `compare` gives the three
+`read_turn_file` reads `out/result.json` and `out/junit.xml` (1.4b's walk); `read_junit` parses the JUnit file; `compare` gives the three
 lists against the base run in the base's image. `verify.ran` gains, with
 `where: "vm"`: image digest, base image digest, `manifests_differ`,
 `memory_mb`, `cpus`, `peak_mb`, the runtime's release, system start
