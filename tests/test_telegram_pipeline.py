@@ -108,7 +108,7 @@ def test_a_message_is_recorded_once_through_intake(emu, dsn, tmp_path, op):
             [r] = await of_type(dsn, "message.received", chat_id=op)
             assert r["message_id"] == str(mid) and r["verified"] is True
             async with bridge.kernel.conn() as c:
-                assert await bridge.kernel.highest(c, "telegram", op) == mid
+                assert await bridge.kernel.lowest(c, "telegram", op) == mid
                 assert await bridge.kernel.recorded(c, "telegram", op, [str(mid), "999"]) == {str(mid)}
 
     run(go())

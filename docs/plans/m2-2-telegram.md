@@ -39,11 +39,11 @@ item:
 |---|---|
 | 1, 28 | `bridges/telegram/__main__.py run` calls `core.bridge.serve(TelegramBridge())`; the class implements `Bridge` (`channel = "telegram"`, `performers()`, `async run(outbox)`, `async tick()`) |
 | 2 | Every message ends at `intake.receive(conn, inbound)`; `Received.duplicate` means already recorded, and nothing more happens |
-| 3, 32 | Gap fill pages back to the newest id the last pass saw, or to `intake.highest` for a chat it has no id for, and receives only ids `intake.recorded` does not list, checked before any download |
+| 3, 32 | Gap fill pages back to the newest id the last pass saw, or to `intake.lowest` for a chat it has no id for, and receives only ids `intake.recorded` does not list, checked before any download |
 | 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
 | 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
 | 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
-| 11 | Passes Telegram's raw facts; `receive` sets `verified`, true for every Telegram record |
+| 11 | Passes Telegram's raw facts; `receive` sets `verified` true for every Telegram record, since Telegram's servers attest the sender id, and bind decides whether the sender is the operator (`sender_id == operator_telegram_id`) |
 | 15b, 15c, 25 | Telegram's limits are its entry in `core/bridge.py`'s `LIMITS` (`max_text` 4096 UTF-16 code units, `max_file_bytes` the upload limit), and `core.bridge.split_text("telegram", text)` splits a text over it; the performer and the notice send send one message per part and declare no limit of their own |
 | 38 | `tick()`, which `serve` calls on every `serve_tick_s` wake, runs the gap fill |
 | 39, 40 | Kernel behaviour the pipeline tests exercise through the bridge: a binding that raises binds `none` and owes a notice; a refused release appends `effect.refused` once and owes a notice |
@@ -245,7 +245,7 @@ to `telegram-seen.json` in the key directory after each pass, so it holds
 across reconnects and restarts: a message whose receive failed, or whose
 update was dropped before the process died, is taken by the next pass. A
 pass that fails writes nothing. A chat missing from the file stops at
-`intake.highest`; one with no rows takes its newest id as the stop and
+`intake.lowest`, the smallest id recorded for it; one with no rows takes its newest id as the stop and
 receives nothing. Media is downloaded only for ids not recorded. A flood
 wait from a pass is held like any other, and `tick()` skips its pass
 while one is held.
@@ -317,6 +317,8 @@ an approved send in the ledger for the outbox to yield.
 - Messages sent while the bridge was down are received once, oldest first,
   across three pages, in a chat whose ids have gaps.
 - A chat with no rows backfills nothing.
+- A chat with rows and no seen entry receives a message below its newest
+  row whose update was dropped, and none older than its lowest row.
 - The live handler and the gap fill delivering one message at once write
   one row.
 - The emulator drops the live update for 104 and delivers 105: 104 is
@@ -378,7 +380,7 @@ an approved send in the ledger for the outbox to yield.
 
 `tests/test_telegram_pipeline.py` (with 2.1's port and kernel)
 - A message through `intake.receive` is one `message.received` row with
-  `verified` true; `highest` and `recorded` see it.
+  `verified` true; `lowest` and `recorded` see it.
 - `LIMITS["telegram"]` is 4,096 UTF-16 units and a 4,097-unit send goes
   as two messages.
 - A second `run` waits on `serve`'s lock while the first keeps serving,
@@ -519,17 +521,17 @@ The test window, on the build Mac:
 
 ## Build record
 
-- **On 2.1's port.** Rebased onto 2.1's e951e3def. Every test runs the
+- **On 2.1's port.** Rebased onto 2.1's e4dc6cfb0. Every test runs the
   bridge over `core/bridge.py`, `core/intake.py` and `core/broker.py`
   and the test database; the stand-in kernel is gone. Lookup reads the
   message id recorded before a key's first send, not a date.
 - **Gap fill and D32.** Every id above the stop is checked with
   `intake.recorded`; the stop is the newest id the chat's last pass saw.
   A chat with rows but no entry in `telegram-seen.json` stops at
-  `intake.highest`, which uses the high-water mark as a stop, not only as
-  a paging hint: an update dropped below it before the chat's first pass
-  is not taken. It arises only when the file is lost or a live message
-  lands before a chat's first pass.
+  `intake.lowest`, the smallest id recorded for it, so an update dropped
+  below the newest row before the chat's first pass is still taken. No
+  high-water mark stops a pass; the bridge does not read
+  `intake.highest`.
 
 ## Questions for Tom
 

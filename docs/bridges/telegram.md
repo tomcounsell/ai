@@ -96,7 +96,7 @@ whether the message with that idempotency key exists.
 | Action type | Class | Target | Payload |
 |---|---|---|---|
 | `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `topic_id`, `files` (each a path and its sha256) |
-| `email.send` | `act` | the first recipient | see [email.md](email.md) |
+| `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
 reply target, and each file's bytes, so what leaves is what he saw.
@@ -184,7 +184,8 @@ work.
 
 **After downtime.** The bridge fills the gap itself, on every connect and
 every tick: it pages back through each owned chat to the newest message
-id its last pass saw, kept in `telegram-seen.json` in the key directory,
+id its last pass saw, kept in `telegram-seen.json` in the key directory
+(for a chat with no entry there, to the lowest id recorded for it),
 and receives every message `intake.recorded` does not list. Message ids
 in a Telegram chat only grow, so nothing newer is skipped. The receipt index makes each
 replay land once.

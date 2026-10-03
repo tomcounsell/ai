@@ -161,7 +161,7 @@ class TelegramBridge:
         stop_id = self._seen.get(str(chat))
         if stop_id is None:
             async with self.kernel.conn() as conn:
-                stop_id = await self.kernel.highest(conn, "telegram", str(chat))
+                stop_id = await self.kernel.lowest(conn, "telegram", str(chat))
         if stop_id is None:
             # No rows: nothing before this connect is wanted.
             page = await self.wire.history(chat, limit=1)

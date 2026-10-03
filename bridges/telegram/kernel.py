@@ -22,7 +22,7 @@ class Kernel:
     split_text: Any  # text -> parts within Telegram's limit
     receive: Any
     recorded: Any
-    highest: Any
+    lowest: Any
     claimed: Any
     owns: Any
     owned: Any
@@ -52,7 +52,7 @@ def from_core(dsn: str | None = None) -> Kernel:
         split_text=lambda text: bridge.split_text("telegram", text),
         receive=intake.receive,
         recorded=intake.recorded,
-        highest=intake.highest,
+        lowest=intake.lowest,
         claimed=intake.claimed,
         owns=intake.owns,
         owned=intake.owned,
