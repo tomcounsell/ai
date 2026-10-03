@@ -38,7 +38,7 @@ a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes,
 sha256}` for a regular file with one link, `{name, refused}` for anything else
 (a link, a hard link, a FIFO, a directory), which it never reads. Each entry
 is then moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
-record it again; `done.md` names a screen by its original name. The digest
+record it again. An entry that cannot be moved is removed and recorded as `{name, refused}`. `done.md` names a screen by its original name. The digest
 shows whether a screen is edited afterward; it does not make the image true.
 Screens are evidence, never a gate: nothing requires one and no check reads
 one.
