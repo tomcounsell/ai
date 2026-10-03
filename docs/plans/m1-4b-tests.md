@@ -63,8 +63,13 @@ The test runner:
 - A JUnit file that is not XML, holds a `DOCTYPE` (UTF-8 or UTF-16), is a
   symlink, is a FIFO with no writer (the read returns at once), or sits in
   a linked check directory is "no per-test result", never a crash or a
-  hang; a UTF-16 report is read; a report of any size is read whole.
-- `fresh_dir` removes a read-only tree a run left behind.
+  hang; a UTF-16 report is read; a report declaring an encoding expat
+  cannot read (`utf-16-le` or `utf-16-be` with no BOM, an unknown name) is
+  not XML; a report of any size is read whole.
+- `fresh_dir` removes a read-only tree a run left behind, and a directory
+  with no read bit (modes 0000, 0100, 0300), at the top or inside.
+- A candidate whose tree holds `.valor` is red with that finding and is
+  not rerun.
 - A stop published while the suite sleeps: the suite's process group is
   gone (a child it forked included), no `suite.ran` is written for that
   run, and the runner returns `stopped` within seconds.
@@ -74,7 +79,11 @@ The test runner:
 - One that deletes a test's definition is not red and lists it under
   `deleted_at_head`; one that deletes a test's file but keeps the function
   elsewhere under the same name is judged by the name's removal; one that
-  drops a parametrize case lists that id as deleted.
+  drops a parametrize case lists that id as deleted, whether the case sat
+  in the decorator, a module list it names (followed through the names
+  that list is built from), its `ids=` function, an imported module, or a
+  case file it names; a line inserted just under the decorator deletes
+  nothing.
 - A test failing at base and head is listed under `failing_at_base` and
   does not make the verdict red.
 - Both sides with no JUnit file: head fails, base passes is red; both fail

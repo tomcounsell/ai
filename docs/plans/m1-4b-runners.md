@@ -347,10 +347,9 @@ base's setup runs again to make it, without the suite.
    **Failures are classed by who controls them** (critique finding 2).
    `cause: "kernel"` is only what the kernel controls: no checkout from the
    mirror (which holds the commit), a service that would not start, a
-   stop, or a kernel killed mid-run. Such a run is never
-   reused, records no verdict, and the runner returns `failed`, so the
-   branch reruns. Everything the commit's own code controls is `cause:
-   "commit"`: setup failed, or no JUnit file while
+   stop, or a kernel killed mid-run. Such a run is never reused, records
+   no verdict, and the runner returns `failed`, so the branch reruns. Everything the commit's own code controls is `cause:
+   "commit"`: its tree holds `.valor`, setup failed, or no JUnit file while
    the exit code says the runner itself failed. At head, with the base
    run usable, that is `red` with the failure as a finding (the
    candidate's setup or suite is broken, which is what the check exists to
@@ -370,12 +369,12 @@ base's setup runs again to make it, without the suite.
    directory each opened with `O_NOFOLLOW | O_DIRECTORY`, each component
    below with `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`,
    `fstat` must say `S_ISREG`, and the whole file read. So a linked check
-   directory, a FIFO, a socket, a link, or a device at the path is refused without
-   blocking. A file holding a `DOCTYPE` or an entity declaration is
-   refused, found by expat itself, so the file's own encoding (UTF-16, a
-   BOM, an encoding declaration) is read as the parser reads it; the rest is parsed
-   with `xml.etree.ElementTree`. Any refusal is "no per-test result",
-   never a crash or a hang. Test ids are `classname::name`.
+   directory, a FIFO, a socket, a link, or a device is refused without blocking.
+   A file holding a `DOCTYPE` or an entity declaration is refused, found
+   by expat itself, so its own encoding (UTF-16, a BOM, a declaration) is
+   read as the parser reads it; an encoding expat cannot read
+   (`utf-16-le`, no BOM) is not XML. The rest is parsed with ElementTree.
+   Any refusal is "no per-test result", never a crash or a hang. Test ids are `classname::name`.
 5. `compare(base, head, removed)` gives three lists:
    - `failures`: ids failing or erroring at head that passed or did not
      exist at base, and every id that passed at base and is absent or
@@ -386,8 +385,10 @@ base's setup runs again to make it, without the suite.
      removes. For Python, `removed_definitions(mirror, base, head)` reads
      the diff in the mirror: a deleted test file, or a removed line that
      defines the test's function or class name (parametrized ids reduced
-     to the name); a diff that touches a test's parametrize decorator
-     counts its missing ids as deleted. For other kinds, an id whose name
+     to the name); a diff touching what feeds a test's parametrize
+     decorator (its lines, bindings of names it uses, followed through
+     theirs, a module they come from, a file a string there names) counts
+     its missing ids as deleted. For other kinds, an id whose name
      string the diff removes is deleted; other missing ids are failures.
    - `failing_at_base`: ids failing or erroring at both base and head.
      They are not counted at head and are listed for the reviewer and Tom,

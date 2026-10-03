@@ -230,6 +230,15 @@ def test_a_utf_16_junit_report_is_read(tmp_path):
     )
 
 
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be", "no-such-codec", "shift_jis"])
+def test_a_junit_report_in_an_encoding_expat_cannot_read_is_not_xml(tmp_path, encoding):
+    name = _report(tmp_path, "x")
+    text = f'<?xml version="1.0" encoding="{encoding}"?>' + GOOD.decode()
+    (tmp_path / name / checks.JUNIT).write_bytes(text.encode("utf-8" if encoding == "no-such-codec" else encoding))
+    tests, why = checks.read_junit(tmp_path, name)
+    assert tests is None and "not XML" in why
+
+
 # -- compare ------------------------------------------------------------------------------------
 
 
@@ -324,6 +333,76 @@ def test_removed_definitions(tmp_path):
     assert gone("tests.test_c.TestK::test_m")  # its class went
     assert gone("spec.js::names a thing")  # no Python file: the name string was removed
     assert not gone("other::never_mentioned")
+
+
+R_BASE = (
+    "from tests.cases import IMPORTED\n"
+    "BASE = [1, 2]\n"
+    "CASES = BASE + [3]\n"
+    "\n"
+    "\n"
+    "def ids(x):\n"
+    "    return str(x)\n"
+    "\n"
+    "\n"
+    "@pytest.mark.parametrize(\"x\", CASES, ids=ids)\n"
+    "def test_r(x):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "@pytest.mark.parametrize(\"x\", IMPORTED)\n"
+    "def test_i(x):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "@pytest.mark.parametrize(\"x\", json.loads(Path(__file__).with_name(\"cases_f.json\").read_text()))\n"
+    "def test_f(x):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "@pytest.mark.parametrize(\"x\", [1, 2])\n"
+    "def test_u(x):\n"
+    "    pass\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("edit", "dropped", "kept"),
+    [
+        # A case dropped from a module-level list the decorator uses, followed
+        # through the name it is built from.
+        ({"tests/test_r.py": R_BASE.replace("BASE = [1, 2]", "BASE = [1]")}, "test_r[2]", "test_u[2]"),
+        # The ids= function the decorator names.
+        ({"tests/test_r.py": R_BASE.replace("return str(x)", "return 'n' + str(x)")}, "test_r[2]", "test_u[2]"),
+        # A line inserted inside a multi-line binding.
+        ({"tests/test_r.py": R_BASE.replace("CASES = BASE + [3]\n", "CASES = BASE + [\n    3,\n]\n")},
+         "test_r[3]", "test_u[2]"),
+        # A module the decorator's name is imported from.
+        ({"tests/cases.py": "IMPORTED = [1]\n"}, "test_i[2]", "test_r[2]"),
+        # A case file a string in the decorator names.
+        ({"tests/cases_f.json": "[1]\n"}, "test_f[2]", "test_i[2]"),
+        # A line inserted just under a decorator touches nothing it reads.
+        ({"tests/test_r.py": R_BASE.replace(
+            '@pytest.mark.parametrize("x", [1, 2])\n', '@pytest.mark.parametrize("x", [1, 2])\n@pytest.mark.slow\n'
+        )}, None, "test_u[2]"),
+    ],
+)  # fmt: skip
+def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorator(tmp_path, edit, dropped, kept):
+    repo = scripted.toy_repo(tmp_path)
+    for path, text in {
+        "tests/test_r.py": R_BASE,
+        "tests/cases.py": "IMPORTED = [1, 2]\n",
+        "tests/cases_f.json": "[1, 2]\n",
+    }.items():
+        scripted.commit(repo, path, text)
+    base = scripted.git(repo, "rev-parse", "HEAD")
+    for path, text in edit.items():
+        scripted.commit(repo, path, text)
+    gone = checks.removed_definitions(repo, base, scripted.git(repo, "rev-parse", "HEAD"))
+    if dropped:
+        assert gone(f"tests.test_r::{dropped}")
+    assert not gone(f"tests.test_r::{kept}")
+
 
 
 # -- the environment digest ---------------------------------------------------------------------
@@ -575,6 +654,19 @@ def test_each_setup_command_keeps_its_own_output_file(dsn, tmp_path):
     for name, said in zip(outputs, ("first-step", "second-step"), strict=True):
         assert (checks_dir / name).read_text().strip() == said
     assert decided(got)["verdict"] == "pass"
+
+
+def test_a_candidate_whose_tree_holds_valor_is_red_and_not_rerun(dsn, tmp_path, monkeypatch):
+    # The builder's clone hides the entry from the kernel's look there (a
+    # replace ref would), so the mirror holds a candidate with `.valor`.
+    seen = kws.tree_has_valor
+    monkeypatch.setattr(kws, "tree_has_valor", lambda *a, trusted, **k: trusted and seen(*a, trusted=trusted, **k))
+    _task, _b, out, got = through_test(dsn, tmp_path, writes={".VALOR/x": "x"})
+    head = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "head")
+    assert head["cause"] == "commit" and "holds a .valor entry" in head["why"]
+    d = decided(got)
+    assert d["verdict"] == "red" and "holds a .valor entry" in d["failures"][0]
+    assert out["status"] == "no runner" and out["missing"] == ["review", "docs"]  # not rerun
 
 
 def test_a_base_setup_failure_decides_its_run_and_is_never_reused(dsn, tmp_path):

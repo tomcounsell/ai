@@ -1008,6 +1008,19 @@ def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_p
     assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
 
 
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o300])
+@pytest.mark.parametrize("where", ["inside", "top"])
+def test_fresh_dir_removes_a_directory_with_no_read_bit(tmp_path, mode, where):
+    check = tmp_path / "checks" / "test-head-abc"
+    stuck = check / "repo" / "x" if where == "inside" else check
+    (stuck / "y").mkdir(parents=True)
+    (stuck / "y" / "f").write_text("left behind")
+    (stuck / "y").chmod(mode)
+    stuck.chmod(mode)
+    assert kws.fresh_dir(check) == check
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+
+
 def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
     check = tmp_path / "checks" / "test-head-abc"
     stuck = check / "repo" / "x" / "y"

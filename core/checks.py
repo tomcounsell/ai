@@ -20,8 +20,9 @@ Each run appends `suite.ran`. A run with the same commit, role, command,
 and environment digest, and no `cause`, is reused, so the base runs once per
 task. `cause: "kernel"` (no checkout from the mirror, or a service that would
 not start) is recorded nowhere and the runner returns `failed`, so the
-branch reruns; `cause: "commit"` (setup failed, or no JUnit report and an
-exit code saying the runner itself failed) is the commit's own fault.
+branch reruns; `cause: "commit"` (a tree holding `.valor`, setup failed,
+or no JUnit report and an exit code saying the runner itself failed) is the
+commit's own fault.
 
 The kernel compares the two runs by test id (`compare`) and records
 `test.decided` with leg `kernel` (`verdicts.record_check`), which computes
@@ -134,7 +135,9 @@ def _declares(body: bytes) -> str | None:
         p.Parse(body, True)
     except Declared:
         return "the JUnit report holds a DOCTYPE"
-    except expat.ExpatError as exc:
+    except (expat.ExpatError, ValueError, LookupError) as exc:
+        # ValueError and LookupError: an encoding name expat cannot read
+        # (`utf-16-le` with no BOM, an unknown name).
         return f"the JUnit report is not XML ({exc})"
     return None
 
@@ -154,19 +157,22 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
     For an id that maps to a Python file in the base tree (its classname's
     dotted prefix as a path): the file was deleted; or a line defining the
     test's function or one of its classes was removed and not added back in
-    the same file; or the id carries parameters and the diff touches a
-    line of that test's `parametrize` decorator at base (a dropped case).
-    Any other id is removed when a line the diff removes holds its name."""
+    the same file; or the id carries parameters and the diff touches what
+    feeds that test's `parametrize` decorator at base (a dropped case, see
+    `_feeds_parametrize`). Any other id is removed when a line the diff
+    removes holds its name."""
     deleted: set[str] = set()
+    changed: set[str] = set()
     for line in git.trusted(mirror, "diff", "--no-renames", "--name-status", base, head).splitlines():
         status, _, path = line.partition("\t")
+        changed.add(path)
         if status == "D":
             deleted.add(path)
     removed: dict[str, list[str]] = {}
     added: dict[str, list[str]] = {}
-    # Base line numbers each file's hunks touch: removed lines, and the line
-    # an insertion follows.
-    touched: dict[str, set[int]] = {}
+    # Per file, the base lines the diff removes and the base lines after
+    # which it inserts.
+    touched: dict[str, tuple[set[int], set[int]]] = {}
     path = None
     diff = git.trusted(mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0", base, head)
     for line in diff.splitlines():
@@ -180,7 +186,11 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
         if path and line.startswith("@@ "):
             start, _, count = line.split()[1][1:].partition(",")
             first, n = int(start), int(count or "1")
-            touched.setdefault(path, set()).update(range(first, first + n) if n else (first,))
+            lost, after = touched.setdefault(path, (set(), set()))
+            if n:
+                lost.update(range(first, first + n))
+            else:
+                after.add(first)
             continue
         if path and line.startswith("-"):
             removed.setdefault(path, []).append(line[1:])
@@ -217,36 +227,114 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
         for n in (name, *classes):
             if defines(lost, n) and not defines(back, n):
                 return True
-        return "[" in test_id.rsplit("::", 1)[-1] and _touches_parametrize(
-            mirror, base, path, classes, name, touched.get(path, set())
+        if "[" not in test_id.rsplit("::", 1)[-1]:
+            return False
+        try:
+            source = git.trusted(mirror, "show", f"{base}:{path}")
+        except git.GitError:
+            return False
+        blocks, files = _feeds_parametrize(source, path, classes, name, base_files)
+        lines, after = touched.get(path, (set(), set()))
+        return bool(files & changed) or any(
+            lines & set(range(lo, hi + 1)) or any(lo <= n < hi for n in after) for lo, hi in blocks
         )
 
     return gone
 
 
-def _touches_parametrize(
-    mirror: str | Path, base: str, path: str, classes: list[str], name: str, lines: set[int]
-) -> bool:
-    """Does a base line in `lines` fall inside a `parametrize` decorator of
-    the test function `name` (inside `classes`) in `path` at `base`?"""
+def _feeds_parametrize(
+    source: str, path: str, classes: list[str], name: str, base_files: set[str]
+) -> tuple[list[tuple[int, int]], set[str]]:
+    """What feeds the `parametrize` decorators of the test function `name`
+    (inside `classes`) in `source`, the base text of `path`: the line spans
+    (first, last) of each decorator and of every binding in the module or
+    an enclosing class of a name they use, followed through those bindings'
+    own names; and the base files they draw on, a module a used name is
+    imported from or a file a string in them names (a case file).
+
+    A line removed inside a span, or inserted between two of its lines,
+    touches it; an insertion just after the span's last line does not."""
     try:
-        tree = ast.parse(git.trusted(mirror, "show", f"{base}:{path}"))
-    except git.GitError, SyntaxError, ValueError:
-        return False
-    scope: list[ast.stmt] = tree.body
+        tree = ast.parse(source)
+    except SyntaxError, ValueError:
+        return [], set()
+    scopes: list[list[ast.stmt]] = [tree.body]
+    decorators: list[ast.expr] = []
     for cls in classes:
-        found = [n for n in scope if isinstance(n, ast.ClassDef) and n.name == cls]
+        found = [n for n in scopes[-1] if isinstance(n, ast.ClassDef) and n.name == cls]
         if not found:
-            return False
-        scope = found[0].body
-    for node in scope:
+            return [], set()
+        decorators += found[0].decorator_list
+        scopes.append(found[0].body)
+    for node in scopes[-1]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            for dec in node.decorator_list:
-                if "parametrize" in ast.unparse(dec) and lines & set(
-                    range(dec.lineno, (dec.end_lineno or dec.lineno) + 1)
-                ):
-                    return True
-    return False
+            decorators += node.decorator_list
+    decorators = [d for d in decorators if "parametrize" in ast.unparse(d)]
+    bindings: dict[str, list[ast.stmt]] = {}
+    for scope in scopes:
+        for stmt in scope:
+            for bound in _binds(stmt):
+                bindings.setdefault(bound, []).append(stmt)
+    here = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    blocks: list[tuple[int, int]] = []
+    files: set[str] = set()
+    seen: set[str] = set()
+    todo: list[ast.AST] = list(decorators)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            files |= _module_files(node, here) & base_files
+            continue
+        blocks.append((node.lineno, node.end_lineno or node.lineno))
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                files |= {
+                    f for f in base_files if f in (sub.value, here + sub.value) or f.endswith("/" + sub.value)
+                }
+            elif isinstance(sub, ast.Name) and sub.id not in seen:
+                seen.add(sub.id)
+                todo += bindings.get(sub.id, [])
+    return blocks, files
+
+
+def _binds(stmt: ast.stmt) -> list[str]:
+    """The names a module or class level statement binds."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [stmt.name]
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name).split(".", 1)[0] for a in stmt.names]
+    targets = (
+        stmt.targets
+        if isinstance(stmt, ast.Assign)
+        else [stmt.target]
+        if isinstance(stmt, (ast.AnnAssign, ast.AugAssign))
+        else []
+    )
+    return [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+
+
+def _module_files(node: ast.Import | ast.ImportFrom, here: str) -> set[str]:
+    """The paths an import's modules may live at, relative to the
+    repository root: an absolute import from the root or from the importing
+    file's directory `here` (pytest's rootdir insertion), a relative one
+    from `here`'s ancestor its level names."""
+    if isinstance(node, ast.Import):
+        mods, prefixes = [a.name for a in node.names], {"", here}
+    else:
+        base_mod = node.module or ""
+        mods = ([base_mod] if base_mod else []) + [f"{base_mod}.{a.name}".lstrip(".") for a in node.names]
+        if node.level:
+            parts = [p for p in here.split("/") if p]
+            kept = parts[: max(len(parts) - node.level + 1, 0)]
+            prefixes = {"/".join(kept) + "/" if kept else ""}
+        else:
+            prefixes = {"", here}
+    out: set[str] = set()
+    for prefix in prefixes:
+        for mod in mods:
+            stem = prefix + mod.replace(".", "/")
+            out |= {stem + ".py", stem + "/__init__.py"}
+    return out
 
 
 # -- comparing base and head --------------------------------------------------------
@@ -452,6 +540,9 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
 
     try:
         await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, sha, checkout)
+    except workspace.ValorInTree as exc:
+        # The commit's own tree: no rerun would ever check it out.
+        return done(cause="commit", why=f"no checkout at {role}: {exc}")
     except git.GitError as exc:
         # The mirror holds the commit, so a checkout that fails is the kernel's.
         return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")

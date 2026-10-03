@@ -1174,18 +1174,28 @@ def fresh_dir(check_dir: Path) -> Path:
     return check_dir
 
 
+class ValorInTree(git.GitError):
+    """A commit's tree holds a `.valor` entry: the commit's own doing, so
+    no checkout of it ever succeeds."""
+
+    def __init__(self, rev: str):
+        super().__init__(f"{rev[:12]}'s tree holds a .valor entry")
+        self.rev = rev
+
+
 def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[str, str]:
     """A repository at `dest` holding exactly two commits the kernel made:
     `base` (the base's tree) and `candidate` (`rev`'s tree), with only the
     objects those trees reach, so no builder commit message, intermediate
-    commit, or object outside the two trees exists in it."""
+    commit, or object outside the two trees exists in it. A `rev` whose
+    tree holds `.valor` raises `ValorInTree`; the base's tree is never
+    checked out, so its entries do not count."""
     mirror = Path(mirror)
     dest.parent.mkdir(parents=True, exist_ok=True)
     git.trusted(dest.parent, "init", "-q", "-b", "main", str(dest))
     borrow = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects"), **KERNEL_IDENTITY}
-    for r in (base, rev):
-        if tree_has_valor(dest, r, trusted=True, extra_env=borrow):
-            raise git.GitError(f"{r[:12]}'s tree holds a .valor entry")
+    if tree_has_valor(dest, rev, trusted=True, extra_env=borrow):
+        raise ValorInTree(rev)
     base_tree = git.trusted(dest, "rev-parse", f"{base}^{{tree}}", extra_env=borrow)
     rev_tree = git.trusted(dest, "rev-parse", f"{rev}^{{tree}}", extra_env=borrow)
     first = git.trusted(dest, "commit-tree", base_tree, "-m", "base", extra_env=borrow)
@@ -1484,9 +1494,16 @@ def rmtree(path: Path) -> None:
     def writable(func, p, _exc):
         parent = os.path.dirname(p)
         os.chmod(parent, 0o700)
-        if not os.path.islink(p) and os.path.isdir(p):
-            os.chmod(p, 0o700)
-        func(p)
+        if os.path.islink(p) or not os.path.isdir(p):
+            func(p)
+            return
+        os.chmod(p, 0o700)
+        if func in (os.open, os.scandir):
+            # A directory with no read bit could not be opened or listed, so
+            # its entries were never reached: remove it as a tree of its own.
+            rmtree(Path(p))
+        else:
+            func(p)
 
     shutil.rmtree(path, onexc=writable)
 
