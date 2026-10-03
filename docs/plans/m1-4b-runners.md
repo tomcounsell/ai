@@ -536,22 +536,30 @@ refuses or pauses on money.
    the build asks Tom.
 4. Restart the kernel so `RUNNERS` holds the new runners.
 
-## Questions for Tom
+## Decided by default
 
-1. **Should the build turn start a fresh session from the plan** (finding
-   2: about 70k input tokens resumed, $2.18 before any code)? Assumed: no
-   change in 1.4b; build keeps resuming the working session, and the cost
-   is recorded as a finding for a task after 1.4d.
-2. **Fresh Postgres and Redis per suite run on the task's ports**, rather
-   than the builder's live instances? Assumed: yes, as designed.
-3. **Drafted labels.** Governance hunks not settled by your grant, your
-   paragraph's named kinds, or "tests are not governance" stay drafted and
-   count as information only. Assumed: yes; you confirm any you want
-   counted.
-4. **A real-ledger entry check that fails at rollout** keeps that stage
-   manual until you decide. Assumed: yes.
-5. **Tests failing at both base and head** (sandbox-denied tests included)
-   are listed on `test.decided` as `failing_at_base` and do not make the
-   verdict red. Assumed: yes.
-6. **The docs verdict computed by the kernel** from what was kept, with the
-   session's own `changes` standing. Assumed: yes.
+Reversible calls made by the build session, not questions for Tom.
+
+1. **The build turn keeps resuming the working session; no fresh build
+   session from the plan in 1.4b** (finding 2). It is a harness change,
+   not part of the test or docs runners, and folding it in would widen a
+   stakes-2 task. The cost evidence (about 70k input tokens of resumed
+   context, $2.18 before any code, against a bare baseline that did the
+   whole item for $1.57) makes it a candidate task after 1.4d.
+2. **Fresh Postgres and Redis per suite run, on the task's own ports.**
+   Base and head must not share state, and the trial showed what a check
+   sharing the caller's services can reach (port 6379, the live Redis).
+3. **Governance labels not settled by Tom's grant, his paragraph's named
+   kinds, or "tests are not governance" stay drafted and count as
+   information only.** Under CLAUDE.md, what counts as governance is
+   Tom's call, so a drafted label cannot set a floor.
+4. **A calibration that fails its entry check at rollout leaves that
+   stage on the manual `verdict` path until its entry check passes.** That
+   is not a stop: tasks keep running with that check recorded by hand, the
+   failure is recorded, and the site routes once its entry check passes.
+5. **Tests failing at both base and head are listed as `failing_at_base`
+   and do not make the verdict red.** That matches sdlc-state-machine.md's
+   definition, "failures at head that do not fail at base".
+6. **The kernel computes the docs verdict from the commits it kept, and
+   the session's own `changes` stands.** The turn's verdict file is
+   turn-owned and only adds caution; it never removes it.
