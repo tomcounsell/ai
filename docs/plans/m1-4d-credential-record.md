@@ -144,7 +144,7 @@ until that program exits.
 
 ## Patch round 3: output in files, the stop's log, the lock directory
 
-Rebased onto 1.4w (8d6ecd008); one import conflict in tests/test_kernel.py.
+Rebased onto 1.4w (86523576c); one import conflict in tests/test_kernel.py.
 
 The test and review rounds of patch round 2 found that a program git
 started which left git's process group with `setsid` and kept git's pipes
