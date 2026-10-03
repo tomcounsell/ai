@@ -416,7 +416,8 @@ def test_critique_gets_no_database_credential_and_no_service_port(dsn, tmp_path)
 
     b, ws = run(go())
     harness = critique_turns(ws)[0]["harness"]
-    assert set(harness["env"]) == {"PATH"}
+    assert set(harness["env"]) == {"PATH", "UV_CACHE_DIR"}
+    assert Path(harness["env"]["UV_CACHE_DIR"]).parent == Path(harness["tmpdir"])
     port = str(b.project["ports"]["postgres"])
     assert f"localhost:{port}" not in Path(harness["sandbox_profile"]).read_text()
     assert f"localhost:{port}" in Path(b.harness["sandbox_profile"]).read_text()  # the builder's has it

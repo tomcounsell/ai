@@ -230,13 +230,19 @@ def _free_port() -> int:
 
 def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-") -> Cluster:
     """`initdb` and start a throwaway cluster that trusts local logins, the
-    way the machine cluster does. Its socket sits in a short directory under
-    `/tmp`, since a socket path past 103 bytes does not bind on macOS. With
-    `tcp` it also listens on 127.0.0.1 and ::1 at a free port. Its log
-    (`postgres.log` in `root`) prefixes each line with the SQLSTATE. Its
-    directory is `/tmp/<prefix><random>`, so a caller can find its own."""
+    way the machine cluster does. Its directory is
+    `<pg_scratch>/<prefix><random>`, so a caller can find its own; the
+    `pg_scratch` setting is inside the kernel key directory, which no
+    sandbox profile can read or write, since `initdb`, `pg_ctl` and the
+    server run here outside any sandbox. Its socket sits in that directory,
+    a short path, since a socket path past 103 bytes does not bind on
+    macOS. With `tcp` it also listens on 127.0.0.1 and ::1 at a free port.
+    Its log (`postgres.log` in `root`) prefixes each line with the
+    SQLSTATE."""
     pg_bin = Path(pg_bin or settings.pg_bin)
-    root = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
+    scratch = Path(settings.pg_scratch)
+    scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=scratch))
     data = root / "data"
     owner = getpass.getuser()
     try:
@@ -303,7 +309,7 @@ def restore(
     manifest. Raises `BackupError` on any difference or failure, with the
     cluster removed. Returns a summary, which names the cluster when `keep`
     leaves it running. `prefix` names the scratch cluster's directory
-    under `/tmp` (see `start_cluster`)."""
+    under the `pg_scratch` setting (see `start_cluster`)."""
     dump_path = Path(dump_path)
     manifest_path = Path(f"{dump_path}.json")
     if not manifest_path.is_file():
