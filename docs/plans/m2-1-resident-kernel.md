@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: planned
+status: planned; critique rounds 1 and 2 built in; building
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -11,50 +11,50 @@ review_rounds: 2
 
 Task 2.1 of [valor-rebuild.md](valor-rebuild.md), milestone 2. It lands a
 kernel process that runs under launchd and never exits, a supervisor that
-advances each task one step per event, steering by message, and the port
-that 2.2 (Telegram) and 2.3 (email) build against in parallel. The port
-section below is the contract those two tasks read; its names, arguments,
-rows, payloads, and indexes are exact.
+advances each task one step per event, steering by message, operator
+notices, and the port 2.2 (Telegram) and 2.3 (email) build against. The
+port is in its own file, [m2-1-port.md](m2-1-port.md), the contract the
+bridge plans read; this file is the kernel side.
 
-Built on the rebuild branch after 1.4b and 1.4d merge. It takes 1.4d's
-shape as given: the composition root builds a `broker.Performers` per
-process and passes it to `request`, `release`, `reconcile`, and
-`tasks.dispatch`; no module global holds performers; a performer's
-`perform` and `lookup` are `async`. Where this plan names a signature that
-1.4d also touches, 1.4d's merged form is the base and this plan adds only
-what it says.
+Built on the rebuild branch after 1.4b, 1.4d, and 1.4s merge. It takes
+1.4d's broker as given: a `broker.Performers` built per task from its
+Brief; `request(conn, performers, task_id, action)`,
+`release(conn, performers, effect_id)`, `reconcile(conn, performers,
+effect_id, settle_after_s=None)`; `perform`, `lookup`, and
+`refuse(conn, action)` async; `dispatch(..., offered=())`. Signal files
+are read through 1.4s's `read_turn_file`.
 
 ## Stakes
 
 `critique_rounds: 2`, `review_rounds: 2`. The task changes the kernel's
-process model, the broker's idempotency key, the release path, and the
-schema. A mistake sends a message twice under Valor's name, sends one Tom
-did not approve, loses a task when the process dies, or leaves a turn
-running and spending with no process watching it.
+process model, the broker's key and release path, and the schema. A
+mistake sends a message twice under Valor's name, sends one Tom did not
+approve, loses a task or a turn's signals when the process dies, or
+leaves a turn running and spending with no process watching it.
 
 ## The Done items, as evidence
 
 | Done item (valor-rebuild.md 2.1) | Evidence |
 | --- | --- |
-| A launchd `KeepAlive` process holds the gateway, the broker, the turn runner, and one turn slot held in Postgres | `python -m core serve` (`core/serve.py`); the plist `python -m core service install` writes; `test_serve.py::test_one_turn_slot` (two ready tasks, one turn at a time, a second `serve` waits on the kernel lock) |
-| Killing it mid-task loses nothing; on restart it resumes from the ledger | `test_serve.py::test_kill_mid_turn` (SIGKILL during a scripted turn, restart, the task reaches the same final state with `tasks.audit` empty); rollout step 5 on the build Mac |
-| The supervisor advances a task one state per event | `router.step` runs one runner once; `test_serve.py::test_one_step_per_event` |
-| Same store in, byte-identical context out | `test_serve.py::test_same_store_same_context` (the Brief and prompt rendered twice from one ledger, and after a restart, are equal bytes) |
-| Steering: a message for a task mid-turn is a row delivered at the next turn's start | `message.steered`; `test_intake.py::test_steer_mid_turn` |
-| The port: `intake.receive`, `message.received` with its unique index, `notice.requested` and `notice.sent`, a release-requested row the owning bridge performs, a sweep that reconciles dangling intents on restart | The Port section; `test_intake.py`, `test_port.py` |
-| Absorbs the idempotency key and the tech-stack line | `test_port.py::test_two_identical_sends`; `docs/tech-stack.md` row and section |
+| A launchd `KeepAlive` process holds the gateway, the broker, the turn runner, and one turn slot held in Postgres | `python -m core serve`; its printed plist; `core/slot.py`; `test_serve.py::test_one_turn_slot` |
+| Killing it mid-task loses nothing; on restart it resumes from the ledger | `test_kill_mid_turn`, `test_kill_after_ended_before_collected`, `test_kill_between_intent_and_outcome`, `test_merge_restarts_its_kernel`; rollout step 6 |
+| The supervisor advances a task one state per event | `router.step`; `test_one_step_per_event` |
+| Same store in, byte-identical context out | `turn.started` records the kernel commit and the offered types; `test_same_store_same_context` in a fresh process |
+| Steering: a message for a task mid-turn is a row delivered at the next turn's start | `message.steered`; `test_steer_mid_turn`, `test_steer_during_checks` |
+| The port: `intake.receive`, `message.received` with its unique index, `notice.requested` and `notice.sent`, a release-requested row the owning bridge performs, a sweep that reconciles dangling intents on restart | [m2-1-port.md](m2-1-port.md); `test_intake.py`, `test_bridge.py` |
+| Absorbs the idempotency key and the tech-stack line | `test_bridge.py::test_two_identical_sends`; `docs/tech-stack.md` |
 
 ## Threat model
 
 - Someone posing as Tom: only a `verified` record from the operator in
-  settings answers, approves, stops, or starts work; the rest is inert.
-- A send Tom did not approve: a bridge performs only through
-  `broker.release`, which checks the stop fence, refusal, and an unused
-  approval of the same digest in the intent's transaction.
+  settings binds to anything, and email never approves or stops.
+- A send Tom did not approve: only `broker.release` performs, checking the
+  stop fence, refusal, and an unused approval of the same digest in the
+  intent's transaction.
 - A send performed twice: the platform id derives from a key ending in the
   effect id; reconcile runs only on a free effect lock, `lookup` first.
 - A turn outliving a killed kernel: restart reaps it by marker and sandbox
-  name, ends it, and charges its open calls before anything else.
+  name, ends it, and charges the calls it left open.
 - A duplicated inbound message: the unique index records and binds it once.
 - Two machines on one chat: a bridge receives only chats its machine owns.
 
@@ -64,536 +64,513 @@ running and spending with no process watching it.
 
 `python -m core serve` runs until killed. In order:
 
-1. Connect and take the session advisory lock `kernel:<settings.machine>`,
-   blocking. A second `serve` waits there, and a restart after a kill
-   waits only until Postgres ends the dead session, which it does as the
-   socket closes.
-2. Recover (`serve.recover(conn, performers)`):
-   - For every `turn.started` with no `turn.ended` whose task's
-     `run:<task>` lock is free: `runs.reap(turn_id)` and
-     `runs.reap_sandboxed` for its name, then `turn.reaped` and
-     `turn.ended` with `outcome: "interrupted"`, `result: {}`, and
-     `reason: "kernel restarted"`.
-   - For every `gateway.opened` with no `gateway.charged`:
-     `spending.charge` with the call's `estimate_usd_micros` and
-     `{"estimated": true, "reason": "kernel restarted"}`. Metered, never a
-     stop.
-   - For every dangling intent (an `effect.intent` with no
-     `effect.outcome`) whose action type this process performs:
-     `broker.reconcile(conn, effect_id, performers)`.
-   - The services sweep `router._Services.sweep` runs today, for every
-     task.
+1. Connect and take the session lock `kernel:<settings.machine>`,
+   blocking. A second `serve` waits there; a restart after a kill waits
+   until Postgres ends the dead session as its socket closes.
+2. **Recover** (`serve.recover(conn)`), building each task's Performers
+   from its Brief, as `router.step` does:
+   - Every `turn.started` with no `turn.ended` whose `run:<task>` lock is
+     free: `runs.reap(turn_id)` and `runs.reap_sandboxed` for its name,
+     then `turn.reaped` and `turn.ended` `{outcome: "interrupted",
+     result: {}, reason: "kernel restarted"}`.
+   - Every `turn.ended` with no `turn.collected` whose `run:<task>` lock
+     is free: re-collect with `signals.recollect(workspace, turn_id)`,
+     which reads `.valor/handled/<turn_id>/` and then whatever is still in
+     `.valor/` (a move the kill cut short, a file 1.4s refused to move),
+     moving the latter into `handled/<turn_id>/` as `collect` does, all
+     through `read_turn_file`. `state` and `finished` for
+     `session.record` come from the turn's rows: the state is the one
+     `turn.started` records, `finished` is the `turn.ended` outcome. The
+     broker's `request_id` makes the re-request of an effect return the
+     first.
+   - Every `gateway.opened` with no `gateway.charged` whose `holder` lock
+     is free: `spending.charge` at its `estimate_usd_micros` with
+     `{"estimated": true, "reason": "kernel restarted"}`. `gateway.opened`
+     gains `holder`, the session lock its opener holds (`run:<task>` for
+     turns and judgement inside a run). A call with no holder is left
+     for `tasks.audit` to report. Metered, never a stop.
+   - Every dangling intent of a kernel type (`push_branch`, `merge`):
+     `broker.reconcile` with its task's Performers.
+   - Every `release.requested` with `owner: "kernel"`: nothing here;
+     `schedule` takes it.
+   - The services sweep, for every task (see Services).
 3. Start the gateway once (`Gateway(credential=ClaudeLogin())`), LISTEN on
    `valor_events` on a connection of its own, and loop. Each wake (a
-   notification, or `settings.serve_tick_s` with none) runs, in order:
-   `intake.bind` over every unbound `message.received`,
-   `notices.owe` for every active task, then `schedule`.
+   notification, or `serve_tick_s` with none) runs in order:
+   `intake.bind` over every unbound `message.received`, `notices.owe` for
+   every active task, then `schedule`.
 
-`schedule` folds every task whose fold is not `merged` or `stopped` and
-that has no job running in this process, and starts at most one job per
-task:
+**`schedule`** folds every task not `merged` or `stopped` with no job
+running in this process, and starts at most one job per task:
 
-- `JUDGE` and `MERGE`: a job runs at once, beside any turn. A judgement
-  call or a merge request is not a turn.
+- `release.requested` with `owner: "kernel"` and no intent, outcome, or
+  `effect.refused`: a release job, `broker.release` with the task's
+  Performers. A merge is the task's `MERGE` job. A release the checks
+  refuse appends `effect.refused` once and owes a notice (see the
+  broker), so the job is not found again.
+- A task whose project workspace is not provisioned (a task started by
+  message): a provision job, `workspace.provision` under
+  `provision:<task>` in a thread, off the loop, as `__main__` provisions
+  today. A failure writes `workspace.failed` with the reason and owes a
+  notice; the task stays stoppable and is not provisioned again until
+  Tom steers it (a later `message.steered`) or starts it anew.
+- `JUDGE` and `MERGE`: a job at once, beside any turn.
 - A state whose runner starts a harness (`CLARIFY`, `PLAN`, `CRITIQUE`,
-  `BUILD`, `CHECKS`, `PATCH`): the job needs the turn slot. Ready tasks
-  are taken in order of the id of their latest row, oldest first.
-- `WAITING`, `MERGED`, `STOPPED`, a legacy or calibration task: nothing.
+  `BUILD`, `CHECKS`, `PATCH`): one such job at a time in this process,
+  ready tasks taken in order of the id of their latest row, oldest first.
+- `WAITING`, a legacy or calibration task: nothing.
 
-A job is `router.step(gateway, task_id, runners, dsn, performers)`: under
-the task's `run:<task>` lock (as today), fold, run the state's runner
-once, and return. The rows it writes notify, which wakes the loop for the
-next step. `router.run`, the command line's loop, becomes `step` repeated
-until a settled state, so `python -m core run` behaves as it does today.
+A job is `router.step(gateway, task_id, runners, dsn, performers,
+services)`: under `run:<task>` (as today), build the task's Performers
+with `performers(brief)`, a factory `serve` passes in (the composition
+root's `_performers` joined with `bridge.declared_performers()`, since
+`core/router.py` cannot import `__main__`), fold, run the state's runner
+once, return.
+Its rows notify, which wakes the loop for the next step. `router.run`,
+the command line's loop, is `step` repeated until a settled state.
 
-The turn slot is the session advisory lock `turn-slot:<settings.machine>`,
-held by the job's own connection for the runner's life. `python -m core
-run` takes the same lock for a harness state, waiting for it, so a command
-line run and the resident kernel never run two turns at once. While a job
-holds the slot, the kernel runs `caffeinate -i -w <kernel pid>` so the Mac
-does not sleep mid-turn, and stops it when the slot is released.
+**The turn slot (`core/slot.py`, new).** `slot.held(holder)` is an async
+context manager over the session lock `turn-slot:<settings.machine>` on
+a connection of its own, blocking; waiters are granted in the order they
+queued. It is reentrant within a process: a contextvar records that the
+current task already holds it, and an inner `held` is a no-op. It is
+taken per turn, around `runs.run_turn`, and by 1.4b's check runners
+around each check, so every check holds the slot, and 1.4b's docs check,
+which runs a turn inside its check, takes it once. `python -m core
+run` waits on the same lock. While held it runs `caffeinate -i -w <pid>`,
+which prevents idle sleep, not sleep on closing the lid
+(docs/machine.md). 4.3 adds its sort key and `valor_preempt` on top of
+this module and of `schedule`; 2.1 builds neither.
 
-A task's services start before its first harness step and stop when it
-settles or the kernel exits, so a build, its checks, and a patch share
-one start. Stop is `python -m core stop TASK`, as today; `launchctl`
-stops the whole kernel, never one task.
+**Services.** A task's Postgres and Redis start before its first harness
+step and stop when it settles or the kernel exits, so a build, its
+checks, and a patch share one start. `serve` keeps one 1.4b `_Services`
+handle per task across steps and passes it to `step`. Its `up` runs 1.4b's
+reap of the task's own service mark and the stale check directories
+only when the handle first starts the services, never on a later step.
+While they are up the kernel holds the session lock `services:<task>` on
+the handle's connection. `workspace.sweep` stops another task's services
+only when both `run:<task>` and `services:<task>` are free. 1.4b's
+`check_services` stops the task's services, runs fresh ones, and starts
+the task's again through the same handle, with the lock held throughout.
+`router.run` (`python -m core run`) try-locks `services:<task>` beside
+`run:<task>` and returns `already running` when the kernel holds either,
+so it never reaches its `finally` that brings services down.
+
+Stop is `python -m core stop TASK`. `launchctl` stops the whole kernel.
 
 ### The schema (`core/schema.sql`)
 
-One notification trigger and these indexes, each making a fold or a
-binding total:
+Re-runnable, like the rest of the file, since `migrate` runs it whole:
 
 ```sql
-CREATE UNIQUE INDEX events_one_message ON events
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_message ON events
   (task_id, (payload->>'chat_id'), (payload->>'message_id'))
   WHERE type = 'message.received';
-CREATE UNIQUE INDEX events_one_binding ON events ((payload->>'received_id'))
-  WHERE type = 'message.bound';
-CREATE UNIQUE INDEX events_one_notice ON events (task_id, (payload->>'about_key'))
-  WHERE type = 'notice.requested';
-CREATE UNIQUE INDEX events_one_notice_sent ON events ((payload->>'notice_id'))
-  WHERE type = 'notice.sent';
-CREATE UNIQUE INDEX events_one_release ON events ((payload->>'effect_id'))
-  WHERE type = 'release.requested';
-CREATE INDEX events_sent_messages ON events USING gin ((payload->'sent'))
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_binding ON events
+  ((payload->>'received_id')) WHERE type = 'message.bound';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice ON events
+  (task_id, (payload->>'about_key')) WHERE type = 'notice.requested';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice_sent ON events
+  ((payload->>'notice_id')) WHERE type = 'notice.sent';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_release ON events
+  ((payload->>'effect_id')) WHERE type = 'release.requested';
+CREATE INDEX IF NOT EXISTS events_sent_messages ON events USING gin
+  ((COALESCE(payload->'sent', payload->'result'->'sent')))
   WHERE type IN ('notice.sent', 'effect.outcome');
 
-CREATE FUNCTION events_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION events_notify() RETURNS trigger
+LANGUAGE plpgsql AS $$
 BEGIN
   PERFORM pg_notify('valor_events', json_build_object(
     'id', NEW.id, 'task_id', NEW.task_id, 'type', NEW.type)::text);
   RETURN NULL;
 END $$;
+DROP TRIGGER IF EXISTS events_notify ON events;
 CREATE TRIGGER events_notify AFTER INSERT ON events
   FOR EACH ROW EXECUTE FUNCTION events_notify();
 ```
 
-A notification is delivered at commit. The trigger refuses nothing.
+The binding query uses the same `COALESCE` expression with `@>`, so one
+index serves `notice.sent` and a send's nested `result.sent`. A
+notification is delivered at commit. The trigger refuses nothing;
+`valor_stop` stays as it is.
 
 ### The broker (`core/broker.py`)
 
 - **The key gains the effect id.** `Action.key(effect_id)` is
   `f"{action_type}:{target}:{digest(payload)[:16]}:{effect_id}"`, written
-  as `idempotency_key` on the effect's rows and passed to `perform` and
-  `lookup`. Two identical sends in one task are two effects.
-- **A repeated request is matched by `request_id`, not by the key.**
-  `request(conn, task_id, action, performers, *, request_id=None)`. When
-  `request_id` is given, the effect's rows carry it and a prior effect on
-  the task with the same `request_id` and payload digest is the answer
-  (`_prior` matches on it). The session passes
-  `f"{turn_id}/{entry['file']}"`, one signal file of one turn, so
-  collecting a turn twice never requests twice. The merge request passes
-  none (`verdicts.ensure_merge` reads the merge effect's state before it
-  asks). A row with no `request_id` matches nothing.
-- **A declared performer.** `broker.Declared(action_type, effect_class,
-  usage, owner, refuse=None)` is a performer with no `perform` in this
-  process. `request` holds or refuses it like any other. `release` on a
-  declared type runs every check `release` runs today (stop fence,
-  `refuse`, the merge predicate for a merge, an unused approval whose
-  digest matches), writes no intent, and appends `release.requested`
-  `{"effect_id", "approval_id", "owner"}`. It returns
-  `Outcome(effect_id, "pending")`. A second release of the same effect
-  returns the same pending outcome; the unique index keeps one row.
-- **The owner performs.** In the owning bridge's process the same
-  `release(conn, effect_id, performers)` finds a real performer, repeats
-  the checks, writes `effect.intent` with the `approval_id`, performs,
-  and writes `effect.outcome`, under the per-effect session lock
-  `effect:<id>` as today.
-- **`dangling(conn, action_types) -> list[str]`**: effect ids with an
-  intent and no outcome, of those types, oldest first. The kernel's
-  recover and each bridge's start pass them to `reconcile`.
+  as `idempotency_key` and passed to `perform` and `lookup`. Two identical
+  sends in one task are two effects.
+- **A repeated request matches by `request_id`.** `request(conn,
+  performers, task_id, action, *, request_id=None)`. Given one, the
+  effect's rows carry it and a prior effect on the task with the same
+  `request_id` and digest is the answer. The session passes
+  `f"{turn_id}/{entry['file']}"`. The merge request passes none
+  (`verdicts.ensure_merge` reads the merge effect first). A row with no
+  `request_id` matches nothing.
+- **`Declared`** (in `core/bridge.py`, see the port) is a performer with
+  no `perform` here. `request` holds or refuses it like any other.
+  `release` on a declared type runs every check `release` runs today,
+  writes no intent, and appends `release.requested` on the task stream.
+  At request, a declared send whose files are over the channel's limit
+  (`ChannelLimits` in `core/bridge.py`) is refused with the protocol
+  limit as the reason.
+- **A refused release, bridge or kernel** (the release checks fail:
+  stopped, not approved, refused, merge predicate) appends
+  `effect.refused` with the reason, once, under `events_one_effect_row`,
+  and owes a notice (`effect-refused:<id>`). `core release` on the
+  command line still raises to its caller after the row is written.
+- **The intent carries the action.** `_intent` writes `action_type`,
+  `target`, `payload`, `payload_sha256`, and `effect_class` beside
+  `effect_id`, `idempotency_key`, and `approval_id`. `reconcile` reads
+  the action from the intent, falling back to `effect.held` for rows
+  written before this, so a propose-class intent (never held) reconciles
+  too. 1.4d builds to this shape.
+- **Settle time.** `Declared.settle_after_s` is a number or a function of
+  the action; `bridge.serve` resolves it against the intent's action and
+  passes the number to `reconcile`.
+- **`broker.Unknown` after a failed perform** (raised by `perform`, or by
+  the `lookup` the broker asks next) leaves the intent in flight with no
+  outcome, for reconcile. 2.2 relies on this (port item 24).
+- **`dangling(conn, action_types) -> list[str]`**: intents with no
+  outcome, of those types, oldest first.
 
-### Intake and binding (`core/intake.py`, new)
+### Binding (`core/intake.py`)
 
-`intake.receive` records and returns; the kernel binds. `intake.bind(conn,
-performers)` takes each `message.received` with no `message.bound`, in id
-order, and for the first row below that matches writes, in one
-transaction under `task:<task>`, the task row and `message.bound`
-`{"received_id", "task_id", "as"}` on the channel stream:
+`intake.bind(conn)` takes each `message.received` with no
+`message.bound`, in id order, and for the first row of the port's
+binding table that matches writes, in one transaction under
+`task:<task>`, the task rows and `message.bound`. A row whose binding
+raises (any error, a constraint included) is rolled back and then bound
+`none` with the error in its own transaction, owing a notice; binding
+never retries a row, and later rows never wait behind it. `approve`
+first reads the effect: an existing `release.requested`, intent,
+outcome, or `effect.refused` binds `none` with the notice "already
+released" or "already done". An `approve` writes
+`approval.granted` and `release.requested` together; nothing is
+performed inside `bind`, so a kill between rows leaves either both or
+neither, and the release runs as a job. Provenance on every task row is
+`by: "tom"`, `via` the channel, `role_played: false`. `tasks.stop` gains
+`via` and `role_played` as keyword-only arguments with defaults, its row
+keeping `{reason, by}` plus `provenance`.
 
-| The record | Bound as | Task row |
-| --- | --- | --- |
-| Not from the operator, or not `verified` | `none` | none |
-| Reply to any notice or sent message of a task, text exactly `stop` | `stop` | `task.stopped` (`tasks.stop`) |
-| Reply to a `question` notice whose question is open | `answer` | `question.answered` (`session.answer`) |
-| Reply to a `delivered` notice, task in `merge` or `merged` | `feedback` | `feedback.given` (`session.feedback`) |
-| Reply to an `effect` notice, text exactly `approve` (trimmed, casefolded) | `approve` | `approval.granted`, then `broker.release` |
-| Any other reply to a notice or sent message of a task | `steer` | `message.steered` |
-| Not a reply, in a chat a project spec lists | `start` | `task.started` for that project, the text as the instruction |
-| Not a reply, in a chat no spec lists | `none` | none |
+A plain message starts a task under the project whose spec lists the
+chat, else under `valor`, as valor-rebuild.md decides ("any other
+message from Tom starts a new task"); `schedule` then provisions a
+project task's workspace. A bridge receives only owned chats; the
+operator's email addresses are also read by `main`'s email bridge, which
+2.3's rollout disables for the window.
 
-A reply finds its task through `events_sent_messages`: the `sent` list on
-`notice.sent` and on a bridge send's `effect.outcome`. Every task row
-carries provenance `by: "tom"`, `via` the channel, `role_played: false`.
-`tasks.stop`, `session.answer`, and `session.feedback` take `via` and
-`role_played` (stop gains them).
+A reply that is not an exact `approve` to a task waiting on approval,
+or in `merge` and not to its `delivered` notice, would steer a task no
+runner reads steering for. It binds `steer` and also owes the notice
+"task <id> is waiting on approval; reply `approve` or `stop`" (in
+`merge`: "reply to the delivered notice to give feedback").
 
 ### Steering (`core/machine.py`, `core/session.py`)
 
-`message.steered` `{"received_id", "channel", "chat_id", "message_id",
-"text", "attachments", "provenance"}` on the task stream. The fold keeps
-`f.steering`: the steered rows written after the start of the last turn
-that finished. A finished turn spends them, as it spends an answer; an
-interrupted or failed turn does not. `session.next_prompt` renders them
-after the entry prompt and before the errors report:
+The fold keeps `f.steering`: `message.steered` rows written after the
+start of the last turn of the working session that finished (a turn
+whose `turn.started` is not `fresh`). Only such a turn renders
+`next_prompt`, so only it spends steering; critique, check, and review
+turns do not. `session.next_prompt` renders them after the entry prompt:
 
 ```
 Tom wrote while you worked:
 - <text> (attachments: <path>, ...)
 ```
 
-A steered message does not change the state.
+A steer does not change the state.
 
 ### Operator notices (`core/notices.py`, new)
 
-`notices.owe(conn, task_id)` writes the notices a task's fold owes and
-has not requested. Each is `notice.requested` on the task stream:
+`notices.owe(conn, task_id)` writes the `notice.requested` rows a fold
+owes and has not requested, to `operator_channel` and `operator_chat`:
 
-```json
-{"notice_id": "<new_id>", "channel": "telegram", "chat_id": "<operator chat>",
- "kind": "question | effect | delivered",
- "about_key": "question:<question_id> | effect:<effect_id> | delivered:<sha>",
- "text": "<plain text>", "reply_to": null}
-```
+- `question` (`about_key` `question:<id>`): the question.
+- `effect` (`effect:<id>`): action type, target, effect id, the payload
+  in full (a message as it will be sent), then "Reply approve to send it."
+- `delivered` (`delivered:<sha>`): the candidate and each check's outcome.
 
-- `question`: an open question; the text is the question.
-- `effect`: a held effect. The text names the action type, the target,
-  the effect id, and the payload in full (a message's text as it will be
-  sent), then "Reply approve to send it."
-- `delivered`: `task.delivered`. The text names the candidate sha and
-  each check's outcome.
+`bind` writes the binding notices (a stopped task, a near-`approve`) with
+`about_key` `reply:<received_id>`. A unique violation on `about_key`
+(another kernel wrote it first) is caught in a savepoint and skipped.
+Each text carries the notice's short id, so a lookup matches exactly.
+Notices are not held (open question 9, A).
 
-`owe` is idempotent by `about_key`. Notices are not held (Q9 A). The
-channel and chat are `settings.operator_channel` and `operator_chat`.
+### Context identity (`core/runs.py`, `core/tasks.py`)
 
-## Port
-
-What 2.2 and 2.3 build against. Every name below is in `core/`; a bridge
-imports `core.port`, `core.intake`, and `core.broker` and nothing else
-from the kernel.
-
-### The inbound record (`core/intake.py`)
-
-```python
-@dataclass(frozen=True)
-class Attachment:
-    path: str          # under settings.inbound_dir/<channel>/, written before receive
-    sha256: str
-    mime: str
-    name: str
-    bytes: int
-
-@dataclass(frozen=True)
-class Inbound:
-    channel: str                 # "telegram" or "email"
-    chat_id: str                 # Telegram peer id as text; email: the sender address, lowercased
-    chat_kind: str               # "dm", "group", or "email"
-    message_id: str              # Telegram message id as text; email: the Message-ID header
-    sender_id: str               # Telegram user id as text; email: the From address, lowercased
-    sender_name: str
-    sent_at: str                 # ISO 8601, UTC
-    verified: bool               # Telegram: always true; email: DMARC pass for the From domain
-    kind: str = "message"        # "message" only; polls are not carried
-    text: str = ""
-    reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To
-    thread: list[str] = field(default_factory=list)       # email References, oldest first
-    topic_id: str | None = None  # Telegram forum topic
-    attachments: list[Attachment] = field(default_factory=list)
-    headers: dict[str, str] = field(default_factory=dict)  # email only; UID and UIDVALIDITY go here
-```
-
-```python
-@dataclass(frozen=True)
-class Received:
-    received_id: str   # the message.received row's payload id
-    duplicate: bool    # true when this (channel, chat_id, message_id) is already recorded
-
-class Intake:
-    async def receive(self, inbound: Inbound) -> Received: ...
-    async def highest(self, chat_id: str) -> int | None: ...
-    def owns(self, chat_id: str) -> bool: ...
-```
-
-- `receive` appends `message.received` with `task_id` = the channel and
-  payload `{"received_id": <new_id>, **asdict(inbound)}`, in its own
-  transaction, and returns after commit. A unique violation on
-  `events_one_message` returns the first row's `received_id` with
-  `duplicate: true`. The bridge acknowledges to the platform (Telegram
-  read state, IMAP `\Seen`) only after `receive` returns.
-- `highest(chat_id)` is the largest `message_id` recorded for the chat,
-  compared as an integer, or None. Telegram gap fill starts there.
-- `owns(chat_id)` is true for the operator chat and for a chat a project
-  spec lists under `chats` whose `machine` is `settings.machine` or
-  absent. A bridge does not receive a chat it does not own.
-
-### The bridge (`core/port.py`, new)
-
-```python
-@dataclass(frozen=True)
-class ChannelLimits:
-    max_text: int        # characters per message
-    max_file_bytes: int
-
-PerformFn = Callable[[broker.Action, str], Awaitable[dict[str, Any]]]
-LookupFn = Callable[[broker.Action, str], Awaitable[dict[str, Any] | None]]
-
-class Bridge(Protocol):
-    channel: str
-    limits: ChannelLimits
-    def performers(self) -> dict[str, tuple[PerformFn, LookupFn]]: ...
-    async def run(self, intake: Intake, outbox: Outbox) -> None: ...
-
-async def serve(bridge: Bridge) -> None: ...
-```
-
-A bridge module's `__main__` is `asyncio.run(port.serve(bridge()))`.
-`serve`:
-
-1. Takes the session lock `bridge:<channel>:<settings.machine>`.
-2. Builds `broker.Performers` from the declarations in
-   `port.DECLARED` for the bridge's channel, each joined with the
-   `(perform, lookup)` the bridge returns for that type. The class,
-   usage, and refusal are the kernel's; the bridge supplies only how.
-3. Reconciles `broker.dangling(conn, <its types>)`.
-4. Runs `bridge.run(intake, outbox)` until it returns or raises; then
-   exits nonzero, and launchd restarts it.
-
-`perform(action, key)` returns the result and raises on failure.
-`lookup(action, key)` returns the result of a send that happened, None
-when the platform holds none, and raises `broker.Unknown` when it cannot
-tell. Both results carry
-`{"sent": [{"channel": str, "chat_id": str, "message_id": str}, ...]}`,
-one entry per platform message (a long text split in two is two), which
-is how a reply binds to its task.
-
-### The declared actions (`core/port.py`)
-
-```python
-DECLARED = {
-    "telegram.send_message": broker.Declared(
-        "telegram.send_message", "act", <usage text>, owner="telegram", refuse=_telegram_refuse),
-    "email.send": broker.Declared(
-        "email.send", "act", <usage text>, owner="email", refuse=_email_refuse),
-}
-```
-
-- `telegram.send_message`: target is the chat id as text. Payload
-  `{"text": str, "reply_to": str | None, "topic_id": str | None,
-  "files": [{"path": str, "sha256": str}]}`. Refused when the chat is not
-  owned, when text and files are both empty, or when a file is missing or
-  its sha256 differs.
-- `email.send`: target is the `to` addresses, lowercased, sorted, joined
-  by commas. Payload `{"to": [str], "cc": [str], "subject": str, "body":
-  str, "in_reply_to": str | None, "references": [str], "files": [{"path":
-  str, "sha256": str}]}`. Refused when `to` is empty or a file is missing
-  or differs.
-
-A `random_id` or Message-ID derived from the key differs between two
-identical sends and repeats for a retry of one.
-
-### The outbox (`core/port.py`)
-
-```python
-@dataclass(frozen=True)
-class Release:
-    effect_id: str
-
-@dataclass(frozen=True)
-class NoticeDue:
-    notice_id: str
-    task_id: str
-    chat_id: str
-    text: str
-    reply_to: str | None
-
-class Outbox:
-    def __aiter__(self) -> AsyncIterator[Release | NoticeDue]: ...
-    async def perform(self, item: Release) -> broker.Outcome: ...
-    async def sent(self, item: NoticeDue, sent: list[dict[str, str]]) -> None: ...
-```
-
-- Iterating yields, oldest first, every `release.requested` whose owner
-  is this channel and whose effect has no intent, then every
-  `notice.requested` on this channel with no `notice.sent`; then waits on
-  `valor_events` for a row of either type and yields again. A
-  notification missed while reconnecting is caught by the next full read
-  at `settings.serve_tick_s`.
-- `perform(item)` calls `broker.release(conn, item.effect_id,
-  performers)`: the checks, the intent, the bridge's `perform`, the
-  outcome. A release the checks refuse here (task stopped, file changed)
-  appends `effect.refused` with the reason, which ends the effect.
-- `sent(item, sent)` appends `notice.sent` `{"notice_id", "sent"}` on
-  the notice's task stream. A notice sent but not marked (a crash between)
-  is yielded again; a Telegram notice's `random_id` is derived from
-  `notice_id`, so the platform drops the second send.
-
-A bridge never writes an approval, an intent, or an outcome itself, and
-never sends a message the outbox did not yield.
-
-### Settings (`core/settings.py`)
-
-| Field | Env | Default |
-| --- | --- | --- |
-| `machine` | `VALOR_MACHINE` | the short host name |
-| `operator_telegram_id` | `VALOR_OPERATOR_TELEGRAM_ID` | none (no Telegram sender is the operator) |
-| `operator_email` | `VALOR_OPERATOR_EMAIL` | none |
-| `operator_channel` | `VALOR_OPERATOR_CHANNEL` | `telegram` |
-| `operator_chat` | `VALOR_OPERATOR_CHAT` | none (notices wait unsent) |
-| `inbound_dir` | `VALOR_INBOUND` | `~/valor-inbound` |
-| `serve_tick_s` | `VALOR_SERVE_TICK_S` | 60 |
-
-The operator is a sender whose `sender_id` equals `operator_telegram_id`
-on Telegram or `operator_email` on email, on a `verified` record.
-
-Project specs (`core/workspace.py` `Spec`) gain `chats: tuple[str, ...]`
-(`"telegram:<chat id>"`, `"email:<address>"`) and `machine: str | None`.
-A message that starts a task starts it in the project whose spec lists
-the chat.
+`turn.started` gains `kernel_commit` (the checkout's HEAD) and `offered`
+(the offered types after any narrowing, so 4.1's
+`Performers.offered(ceiling)` result is what is recorded). The claim is: same store, same kernel
+commit, same Performers in, the same Brief and prompt bytes out.
 
 ## Tech debt absorbed
 
-- The broker key collapsing two identical sends in one task: the key ends
-  in the effect id, and a repeated request is matched by `request_id`.
-- `docs/tech-stack.md` marking the resident kernel open: the kernel
-  process row and section describe `serve` under launchd, in use.
+- The broker key collapsing two identical sends: the key ends in the
+  effect id, and a repeated request matches by `request_id`.
+- `docs/tech-stack.md` marking the resident kernel open: the row and
+  section describe `serve` under launchd, in use.
 
 ## Left out
 
-- The Telegram and email performers, clients, and processes: 2.2 and 2.3.
+- The Telegram and email clients and performers: 2.2 and 2.3.
 - Polls, approvals or stops by email, notices by email, standing grants.
 - Binding by judgement (use shapes 2 and 3).
-- More than one turn at a time, and more than one machine.
+- More than one turn at a time, more than one machine, slot priority and
+  preemption (4.3).
 - A database role of the bridges' own.
 
 ## Tests
 
-All against the worktree's test database, with the scripted harness
-(`tests/scripted.py`) and fake bridge performers (`tests/performers.py`).
+Against the worktree's test database, with the scripted harness and fake
+bridge performers.
 
 `tests/test_serve.py` (new):
-- `test_kill_mid_turn`: `serve` in a subprocess; a scripted turn that
-  starts a marked child and opens a gateway call, then sleeps. SIGKILL the
-  kernel by its own pid. The child still runs. Restart `serve`: the child
-  is reaped, `turn.reaped` and `turn.ended` (`interrupted`) are written,
-  the open call is charged with `estimated: true`, the next turn resumes
-  the same entry, the task reaches the state an unkilled run reaches, and
+- `test_kill_mid_turn`: a scripted turn starts a marked child, opens a
+  gateway call, sleeps; SIGKILL the kernel by its own pid. Restart: the
+  child is reaped, the turn ends `interrupted`, the call is charged
+  `estimated`, the task reaches the state an unkilled run reaches, and
   `tasks.audit` is empty.
-- `test_kill_between_intent_and_outcome`: a kernel performer (push) that
-  hangs after its intent; SIGKILL; restart: `reconcile` asks `lookup`,
-  writes `done` when the target holds the commit, writes nothing while
-  `lookup` raises `Unknown`, and `failed` only after `reconcile_after_s`.
-- `test_one_turn_slot`: of two ready tasks in `build`, the one with the
-  older latest row runs first and the other only after it ends; a `judge`
-  task runs beside a turn; `core run` on a third waits for the slot; a
-  second `serve` waits on `kernel:<machine>` until the first is killed.
-- `test_one_step_per_event`: each `router.step` writes the rows of one
-  runner; a step's own rows wake the next.
-- `test_same_store_same_context`: the Brief and prompt dispatched from one
-  ledger, rendered twice and again in a restarted process, are equal
-  bytes; the interrupted turn and the turn after the restart carry the
-  same `brief_sha256`.
-- `test_stop_mid_turn_under_serve`: `core stop` kills the turn; the task
-  folds `stopped`; the slot is free.
-- `test_missed_notification`: a row written while the LISTEN connection is
-  down is acted on at the next tick.
+- `test_kill_after_ended_before_collected`: the kernel dies after
+  `turn.ended`, with the signals moved to `handled/`. Restart records
+  `turn.collected` from them; an effect requested before the kill is not
+  requested twice.
+- `test_live_call_not_charged`: a `core run` holds `run:<task>` with an
+  open call while `serve` restarts; recover leaves the call; its own
+  charge lands.
+- `test_kill_between_intent_and_outcome`: a push hangs after its intent;
+  SIGKILL; restart: `done` when the target holds the commit, nothing while
+  `lookup` raises `Unknown`, `failed` only after `reconcile_after_s`.
+- `test_merge_restarts_its_kernel`: SIGTERM after a merge's intent;
+  restart; `lookup` finds the merge; the outcome is written.
+- `test_dangling_propose_intent`: a propose-class intent with no outcome
+  reconciles after a restart, from the intent row alone.
+- `test_recollect_mid_move`: a kill between moves; restart records every
+  signal once, and the next turn does not read them.
+- `test_refused_kernel_release`: a release on a stopped task writes one
+  `effect.refused`, owes one notice, and is not retried.
+- `test_slot_reentrant`: a check that runs a turn completes.
+- `test_one_turn_slot`: of two ready `build` tasks the older runs first;
+  a `judge` task runs beside the turn; `core run` on a third waits for
+  the slot; a second `serve` waits on `kernel:<machine>`.
+- `test_services_survive_between_steps`: another task's step and a
+  `core run` sweep do not stop services held under `services:<task>`.
+- `test_one_step_per_event`, `test_stop_mid_turn_under_serve`,
+  `test_missed_notification` (a row written while LISTEN is down is acted
+  on at the next tick).
+- `test_same_store_same_context`: Brief and prompt rendered in this
+  process and in a fresh one, from one ledger and one commit, are equal
+  bytes; the interrupted turn and the next carry the same `brief_sha256`.
+- `test_migrate_twice`: the schema runs twice without error.
 
 `tests/test_intake.py` (new):
 - `test_duplicate_inbound`: the same record received twice, and twice
-  concurrently from two connections, writes one `message.received`; both
-  calls return the same `received_id`; the second says `duplicate`; it
-  binds once.
-- `test_binding_table`: one case per row of the binding table, including
-  an unverified record from the operator's address and a verified one
-  from someone else, both bound `none`.
-  An answer to a closed question and feedback outside `merge` steer.
-- `test_approve_by_reply`: `approve` on an effect notice writes the
-  approval with `via: telegram` and releases: a kernel push performs, a
-  Telegram send writes `release.requested`. `Approve.` and `approve it`
-  bind as `steer`.
-- `test_steer_mid_turn`: a steer bound while a turn runs is in the next
-  turn's prompt, not the running one's; an interrupted turn does not
-  spend it; a finished turn does.
-- `test_start_from_chat`: a plain message in a listed chat starts a task
-  in that project; in an unlisted chat it binds `none`.
-- `test_owns`: the operator chat, a chat on this machine, a chat on
-  another machine.
+  concurrently, writes one row; both get one `received_id`; it binds once.
+- `test_binding_table`: one case per row, including an unverified record
+  from the operator's address, a verified one from someone else, and
+  `stop` and `approve` by email binding as `steer`.
+- `test_reply_to_bridge_send_binds`: a reply to a sent message found in
+  an outcome's `result.sent` binds to its task.
+- `test_reply_to_stopped_task`: binds `none` and owes the notice.
+- `test_near_approve`: `Approve.` and `approve it` steer and owe a notice.
+- `test_approve_crash`: a kill inside `bind` leaves both the approval and
+  `release.requested`, or neither.
+- `test_steer_mid_turn`: in the next working turn's prompt, not the
+  running one's; an interrupted turn does not spend it.
+- `test_steer_during_checks`: a steer during `checks` reaches the next
+  `patch` prompt.
+- `test_email_unverified`: every email record is `verified: false`
+  until 2.3 adds its check.
+- `test_binding_error_binds_none`: a second `approve`, and `approve`
+  after `core release`, bind `none`, owe a notice, and the next message
+  binds.
+- `test_steer_while_awaiting_approval`: steers and owes the notice.
+- `test_start_provisions`: a start on a project chat gives a provisioned
+  workspace and a first turn; a failed provision owes a notice.
+- `test_start_rule`, `test_owns` (absent `machine` is the default
+  machine).
 
-`tests/test_port.py` (new):
-- `test_release_requested_then_performed`: approve, kernel release writes
-  `release.requested` and no intent; the bridge's outbox yields it; its
-  `perform` runs once; intent and outcome carry the approval.
-- `test_release_requested_alone_sends_nothing`: a `release.requested` row
-  for an effect whose approval is used, or whose task is stopped, yields a
-  refused outcome and no `perform` call.
-- `test_bridge_crash_between_intent_and_outcome`: the fake bridge dies
-  after its intent; on start, `serve` reconciles through `lookup`; no
-  second `perform` while the first's lock is held.
-- `test_two_identical_sends`: two equal requests from two signal files are
-  two effects with keys ending in different effect ids; the same file
-  collected twice is one effect.
-- `test_notice_crash_before_sent`: a notice sent but not marked is yielded
-  again with the same `notice_id`.
-- `test_declared_class_is_the_kernels`: a bridge's performers take class
-  and refusal from `DECLARED`.
+`tests/test_bridge.py` (new):
+- `test_release_requested_then_performed`: the kernel writes
+  `release.requested`, no intent; the outbox yields it; `perform` runs
+  once; intent and outcome carry the approval.
+- `test_refused_release_yielded_once`: a stopped task's release appends
+  one `effect.refused` and is not yielded again.
+- `test_bridge_crash_between_intent_and_outcome`: on start and on the
+  next tick the bridge reconciles through `lookup`; no second `perform`
+  while the first's lock is held.
+- `test_unknown_leaves_intent`: `perform` raises `Unknown`, or raises and
+  `lookup` raises `Unknown`; the intent stays in flight, no outcome.
+- `test_two_identical_sends`: two equal signal files are two effects;
+  one file collected twice is one.
+- `test_notice_crash_before_sent`, `test_file_hash_mismatch`,
+  `test_oversize_file_refused_at_request` (email sums files and body
+  through the size function), `test_split_utf16`,
+  `test_declared_in_every_task`, `test_tick_called`,
+  `test_settle_after_function`.
 
 ## Files
 
 | File | Change | Also changed by |
 | --- | --- | --- |
-| `core/serve.py` | new: the resident kernel, recover, schedule | |
-| `core/intake.py` | new: `Inbound`, `Intake`, `bind` | |
-| `core/notices.py` | new: `owe`, notice text | |
-| `core/port.py` | new: `Bridge`, `ChannelLimits`, `DECLARED`, `Outbox`, `serve` | |
-| `core/broker.py` | key with effect id, `request_id`, `Declared`, `release.requested`, `dangling` | 1.4d |
-| `core/router.py` | `step`, the turn slot, services per stretch | 1.4b, 1.4d |
-| `core/session.py` | `request_id`, steering in `next_prompt` | 1.4d |
+| `core/serve.py` | new: serve, recover, schedule | 4.3 |
+| `core/slot.py` | new: the turn slot | 4.3 |
+| `core/intake.py` | new: the inbound record, receive, bind | 2.3 (`dmarc_verified`) |
+| `core/notices.py` | new | |
+| `core/bridge.py` | new: the port's bridge side | |
+| `core/broker.py` | key, `request_id`, release path, refused rows, the action on the intent, `dangling` | 1.4d |
+| `core/router.py` | `step`, Performers factory, services handle kept, `run` refuses a held task | 1.4b, 1.4d, 4.3 |
+| `core/runs.py` | slot around `run_turn`; `kernel_commit`, `offered` | 1.4d |
+| `core/session.py` | `request_id`, steering, `record` for recover | 1.4d, 1.4s |
+| `core/signals.py` | `recollect` | 1.4s |
+| `core/spending.py`, `core/gateway.py` | `holder` on `gateway.opened` | |
 | `core/machine.py` | `f.steering` | 1.4b |
-| `core/tasks.py` | `stop` takes `via` and `role_played` | 1.4d, 4.1 |
-| `core/settings.py` | the fields above | 1.4b, 1.5 |
-| `core/workspace.py` | `Spec.chats`, `Spec.machine` | 1.4b |
-| `core/schema.sql` | indexes, trigger | 1.4b, 1.4d, 1.5, 4.1 |
-| `core/__main__.py` | `serve`, `service install`, `service remove`; `release` of a declared type | 1.4b, 1.4d |
-| `core/README.md` | the resident kernel, the port | 1.4b, 1.4d |
-| `projects/valor.toml`, `projects/README.md` | `chats`, `machine` | |
-| `docs/tech-stack.md` | kernel process row and section | |
-| `docs/architecture.md` | the supervisor and steering, as built | 4.2 |
-| `docs/machine.md` | the kernel's plist and log | |
-| `docs/bridges/telegram.md` | its port section points to this one's names | 2.2 |
-| `tests/test_serve.py`, `tests/test_intake.py`, `tests/test_port.py` | new | |
+| `core/tasks.py` | `stop` keyword-only `via`, `role_played` | 1.4d, 4.1 |
+| `core/workspace.py` | `Spec.chats`, `Spec.machine`; sweep honours `services:<task>` | 1.4b |
+| `core/checks.py` | each check under the slot | 1.4b |
+| `core/settings.py` | the port's settings | 1.4b, 1.5 |
+| `core/schema.sql` | indexes, trigger | 1.4b, 1.4d, 1.5 |
+| `core/__main__.py` | `serve`, `serve --plist`; `release` of a declared type | 1.4b, 1.4d |
+| `core/README.md`, `projects/valor.toml`, `projects/README.md` | the kernel, the port, `chats` | 1.4b, 1.4d |
+| `docs/tech-stack.md`, `docs/architecture.md`, `docs/machine.md`, `docs/bridges/telegram.md`, `docs/bridges/email.md` | status quo | 2.2, 2.3, 4.2 |
+| `tests/test_serve.py`, `tests/test_intake.py`, `tests/test_bridge.py` | new | |
 | `tests/test_kernel.py`, `tests/performers.py` | the key; fake bridge performers | 1.4d |
 
-The schema and `core/__main__.py` are touched by four other tasks; 2.1
-merges after 1.4d and rebases on whatever has merged by then.
+2.1 merges after 1.4b, 1.4d, and 1.4s and rebases on what has merged.
+`projects/valor.toml`'s new keys are refused by a kernel built before
+2.1, so the spec and the code merge together.
 
 ## Rollout
 
-1. Merge. The lead runs `python -m core migrate` on the machine cluster;
-   the indexes are partial on new row types, so existing rows are
-   untouched.
-2. Set `operator_telegram_id`, `operator_email`, and `operator_chat` in
-   the service's environment, and `chats` and `machine` in each project
-   spec.
-3. `python -m core service install` writes
-   `~/Library/LaunchAgents/com.valor.kernel.plist`: `ProgramArguments`
-   the repo's `.venv/bin/python -m core serve`, `WorkingDirectory` the
-   repo, `KeepAlive` true, `RunAtLoad` true, `ProcessType` `Interactive`,
-   standard out and error to `<log_dir>/kernel.log`, the environment from
-   step 2 and no secret. It then runs `launchctl bootstrap gui/<uid>` on
-   it. The gateway reads Claude's login from the login Keychain, which a
-   LaunchAgent in the GUI domain reaches. `python -m core service remove`
-   runs `launchctl bootout` and deletes the plist.
-4. In the test window, with `main`'s bridge and worker off on the build
+1. Merge. The lead runs `python -m core migrate`; the indexes are partial
+   on new row types and existing rows are untouched.
+2. Tom creates the Telegram group "Valor rebuild" with only himself and
+   Valor's account and records its id. `main`'s bridge reads only groups
+   its `projects.json` names for this machine's projects; the group's
+   name and id appear in none of them, which the lead confirms by reading
+   that file.
+3. Set `operator_telegram_id`, `operator_email`, and `operator_chat`, and
+   `chats = ["telegram:<group id>"]` in `projects/valor.toml`.
+4. `python -m core serve --plist` prints
+   `com.valor.kernel.plist` for Tom to load: `ProgramArguments` the repo's
+   `.venv/bin/python -m core serve`, `WorkingDirectory` the repo,
+   `KeepAlive` and `RunAtLoad` true, `ProcessType` `Interactive`, output
+   to `<log_dir>/kernel.log`, the settings of step 3 and no secret, and
+   `PATH` holding `/usr/bin:/bin:/usr/sbin:/sbin` plus the directories of
+   `settings.claude`, `settings.git_bin`, and `settings.pg_bin`. Tom
+   loads it with `launchctl bootstrap gui/<uid> <path>`. The gateway
+   reads Claude's login from the login Keychain, which a LaunchAgent in
+   the GUI domain reaches.
+5. In the test window, with `main`'s bridge and worker off on the build
    Mac, start a task from the command line; it advances with no `run`.
-5. Mid-turn, kill the kernel by the pid `launchctl print
+6. Mid-turn, kill the kernel by the pid `launchctl print
    gui/<uid>/com.valor.kernel` names; launchd restarts it; `core status`
    shows the turn interrupted and resumed, and `tasks.audit` is empty.
 
 ## Decided by default
 
-- The bridges are processes of their own, so a platform library stays
-  out of the kernel's memory and a bridge's connection has one owner.
-- Binding runs in the kernel, so `receive` is one insert.
+- The bridges are processes of their own; binding runs in the kernel.
 - One notification channel, `valor_events`, from a trigger.
 - A repeated request matches by `request_id` (turn and signal file).
 - Bridges connect as `valor_kernel`.
-- An interrupted turn's open calls are charged at worst case, marked
-  estimated.
-- The turn slot is a session advisory lock; ready order is each task's
-  latest row id.
-- `approve` and `stop` match only as the whole trimmed, casefolded text.
-- A plain message starts a task only in a chat a project spec lists.
-- Services stay up for a working stretch; `caffeinate -i` for a turn.
-- Telegram is the operator channel; email notices are left out.
+- An interrupted turn's calls are charged at worst case, marked estimated;
+  only calls whose holder lock is free.
+- The slot is per turn, FIFO by Postgres's lock queue; ready order is
+  each task's latest row id.
+- A kernel-owned approval made by reply is released by `schedule`, from
+  `release.requested`; `core release` still releases directly.
+- `approve` and `stop` match only as the whole trimmed, casefolded text;
+  near misses owe a notice.
+- A plain message from Tom starts a task under the project listing the
+  chat, else `valor` (open question Q2 of round one, decided).
+- Services stay up for a working stretch under `services:<task>`.
 - `serve_tick_s` is 60 seconds, a wake interval, not a limit.
+- The email cc: Tom's primary address (`operator_email`'s first entry),
+  reversible in settings.
+- A chat spec with no `machine` belongs to `settings.default_machine`.
 
 ## Questions for Tom
 
-1. **Who is the operator.** Which Telegram account and which email address
-   the kernel treats as Tom, and which chat receives notices. Assumed: the
-   Telegram user id and address `main`'s bridge configuration names for
-   Tom, and the direct chat between Tom and Valor's account as the
-   operator chat.
-2. **Where a plain message from Tom starts work.** Assumed: in the project
-   whose spec lists that chat, with the direct chat listed by the `valor`
-   project; a message in a chat no spec lists is recorded and starts
-   nothing.
+1. **Who is the operator.** Tom's Telegram user id and his email
+   addresses. The operator chat is the new group "Valor rebuild"
+   (decision 16), not a direct chat. Assumed: the user id and addresses
+   `main`'s bridge configuration names for Tom.
+
+## Critique round 1 (of 2): revise
+
+Each finding of critique-2-1-r1.md, and how this revision handles it.
+
+- F1, performers per process: Performers per task from the Brief, in
+  `step` and per effect in recover; 1.4d's signatures and async `refuse`;
+  `declared_performers()` in every task.
+- F2, signals lost after `turn.ended`: recover re-collects through
+  `read_turn_file`; test added.
+- F3, live calls charged: `holder` on `gateway.opened`; only free holders
+  are charged; test added.
+- F4, schema not re-runnable: `IF NOT EXISTS`, `OR REPLACE`, drop then
+  create the trigger; `test_migrate_twice`.
+- F5, nested `sent`: one GIN index over `COALESCE` of both paths; test.
+- F6, refused releases yielded forever: yielded only with no intent,
+  outcome, or `effect.refused`; the bridge release appends it once;
+  `release.requested` on the task stream.
+- F7, approval then release in `bind`: `bind` writes the approval and
+  `release.requested` together; `schedule` releases kernel ones; merge
+  self-restart and approve-after-stop covered.
+- F8, propose-class reconcile: `reconcile` reads the intent row; test.
+- F9, sweep stops kept services: `services:<task>` lock; sweep needs both
+  locks free; 1.4b noted.
+- F10, steering spent by fresh turns: only working-session turns spend
+  it; test during checks.
+- F11, binding: the port's decisions 10 to 14.
+- F12, context identity: `kernel_commit` and `offered` on `turn.started`;
+  the claim restated; fresh-process test.
+- F13, the slot: `core/slot.py`, per turn, FIFO, shared with `core run`
+  and the checks; 4.3 adds its sort key and preemption.
+- F14, the port: [m2-1-port.md](m2-1-port.md), written to the lead's
+  decisions.
+- F15, the operator group: settings, `valor.toml`, rollout step 2, and Q1
+  narrowed to identities.
+- F16: `Spec` fields, the plist `PATH`, plists printed for Tom (decision
+  31), the caffeinate limit, a connection per concurrent intake call,
+  notices deduplicated across kernels.
+- F17: no governance added (the DMARC check is 2.3's, round 2 E).
+- F18: Q2 decided by default (decision 15).
+- F19: limits cited as protocol facts with split and request-time refusal
+  (decision 15b); near-miss notices (15a); the start rule widened to
+  `valor` for unlisted chats.
+
+## Critique round 2 (of 2): revise
+
+Each finding of critique-2-1-r2.md and how it is built in.
+
+- A: the intent carries the action; reconcile reads it, falling back to
+  `effect.held`; 1.4d builds to the shape; test added.
+- B: `slot.held` is reentrant within a process; test added.
+- C: a binding that raises binds `none` and owes a notice; `approve`
+  reads the effect first (port item 39); test added.
+- D: a refused kernel release appends `effect.refused` once and owes a
+  notice (item 40); test added.
+- E: the DMARC check is 2.3's, under its grant (item 11a); email is
+  `verified: false` until it lands.
+- F: a provision job off the loop; a failure owes a notice; test added.
+- G: `settle_after_s` is a number or a function (item 37).
+- H, I: the limits live in `core/bridge.py`; Telegram counts UTF-16
+  units; email's limit is the whole message through a size function
+  (item 15c).
+- J: `Bridge.tick()` (item 38).
+- K: every MTProto record is verified; operator status is decided at
+  bind; chat ids are marked strings in records and in `sent`.
+- L: a steer no runner reads owes a notice.
+- M: `recollect` reads `handled/` and what remains in `.valor/`, and
+  rebuilds `state` and `finished` from the turn rows; test added.
+- N: one services handle per task in `serve`; the reap runs when it
+  first starts them; `core run` refuses a task the kernel holds.
+- Low 1: an absent `machine` is `settings.default_machine`. Low 2: the
+  start rule cites 2.3's rollout. Low 3: 4.1 dropped from the schema
+  row. Low 4: 4.3 is told the slot is `core/slot.py`. Low 5: `offered`
+  is recorded after narrowing. Low 6: the port says how a lookup finds
+  the intent's `at`. Low 7: `step` takes a Performers factory. Low 8:
+  the cc is decided by default. Low 9: an email near-approve notice says
+  approvals come by Telegram.
