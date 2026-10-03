@@ -237,7 +237,7 @@ workspace, which the kernel reads when the turn ends:
 |---|---|---|
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
-| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
+| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, changed in the working tree (as `git status` reports it), or with counts outside 0 to 2, is an error and no plan |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
@@ -245,17 +245,19 @@ workspace, which the kernel reads when the turn ends:
 it there, in a worker thread, so no signal is read twice. The turn controls
 these files: the kernel follows no link, never blocks on a FIFO, and reads
 only a regular file with one link and no holes (a sparse file claims a size
-the turn never wrote). Anything else goes to `Signals.unreadable` with its
-reason, never its contents, and an entry that cannot be moved is removed
-unread (`docs/architecture.md`). An effect file that is not a JSON object
-with `action_type` and `target` is recorded with an error and no request. Everything a turn left is one `turn.collected` row
-with the state it ran in and its verdict; a question takes precedence over
-the other signals in the same turn, and a signal that means nothing in the
-state (a `done.md` during plan) is an error, not acted on. `.valor/` is in the
-clone's `.git/info/exclude`, so signals never enter a commit.
-
-Files, because writing one is a deliberate tool call that survives whatever
-prose follows it, and a turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
+the turn never wrote), and only up to the size it checked, so a file that
+grows afterward is not read past that. Anything else goes to `Signals.unreadable` with its reason (from the operating system's error; a
+linked `.valor` reads "not a plain directory"), never its contents. An
+entry that vanishes before it is read is recorded the same way, an effect
+file with an error. An entry that cannot be moved is removed unread (`docs/architecture.md`). An effect file that is not a JSON
+object with `action_type` and `target` is recorded with an error and no
+request. Everything a turn left is one `turn.collected` row with the state it
+ran in and its verdict; a question takes precedence over the other signals in
+the same turn, and a signal that means nothing in the state (a `done.md`
+during plan) is an error, not acted on. `.valor/` is in the clone's
+`.git/info/exclude`, so signals never enter a commit. Files, because writing
+one is a deliberate tool call that survives whatever prose follows it, and a
+turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
 workspace turn's Brief; it lists the effects the registered performers
 offer (each performer's `usage` line; the merge offers none) and says
 pushing any other way is unavailable, which the sandbox makes true.

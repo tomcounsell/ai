@@ -328,11 +328,13 @@ the working session. The machinery is `core/fresh.py`:
 6. **The verdict** read from `.valor/verdict.json`: opened component by
    component, each relative to its parent's descriptor (`os.open` with
    `dir_fd`), every component with `O_NOFOLLOW` and the last also with
-   `O_NONBLOCK`, then `fstat` must show a regular file with one link and no holes,
-   read through that descriptor, parsed as a JSON object. A symlinked
-   `.valor`, a symlinked file, a FIFO, a socket, or a device is refused
-   without blocking and without reading anything it points to. Then moved
-   to `.valor/handled/<turn_id>/`. The kernel validates it and writes
+   `O_NONBLOCK`. The file is first moved to `.valor/handled/<turn_id>/`,
+   then opened there and `fstat` must show a regular file with one link and
+   no holes; it is read through that descriptor to the size `fstat` showed
+   and no further, and parsed as a JSON object. A symlinked `.valor`, a
+   symlinked file, a FIFO, a socket, or a device is refused without
+   blocking and without reading anything it points to. A file that
+   vanishes between the move and the read is refused with that reason. The kernel validates it and writes
    the verdict row through `verdicts`; the session's text never names its
    own guard, leg, model, or cost.
 
