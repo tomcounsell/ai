@@ -46,15 +46,32 @@ def collect(workspace: str | Path, turn_id: str) -> Signals:
     not a JSON object comes back with an `error` and no request; so does a
     `plan.json` that is not one."""
     root = Path(workspace) / DIR
+    return _read(root, root / "handled" / turn_id, Signals(), move=True)
+
+
+def recollect(workspace: str | Path, turn_id: str) -> Signals:
+    """Read again what a turn left, for a turn that ended but was never
+    collected: first what `.valor/handled/<turn_id>/` already holds, then
+    whatever is still in `.valor/` (a move the kill cut short), moving that
+    aside as `collect` does. A file in both places is read once, from
+    `handled/`."""
+    root = Path(workspace) / DIR
     handled = root / "handled" / turn_id
-    signals = Signals()
+    signals = _read(handled, handled, Signals(), move=False)
+    return _read(root, handled, signals, move=True)
+
+
+def _read(root: Path, handled: Path, signals: Signals, *, move: bool) -> Signals:
+    seen = {e["file"] for e in signals.effects}
     for name in TEXT_SIGNALS:
         path = root / f"{name}.md"
         if path.is_file():
-            setattr(signals, name, path.read_text().strip() or f"(empty {name}.md)")
-            _move(path, handled / path.name)
+            if getattr(signals, name) is None:
+                setattr(signals, name, path.read_text().strip() or f"(empty {name}.md)")
+            if move:
+                _move(path, handled / path.name)
     plan = root / "plan.json"
-    if plan.is_file():
+    if plan.is_file() and signals.plan is None and signals.plan_error is None:
         try:
             value = json.loads(plan.read_text())
             if not isinstance(value, dict):
@@ -62,9 +79,14 @@ def collect(workspace: str | Path, turn_id: str) -> Signals:
             signals.plan = value
         except (ValueError, TypeError) as exc:
             signals.plan_error = f"plan.json is unreadable: {exc!r}"
+    if plan.is_file() and move:
         _move(plan, handled / plan.name)
     effects = root / "effects"
     for path in sorted(effects.glob("*.json")) if effects.is_dir() else []:
+        if path.name in seen:
+            if move:
+                _move(path, handled / "effects" / path.name)
+            continue
         entry: dict[str, Any] = {"file": path.name}
         try:
             request = json.loads(path.read_text())
@@ -78,7 +100,9 @@ def collect(workspace: str | Path, turn_id: str) -> Signals:
         except (ValueError, KeyError, TypeError) as exc:
             entry["error"] = f"unreadable request: {exc!r}"
         signals.effects.append(entry)
-        _move(path, handled / "effects" / path.name)
+        if move:
+            _move(path, handled / "effects" / path.name)
+    signals.effects.sort(key=lambda e: e["file"])
     return signals
 
 

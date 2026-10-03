@@ -371,6 +371,8 @@ class Gateway:
             "estimated_input": estimated,
             "max_tokens": max_tokens,
             "estimate_usd_micros": spending.worst_case(estimated, max_tokens, price),
+            # The turn runs inside the task's run, which holds this lock.
+            "holder": f"run:{grant.task_id}",
         }
         async with await db.connect(self.dsn) as conn:
             try:

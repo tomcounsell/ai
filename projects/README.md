@@ -15,6 +15,10 @@ workspaces for (`python -m core start ... --project NAME`).
 - A spec never decides where a merge may land beyond the task's own bare
   origin. From 1.4d, `merge_url` is honoured only for targets Tom has
   granted in the ledger, and never for the repository's default branch.
+- `chats` lists the chats whose messages start tasks under the project
+  (`telegram:<chat id>`, `email:<sender address>`), and `machine` the
+  machine whose bridges receive them; none means the default machine, so
+  each chat has one owner.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

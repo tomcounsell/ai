@@ -241,7 +241,10 @@ async def record(
         elif "request" in entry:
             r = entry["request"]
             outcome = await broker.request(
-                conn, task_id, broker.Action(r["action_type"], r["target"], r["payload"])
+                conn,
+                task_id,
+                broker.Action(r["action_type"], r["target"], r["payload"]),
+                request_id=f"{turn_id}/{entry['file']}",
             )
             entry = {**entry, "effect_id": outcome.effect_id, "kind": outcome.kind, "error": outcome.error}
         effects.append(entry)
@@ -401,9 +404,22 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
         prompt = (await tasks.brief(conn, task_id)).instruction
     else:
         prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."
+    steering = _steering(f.steering)
     notes = _errors_report(f.last_collected)
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
-    return "\n\n".join(x for x in (prompt, notes, report) if x), f.session
+    return "\n\n".join(x for x in (prompt, steering, notes, report) if x), f.session
+
+
+def _steering(steered: list[dict[str, Any]]) -> str:
+    """What Tom wrote while the last working turn ran (or since it
+    finished), for the next working turn."""
+    if not steered:
+        return ""
+    lines = ["Tom wrote while you worked:"]
+    for p in steered:
+        paths = [a["path"] for a in p.get("attachments") or [] if a.get("path")]
+        lines.append(f"- {p.get('text', '')}" + (f" (attachments: {', '.join(paths)})" if paths else ""))
+    return "\n".join(lines)
 
 
 def _errors_report(collected: dict[str, Any] | None) -> str:

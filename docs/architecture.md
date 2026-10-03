@@ -496,24 +496,28 @@ into children, each a task with its own Brief. Rules the kernel enforces:
 
 ## The supervisor turn
 
-**Built.** No separate supervisor: `python -m core run`, driven by hand,
-folds the task's state and runs that state's runner, repeating until there
-is something for Tom or a stage with no runner.
+**Built.** The kernel, `python -m core serve`, one process per machine
+kept alive by launchd, holds the gateway and the broker and runs every
+task. It wakes on each ledger row (a notification) and every
+`serve_tick_s`, binds new messages, requests the notices owed, and
+advances each task one step: it folds the task's state from the store and
+runs that state's runner once (`router.step`). A task steps again only
+when a row it did not write arrives, so one event is one step. One
+harness turn or check runs at a time on a machine (the turn slot, a
+Postgres lock that `python -m core run` also takes); the judge and the
+merge run beside it. The rendered context is the same bytes from the same
+store in any process. The kernel holds no state of its own: on restart it
+charges calls whose holder died at their estimate, ends turns with no end
+as `interrupted` and reaps their processes, records a turn that ended and
+was never collected, settles kernel effects left between intent and
+outcome, and stops services a killed kernel left up. Serves reliable stop
+and recovery, and Mission item 1: Tom never coordinates the gaps between
+steps.
 
-**Design.** The supervisor turn is the loop step that runs whenever an
-event arrives for a task: a message from a bridge, a turn ending, a
-verdict, a refusal, an approval, a timer from a routine. It renders the
-task's context deterministically from the store (same store state in,
-byte-identical context out, ordered by volatility so the provider's cache
-does the work), then advances the task one SDLC state: transitions are
-code, decisions that are not authority go to the judgement tier, work goes
-to an agent turn. It holds no state, so killing it loses nothing durable.
-Serves reliable stop and recovery, and Mission item 1: Tom never
-coordinates the gaps between steps.
-
-**Steering.** A message for a task mid-turn is a ledger row, delivered as
-the opening of the next turn; only stop interrupts a running turn, and
-answers and feedback work this way. Serves: corrections reach every session.
+**Steering.** A message for a task mid-turn is a ledger row
+(`message.steered`), delivered as the opening of the next working turn
+that finishes; only stop interrupts a running turn, and answers and
+feedback work this way. Serves: corrections reach every session.
 
 ## Bridges
 
@@ -521,8 +525,12 @@ A bridge is I/O: it turns an inbound message into a request or a reply on a
 task, and renders the kernel's outbound records (questions, deliveries,
 approval cards) on its medium. The kernel's loop is the one execution
 engine; delivery is keyed by transport, so a task started by email answers
-by email. The bridge port is owned by [bridges/telegram.md](bridges/telegram.md);
-[bridges/email.md](bridges/email.md) conforms to it. Today the surface is the command line.
+by email. The kernel side of the port is built (`core/intake.py`,
+`core/notices.py`, `core/bridge.py`): one `message.received` row per
+inbound message, bound by the kernel to start, steer, answer, feedback,
+approve, stop, or none; notices owed by the fold; and an outbox that hands
+each bridge its sends after Tom's approval. The bridges themselves are
+[bridges/telegram.md](bridges/telegram.md) and [bridges/email.md](bridges/email.md).
 
 ## How a task flows from request to merge
 

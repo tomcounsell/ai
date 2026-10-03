@@ -45,6 +45,11 @@ if cfg.get("probe_port"):
 with log.open("a") as f:
     f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": resume, "brief": brief,
                         "port_open": port_open}) + "\n")
+if cfg.get("sleep_once"):
+    import time
+    pause = cfg.pop("sleep_once")
+    cfg_path.write_text(json.dumps(cfg))
+    time.sleep(pause)
 if cfg.pop("fail_next", False):
     cfg_path.write_text(json.dumps(cfg))
     sys.exit(1)

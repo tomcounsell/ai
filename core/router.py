@@ -19,6 +19,17 @@ so the run checks that connection (`SELECT 1`) before each turn and before
 each write a runner makes, and returns `lock lost` when it has died. A
 transaction-pooling proxy between the kernel and Postgres would break this,
 since it does not keep a session; the kernel connects directly.
+
+`step` is one runner's run under that lock: the resident kernel
+(`core/serve.py`) calls it once per event, and `run` calls it until the
+task settles. Each step builds the task's performers from its Brief, with
+the factory the composition root passes in, and runs with them as the
+broker's (`broker.CURRENT`).
+
+A task's services (its Postgres, its Redis) are held under the session lock
+`services:<task>` while up, on the services handle's own connection. `run`
+returns `already running` when another process holds either lock, so it
+never stops services the kernel keeps between steps.
 """
 
 import asyncio
@@ -27,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import broker, db, ledger, machine, tasks, verdicts, workspace
+from core import broker, db, ledger, machine, spending, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -43,17 +54,55 @@ class Context:
 
 Runner = Callable[[Context], Awaitable[dict[str, Any]]]
 SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.STOPPED: "stopped"}
+PerformersFactory = Callable[[tasks.Brief], broker.Performers]
 
 
 async def run(
-    gateway: Gateway, task_id: str, runners: Mapping[State | Check, Runner], dsn: str | None = None
+    gateway: Gateway,
+    task_id: str,
+    runners: Mapping[State | Check, Runner],
+    dsn: str | None = None,
+    performers: PerformersFactory | None = None,
 ) -> dict[str, Any]:
     """Run the task until it needs Tom or a runner that does not exist.
     Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
     runner`, `legacy`, `calibration task`, `already running`, `lock lost`, or what a runner
     returned: `failed`, `idle`) and the task's state."""
     dsn = dsn or gateway.dsn
+    services = await _Services.open(dsn, task_id)
+    try:
+        if not await services.claim():
+            return {"status": "already running"}
+        first = True
+        while True:
+            out = await step(gateway, task_id, runners, dsn, performers, services, sweep=first)
+            first = False
+            if out.get("status") != "moved":
+                return out
+    finally:
+        await asyncio.to_thread(services.down)
+        await services.close()
+
+
+async def step(
+    gateway: Gateway,
+    task_id: str,
+    runners: Mapping[State | Check, Runner],
+    dsn: str | None = None,
+    performers: PerformersFactory | None = None,
+    services: _Services | None = None,
+    *,
+    sweep: bool = True,
+) -> dict[str, Any]:
+    """One step of the task under `run:<task>`: fold, run the state's
+    runner once, return. `moved` means it moved and another step follows;
+    any other status is what `run` returns. A task whose run is held
+    elsewhere returns `already running`. `services` is the task's handle,
+    kept by the caller across steps; without one the step opens its own
+    and stops them when it returns."""
+    dsn = dsn or gateway.dsn
     holder = await db.connect(dsn)
+    own = services is None
     try:
         key = f"run:{task_id}"
         got = await (
@@ -69,25 +118,44 @@ async def run(
             except Exception:  # noqa: BLE001  any failure means the session, and its lock, are gone
                 return False
 
-        services = await _Services.open(dsn, task_id)
-        await services.sweep()
+        if own:
+            services = await _Services.open(dsn, task_id)
+            if not await services.claim():
+                return {"status": "already running"}
+        if sweep:
+            await services.sweep()
+        built = None
+        if performers is not None:
+            async with await db.connect(dsn) as conn:
+                built = performers(await tasks.brief(conn, task_id))
+        chosen = broker.CURRENT.set(built)
+        held = spending.HOLDER.set(key)
         try:
-            return await _loop(gateway, task_id, runners, dsn, alive, services)
+            return await _once(gateway, task_id, runners, dsn, alive, services, built)
         finally:
-            await asyncio.to_thread(services.down)
+            spending.HOLDER.reset(held)
+            broker.CURRENT.reset(chosen)
+            if own:
+                await asyncio.to_thread(services.down)
+                await services.close()
     finally:
         await holder.close()
 
 
 class _Services:
     """The task's workspace services (its Postgres, its Redis): started just
-    before the first runner of the run, stopped when the run returns. At the
+    before the first runner that needs them, stopped when the caller says
+    (`run`: when it returns; the kernel: when the task settles or the
+    kernel exits). The handle holds `services:<task>` on a connection of its
+    own from `claim` to `close`, so no sweep stops them meanwhile. At the
     start of every run, the services of other tasks a killed kernel left up
-    are stopped, unless their own run is live (`workspace.sweep`)."""
+    are stopped, unless their own run is live or a kernel keeps them
+    (`workspace.sweep`)."""
 
     def __init__(self, task_id: str, dsn: str, names: list[str], ports: dict[str, int], lay):
         self.task_id, self.dsn, self.names, self.ports, self.lay = task_id, dsn, names, ports, lay
         self.started = False
+        self.conn = None
 
     @classmethod
     async def open(cls, dsn: str, task_id: str) -> _Services:
@@ -100,6 +168,35 @@ class _Services:
         lay = workspace.Layout(Path(b.mirror).parent) if b.mirror else None
         return cls(task_id, dsn, names if lay else [], ports, lay)
 
+    async def claim(self) -> bool:
+        """Take `services:<task>`; False when another process holds it."""
+        if self.conn is not None:
+            return True
+        conn = await db.connect(self.dsn)
+        got = await (
+            await conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (f"services:{self.task_id}",)
+            )
+        ).fetchone()
+        if not got[0]:
+            await conn.close()
+            return False
+        self.conn = conn
+        return True
+
+    async def close(self) -> None:
+        if self.conn is not None:
+            await self.conn.close()
+            self.conn = None
+
+    async def refresh(self) -> None:
+        """Read the task's services again (a task started by message is
+        provisioned after its handle was opened)."""
+        if self.started:
+            return
+        fresh = await _Services.open(self.dsn, self.task_id)
+        self.names, self.ports, self.lay = fresh.names, fresh.ports, fresh.lay
+
     async def sweep(self) -> None:
         """At the start of every run: stop what a killed kernel left up."""
         async with await db.connect(self.dsn) as conn:
@@ -110,6 +207,7 @@ class _Services:
 
     async def up(self) -> str | None:
         """Start them if they are not up; why not, or None."""
+        await self.refresh()
         if self.started or not self.names:
             return None
         try:
@@ -125,60 +223,50 @@ class _Services:
             self.started = False
 
 
-async def _loop(gateway, task_id, runners, dsn, alive, services: _Services) -> dict[str, Any]:
-    while True:
-        if not await alive():
-            return {"status": "lock lost"}
+async def _once(gateway, task_id, runners, dsn, alive, services: _Services, performers) -> dict[str, Any]:
+    if not await alive():
+        return {"status": "lock lost"}
+    async with await db.connect(dsn) as conn:
+        f = machine.fold(await ledger.read(conn, task_id))
+        if f.legacy:
+            return {"status": "legacy", "state": await tasks.status(conn, task_id)}
+        if f.calibration:
+            return {"status": "calibration task", "state": await tasks.status(conn, task_id)}
+        if f.state in SETTLED:
+            return {"status": SETTLED[f.state], "state": await tasks.status(conn, task_id)}
+        if f.state is State.MERGE:
+            # A release that died mid-merge: settle it from the target, then fold again.
+            dangling = f.merge_effect and f.merge_effect["state"] == "in_flight"
+            if dangling and await broker.reconcile(conn, f.merge_effect["effect_id"], performers=performers):
+                return {"status": "moved"}
+            await verdicts.ensure_merge(conn, task_id)
+            return {"status": "delivered", "state": await tasks.status(conn, task_id)}
+    ctx = Context(gateway, task_id, dsn, alive)
+    if runners.get(f.state) is not None or (
+        f.state is State.CHECKS and any(c in runners for c in Check if c not in f.checks)
+    ):
+        why = await services.up()
+        if why:
+            async with await db.connect(dsn) as conn:
+                state = await tasks.status(conn, task_id)
+            return {"status": "failed", "state": state, "turn": {"result": why}}
+    if f.state is State.CHECKS:
+        missing = [c for c in Check if c not in f.checks]
+        for check in missing:
+            if check in runners:
+                return await runners[check](Context(gateway, task_id, dsn, alive, check))
         async with await db.connect(dsn) as conn:
-            f = machine.fold(await ledger.read(conn, task_id))
-            if f.legacy:
-                return {"status": "legacy", "state": await tasks.status(conn, task_id)}
-            if f.calibration:
-                return {"status": "calibration task", "state": await tasks.status(conn, task_id)}
-            if f.state in SETTLED:
-                return {"status": SETTLED[f.state], "state": await tasks.status(conn, task_id)}
-            if f.state is State.MERGE:
-                # A release that died mid-merge: settle it from the target, then fold again.
-                dangling = f.merge_effect and f.merge_effect["state"] == "in_flight"
-                if dangling and await broker.reconcile(conn, f.merge_effect["effect_id"]) is not None:
-                    continue
-                await verdicts.ensure_merge(conn, task_id)
-                return {"status": "delivered", "state": await tasks.status(conn, task_id)}
-        ctx = Context(gateway, task_id, dsn, alive)
-        if runners.get(f.state) is not None or (
-            f.state is State.CHECKS and any(c in runners for c in Check if c not in f.checks)
-        ):
-            why = await services.up()
-            if why:
-                async with await db.connect(dsn) as conn:
-                    state = await tasks.status(conn, task_id)
-                return {"status": "failed", "state": state, "turn": {"result": why}}
-        if f.state is State.CHECKS:
-            missing = [c for c in Check if c not in f.checks]
-            ran = False
-            for check in missing:
-                if check in runners:
-                    out = await runners[check](Context(gateway, task_id, dsn, alive, check))
-                    if out.get("status") != "moved":
-                        return out
-                    ran = True
-                    break
-            if ran:
-                continue
-            async with await db.connect(dsn) as conn:
-                return {
-                    "status": "no runner",
-                    "missing": [c.value for c in missing],
-                    "state": await tasks.status(conn, task_id),
-                }
-        runner = runners.get(f.state)
-        if runner is None:
-            async with await db.connect(dsn) as conn:
-                return {
-                    "status": "no runner",
-                    "missing": [f.state.value],
-                    "state": await tasks.status(conn, task_id),
-                }
-        out = await runner(ctx)
-        if out.get("status") != "moved":
-            return out
+            return {
+                "status": "no runner",
+                "missing": [c.value for c in missing],
+                "state": await tasks.status(conn, task_id),
+            }
+    runner = runners.get(f.state)
+    if runner is None:
+        async with await db.connect(dsn) as conn:
+            return {
+                "status": "no runner",
+                "missing": [f.state.value],
+                "state": await tasks.status(conn, task_id),
+            }
+    return await runner(ctx)

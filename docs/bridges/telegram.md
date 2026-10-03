@@ -9,13 +9,16 @@ This doc also owns the bridge port, the contract in `core/` that every bridge
 conforms to. The email bridge ([email.md](email.md)) conforms to the same port
 and documents only what is particular to email.
 
-**Status.** The port and everything below it are design. The current kernel
-has no bridge: Tom reaches a task through `python -m core` (`answer`,
-`feedback`, `approve`, `release`, `stop`, `correct`), and every answer and
-piece of feedback it records carries `via: "the command line"`. The bridge
-gives those same records a second door. The Telegram code that exists today
-can be adapted to the port; the last sections say what a conforming
-implementation keeps and what it hands to `core/`.
+**Status.** The kernel side of the port is built: `core/bridge.py` (the
+port, the declared send types, their limits, and the outbox),
+`core/intake.py` (the record and binding), and `core/notices.py` (operator
+notices), run by the resident kernel, `python -m core serve`. The Telegram
+bridge process itself is not built yet. Until it is, Tom reaches a task
+through `python -m core` (`answer`, `feedback`, `approve`, `release`,
+`stop`, `correct`), and those records carry `via: "the command line"`. The
+Telegram code that exists today can be adapted to the port; the last
+sections say what a conforming implementation keeps and what it hands to
+`core/`.
 
 ## What it serves
 
@@ -138,17 +141,20 @@ Evidence section counts "decisions escalated to Tom per finished task", and
 
 ```python
 class Bridge(Protocol):
-    channel: str                       # "telegram" or "email"
-    limits: ChannelLimits              # max text length, file size, poll support
+    channel: str  # "telegram" or "email"
 
-    def performers(self) -> list[Performer]: ...
-    async def run(self, intake: Intake, outbox: Outbox) -> None: ...
+    def performers(self) -> dict[str, tuple[PerformFn, LookupFn]]: ...
+    async def run(self, outbox: Outbox) -> None: ...
+    async def tick(self) -> None: ...
 ```
 
-`run` owns the connection: it receives, calls `intake.receive`, acknowledges,
-and drains the outbox until the process stops. `limits` lets `core/` and
-`persona/` render a message that fits before it is requested, so the bridge
-never has to change a message to send it.
+`performers` maps each send type the kernel declares for the channel to how
+the bridge sends it and how it finds a send that happened. `run` owns the
+connection: it receives, records each message through `intake.receive`,
+acknowledges, and sends what the outbox yields until the process stops. The
+outbox calls `tick` on every wake. The limits (`LIMITS` in `core/bridge.py`)
+are protocol facts the kernel holds, so it refuses an impossible send when
+it is requested and the bridge never changes a message to send it.
 
 ## Receiving
 
@@ -268,10 +274,11 @@ before the request, so the digest Tom approves is of the final text. A bridge
 that reformatted, trimmed, or prefixed a message would send something he did
 not approve.
 
-**Length.** Telegram refuses a text message over 4,096 characters. `limits`
-states it so `core/` renders within it. A payload over the limit is sent as a
-`.txt` file holding the same bytes, with a one-line caption naming that it is
-attached; the content is unchanged, so the approval still holds.
+**Length.** Telegram refuses a text message over 4,096 UTF-16 code units
+after entity parsing. A longer text is sent as consecutive messages
+(`split_text`), each within the limit, broken at a newline, else a space;
+the bytes are unchanged, so the approval still holds. A file over 2000 MiB
+is refused when it is requested.
 
 **Idempotency.** MTProto's send request carries a `random_id` the server
 uses to detect a repeated send. The performer derives it from the broker's

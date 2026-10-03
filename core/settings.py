@@ -14,6 +14,7 @@ import getpass
 import os
 import shlex
 import shutil
+import socket
 from dataclasses import dataclass, field, fields
 from datetime import date
 from pathlib import Path
@@ -34,6 +35,14 @@ def _git() -> str:
     from core import binaries
 
     return binaries.git() or ""
+
+
+def _host() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+def _addresses(raw: str) -> tuple[str, ...]:
+    return tuple(a.strip().lower() for a in raw.split(",") if a.strip())
 
 
 def _claude() -> str:
@@ -214,6 +223,34 @@ class Settings:
     )
     # The largest verdict file a fresh session may leave.
     verdict_max_bytes: int = 256 * 1024
+
+    # -- the resident kernel and the bridges (docs/plans/m2-1-port.md) -------
+    # This machine's name: the kernel's and the turn slot's lock keys, and
+    # which project chats this machine's bridges receive.
+    machine: str = field(default_factory=lambda: _env("VALOR_MACHINE", _host()))
+    # The owner of a chat whose project spec names no machine.
+    default_machine: str = field(
+        default_factory=lambda: _env("VALOR_DEFAULT_MACHINE", _env("VALOR_MACHINE", _host()))
+    )
+    # Who the operator is: Tom's Telegram user id and his email addresses
+    # (comma-separated; the first is his primary one).
+    operator_telegram_id: str | None = field(
+        default_factory=lambda: _env("VALOR_OPERATOR_TELEGRAM_ID", "") or None
+    )
+    operator_email: tuple[str, ...] = field(
+        default_factory=lambda: _addresses(_env("VALOR_OPERATOR_EMAIL", ""))
+    )
+    # Where operator notices go: the channel, and the chat on it (the
+    # Telegram group "Valor rebuild", by its -100... id).
+    operator_channel: str = field(default_factory=lambda: _env("VALOR_OPERATOR_CHANNEL", "telegram"))
+    operator_chat: str | None = field(default_factory=lambda: _env("VALOR_OPERATOR_CHAT", "") or None)
+    # Where the bridges write inbound files, by channel, named by sha256.
+    inbound_dir: str = field(
+        default_factory=lambda: _env("VALOR_INBOUND", str(Path.home() / "valor-inbound"))
+    )
+    # How often the kernel and the bridges wake with no notification: a
+    # wake interval, not a limit.
+    serve_tick_s: float = field(default_factory=lambda: float(_env("VALOR_SERVE_TICK_S", "60")))
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

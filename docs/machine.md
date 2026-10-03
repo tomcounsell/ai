@@ -53,11 +53,10 @@ Resident total: about 760 MB above macOS. macOS itself, with its system
 services and no user apps, is estimated at 3.5 GB on a 16 GB Air.
 
 **What exists today.** The machine cluster runs under launchd as a
-Homebrew service. The kernel has no resident process yet: the gateway lives
-inside each `python -m core run` and exits with it. A resident kernel
-process is the design, so the bridges have a live port to hand messages to
-and the gateway outlives any one run. The bridges are not in this branch
-yet.
+Homebrew service. The kernel process is `python -m core serve`, kept alive
+by its LaunchAgent (`python -m core serve --plist` prints it); the gateway
+lives in it and outlives any one task. The bridges are not in this branch
+yet; their port in `core/` is.
 
 ## What runs on demand
 
@@ -136,9 +135,10 @@ the test branch's suite run is turn-sized work (the 3,000 MB line above).
 So the Air runs them back to back, test, review, then docs, with the same
 verdicts and the same join as running them at once.
 
-The current kernel runs turns one after another within a task and has no
-cross-task scheduler. The replay scripts held a lock-file slot per run; a
-kernel-held turn slot in Postgres is the design.
+The turn slot is the session advisory lock `turn-slot:<machine>`
+(`core/slot.py`): every harness turn holds it, so a second kernel or a
+`python -m core run` beside `serve` waits for it. It is reentrant within
+the task that holds it, so a check that runs a turn takes it once.
 
 **What runs beside the turn.** Bridges keep receiving and delivering
 released messages while a turn runs; an incoming request becomes a queued

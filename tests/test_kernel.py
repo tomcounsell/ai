@@ -113,7 +113,13 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
         async with await db.connect(dsn) as conn:
             wrote = await broker.request(conn, task, broker.Action("workspace_write", "a.txt", {"text": "a"}))
             held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
-            again = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            twin = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            once = await broker.request(
+                conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
+            )
+            again = await broker.request(
+                conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
+            )
             with pytest.raises(broker.NotApproved):
                 await broker.release(conn, held.effect_id)
             lines_before = _lines(tmp_path / "outbox.jsonl")
@@ -121,11 +127,13 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
             sent = await broker.release(conn, held.effect_id)
             repeat = await broker.release(conn, held.effect_id)
             state = await tasks.status(conn, task)
-        return wrote, held, again, lines_before, sent, repeat, state
+        return wrote, held, twin, once, again, lines_before, sent, repeat, state
 
-    wrote, held, again, lines_before, sent, repeat, state = run(go())
+    wrote, held, twin, once, again, lines_before, sent, repeat, state = run(go())
     assert wrote.kind == "done" and (tmp_path / "a.txt").read_text() == "a"
-    assert held.kind == "pending" and again.effect_id == held.effect_id
+    # Two identical requests are two effects; one request_id is one.
+    assert held.kind == "pending" and twin.kind == "pending" and twin.effect_id != held.effect_id
+    assert again.effect_id == once.effect_id
     assert lines_before == 0
     assert sent.kind == "done" and repeat.kind == "done"
     assert _lines(tmp_path / "outbox.jsonl") == 1

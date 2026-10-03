@@ -19,10 +19,12 @@ from core.settings import settings
 SCHEMA = Path(__file__).with_name("schema.sql")
 
 
-async def connect(dsn: str | None = None) -> psycopg.AsyncConnection:
+async def connect(dsn: str | None = None, *, application_name: str | None = None) -> psycopg.AsyncConnection:
     """Autocommit, so a read never holds a transaction open and every
-    `conn.transaction()` block is a real transaction, committed on exit."""
-    return await psycopg.AsyncConnection.connect(dsn or settings.dsn(), autocommit=True)
+    `conn.transaction()` block is a real transaction, committed on exit.
+    `application_name` names the process in `pg_stat_activity`."""
+    extra = {"application_name": application_name} if application_name else {}
+    return await psycopg.AsyncConnection.connect(dsn or settings.dsn(), autocommit=True, **extra)
 
 
 def migrate(

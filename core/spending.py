@@ -11,11 +11,18 @@ open checks only that the task is not stopped.
 """
 
 import json
+from contextvars import ContextVar
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from math import ceil
 
 from core import ledger, tasks
 from core.settings import JUDGEMENT_PRICES, PRICES, settings
+
+# The session lock the code opening a call holds while it waits on the
+# call (`run:<task>` inside a run), recorded on `gateway.opened` as
+# `holder`. After a kernel restart, a call whose holder lock is free is
+# charged at its estimate; a call with none is left for `tasks.audit`.
+HOLDER: ContextVar[str | None] = ContextVar("holder", default=None)
 
 
 def prices(model: str) -> dict | None:
@@ -123,7 +130,8 @@ async def open_call(conn, task_id: str, call: dict) -> str:
     nothing else refuses a call. `call` carries `call_id`, `turn_id`,
     `model`, `route`, `estimated_input`, `max_tokens`, and
     `estimate_usd_micros` (the worst case, charged only when the provider
-    reports no usage)."""
+    reports no usage), and `holder` (default `HOLDER`)."""
+    call = {**call, "holder": call.get("holder") or HOLDER.get()}
     async with conn.transaction():
         # Under the task's lock, so a stop and an open never interleave.
         await ledger.lock(conn, f"task:{task_id}")

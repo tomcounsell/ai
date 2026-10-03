@@ -66,8 +66,8 @@ enforcing outside the model is AI Control [4].
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
-| Bridges | Telegram and email modules | chosen, not built; libraries open |
-| Scheduling | launchd | chosen, not built |
+| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; the bridges chosen, not built; libraries open |
+| Scheduling | launchd: the kernel's LaunchAgent and the backup job; routines | the kernel in use; routines chosen, not built |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
@@ -107,19 +107,16 @@ port's input needs validation the dataclasses cannot give without hand code.
 
 ## 2. The kernel process
 
-`python -m core` is the composition root. Each command (`start`, `run`,
-`answer`, `feedback`, `approve`, `release`, `stop`, `status`, `ledger`,
-`correct`) is one short process. `run` starts the gateway on loopback, runs
-the task's turns until a question, a delivery, or a stop,
-and exits. Nothing in the kernel is resident between commands; all state is
-in Postgres. Status: **in use**.
-
-A resident kernel process (the bridges hand it work and it schedules turns)
-is **open**. It becomes necessary when a bridge delivers requests without Tom
-at a terminal. Whatever form it takes, the gateway, the broker, and the
-turn runner stay in one process outside every sandbox, so the stop path
-never crosses a process the turn can reach. Serves "Reliable stop, recovery,
-and correction".
+`python -m core` is the composition root. `python -m core serve` is the
+resident kernel, kept alive by launchd: it binds what the bridges record,
+writes the notices Tom is owed, and schedules every task's turns, one turn
+per machine, waking on each ledger notification. The other commands
+(`start`, `run`, `answer`, `feedback`, `approve`, `release`, `stop`,
+`status`, `ledger`, `correct`) are one short process each, and `run` steps
+one task from the command line. All state is in Postgres. The gateway, the
+broker, and the turn runner stay in one process outside every sandbox, so
+the stop path never crosses a process the turn can reach. Serves "Reliable
+stop, recovery, and correction". Status: **in use**.
 
 **Credential boundaries.** The kernel holds the database connection as
 `valor_kernel` and performs effects through the broker. The gateway sets the
@@ -511,8 +508,9 @@ needs a passkey signature over the exact payload, verified by the broker, is
 session hijack could forge.
 
 **Bridges.** Telegram and email, each a self-contained module in `bridges/`
-conforming to one port in `core/`, with sending as an `act` through the
-broker. Status: **chosen, not built** in this tree. Tom's call is that the
+conforming to one port in `core/` (`core/bridge.py`, in use), with sending
+as an `act` through the broker. Status of the bridges: **chosen, not built**
+in this tree. Tom's call is that the
 existing bridges may survive close to unchanged; their libraries (Telethon
 for Telegram, the standard library's `imaplib` and `smtplib` for email) are
 the candidates, **open** until the bridges are rebuilt. What each bridge does
