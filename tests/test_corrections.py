@@ -147,7 +147,7 @@ def test_every_turn_renders_the_corrections_in_force_when_it_starts(dsn, first, 
     for text in (RESTRAINT, later["text"]):
         assert text in started["brief"]
     system_prompt = started["argv"][started["argv"].index("--system-prompt") + 1]
-    assert system_prompt.startswith("You are Valor.") and started["brief"] in system_prompt
+    assert system_prompt == started["brief"] and system_prompt.startswith("# Persona")
 
 
 def test_the_cli_records_and_lists_corrections(dsn, first):

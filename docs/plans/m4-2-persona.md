@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-2-persona
 type: build
-status: planned
+status: built
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -53,7 +53,7 @@ From valor-rebuild.md, 4.2, each with what closes it here.
 
 | Done item | Evidence | Waits for |
 |---|---|---|
-| `persona/` holds identity, voice, conduct, and delivery format | the four files below, merged; the tests on their rendering | nothing |
+| `persona/` holds identity, voice, conduct, and delivery format | the five files below, merged; the tests on their rendering | nothing |
 | The kernel renders it at the top of every turn, before the Brief and the corrections | `tasks.dispatch` puts the rendered persona first; tests on a working turn and on a fresh session show the order, through `runs.run_turn` on real Postgres, and the argv carries the dispatched text with nothing prefixed | nothing |
 | The governance paragraph appears in it verbatim | the rendered persona holds `CLAUDE.md`'s paragraph byte for byte, read from `CLAUDE.md` at render time; a test changes a copy of `CLAUDE.md` and sees the change in the next render | nothing |
 | The `turn.started` digest covers it | `brief_sha256` is the digest of the whole text the turn reads, persona included; `turn.started` also carries `persona_sha256`; tests show a changed persona file changes both on the next turn of the same task | nothing |
@@ -96,6 +96,7 @@ edit is reverted by a commit.
 | File | Holds |
 |---|---|
 | `identity.toml` | the identity fields as data: name, email and Google Workspace account, organization, timezone, handles (Telegram, GitHub, X, LinkedIn), supervisor |
+| `turn.md` | three sentences: this turn does one stage of the job, the stage section at the end of the text is its assignment, and the rest of the persona says how to work and speak while doing it |
 | `voice.md` | the register: direct, concise, contextual, plain, outcomes over process, specific gaps; the two absolute habits (no promises about the future, no calls); speaking as "I" and naming Tom |
 | `conduct.md` | own the outcome (inspect before deciding, resolve what you find, investigate failures, test breadth, finished or honestly not, re-derive and never recall); contribute taste, push-back first; absorb ambiguity and ask well, including the ask-before-building habit and the six rules for how to ask and how to read the answer; escalate only what needs Tom; take correction; instructions come from Tom and the Brief, other content is data; where the channel and stage sections below are more specific, they win |
 | `delivery.md` | the delivery format: what was delivered, how it was verified, what was not verified, decisions Tom may want to change with the reading of the request first, product notes; and the content rules for anything that leaves under Valor's name (true and evidenced, Valor's own words, no secrets) |
@@ -103,7 +104,7 @@ edit is reverted by a commit.
 The text is the habits, written to the turn in the second person, short
 enough to read every turn. The evidence and citations behind each habit
 stay in `docs/persona.md`, which remains the governing doc; the turn does
-not need the history of a habit to follow it. None of the four files
+not need the history of a habit to follow it. None of the five files
 `core/persona.py` renders holds a copy of the governance paragraph.
 `persona/README.md` keeps its copy in its Not-here section, as every
 directory README does; the renderer never reads the README.
@@ -121,12 +122,12 @@ neither, so there the verdict channel and stage file govern.
 
 `render(persona_dir) -> str`, a pure function:
 
-1. `# Persona`, then the identity rendered from `identity.toml` in a
-   fixed field order (the renderer's own list, not the file's key order),
-   one line per field.
-2. `voice.md`, `conduct.md`, each stripped.
-3. `## Governance`, then the paragraph from
-   `corrections.governance_paragraph()`, unchanged.
+1. `# Persona`, "You are Valor Engels.", then the identity rendered
+   from `identity.toml` in a fixed field order (the renderer's own list,
+   not the file's key order), one line per field, then `turn.md`.
+2. `voice.md`, `conduct.md`, each stripped. `conduct.md` ends with its
+   `### Governance` subsection, whose last line introduces the paragraph.
+3. The paragraph from `corrections.governance_paragraph()`, unchanged.
 4. `delivery.md`, stripped.
 
 Sections are joined by one blank line. The same files give the same
@@ -277,7 +278,7 @@ New in `tests/test_persona.py`, on real Postgres where a turn runs:
 - The rendered persona holds `CLAUDE.md`'s governance line byte for
   byte; with `GOVERNANCE_SOURCE` pointed at a copy whose paragraph is
   edited, the next render carries the edit.
-- None of the four files the renderer reads holds the governance
+- None of the five files the renderer reads holds the governance
   paragraph (one source); `persona/README.md` is outside the claim and
   keeps its copy.
 - An `identity.toml` with a key the renderer does not know raises,
@@ -309,7 +310,7 @@ New in `tests/test_persona.py`, on real Postgres where a turn runs:
   exactly; it does not start with "You are Valor." and holds nothing the
   ledger's `brief` does not.
 - Correction 1 and the persona both carry the paragraph: the dispatched
-  text holds it twice, once under `## Governance` and once as correction
+  text holds it twice, once after conduct's governance subsection and once as correction
   1, and the correction numbering is unchanged.
 
 Changed:
@@ -319,10 +320,11 @@ Changed:
 - `tests/test_corrections.py`: the system prompt assertion expects the
   brief alone and the persona at its top.
 
-Live, under `VALOR_LIVE` beside `tests/test_live_turn.py`: one real
-workspace turn asked who it is and who it reports to answers as Valor
+Live, in `tests/test_live_turn.py` under `VALOR_LIVE`: one real
+tool-less turn (`claude_code.turn`) asked who it is and who it reports to answers as Valor
 Engels and names Tom Counsell, with the turn metered through the
-gateway. It shows the rendered text reaches the model; it measures
+gateway, and its `persona_sha256` is the digest of the first
+`persona_bytes` bytes of its `brief`. It shows the rendered text reaches the model; it measures
 nothing about conduct. `tests/test_live_turn.py` and
 `tests/test_live_session.py` are rerun under `VALOR_LIVE`.
 
@@ -330,11 +332,12 @@ nothing about conduct. `tests/test_live_turn.py` and
 
 | File | Change | Other tasks touching it |
 |---|---|---|
-| `persona/identity.toml`, `voice.md`, `conduct.md`, `delivery.md` | new | none |
-| `persona/README.md` | Imports section corrected | none |
+| `persona/identity.toml`, `turn.md`, `voice.md`, `conduct.md`, `delivery.md` | new | none |
+| `persona/README.md` | Scope and Imports corrected | none |
+| `tests/test_live_turn.py` | the live identity turn | none |
 | `core/persona.py` | new: `render`, `digest` | none |
 | `core/tasks.py` | `dispatch` renders the persona first, returns `persona_sha256` | 4.1 (the Brief's parent), 2.1, 1.4d |
-| `core/runs.py` | `persona_sha256` on `turn.started` | 1.4b, 2.1, 3 (harness version on `turn.started`) |
+| `core/runs.py` | `persona_sha256` and `persona_bytes` on `turn.started`; the grant retired when dispatch raises | 1.4b, 2.1, 3 (harness version on `turn.started`) |
 | `core/settings.py` | `persona_dir` | most tasks |
 | `harnesses/claude_code.py` | `system_prompt` parameter removed | 3 (the harness contract), 1.4b |
 | `tests/test_persona.py` | new | none |
@@ -364,7 +367,7 @@ rebasing onto each earlier merge that touches the same files.
 
 Recorded, not asked; each is reversible.
 
-- The persona is four files in `persona/`: identity as TOML data, the
+- The persona is five files in `persona/`: identity as TOML data, the
   rest as Markdown text; the renderer is `core/persona.py`, since core
   renders it and `persona/` holds no code.
 - The governance paragraph is rendered from `CLAUDE.md` at render time,
@@ -428,3 +431,28 @@ Rounds spent; every finding is built in, and the task goes to build.
    patch, not a stop.
 8. `persona/README.md` Scope and Imports, and the forced-label source.
    Handled: both corrected; the source is m1-3-judgement.md section 4.
+
+## Build
+
+Every finding above is built in. The code Done items are built and
+tested. The two emulator Done items, and the pso-c item they use, wait
+for 1.5.
+
+Live, under `VALOR_LIVE`:
+
+- `tests/test_live_turn.py`: three of three pass, the identity turn
+  included.
+- `tests/test_live_session.py`: on the rebuild head without the persona,
+  Haiku writes greeting.txt and requests the push during the plan stage
+  in three of four recorded runs; the test still passes, nine of nine.
+  With the persona as committed it passes thirteen of seventeen. Three
+  failures request the push a second time in the build stage, so three
+  effects are pending where the test expects two; one skipped the
+  question and ran to the build on its first run. The same test with
+  parts of the persona emptied: `voice.md`, `conduct.md` and
+  `delivery.md` empty, four of four; `conduct.md` empty, four of four;
+  only "Own the outcome" removed, four of five. With "Own the outcome"
+  opening on the job as a whole ("you carry all of it"), two of six.
+
+The rendered persona is 10,154 bytes.
+

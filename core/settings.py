@@ -188,6 +188,11 @@ class Settings:
         )
     )
 
+    # -- the persona every turn renders first (persona/) ----------------------
+    persona_dir: str = field(
+        default_factory=lambda: _env("VALOR_PERSONA", str(Path(__file__).resolve().parent.parent / "persona"))
+    )
+
     # -- the replay and demonstration workspaces ------------------------------
     demo_dir: str = field(default_factory=lambda: _env("VALOR_DEMO", str(Path.home() / "src" / "valor-demo")))
 
