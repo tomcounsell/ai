@@ -265,7 +265,9 @@ plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
 layout. The turn controls these files, so the kernel walks to each one
 relative to directory descriptors, follows no link, never blocks on a
-FIFO, and reads only a regular file with one link; anything else is
+FIFO, and reads only a regular file with one link and no holes (a sparse
+file claims a size the turn never wrote), in a worker thread off the
+router's event loop; anything else is
 recorded as unreadable with its reason, never its contents, and an entry
 that cannot be moved is removed unread (`core/workspace.py`'s
 `open_turn_dir`, `open_turn_file`, `read_turn_file`). The same walk reads a

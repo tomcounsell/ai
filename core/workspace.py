@@ -1264,7 +1264,10 @@ def write_files(dir_fd: int, files: dict[str, str]) -> None:
 # Every read of a path a turn (or a fresh session) can write goes through
 # these: each component opened relative to its parent's descriptor with
 # `O_NOFOLLOW | O_NONBLOCK`, so no link is followed and no FIFO blocks, and a
-# file is read only when `fstat` says a regular file with one link. A missing
+# file is read only when `fstat` says a regular file with one link whose
+# blocks on disk cover its size. A sparse file is refused: its size costs the
+# turn nothing, so reading it is unbounded, while a file whose size is backed
+# by disk the turn wrote is as large as the turn could make it. A missing
 # entry is `(None, None)`; an entry that exists and is refused is
 # `(None, why)`, and its contents are never read.
 
@@ -1315,9 +1318,9 @@ def open_turn_dir(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
 
 
 def open_turn_file(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
-    """The regular file with one link at `relpath` under `dir_fd`, opened for
-    reading as a descriptor the caller closes, or (None, why), or (None,
-    None) when it does not exist. Nothing is read."""
+    """The regular file with one link and no holes at `relpath` under
+    `dir_fd`, opened for reading as a descriptor the caller closes, or (None,
+    why), or (None, None) when it does not exist. Nothing is read."""
     parts = _parts(relpath)
     if parts is None:
         return None, f"{relpath!r} is not a plain relative path"
@@ -1345,6 +1348,9 @@ def open_turn_file(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
     if st.st_nlink != 1:
         os.close(fd)
         return None, f"{relpath} has {st.st_nlink} links"
+    if st.st_blocks * 512 < st.st_size:
+        os.close(fd)
+        return None, f"{relpath} is sparse ({st.st_size} bytes claimed, {st.st_blocks * 512} on disk)"
     return fd, None
 
 

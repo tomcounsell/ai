@@ -33,11 +33,15 @@ cache, and `state/work`; a fresh session controls its check directory
 (`<task>/checks/<stage>-<key>`), the entry itself included, since its
 profile's `subpath` rule covers that path. It can leave any entry type
 there: a symbolic link to any path, a hard link to a file on the same
-volume, a FIFO, a socket, a directory where a file is expected, and it can
-name paths in `plan.json`. The kernel must never read, stat, list, or
+volume, a FIFO, a socket, a directory where a file is expected, a sparse
+file whose size claims far more than the disk it uses (a 1 PiB file costs
+one `truncate`), and it can name paths in `plan.json`. The kernel must never read, stat, list, or
 create anything outside those directories because of an entry the turn
 left, never block on one, and never put the contents of anything but a
-regular file with one link into the ledger. An entry it will not read is
+regular file with one link and no holes into the ledger. A file whose
+size is backed by disk the turn wrote is only as large as the turn could
+make it, and that disk is real and already metered by the machine; a
+sparse file is not, so reading it has no bound. An entry it will not read is
 recorded as unreadable with a reason, and its contents are never read.
 
 ## The sweep
@@ -92,10 +96,14 @@ entry that exists and is refused. No caller matches reason strings.
   kernel's, so the last component is the only one a turn can replace.
 - `open_turn_file(dir_fd, relpath) -> (fd | None, why | None)`: the same
   walk, the file opened with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK |
-  O_CLOEXEC`; `fstat` must say `S_ISREG` and `st_nlink == 1`. Anything
-  else closes the descriptor and returns `None` and a reason ("is a link,
-  not a plain file", "is not a regular file", "has 2 links"); nothing is
-  read. The caller owns the descriptor it gets, so a caller can stream,
+  O_CLOEXEC`; `fstat` must say `S_ISREG`, `st_nlink == 1`, and
+  `st_blocks * 512 >= st_size` (no holes). Anything else closes the
+  descriptor and returns `None` and a reason ("is a link, not a plain
+  file", "is not a regular file", "has 2 links", "is sparse (N bytes
+  claimed, M on disk)"); nothing is read. On APFS a file written plainly,
+  a file cloned with `cp -c`, and a file with a short seek-made gap all
+  report blocks covering their size; `truncate` to a large size, or a
+  seek far past the end before a write, reports the holes. The caller owns the descriptor it gets, so a caller can stream,
   hash, or read from an offset.
 - `read_turn_file(dir_fd, relpath) -> (bytes | None, why | None)`:
   `open_turn_file`, then the whole file read and the descriptor closed. No
@@ -116,6 +124,15 @@ entry that exists and is refused. No caller matches reason strings.
 file, so it is reported once and never read. When the move is refused, the
 entry is removed unread, so nothing is left in `.valor/` for a later turn
 to read, and no signal is credited to a turn that did not write it.
+
+**Off the event loop.** The router runs every task on one event loop, so a
+slow read of a turn file would stall every task. The kernel's reads of
+turn files run in a worker thread: `session.run` calls `signals.collect`
+through `asyncio.to_thread`, `session.record` runs `_verdict` (the plan
+read and the candidate fetch) the same way, and `fresh.py` calls
+`read_verdict` the same way. 1.4b's `read_junit`, 1.4d's transcript
+reader, and 3c's `read_screens` (inside `collect`) are called the same
+way.
 
 Callers:
 
@@ -242,7 +259,11 @@ Elsewhere:
     plain clone, refuses a clone whose `.git/objects` is a link to a
     directory holding `info/alternates`, refuses a linked workspace, and
     with no `.git` still looks up the four names in the workspace;
-    `git.is_repo` is false on a linked workspace.
+    `git.is_repo` is false on a linked workspace; a sparse `verdict.json`
+    is refused unread.
+11a. `tests/test_signals.py`: a `question.md` truncated to 1 PiB is
+    refused as sparse; a 3 MB `done.md` written plainly and an effect file
+    cloned with `cp -c` are read.
 12. `tests/test_fresh.py`: the `big` case and its act in
     `tests/scripted.py` are deleted (a big verdict is read whole); the
     other cases' reasons match the helpers' wording.
@@ -348,3 +369,22 @@ deleted from `tests/test_fresh.py`). Two `tests/test_fresh.py` tests that
 start a task's own Postgres or Redis failed once in the full run while
 other suites ran on the machine and passed when run again on their own.
 Ruff check and format are clean.
+
+### Finding from 3c's review: sparse files
+
+3c's blind review showed a turn can leave a sparse file that uses no disk
+but claims 1 PiB, and the kernel was still hashing it after 20 seconds on
+the router's event loop, which stalls every task; `read_turn_file` reads
+whole files, so verdicts and junit were open to the same attack. Built in:
+`open_turn_file` refuses a file whose blocks on disk do not cover its size,
+from the `fstat` it already does, as unreadable with the sizes in the
+reason. Checked on APFS: an empty file, a 1 byte file, a 3 MB file of
+random bytes and one of zeros, `cp -c` clones of both, and a file with a
+10 MB seek-made gap all report blocks covering their size; `truncate` to
+1 TiB, and a write after a 200 MB or 1 TiB seek, report the holes. A file
+APFS stores compressed would also report fewer blocks than its size and be
+refused; a turn writing files plainly never makes one. The reads of turn
+files moved off the event loop (Off the event loop). Tests: 11a, and a
+sparse verdict under 11. The full suite with this: 529 passed, 7 skipped,
+two tests that start a task's own Postgres having failed once in the full
+run and passed on their own; ruff clean.

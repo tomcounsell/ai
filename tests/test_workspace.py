@@ -429,6 +429,14 @@ def test_a_hard_linked_verdict_is_refused(tmp_path):
     assert verdict is None and why == "verdict.json has 2 links"
 
 
+def test_a_sparse_verdict_is_refused_unread(tmp_path):
+    checks = checks_with_verdict(tmp_path)
+    with open(checks / "critique-abc" / "repo" / ".valor" / "verdict.json", "r+b") as f:
+        f.truncate(1 << 50)
+    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
+    assert verdict is None and why == f"verdict.json is sparse ({1 << 50} bytes claimed, 4096 on disk)"
+
+
 def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
     outside = tmp_path / "outside"
     (outside / "repo" / ".valor").mkdir(parents=True)

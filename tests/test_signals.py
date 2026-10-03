@@ -12,6 +12,7 @@ Live spend: none.
 
 import json
 import os
+import subprocess
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -192,3 +193,21 @@ def test_plain_files_are_collected_and_moved(ws):
     assert sorted(p.name for p in handled.iterdir()) == ["done.md", "effects", "plan.json", "question.md"]
     assert sorted(p.name for p in (handled / "effects").iterdir()) == ["a.json", "b.json"]
     assert collect(ws, "turn-2") == signals.Signals()
+
+
+def test_a_sparse_file_is_refused_and_written_or_cloned_files_are_read(ws):
+    v = ws / ".valor"
+    with open(v / "question.md", "wb") as f:
+        f.truncate(1 << 50)  # claims 1 PiB, uses no disk
+    body = "x" * 3_000_000
+    (v / "done.md").write_text(body)
+    (v / "effects").mkdir()
+    (v / "effects" / "a.json").write_text(
+        json.dumps({"action_type": "send", "target": "tom", "payload": {"t": body}})
+    )
+    subprocess.run(["cp", "-c", str(v / "effects" / "a.json"), str(v / "effects" / "b.json")], check=True)
+    found = collect(ws)
+    assert found.question is None
+    assert found.unreadable == [f"question.md is sparse ({1 << 50} bytes claimed, 0 on disk)"]
+    assert found.done == body
+    assert [e["request"]["payload"]["t"] == body for e in found.effects] == [True, True]

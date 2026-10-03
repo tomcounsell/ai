@@ -3,7 +3,8 @@
 Tom is not watching this session. He reads only what you leave under
 `.valor/` in your workspace, which the kernel collects when your turn ends.
 `.valor/` is ignored by git. Write each file in place as a plain file: a
-link, a hard link, a FIFO, or a directory under a signal's name is not read,
+link, a hard link, a FIFO, a sparse file, or a directory under a signal's
+name is not read,
 and your next turn says so.
 
 - A question for Tom goes in `.valor/question.md`; then end your turn. Ask
