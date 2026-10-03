@@ -272,9 +272,9 @@ an entry that vanishes before it is read, is recorded as unreadable with
 its reason, never its contents, and an entry that cannot be moved is
 removed unread (`core/workspace.py`'s `open_turn_dir`, `open_turn_file`,
 `read_turn_file`). The same walk reads a fresh session's verdict from the
-kernel's checks directory. `turn.collected` records what the turn left, its state, its verdict, and what was
-unreadable; `task.delivered` waits for the checks
-([sdlc-state-machine.md](sdlc-state-machine.md)).
+kernel's checks directory. `turn.collected` records what the turn left, its
+state, its verdict, and what was unreadable; `task.delivered` waits for the
+checks ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
 **An answer or feedback is spent only by a turn that finishes.** After a
 turn that fails or is stopped, the next turn opens with it again. This is
