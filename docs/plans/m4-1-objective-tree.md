@@ -520,6 +520,15 @@ row is rewritten. A task without `parent_id` reads as a root.
   child to investigate. 4.3's plan does not build it either; whichever
   task first needs it writes its threat model (its workspace rule and
   where the child's instruction, now turn-written, is rendered).
+- **Every refusal has a source or a function; nothing caps the tree.**
+  The ceiling refusal: architecture.md, The objective tree, and
+  routines.md ("The kernel refuses"). A stopped or fenced parent, and
+  feedback on a fenced merged node: the stop fence (architecture.md, "Stopping
+  a node fences its subtree"; the lead's call on finding 2). A calibration
+  parent: stop cannot walk through one. An unknown parent: there is no
+  Brief to read. No depth, count, or size limit, and nothing routes to
+  Tom. Checked against Tom's standing rule on invented caps; nothing was
+  dropped.
 - **The Brief lists direct children only**, with subtree spending.
 - **No index is added**: the children read uses the existing GIN index.
 - **The rollup is over all time and counts stopped nodes**; periods are
