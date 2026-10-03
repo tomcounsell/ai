@@ -715,17 +715,32 @@ class Provisioned:
 MKTEMP = """#!/bin/sh
 # Written by the kernel. macOS mktemp makes its file in the user temp
 # directory, which no turn can write, whatever TMPDIR says; given no directory
-# and no template, it is given the turn's TMPDIR.
+# and no template, it is given the turn's TMPDIR. The arguments are read as
+# its getopt_long reads them: options anywhere, `-t` and `-p` take the rest of
+# their word or the next one, `--` ends the options, long names may be cut.
 [ -n "$TMPDIR" ] || exec /usr/bin/mktemp "$@"
 skip=
+ended=
 for a in "$@"; do
     if [ -n "$skip" ]; then skip=; continue; fi
+    if [ -n "$ended" ]; then exec /usr/bin/mktemp "$@"; fi
     case "$a" in
-        --tmpdir|--tmpdir=*) exec /usr/bin/mktemp "$@" ;;
-        --*) ;;
-        -*p*) exec /usr/bin/mktemp "$@" ;;
-        -*t) skip=1 ;;
-        -*) ;;
+        --) ended=1 ;;
+        --*)
+            name=${a#--}
+            case tmpdir in "${name%%=*}"*) exec /usr/bin/mktemp "$@" ;; esac
+            ;;
+        -?*)
+            rest=${a#-}
+            while [ -n "$rest" ]; do
+                c=${rest%"${rest#?}"}
+                rest=${rest#?}
+                case "$c" in
+                    p) exec /usr/bin/mktemp "$@" ;;
+                    t) [ -n "$rest" ] || skip=1; break ;;
+                esac
+            done
+            ;;
         *) exec /usr/bin/mktemp "$@" ;;
     esac
 done

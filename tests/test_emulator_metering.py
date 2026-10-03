@@ -378,8 +378,9 @@ class Args:
     max_feedback = 2
 
 
-def _drive(monkeypatch, state: dict, *, said: str = "ran", reply: dict | None = None, left=()):
-    """One driver step against a task whose status is `state`."""
+def _drive(monkeypatch, state: dict, *, said: str | Exception = "ran", reply: dict | None = None, left=()):
+    """One driver step against a task whose status is `state`; `core run`
+    answers `said`, or raises it."""
     calls = {"stand_in": 0, "run": 0}
 
     def fake_stand_in(*a, **kw):
@@ -389,6 +390,8 @@ def _drive(monkeypatch, state: dict, *, said: str = "ran", reply: dict | None = 
     def fake_core(*args):
         calls["run"] += 1
         assert args[0] == "run"
+        if isinstance(said, Exception):
+            raise said
         return said
 
     monkeypatch.setattr(replay, "status", lambda task: state)
@@ -457,6 +460,13 @@ def test_no_runner_and_a_failed_run_pause_with_the_outcome_unset(monkeypatch):
     for said in ("NO RUNNER for review: record its verdict", "FAILED: the turn errored"):
         result, _ = _drive(monkeypatch, {"state": "checks"}, said=said)
         assert result["outcome"] is None and result["paused"] == said
+
+
+def test_a_core_run_that_fails_keeps_its_whole_error(monkeypatch):
+    error = "python -m core run t failed (1):\n" + "\n".join(f"line {i} " + "x" * 400 for i in range(20))
+    result, _ = _drive(monkeypatch, {"state": "build"}, said=RuntimeError(error))
+    assert result["outcome"] is None and result["paused"] == f"failed: {error}"
+    assert result["log"][-1]["step"] == "run failed" and result["log"][-1]["error"] == error
 
 
 def test_an_answer_the_driver_does_not_know_pauses_it(monkeypatch):

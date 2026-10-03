@@ -370,6 +370,24 @@ def test_mktemp_in_a_turn_makes_its_files_in_the_turns_tmpdir(tmp_path):
     assert made[1].is_dir() and made[4].parent == Path(".")
 
 
+def test_mktemp_in_a_turn_reads_its_arguments_as_mktemp_does(tmp_path):
+    """A prefix attached to `-t` (`-tapp`, `-dtout`) is a prefix, so the
+    file goes to the turn's TMPDIR; a template after `--` is a template, so
+    it goes to the current directory, as `/usr/bin/mktemp` puts them."""
+    lay = _task(tmp_path)
+    run = _turn_shell(
+        tmp_path, lay, "mktemp -tapp; mktemp -dtout; mktemp -t -p; mktemp -- -x.XXXXXX; mktemp z.XXXX -d"
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stderr == ""
+    made = [Path(line) for line in run.stdout.split()]
+    own = (lay.work_state / "tmp").resolve()
+    assert [p.resolve().parent == own for p in made] == [True, True, True, False, False]
+    assert [p.name.split(".")[0] for p in made] == ["app", "out", "-p", "-x", "z"]
+    assert made[3].parent == made[4].parent == Path(".")
+    assert made[1].is_dir() and (lay.repo / made[3]).is_file() and (lay.repo / made[4]).is_dir()
+
+
 def test_git_and_python3_in_a_turn_print_no_temp_directory_error(tmp_path):
     lay = _task(tmp_path)
     run = _turn_shell(

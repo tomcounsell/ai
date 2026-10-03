@@ -235,8 +235,9 @@ reference diff, the candidate's diff from the mirror, and the verification
 output, and nothing that names the arm, the questions, or the feedback. The
 candidate's diff is the whole diff, as the baseline judge's was; the result
 records its size and whether the 70,000 character limit cut it. The model is
-`JUDGE_MODEL`, `claude-sonnet-5-5`: Claude Code 2.1.288's model catalog
-resolves the baseline judge's alias `sonnet` to it. It scores 0 to 5:
+`JUDGE_MODEL`, `claude-sonnet-5-5`: Claude Code 2.1.286's model catalog,
+the version the baseline ran, resolves the baseline judge's alias `sonnet`
+to it. It scores 0 to 5:
 
 - **Fidelity.** Does it build what the requester intended, at the intended
   scope? The answer key is the authority; the reference shows one accepted

@@ -178,12 +178,11 @@ still be judged.
   driver's `--stand-in-model` flag stays for a deliberate comparison run,
   its default the seat. The driver's `--model` is the working turn's model
   and is unchanged.
-- The judge uses a pinned Sonnet id, `JUDGE_MODEL` in `judge.py`. At build
-  the alias `sonnet` is resolved once (one tool-less `claude -p --model
-  sonnet` call through the gateway, its charged row's model read back),
-  and that id is written into `JUDGE_MODEL`. It is expected to be
-  `claude-sonnet-5-5`. The baseline did not record its resolved id; the
-  gate record says so beside the scores.
+- The judge uses a pinned Sonnet id, `JUDGE_MODEL` in `judge.py`: the id
+  Claude Code 2.1.286's model catalog, the version the baseline ran, gives
+  the alias `sonnet` for the first-party provider, `claude-sonnet-5-5`.
+  The baseline did not record its resolved id; the gate record says so
+  beside the scores.
 
 ### Kernel-owned reads (`tests/emulator/stand_in.py`, `tests/emulator/judge.py`)
 
@@ -299,8 +298,8 @@ under the task directory.
 |---|---|
 | The move, the package, imports, `demo_workspace.sh` removal | now |
 | Metering through the gateway, the emulator task, costs.jsonl removal | now |
-| Pinned stand-in and judge models, the judge id probe | now |
-| Mirror reads, the judge diff's exclusions, the hidden-test tree | now |
+| Pinned stand-in and judge models | now |
+| Mirror reads, the whole judge diff, the hidden-test tree | now |
 | The `/tmp` profile change and its tests | now |
 | Driver ends, `--run`, result fields | now |
 | Rebase over 1.4b's edits to `replay.py` and `replay_workspace.py` (the item's `project` key) | after 1.4b merges |
@@ -465,7 +464,8 @@ Other tasks also change `core/`; the edits here are small and named.
 
 1. Build the parts marked "now" on this branch, the `git mv` commit
    first. Suite green.
-2. Resolve the judge's Sonnet id once and commit it in `JUDGE_MODEL`.
+2. `JUDGE_MODEL` is the id Claude Code 2.1.286's catalog gives `sonnet`,
+   committed in `judge.py`; no call resolves it.
 3. When 1.4b merges, rebase; confirm the `project` key handling survived
    the rename and the items carry their `project` key. Run the
    equal-output check and record it.

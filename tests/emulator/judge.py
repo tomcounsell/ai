@@ -32,8 +32,8 @@ uncommitted, a virtualenv included, is not there: an item's commands set
 up what they need.
 
 The judge model is `JUDGE_MODEL`, one pinned Sonnet id: the id Claude
-Code 2.1.288's model catalog resolves the alias `sonnet` to for the
-first-party provider. The baseline judge called that alias
+Code 2.1.286's model catalog, the version the baseline ran, resolves the
+alias `sonnet` to for the first-party provider. The baseline judge called that alias
 (5d90b4776:scripts/judge_replay.py:171) and did not record what it resolved
 to. Its one call goes through the kernel's gateway and is metered on the
 run's emulator task.
@@ -51,7 +51,7 @@ from core import workspace as kws
 from harnesses.claude_code import KEEP_ENV
 from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh
 
-# Claude Code 2.1.288's catalog: alias `sonnet` -> claude-sonnet-5-5 (first party).
+# Claude Code 2.1.286's catalog: alias `sonnet` -> claude-sonnet-5-5 (first party).
 JUDGE_MODEL = "claude-sonnet-5-5"
 DIFF_LIMIT = 70_000  # the baseline's value, kept so scores compare (5d90b4776:scripts/judge_replay.py:45)
 OUTPUT_TAIL = 4_000  # the baseline's value, kept so scores compare (5d90b4776:scripts/judge_replay.py:46)

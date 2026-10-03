@@ -13,9 +13,8 @@ The choices [m1-5-emulator.md](m1-5-emulator.md) made without asking Tom.
   event-loop thread, rather than a long-lived one.
 - Stand-in and judge stay `claude -p` calls, not direct API calls.
 - The stand-in is the `frontier` seat; the judge is `claude-sonnet-5-5`,
-  the id Claude Code 2.1.288's catalog gives the baseline's alias `sonnet`.
-  The baseline did not record its CLI version, so that is the nearest
-  source.
+  the id Claude Code 2.1.286's catalog, the version the baseline ran, gives
+  the baseline's alias `sonnet`.
 - `head_sha` is read from the `effect.held` row, not added to the fold.
 - The judge's diff is the whole diff: the baseline judge excluded nothing,
   so there is no pathspec to make literal. Size and truncation are recorded.

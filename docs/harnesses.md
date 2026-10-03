@@ -381,7 +381,8 @@ must not reach. It runs as Tom's user.
   since `~/.cache/uv` and `~/.local/share/uv` are write-denied. The emulator's
   verification shares the temp directories and adds its tree, as its baseline did.
 - **Read only:** the shared `bin/` (uv, and the kernel's `mktemp`, which hands
-  macOS `mktemp` the turn's `TMPDIR`), first on the turn's `PATH`, then the
+  macOS `mktemp` the turn's `TMPDIR` when it is given no directory and no
+  template, reading its arguments as macOS `mktemp` does), first on the turn's `PATH`, then the
   trusted git's directory, so `git` and `python3` are not `/usr/bin`'s shims,
   which cache in the user temp directory; for the working session, its task's
   `home/` and bare origin. **Stat only:** the allowed directories'

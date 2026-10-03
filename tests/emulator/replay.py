@@ -386,8 +386,8 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     try:
         line = core("run", task_id)
     except RuntimeError as exc:
-        log.append({"at": now(), "step": "run failed", "error": str(exc)[:2000]})
-        result["paused"] = f"failed: {str(exc).splitlines()[0][:300]}"
+        log.append({"at": now(), "step": "run failed", "error": str(exc)})
+        result["paused"] = f"failed: {exc}"
         return
     log.append({"at": now(), "step": "run", "said": line[:2000]})
     said = line.splitlines()[0] if line else ""
