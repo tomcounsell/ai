@@ -76,8 +76,9 @@ Building waits only on what the task's code needs:
 | 1.4d credential, transcripts, performers | now | now | 1.4b |
 | 1.5 emulator and takeover gate | now | now (the scripts' move); the gate runs once 1.4b, 1.4s, 1.4c part one, and 1.4d merge | 1.4d |
 | 1.4s kernel reads of turn-owned files (bug fix) | now | now | 1.4b |
-| 1.4c part one: review runner, host rerun | now | 1.4b merges | 1.4s, before the 1.5 gate runs |
+| 1.4c part one: review runner, host rerun | now | on 1.4b's docs tip; rebases when 1.4b is patched | 1.4b and 1.4s, before the 1.5 gate runs |
 | 1.4u invented caps out of the merged code (cap-audit-code) | now | now | 1.4b and 1.4s; later of 1.4u, 3a, 3b rebases |
+| 1.4v programs by fixed path, denied paths' ancestors denied (bug fix) | now | now | 1.4b; 3b's patch follows it |
 | 1.4c part two: the rerun in a container | now | Tom installs `container` | 1.5 |
 | 2.1 resident kernel, bridge port | now | now, on current code; rebases onto 1.4b, 1.4d, 1.4s | 1.5 |
 | 2.2 Telegram | now | 2.1's critique rounds are done (it builds to the port the plan names) | 2.1 |
@@ -85,7 +86,7 @@ Building waits only on what the task's code needs:
 | 3a the gateway's OpenAI route | now | now | 1.5 |
 | 3b Pi and the harness contract suite | now | now | 3a |
 | 3c headless browser in the workspace | now | now | 1.5 |
-| 4.1 objective tree | now | 2.1 merges | 2.1 |
+| 4.1 objective tree | now | 1.4d and 2.1 merge | 2.1 |
 | 4.2 persona | now | now | 1.5 |
 | 4.3 routines and status page | now | 4.1's build lands | 4.1 |
 | 5 tools on demand | none: built when a task needs a tool twice | | |
@@ -140,12 +141,19 @@ task's plan, never its unmerged branch.
 **Reports.** Agents report only to this session (in every brief: "Report
 only to the lead session through your final result; never address Tom").
 A final result longer than about 600 words is cut off, so every brief
-asks for the full report in a file under this session's scratchpad
-(`report-<agent name>.md`) and a final result that is its path plus a
-summary under 300 words.
-Keep a running table in this session, not a file, of task, stage, agent
-name, and head. When an agent finishes, start the next stage of that task
-at once, without waiting for the others.
+asks for the full report in `~/src/valor-build-notes/<agent name>.md` and a
+final result that is its path plus a summary under 300 words. The briefs
+(`check-brief.md`, `builder-brief.md`) and the running table (`state.md`:
+task, stage, head, next, port blocks, live agents) live in that directory
+too, since `/tmp` and the scratchpad do not survive a reboot. When an agent
+finishes, start the next stage of that task at once, without waiting for
+the others.
+
+**Release.** The machine runs out of memory with idle agents (Tom,
+2026-10-03). Stop each agent with TaskStop as soon as its report is
+joined, drop its test databases by exact name, and free its port block. A
+builder is respawned from `builder-brief.md` for a later patch; the plan
+file is its state.
 
 ## 5. Run the pipeline, per task
 
