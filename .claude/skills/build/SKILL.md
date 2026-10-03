@@ -1,13 +1,13 @@
 ---
 name: build
-description: Continue the Valor rebuild from wherever it stopped. Reads the rebuild plan and each milestone's plan file, works out every task's stage, fans out Opus and Sonnet subagents to run the pipeline on every task whose dependencies allow, until something needs Tom, records the results in the plan files, and pushes. Use when asked to build, continue, resume, or "pick up where we left off" on the rebuild.
+description: Continue the Valor rebuild from wherever it stopped. Reads the rebuild plan and each milestone's plan file, works out every task's stage, fans out Opus and Sonnet subagents to run the pipeline on every task whose dependencies allow, until every task is merged or waiting on another task, records the results in the plan files, and pushes. Use when asked to build, continue, resume, or "pick up where we left off" on the rebuild.
 ---
 
 # /build
 
 Carry the rebuild forward, many pipelines at once, from what the
-repository records, until every task left is waiting on Tom or on another
-task. Work in `~/src/valor-rebuild`
+repository records, until every task left is merged, stopped by the lead, or waiting on
+another task. Work in `~/src/valor-rebuild`
 on branch `valor-cori-rebuild`. Never switch `~/src/ai` off `main`: the live
 old system runs from it.
 
@@ -48,9 +48,9 @@ or any prefix of one.
 | `planned`, critique sound or rounds spent | build (spent rounds' findings ride into the build prompt) |
 | `built` or a patch recorded with no checks after it | checks |
 | checks recorded, no join | the join |
-| `delivered-not-passed`, no feedback from Tom | **stop**: present the delivery and recommendation to Tom |
-| Tom's feedback recorded, not applied | patch as he said, then what he said to run |
-| passed checks or Tom's tap recorded, not merged | merge and roll out (needs Tom's tap unless already recorded) |
+| `delivered-not-passed` | the lead decides against the task's objective: another patch round (with its scope, recorded in the plan file), or stop and record why |
+| a patch round decided (by the lead or Tom), not applied | patch to that scope, then the three checks |
+| passed checks, or the lead's merge decision recorded, not merged | merge and roll out |
 | `merged` | the next item |
 
 3. A task is ready when its stage is not a stop and the tasks it waits on
@@ -179,7 +179,7 @@ builder's narration.
 - **Build.** The builder builds to the plan in its own worktree
   (`git worktree add ~/src/valor-rebuild-<id> -b m<id>-<slug>`), with every
   test it named, then reports head, counts, ruff, what remains for rollout,
-  and decisions Tom may want to change.
+  and decisions the lead may want to change.
 - **Checks**, three fresh subagents at once on the same commit, each in
   its own worktree and its own test database (`VALOR_TEST_DB=valor_rebuild_test_<id><role>`):
   - **test**: suite at base and head, regressions, then breadth (behaviors
@@ -198,10 +198,13 @@ builder's narration.
   docs failing goes to patch once (the repair round); everything passing
   goes to merge. Before a patch, fast-forward the builder's branch onto the
   docs commit. After every patch all three checks run again.
-- **Stop means stop.** When rounds are spent, record the delivery as
-  `delivered-not-passed` with the findings and a recommendation, and stop.
-  Build nothing more on it until Tom answers.
-- **Merge** (on Tom's tap): fast-forward `valor-cori-rebuild` to the docs
+- **Stop means stop**, for subagents. When rounds are spent, record the
+  delivery as `delivered-not-passed` with the findings. The lead then
+  decides against the task's objective, never Tom: another patch round
+  with a named scope, a merge, or a stop, and records the decision and why
+  in the plan file.
+- **Merge**, the lead's call (Tom, 2026-10-03: merges are not tapped):
+  fast-forward `valor-cori-rebuild` to the docs
   head, push, run the plan's rollout steps (back up first with
   `python -m core backup`), record them under "Merged", set
   `status: merged`, remove the task's worktrees.
@@ -213,9 +216,9 @@ where it can carry them; tasks already running with subagents finish
 there. Start a kernel task with:
 `.venv/bin/python -m core start "<instruction>" --project valor --branch valor-cori-rebuild`,
 then `.venv/bin/python -m core run <task>` until it stops on a question, a
-held merge, or a stop. Relay questions and held merges to Tom;
-record his answers with `core answer` and his taps with `core approve` and
-`core release`. Step in with subagents only to repair the kernel when it
+held merge, or a stop. Valor decides held merges and stops itself against
+the task's objective; relay to Tom only a question in Tom's queue below,
+and record his answers with `core answer`. Step in with subagents only to repair the kernel when it
 cannot run its pipeline, and record that repair as a task.
 
 ## Rules every subagent brief carries
@@ -246,9 +249,13 @@ cannot run its pipeline, and record that repair as a task.
 
 ## Tom's queue
 
-Bring Tom only: deliveries to accept (a held merge or a delivery that did
-not pass, with a recommendation), identity and credential choices, and
-questions about intent. Decide every other reversible call, record it under
+Tom and the lead are a CEO and a project manager (Tom, 2026-10-03). Bring
+Tom only: questions about vision, business priorities, and the cost and
+benefit of tradeoffs in how the company works; things only he holds (a
+password, an account, a disk); and governance grants, one per new check,
+gate, hook, review step or guard, each with its incident and mission item.
+Never raise a technical decision, a merge, or an extra round; decide them
+and record why. Decide every other call too, record it under
 "Decided by default" in the plan file, and keep going. Ask one question at
 a time, in plain language, with a concrete example and the recommendation
 first.
@@ -256,5 +263,5 @@ first.
 ## Finish
 
 Commit every record to the plan files, push the branches touched, and
-report in under fifteen lines: what moved, what the checks said, what
-waits for Tom, and the next item `/build` will pick up.
+report in under fifteen lines: what moved, what the checks said, what it
+cost, any tradeoff needing Tom's priorities, and the next item `/build` will pick up.
