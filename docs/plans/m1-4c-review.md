@@ -15,7 +15,7 @@ runner for `checks.review`: governance per hunk, then the kernel's own
 rerun of the candidate's suite and lint on the host in a fresh sandboxed
 checkout (1.4b's machinery), then a blind Opus session in a checkout the
 kernel has set up, whose verdict the runner turns into the recorded one.
-`python -m core verdict` is deleted once docs has a registered runner too.
+`python -m core verdict` is deleted in the same commit.
 Part two, [m1-4c-verifier.md](m1-4c-verifier.md), moves the rerun into an
 Apple container VM.
 
@@ -50,7 +50,7 @@ From valor-rebuild.md, 1.4:
 | Done item | What closes it here |
 |---|---|
 | The blind verifier: Opus in a fresh session, rerunning the tests in a fresh sandboxed checkout like the test branch's; `review.decided` carries the governance boolean | `fresh.review_runner`: seat `reviewer`, the kernel's own head run in a fresh checkout under the check profile with fresh services, before a blind session in its own set-up checkout reads anything |
-| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | review registered unconditionally; `verdict` deleted in the commit where docs is registered too |
+| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | review registered unconditionally, as 1.4b registers docs; `verdict` deleted in the same commit |
 | The review and docs runners always pass `governance_from` | the runner asks governance first and passes its ids; `record_check` already refuses a session-leg review without them (1.4b) |
 
 The Done line stands as written.
@@ -235,9 +235,9 @@ entry check says. An uncalibrated judge on the review path can only add
 caution, at the cost of a tap, and the reviewer still names its own
 instances.
 
-`verdict` is deleted in the commit where docs is registered too. If 1.4b
-registers docs unconditionally, that is this part's registering commit.
-In it:
+1.4b registers the docs runner unconditionally too, so every check has a
+runner once review is registered, and `verdict` is deleted in this part's
+registering commit. In it:
 
 - `verdicts.MANUAL_STAGES`, `manual_allowed`, `_manual`, and the
   manual-leg refusals are deleted; `leg` loses its `"manual"` default on
@@ -253,9 +253,6 @@ In it:
   payloads with a scripted turn id and model;
 - `leg: manual` rows in the ledger fold as before and stay in the
   attention log.
-
-If docs is still manual when this part lands, review is registered, the
-manual path stays for docs alone, and the build record says so.
 
 ### Skills
 
@@ -437,7 +434,8 @@ Reversible calls made by the build session, not questions for Tom.
 5. **The reviewer gets fresh services and a set-up checkout.**
 6. **Review is registered unconditionally.** Governance's calibration is
    information, under Tom's rule against invented safeguards, as for the
-   test runner and breadth. `verdict` goes once docs is registered too.
+   test runner and breadth and 1.4b's docs runner. `verdict` goes in the
+   same commit.
 7. **A run at another seat is information (`review.compared`)**, never a
    second `review.decided`, so the join reads one verdict per candidate.
 8. **Lint locations only for a kind the kernel can parse**, with the
@@ -492,8 +490,8 @@ this part's; 12 is part two's.
 1. Review waited on governance's calibration, so the gate could still
    measure a hand-played review: review is registered unconditionally,
    calibration is information (the lead's call under Tom's rule against
-   invented safeguards); `verdict` goes once docs is registered
-   (Registration; Decided by default 6).
+   invented safeguards); 1.4b registers docs the same way, so `verdict`
+   goes in the same commit (Registration; Decided by default 6).
 2. The advisory lock: part two's.
 3. The head run's reuse key lacked the role: it includes the role, base
    runs stay shared, and 1.4b is told (Design, step 2; Files).
