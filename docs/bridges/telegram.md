@@ -343,8 +343,7 @@ Its resident memory counts against the RAM plan in
 
 ## Conforming an implementation
 
-The bridge may survive as existing code. An implementation conforms to the
-port when:
+An implementation conforms to the port when:
 
 1. **It keeps the transport.** The MTProto client and sign-in, the event
    handler for new messages, reply-chain fetching, media download, and
@@ -399,6 +398,6 @@ job `com.valor.kernel.telegram` that `--plist` prints.
 | `send.py` | `telegram.send_message` perform and lookup, and the notice send to the row's `chat_id`, marked through `outbox.sent` |
 | `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send key's chat and the newest id before its first send), each written whole and renamed into place |
 | `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
-| `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |
+| `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them; `--test-dc` signs in on Telegram's test servers), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |
 
 Nothing the bridge prints holds any part of the API hash.
