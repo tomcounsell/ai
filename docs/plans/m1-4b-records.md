@@ -371,3 +371,56 @@ file's name).
 Suite on `3d692d7b5` plus this round: 814 passed, 13 skipped (build
 database, ports 6720 to 6729). `ruff check` clean; `ruff format --check`
 flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Patch round 4 (Valor's call, 2026-10-03)
+
+From review-1-4b-p3 (changes) and test-1-4b-p3 (pass, two notes) at
+`adabdb96f`, on the docs commit `c7ef0ceb8`.
+
+1. `workspace.rmtree` clears an entry's `uchg` and `uappnd` flags and
+   removes its ACL before it opens, moves or unlinks it. Under the turn
+   profile the checkout allows `file-write*`, which covers flags and ACLs,
+   and a mode alone moves neither, so a check directory named by its sha
+   met the same locked tree on every rerun. The clearing is one
+   `setattrlistat(2)` call relative to the parent's descriptor with
+   `FSOPT_NOFOLLOW` (`ATTR_CMN_FLAGS` with the two user bits dropped and
+   `ATTR_CMN_EXTENDED_SECURITY` with a `kauth_filesec` of
+   `KAUTH_FILESEC_NOACL`), so the descriptor design and the never-follow
+   rule hold, and an entry whose ACL denies list or search is cleared
+   without being opened. The owner may always do both, an ACL denying
+   `writesecurity` included. Tests, each built by `sh` under the real turn
+   profile (`workspace.profile` plus `sandbox-exec`) and each failing on
+   the previous code: a `uchg` file; `uchg` on a file and both its
+   directories; `uappnd` directories; a `uchg` link; an ACL `deny delete`
+   on files; `deny list,search,delete_child` on directories; `deny delete`
+   on directories; `deny delete,writesecurity,writeattr` with `uchg` on a
+   file. `rm -rf` fails on each tree first.
+2. `check_services` starts the task's own services again even when the
+   stop or the removal of the check's services raises (a nested
+   `finally`). Test: a `uchg` file in the check's service directory no
+   longer stops its removal, and with the removal made to raise the task's
+   Postgres is up afterwards.
+3. `record_check` takes a kernel docs verdict only as its docstring and
+   `data.md` say: `changes`, head the candidate, on a candidate whose tree
+   holds `.valor` (`workspace.tree_has_valor`, read in the mirror). Any
+   other verdict, `None` included, another head, or a candidate without
+   `.valor` is refused; review still refuses `kernel`. Test: `None`,
+   `updated` and `no_change` refused, `changes` on a plain candidate
+   refused, review's kernel leg refused, no `docs.decided` written.
+4. The base file a dropped case's spans are counted in is read whole:
+   `git.trusted(..., strip=False)` keeps leading blank lines, so the spans
+   count the lines the diff's hunks count. Test: a base file starting
+   with three blank lines whose decorator list loses a case; it fails on
+   the previous code.
+
+Follow-ups, recorded and not code (liveness only, never a false pass;
+`sdlc-state-machine.md` and the `_feeds_parametrize` docstring already
+state the narrower rule): a dropped case fed through an alias decorator
+(`cases = pytest.mark.parametrize(...)`, then `@cases`), a `params=`
+fixture imported into the test module, one on a base class, one from a
+`pytest_plugins` module, and a `CASES` list filled by `.append`. Each
+counts the dropped case as a failure, so the head is red.
+
+Suite on `330a9353f`: 825 passed, 13 skipped (build database, ports 6720
+to 6729). `ruff check` clean; `ruff format --check` flags only
+`docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
