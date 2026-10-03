@@ -517,6 +517,20 @@ The test window, on the build Mac:
 - **The emulator is a local server process**, so a kill of the bridge
   leaves the server holding what it accepted.
 
+## Build record
+
+- **On 2.1's port.** Rebased onto 2.1's e951e3def. Every test runs the
+  bridge over `core/bridge.py`, `core/intake.py` and `core/broker.py`
+  and the test database; the stand-in kernel is gone. Lookup reads the
+  message id recorded before a key's first send, not a date.
+- **Gap fill and D32.** Every id above the stop is checked with
+  `intake.recorded`; the stop is the newest id the chat's last pass saw.
+  A chat with rows but no entry in `telegram-seen.json` stops at
+  `intake.highest`, which uses the high-water mark as a stop, not only as
+  a paging hint: an update dropped below it before the chat's first pass
+  is not taken. It arises only when the file is lost or a live message
+  lands before a chat's first pass.
+
 ## Questions for Tom
 
 None. The one thing that needs Tom is signing the session in, rollout

@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.conftest import TEST_DB
 
 from core import broker, db, tasks
+from tests.conftest import TEST_DB
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
