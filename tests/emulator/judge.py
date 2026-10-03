@@ -48,9 +48,9 @@ from harnesses.claude_code import KEEP_ENV
 from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh, status
 
 JUDGE_MODEL = "claude-sonnet-5-5"
-DIFF_LIMIT = 70_000
-OUTPUT_TAIL = 4_000
-VERIFY_TIMEOUT = 1_800
+DIFF_LIMIT = 70_000  # the baseline's value, kept so results compare with it
+OUTPUT_TAIL = 4_000  # the baseline's value, kept so results compare with it
+VERIFY_TIMEOUT = 1_800  # the baseline's value, kept so results compare with it
 
 SYSTEM = """You are judging one implementation of a software request against what the person \
 who asked actually wanted. You get the request as given, an answer key with the requester's \

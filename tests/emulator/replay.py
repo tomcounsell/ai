@@ -242,8 +242,8 @@ def judged_as(arm: str):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        proc.terminate()
-        proc.wait(timeout=10)
+        proc.kill()
+        proc.wait()
 
 
 def replay(item: dict, arm: str, args) -> dict:

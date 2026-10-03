@@ -139,7 +139,7 @@ class Meter:
             self._await(self.gateway.close())
         finally:
             self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=10)
+            self.thread.join()
             self.loop.close()
 
     def _await(self, coro):
