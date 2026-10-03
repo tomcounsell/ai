@@ -401,7 +401,9 @@ not yet merged).
 - **Assumptions about 3a.** Model id `gpt-6.1-sol`; `openai_prices`
   returns tiers (`tiers.default.base`); `Gateway(openai_upstream=,
   openai_credential=)`; route `<gateway>/t/<token>/openai/v1`. Rebased
-  onto 3a at 2861e2f5b; they held.
+  onto 3a at 2861e2f5b, then again onto 3a's final head b1fbdffcb; they
+  held. `pi.context_window` finds the model through `openai_prices`
+  (exact or dated id), and a test covers a dated id and `-pro`.
 - **Live runs.** One Pi turn on GPT-6.1 (Pi reported $0.0083, the gateway
   charged $0.0093), a critique at `reviewer_openai` on a recorded candidate
   (verdict `revise`, $0.0086), and the two compaction sessions above. Total

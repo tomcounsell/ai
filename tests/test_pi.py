@@ -125,6 +125,12 @@ def test_models_json_points_at_the_gateway_with_the_placeholder_key_and_the_brie
     assert settings_["defaultProvider"] == pi.PROVIDER and settings_["defaultModel"] == "gpt-6.1-sol"
 
 
+def test_context_window_is_found_by_the_price_tables_id_matching():
+    assert pi.context_window("gpt-6.1-sol-2026-01-15") == pi.context_window("gpt-6.1-sol")
+    with pytest.raises(ValueError):
+        pi.context_window("gpt-6.1-sol-pro")
+
+
 def test_max_output_tokens_comes_from_the_harness_settings(tmp_path):
     _task, made = provision(tmp_path)
     harness = {**made.harness, "max_output_tokens": 1234}
