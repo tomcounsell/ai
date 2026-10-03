@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4b-runners
 type: build
-status: critique round 2 of 2 said revise; its findings built in; in build
+status: delivered-not-passed; see m1-4b-records.md, Delivery
 critique_rounds: 2
 review_rounds: 2
 ---

@@ -223,3 +223,40 @@ commits; an identical request already returns the existing effect.
 
 The plan's tests and records moved into m1-4b-tests.md and this file, so
 each doc is under 600 lines.
+
+## Checks, round 2 of 2, at c8a24d4ba
+
+- Docs: updated, 3e1b97989 (the plan split into this file and
+  `m1-4b-tests.md`).
+- Test: gaps. 588 passed, 9 skipped from a clean checkout; ruff clean. No
+  time limit on a run and a stop ends the group; one setup attempt;
+  per-step setup files; a failed blind checkout is cause `kernel`. The
+  one-second wait only samples the footprint, which is recorded and never
+  compared.
+- Review: changes. Governance boolean: no. No invented caps; round 1's
+  findings 0 to 5, 7 and 8 are fixed.
+
+Findings:
+
+1. Review A: a missing parametrized id counts as deleted only when the
+   diff touches that test's `parametrize` decorator lines. Cases kept
+   outside the decorator (a module-level `CASES`, a fixture file, `ids=`
+   computed elsewhere) land in `failures` when removed on purpose, so the
+   head is red and no patch makes it green. Fix: also count names the
+   decorator references, or return to the broader rule and document it.
+   Test C, the same rule's other edge: a line inserted directly under the
+   decorator counts as touching it.
+2. Test A: `workspace.rmtree`'s handler raises `TypeError` (`open()`
+   missing `flags`) on a directory with no read bit (0000, 0300, 0100), so
+   `fresh_dir` crashes. 0500 trees work.
+3. Test B: a JUnit report declaring `utf-16-le` or `utf-16-be` with no BOM
+   makes expat raise `ValueError`, which `_declares` does not catch; the
+   runner dies on output the commit controls.
+4. Test D (low): a `.valor` entry in the tree gives cause `kernel`, so the
+   branch reruns on every wake. Whether an earlier stage refuses such a
+   tree is unconfirmed.
+
+## Delivery: delivered, not passed
+
+Review rounds are spent. Recommendation to Tom: one more patch for the
+four findings. 1.4c part one is built on 3e1b97989 and is checked there.
