@@ -313,6 +313,41 @@ elif act == "dir_symlink":
     v.symlink_to(real.resolve())
 elif act == "big":
     (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
+elif act == "docs":
+    # Docs commits as `docs_commits` says, then the verdict naming the head.
+    def g(*a):
+        return subprocess.run(["git", "-c", "user.name=Valor docs", "-c", "user.email=docs@valor.invalid", *a],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    for c in cfg.get("docs_commits") or []:
+        for path, text in (c.get("files") or {}).items():
+            p = pathlib.Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+            g("add", "-f", path)
+        for path, target in (c.get("links") or {}).items():
+            pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, path)
+            g("add", "-f", path)
+        for path in c.get("gitlinks") or []:
+            g("update-index", "--add", "--cacheinfo", f"160000,{g('rev-parse', 'HEAD')},{path}")
+        for path in c.get("remove") or []:
+            g("rm", "-q", path)
+        g("commit", "-q", "--allow-empty", "-m", c.get("message", "docs"))
+    tree = g("rev-parse", "HEAD^{tree}")
+    if cfg.get("docs_merge"):
+        side = g("commit-tree", tree, "-p", "HEAD", "-m", "side")
+        g("update-ref", "HEAD", g("commit-tree", tree, "-p", "HEAD", "-p", side, "-m", "merge"))
+    if cfg.get("docs_orphan"):
+        g("update-ref", "HEAD", g("commit-tree", tree, "-m", "orphan"))
+    head = g("rev-parse", "HEAD")
+    for k, val in (cfg.get("docs_config") or {}).items():
+        g("config", k, val)
+    out = {"verdict": cfg.get("docs_verdict", "updated"), "findings": cfg.get("docs_findings", [])}
+    if cfg.get("docs_commits") or cfg.get("docs_orphan"):
+        out["head"] = head
+    if "docs_head" in cfg:
+        out["head"] = cfg["docs_head"]
+    (v / "verdict.json").write_text(json.dumps(out))
 print(json.dumps({"result": "ok", "session_id": "fresh-session", "is_error": False}))
 """
 

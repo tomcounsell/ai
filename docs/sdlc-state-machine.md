@@ -87,17 +87,14 @@ constraint generated from `VERDICTS`). A turn's Brief carries the stage
 file for its state from `skills/sdlc/`.
 
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
-`build`, `patch`, and `critique` (a fresh session, `core/fresh.py`, on a
-workspace the kernel provisioned); test, review, and docs are 1.4's. Until
-each exists the router stops there and says so, and a person records the
-verdict with `python -m core verdict TASK STAGE VERDICT` (`leg: manual`,
-with provenance), which refuses a stage that has a runner.
-
-**Before 1.4, a limitation.** With no separate docs checkout, docs commits
-recorded by hand sit in the builder's workspace on top of the candidate
-and ride into the next candidate after a send-back, although they belong
-to theirs (`checks.docs` below). Nothing drops a docs commit outside the
-doc paths at record time; predicate term 4 refuses the merge instead.
+`build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
+workspace the kernel provisioned), and `checks.test` (`core/checks.py`).
+`checks.review` has none, and `checks.docs` has one (`fresh.docs_runner`)
+that is not registered until governance's judgement has a passing
+calibration record. Where a stage has no runner the router stops there and
+says so, and a person records the verdict with `python -m core verdict TASK
+STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
+has a runner.
 
 **Tasks from before the machine.** A `task.started` without `sdlc: 1` is
 legacy and folds read-only by the old kernel's precedence (stopped; a
@@ -361,19 +358,28 @@ then docs, with judgement calls beside whatever holds the slot.
 
 #### `checks.test`: the suite, then breadth
 
-**What runs.** The app's relevant suite in the workspace at the candidate's
-head and at the task's base commit, deterministic. Then one judgement call
-(use shape 8 in [judgement-layer.md](judgement-layer.md)) over the diff and
-the tests it changed: three yes/no questions, one per gap kind (records in
-states other than the obvious one, a member of an enumeration the code
-branches on, existing tests whose bounds encode the old behavior); the
-kernel lists each kind at caution as a behavior and refuses a caller's.
-Both legs failing leaves no verdict; after two such runs it is a behavior.
+**What runs.** First one judgement call (use shape 8 in
+[judgement-layer.md](judgement-layer.md)) over the diff and the tests it
+changed: three yes/no questions, one per gap kind (records in states other
+than the obvious one, a member of an enumeration the code branches on,
+existing tests whose bounds encode the old behavior); the kernel lists each
+kind at caution as a behavior and refuses a caller's. Both legs failing
+leaves no verdict and runs no suite; after two such runs it is a behavior.
+While breadth has no passing calibration record, what it lists is
+information shown in the delivery, never a behavior. Then the project's own
+suite command, deterministic, at the task's base commit and then at the
+candidate's head, each in a blind checkout from the kernel mirror with its
+own copy of the caches and fresh Postgres and Redis on the task's ports
+(`core/checks.py`). A base run whose setup failed is never reused, and a
+failed setup is run once more before the run counts as failed.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
-at head that do not fail at base, the behaviors, the breadth judgement
-(id, actions, model, cost, guard id), and the verdict the kernel computes:
-any failure `red`, else any behavior `gaps`, else `pass`.
+at head that do not fail at base, `deleted_at_head` (tests that passed at
+base and are gone at head), `failing_at_base` (shown, never counted), the
+behaviors, the breadth judgement (id, actions, model, cost, guard id, and
+`information` while uncalibrated), and the verdict the kernel computes: any
+failure `red`, else any behavior `gaps`, else `pass`. Per-test results at
+base and none at head is `red`.
 
 **Why.** Mission item 1 ("testing actual use"). On popoto #633 the clarify
 arm broke a bound in an existing test and was accepted anyway
@@ -420,23 +426,30 @@ A second round has no incident and expires 2026-12-30 unless one occurs.
 
 **Goal.** No doc says something the candidate made untrue.
 
-**What runs.** A fresh session in its own checkout of the candidate. It
-reads the request, the plan, and the diff, and changes only Markdown that
-instructs no turn: never a `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, or
-`AGENTS.override.md`, nor anything under `skills/`, `persona/`, or
-`.claude/`, in any letter case, since this Mac's file system ignores case
-(`machine.is_doc_path`). No plan widens this, so no code rides in an
-unreviewed docs commit. Its commits sit on the candidate and touch no code.
+**What runs.** A fresh session in its own clone of the candidate, cloned
+from the kernel mirror, never the builder's clone. It reads the request,
+the plan, the diff, and after a send-back the previous docs commits as a
+patch, and changes only Markdown that instructs no turn: never a
+`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, or `AGENTS.override.md`, nor
+anything under `skills/`, `persona/`, or `.claude/`, in any letter case,
+since this Mac's file system ignores case (`machine.is_doc_path`). No plan
+widens this, so no code rides in an unreviewed docs commit.
 
-**Exit evidence.** `docs.decided`: the candidate, the head of the docs
-commits on top of it, their paths, and the governance boolean over their
-diff (a doc can add a rule). `updated` or `no_change` passes. `changes`
-means a doc states something the code should still honor and the candidate
-breaks it, or a doc cannot be made true without a code change. The kernel
-checks the commits' paths when the turn ends: a commit outside the doc paths
-is dropped and recorded as a `changes` finding, since code is the builder's
-to change. Docs commits belong to their candidate: after a send-back they
-are not merged; the next docs session starts from them, keeping what holds.
+**Exit evidence.** The session writes a verdict, its findings, and its
+head. The kernel fetches that head from the session's clone into the mirror
+under the check profile and keeps the longest prefix of commits on the
+candidate that touch doc paths alone, with regular file modes (`100644`,
+`100755`, read from `git diff-tree -r`); a merge, a commit off the
+candidate, or a tree holding `.valor` keeps nothing. It records
+`docs.kept`, so a rerun asks only governance again, then judges governance
+over the kept diff (a doc can add a rule) and records `docs.decided`: the
+candidate, the kept head, the dropped commits and their paths, the
+governance answer, and the verdict it computes. `updated` or `no_change`
+passes. `changes` means a doc states something the code should still honor
+and the candidate breaks it, a doc cannot be made true without a code
+change, or the kernel dropped a commit. Docs commits belong to their
+candidate: after a send-back they are not merged, and the next docs session
+reads them as `previous-docs.patch`, keeping what holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 

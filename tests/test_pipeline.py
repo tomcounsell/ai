@@ -735,17 +735,20 @@ def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_pat
     assert critique.returncode == 1 and "critique has a runner" in critique.stderr
     run(scripted.critique(dsn, task))
     run(drive(dsn, task))
-    assert cli("verdict", task, "test", "pass", *who).returncode == 0
+    refused = cli("verdict", task, "test", "pass", *who)
+    assert refused.returncode == 1 and "test has a runner" in refused.stderr
+    run(scripted.check(dsn, task, "test", "pass"))
     out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
     assert out.returncode == 0, out.stderr
     assert cli("verdict", task, "docs", "no_change", *who).returncode == 0
     assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
     run(drive(dsn, task))
-    for stage, verdict in (("test", "pass"), ("review", "pass"), ("docs", "no_change")):
+    run(scripted.check(dsn, task, "test", "pass"))
+    for stage, verdict in (("review", "pass"), ("docs", "no_change")):
         assert cli("verdict", task, stage, verdict, *who).returncode == 0
     f = run(fold(dsn, task))
     assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
-    refused = cli("verdict", task, "test", "pass", *who)
+    refused = cli("verdict", task, "review", "pass", *who)
     assert refused.returncode == 1 and "not checks" in refused.stderr
     assert "build has a runner" in cli("verdict", task, "build", "candidate").stderr
     assert "no manual verdict" in cli("verdict", task, "merge", "released").stderr
@@ -856,7 +859,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
         return st, pushed, await drive(dsn, b.id)
 
     st, pushed, out = run(go())
-    by_hand = cli("verdict", st["task_id"], "test", "pass")
+    by_hand = cli("verdict", st["task_id"], "review", "pass")
     assert by_hand.returncode == 1 and "predates" in by_hand.stderr
     assert st["legacy"] is True and st["state"] == "merge"
     assert pushed.kind == "done" and git(origin, "rev-parse", "valor/old") == head

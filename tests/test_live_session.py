@@ -3,15 +3,18 @@ toy repository the kernel provisions (`start --project`): start; the judge
 says precise (through the local judgement upstream, the way the emulator
 forces an arm); run until Valor asks Tom a question; answer; run through the
 plan, the fresh critique session, and the build until Valor builds a
-candidate and requests a push; the three checks by hand; approve and release
-every held push and the merge; the bare origin gets both; every turn's Brief
-carried the corrections and its stage.
+candidate and requests a push; the test runner over the spec's suite
+(`true`, so the suite was not run); review by hand; the fresh docs session
+through the docs runner; approve and release the push and the merge; the
+bare origin gets both; every turn's Brief carried the corrections and its
+stage.
 
 Every turn runs under the kernel's sandbox profiles, with its own Claude Code
 config directory and the gateway supplying the credential.
 
-Live spend: about $1.00 per run, metered by the gateway: Haiku working
-turns and one Opus critique. Runs only when `VALOR_LIVE=1`.
+Live spend: about $1.50 per run, metered by the gateway: Haiku working
+turns, one Opus critique, and one Opus docs session. Runs only when
+`VALOR_LIVE=1`.
 """
 
 import asyncio
@@ -28,7 +31,7 @@ from tests import judgement_upstream
 from tests.conftest import TEST_DB
 
 pytestmark = [
-    pytest.mark.spend(usd=1.00),
+    pytest.mark.spend(usd=2.00),
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
 ]
 
@@ -92,18 +95,20 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     core("answer", task, "Say exactly: Morning, Tom.")
     # The plan is written, the fresh critique session reads it (sending it
     # back at most as often as the plan's counts allow), and the build runs:
-    # the candidate waits on its checks.
+    # the test runner records its verdict, and the candidate waits on review.
     assert core("run", task).startswith("NO RUNNER")
     state = json.loads(core("status", task))
     candidate = state["candidate"]["sha"]
-    for stage, verdict in (("test", "pass"), ("review", "pass"), ("docs", "no_change")):
-        core("verdict", task, stage, verdict, *who)
+    core("verdict", task, "review", "pass", *who)
+    # The docs runner's fresh session, kept by the kernel, completes the join.
+    core("run", task)
     state = json.loads(core("status", task))
     assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
     # The plan and the build stages may each push their own commits; every
     # push is held for Tom, and the merge is held for Tom.
     pending = {e for e, s in state["effects"].items() if s == "pending"}
     held = [r for r in rows("effect.held") if r["effect_id"] in pending]
+    assert len(held) == len(pending)
     assert [r["action_type"] for r in held].count("merge") == 1
     pushes = [r for r in held if r["action_type"] == "push_branch"]
     assert pushes, "expected at least one push_branch held for Tom"
@@ -122,6 +127,10 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     sh("git", "merge-base", "--is-ancestor", pushed, candidate, cwd=origin)
     assert json.loads(core("status", task))["state"] == "merged"
 
+    tested = rows("test.decided")[0]
+    assert tested["leg"] == "kernel" and tested["command"] == "true" and tested["verdict"] == "pass"
+    documented = rows("docs.decided")[0]
+    assert documented["leg"] == "session" and documented["usd_micros"] > 0
     started = rows("turn.started")
     assert len(started) >= 3
     assert "# Stage: plan" in started[0]["brief"]

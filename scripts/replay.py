@@ -25,8 +25,14 @@ An item is a JSON file:
       "services": ["postgres"],          postgres, redis, or []
       "request": "Tom's request, verbatim",
       "answer_key": "psyoptimal-894.key.md",
-      "verify": ["shell commands the judge runs in the workspace, sandboxed"]
+      "verify": ["shell commands the judge runs in the workspace, sandboxed"],
+      "project": {"kind": "python-uv", "setup": ["uv sync --frozen"],
+                  "suite": "uv run pytest -q --junitxml={junit} tests",
+                  "env": {"UV_PYTHON": "3.12"}}
     }
+
+`project` is optional; without it the suite is `true`, and a delivery says
+the suite was not run.
 
 Relative paths are relative to the item file. Keep items and answer keys
 outside every run directory (for example $VALOR_DEMO/items/): a turn's
@@ -254,6 +260,7 @@ def _replay(item: dict, arm: str, args) -> dict:
             item["services"],
             max_output_tokens=args.max_output_tokens,
             rebuild=args.rebuild,
+            **item.get("project", {}),
         )
         if result is not None and result.get("task_id"):
             ws = replay_workspace.attach(

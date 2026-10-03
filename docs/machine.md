@@ -134,7 +134,10 @@ in the design ([sdlc-state-machine.md](sdlc-state-machine.md)), but on
 the Air each takes the one slot: the review and docs turns are turns, and
 the test branch's suite run is turn-sized work (the 3,000 MB line above).
 So the Air runs them back to back, test, review, then docs, with the same
-verdicts and the same join as running them at once.
+verdicts and the same join as running them at once. A suite run stops the
+task's own Postgres and Redis and starts fresh ones on the same ports for
+itself, so a check adds no service to the memory budget; its copy of the
+package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
 
 The current kernel runs turns one after another within a task and has no
 cross-task scheduler. The replay scripts held a lock-file slot per run; a
