@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4i-idle-turns
 type: bug
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 1
 ---
@@ -91,3 +91,15 @@ default by the lead). 1 for review.
   turn's signal not count and assert that the next turn is told why and
   delivers, instead of asserting the run ended `idle`. The refused mirror
   fetch test removes the planted `alternates` file before the second turn.
+
+## Merged
+
+Merged 2026-10-03 onto valor-cori-rebuild at f3b7c4e1a, after one patch
+round's checks passed (test pass, 514 collected at base and head; review
+pass; docs no_change). Rebased onto ca620a91f; the conflict in
+`docs/architecture.md` took this task's text. The lead's suite on the
+rebased head: 696 passed, 11 skipped, 4 failed under load (one
+`test_fresh` and three `test_workspace` cases); each passed when rerun, so
+none is a regression. Ruff clean. Backed up first with
+`python -m core backup`. No rollout step beyond the merge: the setting is
+gone from code and docs.
