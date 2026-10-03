@@ -31,8 +31,9 @@ file.
 
 ## Port used
 
-The lead's port decisions, items 1 to 36, as 2.1 writes them in
-[m2-1-port.md](m2-1-port.md). What 2.2 uses, by item:
+The lead's port decisions, items 1 to 36 and 34a, as 2.1 writes them in
+[m2-1-port.md](m2-1-port.md) (2.1's commit 4ce1cede3). What 2.2 uses, by
+item:
 
 | Item | What 2.2 does with it |
 |---|---|
@@ -52,7 +53,7 @@ The lead's port decisions, items 1 to 36, as 2.1 writes them in
 | 29 | Connections named `valor-telegram` and `valor-telegram-perform`, by `serve` |
 | 30 | Imports `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, `core.credentials`, nothing else |
 | 31 | `--plist` prints the job for Tom to load |
-| 33, 34 | The lookup scans own messages dated at or after `since` less the clock margin, skipping `intake.claimed` ids |
+| 33, 34, 34a | `lookup(action, key, since)`: `since` is the intent's `at`, which `bridge.serve` passes on a `Release` and on reconcile alike. The scan covers own messages dated at or after `since` less the clock margin, skipping `intake.claimed` ids |
 | 35 | A notice lookup matches the notice's short id in its text |
 | 36 | Flood waits are held in memory for the process |
 
@@ -214,7 +215,8 @@ result is `{"sent": [...]}`, one entry per message, in order.
 effect twice. It is the main mechanism for notices, which the outbox
 yields again until marked sent.
 
-**Lookup** (`lookup(action, key, since)`). Scan the account's own messages
+**Lookup** (`lookup(action, key, since)`, `since` the intent's `at` from
+`bridge.serve`, on a release and on reconcile alike). Scan the account's own messages
 in the target chat, newest first, down to those dated before `since` less
 a clock margin of 60 seconds, for skew between this Mac's clock and
 Telegram's dates. Skip ids in `intake.claimed`. Compare texts after
@@ -440,20 +442,31 @@ The test window, on the build Mac:
    tests/test_live_telegram_window.py`, which kills its own child by pid
    at the pause and checks one message on screen and a reconciled `done`;
    then bootstrap the job again.
-9. Enable the running system: `launchctl enable` for the bridge,
-   watchdog, and update labels, `./scripts/valor-service.sh start`,
-   `worker-enable` then `worker-start`, `email-enable` then
-   `email-start`. `main` does not read the operator group, so it replays
-   none of the window's messages.
-10. RSS after a day connected: `ps -o rss= -p <pid>`, the pid from
+9. `launchctl bootout gui/$(id -u)/com.valor.kernel.telegram`, so the
+   new bridge is live only during the window. Enable the running system:
+   `launchctl enable` for the bridge, watchdog, and update labels,
+   `./scripts/valor-service.sh start`, `worker-enable` then
+   `worker-start`, `email-enable` then `email-start`. `main` does not
+   read the operator group, so it replays none of the window's messages.
+10. RSS after a day connected is a day-long window of its own: steps 4
+    and 6, then after a day `ps -o rss= -p <pid>`, the pid from
     `launchctl print gui/$(id -u)/com.valor.kernel.telegram`, recorded in
-    machine.md. Under question 3's assumed answer the bridge stays
-    connected for the day after step 9; otherwise the day is its own
-    window.
+    machine.md; then step 9.
 11. The results go into this file's Done section and the task's ledger.
 
 ## Decided by default
 
+- **The bridge's session is its own login**, a new authorized device on
+  Valor's account that Tom signs in during the window, not a copy of the
+  running bridge's session: two processes must never share one session.
+- **Valor's API id and hash are used against Telegram's test servers**,
+  with test accounts and no Valor session. The test servers touch no real
+  chat, and the choice is reversible. `keys` copies them from the vault
+  into the key directory, printing no value; the lead session runs the
+  suite outside a turn.
+- **The bridge is live only during test windows**, as valor-rebuild.md
+  says of the new bridges, so the day-long RSS measurement is a window of
+  its own.
 - **Secrets in the kernel key directory**, as machine.md decides for
   kernel-held secrets: the API id, hash, and session. Telegram.md,
   machine.md, and tech-stack.md are made to say so.
@@ -479,20 +492,5 @@ The test window, on the build Mac:
 
 ## Questions for Tom
 
-Credential and intent only. The build proceeds on each assumed answer.
-
-1. **Which session does the bridge use?** Assumed: its own login, a new
-   authorized device on Valor's account, made by Tom in the window with
-   `python -m bridges.telegram login`, not a copy of the running bridge's
-   session, since two processes must never share one session. The login
-   code arrives in Valor's other sessions, `main`'s bridges included.
-2. **May the build use Valor's Telegram API id and hash against Telegram's
-   test servers, with test accounts and no Valor session?** Assumed: yes;
-   `keys` copies them from the vault into the key directory, printing no
-   value, and the lead session runs the suite outside a turn. If not, the
-   `random_id` and error-mapping checks move into Tom's window.
-3. **May the bridge stay connected outside a window, reading only the
-   operator group, for the day-long RSS measurement?** Assumed: yes. It
-   reads no chat the running system owns and sends nothing without a tap,
-   apart from notices to the operator group. If not, the measurement is a
-   day-long window of its own.
+None. The one thing that needs Tom is signing the session in, rollout
+step 5.
