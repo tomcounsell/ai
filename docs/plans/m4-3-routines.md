@@ -301,9 +301,7 @@ JavaScript, no forms. It imports only `core/` read models:
 
 - `tasks.index` (new): every task with its state, spending, attention
   counts, and last row time
-- `tasks.status`
-- `ledger.read`
-- `broker.pending`
+- `tasks.status`, `ledger.read`, `broker.pending`
 - `tasks.attention_log` (new): every task's attention entries in time order
 - `routines.report`
 
@@ -472,7 +470,7 @@ processes):
   the oldest latest row goes first.
 - **Fresh sessions.** A preempted fresh session (critique) is rerun, and
   only that branch.
-- **Report.** The emulator report counts a replay's preempted turns.
+- The emulator report counts a replay's preempted turns.
 
 `tests/test_ui.py` (aiohttp test client):
 
