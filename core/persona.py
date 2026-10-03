@@ -36,7 +36,7 @@ CLOSING = "delivery.md"
 
 
 class PersonaUnreadable(ValueError):
-    """A persona file is missing, or the identity does not match `IDENTITY`."""
+    """A persona file is missing, or the identity lacks a field `IDENTITY` names."""
 
 
 def _text(directory: Path, name: str) -> str:
@@ -55,10 +55,6 @@ def identity(directory: str | Path) -> dict[str, str]:
         raise PersonaUnreadable(f"{path}: {exc.strerror or exc}") from None
     except tomllib.TOMLDecodeError as exc:
         raise PersonaUnreadable(f"{path}: {exc}") from None
-    known = {key for key, _ in IDENTITY}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise PersonaUnreadable(f"{path}: unknown identity key(s) {', '.join(unknown)}")
     missing = [key for key, _ in IDENTITY if not str(data.get(key, "")).strip()]
     if missing:
         raise PersonaUnreadable(f"{path}: missing identity key(s) {', '.join(missing)}")

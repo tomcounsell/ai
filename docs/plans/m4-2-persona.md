@@ -131,9 +131,9 @@ neither, so there the verdict channel and stage file govern.
 4. `delivery.md`, stripped.
 
 Sections are joined by one blank line. The same files give the same
-bytes on every call. A missing file, a missing identity field, or an
-identity key the renderer does not know raises; the error names the
-file and the key.
+bytes on every call. A missing file or a missing identity field
+raises; the error names the file and the key. An identity key the
+renderer does not know is ignored.
 
 `digest(text)` is `ledger.digest` of the rendered text, so the persona
 digest is computed the same way as every other digest in the ledger.
@@ -281,8 +281,8 @@ New in `tests/test_persona.py`, on real Postgres where a turn runs:
 - None of the five files the renderer reads holds the governance
   paragraph (one source); `persona/README.md` is outside the claim and
   keeps its copy.
-- An `identity.toml` with a key the renderer does not know raises,
-  naming the key.
+- An `identity.toml` with a key the renderer does not know renders
+  without error, the same bytes as without the key.
 - The rendered persona carries the ask-before-building habit (its
   example and existing-UI clauses) and the delivery format's
   "not verified" and "reading of the request first" items.
@@ -456,3 +456,8 @@ Live, under `VALOR_LIVE`:
 
 The rendered persona is 10,154 bytes.
 
+Under Tom's rule that a limit or refusal needs a source or a function,
+the raise on an unknown identity key (critique finding 7) is dropped: it
+had neither. Unknown keys are ignored and a test shows an extra key
+renders. The raise on a missing file or a missing identity field stays:
+without them there is no text to render.
