@@ -292,6 +292,15 @@ def test_screens_are_recorded_with_their_digest_and_moved_aside(tmp_path):
     assert signals.collect(tmp_path, "t2").screens == []  # a later turn records none of them
 
 
+def test_a_screen_that_cannot_be_moved_aside_is_refused_and_removed(tmp_path):
+    screens = plant(tmp_path)
+    (screens / "a.png").write_bytes(b"png")
+    (tmp_path / ".valor" / "handled" / "t1" / "screens" / "a.png").mkdir(parents=True)  # blocks the move
+    found = signals.collect(tmp_path, "t1")
+    assert found.screens == [{"name": "a.png", "refused": "could not be moved aside"}]
+    assert not (screens / "a.png").exists()
+
+
 def test_an_absent_or_empty_screens_directory_records_nothing(tmp_path):
     assert signals.collect(tmp_path, "t").screens == []
     plant(tmp_path)
