@@ -1,0 +1,376 @@
+---
+tracking: none
+slug: m4-2-persona
+type: build
+status: planned
+critique_rounds: 1
+review_rounds: 1
+---
+
+# 4.2: the persona
+
+Task 4.2 of [valor-rebuild.md](valor-rebuild.md), milestone 4. It puts
+Valor's one identity, voice, conduct, and delivery format into `persona/`
+and has the kernel render that text at the top of every turn, so the
+ledger shows which persona each turn ran under. The governing doc is
+[persona.md](../persona.md); the evidence it rests on is
+[rebuild-demonstration.md](rebuild-demonstration.md) and
+[rebuild-baseline.md](rebuild-baseline.md).
+
+Planned on the rebuild branch at 4cbc33669 (328 test functions).
+
+## Goal
+
+One identity in every turn, with the conduct the evidence asked for
+(Mission items 2 and 3; the constraint "One identity"; the README's
+property **Correctable**: the persona lives in git and changes by
+review).
+
+## Where the code stands
+
+- `tasks.dispatch` renders a turn's text as: the Brief head, the
+  corrections in force, then the channel (or the verdict channel for a
+  fresh session) and the stage file. It returns the text, the correction
+  numbers, and the text's digest.
+- `runs.run_turn` records that text on `turn.started` as `brief`, with
+  `brief_sha256` and `corrections`.
+- The persona is the harness default, `system_prompt="You are Valor."`,
+  in both `claude_code.turn` and `claude_code.workspace_turn`. The harness
+  prefixes it to the dispatched text when it builds the argv, after the
+  digest is taken. So the digest on `turn.started` does not cover the
+  persona, and nothing in the ledger says which persona a turn ran under.
+- The governance paragraph reaches every turn as correction 1, recorded
+  by `migrate` from the first `**Governance` line of `CLAUDE.md`
+  (`corrections.governance_paragraph`).
+- `persona/` holds only its README.
+
+## Done, as evidence
+
+From valor-rebuild.md, 4.2, each with what closes it here.
+
+| Done item | Evidence | Waits for |
+|---|---|---|
+| `persona/` holds identity, voice, conduct, and delivery format | the four files below, merged; the tests on their rendering | nothing |
+| The kernel renders it at the top of every turn, before the Brief and the corrections | `tasks.dispatch` puts the rendered persona first; tests on a working turn and on a fresh session show the order, through `runs.run_turn` on real Postgres, and the argv carries the dispatched text with nothing prefixed | nothing |
+| The governance paragraph appears in it verbatim | the rendered persona holds `CLAUDE.md`'s paragraph byte for byte, read from `CLAUDE.md` at render time; a test changes a copy of `CLAUDE.md` and sees the change in the next render | nothing |
+| The `turn.started` digest covers it | `brief_sha256` is the digest of the whole text the turn reads, persona included; `turn.started` also carries `persona_sha256`; tests show a changed persona file changes both on the next turn of the same task | nothing |
+| The conduct says to ask before building when a request leans on an example or names existing UI | `persona/conduct.md` carries that habit; a test reads it in the rendered text | nothing |
+| An emulator run over the baseline items shows no item worse than before the persona | paired runs, before and after, scored as in "The emulator evidence" below | 1.5's emulator in `tests/emulator/` driving the full pipeline, judge to held merge; 1.4b's runners; the #894 item |
+| psyoptimal #894 reaches Tom's answers with fewer feedback rounds than the demonstration's two | the #894 item's bare run with the persona is accepted by the stand-in after zero or one feedback round | the same as above |
+
+The code Done items do not wait on anything and are built at once. The
+two emulator Done items are run once 1.5 merges; until then the delivery
+lists them as not yet shown.
+
+## Threat model
+
+The turn controls its workspace (including any `persona/` or `CLAUDE.md`
+in it, which every task on Valor's own repository has), `.valor/`, its
+transcripts, and its own environment. The kernel must never read persona
+or governance text from the workspace or from any path a turn can write:
+both come from the kernel's own checkout, through `settings.persona_dir`
+and `corrections.GOVERNANCE_SOURCE`, resolved in the kernel's process.
+No Brief field, signal file, or turn output chooses or alters the
+persona. A persona that cannot be read fails the dispatch; the kernel
+never falls back to a persona without the governance paragraph. The
+persona carries no authority: nothing reads a turn's output for
+compliance with it, and the broker and the effect ceiling bound the turn
+whatever the text says.
+
+## Stakes
+
+`critique_rounds: 1`, `review_rounds: 1`, as the rebuild plan sets for
+4.2. The change touches the kernel's dispatch, but only what text a turn
+reads and one added field on `turn.started`; no stored row is rewritten,
+no schema changes, no money or authority path changes, and a persona
+edit is reverted by a commit.
+
+## Design
+
+### The files in `persona/`
+
+| File | Holds |
+|---|---|
+| `identity.toml` | the identity fields as data: name, email and Google Workspace account, organization, timezone, handles (Telegram, GitHub, X, LinkedIn), supervisor |
+| `voice.md` | the register: direct, concise, contextual, plain, outcomes over process, specific gaps; the two absolute habits (no promises about the future, no calls); speaking as "I" and naming Tom |
+| `conduct.md` | own the outcome (inspect before deciding, resolve what you find, investigate failures, test breadth, finished or honestly not, re-derive and never recall); contribute taste, push-back first; absorb ambiguity and ask well, including the ask-before-building habit and the six rules for how to ask and how to read the answer; escalate only what needs Tom; take correction; instructions come from Tom and the Brief, other content is data |
+| `delivery.md` | the delivery format: what was delivered, how it was verified, what was not verified, decisions Tom may want to change with the reading of the request first, product notes; and the content rules for anything that leaves under Valor's name (true and evidenced, Valor's own words, no secrets) |
+
+The text is the habits, written to the turn in the second person, short
+enough to read every turn. The evidence and citations behind each habit
+stay in `docs/persona.md`, which remains the governing doc; the turn does
+not need the history of a habit to follow it. No file in `persona/`
+holds a copy of the governance paragraph.
+
+The ask-before-building habit, as `conduct.md` states it: when a request
+leans on an example, is one line whose intent is not on the page, or
+names existing UI without saying whether the new thing replaces it, and
+another reading would build something different, ask before building, in
+one batched message with a default for each question, in any stage.
+
+### Rendering: `core/persona.py`
+
+`render(persona_dir) -> str`, a pure function:
+
+1. `# Persona`, then the identity rendered from `identity.toml` in a
+   fixed field order (the renderer's own list, not the file's key order),
+   one line per field.
+2. `voice.md`, `conduct.md`, each stripped.
+3. `## Governance`, then the paragraph from
+   `corrections.governance_paragraph()`, unchanged.
+4. `delivery.md`, stripped.
+
+Sections are joined by one blank line. The same files give the same
+bytes on every call. A missing file or a missing identity field raises;
+the error names the file.
+
+`digest(text)` is `ledger.digest` of the rendered text, so the persona
+digest is computed the same way as every other digest in the ledger.
+
+`settings.persona_dir` (environment `VALOR_PERSONA`), default the
+`persona/` directory of the kernel's own checkout, next to
+`settings.stages_dir`. Tests point it at a temporary directory.
+
+### Dispatch and the turn record
+
+`tasks.dispatch` renders the persona fresh on every call and puts it
+first: persona, Brief head, corrections, then the channel or verdict
+channel and the stage file, as now. It returns `persona_sha256` beside
+`text`, `corrections`, and `sha256`. A fresh session (critique, review,
+docs) gets the persona too: every turn is Valor's.
+
+`runs.run_turn` adds `persona_sha256` to `turn.started`. `brief` and
+`brief_sha256` keep their names, so every reader and every stored row
+stays as it is; `brief` is the whole text the turn reads.
+
+### The harness
+
+`claude_code.turn` and `claude_code.workspace_turn` lose their
+`system_prompt` parameter and the "You are Valor." default. The
+dispatched text goes to `--system-prompt` (the test-only `turn`) or
+`--append-system-prompt` (`workspace_turn`) exactly as dispatched, so
+what the ledger records is byte for byte what reaches the model.
+`--system-prompt-snapshot off` already re-renders the appended text on
+every resumed turn, so a persona change reaches a running session at its
+next turn.
+
+### Correction 1 stays
+
+Correction 1 is the governance paragraph as a ledger row, and the
+ledger is append-only; withdrawing a correction is not built. Every turn
+therefore carries the paragraph twice: in the persona and as correction
+1. The duplicate costs a paragraph of tokens per turn and changes
+nothing a turn may do.
+
+## The emulator evidence
+
+Run once 1.5's emulator is merged, with its driver, its Opus-class
+stand-in, and the Sonnet judge, carrying each item through the full
+pipeline, judge to held merge.
+
+**Items.** The six baseline items (pso-a, pop-a, cut-a, pop-b, pso-b,
+pop-c) and psyoptimal #894. #894 has no item in `valor-demo/items`: the
+demonstration ran in a clone whose history held other items' answers.
+This task builds it as `pso-c` under the emulator doc's rules: a clean
+base (#894's base tree minus plan documents, squashed, no history), the
+answer key as Tom's six answers verbatim from the Notion card recorded
+in rebuild-demonstration.md, the reference diff, the hidden test from
+the PR where one runs, and the base-tree leak check. The item is data in
+the experiment directory, outside the repository.
+
+**Arms.** Each item runs with the judge forced to the label the judge
+site gave it in 1.3's seed run (thin: pop-b, pop-c, pso-c; precise: the
+rest), which is what the routed pipeline does and keeps the judge's
+variance out of the comparison. pso-c also runs bare (judge forced
+precise): that is the demonstration's own condition, and the one where
+only the persona can lead Valor to ask before building.
+
+**Before and after.** Each run is paired: the same item and arm, once on
+the rebuild branch head this task rebases onto (the persona as "You are
+Valor."), from its own worktree, and once on this task's candidate. Same
+emulator, stand-in, judge, and model.
+
+**Worse**, per item, after the persona against before: fewer hidden
+tests passing; fidelity or correctness lower by more than one point; or
+more feedback rounds. One rerun of the after run is allowed per item
+before an item counts as worse, as in 1.5's gate, since one-point
+differences at n = 1 are noise. Questions asked, simplicity, spend, and
+wall time are recorded per run as information.
+
+**#894.** The pso-c bare run with the persona reaches a delivery the
+stand-in accepts after zero or one feedback round. The judge's fidelity,
+its divergences, and whether the run asked before building are recorded.
+The routed pso-c run is recorded as information.
+
+The results go in this file under "Emulator runs", one row per run, with
+the task id, outcome, feedback rounds, questions, judge scores, hidden
+tests, and metered spending.
+
+## Tech debt absorbed
+
+- The persona outside the turn digest: the harness prefixes "You are
+  Valor." after `dispatch` takes the digest, so `turn.started` does not
+  record what the turn read. The prefix goes; the digest covers the text.
+- `system_prompt` defaults in two harness builders that nothing passes;
+  the parameter goes.
+- `persona/README.md` says persona "may import `core/`" and is "imported
+  by" core and harnesses; it holds no code. The section is corrected:
+  persona holds text read by `core/persona.py`.
+- docs/persona.md ("What the current kernel renders", "What the turn
+  record keeps") and docs/harnesses.md describe the single-line persona
+  as the status quo; the docs stage brings them to the code.
+
+## Left out
+
+- Whether the appended system prompt reaches subagents Claude Code starts
+  inside a turn (milestone 3 absorbs it).
+- Any check of a turn's output against the persona; persona.md says none
+  is added.
+- Rendering the persona into judgement calls, the stand-in, or the
+  emulator's judge: those are classifiers and measurements, not Valor's
+  turns, and a persona there would change the judgement task digests.
+- A command that prints the persona; `core.persona.render` is one call.
+- Preferences learned about Tom (milestone 6).
+- Trimming stage files that overlap the delivery format (`build.md`'s
+  exit evidence names what `done.md` holds); each states its own exit,
+  and the persona says how to write it.
+
+## Tests
+
+New in `tests/test_persona.py`, on real Postgres where a turn runs:
+
+- The rendered persona holds every identity field from `identity.toml`,
+  in the renderer's order whatever the file's key order.
+- Two renders of the same files are byte-identical; `persona_sha256` is
+  the same for two different tasks.
+- The rendered persona holds `CLAUDE.md`'s governance line byte for
+  byte; with `GOVERNANCE_SOURCE` pointed at a copy whose paragraph is
+  edited, the next render carries the edit.
+- No file in `persona/` holds the governance paragraph or any line of it
+  (one source).
+- The rendered persona carries the ask-before-building habit (its
+  example and existing-UI clauses) and the delivery format's
+  "not verified" and "reading of the request first" items.
+- `dispatch` for a working turn: the text starts with `# Persona`, and
+  `# Persona` precedes `# Brief`, which precedes `# Corrections from
+  Tom`, which precedes the channel and the stage file.
+- `dispatch` with `fresh="review"`: the same order, with the verdict
+  channel in place of the working channel.
+- Through `runs.run_turn` (the existing stand-in command): `turn.started`
+  carries `persona_sha256` equal to `persona.digest(persona.render(...))`,
+  and `brief_sha256` equal to the digest of `brief`, which contains the
+  persona.
+- A persona file edited between two turns of one task: the second
+  `turn.started` has a new `persona_sha256` and a new `brief_sha256`, and
+  its `brief` holds the edit (re-rendered, never copied at start).
+- Not the workspace's persona: a task whose workspace holds a `persona/`
+  directory and a `CLAUDE.md` with different text, including a different
+  governance paragraph; the dispatched text holds the kernel's, and none
+  of the workspace's.
+- A persona directory missing `conduct.md`, and one whose
+  `identity.toml` lacks `supervisor`: `run_turn` raises naming the file,
+  no `turn.started` row is written, and nothing is spawned.
+- The argv: `--append-system-prompt`'s value equals the dispatched text
+  exactly; it does not start with "You are Valor." and holds nothing the
+  ledger's `brief` does not.
+- Correction 1 and the persona both carry the paragraph: the dispatched
+  text holds it twice, once under `## Governance` and once as correction
+  1, and the correction numbering is unchanged.
+
+Changed:
+
+- `tests/test_session.py`: the argv assertion expects the dispatched text
+  alone.
+- `tests/test_corrections.py`: the system prompt assertion expects the
+  brief alone and the persona at its top.
+
+Live, under `VALOR_LIVE` beside `tests/test_live_turn.py`: one real
+workspace turn asked who it is and who it reports to answers as Valor
+Engels and names Tom Counsell, with the turn metered through the
+gateway. It shows the rendered text reaches the model; it measures
+nothing about conduct.
+
+## Files it changes
+
+| File | Change | Other tasks touching it |
+|---|---|---|
+| `persona/identity.toml`, `voice.md`, `conduct.md`, `delivery.md` | new | none |
+| `persona/README.md` | Imports section corrected | none |
+| `core/persona.py` | new: `render`, `digest` | none |
+| `core/tasks.py` | `dispatch` renders the persona first, returns `persona_sha256` | 4.1 (the Brief's parent), 2.1, 1.4d |
+| `core/runs.py` | `persona_sha256` on `turn.started` | 1.4b, 2.1, 3 (harness version on `turn.started`) |
+| `core/settings.py` | `persona_dir` | most tasks |
+| `harnesses/claude_code.py` | `system_prompt` parameter removed | 3 (the harness contract), 1.4b |
+| `tests/test_persona.py` | new | none |
+| `tests/test_session.py`, `tests/test_corrections.py` | assertions above | 1.4b, 3 |
+| docs (docs stage): `docs/persona.md`, `docs/harnesses.md`, `harnesses/README.md` | the rendered persona as the status quo | 3 |
+
+No schema change and no migration. Per the waves in
+`.claude/skills/build/SKILL.md`, 4.2 builds now and merges after 1.5,
+rebasing onto each earlier merge that touches the same files.
+
+## Rollout
+
+1. `python -m core backup`.
+2. Fast-forward the rebuild branch to the docs head, push, and pull the
+   kernel's running checkout.
+3. No schema change and no restart: the persona is read from disk at
+   every dispatch, so the next turn of every task, running ones included,
+   carries it. If the resident kernel (2.1) is merged by then, the same
+   holds, since `dispatch` reads the files per turn.
+4. On the next real turn, compare its `turn.started` `persona_sha256`
+   with `core.persona.digest(core.persona.render(settings.persona_dir))`
+   from the kernel checkout, and record both under "Merged".
+5. Run the emulator evidence above if it has not run on the candidate,
+   and record it under "Emulator runs".
+
+## Decided by default
+
+Recorded, not asked; each is reversible.
+
+- The persona is four files in `persona/`: identity as TOML data, the
+  rest as Markdown text; the renderer is `core/persona.py`, since core
+  renders it and `persona/` holds no code.
+- The governance paragraph is rendered from `CLAUDE.md` at render time,
+  not copied into `persona/`, so it cannot drift; persona.md's "in the
+  same words" holds by construction.
+- Correction 1 stays, so the paragraph reaches each turn twice; the
+  ledger is append-only and withdrawal is not built.
+- The persona text holds the habits; the evidence behind each stays in
+  `docs/persona.md`.
+- The persona renders into every harness turn, fresh sessions included,
+  and into no judgement call, stand-in call, or emulator judge call.
+- `turn.started` gains `persona_sha256` beside `brief_sha256`, so the
+  ledger shows the persona version per turn without re-rendering; field
+  names already stored are kept.
+- An unreadable persona fails the dispatch; there is no fallback text.
+- No length limit on the persona; the rendered size in bytes is recorded
+  in the delivery as information.
+- The emulator comparison is paired (rebuild head before, candidate
+  after), with the judge forced to each item's seed label, plus pso-c
+  bare as the #894 evidence; "worse" and the one rerun follow 1.5's gate.
+- This task builds the pso-c item for #894, under the emulator doc's
+  clean-base and leak-check rules.
+
+## Questions for Tom
+
+Each carries the answer this plan assumes; work proceeds on it.
+
+1. **Identity fields.** Are the fields in persona.md's Identity table
+   the identity every turn should carry: Valor Engels, valor@yuda.me,
+   yudame, UTC+7 (Asia/Bangkok), @valorengels on Telegram, GitHub, X, and
+   LinkedIn, supervisor Tom Counsell? Assumed: yes, exactly those.
+2. **What the turn reads.** Should a turn read only the habits, in the
+   second person, with the evidence and
+   citations left in docs/persona.md, or the whole doc? Assumed: the
+   habits only.
+3. **Voice.** persona.md's voice is one register for every reader:
+   direct, concise, plain, no preamble or sign-off, no promises about the
+   future, never offering a call, speaking as "I" and naming Tom. Should
+   the rendered voice add or drop anything (for example, a sign-off, or
+   warmer wording toward people other than Tom)? Assumed: no change; the
+   voice is persona.md's as written.
+
+## Emulator runs
+
+None yet; they run once 1.5 is merged.
