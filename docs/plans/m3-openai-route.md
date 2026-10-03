@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-openai-route
 type: build
-status: built; awaiting review
+status: passed; merge held for Tom's tap
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -447,6 +447,17 @@ merges second rebases onto the first.
 The recordings and the live test together make about a dozen GPT-6.1
 calls of a few hundred tokens each and one web search, well under a
 dollar. The suite's replayed tests spend nothing.
+
+- Checks at `2861e2f5b`: test `pass`; review `changes` (round 2 of 2:
+  OpenAI ids matched by prefix, a stale comment); docs `updated`. Join:
+  patch, the second send-back.
+- Checks at `a62dc423c`: test `pass` (629 passed, 8 skipped); review
+  `pass`, governance no, no invented caps; docs `updated` at `d446c2d74`.
+  Join: merge, held for Tom's tap.
+- Follow-ups, none blocking: `_usd` in `core/__main__.py` formats spend as
+  a float, so a worst case past float range makes `status` raise; format
+  it in integers. An Anthropic call cut after it searched is charged no
+  search fee, and `docs/architecture.md` does not say so.
 
 ## Rollout
 
