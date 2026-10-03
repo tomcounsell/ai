@@ -161,8 +161,8 @@ it.
    - `plan.md`: the stakes header `critique_inputs` writes, then the plan
      file's bytes from `git show <f.plan["commit"]>:<path>` in the mirror;
    - `diff.patch` (base to candidate, from the mirror);
-   - `verify.json` (the `verify.ran` fields and `reviewer_setup_exit`, no
-     free text);
+   - `verify.json` (the `verify.ran` fields and `reviewer_setup_exit`: ids,
+     counts, codes, and lint locations; no message or output tail);
    - `governance.json`: each kernel instance (id, path, start and end
      line, the hunk's added lines, granted or not), the abstentions, and
      the unjudged hunks;
@@ -344,8 +344,10 @@ Unit and router tests run with `VALOR_TEST_DB` and the scripted session.
 - The reviewer's checkout holds no builder `.valor/`, and its profile
   refuses reading the builder clone's `.valor/done.md`, the builder's
   `TMPDIR`, `~/.claude`, and the test branch's check directory.
-- `verify.json` carries no free text: a failure message the candidate's
-  test prints, and a ruff message, do not appear in it.
+- `verify.json` carries no message or output tail: a failure message the
+  candidate's test prints, and a ruff message, do not appear in it. The
+  lint paths in it are the candidate's own, so they are the one
+  candidate-chosen string in the file.
 - The lint record: a spec with no `lint` gives `lint: null`; ruff concise
   output gives path, line, and rule; a lint of another kind gives the
   exit code only.
@@ -433,8 +435,9 @@ Reversible calls made by the build session, not questions for Tom.
 3. **The reviewer's `changes` outranks `governance_refused`.** Tom's tap
    is not spent on code about to change; the merge stays blocked until
    every instance is granted.
-4. **`verify.json` carries no free text.** Failure and lint messages are
-   candidate-controlled and could carry narration aimed at the reviewer;
+4. **`verify.json` carries no message or output tail.** Failure and lint
+   messages are candidate-controlled and could carry narration aimed at
+   the reviewer; lint paths stay, since a location needs one;
    the reviewer's checkout is set up, so it can rerun any test to read
    one.
 5. **The reviewer gets fresh services and a set-up checkout.**
