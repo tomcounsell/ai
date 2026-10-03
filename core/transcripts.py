@@ -35,6 +35,7 @@ import contextlib
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -209,12 +210,41 @@ async def _store(conn, turn_id: str, name: str, fd: int, prev: dict[str, Any] | 
     }
 
 
+async def _opened(read, t: Transcript):
+    """`read(t)` in a worker thread that owns the descriptors it opens: it
+    hands them to the caller only while the caller still awaits, and
+    closes them in its own `finally` otherwise. A caller cancelled after
+    the hand-over closes them itself."""
+    gate = threading.Lock()
+    state: dict[str, Any] = {"cancelled": False, "files": []}
+
+    def run():
+        files, skipped = read(t)
+        handed = False
+        try:
+            with gate:
+                if not state["cancelled"]:
+                    state["files"], handed = files, True
+        finally:
+            if not handed:
+                _close(files)
+        return files, skipped
+
+    try:
+        return await asyncio.to_thread(run)
+    except BaseException:
+        with gate:
+            state["cancelled"] = True
+            _close(state["files"])
+        raise
+
+
 async def copy(conn, task_id: str, turn_id: str, t: Transcript, *, read=collect) -> dict[str, Any]:
     """Copy the turn's files into the store. Returns what `turn.ended`
     gains: `transcript`, or `no_transcript` with the reason."""
     opened: list[tuple[str, int]] = []
     try:
-        opened, skipped = await asyncio.to_thread(read, t)
+        opened, skipped = await _opened(read, t)
         last = await _last_copies(conn, task_id)
         records = []
         async with conn.transaction():

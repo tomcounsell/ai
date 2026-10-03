@@ -186,6 +186,47 @@ def test_a_failing_insert_stores_nothing_and_still_ends_the_turn(dsn, tmp_path):
             os.fstat(fd)
 
 
+def open_fds() -> set[int]:
+    return {int(n) for n in os.listdir("/dev/fd")}
+
+
+def test_a_copy_cancelled_while_its_thread_reads_leaves_no_descriptor_open(dsn, tmp_path, monkeypatch):
+    lay = Layout(tmp_path)
+    lay.session.write_bytes(b'{"a":1}\n')
+    lay.agent("one").write_bytes(b'{"b":2}\n')
+    task = run(new_task(dsn))
+    reading, cancelled, closed = threading.Event(), threading.Event(), threading.Event()
+    real_close = transcripts._close
+
+    def close(files):
+        real_close(files)
+        if files:
+            closed.set()
+
+    def read(t):  # opens the files, then is still reading when the copy is cancelled
+        files = transcripts.collect(t)
+        reading.set()
+        cancelled.wait(10)
+        return files
+
+    monkeypatch.setattr(transcripts, "_close", close)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            before = open_fds()
+            copying = asyncio.create_task(transcripts.copy(conn, task, ledger.new_id(), lay.t, read=read))
+            await asyncio.to_thread(reading.wait, 10)
+            copying.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await copying
+            cancelled.set()
+            await asyncio.to_thread(closed.wait, 10)
+            return before, open_fds()
+
+    before, after = run(go())
+    assert reading.is_set() and closed.is_set() and after <= before
+
+
 def test_a_sparse_file_is_skipped_without_reading_its_holes(dsn, tmp_path):
     lay = Layout(tmp_path)
     lay.session.write_bytes(b"ok\n")

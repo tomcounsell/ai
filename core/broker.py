@@ -30,15 +30,17 @@ intent.
 Performing follows intent, then outcome: the intent row commits before the
 performer runs, so a kill between the two leaves a findable dangling intent,
 never a silent effect. The performing process holds a session lock on the
-effect from before its intent to its outcome; `reconcile` settles an intent
-whose lock is free (its process died) by asking the target through the
-performer's `lookup`, and the router does so for a task's merge.
+effect from before its intent to its outcome, and its lock file
+(`core.performing`), which its worker thread and every git it runs hold
+too; `reconcile` settles an intent once both are free (its process died
+and its git exited) by asking the target through the performer's
+`lookup`, and the router does so for a task's merge.
 
 Performers are the task's own: the composition root builds a `Performers`
 from the task's Brief and passes it to every call here, so one task's
 performer never acts for another. Every performer method is a coroutine;
-one that runs git runs it in a worker thread, so the event loop the
-gateway's streams run on never waits on a push.
+one that runs git runs it in a worker thread (`performing.in_thread`),
+so the event loop the gateway's streams run on never waits on a push.
 """
 
 from contextlib import asynccontextmanager
@@ -47,8 +49,7 @@ from typing import Any, Protocol
 
 import psycopg
 
-from core import git, ledger, machine, tasks
-from core.settings import settings
+from core import git, ledger, machine, performing, tasks
 from core.tasks import EFFECT_RANK
 
 
@@ -158,13 +159,16 @@ def _governance(f: machine.Fold, action: Action) -> tuple[bool, list[machine.Ins
 @asynccontextmanager
 async def _performing(conn, effect_id: str):
     """A session lock on one effect, held from before its intent until its
-    outcome is written. A process that dies mid-perform loses its session,
-    and the lock with it, which is how `reconcile` knows no one is still
-    performing a dangling intent."""
+    outcome is written, and the effect's lock file (`core.performing`),
+    which the performer's worker thread and every git it runs hold too. A
+    process that dies mid-perform loses its session, and its descriptors
+    with it; git still running keeps the file locked. Both free is how
+    `reconcile` knows no one is still performing a dangling intent."""
     key = f"effect:{effect_id}"
     await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
     try:
-        yield
+        with performing.performing(effect_id):
+            yield
     finally:
         await _unlock(conn, key)
 
@@ -275,21 +279,20 @@ async def held_task(conn, effect_id: str) -> str:
         return intended["task_id"]
 
 
-async def reconcile(
-    conn, performers: Performers, effect_id: str, settle_after_s: float | None = None
-) -> Outcome | None:
+async def reconcile(conn, performers: Performers, effect_id: str) -> Outcome | None:
     """Settle an effect whose intent has no outcome because the process
     performing it died: rebuild the action from the intent row (or, for an
     intent written without it, the effect's `effect.held` row) and ask the
     target through the performer's `lookup`.
-    Present: `done`. Absent: `failed`, but only once the intent is older
-    than `settle_after_s` (default `settings.reconcile_after_s`, twice the
-    hard limit on any git call, a push included), because a performer whose database connection
-    dropped frees its lock while its push may still be running; before
-    that, nothing. Unknown (the target did not answer): nothing; the effect
-    stays in flight. Also nothing while a live process holds the effect
-    (`_performing`), when there is nothing to settle, or when no performer
-    for it is offered. Returns the outcome written, if any."""
+    Asked only once no process holds the effect: not its session lock,
+    and not its lock file (`core.performing.settled`), which the
+    performer's worker thread and every git it started hold until they
+    exit, so a perform whose database connection dropped, or whose kernel
+    died while its push ran, is read only after the push was reaped.
+    Present: `done`. Absent: `failed`. Unknown (the target did not answer):
+    nothing; the effect stays in flight. Also nothing when there is
+    nothing to settle, or when no performer for it is offered. Returns the
+    outcome written, if any."""
     key = f"effect:{effect_id}"
     got = await (
         await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
@@ -312,24 +315,13 @@ async def reconcile(
             ).fetchall()
         }
         performer = performers.get(described["action_type"])
-        if kinds != {"effect.intent"} or performer is None:
+        if kinds != {"effect.intent"} or performer is None or not performing.settled(effect_id):
             return None
         action = Action(described["action_type"], described["target"], described["payload"])
         try:
             found = await performer.lookup(action, described["idempotency_key"])
         except Exception:  # noqa: BLE001  unknown: conclude nothing
             return None
-        if not found:
-            limit = settle_after_s if settle_after_s is not None else settings.reconcile_after_s
-            age = await (
-                await conn.execute(
-                    "SELECT extract(epoch FROM clock_timestamp() - at) FROM events "
-                    "WHERE type = 'effect.intent' AND payload->>'effect_id' = %s",
-                    (effect_id,),
-                )
-            ).fetchone()
-            if age is None or float(age[0]) < limit:
-                return None
         kind = "done" if found else "failed"
         async with conn.transaction():
             await ledger.append(

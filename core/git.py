@@ -22,7 +22,10 @@ name drivers; a driver's program comes from config. So every call:
 - runs git in its own process group, killed whole when the call outlives
   its time: the smaller of `git_timeout_s` and what is left of the
   `deadline` the caller set (a performer sets one for its whole perform,
-  so a push and the calls around it share one limit);
+  so a push and the calls around it share one limit), and, inside a
+  perform, holding the effect's lock (`core.performing`), which every
+  process git starts inherits, so `broker.reconcile` waits until the last
+  of them has exited;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
@@ -50,7 +53,8 @@ Reading config (`git config --list`) runs nothing: it only reads files. A
 workspace whose config the kernel refuses gets no candidate, no instance,
 no git facts, and no push until the turn removes the key.
 
-Imports the standard library and `core.settings`.
+Imports the standard library, `core.binaries`, `core.performing`, and
+`core.settings`.
 """
 
 import contextlib
@@ -65,7 +69,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from core import binaries
+from core import binaries, performing
 from core.settings import settings
 
 # The PATH every kernel git call runs with: system directories only, none a
@@ -170,7 +174,9 @@ def _git(
     """The trusted git (`settings.git_bin`, checked each call), never
     whichever `git` comes first on a PATH, in its own process group, killed
     whole when it outlives its limit (the smaller of `git_timeout_s` and
-    what is left of the caller's `deadline`)."""
+    what is left of the caller's `deadline`). Inside a perform, git gets
+    the effect's lock descriptor (`core.performing`), which every process
+    it starts inherits."""
     git_bin = binary()
     limit = settings.git_timeout_s
     ends = _DEADLINE.get()
@@ -178,6 +184,7 @@ def _git(
         limit = min(limit, ends - time.monotonic())
         if limit <= 0:
             raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
+    held = performing.held()
     proc = subprocess.Popen(
         [git_bin, "-C", str(workspace), *PINNED, *args],
         stdout=subprocess.PIPE,
@@ -185,6 +192,7 @@ def _git(
         text=text,
         env={**env(), **(extra_env or {})},
         start_new_session=True,
+        pass_fds=() if held is None else (held,),
     )
     try:
         stdout, stderr = proc.communicate(timeout=limit)

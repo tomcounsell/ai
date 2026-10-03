@@ -246,18 +246,17 @@ its question or delivery commit together. Connections are autocommit
 An effect's `effect.intent` row commits before its performer runs, and its
 `effect.outcome` row after. A kill between the two leaves an intent with no
 outcome. The process performing an effect holds a session advisory lock on
-it from before the intent to the outcome, so the lock is free only when
-that process died. `broker.reconcile`
+it from before the intent to the outcome, and a `flock` on the effect's
+lock file (`core/performing.py`, in the kernel key directory), which its
+worker thread and every git that thread runs hold too, so both are free
+only when that process died and every git it started has exited.
+`broker.reconcile`
 then rebuilds the action from the intent row (from the effect's
 `effect.held` row for an older intent that lacks it; with neither it
 concludes nothing) and asks the target through the performer's `lookup`, which answers
 present (the target branch holds the commit, at its tip or below it),
-absent, or unknown (the target did not answer). Present is written `done`.
-Absent is written `failed` only once the intent is older than
-`reconcile_after_s` (at least twice `git_timeout_s`, the one deadline on a
-perform's git calls; settings refuse less), since a
-performer whose database connection dropped frees the lock while its push
-may still run. Unknown writes nothing, and the effect stays in flight. Either outcome is marked `reconciled`. The router does this for a
+absent, or unknown (the target did not answer). Present is written `done`,
+absent `failed`. Unknown writes nothing, and the effect stays in flight. Either outcome is marked `reconciled`. The router does this for a
 task's merge on its next run; other dangling intents stay listed by
 `tasks.audit` (`docs/architecture.md`, the broker).
 

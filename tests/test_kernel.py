@@ -296,7 +296,7 @@ def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_a
             rows = await ledger.read(conn, task)
             (intent,) = [r["payload"] for r in rows if r["type"] == "effect.intent"]
             settled = await broker.reconcile(
-                conn, broker.Performers(WorkspaceWrite(tmp_path)), intent["effect_id"], settle_after_s=0
+                conn, broker.Performers(WorkspaceWrite(tmp_path)), intent["effect_id"]
             )
             return rows, intent, settled, await broker.held_task(conn, intent["effect_id"]), task
 
@@ -327,9 +327,9 @@ def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one
                     "effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": None,
                 })  # fmt: skip
             return (
-                await broker.reconcile(conn, perf, held, settle_after_s=0),
-                await broker.reconcile(conn, perf, bare, settle_after_s=0),
-                await broker.reconcile(conn, perf, ledger.new_id(), settle_after_s=0),
+                await broker.reconcile(conn, perf, held),
+                await broker.reconcile(conn, perf, bare),
+                await broker.reconcile(conn, perf, ledger.new_id()),
             )
 
     from_held, without, unknown = run(go())

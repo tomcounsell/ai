@@ -126,10 +126,10 @@ What the kernel must never do:
   header writer call it with `loopback=False`, so only `https` is ever
   granted or written. Tests write grant rows directly and pass
   `loopback=True` to the writer to reach `http://127.0.0.1:<port>/...`.
-- **Crash leftovers.** Before writing its own file, the writer removes
-  `github-push-*.gitconfig` files older than twice `git_timeout_s`; every
-  kernel git call is killed at `git_timeout_s`, so none belongs to a live
-  call.
+- **Crash leftovers.** The file is named `github-push-<pid>-<random>.gitconfig`
+  by the PID of the process writing it. Before writing its own file, the
+  writer removes every such file whose process no longer exists, and any
+  not named by a PID; a live writer removes its own when its call ends.
 - **`git.py`**: `push`, `remote_head`, `remote_sha`, and `holds` take
   `credential: Path | None`; with it, `GIT_CONFIG_GLOBAL` is that file
   instead of `/dev/null`. `hostile` already refuses `http.`, `credential`,
@@ -220,7 +220,7 @@ What the kernel must never do:
   the request's and the release's transaction under the task lock.
 - **Signatures**: `broker.request(conn, performers, task_id, action)`,
   `broker.release(conn, performers, effect_id)`,
-  `broker.reconcile(conn, performers, effect_id, settle_after_s=None)`,
+  `broker.reconcile(conn, performers, effect_id)`,
   `runs.run_turn(..., offered=())` handing it to `tasks.dispatch(...,
   offered=())`. `PERFORMERS`, `register`, and module-level `offered` are
   deleted.
@@ -234,15 +234,22 @@ What the kernel must never do:
   it to `session` (turn effect requests), `verdicts.ensure_merge`, and
   `broker.reconcile`, and session and fresh pass `performers.offered()` to
   `run_turn`.
-- **`tools/push_branch.py`**: `perform` and `lookup` run in
-  `asyncio.to_thread`, setting `git.deadline` inside the thread function
-  (a contextvar; `to_thread` copies the context). `Merge` writes and
+- **`tools/push_branch.py`**: `perform` runs in `performing.in_thread`
+  and `lookup` in `asyncio.to_thread`, setting `git.deadline` inside the
+  thread function (a contextvar; `to_thread` copies the context). `Merge` writes and
   removes the config file around each git call, all inside the thread.
 - **Cancellation.** `to_thread` cannot stop a running thread. A cancelled
   release leaves the push running to its git deadline, the config file in
-  place until git exits, and an intent with no outcome; the effect lock
-  frees, and `reconcile` settles it (it waits `reconcile_after_s`, twice
-  the git deadline, before it concludes `failed`).
+  place until git exits, and an intent with no outcome. The effect's
+  session lock frees, but its lock file (`core/performing.py`,
+  `<effect_id>.lock` in the kernel key directory) stays held: the release
+  holds it from before the intent, `performing.in_thread` hands the
+  worker thread a duplicate taken while the release still holds it, and
+  every git the thread runs inherits it, so the `flock` stands until the
+  last of them exits, a dead kernel's orphaned git included. `reconcile`
+  reads the remote (`lookup`, `ls-remote` with the same pinned credential
+  config) only once that lock is free, and then concludes `done` or
+  `failed` at once; no age is read.
 - **The intent carries the action.** `broker._intent` writes
   `{effect_id, idempotency_key, approval_id, action_type, target,
   payload, payload_sha256, effect_class}`, so `reconcile` rebuilds what to
@@ -371,8 +378,9 @@ contain the token, its base64 form, or the file's contents, and the probe
 cannot open the file or `github-keys`; afterwards no config file remains,
 and the token, its base64 form, and its SHA-256 appear in no `events`
 payload, no `documents` body (each `transcript` document's base64 decoded
-before searching), and no captured log or exception; a leftover older than
-twice `git_timeout_s` is removed and a younger one kept; `github-key`
+before searching), and no captured log or exception; a leftover whose
+writer's PID names no process is removed, and one whose writer lives is
+kept; `github-key`
 prints `written`, `kept`, then `missing`, never the value.
 
 **Merge targets**: `start --project` with an ungranted pair refuses,
@@ -546,3 +554,31 @@ Every finding built in:
    the outline's transcript text matches; the live test resumes once;
    names are paths under `projects/<dir>`; the `project_name` side effect
    named; the `--workspace` perform-time read runs without the credential.
+
+## Patch round 1
+
+From the review:
+
+1. **Credential refusal** is matched on git's own phrases ("The requested
+   URL returned error: 401" or "...: 403", failed authentication), never a
+   bare status code, which a SHA can hold.
+2. **`merge-target remove`** requires `--by`.
+3. **Chunk encoding** (base64 and the JSON dump) runs in the worker thread.
+
+From the test check and the lead:
+
+4. **A cancelled transcript copy leaks nothing.** The thread function that
+   opens the files owns them: it hands them over only while the copy still
+   awaits, and closes them in its own `finally` otherwise; a copy cancelled
+   after the hand-over closes them itself. Test: cancel mid-read, no
+   descriptor stays open.
+5. **Facts, not ages.** `git_timeout_s` (120 s) and both factors of two
+   came from proposed patch 2 of 1.2 (`be1388e3e`), accepted under the
+   delegated decision of 2026-10-02 (`f9e629363`); the 120 and the two
+   cite no protocol fact or document, and 1.4d's header sweep copied the
+   two. Reconcile now reads the remote only once the effect's lock file is
+   free (the push process reaped), and settles at once; `reconcile_after_s`
+   and its settings check are gone. The header sweep removes a file whose
+   writer's PID (in the name) names no process. `git_timeout_s` itself is
+   kept as it is, unsourced, for the lead.
+

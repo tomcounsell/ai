@@ -25,14 +25,16 @@ remote's `HEAD` names, read just before the push. A task with a kernel
 mirror pushes from the mirror with the GitHub credential, a per-call config
 file (`core.credentials.header_file`); no other push carries it.
 
-Every method is a coroutine; git runs in a worker thread
-(`asyncio.to_thread`), with the perform's deadline set inside it.
+Every method is a coroutine; git runs in a worker thread, with the
+perform's deadline set inside it. A perform's thread holds the effect's
+lock file and hands it to every git it runs (`core.performing.in_thread`),
+so `broker.reconcile` reads the remote only after the push was reaped.
 """
 
 import asyncio
 from pathlib import Path
 
-from core import broker, credentials, git, targets
+from core import broker, credentials, git, performing, targets
 from core.settings import settings
 
 
@@ -70,7 +72,7 @@ class PushBranch:
         return self.url or git.push_url(self.workspace), action.target
 
     async def perform(self, action, key: str) -> dict:
-        return await asyncio.to_thread(self._bounded, self._perform, action)
+        return await performing.in_thread(self._bounded, self._perform, action)
 
     async def lookup(self, action, key: str) -> dict | None:
         """Present (the remote branch holds the commit, at its tip or below
@@ -81,8 +83,7 @@ class PushBranch:
     @staticmethod
     def _bounded(fn, action):
         """One deadline, `git_timeout_s`, for every git call of the perform
-        (or lookup), so `reconcile_after_s` (at least twice it) bounds it.
-        Set inside the worker thread."""
+        (or lookup), set inside the worker thread."""
         with git.deadline(settings.git_timeout_s):
             return fn(action)
 

@@ -26,13 +26,10 @@ import os
 import secrets
 import shutil
 import stat
-import time
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
-
-from core.settings import settings
 
 MARK_BEGIN = (
     "# valor-kernel: every role needs a password on the kernel databases (python -m core secure-login)"
@@ -259,9 +256,9 @@ def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
     token as `http.<url>.extraHeader`, with `http.followRedirects=false` so
     git never carries the header to a redirect's target; yields its path and
     removes it on exit. Refuses a URL `targets.url_ok` refuses, so nothing
-    the URL holds can add a line. Leftovers a crashed call left, older than
-    twice `git_timeout_s`, are removed first: every kernel git call is
-    killed by then, so none belongs to a live call."""
+    the URL holds can add a line. The file is named by the PID of the
+    process writing it; leftovers whose process no longer exists are
+    removed first (`sweep_headers`)."""
     from core import targets
 
     if not targets.url_ok(url, loopback=loopback):
@@ -270,7 +267,7 @@ def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
     directory = Path(keyfile).parent
     sweep_headers(directory)
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    path = directory / f"{HEADER_PREFIX}{secrets.token_hex(16)}{HEADER_SUFFIX}"
+    path = directory / f"{HEADER_PREFIX}{os.getpid()}-{secrets.token_hex(16)}{HEADER_SUFFIX}"
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
@@ -283,22 +280,33 @@ def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
             path.unlink()
 
 
-def sweep_headers(directory: str | Path, older_than_s: float | None = None) -> list[str]:
-    """Remove header files older than twice `git_timeout_s`; returns the
-    names removed."""
-    limit = 2 * settings.git_timeout_s if older_than_s is None else older_than_s
-    now = time.time()
+def sweep_headers(directory: str | Path) -> list[str]:
+    """Remove header files whose writing process (the PID in the name) no
+    longer exists, and any not named by a PID; returns the names removed.
+    A live writer removes its own file when its call ends."""
     removed = []
     for entry in os.scandir(directory):
-        if not (entry.name.startswith(HEADER_PREFIX) and entry.name.endswith(HEADER_SUFFIX)):
+        name = entry.name
+        if not (name.startswith(HEADER_PREFIX) and name.endswith(HEADER_SUFFIX)):
             continue
-        try:
-            if now - entry.stat(follow_symlinks=False).st_mtime > limit:
-                os.unlink(entry.path)
-                removed.append(entry.name)
-        except FileNotFoundError:
+        pid = name[len(HEADER_PREFIX) : -len(HEADER_SUFFIX)].split("-", 1)[0]
+        if pid.isdigit() and _alive(int(pid)):
             continue
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(entry.path)
+            removed.append(name)
     return removed
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this PID exists (signal 0 sends nothing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def copy_keys(vault_env: str | Path, keyfile: str | Path, names: list[str]) -> dict[str, str]:

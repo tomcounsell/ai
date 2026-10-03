@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, credentials, db, git, ledger, targets, tasks
+from core import broker, credentials, db, git, ledger, performing, targets, tasks
 from core import workspace as kws
 from core.settings import settings
 from tests import scripted
@@ -357,19 +357,22 @@ def test_the_token_is_in_no_process_no_row_and_no_file_a_turn_can_open(
     assert not any(f in t for t in texts for f in forms(token))
 
 
-def test_leftover_header_files_older_than_twice_the_git_timeout_are_removed(tmp_path, keyfile):
-    old = keyfile.parent / "github-push-old.gitconfig"
-    young = keyfile.parent / "github-push-young.gitconfig"
-    for p in (old, young):
+def test_leftover_header_files_whose_writer_is_gone_are_removed(tmp_path, keyfile):
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()  # reaped: its PID names no process
+    gone = keyfile.parent / f"github-push-{dead.pid}-aa.gitconfig"
+    live = keyfile.parent / f"github-push-{os.getppid()}-bb.gitconfig"
+    unnamed = keyfile.parent / "github-push-old.gitconfig"
+    for p in (gone, live, unnamed):
         p.write_text("x")
-    stale = time.time() - 2 * settings.git_timeout_s - 5
-    os.utime(old, (stale, stale))
     with credentials.header_file(keyfile, "https://github.com/tomcounsell/ai.git") as path:
         assert path.exists() and oct(path.stat().st_mode & 0o777) == "0o600"
+        assert path.name.startswith(f"github-push-{os.getpid()}-")
         assert path.read_text().startswith(
             '[http]\n\tfollowRedirects = false\n[http "https://github.com/tomcounsell/ai.git"]\n\textraHeader = '
         )
-    assert not old.exists() and young.exists() and not path.exists()
+        assert credentials.sweep_headers(keyfile.parent) == []  # its own writer is alive
+    assert not gone.exists() and not unnamed.exists() and live.exists() and not path.exists()
 
 
 def test_the_header_writer_refuses_a_url_it_would_not_write(tmp_path, keyfile):
@@ -470,7 +473,10 @@ def test_the_deadline_applies_inside_the_worker_thread(tmp_path, keyfile, token,
     assert elapsed < 10 and leftovers(keyfile) == []
 
 
-def test_a_release_cancelled_mid_push_is_settled_by_reconcile(dsn, tmp_path):
+def test_a_release_cancelled_mid_push_is_settled_only_after_git_is_reaped(dsn, tmp_path):
+    """The release's coroutine, and with it its database session and its
+    own hold on the effect's lock file, is gone while git still pushes:
+    reconcile concludes nothing until git exits, then reads the remote."""
     with Server(tmp_path / "remote") as server:
         ws, _origin = scripted.workspace(tmp_path)
         bare = server.bare("ws.git")
@@ -499,18 +505,20 @@ def test_a_release_cancelled_mid_push_is_settled_by_reconcile(dsn, tmp_path):
             releasing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await releasing
-            server.release.set()
-            for _ in range(200):
-                found = await asyncio.to_thread(subprocess.run, ["git", "-C", str(bare), "rev-parse", "-q", "--verify",
-                                                "valor/x"], capture_output=True, check=False)  # fmt: skip
-                if found.returncode == 0:
-                    break
-                await asyncio.sleep(0.05)
             async with await db.connect(dsn) as conn:
-                settled = await broker.reconcile(conn, perf, held.effect_id, settle_after_s=0)
-                return settled, await ledger.read(conn, task)
+                early = await broker.reconcile(conn, perf, held.effect_id)
+            still_held = not performing.settled(held.effect_id)
+            server.release.set()
+            async with await db.connect(dsn) as conn:
+                for _ in range(200):  # until git exits
+                    settled = await broker.reconcile(conn, perf, held.effect_id)
+                    if settled is not None:
+                        break
+                    await asyncio.sleep(0.05)
+                return early, still_held, settled, await ledger.read(conn, task)
 
-        settled, written = run(go())
+        early, still_held, settled, written = run(go())
+    assert early is None and still_held
     assert settled is not None and settled.kind == "done"
     assert [r["type"] for r in written].count("effect.intent") == 1
     (outcome,) = [r["payload"] for r in written if r["type"] == "effect.outcome"]

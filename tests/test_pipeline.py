@@ -19,7 +19,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, db, guards, ledger, machine, router, session, tasks, verdicts
+from core import broker, db, guards, ledger, machine, performing, router, session, tasks, verdicts
 from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -1458,7 +1458,7 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
         origin.rename(tmp_path / "away.git")
         out = await drive(dsn, task)
         async with await db.connect(dsn) as conn:
-            assert await scripted.reconcile(conn, effect, settle_after_s=0) is None
+            assert await scripted.reconcile(conn, effect) is None
         return effect, out, await rows(dsn, task)
 
     effect, out, written = run(go())
@@ -1466,27 +1466,33 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
     assert out["status"] == "delivered" and out["state"]["merge_effect"]["state"] == "in_flight"
 
 
-def test_a_missing_merge_is_failed_only_after_no_performer_could_still_be_pushing(dsn, tmp_path, monkeypatch):
-    """A performer whose database connection dropped frees its lock while its
-    push may still run, bounded by the git time limit; until the intent is
-    older than that, an absent effect concludes nothing."""
+def test_a_missing_merge_is_failed_only_once_no_process_holds_it(dsn, tmp_path):
+    """A performer whose database connection dropped frees its session
+    lock while its thread and its git may still run; they hold the
+    effect's lock file, and until it is free an absent effect concludes
+    nothing."""
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task, effect, _ = await _dangling(dsn, ws)
-        young = await drive(dsn, task)
-        assert _outcomes(await rows(dsn, task), effect) == []
-        monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "0")
-        monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "0")  # for the broker's copy only
-        monkeypatch.setattr(broker, "settings", type(broker.settings)())
-        old = await drive(dsn, task)
-        return effect, young, old, await rows(dsn, task)
+        p = performing.path(effect)
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = performing.hold(p)  # a push still running
+        try:
+            held = await drive(dsn, task)
+            assert _outcomes(await rows(dsn, task), effect) == []
+        finally:
+            os.close(fd)
+        freed = await drive(dsn, task)
+        return effect, held, freed, await rows(dsn, task)
 
-    effect, young, old, written = run(go())
-    assert young["state"]["merge_effect"]["state"] == "in_flight"
+    effect, held, freed, written = run(go())
+    assert held["state"]["merge_effect"]["state"] == "in_flight"
     (outcome,) = _outcomes(written, effect)
     assert outcome["kind"] == "failed" and outcome["reconciled"] is True
-    assert old["status"] == "delivered" and old["state"]["merge_effect"]["effect_id"] != effect  # a new merge
+    assert (
+        freed["status"] == "delivered" and freed["state"]["merge_effect"]["effect_id"] != effect
+    )  # a new merge
 
 
 def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_performer(dsn, tmp_path):
@@ -1519,7 +1525,7 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
             await ledger.append(
                 conn, other, "effect.intent", {"effect_id": parked.effect_id, "idempotency_key": "k"}
             )
-            none = await broker.reconcile(conn, broker.Performers(), parked.effect_id, settle_after_s=0)
+            none = await broker.reconcile(conn, broker.Performers(), parked.effect_id)
         return failed, got[0], none
 
     failed, lock_free, none = run(go())
@@ -1600,17 +1606,6 @@ def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, 
         marker.unlink(missing_ok=True)
     assert shim_ran is True  # the poisoning is real
     assert kernel_ran is False
-
-
-def test_settings_refuse_a_reconcile_wait_shorter_than_two_git_limits(monkeypatch):
-    from core.settings import Settings
-
-    monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "120")
-    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "239")
-    with pytest.raises(ValueError, match="at least twice"):
-        Settings()
-    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "240")
-    assert Settings().reconcile_after_s == 240
 
 
 def test_a_perform_has_one_deadline_for_all_its_git_calls(tmp_path):
