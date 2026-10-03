@@ -23,10 +23,10 @@ impossible send at request time without importing a bridge:
   message length limit); 2000 MiB per file (its upload documentation:
   4000 parts of 512 KiB).
 - Email: no per-message text limit. Gmail refuses a message over 25 MB
-  (its maximum email size), counted as 25,000,000 bytes of the whole
-  encoded message. The size function that measures it (`message_bytes`)
-  is the email bridge's; until it is set, an email is not refused for
-  size at request time.
+  ("Gmail sending limits in Google Workspace", Admin Help: maximum email
+  size 25 MB), counted as 25,000,000 bytes of the whole encoded message.
+  `message_bytes` measures it with `core.mail`, the builder the email
+  bridge's performer sends from, so the size refused is the size sent.
 """
 
 import asyncio
@@ -39,8 +39,14 @@ from typing import Any, Protocol
 
 import psycopg
 
-from core import broker, db, ledger, tasks
+from core import broker, db, ledger, mail, tasks
 from core.settings import settings
+
+# The email bridge builds and measures its messages with the kernel's
+# builder, reached here (a bridge imports core.bridge, never core.mail).
+email_message = mail.email_message
+email_serialized = mail.serialized
+email_message_id = mail.message_id
 
 
 @dataclass(frozen=True)
@@ -52,10 +58,18 @@ class ChannelLimits:
     message_bytes: Callable[[broker.Action], int] | None = None
 
 
+def _email_message_bytes(action: broker.Action) -> int:
+    return mail.email_encoded_bytes(action.payload)
+
+
 LIMITS: dict[str, ChannelLimits] = {
     "telegram": ChannelLimits(max_text=4096, text_units="utf16", max_file_bytes=2000 * 1024 * 1024),
     "email": ChannelLimits(
-        max_text=None, text_units="chars", max_file_bytes=None, max_message_bytes=25_000_000
+        max_text=None,
+        text_units="chars",
+        max_file_bytes=None,
+        max_message_bytes=25_000_000,
+        message_bytes=_email_message_bytes,
     ),
 }
 
@@ -169,12 +183,12 @@ DECLARED: dict[str, Declared] = {
         usage=(
             '`email.send`: target the `to` addresses, lowercased, sorted, comma-joined, payload `{"to": '
             '[...], "cc": [...], "subject": "...", "body": "...", "in_reply_to": null, "references": [], '
-            '"files": [{"path": "...", "sha256": "..."}]}`; sent once Tom approves.'
+            '"files": [{"path": "...", "sha256": "..."}]}`; or, to reply to all of a received email, '
+            'payload `{"reply_to": "<its message id>", "body": "...", "files": [...]}` with any target, '
+            "and the recipients, subject, and threading are filled in from it; sent once Tom approves."
         ),
         owner="email",
         refuse=_refuse_email,
-        # 2.3 owns email's settle function and cites its basis.
-        settle_after_s=lambda action: settings.reconcile_after_s,
     ),
 }
 

@@ -9,8 +9,9 @@ import pytest
 
 from core import broker, db, intake, ledger, machine, notices, serve, tasks
 from core.machine import State
-from tests import bridges, scripted
-from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
+from tests import fake_bridges as bridges
+from tests import scripted
+from tests.fake_bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
 from tests.test_pipeline import drive, to_checks
 
 pytestmark = pytest.mark.spend(usd=0)

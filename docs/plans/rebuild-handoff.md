@@ -39,7 +39,9 @@ switch it off `main`; the rebuild is a separate checkout.
    Homebrew `postgresql@18` running as a service on port 5432 (if an older
    Homebrew Postgres holds the port, dump its databases with `pg_dumpall`,
    stop it, start 18, restore, and put `postgresql@18/bin` first on PATH),
-   `uv`, and the `claude` CLI logged in.
+   `uv`, the `claude` CLI logged in, and Homebrew `dovecot` and `openssl`
+   for the email tests (Dovecot is only run by the tests, as the user, never
+   as a service).
 2. **Checkout.**
    `git clone -b valor-cori-rebuild https://github.com/tomcounsell/ai.git ~/src/valor-rebuild`
    (Valor's Macs reach GitHub over HTTPS through `gh`, not SSH),
@@ -51,7 +53,7 @@ switch it off `main`; the rebuild is a separate checkout.
    printing it.
 4. **The kernel database.** `.venv/bin/python -m core migrate` creates the
    `valor_kernel` role, the `valor_rebuild` database, the schema, correction
-   1, and the four seeded guards, then runs `secure-login`: it writes
+   1, and the five seeded guards, then runs `secure-login`: it writes
    `~/.config/valor-kernel/pgpass` and puts scram rules for the two kernel
    databases at the top of that Mac's `pg_hba.conf` (every other database
    keeps its rules). Then add `export PGPASSFILE=~/.config/valor-kernel/pgpass`

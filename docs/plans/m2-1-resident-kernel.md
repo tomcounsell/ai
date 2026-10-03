@@ -511,7 +511,7 @@ bridge performers.
 - Recollect covers the last non-fresh turn with a state.
 - `core run` refuses a task whose `services:<task>` another process
   holds: one holder is a scheduling fact.
-- The test helpers are `tests/bridges.py`.
+- The test helpers are `tests/fake_bridges.py`.
 
 ## Questions for Tom
 

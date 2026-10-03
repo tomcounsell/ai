@@ -6,16 +6,9 @@ conforms to the bridge port defined in [telegram.md](telegram.md#the-bridge-port
 intake, performers, and the outbox. This doc covers what is particular to
 email.
 
-**Status.** The kernel side of the port is built (`core/bridge.py`,
-`core/intake.py`, `core/notices.py`); the email bridge process is not.
-Every email record is `verified=false`, so it binds as nothing until DMARC
-verification is built. `core/bridge.py` states Gmail's limit as 25,000,000
-bytes of the whole encoded message; its size function is the email
-bridge's, and until the bridge sets it, an email is not refused for size
-at request time. Until the bridge is built, answers and feedback reach a task
-through `python -m core` and record `via: "the command line"`. The email
-code that exists today can be adapted to the port; the last sections say
-what a conforming implementation keeps and what it hands to `core/`.
+**Status.** Built in `bridges/email/`. `python -m bridges.email run`
+runs it under `bridge.serve`; `keys` copies its credentials and `--plist`
+prints its launchd job. The last section lists the modules.
 
 ## What it serves
 
@@ -29,35 +22,57 @@ what a conforming implementation keeps and what it hands to `core/`.
 
 ## Receiving
 
-**The mailbox.** One mailbox, Valor's, on a provider that offers IMAP and
-SMTP. The bridge signs in with an app password kept in Keychain. Every
-message Valor sends leaves from this address, as Valor.
+**The mailbox.** One mailbox, Valor's (`email_address`), on Gmail over IMAP
+(`imap_host`, port 993) and SMTP (`smtp_host`, port 587, STARTTLS), with
+certificates verified. The bridge signs in with an app password that
+`python -m bridges.email keys` copies from the vault `.env` into
+`mail-keys` in the kernel key directory (mode 600), printing each name
+with `written`, `kept`, or `missing` and never a value. Every message Valor
+sends leaves from this address, as Valor.
 
-**Polling.** The bridge polls `INBOX` for unseen messages on an interval set
-in settings, fetching with `BODY.PEEK[]` so the fetch itself changes nothing.
-For each message it builds one `Inbound` record, calls `intake.receive`, and
-sets `\Seen` only after `receive` returns. A crash in between leaves the
-message unseen; the next poll fetches it again, and the receipt index on
-`(channel, chat_id, message_id)` lands it once. Mail the provider files as
-spam never reaches `INBOX` and never reaches the bridge.
+**Polling.** Every `email_poll_s` seconds (30) the bridge opens one IMAP
+connection, with a socket timeout of `imap_timeout_s` (30), and:
+
+1. selects `INBOX` and reads its `UIDVALIDITY`;
+2. searches `UNSEEN SINCE <email_since>` with an `OR` tree of `FROM` terms
+   over `intake.owned("email")`, and keeps a match only when
+   `intake.owns("email", sender)`, since `FROM` matches substrings;
+3. fetches the headers of every match and asks `intake.recorded` which are
+   already received; those are marked `\Seen` without a body fetch;
+4. for each other message, oldest first, fetches it with `BODY.PEEK[]` so
+   the fetch changes nothing, parses it, saves its attachments, calls
+   `intake.receive`, and sets `\Seen` only after `receive` returns.
+
+A crash between `receive` and `\Seen` leaves the message unseen; the next
+poll finds it recorded and marks it, and the receipt index on `(channel,
+chat_id, message_id)` lands it once in any case. A message whose parse,
+save, or receive raises is logged with its UID and left unseen, and the
+poll goes on. A failed login or connection is one failed poll in the log;
+the next runs on schedule. Mail Gmail files as spam never reaches `INBOX`,
+and mail opened in webmail before a poll is seen already and is not
+received until it is marked unread.
 
 **The record.** Email fills the port's fields this way:
 
 | Field | From |
 |---|---|
-| `message_id` | The `Message-ID` header. A message without one gets `uid:<UIDVALIDITY>:<UID>` |
-| `chat_id` | The thread root: the first id in `References`, else `In-Reply-To`, else the message's own `Message-ID` |
+| `message_id` | The `Message-ID` header. A message without one gets `sha256:<digest of its bytes>`, the same on every fetch |
+| `chat_id` | The thread root: the first id in `References`, else the message's own `Message-ID` |
 | `chat_kind` | `email` |
 | `sender_id` | The address in `From`, lowercased |
 | `sender_name` | The display name in `From` |
 | `reply_to` | `In-Reply-To` |
-| `thread` | The ids in `References`, oldest first. Their bodies are already in the ledger as received or sent messages, so the bridge does not fetch them |
-| `text` | The `text/plain` part, decoded; for HTML-only mail, the HTML reduced to text |
-| `attachments` | Each attachment part saved to the media directory, with filename, media type, and size, within a per-message size and count cap; parts over the cap are listed as skipped |
-| `headers` | `Subject`, `To`, `Cc`, `Date`, and the receiving server's `Authentication-Results` |
+| `thread` | One `{"id"}` per id in `References`, oldest first. Their bodies are already in the ledger as received or sent messages, so the bridge does not fetch them |
+| `text` | The subject, a blank line, then the first `text/plain` part, decoded (an unknown charset read as UTF-8); for HTML-only mail, the HTML reduced to text with scripts and styles dropped |
+| `attachments` | Each attachment part saved under `inbound_dir/email/`, named by the sha256 of its bytes, as `{name, mime, bytes, path}` with the filename sanitized; a part that does not decode is `{name, mime, bytes, skipped}` |
+| `headers` | `subject`, `date`, `to`, `cc`, the raw `from` and `authentication_results` values as received (topmost first), and `uid` and `uidvalidity` |
 
-The bridge records every message in `INBOX`. It does not filter senders,
-and it does not drop a message for having an empty body.
+The bridge receives mail from owned senders only: Tom's addresses
+(`operator_email`) and the `email:<address>` chats a project spec on this
+machine lists. Replies to Valor's mail from anyone else are not recorded
+as thread context. A message with an empty body, or with no `From` (whose
+sender is empty, so never owned), is not dropped by the parser. There is no
+inbound size or part cap.
 
 ## How a message becomes work
 
@@ -66,18 +81,18 @@ the kernel binds replies to notices by structure, and the judgement layer
 classifies the rest as a new request, a steer, feedback, an answer, a
 correction, an exemplar, or conversation. Three things differ for email.
 
-**Who counts as Tom.** A `From` header is a claim anyone can write. The
-kernel treats an email as Tom's only when the record's
-`Authentication-Results` shows the receiving server's DMARC pass for his
-address. Without it, the message is someone else's: recorded as thread
-context, and nothing more.
+**Who counts as Tom.** A `From` header is a claim anyone can write.
+`intake.receive` sets every email record's `verified` false, so a record
+from Tom's address is recorded and starts nothing. The bridge never sets
+`verified`.
 
 **No approvals or stops by email.** An email reply carries quoted history,
 signatures, and client furniture around what the person typed, so a fixed
 token such as `approve` cannot be read from it without interpretation, and
-interpretation does not decide authority. Approvals and stops come through
-Telegram or the command line. An email that reads like an approval leaves
-the effect held, and the judgement layer may raise it with Tom.
+interpretation does not decide authority. Email binds only `answer`,
+`steer`, and `start`: a reply whose text is exactly `stop` or `approve`
+binds as a steer. Approvals and stops come through Telegram or the command
+line.
 
 **Answers and feedback.** A reply from Tom whose `In-Reply-To` is the
 `Message-ID` of a question or delivery notice binds to that record and is
@@ -94,8 +109,8 @@ rebuild-baseline.md (popoto #191 and #188).
 
 ## Sending
 
-**The performer.** `email.send` is `act`. Its target is the `To`
-addresses, lowercased, sorted, and comma-joined, and its payload is the whole message:
+**The performer.** `email.send` is `act`. Its target is the `to` list,
+lowercased, sorted, and comma-joined, and its payload is the whole message:
 
 | Payload field | Meaning |
 |---|---|
@@ -106,35 +121,71 @@ addresses, lowercased, sorted, and comma-joined, and its payload is the whole me
 | `files` | Each attachment as a path and its sha256 |
 
 The digest Tom approves covers the recipients, the subject, the body, and
-each file's bytes. The bridge builds the MIME message from exactly these
-fields: `text/plain` with attachments as `multipart/mixed` parts when there
-are files. It adds only the headers transport requires: `From` (Valor's
-address), `Date`, and `Message-ID`.
+each file's bytes. `perform` reads each file once and compares its sha256
+with the payload's; a mismatch or a missing file fails before SMTP
+connects, so a file changed after Tom's tap never leaves. The message is
+built by `core/mail.py`'s `email_message`, which the bridge reaches through
+`core.bridge`: a UTF-8 `text/plain` body, files as `multipart/mixed`
+parts, the subject and `References` chain unchanged, and only the headers
+transport requires added: `From` (Valor's address), `Date`, and
+`Message-ID`.
 
-**Recipients are `core/`'s choice.** Replying to a thread, `core/` proposes
-reply-all: the original sender plus every `To` and `Cc` address, minus
-Valor's own. Tom sees that list in the approval prompt. The bridge sends to
+**Size.** Gmail refuses a message over 25 MB encoded. Email's entry in
+`core/bridge.py`'s `LIMITS` has `max_message_bytes` 25,000,000 and
+`message_bytes`, `mail.email_encoded_bytes`: the length of the message
+`email_message` builds, attachments base64 encoded. A send over
+25,000,000 bytes is refused at request time with that limit as the
+reason, so Tom never approves an impossible send. The performer builds
+with the same function, so the size measured is the size sent. `MAIL FROM`
+carries `SIZE`.
+
+**Recipients are `core/`'s choice.** A turn replies to a thread by
+requesting `email.send` with `reply_to` (the received email's
+`received_id` or `Message-ID`), a `body`, and any `files`.
+`core/session.py` finds that message in the ledger and fills in reply-all
+through `mail.reply_all`: the original sender in `To`, every other
+`To` and `Cc` address in `Cc`, minus Valor's own, lowercased and without
+repeats, with a `Re:` subject, `In-Reply-To`, and the whole `References`
+chain. A `reply_to` that names no received email is
+an error to the turn and requests nothing. Tom sees the recipient list in
+the approval prompt. The bridge sends to
 the addresses in the payload and to no others.
 
-**Idempotency.** The performer derives the `Message-ID` from the broker's
-idempotency key, so the same effect always carries the same id. `lookup`
-reconciles a dangling intent by searching the mailbox's sent folder for that
-`Message-ID` header. A search that finds nothing is read as never sent only
-after `reconcile_after_s` (`core/settings.py`) has passed since the intent;
-until the bridge ships its own settle function, that is the rule. The outcome records the `Message-ID`, which is how a
-reply to the sent message binds back to its task.
+**Idempotency.** The `Message-ID` is `<valor.<first 32 hex of the key's
+sha256>@<Valor's domain>>`, so a retry of one effect repeats its id and two
+effects never share one. `lookup(action, key, since)` opens the folder
+whose `LIST` flags include `\Sent` and searches for that exact id among
+messages from the day before `since` (the intent's time): with Gmail's
+`X-GM-RAW "rfc822msgid:"` when the server offers it, else `HEADER
+Message-ID`. Found, it returns the result; not found, `None`; a mailbox it
+cannot read raises `broker.Unknown`. Gmail copies mail sent over SMTP into
+Sent Mail ("Choose your IMAP email client settings for Gmail", Gmail
+Help); no document gives how long that takes, so the bridge waits for
+nothing and reads Sent Mail only for a send in doubt (below).
+The result's `sent` entry carries the `Message-ID` and the thread root, which
+is how a reply from any recipient binds back to its task.
 
-**One attempt.** `perform` submits once over SMTP with STARTTLS. A refused
-connection, a refused login, or a refused message returns a failed outcome
-with the server's reply. When the server accepts the message for some
-recipients and refuses others, the outcome is `done` and lists the refused
-addresses; reaching them is a new request and a new approval. The bridge
-keeps no retry loop, backoff schedule, or dead-letter queue.
+**One attempt.** `perform` submits once over SMTP with STARTTLS. Each step
+waits under the minimum timeout RFC 5321 section 4.5.3.2 gives a client:
+the greeting, `MAIL`, and `RCPT` 5 minutes (EHLO, STARTTLS, AUTH, and QUIT
+too), `DATA`'s reply 2 minutes, each send call of the body 3 minutes, at
+most one TLS record (16,384 bytes) per call, and the final reply 10
+minutes. No timer spans the upload, so a large message takes the time its
+size takes. A server accepts a message only on the end of data line, with
+a 250 (RFC 5321 section 4.1.1.4): the 250 is `done`, and a refused
+connection, login, `MAIL`, every recipient, or `DATA`, or any end before
+that line has gone, is `failed` with the reason. Once the line has gone,
+an end with no reply (a lost connection, the 10 minute timeout) raises
+`broker.Unknown`: the server may have stored the message, so `reconcile`
+reads Sent Mail by its Message-ID once no process performs the send, and
+writes `done` or `failed` at once. When the server accepts
+the message for some recipients and refuses others, the outcome is `done`
+with `refused` listing each address and its reply; reaching them is a new
+request and a new approval. The bridge keeps no retry loop, backoff
+schedule, or dead-letter queue.
 
-**Operator notices.** Notices go to Tom's operator channel, which is set in
-settings and is Telegram by default. When settings name email, the bridge
-sends notices to Tom's address with a `Message-ID` it records in
-`notice.sent`, so his reply binds the same way.
+**Operator notices.** Notices go to Tom's operator channel, Telegram. The
+email bridge performs the outbox's releases and ignores its notices.
 
 ## Stop and recovery
 
@@ -154,51 +205,39 @@ it exits.
 - **Persona rewriting.** It does not draft, rephrase, add prefixes, or
   convert formats. The body it sends is the body Tom approved.
 - **Retries without approval.** A failed send stays failed.
-- **State of its own.** It keeps no message-id map, history cache, or queue
-  outside the ledger. Its only local state is the media directory.
+- **State of its own.** It keeps no message-id map, UID cursor, history
+  cache, or queue outside the ledger. Its only local state is the inbound
+  directory.
 - **Alerts.** It raises no operator alerts of its own. A login that fails is
   a failed poll in its log and, for a send, a failed outcome on the ledger;
   telling Tom is `core/`'s job.
 
-## Conforming an implementation
+## The implementation
 
-The bridge may survive as existing code. An implementation conforms to the
-port when:
+| Module | Holds |
+|---|---|
+| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the poll beside each released send |
+| `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`) |
+| `bridges/email/config.py` | `Config`, from settings and `mail-keys`, and the SMTP timeouts (`SMTPTimeouts`); the passwords are held here only |
+| `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |
+| `bridges/email/imap.py` | The poll |
+| `bridges/email/smtp.py` | `perform` and `lookup` |
+| `core/mail.py` | `reply_all`, the message builder, and its encoded size |
+| `core/session.py` | A `reply_to` request filled in as reply-all |
 
-1. **It keeps the transport.** IMAP connection and polling, message
-   parsing (addresses, subject, body extraction, attachment extraction and
-   persistence), MIME assembly with `In-Reply-To` and `References`, and SMTP
-   submission. These are I/O and stay.
-2. **It marks `\Seen` after `receive`.** A poller that marks messages seen
-   before fetching them changes to fetch with `BODY.PEEK[]` and mark after
-   the ledger commits.
-3. **Its handler ends at `intake.receive`.** Project lookup, customer
-   resolution, subject coalescing, session ids, persona choice, triage,
-   injection screening, and session enqueueing move to `core/` or are
-   removed.
-4. **Its send is a performer.** The SMTP send becomes `perform`, with a
-   `Message-ID` derived from the key, plus a `lookup` over the sent folder.
-   An outbox relay over a queue becomes the outbox loop over released
-   effects. Reply-all recipient computation moves to `core/`. Retry
-   counters, backoff, and dead-letter writing are removed.
-5. **Its ids go to the ledger.** Inbound `Message-ID`s in
-   `message.received`, outbound ones in `effect.outcome` and `notice.sent`.
-   Any other store mapping message ids to sessions is removed.
-6. **It imports only `core/` ports**, and nothing from the Telegram bridge.
-7. **It passes the integration tests** in `tests/`: a real test mailbox, a
-   real Postgres, no mocks. A message fetched before a kill lands once; a
-   send killed after its intent is found by `lookup` and not repeated; a
-   reply to a delivery notice records `feedback.given` with `via: email`.
+The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
+`core.settings`, `core.db`, and `core.credentials`, and nothing from the
+Telegram bridge. Its tests run against Dovecot and a local SMTP server
+(`tests/mailserver.py`) with a real Postgres and no mocks.
 
 ## Gaps
 
-- **The sent folder.** `lookup` assumes the provider files mail submitted
-  over SMTP into the sent folder, as Gmail does. On a provider that does not,
-  the performer appends the message to the sent folder over IMAP after
-  submitting, and a kill between the two leaves a send `lookup` cannot see.
-- **DMARC as the test of Tom's identity.** It holds only while Tom's
-  domain publishes a DMARC policy and the receiving server writes
-  `Authentication-Results`. Whether this counts as a check under the
-  governance paragraph, and so needs Tom's grant, is his call.
+- **The sent folder.** `lookup` relies on Gmail filing mail submitted over
+  SMTP into the folder flagged `\Sent`. A send in doubt that Gmail has
+  not yet filed when `reconcile` reads is recorded `failed` though
+  delivered; nothing resends it, so no copy is doubled. On a provider
+  that does not file sent mail, every send in doubt reads `failed`.
+- **Email starts nothing.** No email record is verified, so mail from Tom
+  is recorded and binds as nothing.
 - **Approving every send.** As on Telegram, each send to anyone but Tom
   waits for his tap, and the broker has no standing grants.

@@ -66,9 +66,9 @@ enforcing outside the model is AI Control [4].
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
-| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; the bridges chosen, not built; libraries open |
-| Scheduling | launchd: the kernel's LaunchAgent and the backup job; routines | the kernel in use; routines chosen, not built |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
+| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; email in use (`imaplib`, `smtplib`); Telegram chosen, not built |
+| Scheduling | launchd: the kernel's LaunchAgent, the email bridge's, and the backup job; routines | launchd in use; routines chosen, not built |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the bridges' credentials) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -510,11 +510,11 @@ session hijack could forge.
 
 **Bridges.** Telegram and email, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
-as an `act` through the broker. Status of the bridges: **chosen, not built**
-in this tree. Tom's call is that the
-existing bridges may survive close to unchanged; their libraries (Telethon
-for Telegram, the standard library's `imaplib` and `smtplib` for email) are
-the candidates, **open** until the bridges are rebuilt. What each bridge does
+as an `act` through the broker. Status: email **in use**, on the standard
+library's `imaplib` and `smtplib`, tested against Dovecot and a local SMTP
+server; Telegram **chosen, not built**, Telethon its candidate library,
+**open** until it is built. Tom's call is that the bridges stay close to
+`main`'s. What each does
 is [bridges/telegram.md](bridges/telegram.md) and
 [bridges/email.md](bridges/email.md).
 
@@ -533,8 +533,8 @@ is metered like any other task.
 both turn sandbox profiles deny: the kernel databases' passwords in a libpq
 password file, and the judgement keys in `judgement-keys` beside it, copied
 from the vault `.env` by `python -m core judgement-keys` ([machine.md](machine.md),
-Keychain, for why not the Keychain). Status: **in use**. The bridges'
-secrets go in the macOS Keychain: **chosen, not built**. Nothing secret is
+Keychain, for why not the Keychain), and the bridges' credentials beside them
+(`mail-keys`, by `python -m bridges.email keys`). Status: **in use**. Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.
 

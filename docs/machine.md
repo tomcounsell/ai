@@ -55,8 +55,10 @@ services and no user apps, is estimated at 3.5 GB on a 16 GB Air.
 **What exists today.** The machine cluster runs under launchd as a
 Homebrew service. The kernel process is `python -m core serve`, kept alive
 by its LaunchAgent (`python -m core serve --plist` prints it); the gateway
-lives in it and outlives any one task. The bridges are not in this branch
-yet; their port in `core/` is.
+lives in it and outlives any one task. The email bridge is in
+`bridges/email/`, kept alive by its own LaunchAgent
+(`python -m bridges.email --plist` prints it); the Telegram bridge is not in
+this branch.
 
 ## What runs on demand
 
@@ -255,7 +257,7 @@ authority, and a turn holds none.
 | The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |
 | The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run` or `calibrate` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
-| Mail credentials | The email bridge | Not built |
+| Mail credentials, `IMAP_USER`, `IMAP_PASSWORD`, `SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password) | The email bridge, at start | `mail-keys` in the kernel key directory (mode 600), written only by `python -m bridges.email keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the bridge's `Config` only, never in `os.environ`, a ledger row, or a log line |
 | Git hosting tokens | The broker's performer for a released push, never the turn | Not needed yet: pushes go to a local bare origin |
 
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
@@ -272,8 +274,9 @@ the gateway is for visibility and honest metering, not a hard wall.
 **The kernel key directory.** The passwords for `valor_kernel` and the
 owner role on the kernel databases live in a libpq password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
-the judgement keys in `judgement-keys` and the optional long-lived Claude
-token in `claude-token` beside it, paths derived from the password file's
+the judgement keys in `judgement-keys`, the mail credentials in
+`mail-keys`, and the optional long-lived Claude token in `claude-token`
+beside it, paths derived from the password file's
 so the sandbox deny, derived from the same setting, cannot drift from
 them. A Keychain item is readable by a turn through `security`,
 and the vault `.env` syncs to iCloud and is loaded into the environment of

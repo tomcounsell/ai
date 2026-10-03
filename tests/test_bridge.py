@@ -18,8 +18,8 @@ from core.bridge import (
     Release,
     split_text,
 )
-from tests import bridges
-from tests.bridges import FakeBridge, declared, new_task, of_type
+from tests import fake_bridges as bridges
+from tests.fake_bridges import FakeBridge, declared, new_task, of_type
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -231,9 +231,8 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
         task = await new_task(dsn)
         sized = dataclasses.replace(LIMITS["email"], message_bytes=lambda a: len(a.payload["body"]) + 3000)
         async with await db.connect(dsn) as conn:
-            # Until the email bridge sets the size function, no email is
-            # refused for size.
-            unmeasured = await broker.request(conn, task, email("b" * 30_000_000), performers=declared())
+            # The email size function measures the whole encoded message.
+            measured = await broker.request(conn, task, email("b" * 30_000_000), performers=declared())
             with mock.patch.dict(LIMITS, {"email": sized}):
                 over = await broker.request(
                     conn, task, email("b" * (25_000_000 - 2999)), performers=declared()
@@ -244,11 +243,11 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
             nobody = await broker.request(
                 conn, task, broker.Action("email.send", to, {"to": [], "body": "x"}), performers=declared()
             )
-        return unmeasured, over, under, nobody
+        return measured, over, under, nobody
 
-    unmeasured, over, under, nobody = run(go())
-    assert LIMITS["email"].max_message_bytes == 25_000_000 and LIMITS["email"].message_bytes is None
-    assert unmeasured.kind == "pending"
+    measured, over, under, nobody = run(go())
+    assert LIMITS["email"].max_message_bytes == 25_000_000
+    assert measured.kind == "refused" and "over email's limit of 25000000 bytes" in measured.error
     assert over.kind == "refused" and "over email's limit of 25000000 bytes" in over.error
     assert under.kind == "pending"
     assert nobody.kind == "refused" and "no recipient" in nobody.error
@@ -319,8 +318,8 @@ def test_tick_called(dsn, op):
 
 def test_settle_after_function(dsn, tmp_path):
     action = broker.Action("email.send", "a@b.c", {"to": ["a@b.c"], "subject": "s", "body": "b" * 1_000_000})
-    with bridges.operator(tmp_path) as s:
-        assert DECLARED["email.send"].settle(action) == s.reconcile_after_s
+    with bridges.operator(tmp_path):
+        assert DECLARED["email.send"].settle(action) is None
         sized = Declared("x", "act", "", "email", settle_after_s=lambda a: len(a.payload["body"]) / 1000)
         assert sized.settle(action) == 1000.0
         assert DECLARED["telegram.send_message"].settle(action) is None
