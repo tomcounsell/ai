@@ -7,8 +7,9 @@ where `settings.pi` defaults (`/opt/homebrew/bin/pi`) and every turn profile
 denies writing. `VALOR_PI` names another install; the profile then denies
 writing the directory above that install's first `node_modules`
 (`workspace.pi_install`), so no turn can change the code the next turn, or a
-reviewer, runs, or the `package.json` the version is read from. The kernel runs it as the absolute `node` and `cli.js`, inside the same turn
-sandbox profile and `VALOR_TURN` mark as Claude Code, and records the release
+reviewer, runs, or the `package.json` the version is read from. The kernel
+runs it as the absolute `node` and `cli.js`, inside the same turn sandbox
+profile and `VALOR_TURN` mark as Claude Code, and records the release
 on every `turn.started`. Its wrapper `workspace_turn` takes the same
 `harness` settings as Claude Code's, plus `pi_agent_dir`, the turn's own Pi
 directory, and a task's Brief names the wrapper in `harness_name`
@@ -34,8 +35,8 @@ directory, and a task's Brief names the wrapper in `harness_name`
   package list); it cannot change the provider, model, tools, or system
   prompt, which are flags. The working session owns its clone, so its settings
   stand there. A blind checkout leaves `.pi` out of the working tree, as a
-  directory or a link, for every harness (`workspace.BLIND_LEFT_OUT`); the diff the reviewer gets
-  still shows a candidate's change to it.
+  directory or a link, for every harness (`workspace.BLIND_LEFT_OUT`); the
+  diff the reviewer gets still shows a candidate's change to it.
 - **The prompt is on stdin.** `-p` merges piped input into the prompt, so a
   prompt starting with `-` or `@` is neither an option nor a file. Only the
   Brief is appended to the system prompt.
@@ -63,5 +64,9 @@ that list. Codex has not been run here.
 The Pi cases of the contract suite and `tests/test_pi.py` run only against
 the pinned release and are skipped when the installed Pi is another one. On a
 machine whose `pi` is not at `PINNED`, run them with `VALOR_PI` set to a
-pinned install, for example `VALOR_PI=~/.cache/valor-pi-<PINNED>/node_modules/.bin/pi
-python -m pytest tests/test_pi.py tests/test_harness_contract.py`.
+pinned install, for example:
+
+```
+VALOR_PI=~/.cache/valor-pi-<PINNED>/node_modules/.bin/pi \
+  python -m pytest tests/test_pi.py tests/test_harness_contract.py
+```
