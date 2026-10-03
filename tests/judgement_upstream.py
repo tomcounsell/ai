@@ -15,7 +15,7 @@ Two kinds of path, each ending in the leg (`jev` or `open_weight`):
 - `/s/<script>/<leg>`: the next reply a test queued for that script (or its
   default): `{"probs": {question: {label: p}}}`, or `{"status": 500}`,
   `{"delay": seconds}`, `{"body": "raw text"}`, `{"model": "other"}`,
-  `{"provider": "other"}`, `{"usage": None}`, `{"cost": 0.001}`,
+  `{"provider": "other"}`, `{"usage": None}`, `{"cost": 0.001}`, `{"input_tokens": n}`,
   `{"drop_label": "label"}`, `{"choice": "label"}`, and `{"by_path": {path:
   probs}}` and `{"fail_paths": [path]}` (answers by the `path` input, for
   concurrent per-hunk calls), combinable.
@@ -189,6 +189,7 @@ class Upstream:
             tokens = math.ceil(len(raw) / 3 * 1.2) + 190
         else:
             tokens = math.ceil(len(raw) / 3 * 0.6)
+        tokens = spec.get("input_tokens", tokens)
         if leg == "jev":
             out = json.loads(json.dumps(JEV_TEMPLATE))
             out["model"] = spec.get("model", JEV_MODEL)
