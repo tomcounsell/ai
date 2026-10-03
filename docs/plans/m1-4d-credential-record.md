@@ -144,6 +144,8 @@ until that program exits.
 
 ## Patch round 3: output in files, the stop's log, the lock directory
 
+Rebased onto 1.4w (8d6ecd008); one import conflict in tests/test_kernel.py.
+
 The test and review rounds of patch round 2 found that a program git
 started which left git's process group with `setsid` and kept git's pipes
 open held the call, and a stopped caller, until it exited. The lead's
@@ -152,7 +154,8 @@ calls:
 1. **Files, not pipes.** `git._git`'s stdout and stderr, `bounded`'s
    stderr, and `_service_run`'s output go to unlinked files the kernel
    holds (`git.output_file`), read by position after the process is
-   waited on (`git.read_output`). Turn output is unchanged. Tests: a fake
+   waited on (`git.read_output`). Turn and setup output keep
+   1.4w's pipes. Tests: a fake
    git that starts a `setsid` program holding its stdout and stderr; the
    call returns git's output when git exits, and a cancelled
    `git.threaded` caller returns with git's group killed and the program

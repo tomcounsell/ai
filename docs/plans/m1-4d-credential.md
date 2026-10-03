@@ -529,14 +529,16 @@ Each is reversible and was decided by the build session:
   `git.deadline`, `git.remaining`, `reconcile_after_s`, and `bounded`'s
   `timeout` are gone, and the effect lock `core.performing` is what
   reconcile waits on.
-- A kernel subprocess writes its output to files the kernel holds, never
-  pipes: `git._git`'s stdout and stderr, `bounded`'s stderr, and
-  `_service_run`'s output go to unlinked files (`git.output_file`), and the
-  kernel waits on the process itself, then reads them. With pipes, a
-  program git started that left git's process group (`setsid`) and kept
-  the pipes open held the call, and a stopped caller, until it exited,
-  and no time limit ends that wait. The setup logs already work this way.
-  Turn output is not changed here.
+- `git._git`'s stdout and stderr, `bounded`'s stderr, and
+  `_service_run`'s output go to unlinked files the kernel holds
+  (`git.output_file`), not pipes, and the kernel waits on the process
+  itself, then reads them. With pipes, a program git started that left
+  git's process group (`setsid`) and kept the pipes open held the call,
+  and a stopped caller, until it exited, and no time limit ends that wait.
+  None of these programs is node, which aborts when its stdout is a file
+  at a path its profile denies. Turn and setup output stay in the pipes
+  the kernel copies into their files, where the reap by mark ends every
+  process before the copy waits for EOF.
 - `git.threaded` waits on its thread with `asyncio.wait`, not
   `asyncio.shield`: on Python 3.14 a shielded future that raises after its
   caller was cancelled logs an ERROR with a traceback, and an interrupted
