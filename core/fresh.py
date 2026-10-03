@@ -886,15 +886,19 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                 return {"status": "lock lost"}
             try:
                 async with checks.stop_heard(ctx) as stop:
+                    # A stop written before the LISTEN is read here.
+                    async with await db.connect(ctx.dsn) as conn:
+                        if await tasks.is_stopped(conn, ctx.task_id):
+                            return {"status": "stopped"}
                     setup = await checks._setup(
                         checkout, harness, commands, f"review-{ctx.task_id}-setup", stop,
                         lambda step: lay.checks / f"{check_dir.name}.{step}.out",
                     )  # fmt: skip
             except checks._Stopped:
                 return {"status": "stopped"}
-            # Setup ran before the inputs exist, so it can plant none; a
-            # `.valor` it made goes, so the kernel's inputs can be written.
-            await asyncio.to_thread(workspace.rmtree, checkout / workspace.VALOR_DIR)
+            # Setup ran before the inputs exist, so it can plant none: a
+            # `.valor` it made, or a link where the checkout was, makes
+            # `write_inputs` refuse, and the kernel follows nothing it left.
             seen = {**verify, "reviewer_setup_exit": setup["commands"][-1]["exit"] if commands else None}
             try:
                 files = review_inputs(checkout, rows, f, b, seen, governance)

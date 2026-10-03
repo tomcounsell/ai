@@ -419,13 +419,17 @@ async def _setup(checkout: Path, harness: dict[str, Any], commands: list[str], m
 RUFF_LINE = re.compile(r"^(?P<path>[^\n]+?):(?P<line>\d+):(?P<col>\d+): (?P<rule>[A-Za-z][A-Za-z0-9-]*)")
 
 
+RUFF_CHECK = re.compile(r"\bruff check\b")
+
+
 def lint_command(project: dict[str, Any]) -> str | None:
     """The spec's lint command as the kernel runs it: for kind `python-uv`
-    a `ruff check` command gets `--output-format concise`, so its lines can
-    be read as locations."""
+    each `ruff check` invocation gets `--output-format concise` right after
+    it, so its lines can be read as locations and no other command in a
+    compound line gets the flag."""
     command = project.get("lint")
-    if command and project.get("kind") == "python-uv" and "ruff check" in command:
-        return f"{command} --output-format concise"
+    if command and project.get("kind") == "python-uv":
+        return RUFF_CHECK.sub(r"\g<0> --output-format concise", command)
     return command
 
 

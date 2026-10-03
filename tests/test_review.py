@@ -133,7 +133,12 @@ def test_lint_locations_keep_path_line_and_rule_and_drop_the_message():
         {"path": "src/b c.py", "line": 10, "rule": "F401"},
     ]
     uv = {"kind": "python-uv", "lint": "uv run ruff check ."}
-    assert checks.lint_command(uv) == "uv run ruff check . --output-format concise"
+    assert checks.lint_command(uv) == "uv run ruff check --output-format concise ."
+    both = {"kind": "python-uv", "lint": "uv run ruff check . && uv run ruff format --check ."}
+    assert (
+        checks.lint_command(both)
+        == "uv run ruff check --output-format concise . && uv run ruff format --check ."
+    )
     assert checks.lint_command({"kind": "node", "lint": "npm run lint"}) == "npm run lint"
     assert checks.lint_command({"kind": "python-uv", "lint": None}) is None
 
@@ -475,10 +480,11 @@ def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tm
 # -- stops ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("where", ["head run", "setup", "turn"])
+@pytest.mark.parametrize("where", ["head run", "lint", "setup", "turn"])
 def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
     hang = {
         "head run": {"suite": 'case "$PWD" in */test-review-*) sleep 300 & sleep 300;; esac; true'},
+        "lint": {"lint": "sleep 300 & sleep 300"},
         "setup": {"setup": ['case "$PWD" in */review-*/repo) sleep 300 & sleep 300;; esac; true']},
         "turn": {},
     }[where]
@@ -489,7 +495,8 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
         running = asyncio.create_task(
             drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
         )
-        mark = {"head run": f"test-{task}-review", "setup": f"review-{task}-setup-0", "turn": None}[where]
+        mark = {"head run": f"test-{task}-review", "lint": f"test-{task}-review-lint",
+                "setup": f"review-{task}-setup-0", "turn": None}[where]  # fmt: skip
 
         def started():
             if mark:
@@ -516,3 +523,66 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
 
 def seen_turn(ws: Path) -> list[dict]:
     return [t for t in scripted.turns(ws) if t["stage"] == "review"]
+
+
+async def _run_review(dsn, task, ws, alive):
+    """The review runner called once outside the router, with `alive` as the
+    run's lock check."""
+    gateway = Gateway(dsn)
+    await gateway.start()
+    try:
+        return await review_runner(ws)(router.Context(gateway, task, dsn, alive, Check.REVIEW))
+    finally:
+        await gateway.close()
+
+
+def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path):
+    """A stop written after the head run and before the setup's LISTEN: the
+    setup never starts and nothing is recorded."""
+
+    async def go():
+        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"])
+        steer(ws)
+        lay = kws.Layout(Path(b.mirror).parent)
+        sha = machine.fold(await rows(dsn, task)).candidate.sha
+
+        async def alive():
+            # The last lock check before the setup is the first one after
+            # the reviewer's checkout exists.
+            if (lay.checks / f"review-{sha[:12]}" / "repo").exists():
+                async with await db.connect(dsn) as conn:
+                    if not await tasks.is_stopped(conn, task):
+                        await tasks.stop(conn, task, reason="test", by="test")
+            return True
+
+        out = await _run_review(dsn, task, ws, alive)
+        return out, lay, sha, ws, await rows(dsn, task)
+
+    out, lay, sha, ws, got = run(go())
+    assert out["status"] == "stopped", out
+    assert not (lay.checks / f"review-{sha[:12]}.setup-0.out").exists()
+    assert not reviews(got) and not seen_turn(ws)
+
+
+def test_a_link_the_reviewer_setup_plants_is_never_followed(dsn, tmp_path):
+    """Setup swaps the checkout for a link to another directory holding a
+    `.valor`: the kernel refuses to write the inputs and deletes nothing
+    there."""
+    victim = tmp_path / "victim"
+    (victim / ".valor").mkdir(parents=True)
+    (victim / ".valor" / "done.md").write_text("kept\n")
+    plant = f'case "$PWD" in */review-*/repo) cd .. && mv repo repo.moved && ln -s {victim} repo;; esac; true'
+
+    async def go():
+        task, _b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[plant])
+        steer(ws)
+
+        async def alive():
+            return True
+
+        return await _run_review(dsn, task, ws, alive), ws, await rows(dsn, task)
+
+    out, ws, got = run(go())
+    assert out["status"] == "failed" and "review inputs" in out["turn"]["result"], out
+    assert (victim / ".valor" / "done.md").read_text() == "kept\n"
+    assert not reviews(got) and not seen_turn(ws)
