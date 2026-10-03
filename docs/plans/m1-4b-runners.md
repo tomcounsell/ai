@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4b-runners
 type: build
-status: delivered-not-passed; see m1-4b-records.md, Delivery
+status: merged; see m1-4b-records.md, Merged
 critique_rounds: 2
 review_rounds: 2
 ---

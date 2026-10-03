@@ -479,3 +479,22 @@ writer is gone); the five parametrize feed gaps of round 4.
 Suite on `2f773b1d4`: 835 passed, 13 skipped (build database, ports 6720 to
 6729). `ruff check` clean; `ruff format --check` flags only
 `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Merged
+
+Passed patch round 5 on all three checks (test pass: 835 passed, 13
+skipped against 700 and 11 at base; review pass, governance no; docs
+updated). Rebased by the lead onto `e4f5a7036` (the idle stop removed)
+before the checks. The lead's suite on `b178a1f2d`: 835 passed, 13
+skipped; `ruff check` clean, `ruff format --check` flags only the two
+known docs files. Backup `valor_rebuild-20261003T191518Z.dump` (315
+events). `valor-cori-rebuild` fast-forwarded to `b178a1f2d` on
+2026-10-04.
+
+Follow-ups, no code in this task: `rmtree` meets ENOTEMPTY when a process
+keeps writing into a depth-1 directory; five parametrize feed gaps;
+`tree_has_valor` strips the `ls-tree -z` output, so an entry named
+` .valor` counts as `.valor` (fails closed; `strip=False` fixes it);
+overloads for the `text` parameter of `git.trusted` and `git.out`.
+
+The rollout steps are recorded below as they run.
