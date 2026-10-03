@@ -4,12 +4,21 @@ The ledger can never be emptied, so each session drops and recreates the
 database as its owner. `db.migrate` touches no role password, password
 file, or `pg_hba.conf`, so a test run leaves the machine cluster's
 credentials as it found them. Every test marks its live spend with
-`@pytest.mark.spend(usd=...)`.
+`@pytest.mark.spend(usd=...)`. A session's task directories (turn output
+among them) live in a temporary `VALOR_WORK`, never the machine's.
 """
+
+import atexit
+import os
+import shutil
+import tempfile
 
 import pytest
 
-from core import db
+os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
+atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
+
+from core import db  # settings read VALOR_WORK on import
 from core.settings import settings
 
 TEST_DB = settings.test_database

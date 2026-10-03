@@ -143,7 +143,7 @@ def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | No
     except git.GitError as exc:
         return None, str(exc)
     if left:
-        return None, "done.md with uncommitted changes; commit everything first:\n" + "\n".join(left[:20])
+        return None, "done.md with uncommitted changes; commit everything first:\n" + "\n".join(left)
     if head is None:
         return None, "the workspace has no commit"
     return {"sha": head, "turn_id": turn_id}, None

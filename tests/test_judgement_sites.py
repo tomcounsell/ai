@@ -467,7 +467,7 @@ def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(ds
 def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
-    big = "".join(f"line_{i} = '{'x' * 60}'\n" for i in range(6_000))  # about 450 KB, one hunk
+    big = "".join(f"line_{i} = '{'x' * 60}'\n" for i in range(12_000))  # about 900 KB, one hunk
 
     async def go():
         task = await governance_candidate(dsn, ws, extra={"data/big.py": big})
@@ -478,7 +478,12 @@ def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
 
     decided = run(go())
     assert [i["path"] for i in decided["governance"]["instances"]] == ["data/big.py"]
-    assert not [r for r in UP.seen(sid) if r["body"].get("state", {}).get("path") == "data/big.py"]
+
+    def path(r):
+        return r["body"]["state"] if r["leg"] == "jev" else json.loads(r["body"]["messages"][1]["content"])
+
+    sent = [r["leg"] for r in UP.seen(sid) if path(r).get("path") == "data/big.py"]
+    assert sent == ["jev", "open_weight"]  # each provider refuses it itself
 
 
 # -- calibration tasks -------------------------------------------------------------
@@ -505,6 +510,11 @@ def _cases(tmp_path, n=2) -> Path:
     path = tmp_path / "cases.json"
     path.write_text(json.dumps({"site": "intake.underspecified", "cases": (cases * n)[: max(n, 2)]}))
     return path
+
+
+def test_calibrate_loads_any_number_of_cases(tmp_path):
+    site, cases = judgement_sites.load_cases(_cases(tmp_path, 51))
+    assert site == "intake.underspecified" and len(cases) == 51
 
 
 def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_path):
@@ -542,11 +552,6 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
     assert first["entry_check"] is False and first["legs"]["jev"]["confusion"]["thin"] == {"precise": 1}
     assert state["spent_usd_micros"] > 0 and tasks.audit(state) == []
     assert [c["case"] for c in first["cases"]] == ["one-liner", "precise"]
-
-
-def test_calibrate_refuses_too_many_cases(dsn, tmp_path):
-    with pytest.raises(ValueError, match="at most 50"):
-        run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, _cases(tmp_path, n=51)))
 
 
 def test_an_old_task_document_carrying_mode_still_loads(dsn):
@@ -644,7 +649,7 @@ def test_breadth_splits_test_paths_from_the_rest():
 def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": gaps()})
-    big = "".join(f"row_{i} = '{'y' * 60}'\n" for i in range(6_000))
+    big = "".join(f"row_{i} = '{'y' * 60}'\n" for i in range(12_000))
 
     async def go():
         task = await scripted.start(dsn, ws)
@@ -675,10 +680,8 @@ def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(d
         return (await rows(dsn, task, "test.decided"))[0]["payload"]
 
     decided = run(go_big())
-    assert UP.seen(sid2) == []
-    assert decided["behaviors"] == [
-        "breadth not judged: the change is larger than either judgement leg may be sent"
-    ]
+    assert [r["leg"] for r in UP.seen(sid2)] == ["jev", "open_weight"]  # each provider refuses it itself
+    assert decided["behaviors"] == ["breadth not judged: the change is larger than either provider accepts"]
 
 
 def test_a_new_candidate_gets_its_own_reruns():
@@ -984,3 +987,123 @@ def test_breadth_and_governance_read_the_mirror_when_the_clone_lost_the_candidat
 
     jid, ids, docs_ids = run(go())
     assert jid and ids and len(docs_ids) == 1
+
+
+# -- the fan-out: every hunk at once, through one connection ---------------------------
+
+
+class _Stub:
+    """A leg that answers `NO` once `need` of its calls are in flight
+    together, without a provider."""
+
+    def __init__(self, leg, need: int = 1):
+        self._leg, self.need, self.in_flight, self.most = leg, need, 0, 0
+        self._all_in: asyncio.Event | None = None
+
+    def __getattr__(self, name):
+        return getattr(self._leg, name)  # the real leg's name, model, limits, and estimate
+
+    async def ask(self, task, inputs):
+        self._all_in = self._all_in or asyncio.Event()
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        if self.in_flight >= self.need:
+            self._all_in.set()
+        await asyncio.wait_for(self._all_in.wait(), 30)
+        usage = {"input_tokens": 10, "output_tokens": 0, "reported_usd": None}
+        return judgement.LegAnswer(dict(NO), {"adds": None}, usage, self.model)
+
+
+def _stub_port(need: int = 1) -> judgement.JudgementPort:
+    legs = UP.port(fixed="false").legs
+    return judgement.JudgementPort(
+        {"jev": _Stub(legs["jev"], need), "open_weight": _Stub(legs["open_weight"])}
+    )
+
+
+async def _many_hunks(dsn, ws, n: int) -> str:
+    """A task whose candidate changes `n` lines of one file, each far
+    enough from the next to be its own hunk."""
+    commit(ws, "data/many.txt", "".join(f"line {i}\n" for i in range(n * 10)), "many lines")
+    task = await scripted.start(dsn, ws)
+    await drive(dsn, task)
+    await scripted.critique(dsn, task)
+    changed = "".join(f"line {i}{' changed' if i % 10 == 5 else ''}\n" for i in range(n * 10))
+    commit(ws, "data/many.txt", changed, "change many lines")
+    scripted.steer(ws, build="reasons")
+    await drive(dsn, task)
+    return task
+
+
+def test_governance_fan_out_runs_past_eight_at_once(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 12)
+        older, newer = await candidate_range(dsn, task)
+        hunks = judgement_sites.diff_hunks(str(ws), older, newer)
+        port = _stub_port(need=len(hunks))
+        ids = await judgement_sites.governance(port, dsn, task, older, newer)
+        return hunks, ids, port.legs["jev"].most
+
+    hunks, ids, most = run(go())
+    assert len(hunks) >= 12 and len(ids) == len(hunks) and most == len(hunks)
+
+
+def test_a_300_hunk_fan_out_opens_one_connection(dsn, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+    real = db.connect
+    opened = []
+
+    async def counted(*args, **kwargs):
+        opened.append(1)
+        return await real(*args, **kwargs)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 300)
+        older, newer = await candidate_range(dsn, task)
+        monkeypatch.setattr(db, "connect", counted)
+        ids = await judgement_sites.governance(_stub_port(), dsn, task, older, newer)
+        monkeypatch.setattr(db, "connect", real)
+        answered = await rows(dsn, task, "judgement.answered")
+        return ids, answered, await tasks_status(dsn, task)
+
+    ids, answered, state = run(go())
+    assert len(ids) >= 300 and len(opened) == 1
+    governed = {r["payload"]["judgement_id"] for r in answered if r["payload"]["site"] == GOVERNANCE.site}
+    assert governed == set(ids)
+    assert not state["open_calls"] and tasks.audit(state) == []
+
+
+def test_a_stop_between_two_hunks_opens_leaves_every_opened_call_charged(dsn, tmp_path, monkeypatch):
+    from core import spending
+
+    ws, _ = scripted.workspace(tmp_path)
+    real = spending.open_call
+    seen = []
+
+    async def stop():
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, seen[0], reason="test")
+
+    async def stopping(conn, task_id, call):
+        seen.append(task_id)
+        if len(seen) == 3:  # the second hunk's first call: a stop queues behind it
+            asyncio.get_running_loop().create_task(stop())
+            await asyncio.sleep(0.3)
+        return await real(conn, task_id, call)
+
+    async def go():
+        task = await _many_hunks(dsn, ws, 6)
+        older, newer = await candidate_range(dsn, task)
+        monkeypatch.setattr(spending, "open_call", stopping)
+        with pytest.raises(tasks.TaskStopped):
+            await judgement_sites.governance(_stub_port(), dsn, task, older, newer)
+        monkeypatch.setattr(spending, "open_call", real)
+        return await rows(dsn, task, "gateway.opened"), await rows(dsn, task, "gateway.charged"), task
+
+    opened, charged, task = run(go())
+    assert len(opened) >= 2
+    assert sorted(r["payload"]["call_id"] for r in opened) == sorted(r["payload"]["call_id"] for r in charged)
+    state = run(tasks_status(dsn, task))
+    assert state["state"] == "stopped" and not state["open_calls"] and tasks.audit(state) == []

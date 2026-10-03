@@ -98,7 +98,7 @@ lives in an index beside the items.
 Fetches the item's repository into a bare cache of the experiment's own
 (through `gh`, as Tom) and writes the run's project spec,
 `runs/<run>/project.toml`. The kernel provisions the rest when the driver
-starts the task (`core/workspace.py`; docs/harnesses.md, The workspace):
+starts the task (`core/workspace.py`; docs/workspace.md):
 
 - **The clone.** At the base commit with no tags, one branch, its reflog
   expired and garbage collected, so it holds no commit after the base.

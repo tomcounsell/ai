@@ -205,7 +205,7 @@ def breadth_outcome(rows: list[dict], judgement_id: str, candidate: machine.Cand
         labels = {q.id: q.labels["true"] for q in BREADTH.questions}
         out["behaviors"] = [labels[q] for q, a in p["action"].items() if a == "caution"]
     elif p.get("too_large"):
-        out["behaviors"] = ["breadth not judged: the change is larger than either judgement leg may be sent"]
+        out["behaviors"] = ["breadth not judged: the change is larger than either provider accepts"]
     else:
         spent = judgement.unanswered_count(rows, BREADTH.site, {"candidate": p["ref"]["candidate"]})
         if spent < UNANSWERED_RUNS:
@@ -274,19 +274,11 @@ def _governance_inputs(h: DiffHunk, paths: list[str]) -> dict[str, str]:
 async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, newer: str) -> list[str]:
     """One governance judgement per hunk with added lines between `older`
     and `newer` (review: the base to the candidate; docs: the candidate to
-    the docs head), `settings.judgement_concurrency` at a time. A hunk with
-    an answered row for the same id and the same input reuses it; a hunk
-    whose reruns are spent reuses its last failure. Returns the ids, one
-    per hunk."""
-    from core.settings import settings
-
-    async with await db.connect(dsn) as conn:
-        rows = await ledger.read(conn, task_id)
-        b = await tasks.brief(conn, task_id)
-    repo = b.mirror or b.workspace
-    hunks = diff_hunks(repo, older, newer)
-    paths = git.diff_paths(repo, older, newer)
-    gate = asyncio.Semaphore(settings.judgement_concurrency)
+    the docs head), all at once, writing through one shared connection. A
+    hunk with an answered row for the same id and the same input reuses
+    it; a hunk whose reruns are spent reuses its last failure. Every hunk
+    finishes, and its calls are charged, before a stop or other failure is
+    raised. Returns the ids, one per hunk."""
 
     async def one(h: DiffHunk) -> str:
         inputs = _governance_inputs(h, paths)
@@ -305,11 +297,23 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
         if len(mine) >= UNANSWERED_RUNS:
             return mine[-1]["payload"]["judgement_id"]
         ref = {"hunk": {"id": h.id, "path": h.path, "start": h.start}}
-        async with gate:
-            j = await port.judge(GOVERNANCE, inputs, task_id=task_id, ref=ref, dsn=dsn)
+        j = await port.judge(GOVERNANCE, inputs, task_id=task_id, ref=ref, shared=shared)
         return j.judgement_id
 
-    return list(await asyncio.gather(*(one(h) for h in hunks)))
+    async with await db.connect(dsn) as conn:
+        rows = await ledger.read(conn, task_id)
+        b = await tasks.brief(conn, task_id)
+        repo = b.mirror or b.workspace
+        hunks = diff_hunks(repo, older, newer)
+        paths = git.diff_paths(repo, older, newer)
+        shared = judgement.Shared(conn)
+        # Every hunk runs to its end while the connection is open, so a stop
+        # that one hunk meets never leaves another's opened call uncharged.
+        done = await asyncio.gather(*(one(h) for h in hunks), return_exceptions=True)
+    for got in done:
+        if isinstance(got, BaseException):
+            raise got
+    return list(done)
 
 
 def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) -> dict[str, Any]:
@@ -380,7 +384,6 @@ def unjudged_instance(unjudged: list[tuple[DiffHunk, str]]) -> dict[str, Any]:
 
 # -- calibration -----------------------------------------------------------------
 
-MAX_CASES = 50
 STREAM = "judgement"
 # A judge case's label and the action it expects.
 JUDGE_LABELS = {"precise": "proceed", "thin": "caution"}
@@ -395,8 +398,6 @@ def load_cases(path: str | Path) -> tuple[str, list[dict[str, Any]]]:
     path = Path(path)
     doc = json.loads(path.read_text())
     site, cases = doc["site"], doc["cases"]
-    if len(cases) > MAX_CASES:
-        raise ValueError(f"{len(cases)} cases; a calibration run takes at most {MAX_CASES}")
     out = []
     for c in cases:
         c = dict(c)

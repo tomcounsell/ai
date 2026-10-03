@@ -161,7 +161,7 @@ class Spec:
             raise Refused(f"unknown services {bad}; known: {', '.join(SERVICES)}")
         roles = tuple(raw.get("roles") or ())
         for r in roles:
-            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", r) or r in ("app", "postgres"):
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", r) or r in ("app", "postgres"):
                 raise Refused(f"role name {r!r} is not allowed")
         if roles and "postgres" not in services:
             raise Refused("roles need the postgres service")
@@ -243,6 +243,10 @@ class Layout:
     @property
     def checks(self) -> Path:
         return self.root / "checks"
+
+    @property
+    def setup(self) -> Path:
+        return self.root / "setup"
 
     @property
     def pg(self) -> Path:
@@ -711,7 +715,8 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         git.trusted(lay.root, "clone", "-q", "--no-tags", "--single-branch", "--branch",
                     f"valor-base/{task_id}", f"file://{cache}", str(lay.repo))  # fmt: skip
     finally:
-        git.trusted(cache, "update-ref", "-d", ref)
+        with git.uninterrupted():  # the shared cache keeps no ref of an interrupted task
+            git.trusted(cache, "update-ref", "-d", ref)
     work_branch = f"valor/{task_id[:8]}"
     git.trusted(lay.repo, "checkout", "-q", "-b", work_branch)
     git.trusted(lay.repo, "branch", "-q", "-D", f"valor-base/{task_id}")
@@ -796,9 +801,37 @@ def _remote_head(cache: Path) -> str:
 
 
 def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
-    """The spec's setup in the builder's clone; a failure is recorded, never
-    fatal."""
-    return run_setup(lay.repo, harness, spec.setup, f"setup-{task_id}")
+    """Each setup command once, in the clone, under the turn's profile, with
+    the turn's environment; a failure is recorded, never fatal. A command
+    ends when its own process ends: its whole output goes to
+    `<task root>/setup/<n>.log`, a file the kernel holds open (not a pipe,
+    so a child it leaves running cannot hold the step open) at a path no
+    turn can write, and the child is reaped by the command's mark. Each
+    result names that file. There is no time limit; provisioning under
+    `git.interruptible()` ends it when interrupted."""
+    out: list[dict[str, Any]] = []
+    lay.setup.mkdir(parents=True, exist_ok=True)
+    for command in spec.setup:
+        mark = f"setup-{task_id}-{len(out)}"
+        argv, env = setup_command(harness, mark, command)
+        held = git.watch()
+        path = lay.setup / f"{len(out)}.log"
+        with path.open("wb") as log:
+            kwargs = {"cwd": lay.repo, "env": env, "stdin": subprocess.DEVNULL,
+                      "stdout": log, "stderr": subprocess.STDOUT}  # fmt: skip
+            proc = git.start(argv, **kwargs)
+            try:
+                code = proc.wait()
+            finally:
+                if held:
+                    held.finished(proc)
+                runs.reap(mark)
+            if held and held.interrupted:
+                raise git.Interrupted()
+        out.append({"command": command, "exit": code, "output": str(path)})
+        if code != 0:
+            return {"ok": False, "commands": out}
+    return {"ok": True, "commands": out}
 
 
 def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[list[str], dict[str, str]]:
@@ -806,30 +839,6 @@ def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[lis
     profile, marked `mark`, with the turn's environment."""
     argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
     return argv, {**turn_environment(harness), runs.TURN_ENV: mark}
-
-
-def run_setup(checkout: Path, harness: dict[str, Any], commands, mark: str) -> dict[str, Any]:
-    """Each setup command once, in `checkout`, under the harness's profile,
-    with the turn's environment, marked `<mark>-<n>` and reaped; it stops at
-    the first failure. Returns `ok` and each command's exit and output
-    tail."""
-    out: list[dict[str, Any]] = []
-    for command in commands:
-        step = f"{mark}-{len(out)}"
-        argv, env = setup_command(harness, step, command)
-        try:
-            ran = subprocess.run(
-                argv, cwd=checkout, env=env, capture_output=True, text=True,
-                timeout=settings.setup_timeout_s, check=False,
-            )  # fmt: skip
-            code, text = ran.returncode, ran.stdout + ran.stderr
-        except subprocess.TimeoutExpired as exc:
-            code, text = "timeout", str(exc)
-        runs.reap(step)
-        out.append({"command": command, "exit": code, "tail": text[-1500:]})
-        if code != 0:
-            return {"ok": False, "commands": out}
-    return {"ok": True, "commands": out}
 
 
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
@@ -856,17 +865,28 @@ def _pg(name: str) -> str:
     return str(Path(settings.pg_bin) / name)
 
 
-def _service_run(lay: Layout, task_id: str, *argv: str, timeout: float = 120) -> subprocess.CompletedProcess:
-    """A service program under the service profile."""
+def _service_run(lay: Layout, task_id: str, *argv: str) -> subprocess.CompletedProcess:
+    """A service program under the service profile, to its end. There is no
+    time limit: under `git.interruptible()` (provisioning, a run starting
+    the services) an interrupt ends it, and `git.Interrupted` is raised."""
     full = [binaries.require(binaries.SANDBOX_EXEC), "-f", str(lay.profiles / "service.sb"), *argv]
-    return subprocess.run(
+    held = git.watch()
+    proc = git.start(
         full,
-        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
-        check=False,
         env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
     )
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        if held:
+            held.finished(proc)
+    if held and held.interrupted:
+        raise git.Interrupted()
+    return subprocess.CompletedProcess(full, proc.returncode, stdout, stderr)
 
 
 def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str, str]:
@@ -885,7 +905,7 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
             f"--pwfile={pwfile}", "-E", "UTF8", "--locale=C",
         )  # fmt: skip
         if done.returncode != 0:
-            raise Refused(f"initdb: {done.stderr.strip()[-400:]}")
+            raise Refused(f"initdb: {done.stderr.strip()}")
     finally:
         pwfile.unlink(missing_ok=True)
     with (data / "postgresql.conf").open("a") as f:
@@ -967,7 +987,7 @@ def _start_redis(lay: Layout, task_id: str, port: int) -> None:
         "--daemonize", "yes", "--pidfile", str(pidfile), "--logfile", str(lay.redis / "redis.log"),
     )  # fmt: skip
     if done.returncode != 0:
-        raise Refused(f"redis-server did not start: {done.stderr.strip()[-300:]}")
+        raise Refused(f"redis-server did not start: {done.stderr.strip()}")
     for _ in range(100):
         if _connects(port):
             return
@@ -1008,16 +1028,15 @@ def stop_services(task_id: str, lay: Layout | None = None) -> list[dict[str, Any
     """Stop the task's services: Postgres cleanly, then every process left
     under its service mark. Returns every process that was running under
     the mark: those Postgres stopped cleanly (`stopped`) and those the mark
-    reaped (`SIGTERM`, `SIGKILL`)."""
+    reaped (`SIGTERM`, `SIGKILL`). It runs even after an interrupt: it is
+    the interrupted work's cleanup."""
     lay = lay or layout(task_id)
     mark = f"valor.service.{task_id}"
     before = runs.sandboxed_pids(mark, "valor.service.none")
     names = runs.commands(before)
     if (lay.profiles / "service.sb").exists():
-        try:
+        with git.uninterrupted():
             _stop_postgres(lay, task_id)
-        except subprocess.TimeoutExpired:
-            pass
     reaped = runs.reap_sandboxed(mark, "valor.service.none")
     killed = {r["pid"] for r in reaped}
     return reaped + [
@@ -1069,7 +1088,7 @@ def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, 
     """Run `argv` in its own process group with a file-size limit, killing
     the whole group when its summed footprint passes `max_footprint` or the
     time limit passes. Returns the exit code (or `footprint`, `timeout`) and
-    the stderr tail."""
+    its whole stderr."""
 
     # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.
@@ -1094,7 +1113,7 @@ def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, 
             break
         time.sleep(0.5)
     _, err = proc.communicate()
-    return (why or proc.returncode), err.decode(errors="replace")[-400:]
+    return (why or proc.returncode), err.decode(errors="replace")
 
 
 def fetch_into_mirror(

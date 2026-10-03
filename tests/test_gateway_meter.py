@@ -397,3 +397,296 @@ def test_an_allowed_path_with_an_escaped_query_reaches_upstream_byte_for_byte(ds
     path = "/v1/models?after_id=a%2Fb%20c&limit=2"
     statuses, seen = _raw_calls(dsn, ClaudeLogin(str(token)), [path])
     assert statuses[path] == 200 and seen == [(path, "Bearer kernel-held-token")]
+
+
+# -- no timeout of its own: an exit or a disconnect cuts a call ----------------------------
+
+
+async def _raw_upstream(*, answer: bytes | None = None, hang_up: bool = False, status: str = "200 OK"):
+    """A local upstream on a bare socket: it reads a request's head, then
+    sends `answer` (if any) under `status` and waits, or hangs up at once. `seen` is set
+    when a request arrives; `closed` when the gateway closes its side."""
+    seen, closed = asyncio.Event(), asyncio.Event()
+
+    async def on(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        seen.set()
+        if hang_up:
+            writer.close()
+            return
+        if answer is not None:
+            head = (
+                f"HTTP/1.1 {status}\r\n".encode()
+                + b"content-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+            )
+            writer.write(head + f"{len(answer):x}\r\n".encode() + answer + b"\r\n")
+            await writer.drain()
+        while await reader.read(65536):
+            pass
+        closed.set()
+        writer.close()
+
+    server = await asyncio.start_server(on, "127.0.0.1", 0)
+    return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}", seen, closed
+
+
+async def _rows(dsn, task, kind):
+    async with await db.connect(dsn) as conn:
+        return [r["payload"] for r in await ledger.read(conn, task) if r["type"] == kind]
+
+
+async def _new_task(dsn) -> str:
+    async with await db.connect(dsn) as conn:
+        return await tasks.start(conn, tasks.Brief(instruction="cut"))
+
+
+def test_the_gateway_sets_no_upstream_timeout_of_its_own(dsn):
+    async def go():
+        gateway = Gateway(dsn, upstream="http://127.0.0.1:9")
+        await gateway.start()
+        timeout = gateway._session.timeout
+        await gateway.close()
+        return timeout
+
+    timeout = asyncio.run(go())
+    assert timeout.total is None and timeout.connect is None
+    assert timeout.sock_read is None and timeout.sock_connect is None
+
+
+def test_a_client_that_disconnects_cuts_its_call(dsn):
+    async def go():
+        server, url, seen, closed = await _raw_upstream()
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+
+        async def client():
+            async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+                await r.read()
+
+        pending = asyncio.create_task(client())
+        await asyncio.wait_for(seen.wait(), 10)
+        pending.cancel()
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.wait_for(closed.wait(), 10)
+        await gateway.close()
+        server.close()
+        return await _rows(dsn, task, "gateway.opened"), await _rows(dsn, task, "gateway.charged")
+
+    opened, charged = asyncio.run(go())
+    assert len(opened) == 1 and len(charged) == 1
+    assert charged[0]["cut"] is True and charged[0]["unsent"] is False
+    assert charged[0]["usd_micros"] == opened[0]["estimate_usd_micros"]  # nothing reported: the worst case
+
+
+def test_a_401_whose_client_leaves_at_once_still_rereads_the_credential(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("first\n")
+    login = ClaudeLogin(str(token), ttl_s=3600)
+    assert login.token() == "first"
+    token.write_text("second\n")
+
+    async def go():
+        started = STREAM[: STREAM.index(b"event: message_delta")]
+        server, url, _, closed = await _raw_upstream(answer=started, status="401 Unauthorized")
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url, credential=login)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+            got = r.status  # the head only; the client leaves before the body ends
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.wait_for(closed.wait(), 10)
+        await gateway.close()
+        server.close()
+        return got
+
+    assert asyncio.run(go()) == 401
+    assert login.token() == "second"
+
+
+def test_a_started_stream_whose_client_leaves_is_charged_once(dsn):
+    async def go():
+        started = STREAM[: STREAM.index(b"event: message_delta")]
+        server, url, _, closed = await _raw_upstream(answer=started)
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+        first = asyncio.Event()
+
+        async def client():
+            async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+                await r.content.readany()
+                first.set()
+                await r.read()
+
+        pending = asyncio.create_task(client())
+        await asyncio.wait_for(first.wait(), 10)
+        pending.cancel()
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.wait_for(closed.wait(), 10)
+        await gateway.close()
+        server.close()
+        async with await db.connect(dsn) as conn:
+            state = await tasks.status(conn, task)
+        return await _rows(dsn, task, "gateway.opened"), await _rows(dsn, task, "gateway.charged"), state
+
+    opened, charged, state = asyncio.run(go())
+    assert len(opened) == 1 and len(charged) == 1
+    assert charged[0]["usd_micros"] == CUT and charged[0]["cut"] is True
+    assert not state["open_calls"] and tasks.audit(state) == []
+
+
+def test_an_unreachable_upstream_is_a_502_naming_it(dsn):
+    async def go():
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream="http://127.0.0.1:6561")  # nothing listens here
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+            got = r.status, await r.json()
+        await gateway.drain(task)
+        await gateway.close()
+        return got, await _rows(dsn, task, "gateway.charged")
+
+    (status, body), charged = asyncio.run(go())
+    assert status == 502 and "could not reach the provider" in body["error"]["message"]
+    assert charged[0]["unsent"] is True and charged[0]["usd_micros"] == 0
+
+
+def test_an_upstream_that_closes_before_answering_is_a_502_naming_it(dsn):
+    async def go():
+        server, url, _, _ = await _raw_upstream(hang_up=True)
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+            got = r.status, await r.json()
+        await gateway.drain(task)
+        await gateway.close()
+        server.close()
+        return got, await _rows(dsn, task, "gateway.charged")
+
+    (status, body), charged = asyncio.run(go())
+    assert status == 502 and "ended before it answered" in body["error"]["message"]
+    assert len(charged) == 1 and charged[0]["cut"] is True
+
+
+def _held_open(dsn, monkeypatch, leave):
+    """A call held inside its open, then `leave(gateway, task, pending)`,
+    then let go: what the upstream saw and the call's rows."""
+    real = spending.open_call
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held(conn, task_id, call):
+        entered.set()
+        await release.wait()
+        return await real(conn, task_id, call)
+
+    monkeypatch.setattr(spending, "open_call", held)
+
+    async def go():
+        server, url, seen, _ = await _raw_upstream()
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+
+        async def client():
+            async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+                return r.status
+
+        pending = asyncio.create_task(client())
+        await asyncio.wait_for(entered.wait(), 10)
+        await leave(gateway, task, pending)
+        release.set()
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.sleep(0.2)
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await gateway.close()
+        server.close()
+        return (
+            seen.is_set(),
+            await _rows(dsn, task, "gateway.opened"),
+            await _rows(dsn, task, "gateway.charged"),
+        )
+
+    return asyncio.run(go())
+
+
+def test_a_call_revoked_while_it_opens_is_not_sent_and_is_charged_nothing(dsn, monkeypatch):
+    async def revoke(gateway, task, pending):
+        gateway.revoke(task)
+
+    sent, opened, charged = _held_open(dsn, monkeypatch, revoke)
+    assert not sent
+    assert len(opened) == 1 and len(charged) == 1
+    assert charged[0]["unsent"] is True and charged[0]["usd_micros"] == 0
+
+
+def test_a_call_whose_client_leaves_while_it_opens_is_not_sent_and_is_charged_nothing(dsn, monkeypatch):
+    async def leave(gateway, task, pending):
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.sleep(0.2)  # the gateway's handler hears the disconnect
+
+    sent, opened, charged = _held_open(dsn, monkeypatch, leave)
+    assert not sent
+    assert len(opened) == 1 and len(charged) == 1
+    assert charged[0]["unsent"] is True and charged[0]["usd_micros"] == 0
+
+
+def test_a_revoke_while_a_call_is_being_charged_leaves_one_charge(dsn, monkeypatch):
+    real = spending.charge
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held(conn, task_id, call_id, usd, detail):
+        entered.set()
+        await release.wait()
+        return await real(conn, task_id, call_id, usd, detail)
+
+    monkeypatch.setattr(spending, "charge", held)
+
+    async def go():
+        runner, url = await _upstream(WHOLE, content_type="application/json")
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+
+        async def client():
+            async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+                return r.status
+
+        pending = asyncio.create_task(client())
+        await asyncio.wait_for(entered.wait(), 10)
+        gateway.revoke(task)
+        release.set()
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.gather(pending, return_exceptions=True)
+        await gateway.close()
+        await runner.cleanup()
+        async with await db.connect(dsn) as conn:
+            state = await tasks.status(conn, task)
+        return await _rows(dsn, task, "gateway.charged"), state
+
+    charged, state = asyncio.run(go())
+    assert len(charged) == 1 and charged[0]["usd_micros"] == COMPLETE
+    assert not state["open_calls"] and tasks.audit(state) == []
+
+
+def test_a_login_expiring_in_seconds_is_still_used(tmp_path):
+    import time
+
+    from core.gateway import ClaudeLogin
+
+    soon = int(time.time() * 1000) + 10_000
+    assert ClaudeLogin(str(tmp_path / "absent"), keychain=lambda: _keychain_json(soon)).token() == "kc-token"

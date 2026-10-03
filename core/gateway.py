@@ -21,13 +21,15 @@ For each metered call the gateway:
    reading the usage the provider reports as it passes;
 3. charges what the provider reported when the call closes.
 
-A revoke cuts every in-flight call of the task at once. A call that ends
-without its final usage (cut, or the client died) is charged so the ledger
-never records less than the invoice: on the Anthropic route its input as
-reported plus every output token it was allowed; on the OpenAI route, which
-reports input only at the end, the worst case estimated before the call.
-Other listed paths (token counting, model lists) cost nothing and pass
-through unmetered.
+A revoke cuts every in-flight call of the task at once, and so does the
+turn's exit; a call whose client disconnects is cut alone. The gateway sets
+no timeout of its own: a call lasts as long as a client waits for it. A call
+that ends without its final usage (cut, or the client died) is charged so
+the ledger never records less than the invoice: on the Anthropic route its
+input as reported plus every output token it was allowed; on the OpenAI
+route, which reports input only at the end, the worst case estimated before
+the call. Other listed paths (token counting, model lists) cost nothing and
+pass through unmetered.
 
 **The Claude credential.** A turn runs with its own Claude Code config
 directory, which holds no login, so it carries a placeholder (`TURN_TOKEN`)
@@ -194,7 +196,7 @@ class ClaudeLogin:
         try:
             oauth = json.loads(raw)["claudeAiOauth"]
             access, expires = str(oauth["accessToken"]), oauth.get("expiresAt")
-            expired = expires is not None and float(expires) / 1000 < time.time() + 30
+            expired = expires is not None and float(expires) / 1000 < time.time()
         except ValueError, KeyError, TypeError:
             raise CredentialUnavailable("the Keychain's Claude login is not in the shape expected") from None
         if expired:
@@ -441,6 +443,8 @@ class Gateway:
         self.revoked: set[str] = set()
         self.calls: dict[str, set[asyncio.Task]] = {}
         self.upstream_calls: dict[str, set[asyncio.Task]] = {}
+        # Calls whose client left before they were sent: they are not sent.
+        self.abandoned: set[asyncio.Task] = set()
         self.url: str | None = None
         self._runner: web.AppRunner | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -448,14 +452,14 @@ class Gateway:
     async def start(self, host: str = "127.0.0.1", port: int = 0) -> str:
         app = web.Application(client_max_size=64 * 1024 * 1024)
         app.router.add_route("*", "/t/{token}/{tail:.*}", self.handle)
-        self._runner = web.AppRunner(app, handler_cancellation=False)
+        self._runner = web.AppRunner(app, handler_cancellation=True)
         await self._runner.setup()
         site = web.TCPSite(self._runner, host, port)
         await site.start()
         bound = site._server.sockets[0].getsockname()[1]
         self.url = f"http://{host}:{bound}"
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=300),
+            timeout=aiohttp.ClientTimeout(total=None),
             auto_decompress=False,
         )
         return self.url
@@ -484,7 +488,13 @@ class Gateway:
         they are streaming or still waiting on the provider."""
         self.revoked.add(task_id)
         self.retire(task_id)
-        for call in self.upstream_calls.get(task_id, ()):
+        self.cut(task_id)
+
+    def cut(self, task_id: str) -> None:
+        """Cut the task's calls that are waiting on or streaming from the
+        provider; each is still charged. A turn's exit cuts its calls, since
+        no client is left to read them."""
+        for call in list(self.upstream_calls.get(task_id, ())):
             call.cancel()
 
     async def drain(self, task_id: str) -> None:
@@ -521,20 +531,38 @@ class Gateway:
             except CredentialUnavailable as exc:
                 return _error(401, "authentication_error", str(exc))
         if request.method == "POST" and tail.rstrip("/") == "v1/messages":
-            response = await self._call(grant, self._metered(request, grant, path, headers, body))
-        else:
-            response = await self._forward(request, self.upstream + path, headers, body)
-        if response.status == 401 and self.credential is not None:
-            self.credential.invalidate()
-        return response
+            return await self._call(grant, self._metered(request, grant, path, headers, body))
+        return await self._forward(request, self.upstream + path, headers, body)
 
     async def _call(self, grant: Grant, coro) -> web.StreamResponse:
-        """Run one metered call as its own task, which `drain` waits on and
-        a client disconnect never cancels."""
+        """Run one metered call as its own task, which `drain` waits on. A
+        client that leaves cancels only the wait: a call waiting on the
+        provider is cut; one not yet sent is never sent; one being charged
+        is left to finish. Either way its charge lands before this returns."""
         call = asyncio.create_task(coro)
         self.calls.setdefault(grant.task_id, set()).add(call)
         call.add_done_callback(self.calls[grant.task_id].discard)
-        return await asyncio.shield(call)
+        try:
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            if call in self.upstream_calls.get(grant.task_id, ()):
+                call.cancel()
+            elif not call.done():
+                self.abandoned.add(call)
+                call.add_done_callback(self.abandoned.discard)
+            await asyncio.shield(call)
+            raise
+
+    def _answered(self, status: int, openai: str | None) -> None:
+        """A 401 invalidates the credential it refused. Here and not after
+        `handle`'s await: a client that has read the whole 401 may leave
+        before the call returns."""
+        if status != 401:
+            return
+        if openai is None and self.credential is not None:
+            self.credential.invalidate()
+        elif openai == "kernel" and self.openai_credential is not None:
+            self.openai_credential.invalidate()
 
     async def _openai(self, request, grant: Grant, tail: str, query: str, headers, body):
         """The OpenAI route: listed paths only, the turn's credential and
@@ -555,14 +583,8 @@ class Gateway:
         url = self.openai_upstream + "/" + tail + query
         source = "kernel" if key is not None else "turn"
         if request.method == "POST":  # only v1/responses takes POST
-            response = await self._call(
-                grant, self._metered_openai(request, grant, url, headers, body, source)
-            )
-        else:
-            response = await self._forward(request, url, headers, body, openai=source)
-        if response.status == 401 and key is not None:
-            self.openai_credential.invalidate()
-        return response
+            return await self._call(grant, self._metered_openai(request, grant, url, headers, body, source))
+        return await self._forward(request, url, headers, body, openai=source)
 
     async def _forward(self, request, url, headers, body, openai: str | None = None) -> web.StreamResponse:
         """Forward one unmetered call. `openai` names the credential an
@@ -572,13 +594,16 @@ class Gateway:
             async with self._session.request(
                 request.method, URL(url, encoded=True), headers=headers, data=body
             ) as up:
+                self._answered(up.status, openai)
                 if openai and up.status == 401:
                     return _openai_refused(openai)
                 return web.Response(
                     status=up.status, body=await up.read(), headers=_response_headers(up, openai)
                 )
-        except aiohttp.ClientError:
-            return (_openai_error if openai else _error)(502, "api_error", "upstream failed")
+        except aiohttp.ClientConnectorError as exc:
+            return _unreachable(exc, openai)
+        except aiohttp.ClientError as exc:
+            return _ended(exc, openai)
 
     async def _metered(self, request, grant: Grant, path, headers, body) -> web.StreamResponse:
         try:
@@ -671,11 +696,21 @@ class Gateway:
         cut = False
         unsent = False
         response = None
+        failed = None
+        me = asyncio.current_task()
         upstream = self.upstream_calls.setdefault(grant.task_id, set())
-        upstream.add(asyncio.current_task())
+        upstream.add(me)
+        # From here `cut`, `revoke`, and a leaving client cancel this call.
+        # One whose client already left, or whose token was retired while it
+        # opened, is not sent: a turn that has exited is never waited on.
+        if me in self.abandoned or self.grants.get(request.match_info["token"]) is not grant:
+            upstream.discard(me)
+            await close(meter, status, cut, True)
+            return fail(403, "permission_error", "turn token revoked or unknown")
         try:
             async with self._session.post(URL(url, encoded=True), headers=headers, data=body) as up:
                 status = up.status
+                self._answered(status, openai)
                 if hasattr(meter, "headers"):
                     meter.headers(up.headers)
                 if openai and status == 401:
@@ -700,20 +735,23 @@ class Gateway:
                     request.transport.close()
                 else:
                     await response.write_eof()
-        except aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError:
-            unsent = True  # never reached the provider: nothing billed
-        except ConnectionError, aiohttp.ClientError:
-            cut = True
-        except asyncio.CancelledError:
-            # Revoked: the stop owns this cancellation, and the charge still lands.
-            asyncio.current_task().uncancel()
-            cut = True
+        except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as exc:
+            unsent, failed = True, exc  # never reached the provider: nothing billed
+        except (ConnectionError, aiohttp.ClientError) as exc:
+            cut, failed = True, exc
+        except asyncio.CancelledError as exc:
+            # Revoked, cut, or the client left: the charge still lands.
+            me.uncancel()
+            cut, failed = True, exc
             if request.transport is not None:
                 request.transport.close()
         finally:
-            upstream.discard(asyncio.current_task())
+            # Out of the set first, so no cancel can land in the charge.
+            upstream.discard(me)
             await close(meter, status, cut, unsent)
-        return response if response is not None else fail(502, "api_error", "upstream failed")
+        if response is not None:
+            return response
+        return _unreachable(failed, openai) if unsent else _ended(failed, openai)
 
     async def _close(self, grant, call, price, meter: Meter, status, cut, unsent) -> None:
         if unsent:
@@ -778,6 +816,19 @@ class Gateway:
 def _response_headers(up: aiohttp.ClientResponse, openai: str | None = None) -> dict[str, str]:
     drop = DROP_RESPONSE | OPENAI_ACCOUNT_HEADERS if openai else DROP_RESPONSE
     return {k: v for k, v in up.headers.items() if k.lower() not in drop}
+
+
+def _unreachable(exc: BaseException | None, openai: str | None = None) -> web.Response:
+    # The exception's type only: aiohttp's text can carry headers.
+    fail = _openai_error if openai else _error
+    return fail(502, "api_error", f"the gateway could not reach the provider ({type(exc).__name__})")
+
+
+def _ended(exc: BaseException | None, openai: str | None = None) -> web.Response:
+    fail = _openai_error if openai else _error
+    return fail(
+        502, "api_error", f"the provider's connection ended before it answered ({type(exc).__name__})"
+    )
 
 
 def _error(status: int, kind: str, message: str) -> web.Response:

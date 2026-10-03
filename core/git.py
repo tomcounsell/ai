@@ -22,7 +22,9 @@ name drivers; a driver's program comes from config. So every call:
 - runs git in its own process group, killed whole when the call outlives
   its time: the smaller of `git_timeout_s` and what is left of the
   `deadline` the caller set (a performer sets one for its whole perform,
-  so a push and the calls around it share one limit);
+  so a push and the calls around it share one limit); a call made under
+  `interruptible()` (provisioning) has no time limit, and ends when its
+  holder interrupts it;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
@@ -59,6 +61,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +144,90 @@ class GitError(RuntimeError):
     pass
 
 
+class Interrupted(GitError):
+    def __init__(self):
+        super().__init__("interrupted")
+
+
+class Interruptible:
+    """Work whose holder can end it: every process started through `start`
+    runs in its own process group with no time limit, and `interrupt()`
+    ends them all (TERM, `reap_grace_s`, then KILL; git removes its lock
+    files on TERM) and refuses any later start. One lock spans the flag,
+    the start, and the record, so no process starts unseen."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._groups: set[int] = set()
+        self.interrupted = False
+
+    def start(self, argv: list[str], **kwargs) -> subprocess.Popen:
+        with self._lock:
+            if self.interrupted:
+                raise Interrupted()
+            proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
+            self._groups.add(proc.pid)
+            return proc
+
+    def finished(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._groups.discard(proc.pid)
+
+    def interrupt(self) -> None:
+        with self._lock:
+            self.interrupted = True
+            groups = set(self._groups)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for group in groups:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(group, sig)
+            if sig == signal.SIGTERM and groups:
+                time.sleep(settings.reap_grace_s)
+                with self._lock:
+                    groups &= self._groups
+
+
+_WATCH: contextvars.ContextVar[Interruptible | None] = contextvars.ContextVar("git_watch", default=None)
+
+
+@contextlib.contextmanager
+def interruptible():
+    """Run the block's git calls (and whatever else starts through the
+    watch, `watch()`) under one `Interruptible`. `asyncio.to_thread` copies
+    the context, so a block that starts a thread covers it."""
+    held = Interruptible()
+    token = _WATCH.set(held)
+    try:
+        yield held
+    finally:
+        _WATCH.reset(token)
+
+
+@contextlib.contextmanager
+def uninterrupted():
+    """A call that must run even after an interrupt (removing a ref the
+    interrupted work added, stopping the services it started), with the
+    usual time limit for a git call."""
+    token = _WATCH.set(None)
+    try:
+        yield
+    finally:
+        _WATCH.reset(token)
+
+
+def watch() -> Interruptible | None:
+    return _WATCH.get()
+
+
+def start(argv: list[str], **kwargs) -> subprocess.Popen:
+    """A process in its own process group, recorded on the current watch
+    when there is one (`interruptible()`)."""
+    held = _WATCH.get()
+    if held is not None:
+        return held.start(argv, **kwargs)
+    return subprocess.Popen(argv, start_new_session=True, **kwargs)
+
+
 def binary() -> str:
     """The trusted git's path, checked now."""
     try:
@@ -159,22 +246,20 @@ def _git(
     """The trusted git (`settings.git_bin`, checked each call), never
     whichever `git` comes first on a PATH, in its own process group, killed
     whole when it outlives its limit (the smaller of `git_timeout_s` and
-    what is left of the caller's `deadline`). `prefix` runs it under a
-    sandbox (`sandbox-exec ... -f <profile>`)."""
+    what is left of the caller's `deadline`; under `interruptible()`, the
+    deadline alone). `prefix` runs it under a sandbox (`sandbox-exec ...
+    -f <profile>`)."""
     git_bin = binary()
-    limit = settings.git_timeout_s
+    held = _WATCH.get()
+    limit = None if held is not None else settings.git_timeout_s
     ends = _DEADLINE.get()
     if ends is not None:
-        limit = min(limit, ends - time.monotonic())
+        limit = ends - time.monotonic() if limit is None else min(limit, ends - time.monotonic())
         if limit <= 0:
             raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
-    proc = subprocess.Popen(
-        [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=text,
-        env={**env(), **(extra_env or {})},
-        start_new_session=True,
+    argv = [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args]
+    proc = start(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, env={**env(), **(extra_env or {})}
     )
     try:
         stdout, stderr = proc.communicate(timeout=limit)
@@ -183,6 +268,11 @@ def _git(
             os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
         proc.communicate()
         raise GitError(f"git {' '.join(args[:2])} did not finish in {limit:.0f}s") from None
+    finally:
+        if held is not None:
+            held.finished(proc)
+    if held is not None and held.interrupted:
+        raise Interrupted()
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
@@ -230,7 +320,7 @@ def hostile(
     )  # fmt: skip
     listed = _git(workspace, "config", "--list", "--show-scope", "--includes", prefix=prefix)
     if listed.returncode != 0:  # unreadable config is refused, never assumed clean
-        return [f"the config could not be read: {listed.stderr.strip()[:200]}"]
+        return [f"the config could not be read: {listed.stderr.strip()}"]
     found = []
     for line in listed.stdout.splitlines():
         scope, _, entry = line.partition("\t")
@@ -272,7 +362,7 @@ def trusted(
     does not require to be UTF-8."""
     done = _git(cwd, *args, text=text, extra_env=extra_env)
     if done.returncode != 0:
-        raise GitError(f"git {' '.join(args[:3])}: {_text(done.stderr).strip()[:300]}")
+        raise GitError(f"git {' '.join(args[:3])}: {_text(done.stderr).strip()}")
     return done.stdout.strip() if strip else done.stdout
 
 
@@ -427,7 +517,7 @@ def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
     unreachable is not the same as absent."""
     listed = run(workspace, "ls-remote", "--upload-pack=git-upload-pack", url, f"refs/heads/{branch_name}")
     if listed.returncode != 0:
-        raise GitError(f"ls-remote {url}: {listed.stderr.strip()[:200]}")
+        raise GitError(f"ls-remote {url}: {listed.stderr.strip()}")
     fields = listed.stdout.split()
     return fields[0] if fields else None
 

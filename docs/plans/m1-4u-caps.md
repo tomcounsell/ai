@@ -31,7 +31,7 @@ Line numbers are at `b3f9011c7`.
 | Done item | Evidence |
 |---|---|
 | No case limit on calibration | `test_calibrate_loads_any_number_of_cases`: a 51-case file loads whole; `test_calibrate_refuses_too_many_cases` is gone |
-| The fallback leg sends no `max_tokens`; its input limit is its endpoint's context | `test_open_weight_sends_no_output_limit`, `test_open_weight_input_limit_is_its_endpoints_context`; the too-large tests size their inputs from the settings |
+| The fallback leg sends no `max_tokens` and is sent every input; OpenRouter's own context refusal is `input_too_large`, billed nothing | `test_open_weight_sends_no_output_limit`, `test_the_fallback_is_sent_an_input_over_its_context_by_the_estimate`, `test_openrouters_context_refusal_is_read_from_its_body_whatever_the_size_sent`, `test_another_openrouter_404_is_an_http_status_failure`, `test_inputs_too_large_for_both_legs_fail_as_too_large_billed_nothing` |
 | An open-weight call with no reported usage is charged the most its endpoint can produce | `test_open_weight_worst_case_is_its_endpoints_largest_answer` |
 | A governance fan-out runs every hunk at once on one Postgres connection | `test_governance_fan_out_runs_past_eight_at_once`, `test_a_300_hunk_fan_out_opens_one_connection` |
 | The kernel's open-file limit is raised to its hard limit, or OPEN_MAX, and never lowered | `test_start_raises_the_open_file_limit_and_never_lowers_it` |
@@ -42,7 +42,7 @@ Line numbers are at `b3f9011c7`.
 | A call that never reached the provider, or was cut before it answered, says so | `test_an_unreachable_upstream_is_a_502_naming_it`, `test_an_upstream_that_closes_before_answering_is_a_502_naming_it` |
 | Provisioning's git calls and setup commands run with no limit, and an interrupted `start` kills them | `test_provisioning_runs_past_the_git_timeout`, `test_interrupting_start_kills_provisioning_git`, `test_interrupting_start_kills_a_setup_command`; `setup_timeout_s` is gone |
 | A perform's git calls still end at `git_timeout_s` and the deadline | the existing `core/git.py` deadline tests, unchanged |
-| A service program that does not finish is a `Refused` naming it, in provisioning and in a run | `test_a_hung_service_program_is_refused_by_name`, `test_a_run_whose_services_hang_returns_the_reason` |
+| A service program runs with no time limit; a stop of the task or a cancel of the run interrupts its start | `test_a_service_program_has_no_time_limit_and_an_interrupt_ends_it`, `test_a_stop_of_the_task_interrupts_its_services_starting`, `test_a_cancelled_run_interrupts_its_services_starting` |
 | A Keychain token is used until its stated expiry | `test_a_login_expiring_in_seconds_is_still_used`; the expired case keeps its test |
 | A role name may use Postgres's whole identifier length | `test_a_63_character_role_is_accepted_and_created`, `test_a_64_character_role_is_refused` |
 | Suite green, ruff clean | `VALOR_TEST_DB=valor_rebuild_test_14u .venv/bin/python -m pytest -q tests`; `uvx ruff check .`, `uvx ruff format --check .` |
@@ -70,7 +70,7 @@ written beside it.
 |---|---|---|---|---|
 | 1 | `core/settings.py:216`, `core/workspace.py:1251-1253` | `verdict_max_bytes`, 256 KiB | not in this task | 1.4s removes it (m1-4s-signal-reads.md); both touch `workspace.py`, so it stays there |
 | 2 | `core/judgement_sites.py:377`, `:391-392` | `MAX_CASES = 50`: `load_cases` raises on more | unbounded | `calibrate` asks the cases one after another (`:434-437`), so the count holds no slot, no connection, and nothing turn-owned |
-| 3 | `core/settings.py:168-169`, `tools/open_weight.py:51-52`, `:93` | input limit 100,000 estimated tokens; every call sends `max_tokens` 400 | derived: no `max_tokens` sent; input limit `OPEN_WEIGHT_CONTEXT` = 131,072; most output `OPEN_WEIGHT_MAX_COMPLETION` = 117,964 | See "The fallback leg" below |
+| 3 | `core/settings.py:168-169`, `tools/open_weight.py:51-52`, `:93` | input limit 100,000 estimated tokens; every call sends `max_tokens` 400 | derived: no `max_tokens` sent; no input limit of Valor's, OpenRouter refuses an input over the endpoint's context (131,072) itself; most output `OPEN_WEIGHT_MAX_COMPLETION` = 117,964 | See "The fallback leg" below |
 | 4 | `core/settings.py:171`, `core/judgement_sites.py:283`, `:302` | `judgement_concurrency` = 8 governance calls at once | unbounded, on one shared connection | See "The fan-out" below |
 | 5 | `harnesses/claude_code.py:113`, `:146`, `:152`; docstrings `:16-17`, `:134-135` | sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS` = 32000 on every workspace turn | unbounded by Valor: set only when the project spec names `max_output_tokens` | Claude Code documents its own per-model default and cap (code.claude.com/docs/en/env-vars, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`). The gateway charges from each body's `max_tokens` (`core/gateway.py:351`), so metering stays never under the invoice with any value. The spec key is Tom's per-project choice and stays. `turn()` (`:51`, 1024) builds test turns only and is left |
 | 6 | `core/gateway.py:272` | `sock_read=300`: an upstream silent for 300 s is cut, and the turn sees 502 "upstream failed" | unbounded: `sock_read=None`, and a call is cut when no client waits for it | See "The gateway" below |
@@ -78,7 +78,7 @@ written beside it.
 | 8 | `core/gateway.py:156` | a Keychain token expiring within 30 s is refused as expired | unbounded: compared with `time.time()` | The provider checks the token when the request arrives; a token that expires in flight gets a 401, which the gateway already answers by rereading the Keychain once (`:101-120`) and passing the 401 on |
 | 9 | `core/workspace.py:157` | role names `[a-z_][a-z0-9_]{0,40}` | derived: `{0,62}` | Postgres identifiers are at most `NAMEDATALEN - 1` = 63 bytes (Postgres docs, Lexical Structure, Identifiers); a longer name is truncated, so a spec role and its created role would differ. The character set stays: names go into `pgpass` lines and SQL |
 | 10 | `core/gateway.py:272`, `:411-412`, `:424` | `sock_connect=10`; a connect failure or timeout is `unsent`, and the turn sees 502 "upstream failed" | unbounded, and an honest outcome | The operating system ends a connect that gets no answer (on macOS about 75 s, the TCP connection-establishment timer). The 502 names what happened (below). Bug fix, no guard |
-| 11 | `core/workspace.py:766-775`, `core/router.py:115-118` | a service program past its 120 s raises `TimeoutExpired`; `_Services.up` catches only `Refused`, so a run ends in a traceback | an honest outcome | `_service_run` raises `Refused("<program> did not finish in 120 s")`; `stop_services` (`:926`) catches `Refused` in place of `TimeoutExpired`. The 120 s, `pg_ctl -t 60` (pg_ctl's own default), and the Redis poll keep their function (a hung start holds `provision:<task>` or the run lock) and are not changed here. Bug fix, no guard |
+| 11 | `core/workspace.py:766-775`, `core/router.py:115-118` | a service program past its 120 s raises `TimeoutExpired`; `_Services.up` catches only `Refused`, so a run ends in a traceback | unbounded, and interruptible | `_service_run` has no timeout: a service program runs to its end, and a stop of the task or a cancel of the run interrupts the start (Patch round 2). `pg_ctl -t 60` is pg_ctl's own default. The Redis readiness poll goes to the follow-up cap sweep (Decided by default) |
 | 12 | `core/settings.py:227`, `core/session.py:100-102` | `idle_turns` = 2: two turns in a row with no signal end the run for Tom | not changed by this task | Tom's question 1. Whichever way he answers, a one-line follow-up does it |
 
 ### The fallback leg (row 3)
@@ -98,10 +98,12 @@ checked 2026-10-03) gives that endpoint `context_length` 131072 and
   answer cut at 400 reads as `malformed` and fails the leg. The body sends
   no `max_tokens`, and the endpoint's own completion limit applies.
   `open_weight_max_tokens` is removed.
-- **Input limit.** `open_weight_max_input_tokens` becomes
-  `OPEN_WEIGHT_CONTEXT`. An input the endpoint cannot hold is one the
-  provider refuses, so skipping it is a protocol fact. The skip keeps its
-  existing `input_too_large` record.
+- **Input limit.** None of Valor's: `open_weight_max_input_tokens`, the
+  legs' `max_input_tokens`, and the port's pre-check are removed. The estimate (bytes / 3) is a
+  metering worst case; the host bills 0.39 to 0.62 of it, so a pre-check
+  against the context would refuse inputs the endpoint holds. OpenRouter
+  refuses an input over the endpoint's context itself (Patch round 3),
+  and that refusal is `input_too_large`, billed nothing.
 - **Metering.** The leg's `max_output_tokens` (the figure
   `judgement_worst_case` charges, `core/judgement.py:348-350`) becomes
   `OPEN_WEIGHT_MAX_COMPLETION`, the most the endpoint will produce for any
@@ -274,15 +276,16 @@ make provisioning interruptible, not a number. So:
 - `core/settings.py`: `OPEN_WEIGHT_CONTEXT` and
   `OPEN_WEIGHT_MAX_COMPLETION` with their source; `open_weight_max_tokens`,
   `judgement_concurrency`, and `setup_timeout_s` removed;
-  `open_weight_max_input_tokens` set from the context; the comment on the
-  legs rewritten to the facts.
+  `open_weight_max_input_tokens` removed; the comment on the legs
+  rewritten to the facts.
 - `core/judgement.py`: `Shared` and `_connect`; `judge` takes `shared`;
   `post` returns `rate_limited`, parses `Retry-After`, and refuses inside
   a hold.
 - `core/judgement_sites.py`: `MAX_CASES` removed; `governance` shares one
   connection and gathers every hunk with `return_exceptions=True`.
-- `tools/open_weight.py`: no `max_tokens` in the body; the leg's input and
-  output figures from the endpoint's.
+- `tools/open_weight.py`: no `max_tokens` in the body; no input limit, and
+  OpenRouter's context refusal read as `input_too_large`; the output figure
+  from the endpoint's.
 - `core/__main__.py`: the open-file limit raised in `main`; `_provision`
   under an `Interruptible`, with SIGTERM and SIGHUP handled.
 - `core/gateway.py`: `cut`; `abandoned`; `handler_cancellation=True` with
@@ -296,8 +299,8 @@ make provisioning interruptible, not a number. So:
 - `core/workspace.py`: the clone's ref removed under `uninterrupted()`;
   setup commands through `git.start`, output to a file, waited on, with no
   timeout; role regex
-  `{0,62}`; `_service_run` raises `Refused` on timeout; `stop_services`
-  catches `Refused`.
+  `{0,62}`; `_service_run` has no timeout and a run's service start is
+  interruptible by a stop or a cancel.
 - `harnesses/claude_code.py`: `workspace_turn`'s `max_output_tokens`
   defaults to `None`, and the variable is set only when it is given; both
   docstrings say what it does.
@@ -312,8 +315,7 @@ New, each of a removed cap's unbounded or honest behavior:
 1. `test_calibrate_loads_any_number_of_cases`: `load_cases` on 51 cases
    returns 51.
 2. `test_open_weight_sends_no_output_limit`: the body has no `max_tokens`.
-3. `test_open_weight_input_limit_is_its_endpoints_context`: the leg's
-   input limit is `OPEN_WEIGHT_CONTEXT`.
+3. Removed in Patch round 3 with the field it read.
 4. `test_open_weight_worst_case_is_its_endpoints_largest_answer`: a local
    upstream that answers 200 with no usage; the charge is
    `judgement_worst_case(estimate, OPEN_WEIGHT_MAX_COMPLETION, price)`.
@@ -434,8 +436,7 @@ tests, unchanged).
   nothing and has its function.
 - Truncated text in rows (stderr and setup tails, ledger display): they
   refuse and route nothing.
-- `_service_run`'s 120 s and the Redis poll's values: functional; only
-  their outcome is fixed here.
+- The Redis poll's values: the follow-up cap sweep (Decided by default).
 - `scripts/`: 1.5 moves every replay script into `tests/emulator/` and
   edits them (m1-5-emulator.md), so this task does not touch them. Their
   verdicts, relayed to builder-1-5:
@@ -503,6 +504,15 @@ timeouts. The docs check writes these.
   asked; nothing waits on `Retry-After`.
 - The project spec's `max_output_tokens` key is kept as Tom's per-project
   choice.
+- The remaining unsourced limits the review of patch round 2 listed are
+  out of this task's scope and go to a follow-up cap sweep the lead runs
+  after milestone 1 merges: the Redis readiness poll (100 × 0.05 s, then
+  `Refused`), `_connects`' 0.2 s socket timeout, Jev's 10 s and the
+  fallback's 30 s HTTP timeouts, the Keychain `security` call's 10 s
+  timeout and its re-read `ttl_s` and `min_interval_s` (60 s each),
+  `reap_grace_s` (2.0), the gateway's `client_max_size` (64 MiB), and
+  `mirror_fetch_max_bytes` (2 GB) and `mirror_fetch_max_footprint_mb`
+  (1,024). `git_timeout_s` and `reconcile_after_s` go with 1.4d.
 
 ## Patch round 1 (review round 1 of 2)
 
@@ -559,3 +569,27 @@ Tom, on one more patch round for nine deliveries with the scopes and order put t
 Scope: the Delivery's recommendation (setup output to log files, the constant and the seek dropped, the other unsourced error-output cuts removed), plus the lead's additions: `setup_timeout_s` 1200, `_service_run`'s `timeout=120`, and `suite_timeout_s` each sourced or removed; Jev's `max_input_tokens` 30k replaced by the documented 32,000 (state and longest question) and 64,000 (whole request), no margin, estimate factors cited or replaced by Jev's own refusal.
 
 Question 1, `idle_turns`: Tom: "Remove it". The setting and the stop it drives are deleted in a one-line follow-up; the incident's cause is fixed in the code (background tasks disabled in every turn).
+
+## Patch round 2 (Tom's feedback scope)
+
+Rebased onto `valor-cori-rebuild` (3a merged); the gateway conflict keeps both the OpenAI route and this task's cut, abandon and 401 handling.
+
+- **Setup output.** Each command's whole stdout and stderr go to `<task root>/setup/<n>.log`, outside the turn profile's writable paths; the result is `{command, exit, output}`. `SETUP_TAIL` and the seek are gone. Tests: `test_a_setup_commands_whole_output_is_in_its_log_which_no_turn_can_write` (100,000 characters kept whole; a setup command's write to `setup/0.log` is refused by the profile), and the child-holds-output test reads the log.
+- **The other cuts.** A turn's whole stdout and stderr go to `<work dir>/<task>/turns/<turn>.stdout` and `.stderr`; `turn.ended` names both in place of `stderr_tail`, the harness parses the stdout file, unparseable output is `{"unparsed": true}`, and the failed status line names the stderr file. Also whole now: git's stderr in `hostile`, `trusted` and `remote_sha`; `initdb`'s and `redis-server`'s stderr; `bounded`'s stderr; a reaped process's command line; the uncommitted files `done.md` lists; `ledger.render`'s payloads. The test session's `VALOR_WORK` is a temporary directory. Tests: one per cut, in `test_kernel.py`, `test_workspace.py`, `test_reap.py`, `test_session.py`.
+- **`setup_timeout_s`.** Already removed on this branch: provisioning is interruptible.
+- **`_service_run`'s `timeout=120`.** Removed. A service program runs to its end through `git.start`, recorded on the watch; under `git.interruptible()` an interrupt ends it with `git.Interrupted`. A run's `_Services.up` starts the services under a watch and races a stop of the task (LISTEN on the stop channel, `is_stopped` first) and a cancel of the run; either interrupts the start, `started` is set before the first program so `down` stops what started, and a stop folds as `stopped`. `stop_services` runs uninterrupted, as cleanup. `pg_ctl -t 60` stays: it is pg_ctl's own default. Tests: `test_a_service_program_has_no_time_limit_and_an_interrupt_ends_it`, `test_a_stop_of_the_task_interrupts_its_services_starting`, `test_a_cancelled_run_interrupts_its_services_starting`.
+- **`suite_timeout_s`.** Not on this branch; it is in 1.4b's unmerged `core/checks.py`. Verdict: remove it, since the stop raced in `_race` already ends a hung suite. 1.4b's patch, or this task's rebase after 1.4b, applies it.
+- **Jev's input limit.** `jev_max_input_tokens` is removed and Jev gets no pre-check. Jev documents 64,000 tokens per request and 32,000 for the state plus the longest question (https://docs.typesafe.ai/models), counted by its own tokenizer; the estimate's factors are metering worst cases, and bytes / 3 is not Jev's count (probed 2026-10-03: a 73,804-byte state billed 22,150 input tokens). So any pre-check would be an invented refusal. A 158,384-byte state got `400 {"detail": {"error_type": "max_tokens_exceeded"}}` with no usage; `Jev.ask` reads that as `input_too_large`, billed nothing, so too-large judgements still settle at once. The two probe calls cost about $0.001, unmetered. The open-weight pre-check stays (the endpoint's listed context). The test upstream refuses like Jev. Tests: `test_jev_is_sent_any_input_and_its_own_refusal_is_input_too_large_billed_nothing`, `test_jevs_max_tokens_exceeded_is_read_from_its_body_whatever_the_size_sent`, `test_another_jev_400_is_an_http_status_failure`, and the two too-large site tests.
+- `idle_turns` is untouched (1.4i).
+- Rebased again onto `ca620a91f` (3c and 4.2 merged): `claude_code.workspace_turn` keeps 4.2's signature with `max_output_tokens: int | None = None`, and `run_turn` keeps 4.2's grant-retiring dispatch with the output files. Suite there: 748 passed, 11 skipped. `ruff check` clean; `ruff format --check` flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`, which this task does not touch.
+
+## Patch round 3 (the lead's narrow round)
+
+Scope: the review of patch round 2 (`changes`, F1 and F2), and the remaining unsourced limits recorded under Decided by default.
+
+- **F1, the fallback's input pre-check.** Removed: `settings.open_weight_max_input_tokens` is gone, as for Jev. `OPEN_WEIGHT_CONTEXT` stays as the endpoint's listed fact; the test upstream refuses by it. OpenRouter's own refusal, probed 2026-10-03 with an 842,333-byte body (estimate 280,778): with `allow_fallbacks` off it answers `404` with no usage and `error.message` "No endpoints found for qwen/qwen3-235b-a22b-2507. Every candidate endpoint was removed during routing: ...; Filter by Context Length removed novita/fp8, parasail/fp8, ...; ...". `OpenWeight.ask` reads a 404 whose message names `parasail/fp8` in the "Filter by Context Length removed" step as `input_too_large`, billed nothing, so a judgement both legs refuse settles at once as before; any other 404 is `http_status`. The probe was refused at routing and billed nothing. Metering is unchanged: the worst case is still reserved from the estimate. The test upstream refuses an open-weight input whose billed tokens (bytes / 3 × 0.6, as it bills) are over the context, with that 404. The two site tests' oversize hunks grow to about 900 KB and both legs are asked. Tests: `test_the_fallback_is_sent_an_input_over_its_context_by_the_estimate`, `test_openrouters_context_refusal_is_read_from_its_body_whatever_the_size_sent`, `test_another_openrouter_404_is_an_http_status_failure`, `test_inputs_too_large_for_both_legs_fail_as_too_large_billed_nothing`.
+- **The lead's additions.** `Leg.max_input_tokens`, each leg's `max_input_tokens`, and the pre-check in `JudgementPort._open` with the `call is None` paths in `_call` and `_unused` are deleted: every leg is asked, and an input too large for it is the provider's refusal. The two tests that only read the field are removed. `REASONS["input_too_large"]` reads "the provider refused the inputs as over its limit".
+- **The refusal is matched on message text (the lead's decision).** OpenRouter's 404 has no structured field naming the endpoint a filter removed, so `_over_context` matches `parasail/fp8` in the message's "Filter by Context Length removed" step. If OpenRouter rewords that message, an oversize input reads as `http_status`, billed nothing, and is rerun up to `UNANSWERED_RUNS` before it settles.
+- **F2.** The Done rows for the fallback leg and the service programs, and items 3 and 11, describe the code as it is and name the tests that exist.
+- **Remaining unsourced limits.** Recorded under Decided by default; not changed here.
+- No new cap, guard or retry.

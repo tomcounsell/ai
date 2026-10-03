@@ -495,3 +495,25 @@ def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path
         proc.kill()
         out, _ = proc.communicate()
     assert "unknown option" not in out
+
+
+def test_done_with_uncommitted_changes_names_every_file(tmp_path):
+    from tests import scripted
+
+    repo = scripted.toy_repo(tmp_path)
+    names = [f"f{i:02}.txt" for i in range(30)]
+    for name in names:
+        (repo / name).write_text("x\n")
+    candidate, why = session._candidate(str(repo), "t")
+    assert candidate is None and all(name in why for name in names)
+
+
+def test_a_failing_git_call_raises_with_gits_whole_stderr(tmp_path):
+    from core import git
+    from tests import scripted
+
+    repo = scripted.toy_repo(tmp_path)
+    ref = "x" * 400
+    with pytest.raises(git.GitError) as failed:
+        git.trusted(repo, "show", "--quiet", "--format=%H", ref)
+    assert str(failed.value).endswith(f"'{ref}': File name too long")  # past the first 300 characters

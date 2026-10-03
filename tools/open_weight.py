@@ -12,6 +12,13 @@ number per label: the model's stated probability.
 A generative model's stated probabilities are a weaker signal than a
 decision endpoint's, which is why its floors are its own.
 
+The kernel sends every input: its estimate (bytes / 3) is a metering worst
+case, not the host's count. OpenRouter refuses an input over the pinned
+endpoint's context itself: with fallbacks off it answers `404` with no
+usage, its `error.message` naming the endpoint among those its "Filter by
+Context Length" removed (an 842,333-byte body, probed 2026-10-03). That is
+`input_too_large`, billed nothing.
+
 Effect class `read`. One POST is one attempt. `usage.cost` is OpenRouter's
 reported charge; the port charges the larger of it and the tokens at the
 pinned price.
@@ -23,6 +30,7 @@ from collections.abc import Mapping
 from core import judgement, spending
 from core.judgement import DATA_ONLY, JudgementTask, LegAnswer, LegError
 from core.settings import (
+    OPEN_WEIGHT_MAX_COMPLETION,
     OPEN_WEIGHT_MODEL,
     OPEN_WEIGHT_PIN,
     OPEN_WEIGHT_PROVIDER,
@@ -48,8 +56,8 @@ class OpenWeight:
         self._key = key
         self.model = OPEN_WEIGHT_PIN
         self.timeout_s = timeout_s or settings.open_weight_timeout_s
-        self.max_input_tokens = settings.open_weight_max_input_tokens
-        self.max_output_tokens = settings.open_weight_max_tokens
+        # No output limit is sent; the endpoint's own is the worst case.
+        self.max_output_tokens = OPEN_WEIGHT_MAX_COMPLETION
 
     def body(self, task: JudgementTask, inputs: Mapping[str, str]) -> dict:
         lines = [SYSTEM, ""]
@@ -90,7 +98,6 @@ class OpenWeight:
                 "require_parameters": True,
             },
             "temperature": 0,
-            "max_tokens": self.max_output_tokens,
             "usage": {"include": True},
         }
 
@@ -108,9 +115,29 @@ class OpenWeight:
         if isinstance(got, LegError):
             return got
         status, raw = got
+        if status == 404 and _over_context(raw):
+            return LegError(
+                "input_too_large", "none", status=404, what="OpenRouter: over the endpoint's context"
+            )
         if status != 200:
             return LegError("http_status", "none", status=status, what=f"HTTP {status}")
         return decode(task, raw)
+
+
+def _over_context(raw: bytes) -> bool:
+    """Whether an error body says the pinned endpoint was removed for its
+    context length."""
+    try:
+        message = json.loads(raw)["error"]["message"]
+    except ValueError, UnicodeDecodeError, KeyError, TypeError:
+        return False
+    if not isinstance(message, str):
+        return False
+    for step in message.split(";"):
+        _, found, removed = step.partition("Filter by Context Length removed ")
+        if found and OPEN_WEIGHT_PROVIDER in (e.strip(" .") for e in removed.split(",")):
+            return True
+    return False
 
 
 def _usage(payload) -> dict | None:

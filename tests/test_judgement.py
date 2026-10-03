@@ -29,7 +29,8 @@ from psycopg.types.json import Jsonb
 from core import credentials, db, judgement, ledger, spending, tasks
 from core.judgement import DATA_ONLY, LOOPBACK_KEY, JudgementPort
 from core.judgement_tasks import BREADTH, GOVERNANCE, JUDGE, TASKS
-from core.settings import JEV_MODEL, JEV_URL, OPEN_WEIGHT_PIN, OPEN_WEIGHT_URL
+from core.settings import JEV_MODEL, JEV_URL, OPEN_WEIGHT_CONTEXT, OPEN_WEIGHT_PIN, OPEN_WEIGHT_URL
+from core.settings import settings as config
 from harnesses import claude_code
 from tests import judgement_upstream
 from tests.conftest import TEST_DB
@@ -301,19 +302,59 @@ def test_both_down_is_a_failure_row_with_fixed_reasons_and_no_provider_text(dsn)
     assert "sekrit" not in json.dumps(run(rows(dsn, task)), default=str)
 
 
-def test_an_input_over_jevs_cap_skips_jev_and_opens_nothing_for_it(dsn):
-    big = {**REQUEST, "request": "x" * 100_000}
+JEV_TOO_LARGE = {"status": 400, "text": json.dumps({"detail": {"error_type": "max_tokens_exceeded"}})}
+
+
+def test_jev_is_sent_any_input_and_its_own_refusal_is_input_too_large_billed_nothing(dsn):
+    big = {**REQUEST, "request": "x" * (32_000 * 4)}
     j, task, seen = ask(dsn, default={"probs": PRECISE}, inputs=big)
-    assert [r["leg"] for r in seen] == ["open_weight"] and j.leg == "fallback"
-    assert [r["payload"]["leg"] for r in run(rows(dsn, task, "gateway.opened"))] == ["open_weight"]
-    assert j.attempts[0]["reason"] == "input_too_large"
+    assert [r["leg"] for r in seen] == ["jev", "open_weight"] and j.leg == "fallback"
+    assert j.attempts[0]["reason"] == "input_too_large" and j.attempts[0]["status"] == 400
+    assert _charges(dsn, task)["jev"]["usd_micros"] == 0
 
 
-def test_inputs_too_large_for_both_legs_fail_as_too_large(dsn):
-    huge = {**REQUEST, "request": "x" * 400_000}
+def test_jevs_max_tokens_exceeded_is_read_from_its_body_whatever_the_size_sent(dsn):
+    j, _, _ = ask(dsn, JEV_TOO_LARGE, default={"probs": PRECISE})
+    assert j.leg == "fallback" and j.attempts[0]["reason"] == "input_too_large"
+
+
+def test_another_jev_400_is_an_http_status_failure(dsn):
+    j, _, _ = ask(dsn, {"status": 400, "text": json.dumps({"detail": "bad"})}, default={"probs": PRECISE})
+    assert j.leg == "fallback" and j.attempts[0]["reason"] == "http_status"
+
+
+def test_inputs_too_large_for_both_legs_fail_as_too_large_billed_nothing(dsn):
+    # over the endpoint's context as the host counts it (bytes / 3 x 0.6)
+    huge = {**REQUEST, "request": "x" * (OPEN_WEIGHT_CONTEXT * 6)}
     j, task, seen = ask(dsn, inputs=huge)
-    assert seen == [] and not j.answered
+    assert [r["leg"] for r in seen] == ["jev", "open_weight"] and not j.answered
+    assert [(a["reason"], a["status"]) for a in j.attempts] == [
+        ("input_too_large", 400),
+        ("input_too_large", 404),
+    ]
+    assert {leg: c["usd_micros"] for leg, c in _charges(dsn, task).items()} == {"jev": 0, "open_weight": 0}
     assert run(rows(dsn, task, "judgement.failed"))[0]["payload"]["too_large"] is True
+
+
+def test_the_fallback_is_sent_an_input_over_its_context_by_the_estimate(dsn):
+    # over the endpoint's context by the estimate, but under it as the host counts
+    over = {**REQUEST, "request": "x" * (OPEN_WEIGHT_CONTEXT * config.bytes_per_token * 6 // 5)}
+    assert ow_leg.OpenWeight(OPEN_WEIGHT_URL, LOOPBACK_KEY).estimate(JUDGE, over) > OPEN_WEIGHT_CONTEXT
+    j, _, seen = ask(dsn, default={"probs": PRECISE}, inputs=over)
+    assert [r["leg"] for r in seen] == ["jev", "open_weight"] and j.leg == "fallback" and j.answered
+
+
+def test_openrouters_context_refusal_is_read_from_its_body_whatever_the_size_sent(dsn):
+    refusal = {"status": 404, "text": json.dumps(judgement_upstream.OPEN_WEIGHT_TOO_LARGE)}
+    j, task, _ = ask(dsn, JEV_TOO_LARGE, refusal)
+    assert [a["reason"] for a in j.attempts] == ["input_too_large", "input_too_large"]
+    assert run(rows(dsn, task, "judgement.failed"))[0]["payload"]["too_large"] is True
+
+
+def test_another_openrouter_404_is_an_http_status_failure(dsn):
+    other = json.dumps({"error": {"message": "No endpoints found for this model.", "code": 404}})
+    j, _, _ = ask(dsn, {"status": 500}, {"status": 404, "text": other})
+    assert [a["reason"] for a in j.attempts] == ["http_status", "http_status"]
 
 
 def test_a_stopped_task_asks_no_provider_and_its_refusal_is_a_ledger_row(dsn):
@@ -651,3 +692,69 @@ def test_each_legs_estimate_covers_what_it_billed_for_a_hunk_of_hashes():
 def test_a_landed_calibrated_digest_is_the_task_as_the_providers_legs_render_it(task):
     legs = {"jev": jev_leg.Jev("u", "k"), "open_weight": ow_leg.OpenWeight("u", "k")}
     assert judgement.task_sha256(task, JudgementPort(legs).signature()) == task.calibrated
+
+
+# -- the fallback's limits are its endpoint's; a 429 holds its endpoint -----------------
+
+
+def test_open_weight_sends_no_output_limit():
+    leg = ow_leg.OpenWeight(OPEN_WEIGHT_URL, LOOPBACK_KEY)
+    assert "max_tokens" not in leg.body(JUDGE, REQUEST)
+
+
+def test_open_weight_worst_case_is_its_endpoints_largest_answer(dsn):
+    from core.settings import OPEN_WEIGHT_MAX_COMPLETION
+
+    j, task, _ = ask(dsn, {"status": 500}, {"probs": PRECISE, "usage": None})
+    assert j.leg == "fallback"
+    opened = next(
+        r["payload"] for r in run(rows(dsn, task, "gateway.opened")) if r["payload"]["leg"] == "open_weight"
+    )
+    price = spending.judgement_price(opened["model"])
+    want = spending.judgement_worst_case(opened["estimated_input"], OPEN_WEIGHT_MAX_COMPLETION, price)
+    assert opened["max_tokens"] == OPEN_WEIGHT_MAX_COMPLETION and opened["estimate_usd_micros"] == want
+    assert _charges(dsn, task)["open_weight"]["usd_micros"] == want
+
+
+def test_a_429_holds_its_endpoint_and_the_next_call_goes_to_the_fallback(dsn):
+    sid = UP.script({"status": 429, "headers": {"Retry-After": "60"}}, default={"probs": PRECISE})
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.attempts[0]["reason"] == "rate_limited" and j.leg == "fallback"
+    assert [r["leg"] for r in UP.seen(sid)] == ["jev", "open_weight"]
+
+    async def again():
+        task = await new_task(dsn)
+        started = asyncio.get_running_loop().time()
+        got = await UP.port(script=sid).judge(JUDGE, REQUEST, task_id=task, ref={"t": 2}, dsn=dsn)
+        return got, asyncio.get_running_loop().time() - started
+
+    j, elapsed = run(again())
+    assert j.attempts[0]["reason"] == "rate_limited" and j.leg == "fallback" and j.answered
+    assert [r["leg"] for r in UP.seen(sid)] == ["jev", "open_weight", "open_weight"]  # jev held
+    assert elapsed < 5
+
+
+def test_a_429_without_retry_after_holds_nothing(dsn):
+    sid = UP.script({"status": 429}, default={"probs": PRECISE})
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.attempts[0]["reason"] == "rate_limited"
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.leg == "primary"
+    assert [r["leg"] for r in UP.seen(sid)] == ["jev", "open_weight", "jev"]
+
+
+def test_a_retry_after_of_non_ascii_digits_holds_nothing(dsn):
+    assert judgement.retry_after("²", 100.0) is None
+    assert judgement.retry_after("٣٠", 100.0) is None
+    sid = UP.script({"status": 429, "headers": {"Retry-After": "²"}}, default={"probs": PRECISE})
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.attempts[0]["reason"] == "rate_limited" and j.leg == "fallback"
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.leg == "primary"  # nothing was held
+
+
+def test_retry_after_as_an_http_date_is_honoured():
+    assert judgement.retry_after("Wed, 21 Oct 2037 07:28:00 GMT", 0.0) == 2139722880.0
+    assert judgement.retry_after("60", 100.0) == 160.0
+    assert judgement.retry_after(None, 100.0) is None
+    assert judgement.retry_after("soon", 100.0) is None

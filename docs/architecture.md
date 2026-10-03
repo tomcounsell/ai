@@ -251,7 +251,7 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway (`route: gateway` or `openai`); the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage; on the OpenAI route the credential, tier, tool calls, and request id | yes |
-| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, the paths of its stdout and stderr files, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record, but
@@ -306,7 +306,7 @@ ports, under a service sandbox; and the project's setup, run once under the
 turn's sandbox. Services run only while a run of the task lasts; every run
 first stops those a killed kernel left up whose run or provisioning is not
 live. The disk is kept until `python -m core workspace remove`. The mirror's
-fetch treats the builder's clone as hostile (harnesses.md, The workspace).
+fetch treats the builder's clone as hostile (workspace.md).
 Serves Mission item 1 and bounded authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which

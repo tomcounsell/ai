@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import broker, db, ledger, machine, tasks, verdicts, workspace
+from core import broker, db, git, ledger, machine, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -83,7 +83,10 @@ class _Services:
     """The task's workspace services (its Postgres, its Redis): started just
     before the first runner of the run, stopped when the run returns. At the
     start of every run, the services of other tasks a killed kernel left up
-    are stopped, unless their own run is live (`workspace.sweep`)."""
+    are stopped, unless their own run is live (`workspace.sweep`). Starting
+    them has no time limit: a stop of the task, or a cancel of the run,
+    interrupts it (`git.interruptible()`), and whatever did start is
+    stopped with the run."""
 
     def __init__(self, task_id: str, dsn: str, names: list[str], ports: dict[str, int], lay):
         self.task_id, self.dsn, self.names, self.ports, self.lay = task_id, dsn, names, ports, lay
@@ -112,11 +115,29 @@ class _Services:
         """Start them if they are not up; why not, or None."""
         if self.started or not self.names:
             return None
-        try:
-            await asyncio.to_thread(self._start)
-        except workspace.Refused as exc:
-            return str(exc)
-        self.started = True
+        self.started = True  # from the first program on, `down` stops what started
+        with git.interruptible() as held:
+            job = asyncio.ensure_future(asyncio.to_thread(self._start))
+            stopped = asyncio.ensure_future(self._stopped())
+            try:
+                await asyncio.wait({job, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                await self._interrupt(held, job)
+                job.cancelled() or job.exception()  # the interrupt, not the thread's error, is raised
+                raise
+            finally:
+                stopped.cancel()
+            if not job.done():
+                await self._interrupt(held, job)
+                if not stopped.cancelled() and stopped.exception() is not None:
+                    job.cancelled() or job.exception()
+                    raise stopped.exception()  # the listener failed; the task was not stopped
+            try:
+                await job
+            except workspace.Refused as exc:
+                return str(exc)
+            except git.Interrupted:
+                return "the task was stopped while its services started"
         return None
 
     def _start(self) -> None:
@@ -127,6 +148,26 @@ class _Services:
         workspace.stop_services(self.task_id, self.lay)
         workspace.remove_check_services(self.lay)
         workspace.start_services(self.task_id, self.lay, self.names, self.ports)
+
+    async def _stopped(self) -> None:
+        """Returns once the task is stopped."""
+        async with await db.connect(self.dsn) as listener:
+            await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
+            if await tasks.is_stopped(listener, self.task_id):
+                return
+            async for note in listener.notifies():
+                if note.payload == self.task_id:
+                    return
+
+    @staticmethod
+    async def _interrupt(held: git.Interruptible, job: asyncio.Future) -> None:
+        """End the start and wait for its thread, whatever else is cancelled."""
+        stop = asyncio.ensure_future(asyncio.to_thread(held.interrupt))
+        while not (stop.done() and job.done()):
+            try:
+                await asyncio.wait({stop, job})
+            except asyncio.CancelledError:
+                asyncio.current_task().uncancel()
 
     def down(self) -> None:
         if self.started:
@@ -160,6 +201,8 @@ async def _loop(gateway, task_id, runners, dsn, alive, services: _Services) -> d
             why = await services.up()
             if why:
                 async with await db.connect(dsn) as conn:
+                    if await tasks.is_stopped(conn, task_id):
+                        continue  # the fold settles it as stopped
                     state = await tasks.status(conn, task_id)
                 return {"status": "failed", "state": state, "turn": {"result": why}}
         if f.state is State.CHECKS:

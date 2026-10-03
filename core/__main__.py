@@ -84,6 +84,8 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import resource
+import signal
 from pathlib import Path
 
 from core import (
@@ -94,6 +96,7 @@ from core import (
     credentials,
     db,
     fresh,
+    git,
     guards,
     judgement,
     judgement_sites,
@@ -224,7 +227,8 @@ def _status_line(task_id: str, out: dict) -> str:
         "legacy": "this task predates the state machine; it is read-only",
         "already running": "another run of this task is in progress",
         "lock lost": "the run's lock connection died; run again",
-        "failed": f"the turn failed: {turn.get('stderr_tail') or turn.get('result')}",
+        "failed": f"the turn failed: {turn.get('result')}"
+        + (f"; its stderr is in {turn['stderr']}" if turn.get("stderr") else ""),
     }[status]
     return f"{status.upper()} (task {task_id}; {spent}): {detail}"
 
@@ -250,6 +254,37 @@ async def _run_task(task_id: str) -> str:
     finally:
         await gateway.close()
     return _status_line(task_id, out)
+
+
+async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None):
+    """`workspace.provision` in a thread, with no time limit on its git
+    calls or setup commands. An interrupt of `start` (Ctrl-C, or SIGTERM or
+    SIGHUP of the kernel while it provisions) ends them, and the thread is
+    waited for, so `provision:<task>` is held until its cleanup is done; a
+    second signal or cancel during that cleanup waits for it too."""
+    loop = asyncio.get_running_loop()
+    me = asyncio.current_task()
+    with git.interruptible() as held:
+        job = asyncio.ensure_future(asyncio.to_thread(workspace.provision, task_id, spec, ports, base=base))
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            loop.add_signal_handler(sig, me.cancel)
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            # The handlers stay: without them a second signal would end the
+            # kernel with the cleanup half done.
+            stop = asyncio.ensure_future(asyncio.to_thread(held.interrupt))
+            while not (stop.done() and job.done()):
+                try:
+                    await asyncio.wait({stop, job})
+                except asyncio.CancelledError:
+                    me.uncancel()  # a second cancel waits for the same cleanup
+            if not job.cancelled():
+                job.exception()  # the thread's own Refused; the interrupt is what is raised
+            raise
+        finally:
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                loop.remove_signal_handler(sig)
 
 
 async def _start_project(conn, args) -> str:
@@ -286,7 +321,7 @@ async def _start_project(conn, args) -> str:
         finally:
             await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
         try:
-            made = await asyncio.to_thread(workspace.provision, task_id, spec, ports, base=args.base)
+            made = await _provision(task_id, spec, ports, args.base)
         except workspace.Refused as exc:
             raise SystemExit(f"start refused: {exc}") from None
         try:
@@ -615,7 +650,28 @@ class _Parser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+OPEN_MAX = 10240
+
+
+def _raise_open_files() -> None:
+    """The soft open-file limit to the hard one, so a fan-out of judgement
+    calls (a socket each) is not refused by launchd's soft 256. Where the
+    hard limit is unlimited and the system refuses that, setrlimit(2)'s own
+    rule: `min(OPEN_MAX, rlim_max)`, `OPEN_MAX` 10240 (`sys/syslimits.h`).
+    Never lowered."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    for want in (hard, min(OPEN_MAX, hard)):
+        if want <= soft:
+            return
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            return
+        except ValueError, OSError:
+            continue
+
+
 def main() -> None:
+    _raise_open_files()
     parser = _Parser(
         prog="python -m core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

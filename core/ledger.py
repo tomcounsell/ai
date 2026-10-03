@@ -59,11 +59,9 @@ async def lock(conn, key: str) -> None:
 
 
 def render(rows: list[dict[str, Any]]) -> str:
-    """The ledger as text, one line per row."""
+    """The ledger as text, one line per row, each payload whole."""
     lines = []
     for row in rows:
         payload = json.dumps(row["payload"], sort_keys=True)
-        if len(payload) > 150:
-            payload = payload[:147] + "..."
         lines.append(f"{row['id']:>5}  {row['type']:<18} {payload}")
     return "\n".join(lines)

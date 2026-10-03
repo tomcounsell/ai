@@ -28,10 +28,13 @@ nothing here imports them. Inputs are data: an adapter renders them where
 the provider reads data, never into an instruction.
 """
 
+import asyncio
+import contextlib
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from ipaddress import ip_address
 from typing import Any, Protocol
@@ -137,7 +140,8 @@ REASONS = {
     "http_status": "the provider answered with an error status",
     "timeout": "the provider did not answer in time",
     "malformed": "the provider's answer could not be read as a judgement",
-    "input_too_large": "the inputs exceed what this leg may be sent",
+    "input_too_large": "the provider refused the inputs as over its limit",
+    "rate_limited": "the provider asked for no calls until later",
 }
 
 
@@ -158,7 +162,6 @@ class Leg(Protocol):
     name: str  # "jev" or "open_weight"
     model: str  # the pinned id written on rows and priced
     endpoint: str
-    max_input_tokens: int
     max_output_tokens: int
     fixed_text: str  # every instruction the adapter adds to the task's own words
 
@@ -252,6 +255,28 @@ class Judgement:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class Shared:
+    """One connection that many judgements write through, one step at a
+    time. Every step already takes the task's advisory lock, so they run
+    one at a time in Postgres either way; sharing keeps a fan-out of many
+    hunks at one connection. The lock is held only around a step's
+    database work, never around a provider call."""
+
+    conn: Any
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@contextlib.asynccontextmanager
+async def _connect(dsn: str | Shared) -> AsyncIterator[Any]:
+    if isinstance(dsn, Shared):
+        async with dsn.lock:
+            yield dsn.conn
+    else:
+        async with await db.connect(dsn) as conn:
+            yield conn
+
+
 class JudgementPort:
     """Built by the composition root with the two legs. `judge` is the one
     entry point the kernel's sites use; `ask_leg` asks one named leg alone,
@@ -286,11 +311,13 @@ class JudgementPort:
         task_id: str,
         ref: dict[str, Any],
         dsn: str | None = None,
+        shared: Shared | None = None,
     ) -> Judgement:
         """Ask the task's questions. Raises `tasks.TaskStopped` (before any
-        provider call) when the task is stopped."""
+        provider call) when the task is stopped. With `shared`, every step
+        writes through that connection instead of opening its own."""
         _check_inputs(task, inputs)
-        dsn = self._dsn(dsn)
+        dsn = shared or self._dsn(dsn)
         primary, fallback = (self.legs[n] for n in route(task))
         jid = ledger.new_id()
         calls = await self._open(dsn, task, inputs, task_id, jid, [primary, fallback])
@@ -324,17 +351,13 @@ class JudgementPort:
 
     # -- the steps ----------------------------------------------------------
 
-    async def _open(self, dsn, task, inputs, task_id, jid, legs) -> dict[str, dict | None]:
-        """Open each leg's call, in order. A leg whose inputs are over its
-        cap opens nothing (it will not be called). A stopped task's refusal
-        charges what was already opened 0 and raises."""
-        calls: dict[str, dict | None] = {}
-        async with await db.connect(dsn) as conn:
+    async def _open(self, dsn, task, inputs, task_id, jid, legs) -> dict[str, dict]:
+        """Open each leg's call, in order. A stopped task's refusal charges
+        what was already opened 0 and raises."""
+        calls: dict[str, dict] = {}
+        async with _connect(dsn) as conn:
             for leg in legs:
                 estimated = leg.estimate(task, inputs)
-                if estimated > leg.max_input_tokens:
-                    calls[leg.name] = None
-                    continue
                 price = spending.judgement_price(leg.model)
                 call = {
                     "call_id": ledger.new_id(),
@@ -354,22 +377,16 @@ class JudgementPort:
                     await spending.open_call(conn, task_id, call)
                 except tasks.TaskStopped:
                     for done in calls.values():
-                        if done is not None:
-                            await spending.charge(
-                                conn, task_id, done["call_id"], 0, {**_detail(done), "unused": True}
-                            )
+                        await spending.charge(
+                            conn, task_id, done["call_id"], 0, {**_detail(done), "unused": True}
+                        )
                     raise
                 calls[leg.name] = call
         return calls
 
     async def _call(self, dsn, task, inputs, task_id, leg, call, role) -> dict[str, Any]:
         started = time.monotonic()
-        if call is None:
-            got: LegAnswer | LegError = LegError(
-                "input_too_large", "none", what="estimated input over the cap"
-            )
-        else:
-            got = await leg.ask(task, inputs)
+        got: LegAnswer | LegError = await leg.ask(task, inputs)
         latency_ms = round((time.monotonic() - started) * 1000)
         attempt: dict[str, Any] = {
             "leg": leg.name,
@@ -400,26 +417,22 @@ class JudgementPort:
                 {"outcome": "failed", "reason": got.reason, "status": got.status, "text": got.text}
             )
             usage = got.usage
-        if call is not None:
-            charged, detail = _charge_for(call, got, usage)
-            async with await db.connect(dsn) as conn:
-                await spending.charge(conn, task_id, call["call_id"], charged, {**_detail(call), **detail})
-            attempt.update({"call_id": call["call_id"], "usd_micros": charged, "usage": usage})
-        else:
-            attempt.update({"call_id": None, "usd_micros": 0, "usage": None})
+        charged, detail = _charge_for(call, got, usage)
+        async with _connect(dsn) as conn:
+            await spending.charge(conn, task_id, call["call_id"], charged, {**_detail(call), **detail})
+        attempt.update({"call_id": call["call_id"], "usd_micros": charged, "usage": usage})
         attempt["answers"] = answers
         return attempt
 
     async def _unused(self, dsn, task_id, leg, call) -> dict[str, Any]:
-        if call is not None:
-            async with await db.connect(dsn) as conn:
-                await spending.charge(conn, task_id, call["call_id"], 0, {**_detail(call), "unused": True})
+        async with _connect(dsn) as conn:
+            await spending.charge(conn, task_id, call["call_id"], 0, {**_detail(call), "unused": True})
         return {
             "leg": leg.name,
             "role": "fallback",
             "model": leg.model,
             "outcome": "unused",
-            "call_id": call and call["call_id"],
+            "call_id": call["call_id"],
             "usd_micros": 0,
             "answers": None,
         }
@@ -462,7 +475,7 @@ class JudgementPort:
             payload.update(
                 {"answers": answers, "action": action, "abstained": abstained, "leg": leg, "model": model}
             )
-        async with await db.connect(dsn) as conn:
+        async with _connect(dsn) as conn:
             event_id = await ledger.append(conn, task_id, kind, payload)
         return Judgement(
             jid,
@@ -589,17 +602,46 @@ UNANSWERED_RUNS = 2
 # -- one HTTP attempt, for the adapters ------------------------------------------
 
 
+# Per endpoint URL, the wall-clock time before which it is not asked again:
+# the provider's own `Retry-After` on a 429 (RFC 9110, section 10.2.3).
+_HELD: dict[str, float] = {}
+
+
+def retry_after(value: str | None, now: float) -> float | None:
+    """The time a `Retry-After` names, as delta seconds or an HTTP date;
+    None when it is absent or unreadable."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        return now + int(value)
+    try:
+        return parsedate_to_datetime(value).timestamp()
+    except TypeError, ValueError, IndexError:
+        return None
+
+
 async def post(url: str, key: str, body: dict, timeout_s: float) -> tuple[int, bytes] | LegError:
     """One POST with a bearer key and one total timeout, no retry. Returns
     the status and body, or the failure with whether the provider may have
-    billed it. No exception text leaves here: aiohttp's can name headers."""
+    billed it. No exception text leaves here: aiohttp's can name headers.
+    A 429 is `rate_limited`; when it names a `Retry-After`, the endpoint is
+    held until then, and a call inside the hold is not sent and waits for
+    nothing: it is `rate_limited` at once, and the fallback is the retry."""
     import aiohttp
 
+    if _HELD.get(url, 0.0) > time.time():
+        return LegError("rate_limited", "none", what="the provider's Retry-After has not passed")
     try:
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as http,
             http.post(url, json=body, headers={"Authorization": f"Bearer {key}"}) as r,
         ):
+            if r.status == 429:
+                until = retry_after(r.headers.get("Retry-After"), time.time())
+                if until is not None:
+                    _HELD[url] = until
+                return LegError("rate_limited", "none", status=429, what="HTTP 429")
             return r.status, await r.read()
     except TimeoutError:
         return LegError("timeout", "unknown", what="no answer within the timeout")

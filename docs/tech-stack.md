@@ -1,11 +1,10 @@
 # Tech stack
 
 What each part of Valor is built from, and the status of every choice. The
-[architecture](architecture.md) says what the system is; this document says
-what it runs on. Where the RAM goes on the target machine is
-[machine.md](machine.md). The schema and the document model are
-[data.md](data.md). The harness port is [harnesses.md](harnesses.md), and the
-judgement tier is [judgement-layer.md](judgement-layer.md).
+[architecture](architecture.md) says what the system is; this document says what it runs on. Where
+the RAM goes on the target machine is [machine.md](machine.md). The schema and the document model
+are [data.md](data.md). The harness port is [harnesses.md](harnesses.md), and the judgement tier is
+[judgement-layer.md](judgement-layer.md).
 
 Every choice carries one of three statuses:
 
@@ -14,15 +13,14 @@ Every choice carries one of three statuses:
   in the code.
 - **open**: a known question, with what would close it.
 
-Each entry also names the mission item it serves or the constraint it
-enforces. Mission items and constraints are the numbered list and the four
-constraints in [mission.md](mission.md).
+Each entry also names the mission item it serves or the constraint it enforces. Mission items and
+constraints are the numbered list and the four constraints in [mission.md](mission.md).
 
 ## The selection rule
 
-The scarce resource is Tom's review, not authorship. A frontier model writes
-any mainstream language well; what limits the system is whether a person can
-read the kernel at full speed and catch what the model got subtly wrong. So:
+The scarce resource is Tom's review, not authorship. A frontier model writes any mainstream language
+well; what limits the system is whether a person can read the kernel at full speed and catch what
+the model got subtly wrong. So:
 
 - the kernel is Python, the language its reviewer reads fastest;
 - enforcement lives in the most boring layer available: Postgres grants and
@@ -30,11 +28,10 @@ read the kernel at full speed and catch what the model got subtly wrong. So:
 - a port is a plain Python type with one implementation, and the second
   implementation is written when a second real need arrives.
 
-The last point is Mission item 5 applied to the stack: extraction on a
-demonstrated second need, never on a first. The first two serve the
-constraint "Bounded authority, metered spending", because authority a reviewer
-cannot read is authority nobody checked. The control stance behind
-enforcing outside the model is AI Control [4].
+The last point is Mission item 5 applied to the stack: extraction on a demonstrated second need,
+never on a first. The first two serve the constraint "Bounded authority, metered spending", because
+authority a reviewer cannot read is authority nobody checked. The control stance behind enforcing
+outside the model is AI Control [4].
 
 ## Summary
 
@@ -114,12 +111,10 @@ the task's turns until a question, a delivery, or a stop,
 and exits. Nothing in the kernel is resident between commands; all state is
 in Postgres. Status: **in use**.
 
-A resident kernel process (the bridges hand it work and it schedules turns)
-is **open**. It becomes necessary when a bridge delivers requests without Tom
-at a terminal. Whatever form it takes, the gateway, the broker, and the
-turn runner stay in one process outside every sandbox, so the stop path
-never crosses a process the turn can reach. Serves "Reliable stop, recovery,
-and correction".
+A resident kernel process (the bridges hand it work and it schedules turns) is **open**. It becomes
+necessary when a bridge delivers requests without Tom at a terminal. Whatever form it takes, the
+gateway, the broker, and the turn runner stay in one process outside every sandbox, so the stop path
+never crosses a process the turn can reach. Serves "Reliable stop, recovery, and correction".
 
 **Credential boundaries.** The kernel holds the database connection as
 `valor_kernel` and performs effects through the broker. The gateway sets the
@@ -130,13 +125,11 @@ environment is an allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`,
 locale, terminal) with no tokens, no agent sockets, and only a placeholder
 Claude credential. Status: **in use**.
 
-A turn can still read the machine's Claude login from the Keychain, so it
-could call the provider around the gateway with that credential: the
-sandbox profile limits loopback but leaves the public internet open
-(section 6). The gateway is the metered path, not the only path. Tom
-accepted this on 2026-10-01 and it is not to be closed: the gateway is for
-visibility and honest metering, not a hard wall, and turns run as the
-machine's user with no separate macOS account.
+A turn can still read the machine's Claude login from the Keychain, so it could call the provider
+around the gateway with that credential: the sandbox profile limits loopback but leaves the public
+internet open (section 6). The gateway is the metered path, not the only path. Tom accepted this on
+2026-10-01 and it is not to be closed: the gateway is for visibility and honest metering, not a hard
+wall, and turns run as the machine's user with no separate macOS account.
 
 ## 3. Persistence
 
@@ -208,13 +201,11 @@ with memory. Status: **open**.
 
 ### Memory
 
-popoto [20] over Postgres, built last. It waits on popoto's Postgres backend
-(the issue cited in [20]). Until then `memory/` holds its README and the
-port the kernel reads through. Status: **chosen, not built**. Serves the
-Evidence items "Tom's feedback, both directions": the corrections and
-exemplar ledgers live in the kernel's events table from the start, and
-episodic memory is what arrives last. Retrieved content carries no source
-class and grants nothing [7].
+popoto [20] over Postgres, built last. It waits on popoto's Postgres backend (the issue cited in
+[20]). Until then `memory/` holds its README and the port the kernel reads through. Status:
+**chosen, not built**. Serves the Evidence items "Tom's feedback, both directions": the corrections
+and exemplar ledgers live in the kernel's events table from the start, and episodic memory is what
+arrives last. Retrieved content carries no source class and grants nothing [7].
 
 ## 4. The model gateway
 
@@ -234,15 +225,21 @@ OpenAI route any method a listed path does not take, is a 403. `revoke` retires 
 cancels its in-flight calls at once; the stop path calls it before killing
 the turn's process group.
 
-`CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output. The cap is what
-keeps the worst-case estimate (the charge when usage goes unreported) close to a call's real cost, so it is part
-of metering, not a tuning knob.
+The worst-case estimate (the charge when usage goes unreported) comes from each request body's
+`max_tokens`. Valor sets no output limit of its own on a workspace turn; a project spec's
+`max_output_tokens` sets Claude Code's.
 
-Serves "Bounded authority, metered spending" and "Stop is immediate and lossless".
-Evidence: across 69 calls in the demonstration the gateway's charge and
-Claude Code's own cost report agreed to $0.000024 of $2.97
-(rebuild-demonstration.md, Money). The baseline ran twelve more tasks and a
-rerun through the same path for $18.37 (rebuild-baseline.md, Caveats).
+The gateway sets no connect or read timeout on the provider. It runs each
+metered call behind a shield and cancels the connection handler when the
+client leaves, so a call no client waits for is cut and charged: when the
+client disconnects, when the turn exits (`cut`, before the drain), and on
+`revoke`. Only a call registered as in flight is cancelled, so an opening or
+a charge is never torn. A login is used until its stated expiry.
+
+Serves "Bounded authority, metered spending" and "Stop is immediate and lossless". Evidence: across
+69 calls in the demonstration the gateway's charge and Claude Code's own cost report agreed to
+$0.000024 of $2.97 (rebuild-demonstration.md, Money). The baseline ran twelve more tasks and a rerun
+through the same path for $18.37 (rebuild-baseline.md, Caveats).
 
 **Prices.** A table of US dollars per million tokens per model, input,
 output, cache write, and cache read, from the provider's public pricing
@@ -270,15 +267,14 @@ reviewer, and light; the judgement legs are pinned beside the seats.
   the reviewer shares the builder's model.
 - **Judgement**: the Jev-class seat (section 5).
 
-Ids are pinned, never floating aliases, because a ledger row has to describe
-a fixed thing. Editing the registry is a change inside the trust boundary,
-reviewed like kernel code: whoever can rewrite the reviewer's seat can
-defeat verification without touching an agent. Serves "Bounded authority, metered spending" and the Evidence item "Independent checks".
+Ids are pinned, never floating aliases, because a ledger row has to describe a fixed thing. Editing
+the registry is a change inside the trust boundary, reviewed like kernel code: whoever can rewrite
+the reviewer's seat can defeat verification without touching an agent. Serves "Bounded authority,
+metered spending" and the Evidence item "Independent checks".
 
-Adopting a new frontier model is one edit, the same day. The system does not
-out-evaluate the labs on capability. A cheaper capable model does not lower
-any ceiling; it buys better outcomes on the same terms (the constraint
-"Bounded authority, metered spending").
+Adopting a new frontier model is one edit, the same day. The system does not out-evaluate the labs
+on capability. A cheaper capable model does not lower any ceiling; it buys better outcomes on the
+same terms (the constraint "Bounded authority, metered spending").
 
 ## 5. The judgement tier
 
@@ -378,13 +374,12 @@ added on a second real need (Mission item 5).
 
 ### Sandbox: what runs today
 
-Every workspace turn runs under a **`sandbox-exec`** profile generated per
-workspace (`core/workspace.py`; `scripts/demo_workspace.sh` for the
-demonstration). Status: **in use**.
+Every workspace turn runs under a **`sandbox-exec`** profile generated per workspace
+(`core/workspace.py`; `scripts/demo_workspace.sh` for the demonstration). Status: **in use**.
 
-The profile's rules (files, loopback, binding, the `valor.turn.<turn id>`
-mark the reaper uses) are specified in [harnesses.md](harnesses.md) (The
-turn sandbox, Reaping what a turn leaves). Serves "Bounded authority, metered spending" and "Stop is immediate and lossless".
+The profile's rules (files, loopback, binding, the `valor.turn.<turn id>` mark the reaper uses) are
+specified in [harnesses.md](harnesses.md) (The turn sandbox, Reaping what a turn leaves). Serves
+"Bounded authority, metered spending" and "Stop is immediate and lossless".
 
 What `sandbox-exec` gives: no RAM overhead, the Mac's native toolchains
 (Homebrew Postgres, uv, Xcode), and a profile a person can read in a minute.
@@ -409,13 +404,12 @@ Building images needs Rosetta even for arm64. Status: **chosen, not
 built**; the `container` CLI is not installed on the machine the
 demonstration ran on.
 
-What containers give that `sandbox-exec` does not: a separate user and
-filesystem, so a Keychain read is impossible rather than unfenced; a network
-whose shape is set from outside; a fresh VM per verification, so the blind
-verifier never runs in the executor's environment [4]. What they cost: RAM
-per running VM, Linux toolchains only, and dependencies baked into an image
-from a lockfile, since a host-only network reaches no package registry. Each
-of those costs lands on the 16 GB machine ([machine.md](machine.md)).
+What containers give that `sandbox-exec` does not: a separate user and filesystem, so a Keychain
+read is impossible rather than unfenced; a network whose shape is set from outside; a fresh VM per
+verification, so the blind verifier never runs in the executor's environment [4]. What they cost:
+RAM per running VM, Linux toolchains only, and dependencies baked into an image from a lockfile,
+since a host-only network reaches no package registry. Each of those costs lands on the 16 GB
+machine ([machine.md](machine.md)).
 
 ### Which sandbox for which work
 
@@ -445,11 +439,10 @@ The kernel provisions a task's workspace from a project spec
   out of the sandbox), and a Redis of its own;
 - an empty gh config and a git config with no credential helper.
 
-Status: **in use** (`python -m core start --project`). Serves Mission item
-1 (the turn tests actual use against a real database) inside "Bounded
-authority, metered spending". How a workspace is provisioned and torn down as part
-of a task is [architecture.md](architecture.md); its memory cost is
-[machine.md](machine.md).
+Status: **in use** (`python -m core start --project`). Serves Mission item 1 (the turn tests actual
+use against a real database) inside "Bounded authority, metered spending". How a workspace is
+provisioned and torn down as part of a task is [architecture.md](architecture.md); its memory cost
+is [machine.md](machine.md).
 
 **Running and viewing the app.** No turn in the demonstration or the baseline
 looked at a page in a browser, including the two UI items
@@ -489,9 +482,9 @@ remote the turn cannot. Status: **in use**.
   (`tests/performers.py`), for the tests only: a file in the workspace, and
   a local outbox that stands where a bridge's send will.
 
-Serves "Bounded authority, metered spending": a sandbox holds no credential capable
-of an effect outside it, and every effect that leaves is a typed action [11].
-The effect protocol and approvals are [architecture.md](architecture.md).
+Serves "Bounded authority, metered spending": a sandbox holds no credential capable of an effect
+outside it, and every effect that leaves is a typed action [11]. The effect protocol and approvals
+are [architecture.md](architecture.md).
 
 ## 9. Surfaces
 
@@ -543,12 +536,11 @@ Status: **in use**. An operational telemetry stack (latency, error rates) is
 
 ## 11. The 16 GB M4 Air
 
-Everything runs Mac native, one install per machine, with a MacBook Air M4
-and 16 GB of RAM as the target (Tom's decision). Valor's four Macs each run
-their own install for the projects they own, with nothing shared between
-them. The demonstration and the baseline ran on a 64 GB Mac, so no
-memory figure from them carries over; the RAM plan per component is
-[machine.md](machine.md). What the target machine fixes in the stack:
+Everything runs Mac native, one install per machine, with a MacBook Air M4 and 16 GB of RAM as the
+target (Tom's decision). Valor's four Macs each run their own install for the projects they own,
+with nothing shared between them. The demonstration and the baseline ran on a 64 GB Mac, so no
+memory figure from them carries over; the RAM plan per component is [machine.md](machine.md). What
+the target machine fixes in the stack:
 
 - **One `claude -p` at a time.** The baseline ran replays concurrently, with
   slot locks and a Redis server and test database per run

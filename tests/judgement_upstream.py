@@ -13,12 +13,21 @@ Two kinds of path, each ending in the leg (`jev` or `open_weight`):
   `precise` or `thin` for the request judge (thin is `one_line_ask`),
   `true` or `false` for a boolean. The emulator's forced arms use this.
 - `/s/<script>/<leg>`: the next reply a test queued for that script (or its
-  default): `{"probs": {question: {label: p}}}`, or `{"status": 500}`,
+  default): `{"probs": {question: {label: p}}}`, or `{"status": 500}` (with `"headers"`, sent with it),
   `{"delay": seconds}`, `{"body": "raw text"}`, `{"model": "other"}`,
   `{"provider": "other"}`, `{"usage": None}`, `{"cost": 0.001}`, `{"input_tokens": n}`,
   `{"drop_label": "label"}`, `{"choice": "label"}`, and `{"by_path": {path:
   probs}}` and `{"fail_paths": [path]}` (answers by the `path` input, for
   concurrent per-hunk calls), combinable.
+
+Like Jev, the `jev` leg refuses an input over Jev's documented limits (32,000
+tokens for the state plus the longest question, 64,000 for the request,
+counted here as bytes / 3) with `400 {"detail": {"error_type":
+"max_tokens_exceeded"}}` and no usage, on either path and before any queued
+reply is taken. Like OpenRouter, the `open_weight` leg refuses an input whose
+billed tokens (counted as below) are over the pinned endpoint's context with
+the `404` OpenRouter sends, naming the endpoint among those its "Filter by
+Context Length" removed, and no usage.
 
     python -m tests.judgement_upstream --answer thin [--port 0]
 
@@ -38,7 +47,13 @@ from typing import Any
 from aiohttp import web
 
 from core.judgement import LOOPBACK_KEY, JudgementPort
-from core.settings import JEV_MODEL, OPEN_WEIGHT_MODEL, OPEN_WEIGHT_PROVIDER_NAME
+from core.settings import (
+    JEV_MODEL,
+    OPEN_WEIGHT_CONTEXT,
+    OPEN_WEIGHT_MODEL,
+    OPEN_WEIGHT_PROVIDER,
+    OPEN_WEIGHT_PROVIDER_NAME,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIXED = {"precise": "precise", "thin": "one_line_ask", "true": "true", "false": "false"}
@@ -62,6 +77,27 @@ OW_TEMPLATE = _template(
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
     },
 )
+
+
+def _over_jevs_limits(raw: bytes, body: dict) -> bool:
+    longest = max((len(json.dumps(q)) for q in body.get("questions", {}).values()), default=0)
+    return (len(json.dumps(body.get("state"))) + longest) / 3 > 32_000 or len(raw) / 3 > 64_000
+
+
+def _open_weight_tokens(raw: bytes) -> int:
+    return math.ceil(len(raw) / 3 * 0.6)
+
+
+# OpenRouter's refusal of an input past the pinned endpoint's context, as probed 2026-10-03.
+OPEN_WEIGHT_TOO_LARGE = {
+    "error": {
+        "message": f"No endpoints found for {OPEN_WEIGHT_MODEL}. Every candidate endpoint was removed "
+        "during routing: Filter by Parameters removed alibaba; Filter by Context Length removed "
+        f"novita/fp8, {OPEN_WEIGHT_PROVIDER}, venice/fp8; Filter by Fallback removed deepinfra/fp8.",
+        "code": 404,
+        "metadata": {"failed_routing_step": "Filter by Fallback"},
+    }
+}
 
 
 def questions_of(leg: str, body: dict) -> dict[str, list[str]]:
@@ -156,6 +192,12 @@ class Upstream:
                 "authorization": request.headers.get("Authorization"),
             }
         )
+        if leg == "jev" and _over_jevs_limits(raw, body):
+            return web.Response(
+                status=400, text=json.dumps({"detail": {"error_type": "max_tokens_exceeded"}})
+            )
+        if leg == "open_weight" and _open_weight_tokens(raw) > OPEN_WEIGHT_CONTEXT:
+            return web.Response(status=404, text=json.dumps(OPEN_WEIGHT_TOO_LARGE))
         if script is not None:
             queue = self.scripts.get(script, [])
             spec = queue.pop(0) if queue else dict(self.defaults.get(script, {}))
@@ -168,7 +210,9 @@ class Upstream:
             return web.Response(status=503, text="down")
         if "status" in spec:
             return web.Response(
-                status=spec["status"], text=spec.get("text", '{"detail": {"message": "nope"}}')
+                status=spec["status"],
+                text=spec.get("text", '{"detail": {"message": "nope"}}'),
+                headers=spec.get("headers"),
             )
         if "body" in spec:
             return web.Response(status=200, text=spec["body"], content_type="application/json")
@@ -188,7 +232,7 @@ class Upstream:
         if leg == "jev":
             tokens = math.ceil(len(raw) / 3 * 1.2) + 190
         else:
-            tokens = math.ceil(len(raw) / 3 * 0.6)
+            tokens = _open_weight_tokens(raw)
         tokens = spec.get("input_tokens", tokens)
         if leg == "jev":
             out = json.loads(json.dumps(JEV_TEMPLATE))

@@ -187,3 +187,14 @@ def test_the_sandbox_mark_names_only_the_turns_own_processes(tmp_path):
         for proc in (sandboxed, plain):
             proc.kill()
             proc.wait()
+
+
+def test_a_reaped_processs_command_line_is_recorded_whole():
+    arg = "a" * 500
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", arg])
+    try:
+        time.sleep(0.5)
+        assert runs.commands([proc.pid])[proc.pid].endswith(arg)
+    finally:
+        proc.kill()
+        proc.wait()

@@ -7,6 +7,14 @@
 one call. The inputs are the `state`, a JSON object of the task's fields;
 the question text and rubrics are the only instructions.
 
+Jev's limits are 64,000 tokens per request and 32,000 for the `state` plus
+the longest question (https://docs.typesafe.ai/models), counted by its own
+tokenizer, which the kernel does not have: bytes / 3 is not its count (a
+73,804-byte state billed 22,150 input tokens, probed 2026-10-03). So the
+kernel sends every input, and Jev refuses one over its limits itself with
+`400 {"detail": {"error_type": "max_tokens_exceeded"}}` and no usage (a
+158,384-byte state, probed 2026-10-03): `input_too_large`, billed nothing.
+
 Effect class `read`: it asks a question and changes nothing. One POST is one
 attempt; the port's fallback leg is the retry. A response naming any model
 but the pinned one is malformed, so a release on TypeSafe's side cannot
@@ -37,7 +45,6 @@ class Jev:
         self._key = key
         self.model = model
         self.timeout_s = timeout_s or settings.jev_timeout_s
-        self.max_input_tokens = settings.jev_max_input_tokens
         self.max_output_tokens = 0  # Jev's output tokens are free
 
     def body(self, task: JudgementTask, inputs: Mapping[str, str]) -> dict:
@@ -74,9 +81,20 @@ class Jev:
         if isinstance(got, LegError):
             return got
         status, raw = got
+        if status == 400 and _error_type(raw) == "max_tokens_exceeded":
+            return LegError("input_too_large", "none", status=400, what="Jev: max_tokens_exceeded")
         if status != 200:
             return LegError("http_status", "none", status=status, what=f"HTTP {status}")
         return decode(task, raw, self.model)
+
+
+def _error_type(raw: bytes) -> str | None:
+    """The `detail.error_type` of an error body, or None."""
+    try:
+        detail = json.loads(raw).get("detail")
+    except ValueError, UnicodeDecodeError, AttributeError:
+        return None
+    return detail.get("error_type") if isinstance(detail, dict) else None
 
 
 def _usage(payload) -> dict | None:

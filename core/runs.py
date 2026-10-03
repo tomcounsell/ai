@@ -23,7 +23,11 @@ to its id, and a sandboxed turn's profile denies the mach name
 in the turn's process group, carries the marker in its environment, or sits
 under a sandbox that denies the turn's name (and not another, which an App
 Sandbox denies too) gets SIGTERM, then SIGKILL after `reap_grace_s` (settings), and
-`turn.reaped` lists them. The sandbox mark is the one a daemon cannot shed:
+`turn.reaped` lists them.
+
+A turn's whole stdout and stderr go to `<work_dir>/<task>/turns/<turn>.stdout`
+and `.stderr`, outside every path a turn can write; `turn.ended` names both
+files, and the harness reads its result from the stdout file. The sandbox mark is the one a daemon cannot shed:
 it survives setsid, re-parenting to launchd, and a process retitling
 itself over its environment (redis-server does), and platform binaries hide
 their environment from other processes altogether.
@@ -40,6 +44,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from core import binaries, db, ledger, machine, spending, tasks
@@ -47,6 +52,12 @@ from core.gateway import Gateway
 from core.settings import settings
 
 TURN_ENV = "VALOR_TURN"
+
+
+def output_paths(task_id: str, turn_id: str) -> tuple[Path, Path]:
+    """Where a turn's stdout and stderr are written."""
+    turns = Path(settings.work_dir).expanduser() / task_id / "turns"
+    return turns / f"{turn_id}.stdout", turns / f"{turn_id}.stderr"
 
 
 @dataclass
@@ -111,27 +122,30 @@ async def run_turn(
         except BaseException:
             gateway.retire(task_id)
             raise
-        proc = await asyncio.create_subprocess_exec(
-            *command.argv,
-            env={**command.env, TURN_ENV: turn_id},
-            cwd=command.cwd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        finished = asyncio.create_task(proc.communicate())
+        out_path, err_path = output_paths(task_id, turn_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("wb") as out, err_path.open("wb") as err:
+            proc = await asyncio.create_subprocess_exec(
+                *command.argv,
+                env={**command.env, TURN_ENV: turn_id},
+                cwd=command.cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                start_new_session=True,
+            )
+        finished = asyncio.create_task(proc.wait())
         stopped = asyncio.create_task(_stop_heard(listener, task_id))
         done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
         if stopped in done:
             gateway.revoke(task_id)
             _kill_group(proc.pid)
-            stdout, stderr = await finished
+            await finished
             outcome = "stopped"
         else:
             stopped.cancel()
             gateway.retire(task_id)
-            stdout, stderr = finished.result()
+            gateway.cut(task_id)  # its process has exited: no client is left
             outcome = "done" if proc.returncode == 0 else "failed"
         await gateway.drain(task_id)
         reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
@@ -142,8 +156,9 @@ async def run_turn(
         "turn_id": turn_id,
         "outcome": outcome,
         "returncode": proc.returncode,
-        "result": command.parse(stdout) if outcome != "stopped" else {},
-        "stderr_tail": stderr.decode(errors="replace")[-400:],
+        "result": command.parse(out_path.read_bytes()) if outcome != "stopped" else {},
+        "stdout": str(out_path),
+        "stderr": str(err_path),
     }
     async with await db.connect(dsn) as conn:
         ended["metered_usd_micros"] = await spending.turn_spent(conn, task_id, turn_id)
@@ -270,7 +285,7 @@ def _commands(pids: list[int]) -> dict[int, str]:
         check=False,
     ).stdout
     rows = (line.strip().split(None, 1) for line in listing.splitlines() if line.strip())
-    return {int(row[0]): (row[1] if len(row) > 1 else "")[:200] for row in rows}
+    return {int(row[0]): (row[1] if len(row) > 1 else "") for row in rows}
 
 
 def _signal(pid: int, sig: int) -> bool:
