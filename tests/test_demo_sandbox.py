@@ -328,3 +328,53 @@ def test_the_verification_profile_shares_tmp_and_adds_its_tree(tmp_path):
         assert _probe(verifying, 1, f"write:{tree / 'x'}", f"write:{name}") == ["open", "open"]
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def _turn_shell(tmp_path: Path, lay: kws.Layout, script: str) -> subprocess.CompletedProcess:
+    """`script` in sh under the task's turn profile, with the turn's PATH and
+    its own TMPDIR, from inside its clone."""
+    kws.write_tools(lay.root.parent / "bin")
+    own = lay.work_state / "tmp"
+    own.mkdir(exist_ok=True)
+    env = kws.harness_env(lay, kws.Spec(name="p", repo="r", kind="python", suite="true"), {}, {})
+    env.update({"HOME": str(lay.home), "TMPDIR": str(own)})
+    sandbox = [
+        "sandbox-exec",
+        "-D",
+        "GATEWAY_PORT=1",
+        "-D",
+        "VALOR_TURN=t",
+        "-f",
+        str(_turn_profile(tmp_path, lay, [])),
+    ]
+    return subprocess.run(
+        [*sandbox, "/bin/sh", "-c", script],
+        cwd=lay.repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_mktemp_in_a_turn_makes_its_files_in_the_turns_tmpdir(tmp_path):
+    lay = _task(tmp_path)
+    run = _turn_shell(
+        tmp_path, lay, 'mktemp; mktemp -d; mktemp -t probe; mktemp -p "$TMPDIR" x.XXXX; mktemp y.XXXX'
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stderr == ""
+    made = [Path(line) for line in run.stdout.split()]
+    own = (lay.work_state / "tmp").resolve()
+    assert [p.resolve().parent == own for p in made] == [True, True, True, True, False]
+    assert made[1].is_dir() and made[4].parent == Path(".")
+
+
+def test_git_and_python3_in_a_turn_print_no_temp_directory_error(tmp_path):
+    lay = _task(tmp_path)
+    run = _turn_shell(
+        tmp_path, lay, "git --version && git init -q . && git status --short && python3 -c 'print(42)'"
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stderr == ""
+    assert run.stdout.splitlines()[-1] == "42"

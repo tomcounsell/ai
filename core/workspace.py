@@ -712,6 +712,38 @@ class Provisioned:
         return asdict(self)
 
 
+MKTEMP = """#!/bin/sh
+# Written by the kernel. macOS mktemp makes its file in the user temp
+# directory, which no turn can write, whatever TMPDIR says; given no directory
+# and no template, it is given the turn's TMPDIR.
+[ -n "$TMPDIR" ] || exec /usr/bin/mktemp "$@"
+skip=
+for a in "$@"; do
+    if [ -n "$skip" ]; then skip=; continue; fi
+    case "$a" in
+        --tmpdir|--tmpdir=*) exec /usr/bin/mktemp "$@" ;;
+        --*) ;;
+        -*p*) exec /usr/bin/mktemp "$@" ;;
+        -*t) skip=1 ;;
+        -*) ;;
+        *) exec /usr/bin/mktemp "$@" ;;
+    esac
+done
+exec /usr/bin/mktemp -p "$TMPDIR" "$@"
+"""
+
+
+def write_tools(bin_dir: Path) -> None:
+    """The shared `bin/` the turn's PATH starts with: `mktemp`, which on
+    macOS ignores TMPDIR, made to use it. Written whole and swapped in, so a
+    turn of another task never runs half a file."""
+    bin_dir.mkdir(exist_ok=True)
+    part = bin_dir / f".mktemp.{os.getpid()}"
+    part.write_text(MKTEMP)
+    part.chmod(0o755)
+    os.replace(part, bin_dir / "mktemp")
+
+
 def harness_env(
     lay: Layout,
     spec: Spec,
@@ -722,12 +754,15 @@ def harness_env(
     passfile: Path,
 ) -> dict[str, str]:
     """The turn's environment for this project: tools (`bin_dir`, the work
-    directory's `bin/`) first on PATH, the caches under `lay`, the database
-    and Redis it was given, and `passfile` as the Postgres password file.
-    The directories are passed, never derived from `lay`, so a check's own
-    service layout gets the task's `bin/`."""
+    directory's `bin/`) first on PATH, then the trusted git's directory (the
+    developer tools, so `git` and `python3` are not `/usr/bin`'s shims, which
+    write a cache to the user temp directory no turn can write), the caches
+    under `lay`, the database and Redis it was given, and `passfile` as the
+    Postgres password file. The directories are passed, never derived from
+    `lay`, so a check's own service layout gets the task's `bin/`."""
+    git_dir = Path(git.binary()).parent
     env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "PATH": f"{bin_dir}:{git_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
         "VALOR_BROWSER": settings.browser,
         "UV_CACHE_DIR": str(lay.cache / "uv"),
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
@@ -807,7 +842,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
               lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
-    (lay.root.parent / "bin").mkdir(exist_ok=True)
+    write_tools(lay.root.parent / "bin")
     _install_tools(lay.root.parent / "bin")
     # The clone: history up to the base only, no tags, one work branch.
     ref = f"refs/heads/valor-base/{task_id}"

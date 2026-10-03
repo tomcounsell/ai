@@ -60,15 +60,6 @@ def git(cwd: str | Path, *args: str, check: bool = True) -> str:
     return sh("git", "-C", str(cwd), *args, check=check)
 
 
-def ws_git(workspace: str | Path, *args: str, check: bool = True) -> str:
-    """git on a workspace a sandboxed turn could configure, run outside the
-    sandbox: no hooks, no fsmonitor. Diffs also pass `--no-ext-diff
-    --no-textconv`, and nothing here touches the working tree, so no filter
-    the turn defined runs."""
-    pinned = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
-    return sh("git", "-C", str(workspace), *pinned, *args, check=check)
-
-
 def core(*args: str) -> str:
     """`python -m core ARGS` against the kernel's own database."""
     return sh(PYTHON, "-m", "core", *args, cwd=ROOT)
@@ -176,6 +167,23 @@ def spend_of(task_id: str, *, dsn: str | None = None) -> dict:
 
     state = asyncio.run(read())
     return {"usd": state["spent_usd_micros"] / 1e6, "open_calls": state["open_calls"]}
+
+
+def wait_run_lock(task_id: str, *, dsn: str | None = None) -> None:
+    """Block until no run of the task holds its run lock (the session
+    advisory lock on `run:<task>` that `core/router.py` takes), then let it
+    go at once: the next `core run` takes it for itself."""
+
+    async def wait():
+        conn = await db.connect(dsn)
+        try:
+            key = f"run:{task_id}"
+            await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+        finally:
+            await conn.close()
+
+    asyncio.run(wait())
 
 
 def start_emulator_task(run: str, item_task: str | None, *, dsn: str | None = None) -> str:
@@ -297,8 +305,7 @@ def review_rev(task_id: str, state: dict, *, dsn: str | None = None) -> str | No
     return candidate["sha"] if candidate else None
 
 
-def mirror_diff(mirror: str | Path, base: str, rev: str, *args: str, exclude: str | None = None) -> str:
+def mirror_diff(mirror: str | Path, base: str, rev: str, *args: str) -> str:
     """`git diff base rev` in the task's kernel mirror, a repository no turn
-    writes, leaving out `exclude` when given."""
-    paths = ["--", ".", f":(exclude){exclude}"] if exclude else []
-    return kgit.trusted(mirror, "diff", "--no-ext-diff", "--no-textconv", *args, base, rev, *paths)
+    writes."""
+    return kgit.trusted(mirror, "diff", "--no-ext-diff", "--no-textconv", *args, base, rev)

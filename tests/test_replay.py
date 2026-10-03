@@ -1,7 +1,7 @@
 """The replay driver's push rule, on real Postgres and real git: a held
 `push_branch` is approved and released when the workspace pushes to the
 run's own bare origin, and left held for Tom when its push URL points
-anywhere else. Every merge effect is skipped: the driver never answers a
+anywhere else. The URL is the one in the kernel's record of the task. Every merge effect is skipped: the driver never answers a
 merge, and a held merge is not an effect left for Tom.
 
 The driver reaches the kernel through `python -m core`, pointed here at the
@@ -50,7 +50,7 @@ def _run(tmp_path: Path, name: str) -> dict:
         "x",
     )
     git(workdir, "remote", "add", "origin", str(origin))
-    return {"workdir": str(workdir), "origin": str(origin)}
+    return {"workdir": str(workdir), "origin": str(origin), "task_dir": str(run)}
 
 
 async def _held_push(dsn: str, ws: dict) -> str:
@@ -59,11 +59,13 @@ async def _held_push(dsn: str, ws: dict) -> str:
     async with await db.connect(dsn) as conn:
         task = await tasks.start(
             conn,
-            tasks.Brief(instruction="push", max_effect_class="act", workspace=ws["workdir"]),
+            tasks.Brief(
+                instruction="push", max_effect_class="act", workspace=ws["workdir"], push_url=ws["origin"]
+            ),
         )
         held = await broker.request(
             conn,
-            broker.Performers(PushBranch(ws["workdir"])),
+            broker.Performers(PushBranch(ws["workdir"], url=ws["origin"])),
             task,
             broker.Action("push_branch", "valor/work", {"head_sha": git(ws["workdir"], "rev-parse", "HEAD")}),
         )
@@ -72,15 +74,17 @@ async def _held_push(dsn: str, ws: dict) -> str:
 
 
 def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_path, monkeypatch):
+    """The rule reads the kernel's record of the task, never the workdir's
+    git config, which a turn can rewrite."""
     monkeypatch.setenv("VALOR_DB", TEST_DB)
-    local, elsewhere = _run(tmp_path, "local"), _run(tmp_path, "elsewhere")
-    local_task = asyncio.run(_held_push(dsn, local))
-    other_task = asyncio.run(_held_push(dsn, elsewhere))
-    # The workspace's config is rewritten after the push was held, as a turn
-    # could rewrite it.
     stranger = tmp_path / "stranger.git"
     subprocess.run(["git", "init", "-q", "--bare", str(stranger)], check=True)
-    git(elsewhere["workdir"], "remote", "set-url", "--push", "origin", str(stranger))
+    local, elsewhere = _run(tmp_path, "local"), _run(tmp_path, "elsewhere")
+    # The record pushes somewhere else; the workdir's own config still names
+    # the run's origin, and is not what the rule reads.
+    elsewhere["origin"] = str(stranger)
+    local_task = asyncio.run(_held_push(dsn, local))
+    other_task = asyncio.run(_held_push(dsn, elsewhere))
 
     log: list = []
     assert replay.release_pushes(local_task, local, log) == []
@@ -88,7 +92,7 @@ def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_pat
     assert [entry["step"] for entry in log] == ["push released"]
 
     left = replay.release_pushes(other_task, elsewhere, log)
-    assert len(left) == 1 and log[-1]["push_urls"] == [str(stranger)]
+    assert len(left) == 1 and log[-1]["push_url"] == str(stranger)
     assert subprocess.run(
         ["git", "-C", str(stranger), "rev-parse", "valor/work"], capture_output=True, check=False
     ).returncode

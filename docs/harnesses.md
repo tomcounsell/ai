@@ -374,16 +374,18 @@ must not reach. It runs as Tom's user.
   (`work_dir`), other tasks included.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
   clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config),
-  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders`
-  denied, so no two tasks share a temp directory; for a fresh session, only
-  its own check directory, with the same three and `~/.claude*` denied. Its
-  `UV_CACHE_DIR` is `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python`
-  in that directory, since `~/.cache/uv` and `~/.local/share/uv` are write-denied.
-  The emulator's verification runs the working profile with the temp
-  directories shared and its own tree added, as its baseline did.
-- **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
-  working session, its task's `home/` and bare origin. **Stat only:** the
-  allowed directories' ancestors (not listable), so real paths resolve.
+  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders` denied,
+  so no two tasks share a temp directory; for a fresh session, its own check
+  directory, the same three and `~/.claude*` denied. Its `UV_CACHE_DIR` is
+  `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python` in that directory,
+  since `~/.cache/uv` and `~/.local/share/uv` are write-denied. The emulator's
+  verification shares the temp directories and adds its tree, as its baseline did.
+- **Read only:** the shared `bin/` (uv, and the kernel's `mktemp`, which hands
+  macOS `mktemp` the turn's `TMPDIR`), first on the turn's `PATH`, then the
+  trusted git's directory, so `git` and `python3` are not `/usr/bin`'s shims,
+  which cache in the user temp directory; for the working session, its task's
+  `home/` and bare origin. **Stat only:** the allowed directories'
+  ancestors (not listable), so real paths resolve.
 - **Denied entirely:** the kernel's own paths, each named by its setting: the
   kernel key directory (`pg_passfile`'s), the machine cluster's data directory
   (`pg_data_dir`), and the backup disk (`backup_dir`).

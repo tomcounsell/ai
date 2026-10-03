@@ -41,8 +41,11 @@ sandbox lets it read its own run and nothing else in $VALOR_DEMO.
 
 The task runs at effect ceiling `act` with no governance grant. Every held
 `push_branch` is approved and released by this driver under Tom's standing
-permission for pushes to local bare origins, and only when the workspace's
-push URL is the run's own `origin.git`. The driver never answers a merge:
+permission for pushes to local bare origins, and only when the push URL in
+the kernel's record of the task (`core workspace show`, the URL the
+kernel's performer pushes to) is the bare origin the kernel provisioned in
+the task's directory. Nothing is read from the turn's workdir, whose git
+config the turn can rewrite. The driver never answers a merge:
 every `merge` effect of the task is skipped, the current one and any a later
 candidate superseded. Any other held effect stays held and the run ends.
 
@@ -53,9 +56,14 @@ refused merge ends the run `to tom`; a held merge goes to the stand-in,
 whose accept or spent feedback rounds end the run `held`; otherwise the
 task runs on. A stopped task ends the run `stopped`.
 
-`NO RUNNER` (a check stage with no runner) and a failed run exit the driver
-with the outcome unset and say why; the next invocation resumes the same
-task. A run whose result has an outcome is refused unless `--rebuild` is
+Each answer of `core run` ends the step one way. `QUESTION`, `DELIVERED`,
+`STOPPED` and `MERGED` go back to the task's status. `ALREADY RUNNING`
+(another run of the task holds its run lock) waits on that lock until it is
+free, then steps again. `NO RUNNER` (a check stage with no runner),
+`FAILED`, `IDLE` (turns that ended without their stage's signal), `LOCK
+LOST` and `LEGACY`, and any other answer, exit the driver with the outcome
+unset and the answer recorded as the reason; the next invocation resumes
+the same task. A run whose result has an outcome is refused unless `--rebuild` is
 given. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine
 slots ($VALOR_DEMO/claude-turn.lock.N) for its whole invocation.
 
@@ -76,6 +84,7 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
+from core import workspace as kws
 from tests.emulator import workspace as replay_workspace
 from tests.emulator.common import (
     DEMO,
@@ -89,11 +98,13 @@ from tests.emulator.common import (
     spend_of,
     start_emulator_task,
     status,
-    ws_git,
+    wait_run_lock,
 )
 from tests.emulator.stand_in import MODEL as STAND_IN_MODEL
 from tests.emulator.stand_in import stand_in
 
+# The answers of `core run` after which the next step reads the task's status.
+GOES_ON = ("QUESTION", "DELIVERED", "STOPPED", "MERGED")
 PUSH_NOTE = (
     "Tom's standing permission: pushes to a replay workspace's local bare origin are "
     "pre-authorized (replay driver)"
@@ -127,22 +138,22 @@ def _save(result: dict) -> None:
 
 
 def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
-    """Approve and release every held push of the task whose push URL is
-    the run's own bare origin. Every merge effect is skipped: the driver
-    never answers a merge. Returns the held effects left alone."""
+    """Approve and release every held push of the task when the push URL
+    in the kernel's record of the task (`ws["origin"]`, from `core
+    workspace show`) is the bare origin the kernel provisioned in the
+    task's directory. Every merge effect is skipped: the driver never
+    answers a merge. Returns the held effects left alone."""
+    own_origin = ws["origin"] == str(kws.Layout(Path(ws["task_dir"])).origin)
     left = []
     for line in core("pending").splitlines():
         effect_id, owner, action, *_ = line.split()
         if owner != task_id or action == "merge":
             continue
-        urls = (
-            ws_git(ws["workdir"], "remote", "get-url", "--push", "--all", "origin", check=False).split()
-            if action == "push_branch"
-            else []
-        )
-        if action != "push_branch" or urls != [ws["origin"]]:
+        if action != "push_branch" or not own_origin:
             left.append(effect_id)
-            log.append({"at": now(), "step": "held effect left for Tom", "effect": line, "push_urls": urls})
+            log.append(
+                {"at": now(), "step": "held effect left for Tom", "effect": line, "push_url": ws["origin"]}
+            )
             continue
         core(
             "approve",
@@ -379,15 +390,18 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
         result["paused"] = f"failed: {str(exc).splitlines()[0][:300]}"
         return
     log.append({"at": now(), "step": "run", "said": line[:2000]})
-    print(f"{run_name}: {line.splitlines()[0] if line else ''}", file=sys.stderr)
+    said = line.splitlines()[0] if line else ""
+    print(f"{run_name}: {said}", file=sys.stderr)
     if release_pushes(task_id, ws, log):
         result["outcome"] = "an effect other than a local push is held for Tom"
-    elif line.startswith("NO RUNNER"):
-        # A check stage with no runner: a verdict recorded by hand, from a
-        # blind checkout of the mirror, lets the next invocation resume.
-        result["paused"] = line.splitlines()[0]
-    elif line.startswith("FAILED"):
-        result["paused"] = line.splitlines()[0]
+    elif said.startswith("ALREADY RUNNING"):
+        log.append({"at": now(), "step": "waiting on the run lock"})
+        wait_run_lock(task_id)
+    elif not said.startswith(GOES_ON):
+        # NO RUNNER (a verdict recorded by hand, from a blind checkout of
+        # the mirror, lets the next invocation resume), FAILED, IDLE, LOCK
+        # LOST, LEGACY, or an answer this driver does not know.
+        result["paused"] = said or "core run said nothing"
 
 
 def main() -> None:

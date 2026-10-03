@@ -331,19 +331,18 @@ def test_the_delivery_is_read_from_the_mirror_with_the_workdir_gone(tmp_path):
     assert "lib/a.py" in context and "lib/b.py" not in context
 
 
-def test_the_judge_diff_leaves_out_only_the_tasks_own_plan(tmp_path, monkeypatch):
+def test_the_judge_diff_is_the_whole_change_whatever_the_plan_is_named(tmp_path):
+    """The baseline judge read the whole diff; so does this one. A task
+    whose plan names `app.py` hides nothing from it."""
     ws, mirror, base = _mirror(tmp_path)
-    scripted.commit(ws, "docs/plans/existing.md", "# old\n", "a plan the project holds")
-    base = scripted.git(ws, "rev-parse", "HEAD")
-    scripted.commit(ws, "docs/plans/capped.md", "# the task's plan\n", "plan")
-    scripted.commit(ws, "docs/plans/existing.md", "# old\nedited\n", "edit")
+    scripted.commit(ws, "app.py", "# the plan, so the turn said\n", "plan")
+    scripted.commit(ws, "app.py", "# the plan, so the turn said\nprint('the change')\n", "build")
     rev = scripted.commit(ws, "lib/big.py", "x = '" + "y" * 80_000 + "'\n", "big")
     _push(ws, mirror)
-    monkeypatch.setattr(judge, "status", lambda task: {"plan": {"path": "docs/plans/capped.md"}})
     result = {"task_id": "t", "final_rev": rev, "workspace": {"mirror": str(mirror), "base": base}}
     diff, recorded = judge.candidate_diff(result)
-    assert "docs/plans/existing.md" in diff and "docs/plans/capped.md" not in diff
-    assert recorded["left_out"] == "docs/plans/capped.md"
+    assert "print('the change')" in diff and "lib/big.py" in diff
+    assert set(recorded) == {"chars", "lines", "truncated"}
     assert recorded["truncated"] and recorded["chars"] == len(diff) > judge.DIFF_LIMIT
     assert recorded["lines"] == diff.count("\n") + 1
 
@@ -458,6 +457,132 @@ def test_no_runner_and_a_failed_run_pause_with_the_outcome_unset(monkeypatch):
     for said in ("NO RUNNER for review: record its verdict", "FAILED: the turn errored"):
         result, _ = _drive(monkeypatch, {"state": "checks"}, said=said)
         assert result["outcome"] is None and result["paused"] == said
+
+
+def test_an_answer_the_driver_does_not_know_pauses_it(monkeypatch):
+    result, calls = _drive(monkeypatch, {"state": "build"}, said="SOMETHING NEW (task t): x\nmore")
+    assert result["outcome"] is None and result["paused"] == "SOMETHING NEW (task t): x"
+    assert calls["run"] == 1
+
+
+# A scripted task, the real router behind `core run`, and its real answer line.
+
+
+def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
+    """One driver step against a ledger task, `core run` being the real
+    router with scripted runners and `core/__main__.py`'s answer line."""
+    from core import router
+    from core.__main__ import _status_line
+
+    calls = {"run": 0}
+
+    async def fold():
+        async with await db.connect(dsn) as conn:
+            return await tasks.status(conn, task)
+
+    async def route():
+        gateway = Gateway(dsn)
+        await gateway.start()
+        try:
+            return await router.run(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
+        finally:
+            await gateway.close()
+
+    def fake_core(*args):
+        assert args == ("run", task)
+        calls["run"] += 1
+        return _status_line(task, asyncio.run(route()))
+
+    def no_stand_in(*a, **kw):
+        raise AssertionError("the stand-in has no part here")
+
+    monkeypatch.setattr(replay, "status", lambda t: asyncio.run(fold()))
+    monkeypatch.setattr(replay, "core", fake_core)
+    monkeypatch.setattr(replay, "stand_in", no_stand_in)
+    monkeypatch.setattr(replay, "release_pushes", lambda t, ws, log: [])
+    monkeypatch.setattr(replay, "wait_run_lock", lambda t: common.wait_run_lock(t, dsn=dsn))
+    result = {"task_id": task, "run": "toy", "log": [], "outcome": None}
+    replay.step(
+        result, {"answer_key": "k"}, {"mirror": "m", "base": "b", "run_dir": "/nonexistent"}, Args, None
+    )
+    assert calls["run"] == 1
+    return result
+
+
+def test_an_idle_run_ends_the_item_with_its_answer_as_the_reason(monkeypatch, dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, plan="uncommitted")
+    task = asyncio.run(scripted.start(dsn, ws))
+    result = _step_real(monkeypatch, dsn, task)
+    assert result["outcome"] is None and result["paused"].startswith(f"IDLE (task {task}")
+
+
+def test_a_lost_lock_ends_the_item_with_its_answer_as_the_reason(monkeypatch, dsn, owner_dsn, tmp_path):
+    import psycopg
+
+    from core.machine import State
+
+    ws, _ = scripted.workspace(tmp_path)
+    task = asyncio.run(scripted.start(dsn, ws))
+
+    async def cut(ctx):
+        with psycopg.connect(owner_dsn, autocommit=True) as owner:
+            owner.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND granted AND pid <> pg_backend_pid() AND database = "
+                "(SELECT oid FROM pg_database WHERE datname = current_database())"
+            )
+        return await scripted.working(ctx)
+
+    result = _step_real(monkeypatch, dsn, task, runners={State.PLAN: cut})
+    assert result["outcome"] is None and result["paused"].startswith(f"LOCK LOST (task {task}")
+
+
+def test_a_legacy_task_ends_the_item_with_its_answer_as_the_reason(monkeypatch, dsn, tmp_path):
+    from psycopg.types.json import Jsonb
+
+    ws, _ = scripted.workspace(tmp_path)
+    b = tasks.Brief(instruction="old", max_effect_class="act", workspace=str(ws))
+
+    async def make():
+        old = {k: v for k, v in b.__dict__.items() if k not in ("target_branch", "origin_url", "base_sha")}
+        async with await db.connect(dsn) as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)", (b.id, Jsonb(old))
+            )
+            await ledger.append(conn, b.id, "task.started", {"instruction": "old", "max_effect_class": "act",
+                                                             "mode": "bare"})  # fmt: skip
+            await ledger.append(conn, b.id, "task.delivered", {"turn_id": "t", "summary": "done"})
+
+    asyncio.run(make())
+    result = _step_real(monkeypatch, dsn, b.id)
+    assert result["outcome"] is None and result["paused"].startswith(f"LEGACY (task {b.id}")
+
+
+def test_already_running_waits_on_the_run_lock_then_steps_on(monkeypatch, dsn, tmp_path):
+    import threading
+    import time
+
+    import psycopg
+
+    ws, _ = scripted.workspace(tmp_path)
+    task = asyncio.run(scripted.start(dsn, ws))
+    holder = psycopg.connect(dsn, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"run:{task}",))
+    released = threading.Event()
+
+    def release():
+        time.sleep(0.5)
+        holder.close()
+        released.set()
+
+    threading.Thread(target=release, daemon=True).start()
+    result = _step_real(monkeypatch, dsn, task)
+    assert released.is_set()
+    assert result["outcome"] is None and "paused" not in result
+    assert [e["step"] for e in result["log"]] == ["run", "waiting on the run lock"]
+    assert result["log"][0]["said"].startswith(f"ALREADY RUNNING (task {task}")
+    assert scripted.turns(ws) == []
 
 
 def test_a_held_effect_of_another_action_ends_the_run(monkeypatch):

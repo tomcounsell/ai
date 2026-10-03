@@ -16,9 +16,9 @@ verdict moves to `judge_history`).
 The final commit is the result's `final_rev` (the held merge's head, else
 the candidate). Everything is read from the task's kernel mirror, a
 repository no turn writes, never from the turn's workdir. The candidate's
-diff leaves out the task's own plan document (`plan.path`); the result
-records the diff's size, the path left out, and whether the judge's
-truncation cut it.
+diff is the whole diff, as the baseline judge's was: nothing a turn chose
+(its plan's path included) decides what the judge sees. The result records
+the diff's size and whether the judge's truncation cut it.
 
 Verification commands run in a tree of the final commit at
 `<task_dir>/checks/verify-<run>/<repo>`, made fresh from the mirror with
@@ -31,8 +31,12 @@ is stopped after it and listed under `reaped`. Anything the turn left
 uncommitted, a virtualenv included, is not there: an item's commands set
 up what they need.
 
-The judge model is `JUDGE_MODEL`, one pinned Sonnet id. Its one call goes
-through the kernel's gateway and is metered on the run's emulator task.
+The judge model is `JUDGE_MODEL`, one pinned Sonnet id: the id Claude
+Code 2.1.288's model catalog resolves the alias `sonnet` to for the
+first-party provider. The baseline judge called that alias
+(5d90b4776:scripts/judge_replay.py:171) and did not record what it resolved
+to. Its one call goes through the kernel's gateway and is metered on the
+run's emulator task.
 """
 
 import argparse
@@ -45,12 +49,13 @@ from pathlib import Path
 from core import ledger, runs
 from core import workspace as kws
 from harnesses.claude_code import KEEP_ENV
-from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh, status
+from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh
 
+# Claude Code 2.1.288's catalog: alias `sonnet` -> claude-sonnet-5-5 (first party).
 JUDGE_MODEL = "claude-sonnet-5-5"
-DIFF_LIMIT = 70_000  # the baseline's value, kept so scores compare (scripts/judge_replay.py:45)
-OUTPUT_TAIL = 4_000  # the baseline's value, kept so scores compare (scripts/judge_replay.py:46)
-VERIFY_TIMEOUT = 1_800  # the baseline's value, kept so scores compare (scripts/judge_replay.py:47)
+DIFF_LIMIT = 70_000  # the baseline's value, kept so scores compare (5d90b4776:scripts/judge_replay.py:45)
+OUTPUT_TAIL = 4_000  # the baseline's value, kept so scores compare (5d90b4776:scripts/judge_replay.py:46)
+VERIFY_TIMEOUT = 1_800  # the baseline's value, kept so scores compare (5d90b4776:scripts/judge_replay.py:47)
 
 SYSTEM = """You are judging one implementation of a software request against what the person \
 who asked actually wanted. You get the request as given, an answer key with the requester's \
@@ -88,15 +93,13 @@ def reference_diff(item: dict) -> str:
 
 
 def candidate_diff(result: dict) -> tuple[str, dict]:
-    """The final commit's diff against the base, from the mirror, without
-    the task's own plan document; and what the result records of it."""
+    """The final commit's whole diff against the base, from the mirror,
+    and what the result records of it."""
     ws, rev = result["workspace"], result.get("final_rev")
-    plan = (status(result["task_id"]).get("plan") or {}).get("path")
-    diff = mirror_diff(ws["mirror"], ws["base"], rev, exclude=plan) if rev else ""
+    diff = mirror_diff(ws["mirror"], ws["base"], rev) if rev else ""
     return diff, {
         "chars": len(diff),
         "lines": diff.count("\n") + 1 if diff else 0,
-        "left_out": plan,
         "truncated": len(diff) > DIFF_LIMIT,
     }
 
