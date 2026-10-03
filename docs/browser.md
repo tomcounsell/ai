@@ -5,13 +5,16 @@ never a gate.
 
 **`look`.** The workspace's `bin/` holds `look`, a shell script written there
 at each provisioning (to a temporary name, then renamed). `look URL [NAME]
-[--size WxH] [--wait MS]` asks `/usr/bin/curl` for the page's status first and
+[--size WxH] [--wait MS]` takes `--size` only as two integers joined by `x`
+(anything else is refused) and asks `/usr/bin/curl` for the page's status first and
 exits non-zero when nothing answers; on a 5xx it still renders and keeps the
 page, prints the status, and exits non-zero. The browser itself exits 0 on
 its own error page. It then runs Playwright's
 `chrome-headless-shell` twice, once for the screenshot and once for the
 serialized DOM, and writes `.valor/screens/NAME.png` and
-`.valor/screens/NAME.html` in the clone. `.valor/` is excluded from commits, so
+`.valor/screens/NAME.html` at the root of the clone, wherever in the clone it
+runs, and refuses to run outside a git clone. It prints the two paths, the
+status, and a `shasum -a 256` line for each file. `.valor/` is excluded from commits, so
 screens never enter one. Interaction (clicks, forms, logins) is not part of it.
 
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
@@ -35,12 +38,14 @@ session's own tmp.
 **What the kernel records.** When it collects a turn, the kernel opens
 `.valor/screens/` and each file in it by directory descriptor, never following
 a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes}`
-(the size from `fstat`; the kernel never reads a screen's contents) for a regular file with one link, `{name, refused}` for anything else
-(a link, a hard link, a FIFO, a directory), which it never reads. Each entry
-is then moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
-record it again. An entry that cannot be moved is removed and recorded as `{name, refused}`. `done.md` names a screen by its original name. `look` prints a
-`shasum -a 256` of each file it writes, for the turn to quote in `done.md`; the
-kernel records no digest, and a screen is as editable as `done.md`.
+(the size from `fstat`; the kernel never reads a screen's contents) for a
+regular file with one link, `{name, refused}` for anything else (a link, a
+hard link, a FIFO, a directory), which it never reads. Each entry is then
+moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not record
+it again. An entry that cannot be moved is removed and recorded as
+`{name, refused}`. `done.md` names a screen by its original name. The turn
+quotes the checksums `look` printed in `done.md`; the kernel records no
+checksum, and a screen is as editable as `done.md`.
 Screens are evidence, never a gate: nothing requires one and no check reads
 one.
 
