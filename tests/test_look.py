@@ -198,7 +198,7 @@ def test_a_name_that_is_not_a_plain_file_name_is_refused(tmp_path, name):
     cwd.mkdir()
     done = subprocess.run(
         [str(LOOK), "http://127.0.0.1:1/", name],
-        cwd=cwd, env={"PATH": "/usr/bin:/bin", "VALOR_BROWSER": "/bin/true"},
+        cwd=cwd, env={"PATH": "/usr/bin:/bin", "VALOR_BROWSER": "/usr/bin/true"},
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert done.returncode != 0 and "plain file name" in done.stderr
@@ -495,3 +495,155 @@ def test_a_live_build_turn_opens_its_page_and_names_the_screenshot(dsn, tmp_path
         {k: b.get(k) for k in ("state", "verdict", "question", "errors", "done")} for b in builds
     ]
     assert any(s["name"] in (b["done"] or "") for b in builds for s in b["screens"])
+
+
+# -- arguments, replacement, and collection edges ----------------------------------------
+
+BAD = [
+    (["--size"], "--size needs"),
+    (["http://x/", "n", "--size", "800"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "axb"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "1ax2b"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "1x2x3"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "5x5x5"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "x2"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "x5"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "2x"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "1280x"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "1e3x2"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "-5x5"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "\uff15x\uff15"], "--size must be WxH"),
+    (["http://x/", "n", "--size", "0x0"], "--size must be positive"),
+    (["http://x/", "n", "--size", "0x5"], "--size must be positive"),
+    (["http://x/", "n", "--size", "5x0"], "--size must be positive"),
+    (["http://x/", "n", "--size", "000x5"], "--size must be positive"),
+    (["http://x/", "n", "--wait"], "--wait needs"),
+    (["http://x/", "n", "--wait", "3s"], "--wait must be a number"),
+    (["http://x/", "n", "--wait", ""], "--wait must be a number"),
+    (["http://x/", "n", "--bogus"], "unknown option"),
+    (["http://x/", "n", "extra"], "too many arguments"),
+    ([], "usage"),
+]
+
+
+@pytest.mark.parametrize("args,msg", BAD)
+def test_bad_arguments_exit_2_before_touching_anything(tmp_path, args, msg):
+    done = subprocess.run(
+        [str(LOOK), *args],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "VALOR_BROWSER": "/usr/bin/true"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 2 and msg in done.stderr, (done.returncode, done.stderr)
+    assert not (tmp_path / ".valor").exists()
+
+
+def test_unset_browser_is_refused(tmp_path):
+    done = subprocess.run(
+        [str(LOOK), "http://127.0.0.1:1/", "n"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 2 and "VALOR_BROWSER is not set" in done.stderr
+
+
+def test_a_stale_look_in_bin_is_replaced_on_the_next_provision(tmp_path):
+    lay, _ = provision(tmp_path)
+    b = lay.root.parent / "bin" / "look"
+    b.write_text("#!/bin/sh\necho stale\n")
+    kws._install_tools(b.parent)
+    assert b.read_bytes() == LOOK.read_bytes() and os.access(b, os.X_OK)
+    assert not list(b.parent.glob(".*.tmp"))
+
+
+@needs_browser
+def test_default_name_and_a_404_exit_zero(tmp_path):
+    lay, _ = provision(tmp_path)
+    with Server(status=404) as server:
+        profile = turn_profile(lay, tmp_path, server.port)
+        done = look_under(
+            profile, lay.repo, lay.work_state / "tmp", lay.root.parent / "bin" / "look", server.url + "/"
+        )
+    assert done.returncode == 0, done.stderr
+    assert "status 404" in done.stdout
+    shots = lay.repo / ".valor" / "screens"
+    assert len(list(shots.glob("*.png"))) == 1 and len(list(shots.glob("*.html"))) == 1
+
+
+def test_same_name_in_two_turns_each_lands_in_its_own_handled_dir(tmp_path):
+    s = tmp_path / ".valor" / "screens"
+    s.mkdir(parents=True)
+    (s / "a.png").write_bytes(b"1")
+    assert signals.collect(tmp_path, "t1").screens[0]["bytes"] == 1
+    (s / "a.png").write_bytes(b"22")
+    assert signals.collect(tmp_path, "t2").screens[0]["bytes"] == 2
+    h = tmp_path / ".valor" / "handled"
+    assert (h / "t1/screens/a.png").read_bytes() == b"1" and (h / "t2/screens/a.png").read_bytes() == b"22"
+
+
+def test_same_turn_collected_twice_overwrites_without_error(tmp_path):
+    s = tmp_path / ".valor" / "screens"
+    s.mkdir(parents=True)
+    (s / "a.png").write_bytes(b"1")
+    signals.collect(tmp_path, "t1")
+    (s / "a.png").write_bytes(b"22")
+    assert signals.collect(tmp_path, "t1").screens[0]["bytes"] == 2
+    assert not list(s.iterdir())
+
+
+def test_valor_dir_that_is_a_link_is_not_followed(tmp_path):
+    out = tmp_path / "elsewhere" / "screens"
+    out.mkdir(parents=True)
+    (out / "x.png").write_bytes(b"x")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    os.symlink(tmp_path / "elsewhere", clone / ".valor")
+    assert signals.collect(clone, "t").screens == []
+    assert (out / "x.png").exists()
+
+
+def test_handled_turn_dir_that_is_a_link_refuses_and_removes_the_file(tmp_path):
+    s = tmp_path / ".valor" / "screens"
+    s.mkdir(parents=True)
+    (s / "a.png").write_bytes(b"1")
+    (tmp_path / ".valor" / "handled").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.symlink(elsewhere, tmp_path / ".valor" / "handled" / "t1")
+    found = signals.collect(tmp_path, "t1")
+    assert found.screens == [{"name": "a.png", "refused": "could not be moved aside"}]
+    assert not (s / "a.png").exists()
+    assert not list(elsewhere.rglob("*.png"))
+
+
+@needs_browser
+def test_screens_taken_from_a_subdirectory_land_at_the_clone_root(tmp_path):
+    lay, _ = provision(tmp_path)
+    sub = lay.repo / "app" / "deep"
+    sub.mkdir(parents=True)
+    with Server() as server:
+        profile = turn_profile(lay, tmp_path, server.port)
+        done = look_under(
+            profile, sub, lay.work_state / "tmp", lay.root.parent / "bin" / "look", server.url + "/", "sub"
+        )
+    assert done.returncode == 0, done.stderr
+    assert (lay.repo / ".valor" / "screens" / "sub.png").is_file()
+    assert not (sub / ".valor").exists()
+    assert "sha256" not in done.stdout and len(done.stdout.split("\n")) >= 5  # paths, status, two checksums
+    assert {e["name"] for e in signals.collect(lay.repo, "t1").screens} == {"sub.png", "sub.html"}
+
+
+def test_outside_a_git_clone_look_exits_2_and_writes_nothing(tmp_path):
+    with Server() as server:
+        done = subprocess.run(
+            [str(LOOK), server.url + "/", "n"], cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin", "VALOR_BROWSER": "/usr/bin/true", "GIT_CEILING_DIRECTORIES": str(tmp_path.parent)},
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+    assert done.returncode == 2 and "not inside a git clone" in done.stderr
+    assert not (tmp_path / ".valor").exists()

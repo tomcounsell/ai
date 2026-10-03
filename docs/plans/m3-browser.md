@@ -331,7 +331,7 @@ built in.
   passed in 87 seconds: a real build turn served a page on a dev port, ran
   `look`, and `turn.collected` held the screenshot's name and size,
   named in `done.md`.
-- **Full suite at the final head.** 524 passed, 9 skipped, 1 failed:
+- **Full suite at an earlier head.** 524 passed, 9 skipped, 1 failed:
   `test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_live`
   raised `Refused` in a provisioning step while other builds ran on the
   machine, and passed alone on the rerun at the same head; it does not touch
