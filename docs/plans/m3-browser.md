@@ -109,7 +109,7 @@ look URL [NAME] [--size WxH] [--wait MS]
 
 - Writes `.valor/screens/NAME.png` (a screenshot at `--size`, default
   1280x800) and `.valor/screens/NAME.html` (the page's serialized DOM after
-  scripts ran) in the current clone, NAME defaulting to a timestamp. A NAME
+  scripts ran) at the root of the current clone, NAME defaulting to a timestamp. A NAME
   with a slash, a leading dot, or `..` is refused. `.valor/` is already in
   the clone's `.git/info/exclude`, so screens never enter a commit.
 - First asks for the page's status with `/usr/bin/curl -s -o /dev/null -w
@@ -329,7 +329,7 @@ built in.
   integers. The gap cases from the test check are in `tests/test_look.py`.
 - **Live turn run (an earlier version used a static page; the Django run below replaces it).** `VALOR_LIVE=1 pytest tests/test_look.py -k live`
   passed in 87 seconds: a real build turn served a page on a dev port, ran
-  `look`, and `turn.collected` held the screenshot's name, size, and digest,
+  `look`, and `turn.collected` held the screenshot's name and size,
   named in `done.md`.
 - **Full suite at the final head.** 524 passed, 9 skipped, 1 failed:
   `test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_live`
