@@ -1166,11 +1166,9 @@ KERNEL_IDENTITY = {
 
 
 def fresh_dir(check_dir: Path) -> Path:
-    """Remove and make a fresh session's directory, never following a link."""
-    if check_dir.is_symlink():
-        check_dir.unlink()
-    elif check_dir.exists():
-        shutil.rmtree(check_dir)
+    """Remove and make a fresh session's directory with `rmtree`, so a
+    read-only entry a sandboxed run left goes too, never following a link."""
+    rmtree(check_dir)
     for d in (check_dir / "tmp", check_dir / "claude"):
         d.mkdir(parents=True)
     return check_dir
@@ -1491,32 +1489,6 @@ def rmtree(path: Path) -> None:
         func(p)
 
     shutil.rmtree(path, onexc=writable)
-
-
-# -- the docs clone ----------------------------------------------------------------------------
-
-
-def docs_clone(mirror: str | Path, candidate: str, dest: Path, turn_id: str) -> None:
-    """A real clone of the candidate from the mirror, for the docs session.
-    Made over `file://` through a temporary `refs/heads/valor-docs/<turn>`,
-    so objects are copied through the pack protocol and never hardlinked;
-    the ref is deleted after. Refuses a candidate whose tree holds `.valor`."""
-    mirror = Path(mirror)
-    if tree_has_valor(mirror, candidate, trusted=True):
-        raise git.GitError(f"{candidate[:12]}'s tree holds a .valor entry")
-    ref = f"refs/heads/valor-docs/{turn_id}"
-    git.trusted(mirror, "update-ref", ref, candidate)
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        git.trusted(dest.parent, "clone", "-q", "--no-tags", "--single-branch", "--branch",
-                    f"valor-docs/{turn_id}", f"file://{mirror}", str(dest))  # fmt: skip
-    finally:
-        git.trusted(mirror, "update-ref", "-d", ref)
-    git.trusted(dest, "checkout", "-q", "-b", "docs")
-    git.trusted(dest, "branch", "-q", "-D", f"valor-docs/{turn_id}")
-    git.trusted(dest, "remote", "remove", "origin")
-    with (dest / ".git" / "info" / "exclude").open("a") as f:
-        f.write(".valor/\n")
 
 
 def remove(task_id: str, lay: Layout | None = None) -> None:

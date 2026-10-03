@@ -4,9 +4,9 @@ real check services, and the real `sandbox-exec`.
 The toy project's suite is `run.py`, a small runner in the toy repository
 that imports `tests/test_*.py` under the Command Line Tools' Python and
 writes a JUnit report, so no test needs pytest inside the sandbox. A test
-function with a `params` attribute runs once per parameter (`name[p]`),
-and one with `skip = True` is reported skipped. A `conftest.py` at the
-top is imported first.
+function with a `params` attribute (set by the toy `@parametrize`) runs
+once per parameter (`name[p]`), and one with `skip = True` is reported
+skipped. A `conftest.py` at the top is imported first.
 
 Live spend: none.
 """
@@ -83,7 +83,8 @@ BASE_TESTS = {
     "tests/test_a.py": (
         "def test_one():\n    assert True\n\n\n"
         "def test_two():\n    assert True\n\n\n"
-        "def test_p(x):\n    assert x\n\n\ntest_p.params = [1, 2, 3]\n"
+        "def parametrize(*params):\n    def mark(fn):\n        fn.params = params\n        return fn\n\n    return mark\n\n\n"
+        "@parametrize(1, 2, 3)\ndef test_p(x):\n    assert x\n"
     ),
     "tests/test_b.py": "def test_kept():\n    assert True\n",
 }
@@ -176,6 +177,12 @@ def _report(checks_dir, plant: str) -> str:
         (elsewhere / checks.JUNIT).write_bytes(GOOD)
         shutil.rmtree(checks_dir / name)
         (checks_dir / name).symlink_to(elsewhere)
+    elif plant == "utf-16 doctype":
+        report.write_bytes(
+            '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE x [<!ENTITY a "b">]><testsuite/>'.encode(
+                "utf-16"
+            )
+        )
     else:
         report.write_text(plant)
     return name
@@ -186,6 +193,7 @@ def _report(checks_dir, plant: str) -> str:
     [
         ("not xml <<<", "not XML"),
         ('<!DOCTYPE x [<!ENTITY a "b">]><testsuite/>', "DOCTYPE"),
+        ("utf-16 doctype", "DOCTYPE"),  # a byte search would miss it
         ("symlink", "not a plain file"),
         ("fifo", "not a regular file"),
         ("linked dir", "not a plain directory"),
@@ -211,6 +219,15 @@ def test_a_junit_report_gives_ids_by_outcome_whatever_its_size(tmp_path):
     assert why is None
     assert tests["passed"][0] == "t.m::a" and len(tests["passed"]) == 20001
     assert (tests["failed"], tests["errored"], tests["skipped"]) == (["t.m::b"], ["t.m::c"], ["t.m::d[1]"])
+
+
+def test_a_utf_16_junit_report_is_read(tmp_path):
+    name = _report(tmp_path, "x")
+    (tmp_path / name / checks.JUNIT).write_bytes(GOOD.decode().encode("utf-16"))
+    assert checks.read_junit(tmp_path, name) == (
+        {"passed": ["tests.test_a::test_one"], "failed": [], "errored": [], "skipped": []},
+        None,
+    )
 
 
 # -- compare ------------------------------------------------------------------------------------
@@ -248,7 +265,7 @@ def never(_tid):
         (_run(0, _tests(["m::a"])), _run(1, _tests(failed=["m::a"])), ["m::a"]),
         (_run(0, _tests(["m::a"])), _run(1, _tests(["m::a"], errored=["m::new"])), ["m::new"]),
         # The commit broke its own run: red with the cause, whatever else holds.
-        (_run(0, _tests(["m::a"])), _run("timeout", cause="commit", why="ran past"), ["ran past", "m::a"]),
+        (_run(0, _tests(["m::a"])), _run(1, cause="commit", why="setup failed"), ["setup failed", "m::a"]),
         (_run(1, cause="commit", why="setup"), _run(0), []),
     ],
 )
@@ -274,12 +291,17 @@ def test_an_absent_id_whose_definition_is_removed_is_deleted_not_failed():
 # -- what the diff removes ----------------------------------------------------------------------
 
 
+P_BASE = '@pytest.mark.parametrize(\n    "x",\n    [1, 2],\n)\ndef test_p(x):\n    pass\n'
+Q_BASE = 'UNRELATED = 1\n\n\n@pytest.mark.parametrize("x", [1, 2])\ndef test_q(x):\n    pass\n'
+
+
 def test_removed_definitions(tmp_path):
     repo = scripted.toy_repo(tmp_path)
     for path, text in {
         "tests/test_a.py": "def test_gone():\n    pass\n\n\ndef test_edited():\n    pass\n",
         "tests/test_moved.py": "def test_moving():\n    pass\n",
-        "tests/test_p.py": "def test_p(x):\n    pass\n\n\ntest_p.params = [1, 2]\n",
+        "tests/test_p.py": P_BASE,
+        "tests/test_q.py": Q_BASE,
         "tests/test_c.py": "class TestK:\n    def test_m(self):\n        pass\n",
         "spec.js": "it('names a thing', () => {})\n",
     }.items():
@@ -288,14 +310,17 @@ def test_removed_definitions(tmp_path):
     scripted.commit(repo, "tests/test_a.py", "def test_edited(y=1):\n    pass\n")
     scripted.git(repo, "rm", "-q", "tests/test_moved.py")
     scripted.commit(repo, "tests/test_other.py", "def test_moving():\n    pass\n")
-    scripted.commit(repo, "tests/test_p.py", "def test_p(x):\n    pass\n\n\ntest_p.params = [1]\n")
+    scripted.commit(repo, "tests/test_p.py", P_BASE.replace("1, 2", "1"))
+    scripted.commit(repo, "tests/test_q.py", Q_BASE.replace("UNRELATED = 1\n", ""))
     scripted.commit(repo, "tests/test_c.py", "def test_free():\n    pass\n")
     scripted.commit(repo, "spec.js", "\n")
     gone = checks.removed_definitions(repo, base, scripted.git(repo, "rev-parse", "HEAD"))
     assert gone("tests.test_a::test_gone")
     assert not gone("tests.test_a::test_edited")  # its def line came back in the same file
     assert gone("tests.test_moved::test_moving")  # its file was deleted
-    assert gone("tests.test_p::test_p[2]")  # a dropped parameter
+    assert gone("tests.test_p::test_p[2]")  # a dropped case of its decorator
+    # A line removed elsewhere in the file does not delete a missing case.
+    assert not gone("tests.test_q::test_q[2]")
     assert gone("tests.test_c.TestK::test_m")  # its class went
     assert gone("spec.js::names a thing")  # no Python file: the name string was removed
     assert not gone("other::never_mentioned")
@@ -361,7 +386,7 @@ def test_skipping_a_failing_test_is_red(dsn, tmp_path):
 
 def test_deleting_a_test_or_a_parameter_is_listed_and_not_red(dsn, tmp_path):
     a = BASE_TESTS["tests/test_a.py"].replace("def test_two():\n    assert True\n\n\n", "")
-    a = a.replace("[1, 2, 3]", "[1, 2]")
+    a = a.replace("@parametrize(1, 2, 3)", "@parametrize(1, 2)")
     _task, _b, _out, got = through_test(
         dsn, tmp_path, writes={"tests/test_a.py": a}, removes=["tests/test_b.py"]
     )
@@ -492,7 +517,6 @@ def _marked(mark: str) -> list[int]:
 
 
 def test_a_stop_kills_the_running_suite_and_records_nothing(dsn, tmp_path, monkeypatch):
-    monkeypatch.setattr(checks, "settings", dataclasses.replace(settings, suite_timeout_s=600))
     files = {"suite.sh": "exit 0\n"}
 
     async def go():
@@ -527,13 +551,11 @@ def test_a_stop_kills_the_running_suite_and_records_nothing(dsn, tmp_path, monke
 @pytest.mark.parametrize(
     ("writes", "kw", "finding"),
     [
-        ({"broken": "x"}, {"setup": ["test ! -e broken"]}, "setup failed twice at head"),
-        ({"suite.sh": "sleep 30\n"}, {}, "ran past"),
+        ({"broken": "x"}, {"setup": ["test ! -e broken"]}, "setup failed at head"),
         ({"suite.sh": "exit 3\n"}, {}, "no JUnit report"),
     ],
 )
-def test_a_head_the_commit_broke_is_red_with_the_failure(dsn, tmp_path, monkeypatch, writes, kw, finding):
-    monkeypatch.setattr(checks, "settings", dataclasses.replace(settings, suite_timeout_s=5))
+def test_a_head_the_commit_broke_is_red_with_the_failure(dsn, tmp_path, writes, kw, finding):
     files = {**BASE_TESTS, "suite.sh": f"{SUITE.replace('{junit}', '$1')}\n"}
     _task, _b, out, got = through_test(
         dsn, tmp_path, files=files, writes=writes, suite="/bin/bash suite.sh {junit}", **kw
@@ -543,19 +565,23 @@ def test_a_head_the_commit_broke_is_red_with_the_failure(dsn, tmp_path, monkeypa
     assert out["status"] == "no runner" and out["missing"] == ["review", "docs"]  # not rerun
 
 
-def test_a_setup_that_fails_once_then_succeeds_runs_the_suite(dsn, tmp_path):
-    setup = "echo x >> setup-count; test $(wc -l < setup-count) -ge 2"
-    _task, _b, _out, got = through_test(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[setup])
-    suites = [r["payload"] for r in got if r["type"] == checks.SUITE]
-    assert all(s["setup"]["ok"] and s["cause"] is None and s["tests"] for s in suites)
+def test_each_setup_command_keeps_its_own_output_file(dsn, tmp_path):
+    setup = ["echo first-step", "echo second-step"]
+    _task, b, _out, got = through_test(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=setup)
+    checks_dir = kws.Layout(Path(b.mirror).parent).checks
+    head = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "head")
+    outputs = [c["output"] for c in head["setup"]["commands"]]
+    assert len(set(outputs)) == 2
+    for name, said in zip(outputs, ("first-step", "second-step"), strict=True):
+        assert (checks_dir / name).read_text().strip() == said
     assert decided(got)["verdict"] == "pass"
 
 
 def test_a_base_setup_failure_decides_its_run_and_is_never_reused(dsn, tmp_path):
     _task, _b, _out, got = through_test(dsn, tmp_path, writes={"fixed": "x"}, setup=["test -e fixed"])
     base = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "base")
-    assert base["cause"] == "commit" and "setup failed twice at base" in base["why"]
-    assert len(base["setup"]["commands"]) == 1  # the second attempt's record
+    assert base["cause"] == "commit" and "setup failed at base" in base["why"]
+    assert len(base["setup"]["commands"]) == 1
     assert checks.reusable(got, base["commit"], base["command"], base["digest"], "base") is None
     assert decided(got)["verdict"] == "pass"
 

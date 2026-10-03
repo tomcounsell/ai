@@ -368,8 +368,8 @@ information shown in the delivery, never a behavior. Then the project's own
 suite command, deterministic, at the task's base commit and then at the
 candidate's head, each in a blind checkout from the kernel mirror with its
 own copy of the caches and fresh Postgres and Redis on the task's ports
-(`core/checks.py`). A base run whose setup failed is never reused, and a
-failed setup is run once more before the run counts as failed.
+(`core/checks.py`). A base run whose setup failed is never reused. No
+setup command or suite has a time limit; a stop ends a running one.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
 at head that do not fail at base, `deleted_at_head` (tests that passed at
