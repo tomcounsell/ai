@@ -231,8 +231,8 @@ input is estimated at three bytes per token for the worst-case estimate, the
 opening runs under the task's advisory lock, and the response streams
 back unchanged while the gateway reads the provider's usage.
 
-Token counting and model lists pass unmetered; any other path is refused once
-the gateway holds the credential. `revoke` retires the task's tokens and
+Token counting and model lists pass unmetered; any other path, and on the
+OpenAI route any method a listed path does not take, is a 403. `revoke` retires the task's tokens and
 cancels its in-flight calls at once; the stop path calls it before killing
 the turn's process group.
 
