@@ -9,16 +9,17 @@ This doc also owns the bridge port, the contract in `core/` that every bridge
 conforms to. The email bridge ([email.md](email.md)) conforms to the same port
 and documents only what is particular to email.
 
-**Status.** The kernel side of the port is built: `core/bridge.py` (the
-port, the declared send types, their limits, and the outbox),
-`core/intake.py` (the record and binding), and `core/notices.py` (operator
-notices), run by the resident kernel, `python -m core serve`. The Telegram
-bridge process itself is not built yet. Until it is, Tom reaches a task
-through `python -m core` (`answer`, `feedback`, `approve`, `release`,
-`stop`, `correct`), and those records carry `via: "the command line"`. The
-Telegram code that exists today can be adapted to the port; the last
-sections say what a conforming implementation keeps and what it hands to
-`core/`.
+**Status.** The port is built: `core/bridge.py` (the port, the declared
+send types, their limits, and the outbox), `core/intake.py` (the record
+and binding), and `core/notices.py` (operator notices), run by the
+resident kernel, `python -m core serve`. The Telegram bridge is built in
+`bridges/telegram/`, run by `python -m bridges.telegram run`; it is live
+only during Tom's test windows. Its tests run over the real port and the
+test database, with a local emulator (`tests/telegram_emulator.py`) as
+Telegram. Tom also reaches a task through `python -m core` (`answer`,
+`feedback`, `approve`, `release`, `stop`, `correct`), and those records
+carry `via: "the command line"`. The section "As built" below says what
+the bridge's code does.
 
 ## What it serves
 
@@ -60,13 +61,13 @@ interpretation.
 | `sender_id` | The platform's stable id for the sender: a Telegram user id, or an email address |
 | `sender_name` | Display name, for rendering only; never used to identify anyone |
 | `sent_at` | The platform's timestamp |
-| `kind` | `message` or `vote` |
+| `kind` | `message` |
 | `text` | The body as the platform delivered it, unaltered |
 | `reply_to` | The `message_id` this message replies to, if any |
-| `thread` | The ancestors the bridge could fetch, oldest first, each with `message_id`, `sender_id`, `text`, and attachments |
-| `attachments` | Files the bridge downloaded: local path, media type, size, and for a file it could not fetch, the reason |
-| `vote` | For `kind: vote`, the poll's correlation prefix and the chosen option index |
-| `headers` | Channel facts with no field above: for email, subject, To, Cc, References |
+| `thread` | The ancestors the bridge could fetch, oldest first, each `{id, text, attachments}`, nothing downloaded |
+| `topic_id` | The Telegram forum topic, when the message is in one |
+| `attachments` | Files the bridge downloaded, each `{name, mime, bytes, path}`, or `{name, mime, bytes, skipped}` with the reason it could not fetch the file |
+| `headers` | Channel facts with no field above: for Telegram, `grouped_id` of an album; for email, the raw headers |
 
 `receive` appends one `message.received` row to the ledger on the bridge's
 channel stream (the same pattern as the `corrections` stream: `task_id` names
@@ -85,7 +86,8 @@ work" below), in a separate step that reads `message.received` rows.
 
 Every outbound operation is a broker performer, with the same shape as the
 `push_branch` performer that exists today: an `action_type`, a declared
-`effect_class`, and the coroutines `perform(action, key)` and `lookup(action, key)`. The broker
+`effect_class`, `perform(action, key)`, and `lookup(action, key, since)`,
+`since` being the time of the effect's intent. The broker
 holds every `act` request until Tom approves it, writes `effect.intent`
 before `perform` runs, and writes `effect.outcome` after. A kill between the
 two leaves a dangling intent, which `lookup` reconciles by asking the platform
@@ -93,9 +95,8 @@ whether the message with that idempotency key exists.
 
 | Action type | Class | Target | Payload |
 |---|---|---|---|
-| `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `files` (each a path and its sha256) |
-| `telegram.send_poll` | `act` | chat id (groups only) | `question`, `options`, `correlation`; designed, not yet declared in `core/bridge.py` |
-| `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
+| `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `topic_id`, `files` (each a path and its sha256) |
+| `email.send` | `act` | the first recipient | see [email.md](email.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
 reply target, and each file's bytes, so what leaves is what he saw. `text`
@@ -172,25 +173,30 @@ it is requested and the bridge never changes a message to send it.
 over MTProto, not as a bot. A bot cannot post into a user-to-user chat, so
 its messages would land in a separate bot conversation, outside the thread
 that binds a reply to its task, and it would be a second identity. The API
-id, API hash, and session secret live in Keychain.
+id and hash live in `telegram-keys` and the session in `telegram.session`,
+both mode 600 in the kernel key directory (the one holding the database
+password file), which every turn's sandbox denies.
 
-**What arrives.** New messages in DMs and in groups the account belongs to,
-and votes on polls the account sent. The bridge delivers each as one
-`Inbound` record. Edits, reactions, and deletions are not part of the port.
+**What arrives.** New messages in the chats this machine owns
+(`intake.owned("telegram")`). The bridge delivers each as one `Inbound`
+record. Edits, reactions, and deletions are not part of the port.
 
 **Reply chains.** When a message replies to another, the bridge fetches the
 ancestors through the API, up to a fixed number of hops, and puts them in
 `thread`. Fetching is I/O and belongs here. Choosing which ancestor roots the
 conversation, and which task that root belongs to, is `core/`'s.
 
-**Attachments.** Photos, documents, and voice notes are downloaded to the
-bridge's media directory and listed with path, type, and size. A download
+**Attachments.** Photos, documents, and voice notes are downloaded to
+`inbound_dir/telegram/`, each named by its sha256, and listed with path,
+type, and size. A download
 that fails or times out is listed with its reason, so a turn can say exactly
 what it could not read. Transcribing or describing media is not the bridge's
 work.
 
-**After downtime.** On reconnect the client replays updates it missed. The
-receipt index makes each replay land once.
+**After downtime.** The bridge fills the gap itself, on every connect and
+every tick: it pages back through each owned chat and receives every
+message `intake.recorded` does not list. The receipt index makes each
+replay land once.
 
 ## How a message becomes work
 
@@ -292,40 +298,22 @@ is refused when it is requested.
 
 **Idempotency.** MTProto's send request carries a `random_id` the server
 uses to detect a repeated send. The performer derives it from the broker's
-idempotency key, so a resend of the same effect after a crash is refused by
-Telegram as a duplicate rather than delivered twice. `lookup` reconciles a
-dangling intent by scanning the account's recent outgoing messages in the
-target chat for that send. It returns nothing only when Telegram can no
-longer record the send, and raises `Unknown` while it still might, so a
-miss is `failed` only once it is final. The outcome records `chat_id` and `message_id`,
+idempotency key and the message's place in the send, so a resend of the
+same effect is refused by Telegram as a duplicate rather than delivered
+twice. `lookup` reconciles a dangling intent by scanning the account's own
+messages in the target chat dated from the intent on (less a minute for
+clock skew), skipping ids already recorded as sent, for that send's text,
+files, reply target, and topic. Two matches, or part of a split send
+found, is `broker.Unknown`: nothing is concluded. The outcome records `chat_id` and `message_id`,
 which is how a later reply to the sent message binds back to its task.
 
 **One attempt.** `perform` makes one delivery attempt. A flood wait, a
-network error, or a refusal returns a failed outcome with the reason and,
-for a flood wait, the wait time. Sending again is a new request and a new
+refusal, or no connection returns a failed outcome with the reason and,
+for a flood wait, the wait time, which later requests wait out. A
+connection lost after a request was written is `broker.Unknown`: no
+outcome, and the outbox's reconcile settles it through `lookup`. Sending again is a new request and a new
 approval. The bridge keeps no retry loop, dead-letter queue, or resend
 schedule.
-
-## Questions as polls
-
-In a group, a question with a short list of answers can go out as a native
-Telegram poll: Tom taps once instead of typing (Mission item 6). `core/`
-chooses the poll form; the bridge renders it through `telegram.send_poll`
-when the chat supports it.
-
-Protocol facts the bridge works within:
-
-- A user account can send a poll in a group. In a one-to-one chat Telegram
-  refuses it, so a question in a DM always goes as text.
-- Each poll option's identifier carries at most 8 bytes. A longer one is
-  rejected on the wire with no local error, and the poll never appears.
-- The bridge correlates a vote with its question through those bytes: the
-  option index plus a 7-byte prefix of the poll's correlation id. A vote
-  arrives as `kind: vote` with that prefix and index, and binds in `core/`
-  like a reply to a question notice.
-
-When a chat cannot take a poll, `core/` sends the question as text with
-numbered options. The bridge does not convert one form into the other.
 
 ## Stop and recovery
 
@@ -355,7 +343,7 @@ Its resident memory counts against the RAM plan in
   notice from `core/`.
 - **State of its own.** It keeps no queue, deduplication store, session map,
   or message history outside the ledger. Its only local state is the
-  MTProto session and the media directory.
+  MTProto session, the downloaded files, and a flood wait held in memory.
 
 ## Conforming an implementation
 
@@ -363,9 +351,8 @@ The bridge may survive as existing code. An implementation conforms to the
 port when:
 
 1. **It keeps the transport.** The MTProto client and sign-in, the event
-   handler for new messages, reply-chain fetching, media download, sending
-   text, files, and polls, the oversize-as-file path, and poll vote
-   decoding. These are I/O and stay.
+   handler for new messages, reply-chain fetching, media download, and
+   sending text and files. These are I/O and stay.
 2. **Its handler ends at `intake.receive`.** Everything a handler does after
    building the record (choosing a project or session, deciding whether to
    respond, steering, classifying intent, starting a session, writing
@@ -381,8 +368,10 @@ port when:
    removed.
 5. **It imports only `core/` ports.** No settings module, model, or helper
    from outside `core/`, and nothing from another bridge.
-6. **It passes the integration tests** in `tests/`: real Telegram test
-   accounts, a real Postgres, no mocks. A message replayed after a kill lands
+6. **It passes the integration tests** in `tests/`: the emulator as its
+   own process, the bridge killed by its pid, real Telegram test servers
+   with test accounts (`tests/test_live_telegram_dc.py`), and a real
+   Postgres. A message replayed after a kill lands
    once; a send killed after its intent is reconciled and not repeated; a
    reply to a question notice records `question.answered` with
    `via: telegram`.
@@ -390,12 +379,29 @@ port when:
 ## Gaps
 
 - **`random_id` duplicate behaviour.** That Telegram refuses a repeated
-  `random_id` from a user account, rather than silently delivering again, is
-  an assumption to verify against a test account before the performer
-  relies on it. If it does not hold, `lookup` alone reconciles dangling
-  intents.
+  `random_id` from a user account, rather than silently delivering again,
+  is what `tests/test_live_telegram_dc.py` checks on the test servers. The
+  broker never performs one effect twice, so for effects it is defence in
+  depth; for notices, which the outbox yields until marked sent, the scan
+  for the notice's short id backs it.
 - **Approving sends one at a time.** Every reply Valor sends to anyone other
   than Tom waits for his tap. In a busy group that is many taps. A standing
   grant (say, "replies in this chat") would cut them, but the broker has no
   standing grants: every release consumes one approval bound to one digest.
   Whether to add one is Tom's call, since it widens authority.
+
+## As built
+
+`bridges/telegram/`, run as `python -m bridges.telegram run` by the launchd
+job `com.valor.kernel.telegram` that `--plist` prints.
+
+| Module | Does |
+|---|---|
+| `wire.py` | The only module importing Telethon: one client with sequential updates, no automatic flood sleep, reconnect, or request retry; raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, no parse mode, no link preview |
+| `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain (20 hops), files by sha256 with a download timeout of ten seconds or five plus one per MB, tried once more at twice that |
+| `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message; the outbox loop; SIGTERM lets an in-flight send and its outcome finish |
+| `send.py` | `telegram.send_message` perform and lookup, and the notice send to the row's `chat_id`, marked through `outbox.sent` |
+| `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
+| `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |
+
+Nothing the bridge prints holds any part of the API hash.
