@@ -23,14 +23,18 @@ Tom reads status on a page instead of receiving status messages
 
 **4.1, the objective tree** (`m4-1-objective-tree.md`). This plan uses:
 
-- `tasks.start_child(conn, parent_id, *, ceiling=None, **brief_fields)`,
-  which accepts any parent that is not a calibration task or fenced, and
-  refuses a ceiling above the parent's;
-- `tasks.subtree` and `tasks.ancestors`, and spending rolled up from
-  descendants into the parent's reported spending;
-- stop of a node fencing every descendant.
+- `tasks.start_child(conn, parent_id, *, ceiling=None, marker=None,
+  **brief_fields)`: any parent but a calibration or fenced one, a ceiling
+  above the parent's refused, and `marker` merged into `task.started`
+  (`{"sdlc": 1}` when None);
+- `tasks.ancestors` (nearest first) and `tasks.subtree`;
+- `tasks.tree_spending`, whose `charges` lists every `gateway.charged` row
+  in the subtree as `{task_id, call_id, usd_micros, at}` and whose
+  `tree_open_calls` lists open calls;
+- the tree lock `tree:<root id>`, and stop fencing every descendant.
 
-`Brief.routine`, `Brief.replay`, and the objective node are this task's.
+`Brief.routine`, `Brief.replay`, and the `{"objective": NAME}` marker are
+this task's.
 
 **2.1, the resident kernel** (`m2-1-resident-kernel.md`). `python -m core
 serve` (`core/serve.py`) folds every task that is not merged or stopped
@@ -62,9 +66,9 @@ otherwise.
    metered spending, and the routine's metered spending over the last 30
    days with the number of runs in them.
 2. **Period spending is reported and stops nothing.** The 30-day figure is
-   the sum of every `gateway.charged` row whose row time is within 30 days
-   of the report, on every task in the subtrees of the routine's
-   objectives and on every calibration task whose
+   the sum of `tree_spending`'s `charges` on each of the routine's
+   objectives with `at` within 30 days of the report, plus the charges on
+   every calibration task whose
    `task.started.emulator.item_task` is in those subtrees, with open calls
    listed apart. A charge 31 days old is out; one 29 days old is in; a
    charge on a grandchild (a replay under a sweep run) is in; a stand-in
@@ -169,8 +173,10 @@ refuses a routine on it, since refusing would be a check with no grant.
 
 ### Records
 
-- **The objective.** A task started with `Brief.routine` set and an
-  `objective` marker on its `task.started`. Like a calibration task it
+- **The objective.** A root task started with `Brief.routine` set and the
+  marker `{"objective": NAME}` on its `task.started`, through a `marker`
+  argument this task adds to `tasks.start`, matching `start_child`'s. Like
+  a calibration task it
   carries no `sdlc`, and `schedule`, every SDLC writer, and the runners
   pass it by. Unlike one, it can be a parent and can be stopped.
 - **`routine.registered`** on the `routines` stream holds the name, the
@@ -181,8 +187,9 @@ refuses a routine on it, since refusing would be a check with no grant.
   `--restart` after a stop, registers another; the period report sums
   every objective of the name.
 - **A run** is a child of the objective (`tasks.start_child`) with
-  `Brief.routine` set. For expiry it is an SDLC task; for emulator it is
-  an objective node holding the replays.
+  `Brief.routine` set. For expiry it is an SDLC task (the default marker);
+  for emulator it is an objective node holding the replays
+  (`marker={"objective": NAME}`).
 - **`routine.ran`** on the objective records each firing: the run's task
   id, the outcome, a short summary the kernel writes, and the run's
   spending. The outcome is one of `started`, `continued`, `nothing_due`,
@@ -356,11 +363,9 @@ added for instance grants.
 
 ## Absorbs
 
-- [routines.md](../routines.md) "Gaps":
-  - The `routine` command, the routine identity on a task, the period
-    report, and turns ordered across tasks with Tom first.
-  - Its plist row becomes the generated plist (`--plist`).
-  - Its "two task ids" becomes the `need` field.
+- [routines.md](../routines.md) "Gaps": the `routine` command, the routine
+  identity on a task, the period report, and turns ordered with Tom first.
+  Its plist row becomes `--plist`; its "two task ids" becomes `need`.
 - `core/guards.py`'s docstring: "deleting an expired guard is a routine for
   milestone 4".
 - [judgement-layer.md](../judgement-layer.md), Open: "What happens at expiry
@@ -398,8 +403,8 @@ added for instance grants.
 - The first run registers the objective, and a second run reuses it. A
   ceiling change in the toml registers a second objective, and the report
   sums both.
-- `start_child` accepts an objective as parent. `schedule` passes the
-  objective by.
+- `start_child` with `marker={"objective": NAME}` under an objective
+  writes a node `schedule` passes by.
 - Two `routine.registered` rows for one (name, ceiling) are refused by the
   index.
 - A stopped objective: the command writes no row, starts no task, prints
@@ -424,19 +429,16 @@ added for instance grants.
 
 `tests/test_expiry.py`, with rows written at explicit times:
 
-- **Unfired seeded guard.** Granted 2026-10-01 with `expires` 2026-12-30,
-  never fired: not due on 2026-12-29, due on 2026-12-31.
-- **Fired before its expiry.**
-  - Fired 2026-10-05: due on 2027-01-03 and not on 2027-01-02.
-  - Fired 2026-11-01 on a foreground task: not due on 2026-12-31, due on
-    2027-01-31.
+- **Unfired seeded guard** (`expires` 2026-12-30): not due 12-29, due 12-31.
+- **Fired before its expiry** on a foreground task: fired 2026-10-05, due
+  2027-01-03 and not 01-02; fired 2026-11-01, not due 12-31, due 01-31.
 - **Fired only on a background task** (a replay, or a hand-run replay with
   `Brief.replay` and no routine): due at expiry.
 - **Wrong row type.** A `guard_id` in a row type outside
   `machine.VERDICT_ROWS` is not a firing.
 - **Listed by a sweep.** An open sweep's item is not listed again. An item
   a merged sweep kept is due 90 days after that sweep listed it.
-- **Seeded guard absent** from `guards.SEEDED`: not due.
+- A seeded guard absent from `guards.SEEDED`: not due.
 - **Instance grants.**
   - Past its `expires`: due, and rendered with "no firing record".
   - On another project's task: in the "outside this repository" list only.
@@ -499,13 +501,13 @@ time after 4.1 and 2.1.
 
 | File | Change |
 |---|---|
-| `core/routines.py` | new: toml loading, registration, `due`, the expiry runner, the period fold, `report`, `PLIST_ENV`, the plist |
+| `core/routines.py` | new: toml loading, registration, `due`, the expiry runner, the period fold over `tree_spending`'s `charges`, `report`, `PLIST_ENV`, the plist |
 | `core/serve.py` (2.1's code, kernel) | `schedule`'s sort key: background last, then the latest row id; `valor_preempt` before a foreground harness step waits |
 | `core/router.py` (2.1's code, kernel) | `python -m core run` sends `valor_preempt` before waiting for the slot for a foreground step |
 | `core/runs.py` (kernel) | `valor_preempt` listen; the `preempted` outcome |
 | `core/session.py`, `core/fresh.py` (kernel) | a `preempted` turn leaves the step unspent |
 | `core/machine.py` (kernel) | `preempted` folds as unfinished, outside the idle and failed counts |
-| `core/tasks.py` | `Brief.routine`, `Brief.replay`, the objective marker, `background`, `index`, `attention_log` |
+| `core/tasks.py` | `Brief.routine`, `Brief.replay`, `marker` on `tasks.start`, `background`, `index`, `attention_log` |
 | `core/schema.sql` | unique index on `routine.registered` (name, ceiling, `replaces`) |
 | `core/settings.py` | `routines_dir`, `routine_period_days` (30), `ui_port` (8790) |
 | `core/__main__.py` | `routine` (with `--plist`, `--restart`), `routines`; `ROUTINE_RUNNERS` |
@@ -536,11 +538,10 @@ tail ~/Library/Logs/valor/routine-expiry.log
 .venv/bin/python -m core routines
 ```
 
-The emulator sweep's first run comes on its schedule. To remove a job, run
-`launchctl bootout gui/$(id -u)/com.valor.routine.NAME`. To stop a routine,
-run `python -m core stop` on the routine's objective; `python -m core
-routine NAME --restart` starts it again. To open the page, run
-`.venv/bin/python -m ui` and go to `http://127.0.0.1:8790/`.
+The emulator sweep first runs on its schedule. `launchctl bootout
+gui/$(id -u)/com.valor.routine.NAME` removes a job. `python -m core stop`
+on the objective stops a routine; `--restart` starts it again. The page
+is `.venv/bin/python -m ui`, at `http://127.0.0.1:8790/`.
 
 ## Decided by default
 
