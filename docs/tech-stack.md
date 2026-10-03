@@ -66,7 +66,7 @@ enforcing outside the model is AI Control [4].
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
-| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; the bridges chosen, not built; libraries open |
+| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email chosen, not built |
 | Scheduling | launchd: the kernel's LaunchAgent and the backup job; routines | the kernel in use; routines chosen, not built |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
@@ -510,11 +510,12 @@ session hijack could forge.
 
 **Bridges.** Telegram and email, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
-as an `act` through the broker. Status of the bridges: **chosen, not built**
-in this tree. Tom's call is that the
-existing bridges may survive close to unchanged; their libraries (Telethon
-for Telegram, the standard library's `imaplib` and `smtplib` for email) are
-the candidates, **open** until the bridges are rebuilt. What each bridge does
+as an `act` through the broker. The Telegram bridge is built in
+`bridges/telegram/` on **Telethon** (pinned in `uv.lock`), a user account
+over MTProto, with the library confined to `bridges/telegram/wire.py`.
+Email is **chosen, not built**; its libraries (the standard library's
+`imaplib` and `smtplib`) are the candidates, **open** until it is built.
+What each bridge does
 is [bridges/telegram.md](bridges/telegram.md) and
 [bridges/email.md](bridges/email.md).
 

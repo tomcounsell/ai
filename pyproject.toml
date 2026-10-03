@@ -6,6 +6,7 @@ requires-python = ">=3.14"
 dependencies = [
     "aiohttp>=3.12",
     "psycopg[binary]>=3.2",
+    "telethon>=1.40",
 ]
 
 [dependency-groups]

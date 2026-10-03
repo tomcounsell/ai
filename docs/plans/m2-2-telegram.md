@@ -32,25 +32,25 @@ file.
 ## Port used
 
 The lead's port decisions, items 1 to 40 with 11a, 15c, and 34a, as 2.1 writes them in
-[m2-1-port.md](m2-1-port.md) (2.1's commit 4ce1cede3). What 2.2 uses, by
+[m2-1-port.md](m2-1-port.md) (2.1's commit 3e3d07201). What 2.2 uses, by
 item:
 
 | Item | What 2.2 does with it |
 |---|---|
-| 1, 28 | `bridges/telegram/__main__.py run` calls `core.bridge.serve(TelegramBridge())`; the class implements `Bridge` (`channel = "telegram"`, `limits`, `performers()`, `async run(outbox)`) |
+| 1, 28 | `bridges/telegram/__main__.py run` calls `core.bridge.serve(TelegramBridge())`; the class implements `Bridge` (`channel = "telegram"`, `performers()`, `async run(outbox)`, `async tick()`) |
 | 2 | Every message ends at `intake.receive(conn, inbound)`; `Received.duplicate` means already recorded, and nothing more happens |
 | 3, 32 | Gap fill pages with `intake.highest` as a hint and receives only ids `intake.recorded` does not list, checked before any download |
 | 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
 | 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
 | 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
-| 11 | Passes Telegram's raw facts; `verified` as item 11 states, from the account's own peer id the bridge reports |
-| 15b, 15c, 25 | `limits` is Telegram's entry in `core/bridge.py` (`max_text` 4096 UTF-16 code units, `max_file_bytes` the upload limit); the bridge reads it and declares none of its own. The performer splits text over the limit |
+| 11 | Passes Telegram's raw facts; `receive` sets `verified`, true for every Telegram record |
+| 15b, 15c, 25 | Telegram's limits are its entry in `core/bridge.py`'s `LIMITS` (`max_text` 4096 UTF-16 code units, `max_file_bytes` the upload limit), and `core.bridge.split_text("telegram", text)` splits a text over it; the performer and the notice send send one message per part and declare no limit of their own |
 | 38 | `tick()`, which `serve` calls on every `serve_tick_s` wake, runs the gap fill |
 | 39, 40 | Kernel behaviour the pipeline tests exercise through the bridge: a binding that raises binds `none` and owes a notice; a refused release appends `effect.refused` once and owes a notice |
 | 17, 18 | `Inbound.topic_id`, `thread: list[dict]`, `headers["grouped_id"]`, attachments `{name, mime, bytes, path}` or `{name, mime, bytes, skipped: reason}`, files under `settings.inbound_dir/telegram/` named by sha256 |
 | 19 | Payload `files: [{path, sha256}]`: read once, hashed, raise before sending on a mismatch, send the bytes hashed |
 | 22, 24 | `Declared` for `telegram.send_message` is 2.1's; a send in doubt raises `broker.Unknown` |
-| 26 | Uses 2.1's settings: `operator_chat`, `inbound_dir`, `machine`, `serve_tick_s`, `pg_passfile` |
+| 26 | Uses 2.1's settings: `operator_chat`, `inbound_dir`, `machine`, `default_machine`, `serve_tick_s`, `pg_passfile` |
 | 27 | Single instance is `serve`'s session lock `bridge:telegram:<machine>`; no flock |
 | 29 | Connections named `valor-telegram` and `valor-telegram-perform`, by `serve` |
 | 30 | Imports `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, `core.credentials`, nothing else |
@@ -70,9 +70,8 @@ ids have gaps), `random_id` duplicate detection, Telegram's trim of
 leading and trailing whitespace, injected flood waits, dropped live
 updates, a disconnect after accepting a send and before replying, and a
 pause point after a send is accepted. The bridge reaches it below
-`bridges/telegram/wire.py`, through a stand-in wire the test's child
-process passes in; no production setting selects it. Postgres is the
-real test database. `wire.py` itself (Telethon's update handling, error
+`bridges/telegram/wire.py`, through `EmulatorWire`, which the test or
+its child process passes in; no production setting selects it. `wire.py` itself (Telethon's update handling, error
 types, and reconnect) is shown only on the test servers below.
 
 - **Receipt is idempotent and lossless.** Killed between commit and the
@@ -184,7 +183,6 @@ Read with `git show origin/main:<path>`; nothing is imported from it.
 | `bridges/telegram/gap.py` | `bridge/history_fetch.py` | Backward paging that accepts only strictly older ids and stops on a short page | Pages to a floor (below), receives ids `intake.recorded` does not list, oldest first, through the same path as the handler; no per-chat ceiling |
 | `bridges/telegram/send.py` | `_send_queued_message` in `bridge/telegram_relay.py`; `_find_already_sent_poll` | The scan of the account's own messages in a chat, newest first; two matches adopt nothing | The `telegram.send_message` perform and lookup, and the notice send. One attempt per message. Text is split, then files are sent as documents. `random_id` per part. Voice notes, albums, custom emoji, markdown, the oversized-as-file path, and dead letters go |
 | `bridges/telegram/bridge.py` | the body of `main()` in `bridge/telegram_bridge.py` | Graceful shutdown on SIGTERM | `TelegramBridge`: `run(outbox)` connects, runs the gap fill, registers the handler, and iterates the outbox. On SIGTERM an in-flight perform and its outcome finish before exit |
-| `bridges/telegram/peer.py` | `utils/peer.py` | `numeric_peer`, `deliverable_telegram_peer` | The docstring about import cost goes |
 | `bridges/telegram/login.py` | `scripts/telegram_login.py` | The code and two-factor flow; the existing-session check | Reads the API id and hash from the key file; asks for the phone number and the password (through `getpass`) and stores neither; writes the session into the kernel key directory, mode 600. Prints the signed-in name and user id, and no part of the API hash (`main` prints its last four characters). `--test-dc` signs a test account into a session under the test's temporary directory |
 | `bridges/telegram/__main__.py` | none | | `run`, `login`, `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault `.env` into `telegram-keys` in the kernel key directory with `credentials.copy_keys`, printing each name with `written`, `kept`, or `missing`), and `--plist` |
 
@@ -194,10 +192,9 @@ so the sandbox deny on that directory covers them.
 
 ## Behaviour in detail
 
-**Sending.** Text is split so each part is at most 4,096 UTF-16 code
-units, Telegram's count, breaking at the last newline before the limit,
-else the last space, else at the limit, never inside a surrogate pair;
-the kernel counts the same way (item 15c). The first part carries the reply target; every part
+**Sending.** Text goes as the parts `core.bridge.split_text` gives, each
+at most 4,096 UTF-16 code units, Telegram's count (item 15c), so the
+kernel's render and the bridge's send agree. The first part carries the reply target; every part
 carries the topic. Then each file is sent as a document named by its
 `path`'s base name, from the bytes hashed. Part `n` has `random_id` from
 the first 8 bytes of SHA-256 of `key:n`, a signed int64, never zero. The
@@ -210,7 +207,7 @@ result is `{"sent": [...]}`, one entry per message, in order.
 | Telegram answered with an error (flood wait, write forbidden, peer invalid) | that error, with the seconds for a flood | `failed`, after `lookup` finds nothing |
 | Not connected; nothing was written to the socket | a connection error | `failed`, after `lookup` |
 | The connection was lost after a request was written and before its answer | `broker.Unknown` | nothing; the outbox's reconcile settles it |
-| `RandomIdDuplicate` | nothing: perform calls `lookup` and returns its result, or raises `broker.Unknown` if the scan misses | `done`, or nothing |
+| `RandomIdDuplicate` | `broker.Unknown` | nothing; the outbox's reconcile settles it through `lookup` |
 | Killed mid-perform | | nothing; reconcile settles it |
 
 `random_id` is defence in depth for effects: the broker never performs one
@@ -240,11 +237,15 @@ logged once per notice.
 **Gap fill.** Runs on each connect and in `tick()`, per owned
 chat. Each pass pages back from the newest message, receives every id
 `intake.recorded` does not list, and stops at a message dated before the
-pass's floor. During a connection the floor is the previous pass's start
-less the clock margin. The first pass after connecting stops at the lower
-of `intake.highest` and that message's date less `serve_tick_s` and the
-margin. A chat with no rows starts at the connect time. Media is
-downloaded only for ids not recorded.
+pass's floor. After a chat's first pass the floor is the previous pass's
+start less the clock margin, across reconnects too, so a message whose
+receive failed and dropped the connection is taken on the reconnect; it
+never goes below the first pass's floor. The first pass keeps every id
+above `intake.highest` and stops below that message's date less
+`serve_tick_s` and the margin. A chat with no rows starts at the first
+connect. Media is downloaded only for ids not recorded. A flood wait from
+a pass is held like any other, and `tick()` skips its pass while one is
+held.
 
 **Flood waits.** A flood wait on a request is held in memory; later
 requests wait it out. A restart forgets it, and Telegram answers the next
@@ -283,9 +284,17 @@ request with the remaining wait.
 
 ## Tests
 
-Real Postgres (the test database, never `valor_rebuild`), the emulator as
-its own process, and the bridge in `tests/telegram_child.py`, a child
-process the test starts and kills by its pid. No mocks inside the bridge.
+The emulator runs as its own process; the bridge runs in-process or in
+`tests/telegram_child.py`, a child process the test starts and kills by
+its pid. No mocks inside the bridge. Until 2.1's port is in the tree, the
+bridge runs over `tests/telegram_kernel.py`, a stand-in with the port's
+names and shapes: records in memory or a file, `recorded`, `highest`,
+`claimed`, `owns`, `owned`, `split_text` counting UTF-16 units, and an
+outbox that performs, asks `lookup` with the intent's `at` on an error,
+and leaves an effect in flight on `broker.Unknown`.
+`tests/test_telegram_pipeline.py` runs the bridge over the real port and
+the test database (never `valor_rebuild`), and skips until `core.intake`
+and `core.bridge` exist.
 
 `tests/test_telegram_inbound.py`
 - `message.message` with Markdown-looking characters and entities arrives
@@ -323,17 +332,20 @@ process the test starts and kills by its pid. No mocks inside the bridge.
   effects with identical payloads in one task.
 - Sent text carries no parse mode and no link preview; the reply target
   and topic are honored; the result carries one `sent` entry per message.
-- 4,096 UTF-16 units go as one message; 4,097 as two whose joined text is
-  the payload; 2,049 astral-plane emoji as two; a split falls on a newline
-  when there is one.
+- 4,096 units go as one message; a longer text goes as the parts
+  `split_text` gives, one message each. The stand-in's `split_text`
+  counts as the port's does: 4,097 as two whose joined text is the
+  payload, 2,049 astral-plane emoji as two, a split on a newline when
+  there is one.
 - A file whose bytes changed after approval raises before anything is
   sent; a file is sent from the bytes hashed.
 - A flood wait on send writes `failed` carrying the seconds, and the next
-  request waits it out.
+  request waits it out; a flood wait in gap fill holds later passes.
 - The emulator accepts a send and drops the connection before replying:
   `broker.Unknown`, no outcome, and the next tick's reconcile writes `done`
   with one message on screen.
-- `RandomIdDuplicate` on an effect: perform returns the scanned message.
+- `RandomIdDuplicate` on an effect: `broker.Unknown`, no outcome, and the
+  reconcile's lookup writes `done` with the message already on screen.
 - Lookup: a match dated before `since` less the margin is not adopted; a
   claimed id is skipped; a payload with a trailing newline matches the
   trimmed message; a sent message older than a later claimed one is found;
@@ -347,29 +359,37 @@ process the test starts and kills by its pid. No mocks inside the bridge.
 - `RandomIdDuplicate` on a notice with a scan miss: one notice on screen
   afterwards, and `notice.sent` recorded.
 - A notice failing on every attempt logs its reason once.
-- A released effect on a stopped task is refused, recorded once, and
-  nothing is sent.
-- Effects of other owners (`push_branch`, `email.send`) are left alone.
+- The bridge takes a `Release` to `outbox.perform` and sends a
+  `NoticeDue` itself.
 
 `tests/test_telegram_crash.py`
 - Killed at the pause point after the emulator accepted a send: restart,
   `done` (reconciled), one message.
-- Killed after the intent and before the send, restarted within a second,
-  with a settle time of 5 s: the effect is still in flight after the first
-  tick, `failed` on a tick after 5 s, zero messages.
 - Killed after `receive` committed and before the read acknowledgement:
   the replay lands once.
+- Killed after 105 was received and before a tick covered a dropped 104:
+  the first pass after restart records 104.
 - SIGTERM during a perform: the message and its outcome are both recorded
   before exit.
 
 `tests/test_telegram_bridge.py`
+- `keys` copies the two names at mode 600 and its output, the
+  missing-key message, and `--plist` contain no 4-character substring of
+  a fake API hash.
+
+`tests/test_telegram_pipeline.py` (with 2.1's port and kernel)
+- A message through `intake.receive` is one `message.received` row with
+  `verified` true; `highest` and `recorded` see it.
+- `LIMITS["telegram"]` is 4,096 UTF-16 units and a 4,097-unit send goes
+  as two messages.
 - A second `run` waits on `serve`'s lock while the first keeps serving,
   and no process receives a signal.
-- `login` and `keys` output contains no 4-character substring of a fake
-  API hash; `keys` writes mode 600.
-- `peer.py`'s cases from `main`'s tests, kept.
-
-`tests/test_telegram_pipeline.py` (with 2.1's kernel)
+- Killed after the intent and before the send, restarted within a second,
+  with a settle time of 5 s: the effect is still in flight after the first
+  tick, `failed` on a tick after 5 s, zero messages.
+- A released effect on a stopped task is refused, recorded once, and
+  nothing is sent; effects of other owners (`push_branch`, `email.send`)
+  are left alone.
 - An emulated message from Tom in the operator group starts a task;
   `status` shows metered spending.
 - A question notice, Tom's emulated reply, `question.answered` with
@@ -393,9 +413,10 @@ only the test child has.
 ## Files it changes
 
 - New: `bridges/telegram/__init__.py`, `__main__.py`, `wire.py`,
-  `inbound.py`, `gap.py`, `send.py`, `bridge.py`, `peer.py`, `login.py`.
-- New: `tests/telegram_emulator.py`, `tests/telegram_child.py`, and the
-  test files above.
+  `inbound.py`, `gap.py`, `send.py`, `bridge.py`, `kernel.py` (the port
+  gathered into one object), `login.py`; `bridges/__init__.py`.
+- New: `tests/telegram_emulator.py`, `tests/telegram_kernel.py`,
+  `tests/telegram_child.py`, and the test files above.
 - `pyproject.toml`, `uv.lock`: `telethon`, pinned.
 - `docs/bridges/telegram.md`: status, polls removed, secrets in the kernel
   key directory, sends, lookup, notices, and gap fill as built, the
@@ -442,9 +463,9 @@ The test window, on the build Mac:
    effect notice performs the push; `approve` in reply to the delivered
    notice is feedback.
 8. `launchctl bootout gui/$(id -u)/com.valor.kernel.telegram`; Tom runs
-   `VALOR_LIVE=1 VALOR_TELEGRAM_WINDOW=1 pytest
-   tests/test_live_telegram_window.py`, which kills its own child by pid
-   at the pause and checks one message on screen and a reconciled `done`;
+   `VALOR_TELEGRAM_WINDOW=1 VALOR_TELEGRAM_WINDOW_CHAT=<the group's id>
+   pytest tests/test_live_telegram_window.py`, which kills its own child
+   by pid at the pause and finds exactly one message by lookup;
    then bootstrap the job again.
 9. `launchctl bootout gui/$(id -u)/com.valor.kernel.telegram`, so the
    new bridge is live only during the window. Enable the running system:

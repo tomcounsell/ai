@@ -15,6 +15,8 @@ The rule: integration first, no mocks.
 
 The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) runs today from `scripts/` while it is an experiment, and moves here in the design. It uses one module here: `scripts/replay.py` forces its `bare` and `clarify` arms by running `tests/judgement_upstream.py` (`python -m tests.judgement_upstream --answer precise|thin`) and pointing the kernel's judgement legs at it.
 
+The Telegram bridge's tests run Telegram as a local server in its own process (`python -m tests.telegram_emulator --port N`, ports 6531 to 6539) reached through `EmulatorWire`, kill the bridge by its pid in `tests/telegram_child.py`, and run over `tests/telegram_kernel.py`, a stand-in with the port's names, until 2.1's `core/bridge.py` and `core/intake.py` are in the tree; `tests/test_telegram_pipeline.py` runs over the real port and skips until then. The real wire runs on Telegram's test servers in `tests/test_live_telegram_dc.py` (`VALOR_LIVE=1`, `VALOR_TELEGRAM_TEST_DC=1`) and on Valor's account only in Tom's window (`VALOR_TELEGRAM_WINDOW=1`).
+
 Governed by [docs/emulator.md](../docs/emulator.md), [docs/data.md](../docs/data.md) (Test databases), and [docs/tech-stack.md](../docs/tech-stack.md) (Tests).
 
 ## Imports

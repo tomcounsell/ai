@@ -9,6 +9,8 @@ Self-contained comms modules.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
+Entry point: `python -m bridges.telegram run | login | keys | --plist`.
+
 Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, and [docs/bridges/email.md](../docs/bridges/email.md).
 
 ## Imports
