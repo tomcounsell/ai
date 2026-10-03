@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-pi-harness
 type: build
-status: built
+status: delivered-not-passed
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -437,3 +437,30 @@ From the review (`changes`) and the test check (`gaps`):
   `~/.cache/valor-pi-0.73.1/node_modules/.bin/pi`: `tests/test_pi.py` and
   `tests/test_harness_contract.py` 62 passed, 1 skipped (Pi has no
   subagents).
+
+## Checks after patch round 1, at 74431ce59 (review round 1 of 1)
+
+- Test: `gaps`. With `VALOR_PI` at the 0.73.1 install, 693 passed and 14
+  skipped; the default run skips about 20 Pi cases on the version
+  mismatch. Real `sandbox-exec` refuses writes to the Pi install under
+  both profiles. The `~/.pi` test passes with the denial removed: it runs
+  `sandbox-exec` without `-D GATEWAY_PORT` and `-D VALOR_TURN`, so the
+  profile fails to load before `cat` runs. Pass the `-D` flags as
+  `tests/test_demo_sandbox.py` does.
+- Review: `changes`; governance boolean no; no invented caps. `_node()`
+  finds `node` with `shutil.which`, and `~/.bun/bin` and `~/.opencode/bin`
+  come before `/opt/homebrew/bin` on the kernel's PATH; a turn can write
+  both, so a planted `node` runs the `reviewer_openai` Pi session, which
+  writes the verdict. Minor: `pi_install()` returns nothing when the Pi
+  path has no `node_modules`, and does not cover a `VALOR_PI` that is a
+  link outside the install.
+- Docs: `updated`, 0c3d8a438 on `m3b-docs2`.
+
+## Delivery: delivered, not passed
+
+The review rounds are spent. The recommendation is one more patch:
+`node` at a fixed path, as 1.4v does for `claude` and the Postgres
+programs (`docs/plans/m1-4v-binary-paths.md`); `pi_install()` covering an
+install with no `node_modules` and the resolved target of `VALOR_PI`; the
+`~/.pi` test given its `-D` flags.
+
