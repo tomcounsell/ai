@@ -574,4 +574,4 @@ its exit, and has its group killed after (The run; Tests, Results).
 
 ## Tom's feedback (2026-10-03)
 
-Installing Apple's `container` from its signed package needs the Mac's admin password, which only Tom holds; the build asks him for it when 1.4c part two's rerun reaches this step, and otherwise the plan stands.
+Installing Apple's `container` from its signed package needs the Mac's admin password. Tom, same day: it is in 1Password, vault `m-valor`, item `bgqjftkvj4witkswgdoxegdjsy`, and is the same on all of Valor's machines. The build reads it from there at install time and never prints it; nothing waits on Tom. Otherwise the plan stands.

@@ -606,6 +606,9 @@ What this changes:
 - Unchanged: the governance paragraph in `CLAUDE.md`. Adding a check,
   gate, hook, review step, or guard still needs an incident, a mission
   item, and Tom's tap, one per instance.
+- **The Macs' admin password** (the same on all of Valor's machines) is in
+  1Password, vault `m-valor`, item `bgqjftkvj4witkswgdoxegdjsy`. A step
+  that needs `sudo` reads it from there and never prints it.
 
 Decided the same day, recorded in each task's plan: the five passed
 deliveries merge (3a, 3c, 4.2, 1.4d, 1.4c part one); one more patch round
