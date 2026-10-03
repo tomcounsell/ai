@@ -20,12 +20,9 @@ calibration, the judgement keys, the long-lived Claude token, the demo
 items and results at `~/src/valor-demo`, `GITHUB_PUSH_TOKEN` in the
 vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
 (a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
-Postgres). The popoto #191 trial run (task `75c0902b6e25`) is in `build`
-with $6.09 metered and no candidate; Tom decided on 2026-10-03 that
-spending is metered and never stops a task, and the trial continues on
-Valor's Mac (m1-4-checks.md). After pulling, run `python -m core migrate`
-there (with the `PATH`, `PGPASSFILE`, and `VALOR_BACKUP_DIR` below), then
-`python -m core run 75c0902b6e25`. Then 1.4b, then 1.4d; 1.4c after takeover. On this Mac a non-interactive shell finds
+Postgres). The popoto #191 trial run (task `75c0902b6e25`) is done and held at
+its merge, not released (m1-4-checks.md). Next is 1.4b, then 1.4d; 1.4c
+comes after takeover. On this Mac a non-interactive shell finds
 Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
 `PGPASSFILE`, so commands run with `postgresql@18/bin` first,
 `VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and

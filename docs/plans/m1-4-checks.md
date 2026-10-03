@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial continues on Valor's Mac (build metered $6.09, no candidate; spending never stops it, Tom 2026-10-03) after pull and migrate, with core run 75c0902b6e25; then 1.4b, then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; next 1.4b, then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -1587,7 +1587,7 @@ and docs runners, routing on the entry check, no calibration-first), then
 1.4d (the GitHub credential), with 1.4c (the container verifier) after
 takeover.
 
-## The popoto #191 trial run (stopped at a spending cap)
+## The popoto #191 trial run
 
 Run 2026-10-02 on Valor's Mac, in the real ledger, as task `75c0902b6e25`
 (`scripts/replay.py pop-b.json --arm routed` with $4.50 committed, the real
@@ -1670,3 +1670,65 @@ Then fresh subagents play test, review, and docs through `python -m core
 verdict`, stopping at the held merge. Findings 1 and 2 stand as cost
 findings: the reservation tail no longer exists, and the context-carrying
 build is still a cost finding for 1.4b.
+
+### The trial to the held merge, 2026-10-03
+
+Run on Valor's Mac after `python -m core migrate` (the per-call index
+swap; no row changed). The backup disk was not mounted when migrate ran,
+so the dump before it was missed; the dump after it is
+`valor_rebuild-20261003T011437Z.dump` on the backup disk.
+
+1. Build turn 4 metered $1.22 and produced candidate `543c1395`
+   (10 files, +943/-58: the field, `push()`, the load, save, delete, and
+   key-move paths, 26 tests, docs).
+2. Checks, played by fresh subagents through `python -m core verdict`,
+   each in its own clone and its own Redis port:
+   - test `gaps`: base 289 passed, head 315, no regressions; eight
+     untested behaviors, the batch-load stride with several capped fields
+     or instances first.
+   - review (Opus, blind) `pass`, no findings, governance no.
+   - docs `updated` (`25f9e8e4`), with two code points: `push()` refreshed
+     only the list key's TTL, and a capped-only partial save returned the
+     pipeline's first result, not the `HSET` count.
+3. The join sent it to `patch` as the repair round. The patch turn metered
+   $1.46 and produced `aeb94f19`: `push()` refreshes the hash TTL with the
+   lists, a capped-only partial save returns 0, and 142 lines of tests.
+   The first docs commit did not ride into it, as designed.
+4. Checks again on `aeb94f19`:
+   - test `gaps`: base 289, head 327, no regressions; eight narrower
+     behaviors untested (all probed and working).
+   - review `pass`, governance no, one design finding: `push()` from a
+     stale copy after another process deleted the instance recreates the
+     list key alone, with no expiry on a model without a TTL.
+   - docs `updated` (`1cfb6000`, the first docs commit replayed and
+     corrected against the patch).
+5. The join (row 7: review pass, test `gaps`, repair round spent) went to
+   `merge` with the gaps listed. The merge effect `f10a2751760c` is held:
+   candidate `aeb94f19`, head `1cfb6000`, onto the task's own `main`. It is
+   not released.
+
+Total metered: $8.77. What Tom would have had to do from judge to the held
+merge: nothing, once spending stopped refusing. The six verdicts are role
+played; 1.4b replaces them with runners.
+
+Findings for 1.4b:
+
+5. **Hand-played checkers need the task's environment.** popoto's tests
+   flush their Redis, and `tests/test_connection.py` reconnects to
+   `localhost:6379`, where the live old system's Redis listens. Each
+   checker ran its own `redis-server` on its own port and ignored that
+   file. One checker's install landed in the rebuild's venv through an
+   inherited `VIRTUAL_ENV` and was removed. The runners should give each
+   check the task's provisioned Redis and environment, never the caller's.
+6. **The docs head has to reach the builder's clone by hand.** A docs
+   commit made in a checker's own clone was fetched into the workspace on
+   a ref of its own before `verdict --head` could fetch it into the mirror.
+   The docs runner should make the commit where the kernel fetches from.
+7. **Breadth keeps finding gaps.** Both rounds said `gaps`, the second on
+   narrower behaviors. Row 7 delivers with the gaps listed, which is what
+   happened; nothing else is needed.
+8. **The packaging pin.** pandas 3 breaks popoto's test collection at the
+   base; the checkers pinned 2.3.3 from `uv.lock`. Setup should install
+   from the lock.
+
+The trial is done. Next: 1.4b.

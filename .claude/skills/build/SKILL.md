@@ -10,22 +10,6 @@ records, until the next point that needs Tom. Work in `~/src/valor-rebuild`
 on branch `valor-cori-rebuild`. Never switch `~/src/ai` off `main`: the live
 old system runs from it.
 
-## Where the last session left off (2026-10-03)
-
-The popoto #191 trial run (milestone 1.4, before 1.4b) is task
-`75c0902b6e25`, in `build` with $6.09 metered and no candidate. Tom
-decided on 2026-10-03 that spending is metered and shown and never stops
-a task: no cap, no raise. The record and the next steps are in
-`docs/plans/m1-4-checks.md`, "The popoto #191 trial run". Next, on
-Valor's Mac after pulling: `python -m core migrate`, then
-`python -m core run 75c0902b6e25`; at `NO RUNNER`, fresh
-subagents play test, review, and docs through `python -m core verdict`,
-and the run stops at the held merge, never releasing it. On Valor's Mac
-every command needs `PATH=/opt/homebrew/opt/postgresql@18/bin:$PATH`,
-`VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
-`PGPASSFILE=~/.config/valor-kernel/pgpass`. Remove this section when the
-trial is recorded as done.
-
 ## 1. Orient
 
 Read, in order: `CLAUDE.md` (the governance paragraph and the tests line
