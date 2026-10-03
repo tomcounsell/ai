@@ -64,7 +64,7 @@ through the gateway and a real stop mid-stream.
 
 `turn.ended` carries the outcome (`done`, `failed`, `stopped`), the return
 code, the parsed result, the last 400 bytes of stderr, and the metered total
-for the turn.
+for the turn, the numeric sum of the charges on its calls.
 
 One harness turn runs at a time on the machine. The baseline series ran
 three replays at once under slot locks on a 64 GB machine
