@@ -12,7 +12,7 @@ governance_grant: open question 17 (Tom, 2026-10-01), the DMARC verified check i
 
 Task 2.3 of [valor-rebuild.md](valor-rebuild.md), milestone 2. It builds
 `bridges/email/` to the bridge port in
-[m2-1-resident-kernel.md](m2-1-resident-kernel.md#port), to the contract
+[m2-1-port.md](m2-1-port.md), to the contract
 in [bridges/email.md](../bridges/email.md), from the email code on `main`
 (`bridge/email_bridge.py`, `bridge/email_relay.py`), read with
 `git show origin/main:<path>` and never imported.
@@ -93,11 +93,12 @@ random, so this needs the id before it exists.
 
 ## Port used
 
-From the lead's port decisions, which 2.1 writes into its plan:
+From [m2-1-port.md](m2-1-port.md), which wins where this plan differs:
 
-- `core.intake`: `Inbound`, `receive(conn, inbound) -> Received`,
-  `recorded`, `owns(channel, id)`, `owned(channel)`; ownership on
-  `sender_id`, the operator's addresses owned by definition.
+- `core.intake`, module functions: async `receive(conn, inbound) ->
+  Received`, async `recorded(conn, channel, chat_id, ids)`, and
+  `owns(channel, id)`, `owned(channel)`; ownership on `sender_id`, the
+  operator's addresses (`operator_email`, a tuple) owned by definition.
 - The email record: `chat_id` is the thread root (the first `References`
   id, else the message's own `Message-ID`); `sender_id` is the `From`
   address lowercased; `message_id` is the `Message-ID` header;
@@ -106,28 +107,29 @@ From the lead's port decisions, which 2.1 writes into its plan:
   list[str]]` and carries the raw headers; `attachments` entries are
   `{name, mime, bytes, path}` or `{name, mime, bytes, skipped}`; `text`
   is the subject, a blank line, then the body, and that is the
-  instruction. `verified` is set by `core/intake.py` at receive, from the
-  raw headers.
-- `core.bridge`: `Bridge`, `ChannelLimits` (`int | None` fields),
-  `Declared` with an optional `settle_after_s`, and `serve`, which holds
-  `bridge:email:<machine>`, sets `application_name` to `valor-email`
+  instruction. `verified` is set by `receive` in the row's payload, from
+  the raw `From` and `Authentication-Results` headers.
+- `core.bridge`: `Bridge` (`performers()` returning `(perform,
+  lookup)`, `run(outbox)`), `ChannelLimits` (`int | None` fields),
+  `Declared` whose `settle_after_s` may be a function of the action
+  (D37), and `serve`, which holds `bridge:email:<machine>`, sets `application_name` to `valor-email`
   (`valor-email-perform` on the performing connection), and reconciles
   `broker.dangling` at start and on every `serve_tick_s` wake.
 - `Outbox`: iterate, `perform(Release)`, never `broker.release`; email
   ignores `NoticeDue`, since `operator_channel` is Telegram.
 - `email.send`: target the `to` list, lowercased, sorted, comma-joined;
   payload `to`, `cc`, `subject`, `body`, `in_reply_to`, `references`,
-  `files: [{path, sha256}]`. A send whose encoded message exceeds
-  `max_file_bytes` is refused at request time with the protocol limit as
-  the reason (port decision 15b).
+  `files: [{path, sha256}]`; refused at request time when the encoded
+  message exceeds `max_file_bytes`, the protocol limit the reason (15b).
 - Results carrying `sent: [{channel, chat_id, message_id}]`; binding on
   `(channel, chat_id, message_id)`. Email binds only `answer`, `steer`,
   and `start`; an `In-Reply-To` matching no sent message is not a reply;
   a non-reply from the operator starts a task under the project listing
   the chat, otherwise under `valor` (decision 15).
-- `broker.Unknown`: when `perform` raises it, the broker writes no
-  outcome and leaves the intent for `reconcile`.
-- Imports and settings names per port decisions 26 and 30.
+- `lookup(action, key, since)`, `since` the intent's `at`, passed by
+  `serve` on release and reconcile alike (D34a). `broker.Unknown` from
+  either call: no outcome, the intent left for `reconcile`. Imports and
+  settings names per port decisions 26 and 30.
 
 ## What is built
 
@@ -151,17 +153,17 @@ The record beyond the port's mapping: a message with no `Message-ID` gets
 `sha256:<digest of its raw bytes>`, which survives a UIDVALIDITY change,
 and is its own thread root. `sent_at` is the `Date` header, or the
 server's `INTERNALDATE` when `Date` does not parse. `headers` carries
-`subject` and `date` as strings, `from`, `to`, and `cc` as address lists,
-`authentication_results` as a list of the raw header values, topmost
-first, and `uid` and `uidvalidity`.
+`subject` and `date` as strings, `from` and `authentication_results` as
+lists of the raw header values as received, topmost first, `to` and `cc`
+as address lists, and `uid` and `uidvalidity`.
 
 ### `bridges/email/imap.py`: the poll, adapted from `_poll_imap`
 
 One connection per poll, every `email_poll_s` seconds (30, main's value),
 under `imaplib.IMAP4_SSL` with `ssl.create_default_context()` (main
 passes no context, so certificates go unverified there) and a socket
-timeout of `imap_timeout_s` (30, main's `IMAP_SOCKET_TIMEOUT`), so a hung
-server ends one poll and never stalls the loop.
+timeout of `imap_timeout_s` (30, main's `IMAP_SOCKET_TIMEOUT`): a hung
+server ends one poll.
 
 1. `SELECT INBOX`; read `UIDVALIDITY`.
 2. `UID SEARCH UNSEEN SINCE <email_since>` with an `OR` tree of `FROM`
@@ -188,14 +190,13 @@ cap of 20 goes.
 
 ### `bridges/email/smtp.py`: the performer
 
-Adapted from `_build_reply_mime` and `_send_smtp`
-(`bridge/email_bridge.py`) and `_send_smtp_sync`
-(`bridge/email_relay.py`).
+Adapted from `_build_reply_mime` and `_send_smtp` (`bridge/email_bridge.py`)
+and `_send_smtp_sync` (`bridge/email_relay.py`).
 
 - **Files.** `perform` reads each payload file once into memory, hashes
   those bytes, and compares with the payload's `sha256` (the broker's
-  digest binding, not a new check). A mismatch or a
-  missing file raises before SMTP connects, and nothing is sent. The MIME
+  digest binding, not a new check). A mismatch or a missing file raises
+  before SMTP connects, and nothing is sent. The MIME
   is built from the bytes it hashed, so a file changed between Tom's tap
   and the send never leaves.
 - **MIME.** `EmailMessage`, a `text/plain` UTF-8 body, files as
@@ -220,28 +221,27 @@ Adapted from `_build_reply_mime` and `_send_smtp`
   The server may have stored the message, so none of these is `failed`.
   smtplib reports a timeout as `SMTPServerDisconnected`; the raised
   `Unknown` includes the exception's `__context__`, so the timeout is
-  named. Some
-  recipients refused: `done`, with `refused` listing each address and its
-  reply.
+  named. Some recipients refused: `done`, with `refused` listing each
+  address and its reply.
 - **Result.** `message_id`, `accepted`, `refused`, and one `sent` entry
   whose `chat_id` is the thread root (the first `references` id, else the
   own Message-ID), so a reply from any recipient binds.
 - **lookup.** One IMAP connection; plain `LIST "" "*"`, and the folder
-  whose flags include `\Sent`; `UID SEARCH SINCE <the date of the
-  intent's at, less one day> HEADER Message-ID <id>`, or, when the server
-  advertises `X-GM-EXT-1`, `UID SEARCH X-GM-RAW "rfc822msgid:<id>
-  after:<that date>"`, with the `at` `Release` carries (port decision
-  34). The exact key-derived Message-ID needs no scan, so
-  `intake.claimed` is not consulted. Found: the result rebuilt with
+  whose flags include `\Sent`; `UID SEARCH SINCE <the date of since,
+  less one day> HEADER Message-ID <id>`, or, when the server advertises
+  `X-GM-EXT-1`, `UID SEARCH X-GM-RAW "rfc822msgid:<id> after:<that
+  date>"`; the day covers the clock margin and IMAP's date-only `SINCE`.
+  The key-derived Message-ID needs no scan, so `intake.claimed` is not
+  consulted. Found: the result rebuilt with
   `sent`. Not found: `None`. A connection or login failure raises
   `broker.Unknown`.
-- **settle_after_s**, on `email.send`'s `Declared` in `core/bridge.py`:
-  twice the action's deadline plus `email_sent_settle_s`, the time Gmail
-  takes to file a sent message. If `Declared` takes a number rather than
-  a function of the action, it is that value for the largest message
-  Gmail accepts, about 20 minutes. `email_sent_settle_s` is 120 until the
-  window measures it. The wait only delays reading a missing message as
-  never sent; it refuses nothing.
+- **settle_after_s**, on `email.send`'s `Declared` in `core/bridge.py`,
+  a function of the action (D37): twice the action's deadline, from
+  `email_encoded_bytes`, plus `email_sent_settle_s`, the time Gmail takes
+  to file a sent message. A text reply waits about 3 minutes, a 25 MB
+  message about 20. `email_sent_settle_s` is 120 until the window
+  measures it. The wait only delays reading a missing message as never
+  sent; it refuses nothing.
 - **limits.** `max_text` is `None`; `max_file_bytes` is 25,000,000,
   Gmail's limit on the whole encoded message ("Gmail sending limits in
   Google Workspace", Admin Help: maximum email size 25 MB), compared
@@ -263,9 +263,9 @@ and `react` are not carried.
 ### `bridges/email/__init__.py` and `__main__.py`
 
 `EmailBridge` with `channel = "email"`, `limits`, `performers()`
-returning `{"email.send": (perform, lookup)}`, and `run(intake, outbox)`,
-which runs the poll and, together with it, `async for item in outbox:
-await outbox.perform(item)` for each `Release`. The blocking IMAP and
+returning `{"email.send": (perform, lookup)}`, and `run(outbox)`, which
+runs the poll (`intake`'s functions on its own connection) beside `async
+for item in outbox: await outbox.perform(item)` for each `Release`. The blocking IMAP and
 SMTP calls run in a thread (`asyncio.to_thread`). `__main__` has three
 verbs: `run` (`asyncio.run(bridge.serve(EmailBridge()))`), `keys` (the
 credential copy below), and `--plist`, which prints the launchd job
@@ -275,10 +275,10 @@ credential copy below), and `--plist`, which prints the launchd job
 ### `core/intake.py`: the DMARC test
 
 `dmarc_verified(headers, authserv_id)`, pure, the test in the threat
-model: true only when `headers["from"]` is one address, the first entry
-of `headers["authentication_results"]` has authserv-id
-`email_authserv_id`, a `dmarc=pass` result, and `header.from` equal to
-that address's domain, compared without case. `receive` calls it for an
+model: true only when `headers["from"]` is one header holding one
+address, the first entry of `headers["authentication_results"]` has
+authserv-id `email_authserv_id`, a `dmarc=pass` result, and
+`header.from` equal to that address's domain, compared without case. `receive` calls it for an
 email record and sets `verified`; the bridge never sets it.
 
 ### `core/mail.py`: reply-all
