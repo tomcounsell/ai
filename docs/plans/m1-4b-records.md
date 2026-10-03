@@ -424,3 +424,54 @@ counts the dropped case as a failure, so the head is red.
 Suite on `330a9353f`: 825 passed, 13 skipped (build database, ports 6720
 to 6729). `ruff check` clean; `ruff format --check` flags only
 `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Patch round 5 (Valor's call, 2026-10-04)
+
+From review-1-4b-p4 (changes) and test-1-4b-p4 (gaps) at `a6dbb502c`,
+on the docs commit `e580dd1af`.
+
+1. `workspace.rmtree` clears each entry before it reads anything of it:
+   one `setattrlistat(2)` through the parent's descriptor with
+   `FSOPT_NOFOLLOW` writes the flags as 0 and removes the ACL, then the
+   entry is `lstat`ed. The root is cleared the same way through its
+   parent's descriptor before its own `lstat`. An ACL denying `readattr`
+   or `readsecurity` makes `lstat` fail for the owner, so round 4's
+   order (stat, then clear) raised on every rerun. The flags are written
+   as 0 rather than read and masked: a turn can set the ACL and then
+   `uchg` through `chflags(2)` (perl's `syscall(34, ...)` under the real
+   profile), and on such an entry an ACL-only write is refused while the
+   flags cannot be read, so neither order of two writes works; one write
+   of both, reading neither, does. A turn cannot set a system flag, which
+   is the only kind a user cannot clear. The probe for a free `.rm<n>`
+   name in the root counts a `PermissionError` as taken (a turn can make
+   `.rm1` with such an ACL). Tests, each built by `sh` under the real
+   turn profile and each failing on the previous code: `deny readattr`
+   and `deny readsecurity` on a file, on a directory at depth, and on
+   the root; both on a file, a directory and the root followed by
+   `uchg` and `uappnd` set through `chflags(2)`; `.rm1` and `.rm2` with
+   `deny readattr`.
+2. Round 4's two `record_check` refusals for a kernel docs verdict are
+   removed (lead's decision): they named no incident and only kernel
+   code reaches them. The docstring, `data.md` and
+   `sdlc-state-machine.md` say what the code does: a kernel docs verdict
+   names no turn and no judgement, and the docs runner records one,
+   `changes`, on a candidate whose tree holds `.valor`. The test keeps
+   only review's refusal of a kernel leg, which predates round 4.
+3. `tree_has_valor` reads the tree's names as bytes (`git.trusted` and
+   `git.out` take `text=False`) and decodes each with `surrogateescape`
+   before the casefold match, so a name that is not UTF-8 no longer
+   raises `UnicodeDecodeError`. Test: a `git mktree` commit with the name
+   `\xff\xfename`, alone and beside `.Valor`, read trusted and not.
+4. `check_services`: when the stop or the removal of the check's
+   services raises and the restart of the task's own then raises too,
+   the first exception is raised, the restart's failure as its cause.
+   Test: a stop that raises without stopping the check's instances keeps
+   the port taken, the restart is `Refused`, and the stop's
+   `PermissionError` is what the caller gets, `Refused` its `__cause__`.
+5. The threat model in m1-4b-runners.md says setup and suite run with no
+   time limit.
+
+Follow-ups, recorded and not code: a process still writing into a
+depth-1 directory while `rmtree` runs makes it raise `ENOTEMPTY` (a
+retry would be an invented cap; the next rerun removes the tree once the
+writer is gone); the five parametrize feed gaps of round 4.

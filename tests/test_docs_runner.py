@@ -305,7 +305,7 @@ def test_a_review_verdict_has_no_kernel_leg(dsn, tmp_path):
                 await verdicts.record_check(conn, task, Check.REVIEW, "changes", leg="kernel")
         return await rows(dsn, task)
 
-    assert not [r for r in run(go()) if r["type"] == "review.decided"]
+    assert not [r for r in run(go()) if r["type"] == "review.decided" and r["payload"]["leg"] == "kernel"]
 
 
 # -- the config read runs under the profile --------------------------------------------------
