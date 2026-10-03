@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4s-signal-reads
 type: bug
-status: delivered-not-passed
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -559,3 +559,27 @@ is a refusal that does not happen, never a false record.
    bytes compare equal, harmlessly. No filtering code is added.
 2. Finding 2 (a huge or sparse tracked file runs to `git_timeout_s`) is
    left as is, recorded under "Decided by default".
+
+## Merged
+
+Merged 2026-10-04 by the lead's decision, at `a77688557` on
+`valor-cori-rebuild`.
+
+- **Checks that passed** at `3fbc29123`: review pass (review-1-4s-p4), test
+  pass (test-1-4s-p4), docs `no_change` (docs-1-4s-p4).
+- **Rebase.** One squash of `3fbc29123` onto `07e689fec` (1.4b merged and its
+  rollout), since each commit met the same conflicts again. 1.4b's and this
+  task's helpers are kept as one set, as "Shared with 1.4b" says: this
+  task's walk (`_open_dir`, `open_turn_file`, `read_turn_file`) and
+  `_file_away`, and 1.4b's check services, `rmtree`, and `spec_of`. The docs
+  runner reads its verdict through `read_verdict`; `read_junit` returns its
+  reason when the file is missing.
+- **Folds.** The removal of `idle_turns` and the idle stop is kept
+  (`core/session.py`, `core/settings.py`). The `git.dirty` docstring says
+  that `core.symlinks` set false hides a type change, harmless like the
+  filters.
+- **Suite** on the rebased head: 877 passed, 13 skipped. `ruff check` clean;
+  `ruff format --check` flags only `docs/bridges/telegram.md` and
+  `docs/plans/m2-1-port.md`.
+- **Backup** before the merge: `valor_rebuild-20261003T195102Z.dump`.
+- **Follow-ups.** None.

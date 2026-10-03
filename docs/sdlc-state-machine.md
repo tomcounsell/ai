@@ -88,10 +88,8 @@ file for its state from `skills/sdlc/`.
 
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
 `build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
-workspace the kernel provisioned), and `checks.test` (`core/checks.py`).
-`checks.review` and `checks.docs` have none: the docs runner
-(`fresh.docs_runner`) is registered once governance's judgement has a
-calibration record on the real ledger that passes its entry check. Where a
+workspace the kernel provisioned), and `checks.test` (`core/checks.py`). `checks.review` and `checks.docs` have none: the docs
+runner (`fresh.docs_runner`) is registered once governance's judgement has a calibration record on the real ledger that passes its entry check. Where a
 stage has no runner the router stops there and says so, and a person records the verdict with `python -m core verdict TASK
 STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
 has a runner.
