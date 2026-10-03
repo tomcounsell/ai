@@ -175,10 +175,11 @@ refuses a routine on it, since refusing would be a check with no grant.
   pass it by. Unlike one, it can be a parent and can be stopped.
 - **`routine.registered`** on the `routines` stream holds the name, the
   ceiling, the toml's digest, `need`, `mission_item`, and the objective
-  task id. A unique index on (name, ceiling) makes it one objective per
-  name and ceiling. If a reviewed diff changes the toml's ceiling, a second
-  objective is registered; the period report sums every objective of the
-  name.
+  task id, and `replaces`: the stopped objective it follows, or null. A
+  unique index on (name, ceiling, `replaces` with null read as empty) makes it one live objective
+  per name and ceiling at a time. A ceiling change in the toml, or Tom's
+  `--restart` after a stop, registers another; the period report sums
+  every objective of the name.
 - **A run** is a child of the objective (`tasks.start_child`) with
   `Brief.routine` set. For expiry it is an SDLC task; for emulator it is
   an objective node holding the replays.
@@ -199,8 +200,12 @@ refuses a routine on it, since refusing would be a check with no grant.
    naming the directory.
 2. Under `ledger.lock("routine:NAME")`, register the objective if the
    ledger lacks one for (name, ceiling). If the objective is stopped, print
-   `routine NAME is stopped (task ID)`, write nothing, and exit 0: Tom's
-   stop holds across firings.
+   `routine NAME is stopped (task ID); --restart starts it again`, write
+   nothing, and exit 0: Tom's stop holds across firings.
+   `python -m core routine NAME --restart`, Tom's command, registers a
+   fresh objective under the same name with `replaces` set to the stopped
+   one, then runs as below. No diff is needed. On a routine that is not
+   stopped, `--restart` runs it as without the flag.
 3. If the routine's last run is unfinished (expiry: its task is neither
    merged nor stopped; emulator: no `routine.ran` with `finished` or
    `failed`), continue it. Otherwise start a run through the runner.
@@ -380,8 +385,6 @@ added for instance grants.
   demonstrated.
 - **Removing an instance grant from another project's repository.** The
   sweep's instruction lists it but does not remove it.
-- **Restarting a stopped routine.** A reviewed diff that renames it
-  registers a new one.
 - **Anything that changes state from the page.** No buttons that approve,
   stop, or change state; no approval from a phone; no page beyond
   loopback; no database role of the page's own.
@@ -400,7 +403,11 @@ added for instance grants.
 - Two `routine.registered` rows for one (name, ceiling) are refused by the
   index.
 - A stopped objective: the command writes no row, starts no task, prints
-  the stopped line, and exits 0. Stopping the objective mid-run fences the
+  the stopped line, and exits 0. `--restart` then registers a fresh
+  objective with `replaces` set, under the same name and with no change to
+  the toml, and its run starts; the report sums both objectives' spending.
+  A second `--restart` racing the first registers one objective, not two
+  (the index). Stopping the objective mid-run fences the
   run's turn and its replays (through 4.1).
 - Two emulator processes at once: the second prints `already running`.
 - Period spending, with `now` passed as a parameter of the fold:
@@ -463,13 +470,10 @@ processes):
 - **Background.** A replay (a grandchild of a routine objective) is
   background, and so is a hand-run replay with `Brief.replay` and no
   routine.
-- **Hand-run replays don't preempt.** A hand-run replay's ready step sends
-  no `valor_preempt`.
-- **Order.** `schedule` with two ready background tasks and one ready
-  foreground task takes the foreground task first. Among foreground tasks,
-  the oldest latest row goes first.
-- **Fresh sessions.** A preempted fresh session (critique) is rerun, and
-  only that branch.
+- A hand-run replay's ready step sends no `valor_preempt`.
+- `schedule` takes one ready foreground task before two background ones,
+  and among foreground tasks the oldest latest row first.
+- A preempted fresh session (critique) is rerun, and only that branch.
 - The emulator report counts a replay's preempted turns.
 
 `tests/test_ui.py` (aiohttp test client):
@@ -502,9 +506,9 @@ time after 4.1 and 2.1.
 | `core/session.py`, `core/fresh.py` (kernel) | a `preempted` turn leaves the step unspent |
 | `core/machine.py` (kernel) | `preempted` folds as unfinished, outside the idle and failed counts |
 | `core/tasks.py` | `Brief.routine`, `Brief.replay`, the objective marker, `background`, `index`, `attention_log` |
-| `core/schema.sql` | unique index on `routine.registered` (name, ceiling) |
+| `core/schema.sql` | unique index on `routine.registered` (name, ceiling, `replaces`) |
 | `core/settings.py` | `routines_dir`, `routine_period_days` (30), `ui_port` (8790) |
-| `core/__main__.py` | `routine`, `routines`; `ROUTINE_RUNNERS` |
+| `core/__main__.py` | `routine` (with `--plist`, `--restart`), `routines`; `ROUTINE_RUNNERS` |
 | `core/guards.py` | docstring |
 | `routines/expiry/routine.toml`, `routines/emulator/routine.toml` | new |
 | `routines/emulator/runner.py` | new |
@@ -534,7 +538,8 @@ tail ~/Library/Logs/valor/routine-expiry.log
 
 The emulator sweep's first run comes on its schedule. To remove a job, run
 `launchctl bootout gui/$(id -u)/com.valor.routine.NAME`. To stop a routine,
-run `python -m core stop` on the routine's objective. To open the page, run
+run `python -m core stop` on the routine's objective; `python -m core
+routine NAME --restart` starts it again. To open the page, run
 `.venv/bin/python -m ui` and go to `http://127.0.0.1:8790/`.
 
 ## Decided by default
@@ -554,7 +559,7 @@ Each is reversible; Tom can overturn any.
 - **The plist is printed, not committed.** It names the checkout and its
   interpreter, which differ per Mac; `core backup --plist` already works
   this way. The schedule is in the toml, in git.
-- **One objective per (name, ceiling)**, with runs as its children, so
+- **One live objective per (name, ceiling)**, with runs as its children, so
   4.1's rollup gives the period figure and one stop ends the routine.
 - **The period is the rolling 30 days ending at the report**, by the
   charge row's time, and includes the emulator's calibration tasks for the
@@ -579,19 +584,14 @@ Each is reversible; Tom can overturn any.
 - **Schedules.** Expiry runs daily at 04:00 and costs nothing when nothing
   is due. Emulator runs weekly, Sunday 01:00, with all items in three
   arms, one run each. Spending is reported, never capped.
-- **The page** is aiohttp, server-rendered, loopback only, on port 8790,
-  with a read-only session as the kernel role, started by hand.
-- **`need` is stored and shown, never enforced.**
-- **A stopped routine stays stopped** across firings.
-- **No limit beyond the cited ones.**
-  - No routine holds a `routine:NAME` session lock with an `already
-    running` exit. Registration takes a transaction lock, and only the
-    emulator driver holds a run lock, as `run` does.
-  - The command does not drive the expiry task with `router.run`; the
-    kernel does.
-  - No routine sets a timeout, a run count, or a spending figure. The only
-    numbers are the 30-day period (the rebuild plan), the 90 days (the
-    governance paragraph and Mission item 5), the schedules, and the port.
+- **The page** is aiohttp, loopback only, port 8790, read-only, by hand.
+- **A stopped routine stays stopped** across scheduled firings until Tom
+  runs `python -m core routine NAME --restart`, which needs no diff.
+- **No limit beyond the cited ones.** Only the emulator driver holds a
+  run lock, as `run` does; the kernel, not the command, drives the expiry
+  task. No routine sets a timeout, a run count, or a spending figure. The
+  numbers are the 30-day period (the rebuild plan), the 90 days (the
+  governance paragraph, Mission item 5), the schedules, and the port.
 
 ## Questions for Tom
 
