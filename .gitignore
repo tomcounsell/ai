@@ -449,6 +449,7 @@ telegram_session.session
 !tests/fixtures/design_system/exports/*.json
 # Hook test fixtures
 !tests/fixtures/hooks/*.json
+!tests/fixtures/openai/*.json
 !tools/**/manifest.json
 
 # Telegram session files

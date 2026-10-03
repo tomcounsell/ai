@@ -72,8 +72,9 @@ the gateway". 3a closes the route half; 3b closes the Pi half.
   turn's own credential and organization headers are dropped; the meter
   charges the worst case whenever the usage did not arrive whole; a
   fee-bearing tool is charged per call from the response; and a request
-  whose cost the table cannot price (an unpriced model, tier, or
-  fee-bearing tool) gets a 400.
+  whose cost the table cannot price (an unpriced model or fee-bearing
+  tool) gets a 400. A tier the table lacks is forwarded and charged at the
+  highest tier, marked `tier_unpriced`.
 - **Accepted: stored responses on a shared key.** A `previous_response_id`
   continues any response stored under the key, so a turn that learns
   another conversation's id can read its context. The kernel spends on the
@@ -124,13 +125,16 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
   replaying upstream). The `openai/` prefix is stripped before forwarding.
 - **Listed paths.** `OPENAI_CREDENTIALED_PATHS = ("v1/responses",
   "v1/models")`, plus `v1/models/<id>`, checked as `credentialed` checks
-  `CREDENTIALED_PATHS`. `POST v1/responses` is metered; the model listing
-  is forwarded with the key and charged nothing. Any other OpenAI path is
-  a 403, with nothing sent upstream. A tail with a percent escape, a dot
+  `CREDENTIALED_PATHS`, each with its methods (`OPENAI_METHODS`): `POST
+  v1/responses` is metered; `GET` and `HEAD` on the model listing and one
+  model are forwarded with the key and charged nothing. Any other path,
+  or any other method on a listed path (a `DELETE v1/models/<id>` would
+  delete a fine-tuned model), is a 403, with nothing sent upstream. A tail with a percent escape, a dot
   segment, or a doubled slash is refused by `safe_tail` with a 400, as on
   the Anthropic route.
 - **Headers.** The turn's `authorization`, `x-api-key`,
-  `openai-organization`, and `openai-project` are dropped. The gateway sets
+  `openai-organization`, and `openai-project` are dropped, and its
+  `proxy-authorization` on both routes. The gateway sets
   `authorization: Bearer <key>`, the key read from the kernel key
   directory by an `OpenAIKey` credential (`core/gateway.py`, beside
   `ClaudeLogin`).
@@ -141,9 +145,10 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
   `credential: "kernel"` when the kernel's key was set. Unlisted paths are
   a 403 either way.
 - **A 401's body is the gateway's own.** On the OpenAI route an upstream
-  401 is answered with the gateway's own 401 body ("the kernel's OpenAI
-  key was refused") and the upstream's body is dropped, since it can echo
-  part of the key.
+  401 is answered with the gateway's own 401 body naming the key refused
+  ("the kernel's OpenAI key was refused", or "the turn's" when the kernel
+  holds none) and the upstream's body is dropped, since it can echo part
+  of the key. A refused turn key leaves `OpenAIKey` as it was.
 - **A 401 invalidates only its route's credential.** The handler's
   `invalidate()` on a 401 is called on the credential of the route that
   answered, so an OpenAI 401 never forces a Keychain read of the Claude
@@ -195,7 +200,8 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
   estimated input is `estimate_input` (3 bytes per token); the context
   window when the body carries `previous_response_id`, `conversation`, or
   referenced content; and `max_tool_calls + 1` context windows when it
-  carries a hosted tool and sets `max_tool_calls`.
+  carries a hosted tool and sets `max_tool_calls`. A negative
+  `max_tool_calls`, which the protocol does not take, counts as 0.
 
 ### What the meter cannot price
 
@@ -204,12 +210,13 @@ and with nothing sent, when the table cannot give its cost. This is the
 rule that refuses an unpriced model, applied to the other parts of a
 Responses body that carry their own prices:
 
-- `service_tier` naming a tier the entry does not price (`auto` and an
-  absent tier are priced: they open at the highest tier and charge at the
-  tier the response reports);
 - a tool whose type is neither token-only nor in `OPENAI_TOOL_FEES`;
 - a `prompt` reference, since the stored prompt can carry tools and a
   model the gateway cannot see.
+
+A `service_tier` the entry does not price is not refused: the estimate
+already opens at the highest tier, and the charge prices a reported tier
+the entry lacks at the highest tier, marked `tier_unpriced`.
 
 A non-streamed background call's result cannot be fetched through the
 gateway (`GET v1/responses/<id>` and its cancel are unlisted paths), so
@@ -348,6 +355,7 @@ and the table:
   `referenced: true`;
 - a `web_search` body with `max_tool_calls: 3` estimates four context
   windows of input; without it, a cut call's row says `bounded: false`;
+  with `max_tool_calls: -5` it estimates one window and no fee cap;
 - a completed reply with one `web_search_call` streamed and in `output`
   charges one fee, not two;
 - the request id is in `gateway.charged`, not `gateway.opened`.
@@ -355,13 +363,18 @@ and the table:
 Refusals, each showing nothing reached the upstream:
 
 - an unpriced model (400);
-- an unpriced `service_tier` (400);
+- an unpriced `service_tier` is forwarded and charged at the highest
+  tier, `tier_unpriced: true`;
 - a `code_interpreter` tool, a `shell` tool with a `container_auto`
   environment, an `image_generation` tool, an unknown tool type, and a
   `prompt` reference (400); a `function`, an `mcp`, a `web_search`, and a
   local `shell` tool are forwarded;
 - `v1/chat/completions`, `v1/files`, `v1/batches`, `v1/responses/<id>`
   (retrieval), `v1/embeddings`, `v1/realtime` (403);
+- `DELETE` and `POST` on `v1/models/<id>`, `POST` and `PUT` on
+  `v1/models`, and `GET`, `HEAD`, `DELETE`, `PUT`, and `PATCH` on
+  `v1/responses` (403, with and without the kernel key); `HEAD` on a
+  model is forwarded;
 - `openai/v1/responses%2f..`, `openai//v1/responses`, and
   `openai/v1/./responses` (400 from `safe_tail`);
 - a gateway with no OpenAI credential forwards the turn's own key on
@@ -377,6 +390,11 @@ Headers and the key:
   reaches the turn;
 - an upstream 401 on the OpenAI route invalidates `OpenAIKey` and leaves
   `ClaudeLogin`'s cached token and read time untouched;
+- with no kernel key, a 401 on the turn's own key, metered or forwarded,
+  is answered "the turn's OpenAI key was refused" and leaves `OpenAIKey`'s
+  cached read as it was;
+- the turn's `proxy-authorization` never reaches the upstream, with or
+  without the kernel key;
 - a fake key with a recognizable body is absent from the ledger rows,
   every response body and header the turn received, and the gateway's
   captured stderr, in every case above, including an upstream 401 whose
@@ -536,3 +554,9 @@ optional action in Rollout.
   the vault holds no admin key. A web search call reports
   `tool_usage.web_search.num_requests`; the meter takes the larger of it
   and the call items.
+- Patch round 1: the four JSON recordings committed (a `.gitignore`
+  exception), the suite run from a clean clone; the request-side 400 on an
+  unpriced `service_tier` removed; methods checked per listed path, so
+  `DELETE v1/models/<id>` is a 403; a negative `max_tool_calls` counts as
+  0; a 401 names the kernel's or the turn's key; `proxy-authorization`
+  dropped on both routes.

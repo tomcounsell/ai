@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 1 instead.",
+    "type": "invalid_request_error",
+    "param": "max_output_tokens",
+    "code": "integer_below_min_value"
+  }
+}

@@ -110,12 +110,12 @@ openai`), reached with a per-turn token in the path. For every call it:
    estimate is only that fallback charge, never a gate.
 
 The OpenAI route sends the kernel's key (`python -m core openai-key`), or the
-turn's own (`credential: turn`) when the kernel holds none, only to
-`v1/responses` and `v1/models`. It charges at the reported tier, with cached,
-cache-write, long-context, and per-search rates; an unpriced model, tier, tool,
-or stored prompt is a 400 with no row. Content referenced by id or URL, or a
-hosted tool with no `max_tool_calls`, can leave a cut call short of the bill
-(`referenced`, `bounded: false`). Anthropic searches are charged per search;
+turn's own (`credential: turn`) when the kernel holds none, only as `POST
+v1/responses` and `GET` or `HEAD` on `v1/models`. It charges at the reported
+tier (an unpriced one at the highest), with cached, cache-write, long-context,
+and per-search rates; an unpriced model, tool, or stored prompt is a 400 with no
+row. Content referenced by id or URL, or a hosted tool with no `max_tool_calls`,
+can leave a cut call short of the bill (`referenced`, `bounded: false`). Anthropic searches are charged per search;
 its code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
