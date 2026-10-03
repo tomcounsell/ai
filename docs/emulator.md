@@ -105,7 +105,7 @@ starts the task (`core/workspace.py`; docs/harnesses.md, The workspace):
 - **The origin.** A local bare repository is the clone's only remote,
   `main` at the base, and its `HEAD` names `main`, so a task's merge has a
   target branch. Only the broker's `push_branch` and `merge` performers
-  write it, after approval. Nothing reaches GitHub.
+  write it, after approval. The run's spec names no `merge_url`, so nothing reaches GitHub.
 - **Services.** A Postgres cluster of the task's own, with its own roles,
   passwords, and port, separate from the kernel's database, and a
   `redis-server` of its own when the run asks, with no persistence and its

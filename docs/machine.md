@@ -268,6 +268,14 @@ and refuses the branch the remote's HEAD names (its default branch), read
 at start and again before each push. A merge to a local origin needs no
 grant and no token; a `--workspace` task merges with no token.
 
+**Reading what a turn wrote.** A file or directory under a turn's own
+state is the turn's to change, so the kernel opens it component by
+component from a directory it owns, following no link at any step
+(`workspace.open_turn_dir`). `open_turn_file` keeps a file only when it is
+regular, has one link (a hard link could name a file in the kernel key
+directory), and is not sparse, and otherwise returns why. The transcript copy
+([harnesses.md](harnesses.md)) is read this way.
+
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is
 blocked in the sandbox, and gh runs with an empty config.

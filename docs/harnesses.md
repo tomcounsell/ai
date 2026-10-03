@@ -254,7 +254,7 @@ the clone's `.git/info/exclude`, so signals never enter a commit.
 Files, because writing one is a deliberate tool call that survives whatever
 prose follows it, and a turn killed midway leaves what it wrote readable.
 The text of the channel is `skills/sdlc/channel.md`, carried in every
-workspace turn's Brief; it lists the effects the registered performers
+workspace turn's Brief; it lists the effects the task's own performers
 offer (each performer's `usage` line; the merge offers none) and says
 pushing any other way is unavailable, which the sandbox makes true.
 

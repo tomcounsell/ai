@@ -465,33 +465,11 @@ fits in RAM beside a turn and a container on 16 GB.
 
 ## 8. The broker's performers
 
-A performer is a Python class with an `action_type`, a fixed
-`effect_class`, `perform`, and `lookup` by idempotency key. It runs in the
-kernel process, outside the turn's sandbox, which is what lets it write a
-remote the turn cannot. Status: **in use**.
-
-- **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to
-  one branch of the workspace's origin over git, never with `--force`,
-  tags, submodules, or a signature. Git is the Command Line Tools' install
-  (`VALOR_GIT` overrides), checked before each call to be root's alone and
-  a real install, never Apple's `/usr/bin/git` shim (`core/binaries.py`),
-  with a system-only PATH, no `DYLD_*` or global config, one deadline per
-  perform (git in its own process group, killed whole on timeout), replace
-  refs, grafts, commit-graph, and multi-pack-index ignored, and hooks,
-  helpers, pagers, and transports pinned off, and refuses a workspace whose
-  own config names a program, redirects a push, sets any `push.*` or
-  `http.*`, or includes other config, because that config is the turn's to write (`core/git.py`). `lookup`
-  answers present (the branch holds the commit, at its tip or below),
-  absent, or unknown; `broker.reconcile` uses it to settle a dangling merge
-  intent. It pushes to the task's `push_url` (else the origin URL recorded
-  at start) and refuses the task's target branch.
-- **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
-  passed candidate onto the target branch, from the kernel mirror when the
-  task has one, released only when the merge predicate holds; no turn is
-  offered it.
-- **`WorkspaceWrite`** (`propose`) and **`OutboxAppend`** (`act`)
-  (`tests/performers.py`), for the tests only: a file in the workspace, and
-  a local outbox that stands where a bridge's send will.
+A performer is a Python class that runs in the kernel process, outside the
+turn's sandbox, which is what lets it write a remote the turn cannot. Each
+task has its own set, built from its Brief. The set, `push_branch`, `merge`,
+and how the merge authenticates are in [performers.md](performers.md).
+Status: **in use**.
 
 Serves "Bounded authority, metered spending": a sandbox holds no credential capable
 of an effect outside it, and every effect that leaves is a typed action [11].
