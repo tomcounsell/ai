@@ -16,8 +16,8 @@ base the task started from and at the candidate. Each run gets:
 - the check profile, its own process group, a stop raced against it as for
   a turn, and `settings.suite_timeout_s`.
 
-Each run appends `suite.ran`. A run with the same commit, command, and
-environment digest, and no `cause`, is reused, so the base runs once per
+Each run appends `suite.ran`. A run with the same commit, role, command,
+and environment digest, and no `cause`, is reused, so the base runs once per
 task. `cause: "kernel"` (a service that would not start) is recorded nowhere
 and the runner returns `failed`, so the branch reruns; `cause:
 "commit"` (setup failed twice, the suite timed out, or no JUnit report and
@@ -66,19 +66,28 @@ LOCKFILES = (
 # -- JUnit -------------------------------------------------------------------------
 
 
-def read_junit(check_dir: Path) -> tuple[dict[str, list[str]] | None, str | None]:
-    """The per-test results the suite wrote at `<check_dir>/tmp/junit.xml`,
-    read with `workspace.read_turn_file` (no link followed, no FIFO
-    blocked on, at most `settings.junit_max_bytes`). A file holding a
-    DOCTYPE or an entity declaration is refused. Returns ({passed, failed,
-    errored, skipped: [test id]}, None) or (None, why not). A test id is
-    `classname::name`."""
+def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None, str | None]:
+    """The per-test results the suite wrote at `<name>/tmp/junit.xml` under
+    the kernel-owned `checks_dir`: `checks_dir` and the check directory
+    `name` each opened with `O_NOFOLLOW | O_DIRECTORY`, the file read whole
+    with `workspace.read_turn_file` (no link followed, no FIFO blocked on).
+    A file holding a DOCTYPE or an entity declaration is refused. Returns
+    ({passed, failed, errored, skipped: [test id]}, None) or (None, why
+    not). A test id is `classname::name`."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY
     try:
-        root = os.open(check_dir, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY)
+        root = os.open(checks_dir, flags)
     except OSError as exc:
-        return None, f"no check directory ({exc.strerror})"
+        return None, f"no checks directory ({exc.strerror})"
     try:
-        body, why = workspace.read_turn_file(root, JUNIT, settings.junit_max_bytes)
+        try:
+            check = os.open(name, flags, dir_fd=root)
+        except OSError as exc:
+            return None, f"{name} is not a plain directory ({exc.strerror})"
+        try:
+            body, why = workspace.read_turn_file(check, JUNIT)
+        finally:
+            os.close(check)
     finally:
         os.close(root)
     if body is None:
@@ -262,12 +271,16 @@ def environment_digest(mirror: str | Path, sha: str, project: dict[str, Any], bi
     return h.hexdigest()
 
 
-def reusable(rows: list[dict], sha: str, command: str, digest: str) -> dict | None:
+def reusable(rows: list[dict], sha: str, command: str, digest: str, role: str) -> dict | None:
+    """The latest `suite.ran` with this commit, role, command, and digest and
+    no `cause`. The role is in the key, so a head run of one check never
+    stands in for another's."""
     for r in reversed(rows):
         p = r["payload"]
         if (
             r["type"] == SUITE
             and p.get("commit") == sha
+            and p.get("role") == role
             and p.get("command") == command
             and p.get("digest") == digest
             and not p.get("cause")
@@ -425,7 +438,7 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         )
     finally:
         await asyncio.to_thread(services.__exit__, None, None, None)
-    tests, why = read_junit(check_dir)
+    tests, why = read_junit(lay.checks, check_dir.name)
     cause = None
     reason = None
     if code == "timeout":
@@ -488,7 +501,7 @@ def test_runner(port):
                     rows = await ledger.read(conn, ctx.task_id)
                     if await tasks.is_stopped(conn, ctx.task_id):
                         return {"status": "stopped"}
-                kept = reusable(rows, sha, command, digest)
+                kept = reusable(rows, sha, command, digest, role)
                 if kept is not None:
                     ran[role] = kept
                     continue

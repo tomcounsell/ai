@@ -318,8 +318,6 @@ elif act == "dir_symlink":
         p.rmdir()
     v.rmdir()
     v.symlink_to(real.resolve())
-elif act == "big":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
 elif act == "docs":
     # Docs commits as `docs_commits` says, then the verdict naming the head.
     def g(*a):

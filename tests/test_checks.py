@@ -14,6 +14,7 @@ Live spend: none.
 import asyncio
 import dataclasses
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -159,6 +160,27 @@ def decided(got) -> dict:
 GOOD = b'<testsuite><testcase classname="tests.test_a" name="test_one"/></testsuite>'
 
 
+def _report(checks_dir, plant: str) -> str:
+    """A check directory `test-head-x` under `checks_dir` with `plant` as its report."""
+    name = "test-head-x"
+    (checks_dir / name / "tmp").mkdir(parents=True)
+    report = checks_dir / name / checks.JUNIT
+    if plant == "symlink":
+        (checks_dir / "real.xml").write_bytes(GOOD)
+        report.symlink_to(checks_dir / "real.xml")
+    elif plant == "fifo":
+        os.mkfifo(report)  # no writer: a blocking open would hang
+    elif plant == "linked dir":
+        elsewhere = checks_dir / "elsewhere"
+        (elsewhere / "tmp").mkdir(parents=True)
+        (elsewhere / checks.JUNIT).write_bytes(GOOD)
+        shutil.rmtree(checks_dir / name)
+        (checks_dir / name).symlink_to(elsewhere)
+    else:
+        report.write_text(plant)
+    return name
+
+
 @pytest.mark.parametrize(
     ("plant", "why"),
     [
@@ -166,39 +188,29 @@ GOOD = b'<testsuite><testcase classname="tests.test_a" name="test_one"/></testsu
         ('<!DOCTYPE x [<!ENTITY a "b">]><testsuite/>', "DOCTYPE"),
         ("symlink", "not a plain file"),
         ("fifo", "not a regular file"),
-        ("big", "over"),
+        ("linked dir", "not a plain directory"),
     ],
 )
-def test_a_bad_junit_report_is_no_per_test_result(tmp_path, monkeypatch, plant, why):
-    (tmp_path / "tmp").mkdir()
-    report = tmp_path / checks.JUNIT
-    if plant == "symlink":
-        (tmp_path / "real.xml").write_bytes(GOOD)
-        report.symlink_to(tmp_path / "real.xml")
-    elif plant == "fifo":
-        os.mkfifo(report)  # no writer: a blocking open would hang
-    elif plant == "big":
-        monkeypatch.setattr(checks, "settings", dataclasses.replace(settings, junit_max_bytes=10))
-        report.write_bytes(GOOD)
-    else:
-        report.write_text(plant)
+def test_a_bad_junit_report_is_no_per_test_result(tmp_path, plant, why):
+    name = _report(tmp_path, plant)
     started = time.monotonic()
-    tests, got = checks.read_junit(tmp_path)
+    tests, got = checks.read_junit(tmp_path, name)
     assert tests is None and why in got and time.monotonic() - started < 2
 
 
-def test_a_junit_report_gives_ids_by_outcome(tmp_path):
-    (tmp_path / "tmp").mkdir()
-    (tmp_path / checks.JUNIT).write_text(
+def test_a_junit_report_gives_ids_by_outcome_whatever_its_size(tmp_path):
+    many = "".join(f'<testcase classname="t.m" name="p{i}"/>' for i in range(20000))
+    name = _report(
+        tmp_path,
         '<testsuites><testsuite><testcase classname="t.m" name="a"/>'
         '<testcase classname="t.m" name="b"><failure/></testcase>'
         '<testcase classname="t.m" name="c"><error/></testcase>'
-        '<testcase classname="t.m" name="d[1]"><skipped/></testcase></testsuite></testsuites>'
+        f'<testcase classname="t.m" name="d[1]"><skipped/></testcase>{many}</testsuite></testsuites>',
     )
-    assert checks.read_junit(tmp_path) == (
-        {"passed": ["t.m::a"], "failed": ["t.m::b"], "errored": ["t.m::c"], "skipped": ["t.m::d[1]"]},
-        None,
-    )
+    tests, why = checks.read_junit(tmp_path, name)
+    assert why is None
+    assert tests["passed"][0] == "t.m::a" and len(tests["passed"]) == 20001
+    assert (tests["failed"], tests["errored"], tests["skipped"]) == (["t.m::b"], ["t.m::c"], ["t.m::d[1]"])
 
 
 # -- compare ------------------------------------------------------------------------------------
@@ -304,11 +316,13 @@ def test_a_byte_in_bin_changes_the_digest_and_a_changed_digest_is_not_reused(tmp
     second = checks.environment_digest(repo, sha, project, bin_dir)
     assert first != second
     assert first != checks.environment_digest(repo, sha, {"setup": ["false"], "env": {}}, bin_dir)
-    ran = [{"type": checks.SUITE, "payload": {"commit": sha, "command": "c", "digest": first, "cause": None}}]
-    assert checks.reusable(ran, sha, "c", first) is ran[0]
-    assert checks.reusable(ran, sha, "c", second) is None
-    timed_out = [{"type": checks.SUITE, "payload": {**ran[0]["payload"], "cause": "commit"}}]
-    assert checks.reusable(timed_out, sha, "c", first) is None
+    payload = {"commit": sha, "role": "head", "command": "c", "digest": first, "cause": None}
+    ran = [{"type": checks.SUITE, "payload": payload}]
+    assert checks.reusable(ran, sha, "c", first, "head") is ran[0]
+    assert checks.reusable(ran, sha, "c", second, "head") is None
+    assert checks.reusable(ran, sha, "c", first, "review") is None  # review's head run never reuses test's
+    timed_out = [{"type": checks.SUITE, "payload": {**payload, "cause": "commit"}}]
+    assert checks.reusable(timed_out, sha, "c", first, "head") is None
 
 
 # -- the runner through the router --------------------------------------------------------------
@@ -542,7 +556,7 @@ def test_a_base_setup_failure_decides_its_run_and_is_never_reused(dsn, tmp_path)
     base = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "base")
     assert base["cause"] == "commit" and "setup failed twice at base" in base["why"]
     assert len(base["setup"]["commands"]) == 1  # the second attempt's record
-    assert checks.reusable(got, base["commit"], base["command"], base["digest"]) is None
+    assert checks.reusable(got, base["commit"], base["command"], base["digest"], "base") is None
     assert decided(got)["verdict"] == "pass"
 
 
