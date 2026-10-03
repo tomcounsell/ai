@@ -561,8 +561,9 @@ never a gate.
 **`look`.** The workspace's `bin/` holds `look`, a shell script written there
 at each provisioning (to a temporary name, then renamed). `look URL [NAME]
 [--size WxH] [--wait MS]` asks `/usr/bin/curl` for the page's status first and
-exits non-zero when nothing answers or the status is 5xx, since the browser
-itself exits 0 on its own error page. It then runs Playwright's
+exits non-zero when nothing answers; on a 5xx it still renders and keeps the
+page, prints the status, and exits non-zero. The browser itself exits 0 on
+its own error page. It then runs Playwright's
 `chrome-headless-shell` twice, once for the screenshot and once for the
 serialized DOM, and writes `.valor/screens/NAME.png` and
 `.valor/screens/NAME.html` in the clone. `.valor/` is excluded from commits, so

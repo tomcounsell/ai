@@ -111,9 +111,10 @@ look URL [NAME] [--size WxH] [--wait MS]
   with a slash, a leading dot, or `..` is refused. `.valor/` is already in
   the clone's `.git/info/exclude`, so screens never enter a commit.
 - First asks for the page's status with `/usr/bin/curl -s -o /dev/null -w
-  '%{http_code}'`. A `000` (nothing answered) or a `5xx` prints that and
-  exits non-zero without starting the browser; the browser's flags report
-  no status and exit 0 on its own error page.
+  '%{http_code}'`. A `000` (nothing answered) exits non-zero without starting the
+  browser. A `5xx` is rendered and kept like any page, the status is
+  printed, and `look` exits non-zero; the browser's flags report no status
+  and exit 0 on their own.
 - Then runs the browser twice, once with `--screenshot` and once with
   `--dump-dom`, since the two flags are not honoured together in one run.
   Both get `--headless`, `--window-size`, `--virtual-time-budget` (from
@@ -185,7 +186,7 @@ what the tool is for; no check reads whether it was used.
   says so.
 - A page that sets its text after a 1 second timer: with `--wait 2000`
   the html file holds it.
-- A dev port that answers 500 exits non-zero.
+- A dev port that answers 500 is rendered and kept, prints the status, and exits non-zero.
 - A turn profile write to a file under `~/Library/Caches/ms-playwright` is
   denied; `settings.browser` is the fixed build path.
 - A NAME with a slash or `..` is refused; screens land only under
@@ -317,3 +318,4 @@ built in.
   status request; it had no source and no function, so it was dropped. The
   screens reader has no size or count cap. The `--wait` default of 3000 ms
   is the plan's own and sets how long scripts get to settle.
+- **No 5xx refusal.** `look` first refused a 5xx without rendering; that had no source, so it renders, prints the status, and exits non-zero.

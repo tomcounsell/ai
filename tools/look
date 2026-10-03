@@ -4,7 +4,7 @@
 # Opens URL in a headless browser and keeps what it saw in the current
 # clone: .valor/screens/NAME.png (a screenshot) and .valor/screens/NAME.html
 # (the page's DOM after its scripts ran). Prints the two paths and the HTTP
-# status; exits non-zero when nothing answered or the page is a 5xx.
+# status; exits non-zero when nothing answered, or after keeping the page when it is a 5xx.
 #
 # The browser is $VALOR_BROWSER. It runs with --no-sandbox: Chromium's own
 # sandbox adds nothing inside the turn's sandbox-exec profile, which already
@@ -42,7 +42,6 @@ browser="${VALOR_BROWSER:-}"
 status=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' "$url")
 case "$status" in
   000) die "nothing answered at $url" 3 ;;
-  5??) die "$url answered $status" 3 ;;
 esac
 
 dir=".valor/screens"
@@ -65,3 +64,5 @@ rm -f "$data.err"
 echo "$dir/$name.png"
 echo "$dir/$name.html"
 echo "status $status"
+# A 5xx page is rendered and kept like any other; the exit code tells the turn.
+case "$status" in 5??) exit 3 ;; esac
