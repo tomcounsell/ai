@@ -1006,3 +1006,14 @@ def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_p
     assert why is None and json.loads(body) == big
     assert kws.read_verdict(tmp_path, "t1") == (big, None)
     assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
+
+
+def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
+    check = tmp_path / "checks" / "test-head-abc"
+    stuck = check / "repo" / "x" / "y"
+    stuck.mkdir(parents=True)
+    (stuck / "f").write_text("left behind")
+    stuck.chmod(0o555)
+    (check / "repo" / "x").chmod(0o555)
+    assert kws.fresh_dir(check) == check
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]

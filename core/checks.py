@@ -12,22 +12,23 @@ base the task started from and at the candidate. Each run gets:
   setup output), so nothing one run writes reaches another;
 - fresh Postgres and Redis instances on the task's own ports
   (`workspace.check_services`), the task's own stopped meanwhile;
-- the spec's setup, run once more in the same run when it fails;
-- the check profile, its own process group, a stop raced against it as for
-  a turn, and `settings.suite_timeout_s`.
+- the spec's setup;
+- the check profile, its own process group, and a stop raced against it as
+  for a turn. No command has a time limit: a stop ends a running one.
 
 Each run appends `suite.ran`. A run with the same commit, role, command,
 and environment digest, and no `cause`, is reused, so the base runs once per
-task. `cause: "kernel"` (a service that would not start) is recorded nowhere
-and the runner returns `failed`, so the branch reruns; `cause:
-"commit"` (setup failed twice, the suite timed out, or no JUnit report and
-an exit code saying the runner itself failed) is the commit's own fault.
+task. `cause: "kernel"` (no checkout from the mirror, or a service that would
+not start) is recorded nowhere and the runner returns `failed`, so the
+branch reruns; `cause: "commit"` (setup failed, or no JUnit report and an
+exit code saying the runner itself failed) is the commit's own fault.
 
 The kernel compares the two runs by test id (`compare`) and records
 `test.decided` with leg `kernel` (`verdicts.record_check`), which computes
 the verdict.
 """
 
+import ast
 import asyncio
 import hashlib
 import os
@@ -37,10 +38,10 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from xml.parsers import expat
 
 from core import db, git, judgement_sites, ledger, machine, runs, tasks, verdicts, workspace
 from core.machine import Check, State
-from core.settings import settings
 
 SUITE = "suite.ran"
 JUNIT = "tmp/junit.xml"
@@ -92,8 +93,8 @@ def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None
         os.close(root)
     if body is None:
         return None, why
-    if re.search(rb"<!\s*(DOCTYPE|ENTITY)", body, re.IGNORECASE):
-        return None, "the JUnit report holds a DOCTYPE"
+    if why := _declares(body):
+        return None, why
     try:
         tree = ET.fromstring(body)
     except ET.ParseError as exc:
@@ -115,6 +116,29 @@ def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None
     return out, None
 
 
+def _declares(body: bytes) -> str | None:
+    """Why `body` is refused when it holds a DOCTYPE or an entity
+    declaration, found by expat itself, so the file's own encoding (a BOM,
+    UTF-16, an encoding declaration) is read as the parser reads it."""
+
+    class Declared(Exception):
+        pass
+
+    def refuse(*_a):
+        raise Declared
+
+    p = expat.ParserCreate()
+    p.StartDoctypeDeclHandler = refuse
+    p.EntityDeclHandler = refuse
+    try:
+        p.Parse(body, True)
+    except Declared:
+        return "the JUnit report holds a DOCTYPE"
+    except expat.ExpatError as exc:
+        return f"the JUnit report is not XML ({exc})"
+    return None
+
+
 # -- what the diff removes ---------------------------------------------------------------
 
 
@@ -130,8 +154,8 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
     For an id that maps to a Python file in the base tree (its classname's
     dotted prefix as a path): the file was deleted; or a line defining the
     test's function or one of its classes was removed and not added back in
-    the same file; or the id carries parameters, its function still exists,
-    and the diff removes lines in that file (a dropped parametrize case).
+    the same file; or the id carries parameters and the diff touches a
+    line of that test's `parametrize` decorator at base (a dropped case).
     Any other id is removed when a line the diff removes holds its name."""
     deleted: set[str] = set()
     for line in git.trusted(mirror, "diff", "--no-renames", "--name-status", base, head).splitlines():
@@ -140,6 +164,9 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
             deleted.add(path)
     removed: dict[str, list[str]] = {}
     added: dict[str, list[str]] = {}
+    # Base line numbers each file's hunks touch: removed lines, and the line
+    # an insertion follows.
+    touched: dict[str, set[int]] = {}
     path = None
     diff = git.trusted(mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0", base, head)
     for line in diff.splitlines():
@@ -149,6 +176,11 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
             continue
         if line.startswith("diff --git "):
             path = line.split(" b/", 1)[-1]
+            continue
+        if path and line.startswith("@@ "):
+            start, _, count = line.split()[1][1:].partition(",")
+            first, n = int(start), int(count or "1")
+            touched.setdefault(path, set()).update(range(first, first + n) if n else (first,))
             continue
         if path and line.startswith("-"):
             removed.setdefault(path, []).append(line[1:])
@@ -185,9 +217,36 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
         for n in (name, *classes):
             if defines(lost, n) and not defines(back, n):
                 return True
-        return bool("[" in test_id.rsplit("::", 1)[-1] and lost)
+        return "[" in test_id.rsplit("::", 1)[-1] and _touches_parametrize(
+            mirror, base, path, classes, name, touched.get(path, set())
+        )
 
     return gone
+
+
+def _touches_parametrize(
+    mirror: str | Path, base: str, path: str, classes: list[str], name: str, lines: set[int]
+) -> bool:
+    """Does a base line in `lines` fall inside a `parametrize` decorator of
+    the test function `name` (inside `classes`) in `path` at `base`?"""
+    try:
+        tree = ast.parse(git.trusted(mirror, "show", f"{base}:{path}"))
+    except git.GitError, SyntaxError, ValueError:
+        return False
+    scope: list[ast.stmt] = tree.body
+    for cls in classes:
+        found = [n for n in scope if isinstance(n, ast.ClassDef) and n.name == cls]
+        if not found:
+            return False
+        scope = found[0].body
+    for node in scope:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            for dec in node.decorator_list:
+                if "parametrize" in ast.unparse(dec) and lines & set(
+                    range(dec.lineno, (dec.end_lineno or dec.lineno) + 1)
+                ):
+                    return True
+    return False
 
 
 # -- comparing base and head --------------------------------------------------------
@@ -293,12 +352,13 @@ class _Stopped(Exception):
     pass
 
 
-async def _race(argv: list[str], *, cwd: Path, env: dict[str, str], mark: str, timeout: float,
-                stop: asyncio.Task, out: Path) -> tuple[int | str, str, int]:  # fmt: skip
+async def _race(argv: list[str], *, cwd: Path, env: dict[str, str], mark: str,
+                stop: asyncio.Task, out: Path) -> tuple[int, str, int]:  # fmt: skip
     """Run `argv` in its own process group, its output to `out` (a file the
     kernel opened outside the check directory), raced against the stop and
-    `timeout`. Returns (exit code or `timeout`, output tail, peak summed
-    footprint). Raises `_Stopped` after killing the group on a stop."""
+    waited on by its exit, never by its output. Returns (exit code, output
+    tail, peak summed footprint, sampled once a second). Raises `_Stopped`
+    after killing the group on a stop."""
     fd = os.open(out, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -311,14 +371,11 @@ async def _race(argv: list[str], *, cwd: Path, env: dict[str, str], mark: str, t
             start_new_session=True,
         )
         finished = asyncio.create_task(proc.wait())
-        deadline = time.monotonic() + timeout
         peak = 0
-        code: int | str | None = None
         try:
             while True:
-                left = deadline - time.monotonic()
                 done, _ = await asyncio.wait(
-                    {finished, stop}, timeout=max(0.0, min(1.0, left)), return_when=asyncio.FIRST_COMPLETED
+                    {finished, stop}, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
                 )
                 if finished in done:
                     code = proc.returncode
@@ -327,11 +384,6 @@ async def _race(argv: list[str], *, cwd: Path, env: dict[str, str], mark: str, t
                     runs._kill_group(proc.pid)
                     await finished
                     raise _Stopped
-                if time.monotonic() >= deadline:
-                    runs._kill_group(proc.pid)
-                    await finished
-                    code = "timeout"
-                    break
                 pids = await asyncio.to_thread(workspace._group, proc.pid)
                 peak = max(peak, sum(workspace.footprint(p) for p in pids))
         finally:
@@ -346,16 +398,17 @@ async def _race(argv: list[str], *, cwd: Path, env: dict[str, str], mark: str, t
 
 
 async def _setup(checkout: Path, harness: dict[str, Any], commands: list[str], mark: str,
-                 stop: asyncio.Task, out: Path) -> dict[str, Any]:  # fmt: skip
-    """The spec's setup once in `checkout`; stops at the first failure."""
+                 stop: asyncio.Task, out: Callable[[str], Path]) -> dict[str, Any]:  # fmt: skip
+    """The spec's setup once in `checkout`; stops at the first failure. Each
+    command's output goes to its own file, `out(f"setup-{n}")`."""
     ran: list[dict[str, Any]] = []
     for command in commands:
-        step = f"{mark}-{len(ran)}"
+        n = len(ran)
+        step = f"{mark}-{n}"
         argv, env = workspace.setup_command(harness, step, command)
-        code, tail, _ = await _race(
-            argv, cwd=checkout, env=env, mark=step, timeout=settings.setup_timeout_s, stop=stop, out=out
-        )
-        ran.append({"command": command, "exit": code, "tail": tail[-1500:]})
+        path = out(f"setup-{n}")
+        code, tail, _ = await _race(argv, cwd=checkout, env=env, mark=step, stop=stop, out=path)
+        ran.append({"command": command, "exit": code, "tail": tail[-1500:], "output": path.name})
         if code != 0:
             return {"ok": False, "commands": ran}
     return {"ok": True, "commands": ran}
@@ -363,8 +416,8 @@ async def _setup(checkout: Path, harness: dict[str, Any], commands: list[str], m
 
 async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str, stop: asyncio.Task,
                 *, digest: str, run_suite: bool = True) -> dict[str, Any]:  # fmt: skip
-    """One run at `sha`: checkout, the cache clone, fresh services, setup
-    (twice at most), the suite. Returns the `suite.ran` payload. With
+    """One run at `sha`: checkout, the cache clone, fresh services, setup,
+    the suite. Returns the `suite.ran` payload. With
     `run_suite` false only setup runs, to make the seed cache. Raises
     `_Stopped` on a stop."""
     project = b.project or {}
@@ -372,7 +425,10 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     started = time.monotonic()
     check_dir = workspace.fresh_dir(lay.checks / f"test-{role}-{sha[:12]}")
     checkout = check_dir / "repo"
-    out = lay.checks / f"{check_dir.name}.out"
+
+    def out(step: str) -> Path:
+        return lay.checks / f"{check_dir.name}.{step}.out"
+
     mark = f"test-{ctx.task_id}-{role}"
     payload: dict[str, Any] = {
         "commit": sha,
@@ -397,7 +453,8 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     try:
         await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, sha, checkout)
     except git.GitError as exc:
-        return done(cause="commit", why=f"no checkout of {sha[:12]}: {exc}")
+        # The mirror holds the commit, so a checkout that fails is the kernel's.
+        return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")
     seed = lay.checks / SEED
     cache = check_dir / "cache"
     if seed.is_dir():
@@ -416,14 +473,12 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
         commands = list(project.get("setup") or ())
         setup = await _setup(checkout, harness, commands, f"{mark}-setup", stop, out)
-        if not setup["ok"]:
-            setup = await _setup(checkout, harness, commands, f"{mark}-setup", stop, out)
         payload["setup"] = setup
         if not setup["ok"]:
             last = setup["commands"][-1]
             return done(
                 exit=last["exit"], tail=last["tail"], cause="commit",
-                why=f"setup failed twice at {role}: {last['command']} exited {last['exit']}",
+                why=f"setup failed at {role}: {last['command']} exited {last['exit']}",
             )  # fmt: skip
         if role == "base" and commands:
             await asyncio.to_thread(workspace.clone_tree, cache, seed)
@@ -434,16 +489,14 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
                                    command.replace("{junit}", str(junit)))  # fmt: skip
         run_env = {**workspace.turn_environment(harness), runs.TURN_ENV: mark}
         code, tail, peak = await _race(
-            argv, cwd=checkout, env=run_env, mark=mark, timeout=settings.suite_timeout_s, stop=stop, out=out
+            argv, cwd=checkout, env=run_env, mark=mark, stop=stop, out=out("suite")
         )
     finally:
         await asyncio.to_thread(services.__exit__, None, None, None)
     tests, why = read_junit(lay.checks, check_dir.name)
     cause = None
     reason = None
-    if code == "timeout":
-        cause, reason = "commit", f"the suite ran past {settings.suite_timeout_s:.0f} s at {role}"
-    elif tests is None and code not in (0, 1):
+    if tests is None and code not in (0, 1):
         cause, reason = "commit", f"no JUnit report ({why}) and the suite exited {code} at {role}"
     return done(exit=code, tests=tests, junit=why, tail=tail, peak_footprint=peak, cause=cause, why=reason)
 

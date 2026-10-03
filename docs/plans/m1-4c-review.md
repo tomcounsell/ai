@@ -122,7 +122,7 @@ it.
    is told to build the key this way; if it lands without the role, this
    part adds it in `core/checks.py`.
    Then **the lint**, when the spec has one, in the same checkout under
-   the same profile and mark, with its own `settings.suite_timeout_s`:
+   the same profile and mark, with no timeout (a stop ends it):
    - `lint: null` when the spec's `lint` is `None`;
    - otherwise the exit code and duration, always;
    - for kind `python-uv`, locations parsed from ruff's concise lines
@@ -514,7 +514,7 @@ this part's; 12 is part two's.
    step 5; The recorded verdict).
 10. The lint record: `null` with no command, exit and duration always,
     ruff concise locations for `python-uv` without the message, exit only
-    otherwise, under its own `suite_timeout_s` (Design, step 2).
+    otherwise, with no timeout (Design, step 2).
 11. The manual-leg refusals: the verdict is computed for the session leg
     only, and both refusals stay for `leg="manual"` until deletion (The
     recorded verdict).

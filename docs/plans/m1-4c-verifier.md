@@ -228,10 +228,9 @@ null and a memory kill is read from an exit of 137 with the kernel's OOM
 line in `dmesg`.
 
 The CLI call is an async subprocess in its own session, raced against
-`runs._stop_heard`. Setup in the VM has no timeout; `run.sh` runs the
-suite and the lint each under `timeout` with `settings.suite_timeout_s`
-(passed in `spec.json`, as part one times them; no new limit), and a
-timed-out suite or lint is `cause: commit`. On a stop or an interrupt:
+`runs._stop_heard`. No command in the VM has a timeout, as on the host
+(1.4b runs setup and the suite with none); a stop ends the run. On a stop
+or an interrupt:
 `container kill`, then `container delete --force`, never a graceful stop
 (machine.md: a graceful stop left the workload running). Every run ends
 in `container delete --force`.
@@ -291,8 +290,7 @@ host run covers all of them.
 
 `verify_memory_mb` (`VALOR_VERIFY_MEMORY_MB`, default 2,048, then set from
 the measurement) and `verify_cpus` (`VALOR_VERIFY_CPUS`, 4). The VM needs
-both to start; neither is a cap on work. The only timeout is 1.4b's
-suite timeout, on the suite and the lint.
+both to start; neither is a cap on work. No step has a timeout.
 
 ### RAM, measured
 
@@ -560,9 +558,8 @@ are part one's (m1-4c-review.md); 2 and 12 are handled here.
     VM is reused by base sha, base image digest, `memory_mb`, and
     `where`; part one's key carries `where`, so no host result is reused
     for a VM run; `memory_mb` in every VM key, so a raised default reruns
-    a memory kill; the lint runs under its own `suite_timeout_s` inside the
-    VM (image builds and setup have no timeout, `setup_timeout_s` being
-    removed by 1.4u);
+    a memory kill; nothing in the VM has a timeout (image builds, setup,
+    the suite, and the lint), as 1.4b runs them on the host;
     `read_turn_file` is cited for its walk only (Runtime; The run;
     Reading the result).
 

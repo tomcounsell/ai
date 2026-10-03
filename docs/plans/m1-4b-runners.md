@@ -329,27 +329,28 @@ base's setup runs again to make it, without the suite.
    `blind_checkout` from the mirror (refusing a top-level `.valor`),
    `run_setup`, then the suite command with `{junit}` replaced by
    `<check_dir>/tmp/junit.xml`, under `check_services` and the check
-   profile, marked `test-<task>-<role>`, reaped, with
-   `settings.suite_timeout_s` (default 1,800, `VALOR_SUITE_TIMEOUT_S`).
+   profile, marked `test-<task>-<role>`, reaped. No setup command and no
+   suite has a time limit: a stop ends a running one.
    `ctx.alive()` is checked before each suite and before each write.
    **A stop reaches a running suite** (critique finding 9). Setup and
    suite each run as `asyncio.create_subprocess_exec(...,
    start_new_session=True)`, and `asyncio.wait` races the process against
-   `runs._stop_heard(listener, task)` on `tasks.STOP_CHANNEL` and the
-   timeout, as `runs.run_turn` does for a turn. A failed setup runs once
-   more in the same run, in the same checkout, before it counts as the
-   commit's. On a stop, `os.killpg`
+   `runs._stop_heard(listener, task)` on `tasks.STOP_CHANNEL`, as
+   `runs.run_turn` does for a turn, and is waited on by its exit, its
+   output going to a file of its own outside the check directory
+   (`<check>.setup-<n>.out`, `<check>.suite.out`). On a stop, `os.killpg`
    kills the group, `runs.reap(mark)` takes anything that left it, nothing
    is recorded, and the runner returns `stopped`.
 3. Each run appends `suite.ran`: commit, role, command, environment
    digest, exit code, test ids by outcome (passed, failed, errored,
    skipped), duration, output tail, peak footprint, and `cause`.
    **Failures are classed by who controls them** (critique finding 2).
-   `cause: "kernel"` is only what the kernel controls: a service that
-   would not start, a stop, or a kernel killed mid-run. Such a run is never
+   `cause: "kernel"` is only what the kernel controls: no checkout from the
+   mirror (which holds the commit), a service that would not start, a
+   stop, or a kernel killed mid-run. Such a run is never
    reused, records no verdict, and the runner returns `failed`, so the
    branch reruns. Everything the commit's own code controls is `cause:
-   "commit"`: setup failed, the suite timed out, or no JUnit file while
+   "commit"`: setup failed, or no JUnit file while
    the exit code says the runner itself failed. At head, with the base
    run usable, that is `red` with the failure as a finding (the
    candidate's setup or suite is broken, which is what the check exists to
@@ -370,7 +371,9 @@ base's setup runs again to make it, without the suite.
    below with `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`,
    `fstat` must say `S_ISREG`, and the whole file read. So a linked check
    directory, a FIFO, a socket, a link, or a device at the path is refused without
-   blocking. A file holding a `DOCTYPE` is refused; the rest is parsed
+   blocking. A file holding a `DOCTYPE` or an entity declaration is
+   refused, found by expat itself, so the file's own encoding (UTF-16, a
+   BOM, an encoding declaration) is read as the parser reads it; the rest is parsed
    with `xml.etree.ElementTree`. Any refusal is "no per-test result",
    never a crash or a hang. Test ids are `classname::name`.
 5. `compare(base, head, removed)` gives three lists:
@@ -562,135 +565,13 @@ tests`.
 
 ## Tests
 
-Every test runs the real code against a real Postgres and real git; the
-model turn is the scripted session from `tests/scripted.py`, and judgement
-legs are the upstream fixture in `tests/judgement_upstream.py`.
-
-Judgement sites and calibration:
-
-- Breadth and governance answer when the builder's clone has lost the
-  candidate (its objects removed after the fetch): they read the mirror.
-- Governance over a docs diff whose head exists only in the mirror.
-- `calibrate` on a breadth case file scores every question, not only the
-  first; a drafted label counts in `drafted`, never in `entry_check`; one
-  wrong `true` on a governance negative fails the entry check, and one
-  wrong `false` on a positive does too.
-- A case set whose non-drafted labels for a question are all `false` (or
-  all `true`) gives `entry_check: false` with both legs right on every
-  case.
-- The record's `estimate` block: a fixture leg billing more input than
-  estimated shows in `over_estimate`.
-
-The check environment:
-
-- With `VIRTUAL_ENV` and `PGPASSFILE` set in the kernel's own environment,
-  the suite sees neither (the suite command prints its environment).
-- A suite connecting to `localhost:6379` is refused; one connecting to the
-  task's Redis port reaches the fresh instance, which does not hold a key
-  the builder wrote to the task's Redis; a table the builder made in the
-  task's Postgres is absent from the fresh database.
-- After the runner, the task's own services are up on their ports, a table
-  the builder made in the task's Postgres is still there, and the task's
-  Redis holds no key the suite wrote.
-- `PGPASSFILE` names `<check_dir>/tmp/pgpass`; a link planted at that path
-  before the copy is refused.
-- Setup runs in each check checkout.
-- Failures classed by who controls them: a head setup failure, a head
-  suite past its timeout, and a head with no JUnit file and a runner
-  failure exit, each with a usable base, record `red` with the failure as
-  a finding, and the next run does not rerun the test branch. A setup
-  that fails once and then succeeds runs the suite (a marker file counts
-  two setup runs). A base setup failure decides its run by the exit codes
-  and is set up again by the next run, never reused. A service that will
-  not start records nothing and returns `failed`.
-- A kernel SIGKILLed mid-suite (the test sends `SIGKILL` to a kernel
-  subprocess while the check's Redis is up): on the next run the task's
-  Redis on its port holds no key the suite wrote, no process under `valor.service.<task>` from the check
-  layout is alive, and no `checks/*-svc/` directory is left.
-- The check layout's `service.sb` sits at `<svc>/home/profiles/service.sb`
-  and names the task's work directory and `bin/`; the suite's `PATH`
-  holds the task's `bin/`, never `checks/bin`.
-- A head suite that writes into its cache leaves the next head's run
-  unaffected: a planted file is absent from the next clone of the seed.
-- Changing a byte of a file in `bin/` changes the environment digest and
-  reruns the base.
-
-The test runner:
-
-- The base suite runs once across two candidates; a `suite.ran` that timed
-  out or was stopped is run again, never reused.
-- Breadth with both legs failing returns `failed` before any `suite.ran`.
-- A JUnit file that is not XML, holds a `DOCTYPE`, is a symlink, is a
-  FIFO with no writer (the read returns at once), or is over the size
-  bound is "no per-test result", never a crash or a hang.
-- A stop published while the suite sleeps: the suite's process group is
-  gone (a child it forked included), no `suite.ran` is written for that
-  run, and the runner returns `stopped` well before the suite's timeout.
-- A candidate whose `conftest.py` calls `os._exit(0)` before collecting is
-  red, with every base test id counted as absent at head.
-- One that marks a failing test `skip` is red.
-- One that deletes a test's definition is not red and lists it under
-  `deleted_at_head`; one that deletes a test's file but keeps the function
-  elsewhere under the same name is judged by the name's removal; one that
-  drops a parametrize case lists that id as deleted.
-- A test failing at base and head is listed under `failing_at_base` and
-  does not make the verdict red.
-- Both sides with no JUnit file: head fails, base passes is red; both fail
-  is red with the note.
-- With `BREADTH.calibrated` `None`, a breadth answer listing a behavior on
-  a candidate with no failures records `pass`, the behavior under
-  `breadth.information` and in the delivery, and the join goes to merge,
-  not repair; with `calibrated` set, the same records `gaps`.
-- `record_check` refuses a kernel leg test verdict without
-  `breadth`, and a docs verdict without `governance_from`; `verdict
-  test` and `verdict docs` are refused at the command line.
-
-The docs runner, through the router:
-
-- A docs commit touching `core/` is dropped and every later doc-only
-  commit with it; `CLAUDE.md` and `Skills/x.md` (letter case) are dropped;
-  each is a `changes` finding naming its paths.
-- A docs commit adding `.valor`, a merge commit, a head that does not
-  descend from the candidate, and a checkout whose `.git/config` sets
-  `core.fsmonitor` (a marker file proves it never ran) each keep nothing
-  and record `changes`.
-- A `verdict.json` that is a symlink, or whose `head` is not a full commit
-  id, is malformed: no verdict, and the next run reruns docs only.
-- The builder's clone has the same refs and objects before and after the
-  docs runner.
-- A docs commit adding a symlink, and one adding a gitlink, are dropped
-  with their paths as `changes` findings, even under `docs/`.
-- A docs run that dies after `docs.kept` reruns governance only: no
-  second turn, the same kept head, and a verdict.
-- The docs clone shares no inode with the mirror: no file under the
-  clone's `.git/objects` has the same `(st_dev, st_ino)` as any file under
-  the mirror's `objects`, and the temporary `valor-docs/<turn>` ref is gone
-  from the mirror.
-- `git.hostile` over a checkout runs under the profile passed: a config
-  `include.path` naming a file the profile denies fails the read, and the
-  fetch keeps nothing.
-- After a send-back the next candidate does not contain the docs commits,
-  and the next docs session's inputs hold `previous-docs.patch`.
-- A docs runner stopped mid-turn leaves no verdict; the next run reruns
-  docs only while the test verdict stands. The same for a test runner
-  stopped mid-suite, with review's verdict standing.
-- Every join row through the router with the real test and docs runners.
-
-The replay spec:
-
-- `build()` with `setup`, `suite`, and `env` writes them; without them it
-  writes `suite = "true"`.
-
-Live, `VALOR_LIVE=1`, each test declaring its metered spend: one real docs
-turn on the toy greeter candidate (expected about $0.50); one test runner
-on the toy greeter with live breadth (expected about a cent, as
-information).
+The tests are in [m1-4b-tests.md](m1-4b-tests.md).
 
 ## Expected spend, as information
 
 Calibration runs in the build, against a build database: breadth about 10
 cases by two legs, governance up to 50 hunks by two legs, expected about
-$0.50 in all. The live tests above, about $0.50. A docs turn in a real
+$0.50 in all. The live tests in [m1-4b-tests.md](m1-4b-tests.md), about $0.50. A docs turn in a real
 task, about $0.50 to $1.00 at the frontier seat. All metered; nothing
 refuses or pauses on money.
 
@@ -705,193 +586,13 @@ refuses or pauses on money.
 3. If governance's real-ledger record fails its entry check, the docs
    runner is unregistered in a commit that restores `docs` to
    `MANUAL_STAGES`, so the stage stays manual until its entry check
-   passes, and the failure is recorded in this plan file. Breadth's
+   passes, and the failure is recorded in [m1-4b-records.md](m1-4b-records.md). Breadth's
    record changes nothing about registration: the test runner stays
    registered, with breadth's behaviors as information until it passes.
 4. Restart the kernel so `RUNNERS` holds the new runners.
 
-## Decided by default
+## Records
 
-Reversible calls made by the build session, not questions for Tom.
-
-1. **The build turn keeps resuming the working session; no fresh build
-   session from the plan in 1.4b** (finding 2). It is a harness change,
-   not part of the test or docs runners, and folding it in would widen a
-   stakes-2 task. The cost evidence (about 70k input tokens of resumed
-   context, $2.18 before any code, against a bare baseline that did the
-   whole item for $1.57) makes it a candidate task after 1.4d.
-2. **Fresh Postgres and Redis per suite run, on the task's own ports.**
-   Base and head must not share state, and the trial showed what a check
-   sharing the caller's services can reach (port 6379, the live Redis).
-3. **Governance labels not settled by Tom's grant, his paragraph's named
-   kinds, or "tests are not governance" stay drafted and count as
-   information only.** Under CLAUDE.md, what counts as governance is
-   Tom's call, so a drafted label cannot set a floor.
-4. **A calibration that fails its entry check at rollout leaves that
-   stage on the manual `verdict` path until its entry check passes.** That
-   is not a stop: tasks keep running with that check recorded by hand, the
-   failure is recorded, and the site routes once its entry check passes.
-5. **Tests failing at both base and head are listed as `failing_at_base`
-   and do not make the verdict red.** That matches sdlc-state-machine.md's
-   definition, "failures at head that do not fail at base".
-6. **The kernel computes the docs verdict from the commits it kept, and
-   the session's own `changes` stands.** The turn's verdict file is
-   turn-owned and only adds caution; it never removes it.
-7. **No breadth replays of cut-a.** Its only failing hidden test checks a
-   log message's wording, which is none of breadth's gap kinds (states,
-   enumeration members, old bounds), so the replays would most likely add
-   no label and cost two build turns. The breadth set is the #191 trial's
-   two drafted rounds.
-
-## Critique round 1 (of 2)
-
-1. The docs clone could hardlink the mirror's objects: it is made from
-   `file://<mirror>` through a temporary `valor-docs/<turn>` ref, and a
-   test checks that no inode is shared (The docs runner, step 1).
-2. A candidate's own failure looped as infrastructure: failures are
-   classed by who controls them; a head setup failure, timeout, or missing
-   JUnit file with a usable base is `red`, a base one is a reusable run
-   decided by exit codes, and only kernel causes rerun (The test runner,
-   step 3).
-3. The breadth case set did not exist as described: the real cases are
-   named (cut-a by replay, pop-a, pop-b, pso-a, pso-a2), a label `true`
-   needs a failing hidden test of that kind, "every hidden test passed"
-   labels nothing `false`, the #191 candidates are drafted, and both label
-   directions are required (Calibration).
-4. No run limit, and registration read like a run-time read: at most five
-   runs per site per frozen case set, a closed set is recorded for Tom and
-   is not a stop, and registration is a build-time code change (Calibration,
-   Landing, Registration).
-5. Governance labelled by commit: labelled by hunk, the guard and
-   validator hunks positive, `tests/` hunks negative, the negative commits
-   named (Calibration).
-6. A SIGKILL could leave a check's services on the task's ports: the
-   router's service start and `check_services` both reap the task's mark
-   and remove stale `-svc` directories first, with a SIGKILL test (The
-   check environment).
-7. The `-svc` layout broke the `root.parent` assumptions: `harness_env`
-   and `service_profile` take the work and bin directories explicitly, and
-   `check_services` writes the check's `service.sb` (The check environment).
-8. `read_junit` could block on a FIFO: it reads through `read_verdict`'s
-   walk, lifted into `read_turn_file`, with a FIFO test (The test runner,
-   step 4).
-9. Nothing stopped a running suite: setup and suite run as async
-   subprocesses in their own session, raced against the stop channel, and
-   a stop kills the group (The test runner, step 2).
-10. The entry check departed from the Done item, and only the first
-    question was scored: the departure is stated and the build amends the
-    Done line; every question is scored (Calibration, Done items).
-11. The threat model's git claim was false while `git.hostile` ran
-    unsandboxed: it takes the caller's profile, and the claim is restated
-    for both commands (Threat model, The docs runner, step 3).
-
-## Critique round 2 (of 2): revise
-
-The rounds are spent; each finding is built in.
-
-1. The test runner waited on breadth's entry check: it is registered
-   regardless, and an uncalibrated breadth's behaviors are information on
-   `test.decided` and the delivery, never `gaps` (Landing, Registration).
-2. The task's Redis keeps nothing across a restart (`--save ""
-   --appendonly no`): the "builder's data intact" assertions are for
-   Postgres only; for Redis the tests assert no key the suite wrote
-   survives (The check environment, Tests).
-3. A base setup failure was reused: it decides only its own run, and a
-   failed setup runs once more in the same run before it counts as the
-   commit's (The test runner, steps 2 and 3).
-4. Per-test results at base and none at head: `red`, every base id
-   absent, tested with `os._exit(0)` in `conftest.py` (The test runner,
-   step 5).
-5. A docs run that died after the turn redid the turn: a `docs.kept` row
-   is reused and only governance is asked again, with a test (The docs
-   runner, steps 2 and 3).
-6. The governance set named commits without the hunks it claimed: 1.4a's
-   tests come from `db2241e95`, `276e7d79a`, and `58b32cdd9`; `a30c03350`
-   and `5368faebe` are gone; the counts are 10 positives and 22 negatives
-   from `tom`, 18 drafted (Calibration).
-7. The cut-a replays would add no label: dropped (Decided by default, 7).
-8. The kept prefix read only paths: it reads `diff-tree -r` raw modes and
-   keeps a commit only when every entry is a regular file, with a symlink
-   and a gitlink test (The docs runner, step 3).
-9. The threat model reached into the builder's clone: narrowed to the
-   check and docs checkouts, the builder's clone named as out of scope
-   (Threat model).
-10. m1-4-checks.md said 1.4b had questions for Tom: it now says Decided by
-    default, and its status line says `verdict` keeps `review` until 1.4c.
-
-The five-runs-per-site limit stays: it was judged not governance.
-
-## Build record
-
-Calibration ran against the build database (`valor_rebuild_test_14bbuild`),
-never the real ledger. The case files live under
-`~/src/valor-demo/items/judgement/`.
-
-| case file | SHA-256 | cases |
-|---|---|---|
-| `governance.adds.json` | `d3686c87a7ca4b58a298d258b45fe5f228fba089d7f9f2705e20d103906c476e` | 50: 10 `true` and 22 `false` from `tom`, 18 `false` drafted |
-| `checks.test.breadth.json` | `5b8c92c7a913abef5d6df8d9f77e0286ac66f794e6b33e11c9ad0e2b0ef521d3` | 2: popoto #191 cases, every label drafted |
-
-The four validator positives (`920b6f392`, `8bb12c001`, `e2a623a44`,
-`1b8c9a27e`) each add their own validator file
-(`validate_no_module_scope_env.py`, `validate_no_redis_flush.py`,
-`validate_no_broad_process_kill.py`,
-`validate_no_destructive_git_in_shared_checkout.py`); the positive is that
-file's hunk in each.
-
-**Breadth, run 1** (task digest `6d40ad2d94bb`): entry check false, as it
-must be with no human label. On the drafted labels Jev was wrong twice on
-`gap_bound` and the open-weight leg twice each on `gap_state` and
-`gap_enum`. No call billed over its estimate (largest ratio 0.63 and
-0.80). Spend $0.0066. `BREADTH.calibrated` stays `None`; breadth is
-information.
-
-**Governance, run 1** (task digest `2270554f20be`): entry check false.
-Jev was wrong on 8 of the 22 `tom` negatives, all test code (scripted
-stand-ins, fixtures, a recording script), and the open-weight leg on 1. Six
-calls on each leg billed over the estimate, all on `uv.lock` and
-`pyproject.toml` hunks of hashes (largest ratio 1.25 for Jev, 1.36 for the
-open-weight leg). Spend $0.0199.
-
-Changes before run 2: the estimate counts two bytes per token
-(`settings.bytes_per_token`, was three), with
-`tests/fixtures/judgement_hash_dense.json` holding the hunk that billed
-furthest over; the question adds "Tests and the code that serves them
-(fixtures, helpers, scripted stand-ins, recording scripts) are none of
-these" (the governance paragraph's own "Tests are not governance").
-
-**Governance, run 2** (task digest `aa30f9c0d5d4`): entry check false.
-Jev wrong on 2 negatives (`tests/fixtures/record_judgement.py`, which exits
-without `VALOR_LIVE=1`, and an abstain on `tests/scripted.py`); the
-open-weight leg right on every case it answered, with two calls refused
-by the provider (HTTP 429). No call over its estimate. Spend $0.0193.
-
-Change before run 3: the question's test clause adds "even where they exit
-early or refuse to run", and the `false` label reads "it adds none of
-these, or adds only tests and the code that serves them".
-
-**Governance, run 3** (task digest
-`e47a2161d4dd2cc39bedb7a4d0883d95f62e5048030040479040829540f11e6f`,
-calibration task `981e9498eec7`): entry check true. Both legs right on
-all 32 `tom` cases and all 18 drafted ones, no error, no abstain; largest
-estimate ratio 0.86 (Jev) and 0.89 (open-weight). Spend $0.0205.
-`GOVERNANCE.calibrated` is that digest, the docs runner is registered, and
-`MANUAL_STAGES` holds `review` alone.
-
-**Rebase onto `e4b30b78c`** (1.4c part two, 1.4u's planning): no
-conflicts. Built to the plans now on the base: `read_turn_file(dir_fd,
-relpath)` keeps 1.4s's signature (no `max_bytes`, no `then=`;
-`read_verdict` calls `_file_away` itself), `settings.junit_max_bytes` and
-`settings.verdict_max_bytes` are gone and a report or verdict of any size
-is read whole, `read_junit` walks from `lay.checks` by the check
-directory's name, and the `suite.ran` reuse key includes the role
-(m1-4c-review.md, step 2), so a review head run never stands in for the
-test check's. The suite's output already goes to a file and the kernel
-waits on the process, then reaps the group. The governance question's text
-and the calibrated digest are unchanged.
-
-The live session test asserts the held effects as 4.2's does: exactly one
-merge held, at least one `push_branch` held, no outcome before approval,
-every outcome granted, and the origin's branch at the last approved push,
-an ancestor of the merged candidate. Each stage may push its own new
-commits; an identical request already returns the existing effect.
+The calls made by default (the numbered "Decided by default" items cited
+above), both critique rounds and the build record are in
+[m1-4b-records.md](m1-4b-records.md).
