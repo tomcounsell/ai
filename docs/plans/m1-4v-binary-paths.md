@@ -348,3 +348,55 @@ before 1.4v merges.
 Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
 
 Scope: the three findings under Checks (a mount with no mount point can catch the backup dump, with the `diskarbitrationd` deny verified; `~/.local/share/uv` write-denied and fresh sessions given their own `UV_PYTHON_INSTALL_DIR`; the PATH opening in the docs). First in the order.
+
+## Patch round 1 (2026-10-03)
+
+The three findings under Checks, each with its test. Rebased onto
+`valor-cori-rebuild` (3a, 3c and 4.2 there; conflicts in `core/settings.py`,
+`HOME_WRITE_DENIED`, and `docs/README.md` resolved by keeping both sides).
+
+1. **A mount with no mount point.** Reproduced: under `(deny file-mount)`
+   alone, `hdiutil attach` of an image with no `-mountpoint` mounted it at
+   `/Volumes/<label>`. Every profile now also denies the mach name
+   `com.apple.DiskArbitration.diskarbitrationd`: `hdiutil attach`, with or
+   without a mount point, attaches nothing, and `diskutil mount` refuses.
+   Verified as asked, and it showed a second route: `open img.dmg` mounts
+   through DiskImageMounter, a process Launch Services starts outside the
+   sandbox, and `open` of an app bundle the turn wrote runs that app's code
+   outside the sandbox entirely (reproduced: it wrote into a denied
+   directory). Denying `com.apple.coreservices.launchservicesd` stops `open`
+   but makes Claude Code hang (with a real key and with a dummy one), so the
+   profile denies instead the Launch Services database (`com.apple.lsd.*`),
+   the quarantine resolver, and Apple events (`com.apple.coreservices.
+   quarantine-resolver`, `.appleevents`). Under them `open` by path, by
+   `-a`, by bundle id, of the image and of DiskImageMounter by path, and
+   AppleScript's `run application` and Finder `open` all launch nothing;
+   Claude Code ran a turn with a Bash tool call under that profile; uv, git
+   and Python worked. `launchservicesd` staying reachable is named in
+   `sandbox-openings.md`. Test:
+   `test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox`
+   (`hdiutil attach` with no mount point, `diskutil mount`, `open -W` of the
+   image, DiskImageMounter by path, and a planted app; nothing attached,
+   nothing at `/Volumes/<label>`, the app's marker absent). The existing
+   mount-point test now asserts on what is attached, not `hdiutil`'s exit
+   code, which is 0 when diskarbitrationd is unreachable. Both tests fail
+   with the denies removed.
+2. **`~/.local/share/uv`.** Joins `HOME_WRITE_DENIED`; a fresh session's
+   environment carries `UV_PYTHON_INSTALL_DIR` under its own `tmp/` (both
+   the critique and the services branch, which drops the builder's).
+   Tests: creating under `home/.local/share/uv/python` is denied in the
+   ancestor test; `test_critique_gets_no_database_credential_and_no_service_port`
+   checks both uv directories sit in the session's `tmpdir`.
+3. **The PATH opening.** `sandbox-openings.md` says that `uv sync` from
+   Tom's shell takes the first fitting Python on PATH when no managed one
+   fits (none does here: the project wants 3.14, uv holds 3.10 and 3.13),
+   so a `python3.14` a turn left ahead of Homebrew becomes the kernel's
+   interpreter. Docs only.
+
+Docs: `harnesses.md` Files gains "No mount, no `open`" and the fresh
+session's `UV_PYTHON_INSTALL_DIR`; `sandbox-openings.md` gains
+`~/.local/share/uv`, the PATH interpreter, the unmount line restated, and
+`launchservicesd`.
+
+Suite: 704 passed, 11 skipped (own DB and ports 6430-6439). Ruff check clean; format check clean but for the
+known `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
