@@ -210,6 +210,16 @@ ports inside the VM and `{passfile}` as that file. Then, as `valor`, in
 the child cgroup: the setup offline (`UV_OFFLINE=1`,
 `npm_config_offline=true`), the suite with `{junit}` as
 `/home/valor/junit.xml`, and the lint, each exit code taken by `run.sh`.
+**No command's output is read through a pipe.** Each setup command, the
+suite, and the lint runs in its own session (`setsid`) with stdout and
+stderr sent to a file under `/home/valor/logs/`; `run.sh` waits on that
+process's exit (`wait $pid`), never for end of file, then kills the rest
+of its process group. So a setup command that leaves a child holding
+stdout (`pg_ctl start` without `-l`, `x &`) cannot hang the run, and the
+child goes with its group. The host does the same with the CLI: `container
+build` and `container run` write to files under the run's check
+directory, the kernel waits on the process, not on its output, and a stop
+or an interrupt kills the group.
 As root: copies the JUnit file and writes `/out/result.json` (exit codes,
 durations, `memory.peak`, and `oom_kill` from `memory.events`). `/out`
 is made root's with mode 755 before the suite starts. If the build shows
@@ -388,6 +398,11 @@ Tests that need the runtime carry a `container` marker and skip when
 
 **Results.**
 
+- A spec whose setup runs `sh -c 'sleep 600 &'` (a child holding stdout)
+  finishes setup as soon as the command exits, the suite runs, and no
+  `sleep` is left in the VM; the same command in a dependency build
+  finishes the build.
+
 - A suite that allocates past `verify_memory_mb` gives `cause: memory`,
   not a failure finding, and the reviewer's `verify.json` says so.
 - This repository's suite in the VM: every `macos` test skips, the rest
@@ -550,3 +565,9 @@ are part one's (m1-4c-review.md); 2 and 12 are handled here.
     removed by 1.4u);
     `read_turn_file` is cited for its walk only (Runtime; The run;
     Reading the result).
+
+After round 2, from 1.4u's critique: with no timeout, a command whose
+output is read through a pipe waits for end of file, so a setup command
+that leaves a child holding stdout hangs. Every command in the VM and
+every CLI call on the host writes its output to a file, is waited on by
+its exit, and has its group killed after (The run; Tests, Results).
