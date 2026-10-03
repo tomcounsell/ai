@@ -226,7 +226,7 @@ the path, so Claude Code's own side calls and subagents are metered too.
 Status: **in use**.
 
 What it does per call (price, open, forward, charge) is
-[architecture.md](architecture.md)'s (Metered spending). The stack-specific parts:
+[architecture.md](architecture.md)'s (Metered spending, in [metered-spending.md](metered-spending.md)). The stack-specific parts:
 input is estimated at two bytes per token (`settings.bytes_per_token`) for the worst-case estimate, the opening runs under the task's advisory lock, and the response streams back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path, and on the

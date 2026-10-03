@@ -10,10 +10,12 @@ by hand, as `python -m core verdict` records them.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -213,6 +215,153 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert "merge.json: the merge is the kernel's to request" in prompt
     assert state["state"] == "plan" and list(state["effects"].values()) == ["refused"]
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
+
+
+def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-marker")
+    (ws / ".valor").mkdir()
+    (ws / ".valor" / "question.md").symlink_to(outside)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        found = signals.collect(ws, "turn-unreadable")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": "turn-unreadable", "state": "plan"})
+            await ledger.append(conn, task, "turn.ended",
+                                {"turn_id": "turn-unreadable", "outcome": "done", "result": {"session_id": "s"}})  # fmt: skip
+            await session.record(
+                conn, task, "turn-unreadable", found, state=tasks.machine.State.PLAN, workspace=str(ws)
+            )
+            return await ledger.read(conn, task)
+
+    rows = run(go())
+    collected = [r["payload"] for r in rows if r["type"] == "turn.collected"][-1]
+    assert "question.md is a link, not a plain file" in collected["errors"]
+    assert "outside-marker" not in json.dumps([r["payload"] for r in rows])
+
+
+@pytest.mark.parametrize("path", ["docs/plans/p.md", "../outside/fifo"])
+def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_is_never_opened(tmp_path, path):
+    """The payload comes from the committed blob; the turn's copy is never
+    read, so a link to a FIFO there cannot block the kernel."""
+    ws, _ = scripted.workspace(tmp_path)
+    (tmp_path / "outside").mkdir()
+    os.mkfifo(tmp_path / "outside" / "fifo")
+    (ws / "docs" / "plans").mkdir(parents=True)
+    (ws / "docs" / "plans" / "p.md").symlink_to(tmp_path / "outside" / "fifo")
+    git(ws, "add", "docs/plans/p.md")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "plan")
+    got: dict = {}
+
+    def go():
+        got["value"] = session._plan(str(ws), {"path": path, "critique_rounds": 1, "review_rounds": 1})
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "_plan blocked"
+    plan, why = got["value"]
+    if path == "docs/plans/p.md":
+        target = str(tmp_path / "outside" / "fifo").encode()
+        assert why is None and plan["sha256"] == hashlib.sha256(target).hexdigest()
+    else:
+        assert plan is None and why == "../outside/fifo is not committed at HEAD"
+
+
+def test_a_plan_changed_after_its_commit_is_no_plan(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, "docs/plans/p.md", "the plan\n", "plan")
+    raw = {"path": "docs/plans/p.md", "critique_rounds": 1, "review_rounds": 1}
+    plan, why = session._plan(str(ws), raw)
+    assert why is None and plan["sha256"] == hashlib.sha256(b"the plan\n").hexdigest()
+    (ws / "docs" / "plans" / "p.md").write_text("changed\n")
+    assert session._plan(str(ws), raw) == (None, "docs/plans/p.md has changes not committed")
+
+
+@pytest.mark.parametrize(
+    "path,change",
+    [
+        ("docs/plans/the plan.md", "edit"),
+        ("docs/plans/plän.md", "edit"),
+        ("docs/plans/p.md", "rename"),
+    ],
+)
+def test_a_plan_git_quotes_or_renames_away_with_changes_not_committed_is_no_plan(tmp_path, path, change):
+    """Git quotes a path holding a space or a character outside ASCII and
+    names a rename's old path on the left of ` -> `; the plan is checked by
+    a literal pathspec, so each is still refused."""
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, path, "the plan\n", "plan")
+    raw = {"path": path, "critique_rounds": 1, "review_rounds": 1}
+    assert session._plan(str(ws), raw)[1] is None
+    if change == "edit":
+        (ws / path).write_text("changed\n")
+    else:
+        git(ws, "mv", path, "docs/plans/elsewhere.md")
+    assert session._plan(str(ws), raw) == (None, f"{path} has changes not committed")
+
+
+@pytest.mark.parametrize("path", ["docs/plans/p.md", "docs/plans/*.md"])
+def test_a_plan_is_not_refused_for_changes_to_other_files(tmp_path, path):
+    """The pathspec is literal: a plan named `*.md` is not refused for a
+    change to another plan it would match as a glob."""
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, path, "the plan\n", "plan")
+    (ws / "docs" / "plans" / "p.md.bak").write_text("other\n")
+    (ws / "docs" / "plans" / "q.md").write_text("other\n")
+    raw = {"path": path, "critique_rounds": 1, "review_rounds": 1}
+    assert session._plan(str(ws), raw)[1] is None
+
+
+def _hide_an_edit(ws: Path, path: str, route: str) -> None:
+    """Change `path` after its commit in a way the turn's own index or
+    config keeps out of a plain `git status`."""
+    f = ws / path
+    if route in ("assume-unchanged", "skip-worktree"):
+        git(ws, "update-index", f"--{route}", path)
+        f.write_text("changed\n")
+    elif route == "stat cache":
+        # Only mtime and size are compared, and the index's stat data
+        # predates the edit, so git never reads the file again.
+        git(ws, "config", "core.checkStat", "minimal")
+        git(ws, "config", "core.trustctime", "false")
+        before = f.stat().st_mtime - 100
+        os.utime(f, (before, before))
+        git(ws, "update-index", "--refresh")
+        f.write_text(f.read_text().replace("the", "tha"))  # the same size
+        os.utime(f, (before, before))
+    else:  # file mode
+        git(ws, "config", "core.fileMode", "false")
+        f.chmod(0o755)
+    assert git(ws, "status", "--porcelain", "--", path) == ""
+
+
+HIDDEN = ["assume-unchanged", "skip-worktree", "stat cache", "file mode"]
+
+
+@pytest.mark.parametrize("route", HIDDEN)
+def test_a_plan_changed_where_the_turns_index_or_config_hides_it_is_no_plan(tmp_path, route):
+    """The turn writes its own index and config; the plan is compared with
+    HEAD through a fresh index, so neither can hide a change."""
+    ws, _ = scripted.workspace(tmp_path)
+    path = "docs/plans/p.md"
+    scripted.commit(ws, path, "the plan\n", "plan")
+    raw = {"path": path, "critique_rounds": 1, "review_rounds": 1}
+    assert session._plan(str(ws), raw)[1] is None
+    _hide_an_edit(ws, path, route)
+    assert session._plan(str(ws), raw) == (None, f"{path} has changes not committed")
+
+
+@pytest.mark.parametrize("route", HIDDEN)
+def test_a_candidate_with_a_change_the_turns_index_or_config_hides_is_no_candidate(tmp_path, route):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, "app.py", "the code\n", "code")
+    assert session._candidate(str(ws), "t1")[1] is None
+    _hide_an_edit(ws, "app.py", route)
+    candidate, why = session._candidate(str(ws), "t1")
+    assert candidate is None and why.startswith("done.md with uncommitted changes") and "app.py" in why
 
 
 def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():

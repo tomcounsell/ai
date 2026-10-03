@@ -35,15 +35,17 @@ Under a fresh session's profile, which denies `/private/tmp` and
 `/private/var/folders`, `look` runs with its user data directory under the
 session's own tmp.
 
-**What the kernel records.** When it collects a turn, the kernel opens
-`.valor/screens/` and each file in it by directory descriptor, never following
-a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes}`
-(the size from `fstat`; the kernel never reads a screen's contents) for a
-regular file with one link, `{name, refused}` for anything else (a link, a
-hard link, a FIFO, a directory), which it never reads. Each entry is then
-moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not record
-it again. An entry that cannot be moved is removed and recorded as
-`{name, refused}`. `done.md` names a screen by its original name. The turn
+**What the kernel records.** When it collects a turn, the kernel moves each
+entry in `.valor/screens/` to `.valor/handled/<turn_id>/screens/` first, by
+directory descriptor and never through a link, so a later turn does not
+record it again, and then opens it there without following a link or
+blocking (`core/workspace.py`'s `_file_away` and `open_plain_file`, the same
+walk as every other signal). It adds `screens` to `turn.collected`:
+`{name, bytes}` (the size from `fstat`; the kernel never reads a screen's
+contents, so a sparse screen is sized, not refused) for a regular file with
+one link, `{name, refused}` with the reason for anything else (a link, a
+hard link, a FIFO, a directory). An entry that cannot be moved is removed
+unread and recorded as `{name, refused}`. `done.md` names a screen by its original name. The turn
 quotes the checksums `look` printed in `done.md`; the kernel records no
 checksum, and a screen is as editable as `done.md`.
 Screens are evidence, never a gate: nothing requires one and no check reads

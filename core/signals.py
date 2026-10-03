@@ -21,15 +21,22 @@ Brief by `core/tasks.py`.
 Files rather than a line of final output, because writing a file is a
 deliberate tool call that survives whatever prose follows it, and a turn
 killed mid-way leaves whatever it wrote readable. Each file is moved to
-`.valor/handled/<turn_id>/` once read, so no signal is read twice.
+`.valor/handled/<turn_id>/` and read there, so no signal is read twice.
+
+The turn controls everything under its workspace, so every lookup goes
+through `core.workspace`'s descriptor walk: no link is followed, no FIFO
+blocks, and a file is read only when it is a regular file with one link.
+Anything else is recorded in `unreadable` with a reason, never its
+contents. An entry that cannot be moved is removed unread.
 """
 
 import json
 import os
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from core import workspace
 
 DIR = ".valor"
 TEXT_SIGNALS = ("question", "no_question", "done")
@@ -44,140 +51,132 @@ class Signals:
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)
     screens: list[dict[str, Any]] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
 
 
-def collect(workspace: str | Path, turn_id: str) -> Signals:
-    """Read and move aside everything the turn left. An effect file that is
-    not a JSON object comes back with an `error` and no request; so does a
-    `plan.json` that is not one."""
-    root = Path(workspace) / DIR
-    handled = root / "handled" / turn_id
+def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
+    """Move aside, then read, everything the turn left. An effect file that
+    is not a JSON object comes back with an `error` and no request; so does
+    a `plan.json` that is not one. A text signal that cannot be read counts
+    as absent, with its reason in `unreadable`."""
     signals = Signals()
-    for name in TEXT_SIGNALS:
-        path = root / f"{name}.md"
-        if path.is_file():
-            setattr(signals, name, path.read_text().strip() or f"(empty {name}.md)")
-            _move(path, handled / path.name)
-    plan = root / "plan.json"
-    if plan.is_file():
-        try:
-            value = json.loads(plan.read_text())
-            if not isinstance(value, dict):
-                raise TypeError("not a JSON object")
-            signals.plan = value
-        except (ValueError, TypeError) as exc:
-            signals.plan_error = f"plan.json is unreadable: {exc!r}"
-        _move(plan, handled / plan.name)
-    effects = root / "effects"
-    for path in sorted(effects.glob("*.json")) if effects.is_dir() else []:
-        entry: dict[str, Any] = {"file": path.name}
-        try:
-            request = json.loads(path.read_text())
-            if not isinstance(request, dict):
-                raise TypeError("not a JSON object")
-            entry["request"] = {
-                "action_type": str(request["action_type"]),
-                "target": str(request["target"]),
-                "payload": dict(request.get("payload") or {}),
-            }
-        except (ValueError, KeyError, TypeError) as exc:
-            entry["error"] = f"unreadable request: {exc!r}"
-        signals.effects.append(entry)
-        _move(path, handled / "effects" / path.name)
-    signals.screens = read_screens(workspace, turn_id)
+    try:
+        root = os.open(workspace_dir, workspace.DIR_FLAGS)
+    except FileNotFoundError:
+        return signals
+    except OSError as exc:
+        signals.unreadable.append(f"the workspace is not a plain directory ({exc.strerror})")
+        return signals
+    try:
+        valor, why = workspace.open_turn_dir(root, DIR)
+    finally:
+        os.close(root)
+    if valor is None:
+        if why:
+            signals.unreadable.append(why)
+        return signals
+    try:
+        for name in TEXT_SIGNALS:
+            body, why = _take(valor, f"{name}.md", valor, turn_id)
+            if body is not None:
+                setattr(signals, name, body.decode(errors="replace").strip() or f"(empty {name}.md)")
+            elif why:
+                signals.unreadable.append(why)
+        body, why = _take(valor, "plan.json", valor, turn_id)
+        if body is not None:
+            try:
+                value = json.loads(body)
+                if not isinstance(value, dict):
+                    raise TypeError("not a JSON object")
+                signals.plan = value
+            except (ValueError, TypeError) as exc:
+                signals.plan_error = f"plan.json is unreadable: {exc!r}"
+        elif why:
+            signals.plan_error = f"plan.json is unreadable: {why}"
+        _effects(signals, valor, turn_id)
+        signals.screens = _screens(signals, valor, turn_id)
+    finally:
+        os.close(valor)
     return signals
 
 
-def read_screens(workspace: str | Path, turn_id: str) -> list[dict[str, Any]]:
-    """The files in `.valor/screens/` as `{name, bytes}`, each opened
-    relative to a directory descriptor without following links or blocking,
-    and recorded only when a regular file with one link; anything else is
-    `{name, refused: reason}` and is never read. Each entry is then moved to
-    `.valor/handled/<turn_id>/screens/`. Written to be replaced by the shared
-    safe-read helper."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-    out: list[dict[str, Any]] = []
-    fds: list[int] = []
+def _effects(signals: Signals, valor: int, turn_id: str) -> None:
+    effects, why = workspace.open_turn_dir(valor, "effects")
+    if effects is None:
+        if why:
+            signals.unreadable.append(why)
+        return
     try:
-        parent = os.open(workspace, flags | os.O_DIRECTORY)
-        fds.append(parent)
-        for part in (DIR, "screens"):
-            parent = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)
-            fds.append(parent)
-    except OSError:
-        return out  # no screens directory, or one that is not a plain directory
-    try:
-        screens = parent
-        valor = fds[-2]
-        dest = None
-        for name in sorted(os.listdir(screens)):
-            entry: dict[str, Any] = {"name": name}
+        for name in sorted(n for n in os.listdir(effects) if n.endswith(".json")):
+            entry: dict[str, Any] = {"file": name}
+            body, why = _take(effects, name, valor, turn_id, ("effects",))
+            if body is None:
+                entry["error"] = (
+                    f"unreadable request: {why or name + ' was listed and gone when it was moved'}"
+                )
+                signals.effects.append(entry)
+                continue
             try:
-                st = os.stat(name, dir_fd=screens, follow_symlinks=False)
-                if not stat.S_ISREG(st.st_mode):
-                    entry["refused"] = "not a regular file"
-                elif st.st_nlink != 1:
-                    entry["refused"] = "more than one link"
-                else:
-                    fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=screens)
-                    try:
-                        after = os.fstat(fd)
-                    finally:
-                        os.close(fd)
-                    if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
-                        raise OSError("changed while read")
-                    entry["bytes"] = after.st_size
-            except OSError as exc:
-                entry["refused"] = exc.strerror or str(exc)
-            if dest is None:
-                dest = _screens_dest(valor, turn_id, fds)
-            try:
-                if dest is None:
-                    raise OSError("no place to file it")
-                os.rename(name, name, src_dir_fd=screens, dst_dir_fd=dest)
-            except OSError:
-                # A screen that cannot be filed away counts as unreadable and
-                # is removed, so no later turn records it again.
-                entry = {"name": name, "refused": "could not be moved aside"}
-                _remove(screens, name)
-            out.append(entry)
-    except OSError:
-        pass
+                request = json.loads(body)
+                if not isinstance(request, dict):
+                    raise TypeError("not a JSON object")
+                entry["request"] = {
+                    "action_type": str(request["action_type"]),
+                    "target": str(request["target"]),
+                    "payload": dict(request.get("payload") or {}),
+                }
+            except (ValueError, KeyError, TypeError) as exc:
+                entry["error"] = f"unreadable request: {exc!r}"
+            signals.effects.append(entry)
     finally:
-        for fd in fds:
+        os.close(effects)
+
+
+def _screens(signals: Signals, valor: int, turn_id: str) -> list[dict[str, Any]]:
+    """The files in `.valor/screens/` as `{name, bytes}`, each filed away
+    into `handled/<turn_id>/screens/` first and sized there from `fstat`,
+    never read. Anything but a regular file with one link is `{name,
+    refused}`; so is an entry that cannot be filed away, which is removed
+    unread so no later turn records it again. A sparse screen is sized, not
+    refused: nothing reads it."""
+    screens, why = workspace.open_turn_dir(valor, "screens")
+    if screens is None:
+        if why:
+            signals.unreadable.append(why)
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        for name in sorted(os.listdir(screens)):
+            dest, why = workspace._file_away(screens, name, valor, turn_id, ("screens",))
+            if dest is None:
+                out.append({"name": name, "refused": why or f"{name} was listed and gone when it was moved"})
+                continue
+            try:
+                fd, st, why = workspace.open_plain_file(dest, name)
+            finally:
+                os.close(dest)
+            if fd is None:
+                out.append({"name": name, "refused": why or f"{name} was gone from handled/{turn_id}"})
+                continue
             os.close(fd)
+            out.append({"name": name, "bytes": st.st_size})
+    finally:
+        os.close(screens)
     return out
 
 
-def _remove(dir_fd: int, name: str) -> None:
-    for unlink in (os.unlink, os.rmdir):
-        try:
-            unlink(name, dir_fd=dir_fd)
-            return
-        except OSError:
-            continue
-
-
-def _screens_dest(valor: int, turn_id: str, fds: list[int]) -> int | None:
-    """`.valor/handled/<turn_id>/screens/` as a descriptor, made step by step
-    relative to `.valor` and never through a link."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
-    parent = valor
-    for part in ("handled", turn_id, "screens"):
-        try:
-            os.mkdir(part, 0o755, dir_fd=parent)
-        except FileExistsError:
-            pass
-        except OSError:
-            return None
-        try:
-            parent = os.open(part, flags, dir_fd=parent)
-        except OSError:
-            return None
-        fds.append(parent)
-    return parent
-
-
-def _move(path: Path, to: Path) -> None:
-    to.parent.mkdir(parents=True, exist_ok=True)
-    path.replace(to)
+def _take(
+    src: int, name: str, valor: int, turn_id: str, sub: tuple[str, ...] = ()
+) -> tuple[bytes | None, str | None]:
+    """File `name` away into `handled/<turn_id>/<sub...>/`, then read it
+    there. (None, None) when there is no such entry."""
+    dest, why = workspace._file_away(src, name, valor, turn_id, sub)
+    if dest is None:
+        return None, why
+    try:
+        body, why = workspace.read_turn_file(dest, name)
+    finally:
+        os.close(dest)
+    if body is None and why is None:
+        why = f"{name} was gone from handled/{turn_id} when it was read"
+    return body, why

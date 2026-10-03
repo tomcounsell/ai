@@ -317,6 +317,12 @@ not by a turn.
 - Text that is not UTF-8 is decoded with replacement characters. At the
   base, `read_text` raised on it out of `collect`; the decode fixes that
   crash.
+- `git.dirty` takes no size shortcut: the fresh index caches no sizes, so
+  git hashes every tracked file, and a huge or sparse tracked file (20 GiB
+  in the review's probe) runs until `git_timeout_s` and is refused with a
+  timeout reason instead of "uncommitted changes". Left as is (the lead's
+  call): the turn inflicts it on itself, the wait is in a worker thread off
+  the loop, and the outcome is still a refusal.
 
 ## Questions for Tom
 
@@ -457,3 +463,99 @@ if they pass. Everything else in the task passed both checks.
 Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
 
 Scope: the Delivery's recommendation (literal-pathspec porcelain check; tests for a space, a character outside ASCII, and a staged rename).
+
+## Patch round 2 (the Delivery's recommendation)
+
+1. `session._plan` matched `git status --porcelain` lines against the plan
+   path as text. It now asks git about that path alone: `git.dirty` takes
+   a path and runs `git status --porcelain --untracked-files=all -- ':(literal)<path>'`,
+   and any output is "has changes not committed". The pathspec is literal,
+   so a plan named like a glob is asked about as itself.
+2. Tests (`tests/test_session.py`): a plan whose path holds a space, one
+   whose path holds a character outside ASCII, each edited after its
+   commit, and a plan staged as renamed away, are all refused; each of the
+   three failed on the code before the patch. A plan named `docs/plans/*.md`
+   is not refused for another plan's change, and a plain plan is not
+   refused for a sibling `p.md.bak`; the glob case fails without `:(literal)`.
+
+The full suite after patch round 2: 661 passed, 1 failed, 8 skipped, the
+failure being a test that starts a task's own Postgres, which passed on
+its own three times; ruff check clean, ruff format clean apart from
+`docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Repair round (a bug fix; after patch round 2's checks: review pass, test gaps)
+
+The test check's gap: after `git update-index --skip-worktree` or
+`--assume-unchanged` on the plan file, `git status` reports nothing, so
+`session._plan` accepted an edited plan as committed; `session._candidate`
+had the same blind spot. A turn runs git in its own worktree, so it can set
+these bits.
+
+1. `git.dirty` no longer asks the turn's index. It reads HEAD into a fresh
+   index in a temporary directory of the kernel's own (`GIT_INDEX_FILE`;
+   `read-tree --empty` when there is no commit) and runs the same
+   `git status --porcelain` against it. The kernel reads no byte of the
+   turn's files; git compares contents. That index carries no
+   assume-unchanged or skip-worktree bit, no cached stat data, and no
+   untracked cache, so none of them, all of which the turn can write, can
+   hide a change. Repo config the turn can write: `core.fsmonitor` was
+   already pinned off for every call; `core.checkStat=minimal` with
+   `core.trustctime=false` hid a same-size edit with its mtime restored
+   against the turn's index (shown in a scratch repository) and does not
+   against the fresh one; `core.fileMode=false` hid a mode change, so the
+   status call pins `core.fileMode=true`. `core.ignoreStat` and a sparse
+   checkout act only through index bits, which the fresh index lacks. No
+   new cap, no new refusal: the existing "has changes not committed" and
+   "uncommitted changes" errors now see what was hidden.
+2. Tests (`tests/test_session.py`), one per route for `_plan` and for
+   `_candidate`: assume-unchanged, skip-worktree, the stat cache
+   (`checkStat=minimal`, `trustctime=false`, same size, mtime restored),
+   and file mode (`core.fileMode=false`, chmod). Each asserts first that a
+   plain `git status` reports nothing; all eight failed on 636f6177a's
+   `core/git.py` and pass now.
+3. Rebasing onto `valor-cori-rebuild` brought in 3c's `read_screens`, and
+   this plan's "With 3c" makes the second to land fold it into the shared
+   walk. `collect` keeps `screens`; `_screens` opens `.valor/screens` with
+   `open_turn_dir`, files each entry away with `_file_away(...,
+   sub=("screens",))`, then sizes it from `fstat` through a new
+   `workspace.open_plain_file` (the regular-file and one-link checks of
+   `open_turn_file`, without the sparse refusal, which `_open_checked` now
+   adds on top). Recorded as `{name, bytes}` with no digest, as 3c's patch
+   settled (the kernel never reads a screen), so a sparse screen is still
+   sized, not refused. `_screens_dest` and the second walk are gone. A
+   screen whose move is refused is removed unread with `_file_away`'s
+   reason, so two `tests/test_look.py` assertions now check the reason
+   ends in "removed unread" instead of the old "could not be moved aside"
+   wording. Docs: `docs/browser.md` and `docs/harnesses.md`.
+
+Not closed, as not hiding a change: line-ending normalization
+(`core.autocrlf`, `.git/info/attributes` eol) makes a CRLF-only edit
+compare equal by declaration, and `.git/info/exclude` or
+`core.excludesFile` makes a file ignored, which is not a change to commit.
+Neither alters what the kernel records: the plan's digest and the
+candidate both come from the commit.
+
+The full suite after the repair round: 741 passed, 11 skipped; ruff check
+clean, ruff format clean apart from `docs/bridges/telegram.md` and
+`docs/plans/m2-1-port.md`.
+
+## Patch round 4 (review: changes, finding 1; test: pass)
+
+The review's finding 1: the repair round's text claimed more than the code
+does. The fresh index closes index bits, the stat cache, and
+`core.fileMode`. It does not close git's content filters, which the turn can
+set from config, `.git/info/attributes`, or an untracked `.gitattributes`:
+`core.autocrlf` and the `text`/`eol` attributes hide a CRLF-only edit, the
+`ident` attribute hides any text written inside `$Id$`, and
+`working-tree-encoding` makes other bytes compare equal. The repair round's
+"Not closed" paragraph named only line endings and is superseded by this.
+None of these changes what the kernel records: the plan's digest is the
+committed blob's and the candidate is the commit, so what the filters hide
+is a refusal that does not happen, never a false record.
+
+1. Wording only, no code: the `git.dirty` docstring and
+   `docs/harnesses.md` (the `plan.json` and `done.md` rows) now say what
+   the fresh index closes and that the filters can still make differing
+   bytes compare equal, harmlessly. No filtering code is added.
+2. Finding 2 (a huge or sparse tracked file runs to `git_timeout_s`) is
+   left as is, recorded under "Decided by default".

@@ -94,7 +94,7 @@ def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None
     finally:
         os.close(root)
     if body is None:
-        return None, why
+        return None, why or f"no {JUNIT}"
     if why := _declares(body):
         return None, why
     try:
@@ -673,7 +673,7 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         )
     finally:
         await asyncio.to_thread(services.__exit__, None, None, None)
-    tests, why = read_junit(lay.checks, check_dir.name)
+    tests, why = await asyncio.to_thread(read_junit, lay.checks, check_dir.name)
     cause = None
     reason = None
     if tests is None and code not in (0, 1):

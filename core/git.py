@@ -56,7 +56,9 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,7 +242,9 @@ def hostile(
     return found
 
 
-def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+def run(
+    workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     """One git call in the workspace, refused before it runs when the
     workspace's config is hostile."""
     found = hostile(workspace)
@@ -250,7 +254,7 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
             "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
             "key is refused): " + "; ".join(found)
         )
-    return _git(workspace, *args, text=text)
+    return _git(workspace, *args, text=text, extra_env=extra_env)
 
 
 def trusted(
@@ -272,8 +276,8 @@ def trusted(
     return done.stdout.strip() if strip else done.stdout
 
 
-def out(workspace: str | Path, *args: str, text: bool = True) -> Any:
-    done = run(workspace, *args, text=text)
+def out(workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None) -> Any:
+    done = run(workspace, *args, text=text, extra_env=extra_env)
     if done.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {_text(done.stderr).strip()}")
     return done.stdout.strip()
@@ -283,12 +287,20 @@ def _text(output: str | bytes) -> str:
     return output if isinstance(output, str) else output.decode(errors="replace")
 
 
+def _plain_dir(path: str | Path) -> bool:
+    """A directory, not a link to one."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def is_repo(workspace: str | Path | None) -> bool:  # raises GitError when no trusted git exists
     """Whether the directory is a git repository; reads nothing the turn
     controls beyond what `git rev-parse` needs to find it."""
     return (
         bool(workspace)
-        and Path(workspace).is_dir()
+        and _plain_dir(workspace)
         and _git(workspace, "rev-parse", "--git-dir").returncode == 0
     )
 
@@ -326,16 +338,48 @@ def diff_paths(workspace: str | Path, older: str, newer: str) -> list[str]:
     ).splitlines()
 
 
-def dirty(workspace: str | Path) -> list[str]:
-    """Uncommitted and untracked paths (`.valor/` is excluded at setup)."""
-    return out(
-        workspace,
-        "--no-optional-locks",
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignore-submodules=all",
-    ).splitlines()
+def dirty(workspace: str | Path, path: str | None = None) -> list[str]:
+    """Uncommitted and untracked paths (`.valor/` is excluded at setup), or
+    only those at `path`, matched literally. Git quotes a path holding a space
+    or a character outside ASCII, so a caller asking about one path asks git
+    rather than matching the lines.
+
+    The working tree is compared with HEAD through a fresh index the kernel
+    reads from HEAD in a directory of its own, never the turn's index: there
+    an assume-unchanged or skip-worktree bit, cached stat data that matches
+    an edited file, or an untracked cache would each make `status` report
+    nothing, and the turn can write all of them. The fresh index caches no
+    stat data, so every tracked file's content is compared. `core.fileMode`
+    is pinned on, so a mode change the turn's config would hide still
+    counts.
+
+    Git compares content after its filters, and the turn can set those
+    from config, `.git/info/attributes`, or an untracked `.gitattributes`:
+    `core.autocrlf` or the `text`/`eol` attributes make a CRLF-only edit
+    compare equal, the `ident` attribute collapses text inside `$Id$`, and
+    `working-tree-encoding` makes other bytes compare equal. `core.symlinks`
+    set false in the turn's config hides a type change: a link replaced by a
+    file holding its target's text compares equal. So working-tree bytes
+    that differ can still read as clean. What the kernel records does not
+    change: the plan's digest is the committed blob's and the candidate is
+    the commit."""
+    only = ["--", f":(literal){path}"] if path is not None else []
+    commit = head(workspace)
+    with tempfile.TemporaryDirectory(prefix="valor-index-") as tmp:
+        index = {"GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        out(workspace, "read-tree", commit or "--empty", extra_env=index)
+        return out(
+            workspace,
+            "-c",
+            "core.fileMode=true",
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            *only,
+            extra_env=index,
+        ).splitlines()
 
 
 def push_url(workspace: str | Path, remote: str = "origin") -> str:

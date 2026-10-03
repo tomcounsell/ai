@@ -328,11 +328,13 @@ the working session. The machinery is `core/fresh.py`:
 6. **The verdict** read from `.valor/verdict.json`: opened component by
    component, each relative to its parent's descriptor (`os.open` with
    `dir_fd`), every component with `O_NOFOLLOW` and the last also with
-   `O_NONBLOCK`, then `fstat` must show a regular file of at most 256 KB,
-   read through that descriptor, parsed as a JSON object. A symlinked
-   `.valor`, a symlinked file, a FIFO, a socket, or a device is refused
-   without blocking and without reading anything it points to. Then moved
-   to `.valor/handled/<turn_id>/`. The kernel validates it and writes
+   `O_NONBLOCK`. The file is first moved to `.valor/handled/<turn_id>/`,
+   then opened there and `fstat` must show a regular file with one link and
+   no holes; it is read through that descriptor to the size `fstat` showed
+   and no further, and parsed as a JSON object. A symlinked `.valor`, a
+   symlinked file, a FIFO, a socket, or a device is refused without
+   blocking and without reading anything it points to. A file that
+   vanishes between the move and the read is refused with that reason. The kernel validates it and writes
    the verdict row through `verdicts`; the session's text never names its
    own guard, leg, model, or cost.
 
@@ -621,7 +623,7 @@ No migration: a new event type and new Brief fields need none
 | The kernel dies mid-run | the next router run, for any task, stops every other task's services by their mark first and records `services.reaped` |
 | The builder's clone carries alternates, a graft, a replace ref, a shallow file, or a hostile config | the fetch into the mirror is refused (alternates, shallow, config) or reads nothing the turn planted (grafts and replace refs off, upload-pack sandboxed); no plan or no candidate, with the reason |
 | A critique turn fails, is stopped, or leaves no or a malformed verdict file | no `critique.decided`; the run returns `failed`; the next run runs critique again on the same plan |
-| `verdict.json` or `.valor` is a symlink (for example to the kernel's `pgpass`), the file is a FIFO, or it is over 256 KB | refused unread and without blocking; `failed` with that reason |
+| `verdict.json` or `.valor` is a symlink (for example to the kernel's `pgpass`), the file is a FIFO, it has more than one link, or it has holes | refused unread and without blocking; `failed` with that reason |
 | The builder plants a file or symlink under `checks/` | its profile denies writes there; the kernel also removes and makes each checkout without following links |
 | The fresh turn writes `.valor/effects/*.json` or `question.md` | ignored: a fresh session requests nothing and asks Tom nothing |
 | A plan revision | a new plan digest, so a new checkout; the old one is left for the record until removal |
@@ -1088,7 +1090,7 @@ on a toy candidate with a container rerun.
 - Blind checkouts with two kernel commits for critique and review; a real
   clone for docs.
 - Seats: `frontier` for critique and docs, `reviewer` for review.
-- The verdict file is `.valor/verdict.json`, at most 256 KB.
+- The verdict file is `.valor/verdict.json`, a regular file with one link and no holes.
 - Breadth first, then the base suite, then the head suite; `suite.ran`
   reused by commit, command, and environment digest.
 - The docs drop keeps the longest doc-only run of commits from the

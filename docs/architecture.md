@@ -90,57 +90,12 @@ followed by the next turn in the same state.
 
 ## Metered spending
 
-**Built.** Every model call is metered and its price recorded on its task.
-The gateway is a local HTTP proxy with a per-turn token in the path and two
-routes: Anthropic's Messages API (`route: gateway`) and OpenAI's Responses
-API under `openai/` (`route: openai`). For every call it:
-
-1. prices the model from the table in `core/settings.py`, each price
-   carrying the day it was checked (`price_checked` on the charge row); an unpriced model is refused. An Anthropic dated id matches its undated entry; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix. Per-million charges round up to whole micro-dollars in integers;
-2. opens the call with a `gateway.opened` row (call id, turn id, model, route, estimate), refusing with a `gateway.refused` row of reason
-   `stopped` if the task is stopped; nothing else refuses a call;
-3. forwards the call with the kernel's own credential (harnesses.md, Metering
-   through the gateway), streaming the response back unchanged and reading the
-   provider's reported usage as it passes;
-4. charges what the provider reported in a `gateway.charged` row. A call
-   cut before its usage arrives is charged the worst-case estimate (every
-   input token at the most expensive input rate plus every output token it
-   was allowed), so the ledger never records less than the invoice; the
-   estimate is only that fallback charge, never a gate.
-
-The OpenAI route sends the kernel's key, or the turn's own (`credential:
-turn`) when the kernel holds none, only as `POST v1/responses` and `GET` or
-`HEAD` on `v1/models` and one model by id; any other path or method is a 403.
-It drops the turn's `proxy-authorization` and answers an upstream 401 with its
-own body naming the key refused. It charges at the reported tier (one the
-table lacks, at the highest, `tier_unpriced`) with cached, cache-write,
-long-context, and per-search rates; an unpriced model, tool, or stored prompt
-is a 400 with no row. Content referenced by id or URL, or a hosted tool
-without `max_tool_calls`, can leave a cut call short of the bill
-(`referenced`, `bounded: false`). Anthropic searches are charged per search; its code execution is unmetered.
-
-Metered spending is always derived from the ledger, by one fold
-(`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of
-the task's charges, with the calls still open (`core/spending.py`).
-
-Because the harness's base URL points at the gateway, every call the turn
-makes passes through it, Claude Code's own side calls and any subagents it
-starts included. In the first demonstration 69 calls were metered at $2.972649
-against a harness-reported $2.972625 (rebuild-demonstration.md, Money): the
-meter sees what Claude Code spends on its own account.
-
-Serves bounded authority, metered spending. Money never refuses, pauses,
-or stops a task, and nothing asks Tom because of it; the metering sees what
-passes the gateway and is not a wall around the provider (see Limits).
-Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the
-folds read as `gateway.opened`, and rows the folds ignore. Judgement calls
-are opened and charged the same way in the kernel process, with no HTTP
-route (judgement-layer.md).
-
-**Design.** A child's spending rolls up into its parent's reported
-spending (see The objective tree). A task that ends reports what it spent,
-what it produced, and what it asks for. A hung tool spends no money, so a
-per-task wall-clock deadline catches what metering cannot.
+**Built.** Every model call is metered and its price recorded on its task,
+through a local gateway with an Anthropic route and an OpenAI route. Spending
+is derived from the ledger by one fold, `tasks.money`, and nothing refuses,
+pauses, or stops a task because of money. The gateway's steps, routes,
+charging rules, and the design for rollups are in
+[metered-spending.md](metered-spending.md).
 
 ## Effect classes and the broker
 
@@ -265,15 +220,23 @@ Critique, review, and docs run in fresh sessions. Prompts per state are in
 [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
-`.valor/` in its workspace, read when the turn ends and then moved to
-`.valor/handled/<turn_id>/`: `question.md` (the task waits for Tom),
+`.valor/` in its workspace, moved when the turn ends to
+`.valor/handled/<turn_id>/` and read there: `question.md` (the task waits for Tom),
 `no_question.md` (clarify found nothing to ask), `plan.json` (the committed
 plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
-layout. `turn.collected` records what the turn left, its state, its
-verdict, and the screens `look` kept (name and size each, or the
-reason one was refused); `task.delivered` waits for the checks
-([sdlc-state-machine.md](sdlc-state-machine.md)).
+layout. The turn controls these files, so the kernel walks to each one
+relative to directory descriptors, follows no link, never blocks on a
+FIFO, and reads only a regular file with one link and no holes (a sparse
+file claims a size the turn never wrote), and only up to the size it
+checked, in a worker thread off the router's event loop; anything else, and
+an entry that vanishes before it is read, is recorded as unreadable with
+its reason, never its contents, and an entry that cannot be moved is
+removed unread (`core/workspace.py`). The same walk reads a fresh session's verdict from the
+kernel's checks directory. `turn.collected` records what the turn left, its
+state, its verdict, the screens `look` kept (name and size each, or the
+reason one was refused), and what was unreadable; `task.delivered` waits
+for the checks ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
 **An answer or feedback is spent only by a turn that finishes.** After a
 turn that fails or is stopped, the next turn opens with it again. This is

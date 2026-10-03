@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from core import db, ledger, router, runs, tasks
+from core import git as kgit
 from core import workspace as kws
 from core.gateway import Gateway
 from tests import scripted
@@ -358,6 +359,96 @@ def test_a_clone_with_alternates_a_shallow_file_or_hostile_config_is_refused(tmp
         git(made.workspace, "config", "uploadpack.packObjectsHook", "touch /tmp/x")
     with pytest.raises(kws.FetchRefused):
         fetch(made, sha)
+
+
+def test_a_clone_reached_through_a_link_is_refused_at_every_lookup(tmp_path):
+    _task, made = provision(tmp_path)
+    sha = candidate(made)
+    repo = Path(made.workspace)
+    linked = tmp_path / "linked-ws"
+    linked.symlink_to(repo)
+    with pytest.raises(kws.FetchRefused, match="not a plain directory"):
+        kws.fetch_into_mirror(
+            made.mirror, linked, sha, "refs/valor/candidates/l", made.harness["sandbox_profile"], "f"
+        )
+    assert not git_repo(linked) and git_repo(repo)
+    # objects moved out and linked back: refused, though nothing names alternates in the clone itself.
+    outside = tmp_path / "outside-objects"
+    (repo / ".git" / "objects").rename(outside)
+    (outside / "info" / "alternates").write_text(str(tmp_path) + "\n")
+    (repo / ".git" / "objects").symlink_to(outside)
+    with pytest.raises(kws.FetchRefused, match="objects/info/alternates"):
+        fetch(made, sha)
+    (repo / ".git" / "objects").unlink()
+    outside.rename(repo / ".git" / "objects")
+    (repo / ".git" / "objects" / "info" / "alternates").unlink()
+    fetch(made, sha)
+    assert git(made.mirror, "rev-parse", "refs/valor/candidates/t") == sha
+
+
+def test_a_clone_with_no_dot_git_has_the_names_looked_up_in_itself(tmp_path):
+    _task, made = provision(tmp_path)
+    sha = candidate(made)
+    bare = tmp_path / "bare.git"
+    git(tmp_path, "clone", "-q", "--bare", made.workspace, str(bare))
+    (bare / "shallow").write_text(sha + "\n")
+    with pytest.raises(kws.FetchRefused, match="the clone has shallow"):
+        kws.fetch_into_mirror(
+            made.mirror, bare, sha, "refs/valor/candidates/b", made.harness["sandbox_profile"], "f"
+        )
+
+
+def git_repo(path) -> bool:
+    return kgit.is_repo(str(path))
+
+
+def checks_with_verdict(tmp_path: Path, text: str = '{"verdict": "sound", "findings": []}') -> Path:
+    checks = tmp_path / "checks"
+    valor = checks / "critique-abc" / "repo" / ".valor"
+    valor.mkdir(parents=True)
+    (valor / "verdict.json").write_text(text)
+    return checks
+
+
+def test_a_verdict_is_moved_aside_then_read(tmp_path):
+    checks = checks_with_verdict(tmp_path)
+    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
+    assert verdict == {"verdict": "sound", "findings": []} and why is None
+    valor = checks / "critique-abc" / "repo" / ".valor"
+    assert (valor / "handled" / "t1" / "verdict.json").is_file() and not (valor / "verdict.json").exists()
+    assert kws.read_verdict(checks, "critique-abc", "t2") == (None, "no .valor/verdict.json")
+
+
+def test_a_hard_linked_verdict_is_refused(tmp_path):
+    checks = checks_with_verdict(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"verdict": "sound", "findings": ["outside-marker"]}')
+    verdict_file = checks / "critique-abc" / "repo" / ".valor" / "verdict.json"
+    verdict_file.unlink()
+    os.link(outside, verdict_file)
+    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
+    assert verdict is None and why == "verdict.json has 2 links"
+
+
+def test_a_sparse_verdict_is_refused_unread(tmp_path):
+    checks = checks_with_verdict(tmp_path)
+    with open(checks / "critique-abc" / "repo" / ".valor" / "verdict.json", "r+b") as f:
+        f.truncate(1 << 50)
+    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
+    assert verdict is None and why == f"verdict.json is sparse ({1 << 50} bytes claimed, 4096 on disk)"
+
+
+def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "repo" / ".valor").mkdir(parents=True)
+    (outside / "repo" / ".valor" / "verdict.json").write_text('{"verdict": "sound", "findings": []}')
+    before = sorted(str(p) for p in outside.rglob("*"))
+    checks = tmp_path / "checks"
+    checks.mkdir()
+    (checks / "critique-abc").symlink_to(outside)
+    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
+    assert verdict is None and why == "critique-abc is not a plain directory"
+    assert sorted(str(p) for p in outside.rglob("*")) == before
 
 
 def test_grafts_and_replace_refs_in_the_clone_do_not_reach_the_mirror(tmp_path):
@@ -994,17 +1085,18 @@ def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
 
 
 def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_path):
-    valor = tmp_path / ".valor"
-    valor.mkdir()
+    repo = tmp_path / "docs-abc" / "repo"
+    valor = repo / ".valor"
+    valor.mkdir(parents=True)
     big = {"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 400_000}]}
     (valor / "verdict.json").write_text(json.dumps(big))
-    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
     try:
         body, why = kws.read_turn_file(fd, ".valor/verdict.json")
     finally:
         os.close(fd)
     assert why is None and json.loads(body) == big
-    assert kws.read_verdict(tmp_path, "t1") == (big, None)
+    assert kws.read_verdict(tmp_path, "docs-abc", "t1") == (big, None)
     assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
 
 

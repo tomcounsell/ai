@@ -294,7 +294,8 @@ def test_a_screen_that_cannot_be_moved_aside_is_refused_and_removed(tmp_path):
     (screens / "a.png").write_bytes(b"png")
     (tmp_path / ".valor" / "handled" / "t1" / "screens" / "a.png").mkdir(parents=True)  # blocks the move
     found = signals.collect(tmp_path, "t1")
-    assert found.screens == [{"name": "a.png", "refused": "could not be moved aside"}]
+    assert [e["name"] for e in found.screens] == ["a.png"]
+    assert found.screens[0]["refused"].endswith("removed unread")
     assert not (screens / "a.png").exists()
 
 
@@ -616,7 +617,8 @@ def test_handled_turn_dir_that_is_a_link_refuses_and_removes_the_file(tmp_path):
     elsewhere.mkdir()
     os.symlink(elsewhere, tmp_path / ".valor" / "handled" / "t1")
     found = signals.collect(tmp_path, "t1")
-    assert found.screens == [{"name": "a.png", "refused": "could not be moved aside"}]
+    assert [e["name"] for e in found.screens] == ["a.png"]
+    assert found.screens[0]["refused"].endswith("removed unread")
     assert not (s / "a.png").exists()
     assert not list(elsewhere.rglob("*.png"))
 

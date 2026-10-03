@@ -185,8 +185,7 @@ critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
 verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
-`.valor/verdict.json`, read without following links or blocking. Review and
-docs follow in milestone 1.4.
+`.valor/verdict.json`, read by the same walk as the signals. Review and docs follow in milestone 1.4.
 
 Each prompt is followed by what did not count from the previous turn
 (`errors` on its `turn.collected`) and what became of the effects it
@@ -227,8 +226,8 @@ first long task records both in `turn.ended`.
 ## The signal channel: `.valor/`
 
 Serves Mission item 6 (every question and delivery is a ledger row, so the
-attention a task costs is a fold over its ledger) and the constraint
-**bounded authority** (an effect is a request the broker decides).
+attention a task costs is a fold over its ledger) and the constraint **bounded
+authority** (an effect is a request the broker decides).
 
 A turn reaches Tom and the world through files under `.valor/` in its
 workspace, which the kernel reads when the turn ends:
@@ -237,29 +236,30 @@ workspace, which the kernel reads when the turn ends:
 |---|---|---|
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
-| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
-| `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
+| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's), or with counts outside 0 to 2, is an error and no plan |
+| `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
-`core.signals.collect` reads them, then moves each to
-`.valor/handled/<turn_id>/`, so no signal is read twice. An effect file that
-is not a JSON object with `action_type` and `target` is recorded with an
-error and no request. Everything a turn left is one `turn.collected` row
-with the state it ran in and its verdict; a question takes precedence over
-the other signals in the same turn, and a signal that means nothing in the
-state (a `done.md` during plan) is an error, not acted on. `.valor/` is in
-the clone's `.git/info/exclude`, so signals never enter a commit.
-
-Files, because writing one is a deliberate tool call that survives whatever
-prose follows it, and a turn killed midway leaves what it wrote readable.
-The text of the channel is `skills/sdlc/channel.md`, carried in every
+`core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
+it there, in a worker thread, so no signal is read twice. The turn controls
+these files: the kernel follows no link, never blocks on a FIFO, and reads
+only a regular file with one link and no holes (a sparse file claims a size
+the turn never wrote), and only up to the size it checked, so a file that
+grows afterward is not read past that. Anything else goes to `Signals.unreadable` with its reason (from the operating system's error; a
+linked `.valor` reads "not a plain directory"), never its contents. An
+entry that vanishes before it is read is recorded the same way, an effect
+file with an error. An entry that cannot be moved is removed unread (`docs/architecture.md`). An effect file that is not a JSON
+object with `action_type` and `target` is recorded with an error and no
+request. Everything a turn left is one `turn.collected` row with the state it
+ran in and its verdict; a question takes precedence over the other signals in
+the same turn, and a signal that means nothing in the state (a `done.md`
+during plan) is an error, not acted on. `.valor/` is in the clone's
+`.git/info/exclude`, so signals never enter a commit. Files, because writing
+one is a deliberate tool call that survives whatever prose follows it, and a
+turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
 workspace turn's Brief; it lists the effects the registered performers
 offer (each performer's `usage` line; the merge offers none) and says
-pushing any other way is unavailable, which the sandbox makes true.
-
-The text inside a signal file grants nothing. A question is shown to Tom; an
-effect request is classified and bounded by the broker against the task's
-ceiling. The turn's own words never decide what it may do [7].
+pushing any other way is unavailable, which the sandbox makes true. The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is

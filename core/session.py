@@ -31,9 +31,9 @@ Every question is a `question.asked` row and its answer a
 ledger (`tasks.status`).
 """
 
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from core import broker, db, git, ledger, machine, runs, signals, tasks, workspace
@@ -74,7 +74,11 @@ async def run(
             ended = await runs.run_turn(gateway, task_id, turn_for(prompt, resume, b), dsn=dsn, state=state)
         except tasks.TaskStopped:
             return {"status": "stopped"}
-        found = signals.collect(b.workspace, ended["turn_id"]) if b.workspace else signals.Signals()
+        found = (
+            await asyncio.to_thread(signals.collect, b.workspace, ended["turn_id"])
+            if b.workspace
+            else signals.Signals()
+        )
         if not await alive():
             return {"status": "lock lost", "turn": ended}
         ok = ended["outcome"] == "done" and not ended["result"].get("is_error")
@@ -113,12 +117,12 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
             return None, "the workspace is not a git repository, so the plan cannot be committed"
         head = git.head(workspace)
         body = git.show(workspace, "HEAD", path) if head else None
+        left = git.dirty(workspace, path) if body is not None else []
     except git.GitError as exc:
         return None, str(exc)
     if body is None:
         return None, f"{path} is not committed at HEAD"
-    local = Path(workspace) / path
-    if not local.is_file() or local.read_bytes() != body:
+    if left:
         return None, f"{path} has changes not committed"
     return {
         "path": path,
@@ -175,7 +179,7 @@ def _verdict(
 ) -> tuple[str, dict[str, Any], list[str]]:
     """The turn's verdict in its state, what goes with it, and the signals
     that did not count."""
-    errors: list[str] = []
+    errors: list[str] = list(found.unreadable)
     extra: dict[str, Any] = {}
     meant = {
         State.CLARIFY: ("question", "no_question"),
@@ -229,7 +233,9 @@ async def record(
     """Ledger what a turn left, sending each effect request but a merge to
     the broker. Returns the verdict. For a task with a kernel mirror, a plan
     commit or a candidate counts only once it is fetched into the mirror."""
-    verdict, extra, errors = _verdict(state, found, workspace, turn_id, finished, brief)
+    verdict, extra, errors = await asyncio.to_thread(
+        _verdict, state, found, workspace, turn_id, finished, brief
+    )
     effects = []
     for entry in found.effects:
         if "request" in entry and entry["request"]["action_type"] == "merge":

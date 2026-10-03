@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, router, session, tasks
+from core import broker, db, ledger, machine, router, session, signals, tasks
+from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import State
 from tests import scripted
@@ -82,6 +83,34 @@ def test_a_sound_critique_goes_to_build_and_the_build_resumes_the_working_sessio
     assert not [r for r in written if r["type"].startswith("effect.")]
 
 
+def test_turn_files_are_read_off_the_event_loop(dsn, tmp_path, monkeypatch):
+    """The router runs every task on one loop, so the kernel's reads of
+    files a turn controls run in a worker thread."""
+    task, _b, ws = planned(dsn, tmp_path, critique="sound")
+    seen: dict[str, list[bool]] = {}
+
+    def off_loop(owner, name):
+        real = getattr(owner, name)
+
+        def wrapped(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+                on_loop = True
+            except RuntimeError:
+                on_loop = False
+            seen.setdefault(name, []).append(on_loop)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapped)
+
+    off_loop(kws, "read_verdict")
+    off_loop(signals, "collect")
+    off_loop(session, "_verdict")
+    out = run(drive(dsn, task, scripted.fresh_runners(ws)))
+    assert out["missing"] == ["test", "review", "docs"]
+    assert seen == {"read_verdict": [False], "collect": [False], "_verdict": [False]}
+
+
 def test_the_critique_checkout_is_blind_and_has_its_own_tmp_and_config(dsn, tmp_path):
     task, b, ws = planned(dsn, tmp_path)
     run(drive(dsn, task, scripted.fresh_runners(ws)))
@@ -138,7 +167,7 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
         ("fail", None),
         ("none", "no .valor/verdict.json"),
         ("malformed", "not JSON"),
-        ("symlink", "not a plain file"),
+        ("symlink", "verdict.json is a link, not a plain file"),
         ("fifo", "not a regular file"),
         ("dir_symlink", ".valor is not a plain directory"),
     ],
