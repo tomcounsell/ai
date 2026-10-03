@@ -555,53 +555,9 @@ merged only) stops the services, deletes the directory, and frees the ports.
 
 ## Testing actual use: a browser
 
-Serves Mission item 1 ("testing actual use"). A capability for the turn,
-never a gate.
-
-**`look`.** The workspace's `bin/` holds `look`, a shell script written there
-at each provisioning (to a temporary name, then renamed). `look URL [NAME]
-[--size WxH] [--wait MS]` asks `/usr/bin/curl` for the page's status first and
-exits non-zero when nothing answers; on a 5xx it still renders and keeps the
-page, prints the status, and exits non-zero. The browser itself exits 0 on
-its own error page. It then runs Playwright's
-`chrome-headless-shell` twice, once for the screenshot and once for the
-serialized DOM, and writes `.valor/screens/NAME.png` and
-`.valor/screens/NAME.html` in the clone. `.valor/` is excluded from commits, so
-screens never enter one. Interaction (clicks, forms, logins) is not part of it.
-
-**The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
-`chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
-newest in the cache. Every turn profile denies writes to that cache, since
-the user's own Playwright runs outside any sandbox read it. A turn that
-installs Playwright into its own project sets `PLAYWRIGHT_BROWSERS_PATH` to
-its task cache.
-
-**Sandbox.** Chromium's own sandbox cannot start inside a turn's sandbox-exec
-profile: the GPU process exits with "sandbox initialization failed: Operation
-not permitted" and the browser aborts. `look` runs it with `--no-sandbox`.
-That is acceptable because the turn's profile already bounds the process:
-outbound internet and mach services are open to the turn anyway, loopback is
-limited to the dev ports, the gateway, and service ports, and the turn can
-load any page with its other tools. No profile line changes for the browser.
-Under a fresh session's profile, which denies `/private/tmp` and
-`/private/var/folders`, `look` runs with its user data directory under the
-session's own tmp.
-
-**What the kernel records.** When it collects a turn, the kernel opens
-`.valor/screens/` and each file in it by directory descriptor, never following
-a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes,
-sha256}` for a regular file with one link, `{name, refused}` for anything else
-(a link, a hard link, a FIFO, a directory), which it never reads. Each entry
-is then moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
-record it again; `done.md` names a screen by its original name. The digest
-shows whether a screen was edited afterward; it does not make the image true.
-Screens are evidence, never a gate: nothing requires one and no check reads
-one.
-
-**Memory.** Peak resident memory of the browser's process tree over five
-renders of a Django admin login page: 330 to 372 MB (`docs/machine.md`).
-
-The emulator can score the UI items (#894, #872, #893) once it exists.
+The workspace has `look`, a script that screenshots a page served on a dev port
+and dumps its DOM into `.valor/screens/`. The kernel records those screens when
+it collects the turn. [browser.md](browser.md) specifies it.
 
 ## Further harnesses: Codex and Pi
 

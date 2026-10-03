@@ -70,7 +70,7 @@ enforcing outside the model is AI Control [4].
 | Scheduling | launchd | chosen, not built |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
-| Run and view the app | a headless browser in the workspace | open |
+| Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
 
 ## 1. Language and tooling
@@ -454,10 +454,10 @@ of a task is [architecture.md](architecture.md); its memory cost is
 **Running and viewing the app.** No turn in the demonstration or the baseline
 looked at a page in a browser, including the two UI items
 (rebuild-demonstration.md, What was delivered; rebuild-baseline.md, Browser
-use). A headless browser in the workspace, reached on the dev ports the
-profile already allows, is a capability for Mission item 1 ("testing actual
-use"), not a gate. Status: **open**: which browser engine, and whether it
-fits in RAM beside a turn and a container on 16 GB.
+use). `look`, a headless Chromium in the workspace, reached on the dev ports
+the profile already allows, is a capability for Mission item 1 ("testing
+actual use"), not a gate. It takes about 372 MB at peak (machine.md);
+[browser.md](browser.md) specifies it.
 
 ## 8. The broker's performers
 
