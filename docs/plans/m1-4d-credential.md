@@ -14,7 +14,7 @@ Task 1.4d of [m1-4-checks.md](m1-4-checks.md), milestone 1.4 of
 "1.4d outline" and its Project specs section (the merge-target list); this
 plan lifts them and settles what they leave open. It merges after 1.4b
 (the waves table in `.claude/skills/build/SKILL.md`) and depends on 1.4s
-([m1-4s-signal-reads.md](m1-4s-signal-reads.md)) for `read_turn_file` and
+([m1-4s-signal-reads.md](m1-4s-signal-reads.md)) for `open_turn_file` and
 `open_turn_dir`: it builds against that plan's text and keeps one helper
 when the two meet at merge. No migration: new rows are new event types,
 and transcripts are a new document kind in `documents`.
@@ -237,6 +237,13 @@ What the kernel must never do:
   place until git exits, and an intent with no outcome; the effect lock
   frees, and `reconcile` settles it (it waits `reconcile_after_s`, twice
   the git deadline, before it concludes `failed`).
+- **The intent carries the action.** `broker._intent` writes
+  `{effect_id, idempotency_key, approval_id, action_type, target,
+  payload, payload_sha256, effect_class}`, so `reconcile` rebuilds what to
+  look up from the intent row alone; for an intent written without those
+  fields it reads them from the effect's `effect.held` row, and with
+  neither it concludes nothing (a propose-class intent never raises
+  `KeyError`). `held_task` answers for an effect with only an intent.
 - **`tests/performers.py`**: `WorkspaceWrite` and `OutboxAppend` become
   async; tests that called `broker.register` build a `Performers`.
 
@@ -258,16 +265,18 @@ What the kernel must never do:
   at each step, a link at the root refused), lists `projects/` through
   its descriptor, and takes the one child directory that holds
   `<session_id>.jsonl`, never rebuilding Claude Code's cwd encoding (it
-  shortens and hashes long paths). Each file is read with 1.4s's
-  `read_turn_file(dir_fd, relpath)`: a regular file with one link, or
-  nothing and a reason. Subagent files are the regular `agent-*.jsonl`
+  shortens and hashes long paths). Each file is opened with 1.4s's
+  `open_turn_file(dir_fd, relpath) -> (fd, why)`: a regular file with one
+  link that is not sparse (`st_blocks * 512 < st_size` is refused), or
+  nothing and a reason, or `(None, None)` when it does not exist. The
+  kernel streams it from that descriptor, from its offset, one chunk at a
+  time, each read and digest in a worker thread off the event loop. Subagent files are the regular `agent-*.jsonl`
   entries of `<session_id>/subagents/`. A file is named by its path
   relative to `projects/<dir>`, such as
   `<session>/subagents/agent-x.jsonl`, so different sessions' files never
   share a delta chain.
 - **When.** In `runs.run_turn`, after `reap` (no process of the turn is
-  left to write), stopped turns included, before `turn.ended`, in a
-  worker thread.
+  left to write), stopped turns included, before `turn.ended`.
 - **What is stored.** Documents of kind `transcript`, id
   `<turn_id>/<name>/<n>`, body `{turn_id, name, offset, chunk: n,
   base64}`: base64 of the raw bytes stored, so any byte stores exactly and
@@ -373,7 +382,10 @@ does not trigger the default-branch refusal.
 while the server holds a push open; `git.deadline` applies inside the
 thread; a release cancelled mid-push leaves an intent that `reconcile`
 settles `done` once the push lands, and the config file is gone; `reconcile`
-uses the task's own performers; `dispatch` lists the task's offered types;
+uses the task's own performers; a propose-class perform cut off after its
+intent is settled `done` from the intent row alone, an older intent reads
+its action from `effect.held`, and an intent with neither concludes
+nothing; `dispatch` lists the task's offered types;
 the existing suites pass with per-task `Performers`.
 
 **Transcripts**: a scripted turn with a session file and two subagent
@@ -388,7 +400,9 @@ as an `agent-*.jsonl` file, stores nothing for it with "has 2 links"; a
 symlink as the session file, as `projects/<dir>`, and as the root `claude`
 stores nothing with a reason; in each case the secret's bytes are in no
 row and no decoded document; a FIFO or a directory named `agent-x.jsonl`
-is skipped with a reason and does not block; a stopped turn's transcript
+is skipped with a reason and does not block; a sparse `agent-*.jsonl`
+(1 PiB apparent size) is skipped as sparse; every read runs off the event
+loop; a stopped turn's transcript
 is copied; `workspace_turn` passes `--session-id` on a new session and
 `--resume` on a resumed one. Live (`VALOR_LIVE=1`, metered, expected about
 $0.30): a real turn that starts a subagent, then one resumed turn: the
@@ -477,7 +491,7 @@ Done evidence is the live push (9); Tom's two items are rollout steps (10).
 
 Every finding built in:
 
-1. **Hard links.** Transcript files go through 1.4s's `read_turn_file`
+1. **Hard links.** Transcript files go through 1.4s's `open_turn_file`
    (a regular file with one link); 1.4s is a dependency; hard-link tests
    for the session and a subagent file.
 2. **The config root.** The walk starts at the directory holding

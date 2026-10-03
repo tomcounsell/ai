@@ -8,14 +8,17 @@ or `<task>/checks/<name>`) is the kernel's; everything below it is the
 turn's. So the kernel opens the anchor itself, walks `claude` and
 `projects` without following a link (`workspace.open_turn_dir`), lists
 `projects/` and takes the one child directory holding the session file
-the kernel named (`--session-id`), and reads each file with
-`workspace.read_turn_file`: a regular file with one link, or nothing and a
-reason. A file is named by its path under `projects/<dir>`.
+the kernel named (`--session-id`), and opens each file with
+`workspace.open_turn_file`: a regular file with one link that is not
+sparse, or nothing and a reason. A file is named by its path under
+`projects/<dir>`.
 
 Copied after the turn's processes are reaped, stopped turns included,
 before `turn.ended`. Stored as documents of kind `transcript`, id
 `<turn_id>/<name>/<n>`, body `{turn_id, name, offset, chunk, base64}`:
-base64 of the raw bytes, `CHUNK` raw bytes per document, no size cap. A
+base64 of the raw bytes, `CHUNK` raw bytes per document, no size cap. Each
+file is streamed from its descriptor one chunk at a time, every read and
+digest in a worker thread, so the event loop never waits on the disk. A
 file the task's last copy covers is stored from where that copy ended,
 when its first bytes still hash to that copy's digest; otherwise whole,
 with `prefix_changed`. `sha256` and `bytes` are always the whole file's.
@@ -25,7 +28,9 @@ fails, nothing is stored and `turn.ended` says `no_transcript`. Nothing
 here decides anything: a transcript is a record.
 """
 
+import asyncio
 import base64
+import contextlib
 import hashlib
 import os
 from dataclasses import dataclass
@@ -49,10 +54,10 @@ class Transcript:
     session_id: str
 
 
-def collect(t: Transcript) -> tuple[list[tuple[str, bytes]], list[dict[str, str]]]:
-    """The session's files as (name, bytes), and the files skipped with
-    why. Raises `LookupError` when no project directory holds the session
-    file."""
+def collect(t: Transcript) -> tuple[list[tuple[str, int]], list[dict[str, str]]]:
+    """The session's files as (name, open descriptor), the caller closing
+    each, and the files skipped with why. Raises `LookupError` when no
+    project directory holds the session file."""
     from core import workspace
 
     anchor = os.open(t.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -91,14 +96,18 @@ def _collect(projects: int, session_id: str):
     fd, why = workspace.open_turn_dir(projects, holding[0])
     if fd is None:
         raise LookupError(why)
-    files: list[tuple[str, bytes]] = []
+    files: list[tuple[str, int]] = []
     skipped: list[dict[str, str]] = []
+
+    def take(name: str, dir_fd: int, entry: str) -> None:
+        opened, why = workspace.open_turn_file(dir_fd, entry)
+        if opened is not None:
+            files.append((name, opened))
+        elif why is not None:
+            skipped.append({"name": name, "why": why})
+
     try:
-        data, why = workspace.read_turn_file(fd, session)
-        if data is None:
-            skipped.append({"name": session, "why": why})
-        else:
-            files.append((session, data))
+        take(session, fd, session)
         sub_dir = f"{session_id}/subagents"
         sub, why = workspace.open_turn_dir(fd, sub_dir)
         if sub is None:
@@ -107,19 +116,22 @@ def _collect(projects: int, session_id: str):
             return files, skipped
         try:
             for entry in sorted(os.listdir(sub)):
-                if not (entry.startswith("agent-") and entry.endswith(".jsonl")):
-                    continue
-                name = f"{sub_dir}/{entry}"
-                data, why = workspace.read_turn_file(sub, entry)
-                if data is None:
-                    skipped.append({"name": name, "why": why})
-                else:
-                    files.append((name, data))
+                if entry.startswith("agent-") and entry.endswith(".jsonl"):
+                    take(f"{sub_dir}/{entry}", sub, entry)
         finally:
             os.close(sub)
+    except BaseException:
+        _close(files)
+        raise
     finally:
         os.close(fd)
     return files, skipped
+
+
+def _close(files: list[tuple[str, int]]) -> None:
+    for _, fd in files:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 async def _last_copies(conn, task_id: str) -> dict[str, dict[str, Any]]:
@@ -138,64 +150,78 @@ async def _last_copies(conn, task_id: str) -> dict[str, dict[str, Any]]:
     return last
 
 
-def plan(files: list[tuple[str, bytes]], last: dict[str, dict[str, Any]]):
-    """Each file's record for `turn.ended` and its bytes to store."""
-    out = []
-    for name, data in files:
-        prev = last.get(name)
-        offset, changed = 0, prev is not None
-        if (
-            prev is not None
-            and len(data) >= prev["bytes"]
-            and hashlib.sha256(data[: prev["bytes"]]).hexdigest() == prev["sha256"]
-        ):
-            offset, changed = prev["bytes"], False
-        delta = data[offset:]
-        chunks = [delta[i : i + CHUNK] for i in range(0, len(delta), CHUNK)]
-        record = {
-            "name": name,
-            "documents": len(chunks),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-            "offset": offset,
-            "prefix_changed": changed,
-        }
-        out.append((record, chunks))
-    return out
+def _hash_prefix(fd: int, length: int):
+    """The digest of the file's first `length` bytes, read in pieces."""
+    h, pos = hashlib.sha256(), 0
+    while pos < length:
+        piece = os.pread(fd, min(1 << 20, length - pos), pos)
+        if not piece:
+            break
+        h.update(piece)
+        pos += len(piece)
+    return h, pos
+
+
+def _read_chunk(fd: int, pos: int, whole) -> bytes:
+    chunk = os.pread(fd, CHUNK, pos)
+    whole.update(chunk)
+    return chunk
+
+
+async def _store(conn, turn_id: str, name: str, fd: int, prev: dict[str, Any] | None) -> dict[str, Any]:
+    """Stream one file into documents; returns its `turn.ended` record."""
+    size = (await asyncio.to_thread(os.fstat, fd)).st_size
+    whole, offset, changed = hashlib.sha256(), 0, prev is not None
+    if prev is not None and size >= prev["bytes"]:
+        prefix, read = await asyncio.to_thread(_hash_prefix, fd, prev["bytes"])
+        if read == prev["bytes"] and prefix.hexdigest() == prev["sha256"]:
+            whole, offset, changed = prefix, prev["bytes"], False
+    pos, n = offset, 0
+    while chunk := await asyncio.to_thread(_read_chunk, fd, pos, whole):
+        await conn.execute(
+            "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s)",
+            (
+                KIND,
+                f"{turn_id}/{name}/{n}",
+                Jsonb(
+                    {
+                        "turn_id": turn_id,
+                        "name": name,
+                        "offset": pos,
+                        "chunk": n,
+                        "base64": base64.b64encode(chunk).decode(),
+                    }
+                ),
+            ),
+        )
+        pos += len(chunk)
+        n += 1
+    return {
+        "name": name,
+        "documents": n,
+        "sha256": whole.hexdigest(),
+        "bytes": pos,
+        "offset": offset,
+        "prefix_changed": changed,
+    }
 
 
 async def copy(conn, task_id: str, turn_id: str, t: Transcript, *, read=collect) -> dict[str, Any]:
     """Copy the turn's files into the store. Returns what `turn.ended`
     gains: `transcript`, or `no_transcript` with the reason."""
-    import asyncio
-
+    opened: list[tuple[str, int]] = []
     try:
-        files, skipped = await asyncio.to_thread(read, t)
-        planned = plan(files, await _last_copies(conn, task_id))
+        opened, skipped = await asyncio.to_thread(read, t)
+        last = await _last_copies(conn, task_id)
+        records = []
         async with conn.transaction():
-            for record, chunks in planned:
-                offset = record["offset"]
-                for n, chunk in enumerate(chunks):
-                    await conn.execute(
-                        "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s)",
-                        (
-                            KIND,
-                            f"{turn_id}/{record['name']}/{n}",
-                            Jsonb(
-                                {
-                                    "turn_id": turn_id,
-                                    "name": record["name"],
-                                    "offset": offset,
-                                    "chunk": n,
-                                    "base64": base64.b64encode(chunk).decode(),
-                                }
-                            ),
-                        ),
-                    )
-                    offset += len(chunk)
+            for name, fd in opened:
+                records.append(await _store(conn, turn_id, name, fd, last.get(name)))
     except Exception as exc:  # noqa: BLE001  a transcript never keeps turn.ended from being written
         return {"no_transcript": f"{type(exc).__name__}: {exc}"[:400]}
-    return {"transcript": {"files": [r for r, _ in planned], "skipped": skipped}}
+    finally:
+        _close(opened)
+    return {"transcript": {"files": records, "skipped": skipped}}
 
 
 async def joined(conn, turn_id: str, name: str) -> bytes:

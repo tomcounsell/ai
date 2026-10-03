@@ -1,6 +1,7 @@
 """The four bounds on real Postgres, with no model call."""
 
 import asyncio
+import json
 import sys
 
 import aiohttp
@@ -255,3 +256,82 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
     assert elapsed < 1
     assert not state["open_calls"]
     assert state["spent_usd_micros"] > 0  # sent or not is unknown: charged its worst case
+
+
+# -- reconcile from the intent row ----------------------------------------------------------
+
+
+class StuckWrite(WorkspaceWrite):
+    """Writes the file, then never returns: the process dies mid-perform."""
+
+    def __init__(self, root, wrote: asyncio.Event):
+        super().__init__(root)
+        self.wrote = wrote
+
+    async def perform(self, action, key):
+        out = await super().perform(action, key)
+        self.wrote.set()
+        await asyncio.Event().wait()
+        return out
+
+
+def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_alone(dsn, tmp_path):
+    """A propose-class effect has no `effect.held` row; a perform cut off
+    after its intent leaves only the intent, and reconcile settles it."""
+    action = broker.Action("workspace_write", "note.txt", {"text": "hello"})
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t"))
+        wrote = asyncio.Event()
+        stuck = broker.Performers(StuckWrite(tmp_path, wrote))
+        conn = await db.connect(dsn)
+        requesting = asyncio.create_task(broker.request(conn, stuck, task, action))
+        await wrote.wait()
+        requesting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await requesting
+        await conn.close()
+        async with await db.connect(dsn) as conn:
+            rows = await ledger.read(conn, task)
+            (intent,) = [r["payload"] for r in rows if r["type"] == "effect.intent"]
+            settled = await broker.reconcile(
+                conn, broker.Performers(WorkspaceWrite(tmp_path)), intent["effect_id"], settle_after_s=0
+            )
+            return rows, intent, settled, await broker.held_task(conn, intent["effect_id"]), task
+
+    rows, intent, settled, owner, task = run(go())
+    assert not [r for r in rows if r["type"] in ("effect.held", "effect.outcome")]
+    assert intent["action_type"] == "workspace_write" and intent["target"] == "note.txt"
+    assert intent["payload"] == {"text": "hello"} and intent["effect_class"] == "propose"
+    assert intent["payload_sha256"] == ledger.digest({"text": "hello"}) and intent["approval_id"] is None
+    assert settled.kind == "done" and owner == task
+
+
+def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one_concludes_nothing(
+    dsn, tmp_path
+):
+    outbox = tmp_path / "outbox.jsonl"
+    action = broker.Action("outbox_send", "tom", {"text": "hi"})
+    described = action.describe("act", False)
+    outbox.write_text(json.dumps({"key": described["idempotency_key"], "to": "tom", "text": "hi"}) + "\n")
+    perf = broker.Performers(OutboxAppend(outbox), WorkspaceWrite(tmp_path))
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
+            held, bare = ledger.new_id(), ledger.new_id()
+            await ledger.append(conn, task, "effect.held", {"effect_id": held, **described})
+            for effect_id in (held, bare):
+                await ledger.append(conn, task, "effect.intent", {
+                    "effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": None,
+                })  # fmt: skip
+            return (
+                await broker.reconcile(conn, perf, held, settle_after_s=0),
+                await broker.reconcile(conn, perf, bare, settle_after_s=0),
+                await broker.reconcile(conn, perf, ledger.new_id(), settle_after_s=0),
+            )
+
+    from_held, without, unknown = run(go())
+    assert from_held.kind == "done" and from_held.result["key"] == described["idempotency_key"]
+    assert without is None and unknown is None

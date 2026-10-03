@@ -134,7 +134,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
-| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id` | Recovery: a kill between intent and outcome leaves a findable row |
+| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id`, and the action: `action_type`, target, payload, `payload_sha256`, `effect_class`. Older rows hold the first three only | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
 
@@ -248,7 +248,9 @@ An effect's `effect.intent` row commits before its performer runs, and its
 outcome. The process performing an effect holds a session advisory lock on
 it from before the intent to the outcome, so the lock is free only when
 that process died. `broker.reconcile`
-then asks the target through the performer's `lookup`, which answers
+then rebuilds the action from the intent row (from the effect's
+`effect.held` row for an older intent that lacks it; with neither it
+concludes nothing) and asks the target through the performer's `lookup`, which answers
 present (the target branch holds the commit, at its tip or below it),
 absent, or unknown (the target did not answer). Present is written `done`.
 Absent is written `failed` only once the intent is older than

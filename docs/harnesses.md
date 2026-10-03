@@ -297,7 +297,7 @@ kernel copies the session file and its subagents' files into the store as
 `transcript` documents (`core/transcripts.py`, `docs/data.md`), each
 file's SHA-256 on `turn.ended`, so an edit is detectable and the copy
 outlives Claude Code's housekeeping. It follows no link, skips a file not
-regular or with more than one link, and a failed copy says `no_transcript`.
+regular, sparse, or with more links than one; a failed copy says `no_transcript`.
 
 ## Metering through the gateway
 

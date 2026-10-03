@@ -264,16 +264,24 @@ async def release(conn, performers: Performers, effect_id: str) -> Outcome:
 
 
 async def held_task(conn, effect_id: str) -> str:
-    """The task a held effect belongs to, so the caller can build its
-    performers before `release`."""
-    return (await _held(conn, effect_id))["task_id"]
+    """The task a held effect, or an effect with an intent, belongs to, so
+    the caller can build its performers before `release` or `reconcile`."""
+    try:
+        return (await _held(conn, effect_id))["task_id"]
+    except KeyError:
+        intended = await _intended(conn, effect_id)
+        if intended is None:
+            raise
+        return intended["task_id"]
 
 
 async def reconcile(
     conn, performers: Performers, effect_id: str, settle_after_s: float | None = None
 ) -> Outcome | None:
-    """Settle a held effect whose intent has no outcome because the process
-    performing it died: ask the target through the performer's `lookup`.
+    """Settle an effect whose intent has no outcome because the process
+    performing it died: rebuild the action from the intent row (or, for an
+    intent written without it, the effect's `effect.held` row) and ask the
+    target through the performer's `lookup`.
     Present: `done`. Absent: `failed`, but only once the intent is older
     than `settle_after_s` (default `settings.reconcile_after_s`, twice the
     hard limit on any git call, a push included), because a performer whose database connection
@@ -281,7 +289,7 @@ async def reconcile(
     that, nothing. Unknown (the target did not answer): nothing; the effect
     stays in flight. Also nothing while a live process holds the effect
     (`_performing`), when there is nothing to settle, or when no performer
-    for it is registered. Returns the outcome written, if any."""
+    for it is offered. Returns the outcome written, if any."""
     key = f"effect:{effect_id}"
     got = await (
         await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
@@ -289,8 +297,10 @@ async def reconcile(
     if not got[0]:
         return None
     try:
-        held = await _held(conn, effect_id)
-        task_id, described = held["task_id"], held["payload"]
+        intended = await _intended(conn, effect_id)
+        if intended is None:
+            return None
+        task_id, described = intended["task_id"], intended["payload"]
         kinds = {
             r[0]
             for r in await (
@@ -418,14 +428,46 @@ async def pending(conn) -> list[dict[str, Any]]:
     return [{"task_id": t, **p} for t, p in rows]
 
 
+INTENT_FIELDS = ("action_type", "target", "payload", "payload_sha256", "effect_class")
+
+
 async def _intent(conn, task_id, effect_id, described, *, approval_id) -> None:
-    """The intent row, inside the caller's transaction."""
+    """The intent row, inside the caller's transaction. It carries the
+    action whole, so `reconcile` rebuilds what to look up from it alone."""
     await ledger.append(
         conn,
         task_id,
         "effect.intent",
-        {"effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": approval_id},
+        {
+            "effect_id": effect_id,
+            "idempotency_key": described["idempotency_key"],
+            "approval_id": approval_id,
+            **{f: described[f] for f in INTENT_FIELDS},
+        },
     )
+
+
+async def _intended(conn, effect_id: str) -> dict[str, Any] | None:
+    """The effect's intent row as {task_id, payload}, its payload carrying
+    the action: from the intent itself, or, for an intent written without
+    the action, from the effect's `effect.held` row. None when there is no
+    intent, or no row names the action."""
+    row = await (
+        await conn.execute(
+            "SELECT task_id, payload FROM events WHERE type = 'effect.intent' AND payload->>'effect_id' = %s",
+            (effect_id,),
+        )
+    ).fetchone()
+    if row is None:
+        return None
+    task_id, intent = row
+    if all(f in intent for f in INTENT_FIELDS):
+        return {"task_id": task_id, "payload": intent}
+    try:
+        held = await _held(conn, effect_id)
+    except KeyError:
+        return None
+    return {"task_id": task_id, "payload": {**held["payload"], **intent}}
 
 
 async def _perform(conn, performers, task_id, effect_id, action, described) -> Outcome:

@@ -1295,12 +1295,14 @@ def open_turn_dir(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
             os.close(fd)
 
 
-def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
-    """A file a turn can write, read whole: each directory opened without
-    following a link, the file opened without following one or blocking,
-    and read only when it is a regular file with one link (a hard link
-    would let a turn name a file it cannot read itself). Returns (bytes,
-    None) or (None, why)."""
+def open_turn_file(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
+    """A file a turn can write, opened for reading: each directory opened
+    without following a link, the file opened without following one or
+    blocking, and kept only when it is a regular file with one link (a hard
+    link would let a turn name a file it cannot read itself) and not sparse
+    (fewer bytes on disk than its size, so a turn cannot make a reader
+    stream a petabyte of holes). Returns (fd, None), the caller closing fd;
+    (None, None) when the file does not exist; or (None, why)."""
     parts = _parts(relpath)
     if parts is None:
         return None, f"{relpath!r} is not a plain relative path"
@@ -1308,28 +1310,46 @@ def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]
     if len(parts) > 1:
         parent, why = open_turn_dir(dir_fd, "/".join(parts[:-1]))
         if parent is None:
-            return None, why
+            return None, (None if why.endswith("does not exist") else why)
     name = parts[-1]
     try:
         try:
             fd = os.open(name, _FILE_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            return None, None
         except OSError as exc:
             return None, _why(name, exc)
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                return None, f"{name} is not a regular file"
-            if st.st_nlink != 1:
-                return None, f"{name} has {st.st_nlink} links"
-            chunks = []
-            while chunk := os.read(fd, 1 << 20):
-                chunks.append(chunk)
-            return b"".join(chunks), None
-        finally:
+        st = os.fstat(fd)
+        why = None
+        if not stat.S_ISREG(st.st_mode):
+            why = f"{name} is not a regular file"
+        elif st.st_nlink != 1:
+            why = f"{name} has {st.st_nlink} links"
+        elif st.st_blocks * 512 < st.st_size:
+            why = f"{name} is sparse"
+        if why is not None:
             os.close(fd)
+            return None, why
+        return fd, None
     finally:
         if parent != dir_fd:
             os.close(parent)
+
+
+def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
+    """A file a turn can write, read whole through `open_turn_file`.
+    Returns (bytes, None), (None, None) when it does not exist, or (None,
+    why)."""
+    fd, why = open_turn_file(dir_fd, relpath)
+    if fd is None:
+        return None, why
+    try:
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks), None
+    finally:
+        os.close(fd)
 
 
 def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:

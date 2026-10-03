@@ -10,6 +10,7 @@ import base64
 import hashlib
 import os
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -168,12 +169,56 @@ def test_a_failing_insert_stores_nothing_and_still_ends_the_turn(dsn, tmp_path):
     lay = Layout(tmp_path)
     task = run(new_task(dsn))
 
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.write_bytes(b"one")
+    two.write_bytes(b"two")
+    fds = []
+
     def read(t):  # a name Postgres text cannot hold, after one that it can
-        return [("a.jsonl", b"one"), ("b\x00.jsonl", b"two")], []
+        fds.extend([os.open(one, os.O_RDONLY), os.open(two, os.O_RDONLY)])
+        return [("a.jsonl", fds[0]), ("b\x00.jsonl", fds[1])], []
 
     turn_id, out = run(copy(dsn, task, lay.t, read=read))
     assert "no_transcript" in out and "transcript" not in out
     assert run(stored(dsn, turn_id)) == []
+    for fd in fds:  # the copy closed every descriptor it was handed
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_a_sparse_file_is_skipped_without_reading_its_holes(dsn, tmp_path):
+    lay = Layout(tmp_path)
+    lay.session.write_bytes(b"ok\n")
+    with lay.agent("holes").open("wb") as f:
+        f.truncate(1 << 50)  # a petabyte of apparent size, no disk used
+    task = run(new_task(dsn))
+    turn_id, out = run(asyncio.wait_for(copy(dsn, task, lay.t), 10))
+    name = f"{lay.sid}/subagents/agent-holes.jsonl"
+    assert out["transcript"]["skipped"] == [{"name": name, "why": "agent-holes.jsonl is sparse"}]
+    assert set(by_name(out)) == {lay.session_name}
+    assert len(run(stored(dsn, turn_id))) == 1
+
+
+def test_every_read_and_digest_runs_off_the_event_loop(dsn, tmp_path, monkeypatch):
+    monkeypatch.setattr(transcripts, "CHUNK", 4)
+    lay = Layout(tmp_path)
+    lay.session.write_bytes(b"0123456789")
+    task = run(new_task(dsn))
+    run(copy(dsn, task, lay.t))
+    lay.session.write_bytes(b"0123456789abcdef")
+    threads = []
+    real = os.pread
+
+    def pread(fd, n, offset):
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real(fd, n, offset)
+
+    monkeypatch.setattr(transcripts.os, "pread", pread)
+    turn_id, out = run(copy(dsn, task, lay.t))
+    assert threads and not any(threads)
+    rec = by_name(out)[lay.session_name]
+    assert rec["offset"] == 10 and rec["documents"] == 2
+    assert run(joined(dsn, turn_id, lay.session_name)) == b"abcdef"
 
 
 def test_no_session_file_ends_the_turn_with_no_transcript(dsn, tmp_path):
