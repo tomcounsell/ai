@@ -25,8 +25,7 @@ STOP_CHANNEL = "valor_stop"
 class Brief:
     """What the kernel commits to when a task starts.
 
-    `budget_usd_micros` is money, the only budget unit. `max_effect_class`
-    is the ceiling no effect under this task may exceed. `governance_grant`
+    `max_effect_class` is the ceiling no effect under this task may exceed. `governance_grant`
     is Tom's advance word that this task may add a check, gate, hook,
     validator, review round, or approval step, shown in every turn's Brief.
     It grants nothing by itself: the broker computes whether a merge adds
@@ -49,7 +48,6 @@ class Brief:
     """
 
     instruction: str
-    budget_usd_micros: int
     max_effect_class: str = "propose"
     governance_grant: str | None = None
     workspace: str | None = None
@@ -65,8 +63,6 @@ class Brief:
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def __post_init__(self):
-        if self.budget_usd_micros < 0:
-            raise ValueError("a budget is never negative")
         if self.max_effect_class not in EFFECT_RANK:
             raise ValueError(f"unknown effect class {self.max_effect_class!r}")
 
@@ -74,7 +70,8 @@ class Brief:
     def load(cls, body: dict[str, Any]) -> Brief:
         """A stored Brief, from the fields this dataclass has. A document
         written when the Brief had a field it no longer has (`mode`, before
-        the judge ran) still loads; no document is rewritten."""
+        the judge ran, or the money figure tasks once started with) still
+        loads; no document is rewritten."""
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in body.items() if k in known})
 
@@ -134,7 +131,6 @@ async def start(
             {
                 "sdlc": 1,
                 "instruction": brief.instruction,
-                "budget_usd_micros": brief.budget_usd_micros,
                 "max_effect_class": brief.max_effect_class,
                 "governance_grant": brief.governance_grant,
                 "target_branch": brief.target_branch,
@@ -146,11 +142,11 @@ async def start(
     return brief.id
 
 
-async def start_calibration(conn, site: str, budget_usd_micros: int, *, by: str = "tom") -> str:
+async def start_calibration(conn, site: str, *, by: str = "tom") -> str:
     """A calibration task: a document and a `task.started` carrying the site
-    and the budget its judgement calls are metered against, and no `sdlc`
-    marker. It folds as `calibration`, and every SDLC writer refuses it."""
-    b = Brief(instruction=f"calibrate {site}", budget_usd_micros=budget_usd_micros, max_effect_class="read")
+    its judgement calls are metered on, and no `sdlc` marker. It folds as
+    `calibration`, and every SDLC writer refuses it."""
+    b = Brief(instruction=f"calibrate {site}", max_effect_class="read")
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)", (b.id, Jsonb(asdict(b)))
@@ -162,7 +158,6 @@ async def start_calibration(conn, site: str, budget_usd_micros: int, *, by: str 
             {
                 "calibration": site,
                 "instruction": b.instruction,
-                "budget_usd_micros": budget_usd_micros,
                 "max_effect_class": "read",
                 "provenance": ledger.provenance(by, "python -m core calibrate", False),
             },
@@ -181,7 +176,7 @@ async def is_calibration(conn, task_id: str) -> bool:
 
 
 class CalibrationTask(LookupError):
-    """An SDLC or budget writer was pointed at a calibration task."""
+    """An SDLC writer was pointed at a calibration task."""
 
 
 async def brief(conn, task_id: str) -> Brief:
@@ -230,12 +225,10 @@ async def dispatch(
     f = machine.fold(rows)
     state = state or f.state
     standing = await corrections.in_force(conn)
-    committed = money(rows)["committed_usd_micros"]
     head = (
         "# Brief\n\n"
         f"Task: {b.id}\n"
         f"Instruction: {b.instruction}\n"
-        f"Budget: ${committed / 1_000_000:.4f}\n"
         f"Effect ceiling: {b.max_effect_class}\n"
         f"Governance grant: {b.governance_grant or 'none'}"
     )
@@ -291,46 +284,32 @@ async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
     return True
 
 
-# The rows remaining money is folded from.
-MONEY_EVENTS = ("task.started", "budget.raised", "gateway.reserved", "gateway.charged")
+# Ledgers written before 2026-10-03 open a call with this type; it folds as `gateway.opened`.
+LEGACY_OPENED = "gateway.reserved"
 
 
-def money(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """The one computation of a task's money, over its rows in id order
-    (rows of other types are ignored): committed is the Brief's budget plus
-    every raise Tom gave; remaining is committed minus every charge minus
-    every open reservation. `budget.reserve` and `status` both call this."""
-    budget = 0
-    raised = 0
-    charged = 0
-    reserved: dict[str, int] = {}
+def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """A task's metered spending, over its rows in id order (rows of other
+    types are ignored): `spent_usd_micros` is every charge summed, and
+    `open_calls` each call opened and not yet charged, with its worst-case
+    estimate. Information only: nothing refuses on it."""
+    spent = 0
+    open_calls: dict[str, int] = {}
     for row in rows:
         kind, p = row["type"], row["payload"]
-        if kind == "task.started":
-            # Set, not added: a task has one `task.started`, which `start`
-            # writes with the task's document, whose primary key refuses a
-            # second start of the same id.
-            budget = p["budget_usd_micros"]
-        elif kind == "budget.raised":
-            raised += p["usd_micros"]
-        elif kind == "gateway.reserved":
-            reserved[p["call_id"]] = p["usd_micros"]
+        if kind in ("gateway.opened", LEGACY_OPENED):
+            # A legacy row carries its worst case as `usd_micros`.
+            open_calls[p["call_id"]] = p.get("estimate_usd_micros", p.get("usd_micros"))
         elif kind == "gateway.charged":
-            reserved.pop(p["call_id"], None)
-            charged += p["usd_micros"]
-    committed = budget + raised
-    return {
-        "committed_usd_micros": committed,
-        "charged_usd_micros": charged,
-        "open_reservations": reserved,
-        "remaining_usd_micros": committed - charged - sum(reserved.values()),
-    }
+            open_calls.pop(p["call_id"], None)
+            spent += p["usd_micros"]
+    return {"spent_usd_micros": spent, "open_calls": open_calls}
 
 
 # Every kind of attention entry, in the order `attention_counts` lists them.
 # A manual verdict is a person playing a stage no runner plays yet; a grant
 # is Tom's tap on one governance instance.
-ATTENTION_KINDS = ("question", "feedback", "approval", "budget_raise", "verdict", "grant")
+ATTENTION_KINDS = ("question", "feedback", "approval", "verdict", "grant")
 
 
 async def status(conn, task_id: str) -> dict[str, Any]:
@@ -338,11 +317,11 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 
     The state machine's fold (`machine.Fold.summary`: `state`, `legacy`,
     `return_to`, `plan`, `loops`, `counts`, `candidate`, `checks`, `join`,
-    `governance`, `merge_effect`), the money, every turn and effect, and
+    `governance`, `merge_effect`), its metered spending, every turn and effect, and
     the attention log. `attention` lists every point where Tom acted on the
     task, in ledger order, each labelled by `kind`: a question with his
-    answer, feedback on a delivery, an approval of a held effect, a raise of
-    the budget, a manual verdict, and a governance grant, each with the
+    answer, feedback on a delivery, an approval of a held effect, a manual
+    verdict, and a governance grant, each with the
     provenance it was recorded with (see `provenance`). `attention_counts`
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet
@@ -396,16 +375,6 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "provenance": provenance(row),
                 }
             )
-        elif kind == "budget.raised":
-            attention.append(
-                {
-                    "kind": "budget_raise",
-                    "raise_id": p["raise_id"],
-                    "usd_micros": p["usd_micros"],
-                    "note": p.get("note"),
-                    "provenance": provenance(row),
-                }
-            )
         elif kind in machine.VERDICT_ROWS and p.get("leg") == "manual":
             attention.append(
                 {
@@ -428,7 +397,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     return {
         "task_id": task_id,
         **f.summary(),
-        **money(rows),
+        **spending(rows),
         "turns": turns,
         "effects": effects,
         "attention": attention,
@@ -475,17 +444,15 @@ def _counts(attention: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 def audit(state: dict[str, Any]) -> list[str]:
     """What a lossless stop must leave true. Empty means consistent: every
-    gateway call charged, every turn ended, no effect caught between intent
-    and outcome, and nothing spent past the committed budget."""
+    gateway call charged, every turn ended, and no effect caught between
+    intent and outcome."""
     problems = []
-    for call_id in state["open_reservations"]:
-        problems.append(f"gateway call {call_id} reserved and never charged")
+    for call_id in state["open_calls"]:
+        problems.append(f"gateway call {call_id} opened and never charged")
     for turn_id, outcome in state["turns"].items():
         if outcome is None:
             problems.append(f"turn {turn_id} started and never ended")
     for effect_id, effect_state in state["effects"].items():
         if effect_state == "in_flight":
             problems.append(f"effect {effect_id} has an intent and no outcome")
-    if state["charged_usd_micros"] > state["committed_usd_micros"]:
-        problems.append("charged more than the committed budget")
     return problems

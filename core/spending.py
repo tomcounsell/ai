@@ -1,14 +1,13 @@
-"""Money: prices, the per-call reservation, raises, and conservation.
+"""Metered spending: prices, and the rows that open and charge each call.
 
-A budget is integer micro-dollars and nothing else. Tokens are what the
-provider bills on; `cost` is the one place the two units meet.
+Spending is integer micro-dollars. Tokens are what the provider bills on;
+`cost` is the one place the two units meet.
 
-Every model call reserves its worst case before it is forwarded and is
-charged what the provider reported when it closes. Both are ledger rows, and
-remaining money is always derived from the ledger under an advisory lock on
-the task, by the same fold `tasks.status` uses (`tasks.money`), so two calls
-racing on one task can never spend the same money. Only Tom raises a task's
-committed budget, with a `budget.raised` row carrying his provenance.
+Every model call opens with a `gateway.opened` row before it is forwarded
+and closes with a `gateway.charged` row carrying what the provider
+reported. A task's metered spending is the sum of its charges
+(`tasks.spending`), shown in its status and never a reason to refuse: an
+open checks only that the task is not stopped.
 """
 
 import json
@@ -17,10 +16,6 @@ from math import ceil
 
 from core import ledger, tasks
 from core.settings import JUDGEMENT_PRICES, PRICES, settings
-
-
-class BudgetRefused(RuntimeError):
-    pass
 
 
 def prices(model: str) -> dict | None:
@@ -58,8 +53,9 @@ def judgement_price(model: str) -> dict | None:
 
 
 def judgement_worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
-    """A judgement call's reservation: its estimated input and every output
-    token it may produce, rounded up, never under one micro-dollar."""
+    """A judgement call's worst case: its estimated input and every output
+    token it may produce, rounded up, never under one micro-dollar. It is
+    the charge when the provider may have billed and reported nothing."""
     return max(
         1, ceil(input_tokens * price["input"] / 1_000_000) + ceil(max_tokens * price["output"] / 1_000_000)
     )
@@ -114,42 +110,33 @@ def estimate_input(body: dict) -> int:
 
 def worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
     """Input at the most expensive input rate plus every output token the
-    caller allowed."""
+    caller allowed: the charge for a call whose provider reports no usage."""
     return ceil(input_tokens * price["cache_write_1h"] / 1_000_000) + ceil(
         max_tokens * price["output"] / 1_000_000
     )
 
 
-async def reserve(conn, task_id: str, call: dict) -> str:
-    """Reserve `call['usd_micros']` for one model call, or refuse. The
-    refusal is a ledger row too. `call` carries `call_id`, `turn_id`,
-    `model`, `usd_micros`, `estimated_input`, and `max_tokens`."""
+async def open_call(conn, task_id: str, call: dict) -> str:
+    """Open one model call with a `gateway.opened` row before it is
+    forwarded. A stopped task's call is refused instead, with a
+    `gateway.refused` row (reason `stopped`) and `tasks.TaskStopped`;
+    nothing else refuses a call. `call` carries `call_id`, `turn_id`,
+    `model`, `route`, `estimated_input`, `max_tokens`, and
+    `estimate_usd_micros` (the worst case, charged only when the provider
+    reports no usage)."""
     async with conn.transaction():
+        # Under the task's lock, so a stop and an open never interleave.
         await ledger.lock(conn, f"task:{task_id}")
-        rows = await (
-            await conn.execute(
-                "SELECT type, payload FROM events WHERE task_id = %s AND type = ANY(%s) ORDER BY id",
-                (task_id, list(tasks.MONEY_EVENTS)),
-            )
-        ).fetchall()
-        if not any(t == "task.started" for t, _ in rows):
-            raise KeyError(task_id)
-        reason = None
-        if await tasks.is_stopped(conn, task_id):
-            reason = "task stopped"
-        else:
-            left = tasks.money([{"type": t, "payload": p} for t, p in rows])["remaining_usd_micros"]
-            if call["usd_micros"] > left:
-                reason = f"reservation {call['usd_micros']} exceeds remaining {left}"
-        if reason is None:
-            await ledger.append(conn, task_id, "gateway.reserved", call)
+        await tasks.brief(conn, task_id)  # KeyError for an unknown task
+        if not await tasks.is_stopped(conn, task_id):
+            await ledger.append(conn, task_id, "gateway.opened", call)
             return call["call_id"]
-        await ledger.append(conn, task_id, "gateway.refused", {**call, "reason": reason})
-    raise BudgetRefused(reason)
+        await ledger.append(conn, task_id, "gateway.refused", {**call, "reason": "stopped"})
+    raise tasks.TaskStopped(task_id)
 
 
 async def charge(conn, task_id: str, call_id: str, usd_micros: int, detail: dict) -> None:
-    """Close a reservation with what the call actually cost."""
+    """Close an opened call with what it actually cost."""
     async with conn.transaction():
         await ledger.append(
             conn,
@@ -157,42 +144,3 @@ async def charge(conn, task_id: str, call_id: str, usd_micros: int, detail: dict
             "gateway.charged",
             {"call_id": call_id, "usd_micros": usd_micros, **detail},
         )
-
-
-async def raise_budget(
-    conn,
-    task_id: str,
-    usd_micros: int,
-    *,
-    note: str = "",
-    by: str = "tom",
-    via: str = "the command line",
-    role_played: bool = False,
-) -> str:
-    """Add `usd_micros` to the task's committed budget. A stopped task takes
-    no raise (stop is final), and nothing is written. Returns the raise's
-    id."""
-    if usd_micros <= 0:
-        raise ValueError("a raise is more than zero")
-    async with conn.transaction():
-        await ledger.lock(conn, f"task:{task_id}")
-        await tasks.brief(conn, task_id)  # KeyError for an unknown task
-        if await tasks.is_calibration(conn, task_id):
-            raise tasks.CalibrationTask(
-                f"task {task_id} is a calibration task; its budget is set when it starts"
-            )
-        if await tasks.is_stopped(conn, task_id):
-            raise tasks.TaskStopped(task_id)
-        raise_id = ledger.new_id()
-        await ledger.append(
-            conn,
-            task_id,
-            "budget.raised",
-            {
-                "raise_id": raise_id,
-                "usd_micros": usd_micros,
-                "note": note,
-                "provenance": ledger.provenance(by, via, role_played),
-            },
-        )
-    return raise_id

@@ -14,8 +14,10 @@ rewriting any row.
 
 Each is checked row for row (`id`, `xmin`, and a digest of the rest),
 table by table (`pg_relation_filenode`), and fold by fold: every task's
-committed, charged, and remaining money through `tasks.status` against the
-computation the kernel used before (`MONEY_SQL`, kept here as the oracle).
+metered spending and open calls through `tasks.status` against the same
+computation in SQL (`SPENDING_SQL`, kept here as the oracle). A ledger
+written before 2026-10-03 holds `gateway.reserved` and `budget.raised`
+rows; they are read, never rewritten.
 
 Live spend: none.
 """
@@ -37,24 +39,23 @@ pytestmark = pytest.mark.spend(usd=0)
 ADDITIVE = """
 ALTER TABLE events ADD COLUMN IF NOT EXISTS annotation text;
 CREATE INDEX IF NOT EXISTS events_type_idx ON events (type);
-CREATE UNIQUE INDEX IF NOT EXISTS events_one_raise_row
-    ON events ((payload->>'raise_id')) WHERE type = 'budget.raised';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_feedback_row
+    ON events ((payload->>'feedback_id')) WHERE type = 'feedback.given';
 """
 
-# Money as the kernel computed it before `tasks.money`: committed is the
-# budget from the task's document, charged the sum of charges, and remaining
-# committed minus charges minus open reservations (`REMAINING_SQL`).
-MONEY_SQL = """
-SELECT c, ch, c - ch - r FROM (SELECT
-  (SELECT (body->>'budget_usd_micros')::bigint FROM documents
-    WHERE kind = 'task' AND id = %(t)s) AS c,
+# Metered spending in SQL: charged is the sum of charges, and open the
+# worst cases of calls opened (or, in a legacy ledger, reserved) and never
+# charged.
+SPENDING_SQL = """
+SELECT ch, op FROM (SELECT
   COALESCE((SELECT sum((payload->>'usd_micros')::bigint) FROM events
     WHERE task_id = %(t)s AND type = 'gateway.charged'), 0) AS ch,
-  COALESCE((SELECT sum((r.payload->>'usd_micros')::bigint) FROM events r
-    WHERE r.task_id = %(t)s AND r.type = 'gateway.reserved'
+  COALESCE((SELECT sum(COALESCE(r.payload->>'estimate_usd_micros', r.payload->>'usd_micros')::bigint)
+    FROM events r
+    WHERE r.task_id = %(t)s AND r.type IN ('gateway.opened', 'gateway.reserved')
       AND NOT EXISTS (SELECT 1 FROM events c
         WHERE c.task_id = %(t)s AND c.type = 'gateway.charged'
-          AND c.payload->>'call_id' = r.payload->>'call_id')), 0) AS r) AS money
+          AND c.payload->>'call_id' = r.payload->>'call_id')), 0) AS op) AS spending
 """
 
 
@@ -89,8 +90,8 @@ def _snapshot(database: str) -> dict:
             "filenodes": conn.execute(
                 "SELECT pg_relation_filenode('events'), pg_relation_filenode('documents')"
             ).fetchone(),
-            "money": {
-                t: tuple(int(v) for v in conn.execute(MONEY_SQL, {"t": t}).fetchone())
+            "spending": {
+                t: tuple(int(v) for v in conn.execute(SPENDING_SQL, {"t": t}).fetchone())
                 for (t,) in conn.execute(
                     "SELECT id FROM documents WHERE kind = 'task' ORDER BY id"
                 ).fetchall()
@@ -126,7 +127,8 @@ def _check(database: str, before: dict) -> None:
         indexes = {r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'events'")}
         assert {
             "events_type_idx",
-            "events_one_raise_row",
+            "events_one_feedback_row",
+            "events_one_gateway_row",
             "events_one_correction_number",
             "events_one_judge",
             "events_one_turn_row",
@@ -157,12 +159,12 @@ def _check(database: str, before: dict) -> None:
     async def folds():
         async with await db.connect(settings.dsn(database=database)) as conn:
             out = {}
-            for t in before["money"]:
+            for t in before["spending"]:
                 s = await tasks.status(conn, t)
-                out[t] = (s["committed_usd_micros"], s["charged_usd_micros"], s["remaining_usd_micros"])
+                out[t] = (s["spent_usd_micros"], sum(s["open_calls"].values()))
             return out
 
-    assert asyncio.run(folds()) == before["money"]
+    assert asyncio.run(folds()) == before["spending"]
 
 
 @pytest.mark.skipif(not _exists(settings.database), reason=f"no {settings.database} database on this machine")
@@ -197,20 +199,8 @@ def test_a_schema_change_applies_to_a_copy_of_the_kernel_ledger_without_rewritin
         )
         before = _snapshot(copy)
         assert before["events"]
-        if not before["money"]:
+        if not before["spending"]:
             pytest.skip("the ledger on this machine holds no task history to copy")
-        # The old computation never saw raises; the new fold adds each task's
-        # raises to committed and remaining.
-        with _owner(copy) as conn:
-            raised = dict(
-                conn.execute(
-                    "SELECT task_id, sum((payload->>'usd_micros')::bigint) FROM events "
-                    "WHERE type = 'budget.raised' GROUP BY task_id"
-                ).fetchall()
-            )
-        for t, r in raised.items():
-            committed, charged, remaining = before["money"][t]
-            before["money"][t] = (committed + int(r), charged, remaining + int(r))
         _migrate_with_change(copy, tmp_path)
         _check(copy, before)
         _legacy_folds(copy)
@@ -281,11 +271,17 @@ def _legacy_folds(database: str) -> None:
         assert f.state in ORACLE[old_state(rows)], (task, f.state, old_state(rows))
 
 
+# Every type, the legacy ones (`gateway.reserved`, `budget.raised`, and an
+# old refusal reason) included.
 EVERY_TYPE = [
     ("gateway.reserved", {"call_id": "c1", "turn_id": "t1", "model": "m", "usd_micros": 300}),
     ("gateway.reserved", {"call_id": "c2", "turn_id": "t1", "model": "m", "usd_micros": 200}),
     ("gateway.charged", {"call_id": "c1", "usd_micros": 120, "turn_id": "t1", "model": "m"}),
     ("gateway.refused", {"call_id": "c3", "usd_micros": 9_999, "reason": "exceeds remaining"}),
+    ("gateway.opened", {"call_id": "c4", "turn_id": "t1", "model": "m", "estimate_usd_micros": 400}),
+    ("gateway.opened", {"call_id": "c5", "turn_id": "t1", "model": "m", "estimate_usd_micros": 70}),
+    ("gateway.charged", {"call_id": "c4", "usd_micros": 90, "turn_id": "t1", "model": "m"}),
+    ("gateway.refused", {"call_id": "c6", "estimate_usd_micros": 50, "reason": "stopped"}),
     ("turn.started", {"turn_id": "t1", "harness": "x", "argv": [], "brief": "b", "corrections": [1]}),
     ("turn.collected", {"turn_id": "t1", "question": "?", "done": None, "effects": []}),
     ("turn.reaped", {"turn_id": "t1", "processes": [{"pid": 1, "command": "x", "signal": "SIGTERM"}]}),
@@ -342,7 +338,7 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
 
     async def populate():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="every type", budget_usd_micros=1_000))
+            task = await tasks.start(conn, tasks.Brief(instruction="every type"))
             async with conn.transaction():
                 for kind, payload in EVERY_TYPE:
                     await ledger.append(conn, task, kind, payload)
@@ -354,12 +350,60 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
         with _owner(database) as conn:
             types = {r[0] for r in conn.execute("SELECT DISTINCT type FROM events").fetchall()}
         assert {k for k, _ in EVERY_TYPE} | {"task.started", "correction.recorded", "guard.granted"} == types
-        # The old computation never saw raises; the new fold adds them to
-        # committed and remaining, and differs from the oracle by exactly
-        # the raise.
-        committed, charged, remaining = before["money"][task]
-        before["money"][task] = (committed + 500, charged, remaining + 500)
+        assert before["spending"][task] == (120 + 90, 200 + 70)  # raises read as nothing
         _migrate_with_change(database, tmp_path)
         _check(database, before)
     finally:
         _drop(database)
+
+
+# The per-call index as `core/schema.sql` created it before 2026-10-03.
+OLD_CALL_INDEX = """
+DROP INDEX events_one_gateway_row;
+CREATE UNIQUE INDEX events_one_call_row
+    ON events (type, (payload->>'call_id'))
+    WHERE type IN ('gateway.reserved', 'gateway.charged');
+"""
+
+
+def test_migrate_brings_an_old_per_call_index_to_the_new_one_idempotently():
+    database = f"{settings.test_database}_index_{os.getpid()}"
+    dsn = db.migrate(database, fresh=True)
+
+    def indexes() -> dict[str, str]:
+        with _owner(database) as conn:
+            return dict(
+                conn.execute(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'events' "
+                    "AND indexname IN ('events_one_call_row', 'events_one_gateway_row')"
+                ).fetchall()
+            )
+
+    async def append(kind, payload):
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, kind, payload)
+
+    try:
+        with _owner(database) as conn:
+            conn.execute(OLD_CALL_INDEX)
+        assert set(indexes()) == {"events_one_call_row"}
+        task = asyncio.run(_start(dsn))
+        asyncio.run(append("gateway.reserved", {"call_id": "c1", "usd_micros": 300}))
+        before = _snapshot(database)["events"]
+        for _ in range(2):
+            db.migrate(database)
+            got = indexes()
+            assert set(got) == {"events_one_gateway_row"}
+            assert all(t in got["events_one_gateway_row"] for t in ("opened", "reserved", "charged"))
+        assert _snapshot(database)["events"] == before  # no row rewritten
+        asyncio.run(append("gateway.opened", {"call_id": "c2", "estimate_usd_micros": 1}))
+        for kind in ("gateway.opened", "gateway.reserved"):
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                asyncio.run(append(kind, {"call_id": "c1" if kind.endswith("reserved") else "c2"}))
+    finally:
+        _drop(database)
+
+
+async def _start(dsn: str) -> str:
+    async with await db.connect(dsn) as conn:
+        return await tasks.start(conn, tasks.Brief(instruction="old index"))

@@ -2,10 +2,9 @@
 mid-stream, and one turn whose reply becomes a `propose` effect done at
 once and an `act` effect held until Tom approves it from the command line.
 
-Live spend: at most $0.15 per run, the three tasks' committed budgets of
-$0.05 each, which the gateway never lets them pass (three Haiku turns
-under 1,024 and 4,096 output tokens typically cost about $0.03; the stopped
-call is charged its full output allowance).
+Live spend: about $0.03 per run, metered by the gateway (three Haiku turns
+under 1,024 and 4,096 output tokens; the stopped call is charged its full
+output allowance); the marker records $0.15, every call at its worst case.
 Runs only when `VALOR_LIVE=1`, so a plain test run spends nothing.
 """
 
@@ -34,8 +33,8 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
         gateway = Gateway(dsn)
         await gateway.start()
         async with await db.connect(dsn) as conn:
-            done_task = await tasks.start(conn, tasks.Brief(instruction="t", budget_usd_micros=50_000))
-            stop_task = await tasks.start(conn, tasks.Brief(instruction="t", budget_usd_micros=50_000))
+            done_task = await tasks.start(conn, tasks.Brief(instruction="t"))
+            stop_task = await tasks.start(conn, tasks.Brief(instruction="t"))
         done = await runs.run_turn(
             gateway,
             done_task,
@@ -57,7 +56,7 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
         async with await db.connect(dsn) as conn:
             while not await (
                 await conn.execute(
-                    "SELECT 1 FROM events WHERE task_id = %s AND type = 'gateway.reserved'", (stop_task,)
+                    "SELECT 1 FROM events WHERE task_id = %s AND type = 'gateway.opened'", (stop_task,)
                 )
             ).fetchone():
                 await asyncio.sleep(0.1)
@@ -70,9 +69,9 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
 
     done, stopped, done_state, stop_state = asyncio.run(go())
     assert done["outcome"] == "done" and "ready" in done["result"]["text"].lower()
-    assert 0 < done["metered_usd_micros"] <= 50_000
+    assert done["metered_usd_micros"] > 0
     assert stopped["outcome"] == "stopped"
-    assert stop_state["charged_usd_micros"] > 0  # the cut call is charged, not forgotten
+    assert stop_state["spent_usd_micros"] > 0  # the cut call is charged, not forgotten
     assert tasks.audit(done_state) == [] and tasks.audit(stop_state) == []
 
 
@@ -95,9 +94,7 @@ def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_t
         gateway = Gateway(dsn)
         await gateway.start()
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(
-                conn, tasks.Brief(instruction="t", budget_usd_micros=50_000, max_effect_class="act")
-            )
+            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
             ended = await runs.run_turn(
                 gateway,
                 task,

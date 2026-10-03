@@ -104,7 +104,7 @@ legacy and folds read-only by the old kernel's precedence (stopped; a
 delivery not reopened by feedback is `merge`; an unanswered question is
 `waiting`; feedback after a delivery is `patch`; any turn is `build`; else
 `judge`). The router, verdicts, answers, feedback, and grants refuse it;
-status, stop, budget raise, approve, and release work.
+status, stop, approve, and release work.
 
 ## Types
 
@@ -150,9 +150,9 @@ finding of the three branches together.
   (a failing test, an untested behavior, a doc the code contradicts).
 
 So a task patches at most `review_rounds` plus one times before Tom sees
-it; the join table below gives every case. The money budget bounds every
-path. The counts exist so that work that does not converge reaches Tom
-with evidence instead of spending the budget on itself: Mission item 6, and
+it; the join table below gives every case. The counts bound every
+path, and they exist so that work that does not converge reaches Tom
+with evidence instead of spending on itself: Mission item 6, and
 the setup plan's Why section (53 review-round commits in eleven days).
 
 **Setting the counts.** The plan states the stakes in a sentence and picks
@@ -171,15 +171,14 @@ The plan may add work that pays down known tech debt related to the change
 that encodes behavior it replaces), each listed in the plan's scope with
 the debt it pays. Review may do the same with a finding of kind `debt`,
 which goes to `patch` inside the review rounds. The bound is the task's
-Brief: added scope spends from the same budget and never raises the effect
+Brief: added scope is metered on the same task and never raises the effect
 ceiling, and unrelated debt is a new task for Tom. Mission items 1 and 5.
 
 ## The control loop
 
 `python -m core run TASK` is the router. Each call folds the ledger to the
 current state, runs the work that state calls for, records its verdict, and
-continues until the task needs Tom (`waiting`, `merge`, the budget's end,
-two idle turns, a failed turn, or `stopped`) or reaches a stage with no
+continues until the task needs Tom (`waiting`, `merge`, two idle turns, a failed turn, or `stopped`) or reaches a stage with no
 runner, then prints one status line and returns. The router reads verdicts
 and follows the table; it never writes a verdict and never decides
 authority. One run per task at a time: a run holds a session advisory lock
@@ -328,7 +327,7 @@ Effects beyond the workspace are requests to the broker.
 - `failed`: the harness reported an error or the turn did not finish. The
   run returns; the next run retries from the ledger.
 
-**Ledgered.** `turn.started`, every gateway reservation and charge,
+**Ledgered.** `turn.started`, every gateway opening and charge,
 `turn.ended` (with the harness session id), `turn.collected`, effect rows.
 Mission items 1 and 2.
 
@@ -573,14 +572,12 @@ not in the model's incentives [8, 9, 10]; the demonstration's failed resume
 failed cleanly and metered $0 (rebuild-demonstration.md, Kernel findings,
 3). **Exists in the kernel.**
 
-## Budget exhaustion
+## Metered spending
 
-Not a state. Every model call in every state is metered by the gateway
-against the task's one money budget. When the remaining budget cannot
-cover a call, the gateway refuses it, the run returns "budget exhausted",
-and the task keeps its state. Tom raises the budget with `python -m core
-budget raise TASK N` (`budget.raised`, with his provenance), and the next
-run continues. A turn that deliberately called the provider with the
+Not a state. Every model call in every state is metered by the gateway and
+its price recorded on the task, shown in `status` as `Metered spending`.
+Money never refuses a call, ends a run, or changes the task's state; only
+stop refuses calls. A turn that deliberately called the provider with the
 machine's Claude login would spend outside the meter; Tom accepted that on
 2026-10-01 (see [architecture.md](architecture.md), Limits).
 

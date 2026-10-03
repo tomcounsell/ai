@@ -10,9 +10,8 @@ carried the corrections and its stage.
 Every turn runs under the kernel's sandbox profiles, with its own Claude Code
 config directory and the gateway supplying the credential.
 
-Live spend: at most $1.00 per run, the task's committed budget, which the
-gateway never lets it pass: Haiku working turns and one Opus critique. Runs
-only when `VALOR_LIVE=1`.
+Live spend: about $1.00 per run, metered by the gateway: Haiku working
+turns and one Opus critique. Runs only when `VALOR_LIVE=1`.
 """
 
 import asyncio
@@ -75,7 +74,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
         "max_output_tokens = 2048\n"
     )
     task = core(
-        "start", INSTRUCTION, "--budget-usd", "1.00", "--ceiling", "act", "--project", str(spec),
+        "start", INSTRUCTION, "--ceiling", "act", "--project", str(spec),
         "--model", "light",
     )  # fmt: skip
     shown = json.loads(core("workspace", "show", task))

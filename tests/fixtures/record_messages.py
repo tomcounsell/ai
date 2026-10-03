@@ -3,8 +3,8 @@
     VALOR_LIVE=1 .venv/bin/python tests/fixtures/record_messages.py
 
 One streamed and one non-streamed Messages call to `claude-haiku-4-5`, each
-through the kernel's gateway on the test database under a task with a $0.01
-budget, so the spend is metered and ledgered like any other call. The
+through the kernel's gateway on the test database under a task, so the
+spend is metered and ledgered like any other call. The
 recorder supplies the API key from the vault `.env` as its own client
 header; the kernel never reads it. Only the response bodies are saved, never
 headers (they carry the organization id). `recorded.json` keeps what the
@@ -51,7 +51,7 @@ async def main() -> None:
         raise SystemExit("spends money: set VALOR_LIVE=1")
     dsn = db.migrate(settings.test_database)
     async with await db.connect(dsn) as conn:
-        task = await tasks.start(conn, tasks.Brief(instruction="record fixtures", budget_usd_micros=10_000))
+        task = await tasks.start(conn, tasks.Brief(instruction="record fixtures"))
     gateway = Gateway(dsn)
     await gateway.start()
     headers = {"x-api-key": api_key(), "anthropic-version": "2023-06-01"}

@@ -10,14 +10,15 @@ records, until the next point that needs Tom. Work in `~/src/valor-rebuild`
 on branch `valor-cori-rebuild`. Never switch `~/src/ai` off `main`: the live
 old system runs from it.
 
-## Where the last session left off (2026-10-02)
+## Where the last session left off (2026-10-03)
 
 The popoto #191 trial run (milestone 1.4, before 1.4b) is task
-`75c0902b6e25`, in `build` at $6.09 of an $8 budget, with no candidate.
-Each Opus call reserves about $1.75, so the $1.91 left buys nothing.
-The record and the next steps are in `docs/plans/m1-4-checks.md`, "The
-popoto #191 trial run". Next: ask Tom for about $2 more (past the $8 he
-set), then `python -m core run 75c0902b6e25`; at `NO RUNNER`, fresh
+`75c0902b6e25`, in `build` with $6.09 metered and no candidate. Tom
+decided on 2026-10-03 that spending is metered and shown and never stops
+a task: no cap, no raise. The record and the next steps are in
+`docs/plans/m1-4-checks.md`, "The popoto #191 trial run". Next, on
+Valor's Mac after pulling: `python -m core migrate`, then
+`python -m core run 75c0902b6e25`; at `NO RUNNER`, fresh
 subagents play test, review, and docs through `python -m core verdict`,
 and the run stops at the held merge, never releasing it. On Valor's Mac
 every command needs `PATH=/opt/homebrew/opt/postgresql@18/bin:$PATH`,
@@ -125,9 +126,9 @@ builder's narration.
 ## 5. Phase B: Valor builds itself
 
 After takeover, start each task through the kernel:
-`.venv/bin/python -m core start "<instruction>" --project valor --branch valor-cori-rebuild --budget-usd <N>`,
+`.venv/bin/python -m core start "<instruction>" --project valor --branch valor-cori-rebuild`,
 then `.venv/bin/python -m core run <task>` until it stops on a question, a
-held merge, the budget, or a stop. Relay questions and held merges to Tom;
+held merge, or a stop. Relay questions and held merges to Tom;
 record his answers with `core answer` and his taps with `core approve` and
 `core release`. Step in with subagents only to repair the kernel when it
 cannot run its pipeline, and record that repair as a task.

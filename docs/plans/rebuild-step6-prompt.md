@@ -39,7 +39,7 @@ Decisions that shape the plan (details in the open-questions file):
   known tech debt. Patch runs in the builder's own resumed session. Test,
   review, and docs run in parallel after every build and patch. The reviewer
   is Opus or Opus-class.
-- One machine per install. Budgets are for visibility, not a hard wall.
+- One machine per install. Spending is metered for visibility; nothing refuses on money.
 - Judgement tier: Jev; OpenAI's Decisions API for images; the backup is the
   same open-weight model hosted by a second provider.
 - The governance paragraph at the top of `CLAUDE.md` binds the plan: no

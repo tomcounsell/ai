@@ -7,7 +7,7 @@ import aiohttp
 import psycopg
 import pytest
 
-from core import broker, budget, db, ledger, runs, tasks
+from core import broker, db, ledger, runs, spending, tasks
 from core.gateway import Gateway
 from tests.performers import OutboxAppend, WorkspaceWrite
 
@@ -27,7 +27,7 @@ async def new_task(dsn, **kw) -> str:
 
 
 def test_kernel_role_cannot_edit_the_ledger(dsn):
-    task = run(new_task(dsn, budget_usd_micros=1))
+    task = run(new_task(dsn))
     with psycopg.connect(dsn, autocommit=True) as conn:
         for statement in (
             "UPDATE events SET type = 'x' WHERE task_id = %s",
@@ -42,7 +42,7 @@ def test_kernel_role_cannot_edit_the_ledger(dsn):
 
 
 def test_owner_cannot_edit_the_ledger_either(owner_dsn, dsn):
-    task = run(new_task(dsn, budget_usd_micros=1))
+    task = run(new_task(dsn))
     with psycopg.connect(owner_dsn, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             conn.execute("UPDATE events SET type = 'x' WHERE task_id = %s", (task,))
@@ -50,36 +50,12 @@ def test_owner_cannot_edit_the_ledger_either(owner_dsn, dsn):
             conn.execute("DELETE FROM events WHERE task_id = %s", (task,))
 
 
-# -- money is conserved ---------------------------------------------------------
+# -- spending is metered; only a stop refuses a call ------------------------------
 
 
-def test_racing_reservations_never_exceed_the_budget(dsn):
+def test_a_stopped_tasks_call_is_refused_with_a_ledger_row_before_any_provider_call(dsn):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=10_000)
-
-        async def one(i):
-            async with await db.connect(dsn) as conn:
-                try:
-                    await budget.reserve(
-                        conn, task, {"call_id": f"{task}-{i}", "usd_micros": 700, "model": "m"}
-                    )
-                    return True
-                except budget.BudgetRefused:
-                    return False
-
-        granted = await asyncio.gather(*(one(i) for i in range(40)))
-        async with await db.connect(dsn) as conn:
-            state = await tasks.status(conn, task)
-        return sum(granted), state
-
-    granted, state = run(go())
-    assert granted == 14  # 14 * 700 = 9,800; a 15th would pass 10,000
-    assert state["remaining_usd_micros"] == 10_000 - 14 * 700
-
-
-def test_gateway_refuses_over_budget_before_any_provider_call(dsn):
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=10)
+        task = await new_task(dsn)
         gateway = Gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
         await gateway.start()
         base = gateway.issue(task, "turn-1")
@@ -88,28 +64,41 @@ def test_gateway_refuses_over_budget_before_any_provider_call(dsn):
             "max_tokens": 1000,
             "messages": [{"role": "user", "content": "hi"}],
         }
-        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=body) as r:
-            refused = (r.status, await r.json())
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, task, reason="test")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=body) as r:
-            after_stop = r.status
+            refused = (r.status, await r.json())
         await gateway.close()
         async with await db.connect(dsn) as conn:
-            return refused, after_stop, await tasks.status(conn, task)
+            return refused, await ledger.read(conn, task), await tasks.status(conn, task)
 
-    (status, error), after_stop, state = run(go())
-    assert status == 400 and "budget refused" in error["error"]["message"]
-    assert after_stop == 400  # the stop fence, read from the ledger
-    assert state["charged_usd_micros"] == 0 and not state["open_reservations"]
+    (status, error), rows, state = run(go())
+    assert status == 400 and "stopped" in error["error"]["message"]
+    (row,) = [r for r in rows if r["type"].startswith("gateway.")]
+    assert row["type"] == "gateway.refused" and row["payload"]["reason"] == "stopped"
+    assert row["payload"]["turn_id"] == "turn-1" and row["payload"]["model"] == "claude-haiku-4-5"
+    assert state["spent_usd_micros"] == 0 and not state["open_calls"]
+
+
+def test_an_unknown_task_opens_no_call_and_writes_nothing(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(KeyError):
+                await spending.open_call(conn, "no-such-task", {"call_id": "no-such-call"})
+            row = await (
+                await conn.execute("SELECT count(*) FROM events WHERE task_id = 'no-such-task'")
+            ).fetchone()
+            return row[0]
+
+    assert run(go()) == 0
 
 
 def test_prices_round_up_and_match_dated_ids():
-    price = budget.prices("claude-haiku-4-5-20251001")
+    price = spending.prices("claude-haiku-4-5-20251001")
     assert price["output"] == 5_000_000
-    assert budget.cost({"output_tokens": 1}, price) == 5
-    assert budget.cost({"input_tokens": 1}, price) == 1  # 1 micro-dollar, rounded up
-    assert budget.prices("some-unpriced-model") is None
+    assert spending.cost({"output_tokens": 1}, price) == 5
+    assert spending.cost({"input_tokens": 1}, price) == 1  # 1 micro-dollar, rounded up
+    assert spending.prices("some-unpriced-model") is None
 
 
 # -- effects: classes, ceiling, and Tom's tap ------------------------------------
@@ -120,7 +109,7 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
     broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0, max_effect_class="act")
+        task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
             wrote = await broker.request(conn, task, broker.Action("workspace_write", "a.txt", {"text": "a"}))
             held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
@@ -148,7 +137,7 @@ def test_ceiling_and_stop_refuse_effects(dsn, tmp_path):
     broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
-        low = await new_task(dsn, budget_usd_micros=0, max_effect_class="propose")
+        low = await new_task(dsn, max_effect_class="propose")
         async with await db.connect(dsn) as conn:
             above = await broker.request(conn, low, broker.Action("outbox_send", "tom", {"text": "x"}))
             await tasks.stop(conn, low, reason="test")
@@ -172,7 +161,7 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
         broker.Action("outbox_send", "tom", {"text": "x"}, adds_governance=True)
 
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0, max_effect_class="act")
+        task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
             held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "x"}))
             rows = await ledger.read(conn, task)
@@ -188,7 +177,7 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
 
 def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_ledger(dsn, tmp_path):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0)
+        task = await new_task(dsn)
         gateway = Gateway(dsn)
         await gateway.start()
         # A real subprocess that would run for a minute, with a child of its own.
@@ -229,7 +218,7 @@ def _lines(path) -> int:
 
 def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(dsn):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=100_000)
+        task = await new_task(dsn)
         gateway = Gateway(dsn, upstream="http://10.255.255.1")  # a route that never answers
         await gateway.start()
         base = gateway.issue(task, "turn-1")
@@ -249,7 +238,7 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
 
         pending = asyncio.create_task(client())
         async with await db.connect(dsn) as conn:
-            while (await tasks.status(conn, task))["open_reservations"] == {}:
+            while (await tasks.status(conn, task))["open_calls"] == {}:
                 await asyncio.sleep(0.05)
         started = asyncio.get_running_loop().time()
         gateway.revoke(task)
@@ -262,5 +251,5 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
 
     elapsed, state = run(go())
     assert elapsed < 1
-    assert not state["open_reservations"]
-    assert state["charged_usd_micros"] > 0  # sent or not is unknown: charged its worst case
+    assert not state["open_calls"]
+    assert state["spent_usd_micros"] > 0  # sent or not is unknown: charged its worst case

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from core import budget, db, git, judgement, ledger, machine, tasks
+from core import db, git, judgement, ledger, machine, tasks
 from core.judgement import UNANSWERED_RUNS, JudgementPort
 from core.judgement_tasks import BREADTH, BY_SITE, GOVERNANCE, JUDGE
 from core.machine import State
@@ -96,14 +96,10 @@ def judge_runner(port: JudgementPort):
                     ref={"request_sha256": ledger.digest(request)},
                     dsn=ctx.dsn,
                 )
-            except budget.BudgetRefused:
+            except tasks.TaskStopped:
                 async with await db.connect(ctx.dsn) as conn:
                     state = await tasks.status(conn, ctx.task_id)
-                # A stopped task refuses every reservation too; say which.
-                return {
-                    "status": "stopped" if state["state"] == "stopped" else "budget exhausted",
-                    "state": state,
-                }
+                return {"status": "stopped", "state": state}
             judgement_id = j.judgement_id
         if not await ctx.alive():
             return {"status": "lock lost"}
@@ -146,7 +142,7 @@ async def breadth(port: JudgementPort, dsn: str, task_id: str) -> str:
     """The breadth judgement for the task's current candidate: an answered
     row already on the ledger for it, else a failed one once its reruns are
     spent, else a new call. Returns the judgement id. Raises
-    `budget.BudgetRefused` when the money cannot cover the call."""
+    `tasks.TaskStopped` when the task is stopped."""
     async with await db.connect(dsn) as conn:
         rows = await ledger.read(conn, task_id)
         b = await tasks.brief(conn, task_id)
@@ -379,7 +375,6 @@ def unjudged_instance(unjudged: list[tuple[DiffHunk, str]]) -> dict[str, Any]:
 # -- calibration -----------------------------------------------------------------
 
 MAX_CASES = 50
-MAX_CALIBRATION_USD_MICROS = 500_000
 STREAM = "judgement"
 # The expected action per case label, by site.
 CASE_ACTIONS = {JUDGE.site: {"precise": "proceed", "thin": "caution"}}
@@ -406,13 +401,9 @@ def load_cases(path: str | Path) -> tuple[str, list[dict[str, Any]]]:
     return site, out
 
 
-def check_calibration(cases_path: str | Path, budget_usd_micros: int) -> tuple[str, list[dict[str, Any]]]:
-    """The budget, the cases file, and its site, before anything is asked:
-    `ValueError` naming what is wrong."""
-    if budget_usd_micros <= 0 or budget_usd_micros > MAX_CALIBRATION_USD_MICROS:
-        raise ValueError(
-            f"a calibration budget is more than $0 and at most ${MAX_CALIBRATION_USD_MICROS / 1e6:.2f}"
-        )
+def check_calibration(cases_path: str | Path) -> tuple[str, list[dict[str, Any]]]:
+    """The cases file and its site, before anything is asked: `ValueError`
+    naming what is wrong."""
     try:
         site, cases = load_cases(cases_path)
     except FileNotFoundError as exc:
@@ -430,17 +421,15 @@ def endpoint_hosts(port: JudgementPort) -> dict[str, str | None]:
     return {name: urlparse(leg.endpoint).hostname for name, leg in sorted(port.legs.items())}
 
 
-async def calibrate(
-    port: JudgementPort, dsn: str, cases_path: str | Path, budget_usd_micros: int
-) -> dict[str, Any]:
+async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> dict[str, Any]:
     """Both legs alone on every case, one calibration task, one record. The
     record names each leg's endpoint host, so a run against anything but the
     providers says so; the command line refuses one (`check_calibration`)."""
-    site, cases = check_calibration(cases_path, budget_usd_micros)
+    site, cases = check_calibration(cases_path)
     task = BY_SITE[site]
     expected = CASE_ACTIONS[site]
     async with await db.connect(dsn) as conn:
-        task_id = await tasks.start_calibration(conn, site, budget_usd_micros)
+        task_id = await tasks.start_calibration(conn, site)
     results: list[dict[str, Any]] = []
     for c in cases:
         inputs = {"request": c["request"], "thread": "", "project": c.get("project", "")}

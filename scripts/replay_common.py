@@ -104,8 +104,8 @@ def machine_lock(holder: str):
 
 def claude_json(prompt: str, *, system: str, model: str, purpose: str, subject: str) -> dict:
     """One tool-less `claude -p` call outside the kernel and its sandbox,
-    with this machine's own credentials. Not metered by any task budget:
-    its cost goes to `COSTS` instead. Returns the reply text, the cost, and
+    with this machine's own credentials. Not metered on any task: its
+    cost goes to `COSTS` instead. Returns the reply text, the cost, and
     the parsed JSON object the reply holds (None when it holds none)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "AI_AGENT"}
     started = time.monotonic()

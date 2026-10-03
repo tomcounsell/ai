@@ -77,7 +77,7 @@ def _wait_for(path: Path) -> int:
 def _turn(dsn, build) -> tuple[dict, list[dict]]:
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="test", budget_usd_micros=0))
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
         gateway = Gateway(dsn)
         await gateway.start()
         try:

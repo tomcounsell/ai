@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from core import (
-    budget,
     db,
     guards,
     judgement,
@@ -185,7 +184,7 @@ def test_the_judge_verdict_is_read_only_from_this_tasks_own_request_judgement(ds
 
 
 async def to_checks(dsn, ws, **kw) -> str:
-    task = await scripted.start(dsn, ws, budget_usd_micros=100_000, **kw)
+    task = await scripted.start(dsn, ws, **kw)
     await drive(dsn, task)
     await scripted.critique(dsn, task)
     out = await drive(dsn, task)
@@ -302,7 +301,7 @@ async def governance_candidate(dsn, ws, extra=None) -> str:
     """A task whose candidate adds hooks/gate.py, lib/util.py, a change deep
     in lib/handler.py's function, and the scripted plan."""
     commit(ws, "lib/handler.py", LONG_FUNCTION, "a long function at the base")
-    task = await scripted.start(dsn, ws, budget_usd_micros=1_000_000)
+    task = await scripted.start(dsn, ws)
     await drive(dsn, task)
     await scripted.critique(dsn, task)
     commit(ws, "hooks/gate.py", "def gate(push):\n    if push.unreviewed:\n        raise Refused\n", "a gate")
@@ -500,8 +499,8 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
 
     async def go():
         p = UP.port(script=sid)
-        first = await judgement_sites.calibrate(p, dsn, _cases(tmp_path), 10_000)
-        second = await judgement_sites.calibrate(p, dsn, _cases(tmp_path), 10_000)
+        first = await judgement_sites.calibrate(p, dsn, _cases(tmp_path))
+        second = await judgement_sites.calibrate(p, dsn, _cases(tmp_path))
         task = first["calibration_task"]
         started = (await rows(dsn, task, "task.started"))[0]["payload"]
         out = await drive(dsn, task)
@@ -512,7 +511,6 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
                 session.answer(conn, task, "x"),
                 session.feedback(conn, task, "x"),
                 guards.grant(conn, task, "i", note="x", incident="i", mission_item="1"),
-                budget.raise_budget(conn, task, 1_000),
                 tasks.stop(conn, task, reason="x"),
             ):
                 with pytest.raises(LookupError, match="calibration task"):
@@ -522,38 +520,25 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
         return first, second, started, out, state
 
     first, second, started, out, state = run(go())
-    assert started["budget_usd_micros"] == 10_000 and started["calibration"] == "intake.underspecified"
+    assert started["calibration"] == "intake.underspecified"
     assert second["run"] == first["run"] + 1
     assert out["status"] == "calibration task" and state["calibration"] is True
     assert first["legs"]["jev"]["n"] == 2 and set(first["legs"]) == {"jev", "open_weight"}
     assert first["label_sources"] == {"tom": 1, "role_played": 0, "judge": 1}
     # both legs said precise: the one-liner is wrong on both, so the entry check fails
     assert first["entry_check"] is False and first["legs"]["jev"]["confusion"]["thin"] == {"precise": 1}
-    assert state["charged_usd_micros"] > 0 and tasks.audit(state) == []
+    assert state["spent_usd_micros"] > 0 and tasks.audit(state) == []
     assert [c["case"] for c in first["cases"]] == ["one-liner", "precise"]
 
 
-def test_calibrate_refuses_a_missing_or_large_budget_and_too_many_cases(dsn, tmp_path):
-    p = UP.port(fixed="precise")
-    for bad in (0, 500_001):
-        with pytest.raises(ValueError, match="calibration budget"):
-            run(judgement_sites.calibrate(p, dsn, _cases(tmp_path), bad))
+def test_calibrate_refuses_too_many_cases(dsn, tmp_path):
     with pytest.raises(ValueError, match="at most 50"):
-        run(judgement_sites.calibrate(p, dsn, _cases(tmp_path, n=51), 10_000))
-    out = subprocess.run(
-        [sys.executable, "-m", "core", "calibrate", str(_cases(tmp_path))],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "VALOR_DB": TEST_DB},
-        check=False,
-    )
-    assert out.returncode == 2 and "--budget-usd" in out.stderr
+        run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, _cases(tmp_path, n=51)))
 
 
 def test_an_old_task_document_carrying_mode_still_loads(dsn):
     async def go():
-        b = tasks.Brief(instruction="old", budget_usd_micros=0)
+        b = tasks.Brief(instruction="old")
         body = {**tasks.asdict(b), "mode": "bare"}
         async with await db.connect(dsn) as conn, conn.transaction():
             await conn.execute(
@@ -588,7 +573,7 @@ def test_a_forced_arm_judges_through_a_local_upstream_and_its_rows_say_so(dsn, t
 
         async def start():
             async with await db.connect(dsn) as conn:
-                return await tasks.start(conn, tasks.Brief(instruction="x", budget_usd_micros=10_000))
+                return await tasks.start(conn, tasks.Brief(instruction="x"))
 
         task = run(start())
         subprocess.run(
@@ -612,7 +597,7 @@ def test_every_fold_of_a_calibration_start_is_a_calibration_task():
     start = {
         "id": 1,
         "type": "task.started",
-        "payload": {"calibration": "intake.underspecified", "sdlc": 1, "budget_usd_micros": 1},
+        "payload": {"calibration": "intake.underspecified", "sdlc": 1},
     }
     f = machine.fold([start, {"id": 2, "type": "judge.decided", "payload": {"verdict": "precise"}}])
     assert f.calibration and not f.legacy and f.state is State.JUDGE
@@ -622,7 +607,7 @@ def test_every_fold_of_a_calibration_start_is_a_calibration_task():
 # -- patch round 1 -----------------------------------------------------------------
 
 
-def test_a_stopped_task_at_the_judge_reports_stopped_not_budget(dsn, tmp_path):
+def test_a_stopped_task_at_the_judge_reports_stopped(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
@@ -632,33 +617,6 @@ def test_a_stopped_task_at_the_judge_reports_stopped_not_budget(dsn, tmp_path):
         return await scripted.run_judge(dsn, task, "precise")
 
     assert run(go())["status"] == "stopped"
-
-
-def test_breadth_and_governance_refuse_on_budget_before_any_provider_is_asked(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-    sid = UP.script(default={"probs": NO})
-
-    async def go():
-        task = await governance_candidate(dsn, ws)
-        older, newer = await candidate_range(dsn, task)
-        async with await db.connect(dsn) as conn:
-            st = await tasks.status(conn, task)
-            # spend all but a micro-dollar of what is left
-            call = {
-                "call_id": "drain",
-                "turn_id": None,
-                "model": "m",
-                "usd_micros": st["remaining_usd_micros"] - 1,
-            }
-            await budget.reserve(conn, task, call)
-        p = UP.port(script=sid)
-        with pytest.raises(budget.BudgetRefused):
-            await judgement_sites.breadth(p, dsn, task)
-        with pytest.raises(budget.BudgetRefused):
-            await judgement_sites.governance(p, dsn, task, older, newer)
-
-    run(go())
-    assert UP.seen(sid) == []
 
 
 def test_breadth_splits_test_paths_from_the_rest():
@@ -675,7 +633,7 @@ def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(d
     big = "".join(f"row_{i} = '{'y' * 60}'\n" for i in range(6_000))
 
     async def go():
-        task = await scripted.start(dsn, ws, budget_usd_micros=1_000_000)
+        task = await scripted.start(dsn, ws)
         await drive(dsn, task)
         await scripted.critique(dsn, task)
         commit(ws, "tests/test_greeting.py", "def test_it():\n    assert True\n", "a test")
@@ -692,7 +650,7 @@ def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(d
     sid2 = UP.script(default={"probs": gaps()})
 
     async def go_big():
-        task = await scripted.start(dsn, ws2, budget_usd_micros=1_000_000)
+        task = await scripted.start(dsn, ws2)
         await drive(dsn, task)
         await scripted.critique(dsn, task)
         commit(ws2, "data/big.py", big, "a large change")
@@ -830,13 +788,13 @@ def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start_calibration(conn, "intake.underspecified", 10_000)
+            task = await tasks.start_calibration(conn, "intake.underspecified")
         gateway = Gateway(dsn)
         await gateway.start()
         try:
             with pytest.raises(tasks.CalibrationTask):
                 await runs.run_turn(
-                    gateway, task, scripted.turn_for("x", None, tasks.Brief("x", 0, workspace=str(tmp_path)))
+                    gateway, task, scripted.turn_for("x", None, tasks.Brief("x", workspace=str(tmp_path)))
                 )
         finally:
             await gateway.close()

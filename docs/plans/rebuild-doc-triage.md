@@ -152,12 +152,12 @@ Per target, survivors from all sources; the last column counts those from the fe
 
 | Path | Disposition | Target | Mechanism | Reason |
 |---|---|---|---|---|
-| `cori/docs/architecture.md` | rewrite | `docs/architecture.md` | supervisor turn, objective tree, Brief and Report, budgets and effect classes, verification, approvals, failure points | Plan names it the primary source of the architecture doc; demonstration ran on its kernel (budget, stop, ledger, broker). Remove identity mode, spaces, Scribe, operator record; add the judgement tier |
+| `cori/docs/architecture.md` | rewrite | `docs/architecture.md` | supervisor turn, objective tree, Brief and Report, metered spending and effect classes, verification, approvals, failure points | Plan names it the primary source of the architecture doc; demonstration ran on its kernel (metering, stop, ledger, broker). Remove identity mode, spaces, Scribe, operator record; add the judgement tier |
 | `cori/docs/plans/00-seams.md` | fold | `docs/data.md` | schemas, ports, event types, the three execution records (gateway log, tool log, effect ledger) | Record and event shapes the kernel stores; data.md needs the event types and execution records. Space, belief, and memory schemas drop |
 | `cori/docs/plans/01-events.md` | fold | `docs/data.md` | append-only event table with type and schema_version, upcasting readers, advisory locks | The ledger the demonstration relied on is this table; states the plan constraint "a ledger the system cannot edit" |
-| `cori/docs/plans/02-tree.md` | fold | `docs/architecture.md` | objective nodes and states, money budget conserved down the tree, attenuation, generation fencing | Plan constraint: money budget and effect ceiling conserved down the tree. The demonstration ran a single task record; the tree is the next step |
+| `cori/docs/plans/02-tree.md` | fold | `docs/architecture.md` | objective nodes and states, effect ceiling conserved down the tree, attenuation, generation fencing | Plan constraint: effect ceiling conserved down the tree (the money half was superseded 2026-10-03: metered spending only; nothing refuses on money). The demonstration ran a single task record; the tree is the next step |
 | `cori/docs/plans/03-spaces.md` | drop | - | space manifests, row-level security by read token, inbound routing, unassigned space | One identity and no space model in the plan. Workspace scoping the demonstration needed is listed under Gaps |
-| `cori/docs/plans/04-gateway.md` | fold | `docs/architecture.md` | per-Brief tokens, budget pre-check in money, turn caps, revoke, usage rows | Demonstration needed it: every model call metered through the gateway against the $15 budget |
+| `cori/docs/plans/04-gateway.md` | fold | `docs/architecture.md` | per-Brief tokens, per-call open check, turn caps, revoke, usage rows | Demonstration needed it: every model call metered through the gateway onto the $15 task |
 | `cori/docs/plans/05-worker.md` | fold | `docs/harnesses.md` | PydanticAI loop, tool log before and after each call, ask and answer, Report validation | Demonstration needed ask/answer and resume. Keep the ask/answer and tool-log contract; the PydanticAI loop is replaced by the claude -p harness |
 | `cori/docs/plans/06-sandbox.md` | fold | `docs/tech-stack.md` | three sandbox profiles on apple/container, host-only network, stop with disk retained, snapshot | Demonstration needed workspace isolation (sandbox-exec there); plan constraint names Apple containers. Sandbox port belongs in the tech-stack sandbox section |
 | `cori/docs/plans/07-broker.md` | fold | `docs/architecture.md` | effect protocol of intent, action, outcome; idempotency keys; push_branch; effect ledger | Demonstration delivered through a held push_branch approved by Tom; the broker is the plan's effect-class constraint |
@@ -172,7 +172,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `cori/docs/reviews/2026-09-19-commit-pass.md` | drop | - | commit-over-optionality pass | Review round record; its outcomes live in architecture.md and tech-stack.md |
 | `cori/docs/reviews/2026-09-19-plan-findings.md` | drop | - | contradictions found at plan reconcile | Review round record of the process the plan rejects |
 | `cori/docs/reviews/2026-09-19-refinement.md` | fold | `docs/architecture.md` | stop defined as generation fence, token revoke, compute stop with disk retained; three execution records | States the plan constraint "stop is immediate and lossless" precisely; the demonstration's failed turn lost nothing under this definition |
-| `cori/docs/reviews/2026-09-20-budget-ruling.md` | fold | `docs/architecture.md` | budget in dollars per objective only; effect classes named read, propose, act | States plan constraints: money budget per task, named effect classes. The ruling that attention is not a ledger axis conflicts with Mission item 6 and must be resolved in pass 2 |
+| `cori/docs/reviews/2026-09-20-*-ruling.md` (the money ruling) | fold | `docs/architecture.md` | dollars per objective only (superseded 2026-10-03: metered spending only); effect classes named read, propose, act | States plan constraints: a money figure per task (since superseded), named effect classes. The ruling that attention is not a ledger axis conflicts with Mission item 6 and must be resolved in pass 2 |
 | `cori/docs/reviews/2026-09-21-build-log.md` | drop | - | M0 build log, phases and checks | Process history; the plan says the process does not survive |
 | `cori/docs/tech-stack.md` | rewrite | `docs/tech-stack.md` | selection rule, persistence, gateway and seat registry, worker and sandbox ports, broker, approval surface, status per choice | Plan names it the primary source of the tech-stack doc. Swap Redis and popoto for Postgres only, PydanticAI worker for the harness port, add M4 Air limits |
 
@@ -214,7 +214,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/agent-session-liveness-authorship.md` | drop | - | rules for who may write each liveness field, plus the reaper ladder | watchdog/reaper internals; drop by default |
 | `docs/features/agent-session-model.md` | drop | - | Redis AgentSession model with a 14-state status lifecycle | popoto model replaced by the Postgres document store; rederive from architecture |
 | `docs/features/agent-session-queue.md` | drop | - | Redis queue dispatch modules (pickup, revival, health) | Redis queue removed in the rebuild |
-| `docs/features/agent-session-scheduling.md` | drop | - | CLI the agent uses to enqueue SDLC runs and message jobs | Redis/popoto enqueue tooling; scheduled work is rederived as budgeted objectives in routines |
+| `docs/features/agent-session-scheduling.md` | drop | - | CLI the agent uses to enqueue SDLC runs and message jobs | Redis/popoto enqueue tooling; scheduled work is rederived as objectives with metered spending in routines |
 | `docs/features/agent-teams-headless-policy.md` | drop | - | agent teams on for interactive sessions, off for headless claude -p | harness env flag decision; not a plan constraint; rederive in harnesses if needed |
 | `docs/features/agentsession-index-drift-detection.md` | drop | - | detects popoto index vs hash desync | Redis/popoto hygiene guard |
 | `docs/features/agentsession-pending-index-leak.md` | drop | - | guards popoto pending-index rebuilds against phantom members | Redis/popoto hygiene guard |
@@ -303,7 +303,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/hybrid-retrieval-eval.md` | drop | - | popoto BM25+vector vs RRF memory recall evaluation | Memory/popoto, built last; no clause applies |
 | `docs/features/image-vision.md` | drop | - | Haiku vision description of Telegram images | Media tooling not needed by the demonstration |
 | `docs/features/imagine-build-agent-cma.md` | drop | - | skills that build Claude Managed Agents from a build sheet | Unrelated product skill; no clause applies |
-| `docs/features/improvement-cloud-execution.md` | drop | - | cloud sandbox plan and unit-3 infra budget for RSI | Improvement stack |
+| `docs/features/improvement-cloud-execution.md` | drop | - | cloud sandbox plan and unit-3 infra cost for RSI | Improvement stack |
 | `docs/features/improvement-controller.md` | drop | - | recursive self-improvement controller records, journal, dispatch | Improvement stack |
 | `docs/features/improvement-evaluation.md` | drop | - | candidate vs incumbent evaluation harness with Redis arenas | Improvement stack; Redis |
 | `docs/features/improvement-release.md` | drop | - | release lifecycle, rollback drill, promotion gate for improvements | Improvement stack |
@@ -349,7 +349,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/opencode-sync.md` | drop | - | port .claude config into OpenCode layout | Peripheral tooling; no clause applies |
 | `docs/features/openrouter-whisper-backend.md` | drop | - | OpenRouter/OpenAI Whisper transcription backend | Media tooling |
 | `docs/features/operational-logging.md` | drop | - | bracket-prefixed INFO log tags along the message path | Observability convention; ledger replaces it |
-| `docs/features/out-of-domain-recovery.md` | drop | - | bridge-side wedge recovery and per-tool budget backstop | Watchdog/Redis; money budgets are rederived in architecture |
+| `docs/features/out-of-domain-recovery.md` | drop | - | bridge-side wedge recovery and per-tool cost backstop | Watchdog/Redis; metered spending is rederived in architecture |
 | `docs/features/pattern-kill-guard.md` | drop | - | PreToolUse validator blocking pattern kills | Guard; governance restraint |
 | `docs/features/persona-toolbelts.md` | drop | - | per-persona TOML tool manifests compiled to CLI flags (ships dark) | Multi-persona; effect classes and broker replace it |
 | `docs/features/personas.md` | fold | `docs/persona.md` | identity.json plus composable persona segments and overlays | (c) the plan's one-identity persona; fold the identity/voice segments, drop the engineer/teammate/CS split |
@@ -388,7 +388,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/reflection-agent-handoff.md` | drop | - | reflections hand Findings to an agent instead of messaging humans | reflections internals; the one-identity rule already lives in persona/architecture |
 | `docs/features/reflection-scheduler-subprocess.md` | drop | - | launchd-supervised reflection scheduler process | reflections internals; routines under launchd are rederived from the architecture doc |
 | `docs/features/reflections-dashboard.md` | drop | - | web dashboard for reflection runs | dashboard |
-| `docs/features/reflections.md` | drop | - | unified reflection registry, scheduler, run tracking | reflections internals; routines.md is rederived as budgeted objectives |
+| `docs/features/reflections.md` | drop | - | unified reflection registry, scheduler, run tracking | reflections internals; routines.md is rederived as objectives with metered spending |
 | `docs/features/relay-retry-guard.md` | drop | - | bounded outbox retries and dead-letter routing | Redis outbox guard; the bridge is rebuilt on Postgres |
 | `docs/features/remote-update.md` | drop | - | Telegram /update command and cron to sync machines | multi-machine deployment |
 | `docs/features/reply-thread-context-hydration.md` | fold | `docs/bridges/telegram.md` | reply-to carries thread context and resumes or seeds a session | (b) the Telegram bridge's reply-to routing and context depend on it |
@@ -441,7 +441,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/session-telemetry.md` | drop | - | per-session JSONL event trace on disk | observability layer; ledger and execution records rederived from architecture doc |
 | `docs/features/session-transcripts.md` | fold | `docs/harnesses.md` | append-only per-session transcript files of every turn, tool call, and result | (a) demo ran claude -p turns resuming one harness session; transcript capture belongs to the harness port; popoto metadata half drops |
 | `docs/features/session-watchdog-reliability.md` | drop | - | type guards and activity-based stall detection fixes for the watchdog | watchdog bug-fix guards; watchdogs drop by default |
-| `docs/features/session-watchdog.md` | drop | - | 5-minute health monitor alerting on looping or silent sessions | watchdog; budgets and lossless stop replace it |
+| `docs/features/session-watchdog.md` | drop | - | 5-minute health monitor alerting on looping or silent sessions | watchdog; metered spending and lossless stop replace it |
 | `docs/features/side-effect-jobs.md` | drop | - | durable SideEffectJob rows drained by a reflection for post-session memory extraction | memory extraction plumbing via reflections; memory built last |
 | `docs/features/single-machine-ownership.md` | drop | - | validator that each bridge contact resolves to exactly one machine | multi-machine config; rebuild is one Mac |
 | `docs/features/site-vault-content.md` | drop | - | docs site pages built from vault decks and persona bios | public website content; out of scope |
@@ -483,7 +483,7 @@ Per target, survivors from all sources; the last column counts those from the fe
 | `docs/features/tui-interaction-capture.md` | drop | - | hooks capture TUI human-in-the-loop patterns into memory | hook plumbing feeding memory; drop by default |
 | `docs/features/unified-analytics.md` | drop | - | SQLite and Redis dual-write metrics with dashboard | analytics and dashboards; drop by default |
 | `docs/features/update-warning-channel.md` | drop | - | /update warning grammar, caps, and suppression | deployment and update tooling; drop by default |
-| `docs/features/upvote-autonomous-sdlc-pickup.md` | drop | - | reflection starts SDLC lanes on upvote-labeled issues | reflection-driven SDLC intake; scheduled work rederives as budgeted routines |
+| `docs/features/upvote-autonomous-sdlc-pickup.md` | drop | - | reflection starts SDLC lanes on upvote-labeled issues | reflection-driven SDLC intake; scheduled work rederives as routines with metered spending |
 | `docs/features/utc-timestamps.md` | drop | - | tz-aware UTC everywhere, local time only at display | generic convention, not a plan constraint; trivial to restate |
 | `docs/features/uv-sync-worktree-guard.md` | drop | - | blocks uv sync from worktrees sharing the root venv | guard; drop by default |
 | `docs/features/valorengels-site.md` | drop | - | public static docs site source and deploy | website and deployment; out of scope |
@@ -581,10 +581,10 @@ Pass 2 writes these fresh, in the target named.
    the same session, a later delivery as a new `task.delivered`. Includes the
    two open defects: a failed turn must not consume pending feedback, and
    feedback must record its author and the permission it was written under.
-3. **The attention log and attention budget** (`docs/mission.md`,
+3. **The attention log and attention cost** (`docs/mission.md`,
    `docs/architecture.md`). Mission item 6 and the Evidence section. Questions,
    answers, and feedback labelled by kind, per task, with whether each changed
-   the outcome or the authority. The archived budget ruling says attention is
+   the outcome or the authority. The archived money ruling says attention is
    not a ledger axis; pass 2 has to settle that against the mission.
 4. **Workspace provisioning and isolation** (`docs/architecture.md`,
    `docs/machine.md`). What the demonstration ran on: a clone with no later
@@ -631,5 +631,5 @@ Pass 2 writes these fresh, in the target named.
     hosted Jev-class leg, an open-weight fallback behind the same port, and
     confidence gating to a human. `llm-task-taxonomy.md` covers task
     declaration; calibration and the fallback's placement on 16 GB are new.
-16. **The machine budget** (`docs/machine.md`). What runs resident and what
+16. **The machine's RAM plan** (`docs/machine.md`). What runs resident and what
     runs on demand, with RAM per component. The plan marks this doc new.

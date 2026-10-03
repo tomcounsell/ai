@@ -26,7 +26,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from psycopg.types.json import Jsonb
 
-from core import budget, credentials, db, judgement, ledger, tasks
+from core import credentials, db, judgement, ledger, spending, tasks
 from core.judgement import DATA_ONLY, LOOPBACK_KEY, JudgementPort
 from core.judgement_tasks import BREADTH, GOVERNANCE, JUDGE, TASKS
 from core.settings import JEV_MODEL, JEV_URL, OPEN_WEIGHT_PIN, OPEN_WEIGHT_URL
@@ -63,9 +63,9 @@ PRECISE = judge_probs(0.95, 0.02, 0.02, 0.01)
 HALF = judge_probs(0.5, 0.5)
 
 
-async def new_task(dsn, budget_usd_micros=100_000) -> str:
+async def new_task(dsn) -> str:
     async with await db.connect(dsn) as conn:
-        return await tasks.start(conn, tasks.Brief(instruction="judge", budget_usd_micros=budget_usd_micros))
+        return await tasks.start(conn, tasks.Brief(instruction="judge"))
 
 
 async def rows(dsn, task, kind=None) -> list[dict]:
@@ -74,32 +74,18 @@ async def rows(dsn, task, kind=None) -> list[dict]:
     return [r for r in got if kind is None or r["type"] == kind]
 
 
-def ask(dsn, *replies, task_kind=JUDGE, inputs=REQUEST, budget_usd_micros=100_000, default=None, port=None):
+def ask(dsn, *replies, task_kind=JUDGE, inputs=REQUEST, default=None, port=None):
     """One `port.judge` on a fresh task; returns the judgement, the task, and
     the requests the upstream saw."""
     sid = UP.script(*replies, default=default)
 
     async def go():
-        task = await new_task(dsn, budget_usd_micros)
+        task = await new_task(dsn)
         j = await (port or UP.port(script=sid)).judge(task_kind, inputs, task_id=task, ref={"t": 1}, dsn=dsn)
         return j, task
 
     j, task = run(go())
-    within_reservations(dsn, task)
     return j, task, UP.seen(sid)
-
-
-def within_reservations(dsn, task) -> None:
-    """No call was charged more than it reserved: the reservation is the
-    call's worst case, and an answer billed above it would spend money the
-    budget never held."""
-    got = run(rows(dsn, task))
-    reserved = {
-        r["payload"]["call_id"]: r["payload"]["usd_micros"] for r in got if r["type"] == "gateway.reserved"
-    }
-    for r in got:
-        if r["type"] == "gateway.charged":
-            assert r["payload"]["usd_micros"] <= reserved[r["payload"]["call_id"]], r["payload"]
 
 
 # -- the gate -----------------------------------------------------------------
@@ -206,11 +192,11 @@ def test_the_primary_is_charged_its_input_tokens_and_the_unused_fallback_nothing
     charged = _charges(dsn, task)
     assert charged["jev"]["usd_micros"] == math.ceil(tokens * 0.042)
     assert charged["open_weight"]["usd_micros"] == 0 and charged["open_weight"]["unused"] is True
-    reserved = run(rows(dsn, task, "gateway.reserved"))
-    assert [r["payload"]["leg"] for r in reserved] == ["jev", "open_weight"]  # both before any call
-    assert all(r["payload"]["route"] == "judgement" and r["payload"]["turn_id"] is None for r in reserved)
+    opened = run(rows(dsn, task, "gateway.opened"))
+    assert [r["payload"]["leg"] for r in opened] == ["jev", "open_weight"]  # both before any call
+    assert all(r["payload"]["route"] == "judgement" and r["payload"]["turn_id"] is None for r in opened)
     state = run(_status(dsn, task))
-    assert state["open_reservations"] == {} and tasks.audit(state) == []
+    assert state["open_calls"] == {} and tasks.audit(state) == []
 
 
 async def _status(dsn, task):
@@ -229,8 +215,8 @@ def _closed_port() -> int:
 @pytest.mark.parametrize(
     ("reply", "expect"),
     [
-        ({"probs": PRECISE, "usage": None}, "reservation"),  # 200 without usage
-        ({"delay": 2}, "reservation"),  # past the 1 s timeout: billing unknown
+        ({"probs": PRECISE, "usage": None}, "worst case"),  # 200 without usage
+        ({"delay": 2}, "worst case"),  # past the 1 s timeout: billing unknown
         ({"status": 500}, 0),  # refused before generating
         ("closed", 0),  # nothing reached a provider
     ],
@@ -249,12 +235,12 @@ def test_the_primary_is_charged_by_the_gateways_rules(dsn, reply, expect):
         p = UP.port(script=sid, timeouts=(1, 5))
         j, task, _ = ask(dsn, port=p)
     charged = _charges(dsn, task)["jev"]
-    reserved = next(
-        r["payload"] for r in run(rows(dsn, task, "gateway.reserved")) if r["payload"]["leg"] == "jev"
+    opened = next(
+        r["payload"] for r in run(rows(dsn, task, "gateway.opened")) if r["payload"]["leg"] == "jev"
     )
-    want = reserved["usd_micros"] if expect == "reservation" else 0
+    want = opened["estimate_usd_micros"] if expect == "worst case" else 0
     assert charged["usd_micros"] == want
-    if expect == "reservation":
+    if expect == "worst case":
         assert charged["usage_missing"] is True
     assert j.leg == "fallback" or j.answers["request"]["leg"] == "primary"
 
@@ -268,7 +254,7 @@ def test_the_fallback_is_charged_the_reported_cost_when_it_is_more_and_a_tiny_co
     tokens = j.attempts[1]["usage"]["input_tokens"]
     by_tokens = math.ceil(tokens * 0.14) + math.ceil(30 * 0.80)
     assert _charges(dsn, task)["open_weight"]["usd_micros"] == max(by_tokens, 1)
-    assert budget.usd_micros(1e-07) == 1 and budget.usd_micros(2.452e-05) == 25
+    assert spending.usd_micros(1e-07) == 1 and spending.usd_micros(2.452e-05) == 25
 
 
 @pytest.mark.parametrize(
@@ -315,11 +301,11 @@ def test_both_down_is_a_failure_row_with_fixed_reasons_and_no_provider_text(dsn)
     assert "sekrit" not in json.dumps(run(rows(dsn, task)), default=str)
 
 
-def test_an_input_over_jevs_cap_skips_jev_and_reserves_nothing_for_it(dsn):
+def test_an_input_over_jevs_cap_skips_jev_and_opens_nothing_for_it(dsn):
     big = {**REQUEST, "request": "x" * 100_000}
     j, task, seen = ask(dsn, default={"probs": PRECISE}, inputs=big)
     assert [r["leg"] for r in seen] == ["open_weight"] and j.leg == "fallback"
-    assert [r["payload"]["leg"] for r in run(rows(dsn, task, "gateway.reserved"))] == ["open_weight"]
+    assert [r["payload"]["leg"] for r in run(rows(dsn, task, "gateway.opened"))] == ["open_weight"]
     assert j.attempts[0]["reason"] == "input_too_large"
 
 
@@ -330,75 +316,22 @@ def test_inputs_too_large_for_both_legs_fail_as_too_large(dsn):
     assert run(rows(dsn, task, "judgement.failed"))[0]["payload"]["too_large"] is True
 
 
-def _worst(leg, task_kind=JUDGE, inputs=REQUEST) -> int:
-    return budget.judgement_worst_case(
-        leg.estimate(task_kind, inputs), leg.max_output_tokens, budget.judgement_price(leg.model)
-    )
-
-
-def test_a_budget_that_cannot_cover_both_legs_asks_no_provider(dsn):
-    """The primary reserves, the fallback's reservation is refused: the
-    primary's is charged 0 as unused, then the call raises."""
-    sid = UP.script(default={"probs": PRECISE})
-    legs = UP.port(script=sid).legs
-
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=_worst(legs["jev"]) + _worst(legs["open_weight"]) - 1)
-        with pytest.raises(budget.BudgetRefused):
-            await UP.port(script=sid).judge(JUDGE, REQUEST, task_id=task, ref={}, dsn=dsn)
-        return task
-
-    task = run(go())
-    assert UP.seen(sid) == []
-    kinds = [r["type"] for r in run(rows(dsn, task))]
-    assert kinds == ["task.started", "gateway.reserved", "gateway.refused", "gateway.charged"]
-    charged = run(rows(dsn, task, "gateway.charged"))[0]["payload"]
-    assert charged["usd_micros"] == 0 and charged["unused"] is True and charged["leg"] == "jev"
-    assert tasks.audit(run(_status(dsn, task))) == []
-
-
-def test_a_stopped_task_asks_no_provider(dsn):
+def test_a_stopped_task_asks_no_provider_and_its_refusal_is_a_ledger_row(dsn):
     sid = UP.script(default={"probs": PRECISE})
 
     async def go():
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, task, reason="test")
-        with pytest.raises(budget.BudgetRefused, match="stopped"):
+        with pytest.raises(tasks.TaskStopped):
             await UP.port(script=sid).judge(JUDGE, REQUEST, task_id=task, ref={}, dsn=dsn)
+        return task
 
-    run(go())
+    task = run(go())
     assert UP.seen(sid) == []
-
-
-def test_concurrent_judgements_never_spend_past_the_budget(dsn):
-    sid = UP.script(default={"probs": PRECISE, "delay": 0.3})
-    p = UP.port(script=sid)
-    worst = sum(
-        budget.judgement_worst_case(
-            leg.estimate(JUDGE, REQUEST), leg.max_output_tokens, budget.judgement_price(leg.model)
-        )
-        for leg in p.legs.values()
-    )
-
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=12 * worst)
-
-        async def one():
-            try:
-                return await p.judge(JUDGE, REQUEST, task_id=task, ref={}, dsn=dsn)
-            except budget.BudgetRefused:
-                return None
-
-        got = await asyncio.gather(*(one() for _ in range(20)))
-        async with await db.connect(dsn) as conn:
-            return got, await tasks.status(conn, task), task
-
-    got, state, task = run(go())
-    within_reservations(dsn, task)
-    answered = [j for j in got if j is not None]
-    assert 1 <= len(answered) <= 12 and len(got) == 20
-    assert state["charged_usd_micros"] <= state["committed_usd_micros"] and tasks.audit(state) == []
+    got = run(rows(dsn, task))
+    assert [r["type"] for r in got] == ["task.started", "task.stopped", "gateway.refused"]
+    assert got[-1]["payload"]["reason"] == "stopped" and got[-1]["payload"]["leg"] == "jev"
 
 
 def test_one_outcome_row_per_judgement(dsn):
@@ -491,7 +424,7 @@ def test_run_and_calibrate_refuse_to_start_without_a_key_for_a_default_endpoint(
     assert out.returncode == 1 and "TYPESAFE_API_KEY" in out.stderr and "run refused" in out.stderr
     cases = tmp_path / "cases.json"
     cases.write_text(json.dumps({"site": "intake.underspecified", "cases": []}))
-    out = _cli("calibrate", str(cases), "--budget-usd", "0.01", env=env)
+    out = _cli("calibrate", str(cases), env=env)
     assert out.returncode == 1 and "TYPESAFE_API_KEY" in out.stderr
     assert not [r for r in run(rows(dsn, task)) if r["type"] != "task.started"]
 
@@ -551,7 +484,7 @@ def test_an_unpriced_model_cannot_build_a_port():
     leg = jev_leg.Jev("http://127.0.0.1:9/x", LOOPBACK_KEY, model="jev-latest")
     with pytest.raises(ValueError, match="no price"):
         JudgementPort({"jev": leg})
-    assert budget.judgement_price(JEV_MODEL)["input"] == 42_000
+    assert spending.judgement_price(JEV_MODEL)["input"] == 42_000
 
 
 json_values = st.recursive(
@@ -646,7 +579,7 @@ def test_probabilities_are_normalized_before_the_gate():
 
 
 def test_charging_a_malformed_answer_a_bad_reported_cost_and_a_refusal():
-    call = {"model": JEV_MODEL, "usd_micros": 99}
+    call = {"model": JEV_MODEL, "estimate_usd_micros": 99}
     usage = {"input_tokens": 1000, "output_tokens": 5, "reported_usd": None}
     with_usage = judgement.LegError("malformed", "usage", status=200, usage=usage)
     assert judgement._charge_for(call, with_usage, usage)[0] == 42  # 1000 x 0.042
@@ -654,7 +587,7 @@ def test_charging_a_malformed_answer_a_bad_reported_cost_and_a_refusal():
     charged, detail = judgement._charge_for(call, without, None)
     assert charged == 99 and detail["usage_missing"] is True
     unreadable = {"input_tokens": 1000, "output_tokens": 5, "reported_usd": "a lot"}
-    ow_call = {"model": OPEN_WEIGHT_PIN, "usd_micros": 500}
+    ow_call = {"model": OPEN_WEIGHT_PIN, "estimate_usd_micros": 500}
     assert judgement._charge_for(ow_call, judgement.LegError("malformed", "usage"), unreadable)[0] == 500
     refused = judgement.LegError("http_status", "none", status=429)
     charged, detail = judgement._charge_for(call, refused, None)
@@ -668,11 +601,10 @@ def test_calibrate_from_the_command_line_refuses_before_asking(dsn, tmp_path):
     unknown.write_text(json.dumps({"site": "governance.adds", "cases": []}))
     jev, ow = UP.urls(fixed="precise")
     for args, env, said in (
-        ([str(good), "--budget-usd", "0.51"], {}, "at most $0.50"),
-        ([str(tmp_path / "missing.json"), "--budget-usd", "0.01"], {}, "no cases file"),
-        ([str(unknown), "--budget-usd", "0.01"], {}, "no calibration case shape for governance.adds"),
+        ([str(tmp_path / "missing.json")], {}, "no cases file"),
+        ([str(unknown)], {}, "no calibration case shape for governance.adds"),
         (
-            [str(good), "--budget-usd", "0.01"],
+            [str(good)],
             {"VALOR_JEV_URL": jev, "VALOR_OPEN_WEIGHT_URL": ow},
             "a calibration asks the providers, not http://127.0.0.1",
         ),
@@ -693,7 +625,7 @@ def test_a_calibration_record_names_the_endpoints_it_asked(dsn, tmp_path):
             }
         )
     )
-    record = run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, cases, 10_000))
+    record = run(judgement_sites.calibrate(UP.port(fixed="precise"), dsn, cases))
     assert record["endpoints"] == {"jev": "127.0.0.1", "open_weight": "127.0.0.1"}
 
 

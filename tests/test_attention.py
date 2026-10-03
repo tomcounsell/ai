@@ -1,7 +1,7 @@
-"""Tom's taps and raises on real Postgres: approvals carry provenance and
-count apart from questions and feedback, old rows read what they recorded
-and nothing more, and a raise of the budget is folded by the one
-computation of remaining money that reservations also use.
+"""Tom's taps on real Postgres: approvals carry provenance and count apart
+from questions and feedback, old rows read what they recorded and nothing
+more, and a legacy ledger's money rows fold into metered spending and
+never into the attention log.
 
 No model call. Live spend: none.
 """
@@ -16,12 +16,9 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, budget, db, ledger, session, tasks
-from core.gateway import Gateway
-from tests import scripted
+from core import broker, db, ledger, tasks
 from tests.conftest import TEST_DB
 from tests.performers import OutboxAppend
-from tests.scripted import turn_for
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -61,7 +58,7 @@ async def _held(dsn, task, tmp_path, text) -> str:
 
 def test_an_approval_carries_provenance_and_counts_apart_from_questions_and_feedback(dsn, tmp_path):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0, max_effect_class="act")
+        task = await new_task(dsn, max_effect_class="act")
         played = await _held(dsn, task, tmp_path, "one")
         live = await _held(dsn, task, tmp_path, "two")
         return task, played, live
@@ -88,7 +85,6 @@ def test_an_approval_carries_provenance_and_counts_apart_from_questions_and_feed
         "question": {"total": 0, "role_played": 0, "unknown": 0},
         "feedback": {"total": 0, "role_played": 0, "unknown": 0},
         "approval": {"total": 2, "role_played": 1, "unknown": 0},
-        "budget_raise": {"total": 0, "role_played": 0, "unknown": 0},
         "verdict": {"total": 0, "role_played": 0, "unknown": 0},
         "grant": {"total": 0, "role_played": 0, "unknown": 0},
     }
@@ -100,7 +96,7 @@ def test_rows_from_before_provenance_read_what_they_recorded_and_no_more(dsn):
     each reads `role_played` None and counts as unknown."""
 
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0)
+        task = await new_task(dsn)
         async with await db.connect(dsn) as conn, conn.transaction():
             await ledger.append(
                 conn, task, "question.asked", {"question_id": "q1", "turn_id": "t", "text": "?"}
@@ -147,200 +143,57 @@ def test_rows_from_before_provenance_read_what_they_recorded_and_no_more(dsn):
         "question": 1,
         "feedback": 1,
         "approval": 1,
-        "budget_raise": 0,
         "verdict": 0,
         "grant": 0,
     }
 
 
-# -- budget raise ------------------------------------------------------------------
+# -- a legacy ledger -----------------------------------------------------------------
 
 
-def _call(task, i, usd_micros) -> dict:
-    return {"call_id": f"{task}-{i}", "turn_id": "t", "model": "m", "usd_micros": usd_micros}
-
-
-def test_a_raise_reopens_an_exhausted_budget_and_one_fold_answers_remaining(dsn):
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=1_000)
-        seen = []
-        async with await db.connect(dsn) as conn:
-
-            async def agree():
-                state = await tasks.status(conn, task)
-                seen.append(state["remaining_usd_micros"])
-                return state
-
-            await budget.reserve(conn, task, _call(task, 1, 900))
-            await budget.charge(conn, task, f"{task}-1", 950, {})  # over the reservation, under the budget
-            await agree()
-            # The reservation's refusal reads the same remaining the fold shows.
-            with pytest.raises(budget.BudgetRefused, match="exceeds remaining 50$"):
-                await budget.reserve(conn, task, _call(task, 2, 100))
-            await budget.raise_budget(conn, task, 2_000, note="keep going", by="tom")
-            await agree()
-            await budget.reserve(conn, task, _call(task, 3, 1_500))
-            await budget.charge(conn, task, f"{task}-3", 1_400, {})
-            state = await agree()
-        return seen, state
-
-    seen, state = run(go())
-    assert seen == [50, 2_050, 650]
-    assert state["committed_usd_micros"] == 3_000 and state["charged_usd_micros"] == 2_350
-    assert tasks.audit(state) == []  # past the first budget, within the raised one
-    (raised,) = [a for a in state["attention"] if a["kind"] == "budget_raise"]
-    assert raised["usd_micros"] == 2_000 and raised["note"] == "keep going"
-    assert raised["provenance"]["by"] == "tom" and raised["provenance"]["role_played"] is False
-
-
-def test_a_stopped_task_takes_no_raise_and_nothing_is_written(dsn):
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=10)
-        async with await db.connect(dsn) as conn:
-            await tasks.stop(conn, task, reason="test")
-            before = len(await ledger.read(conn, task))
-            with pytest.raises(tasks.TaskStopped):
-                await budget.raise_budget(conn, task, 1_000)
-            for amount in (0, -5):
-                with pytest.raises(ValueError):
-                    await budget.raise_budget(conn, task, amount)
-            return task, before, len(await ledger.read(conn, task))
-
-    task, before, after = run(go())
-    assert before == after
-    out = cli("budget", "raise", task, "5")
-    assert out.returncode != 0 and "stopped" in out.stderr
-
-
-def test_the_cli_raise_is_folded_and_shown_in_the_next_brief(dsn, tmp_path):
-    async def go():
-        return await new_task(dsn, budget_usd_micros=1_000_000, workspace=str(tmp_path))
-
-    task = run(go())
-    out = cli("budget", "raise", task, "2.5", "--note", "more", "--by", "stand-in", "--role-played")
-    assert out.returncode == 0, out.stderr
-    assert "committed $3.5000" in out.stdout
-
-    async def after():
-        async with await db.connect(dsn) as conn:
-            return await tasks.status(conn, task), await tasks.dispatch(conn, task)
-
-    state, dispatched = run(after())
-    assert state["committed_usd_micros"] == 3_500_000
-    assert state["attention_counts"]["budget_raise"] == {"total": 1, "role_played": 1, "unknown": 0}
-    assert "Budget: $3.5000" in dispatched["text"]
-
-
-def test_a_run_stopped_by_an_empty_budget_runs_again_after_a_raise(dsn, tmp_path):
-    """The judge is a task's first spend: with no money it asks no provider,
-    the task stays in judge, and after Tom's raise the next run judges and
-    the working session goes on."""
-    ws, _ = scripted.workspace(tmp_path)
-    scripted.steer(ws, plan="ask")
+def test_a_legacy_ledger_with_reservations_and_raises_folds_to_its_spending(dsn):
+    """Ledgers written before 2026-10-03 open calls with `gateway.reserved`,
+    carry `budget.raised` rows (some without provenance), and start tasks
+    with `budget_usd_micros` in the document and the `task.started` row.
+    Nothing is rewritten: a reservation folds as an opened call, and the
+    raise and the old field are ignored."""
 
     async def go():
-        task = await scripted.start(dsn, ws, budget_usd_micros=0, judge=None)
-        first = await scripted.run_judge(dsn, task, "precise")
-        async with await db.connect(dsn) as conn:
-            kinds = [r["type"] for r in await ledger.read(conn, task)]
-            await budget.raise_budget(conn, task, 1_000)
-        judged = await scripted.run_judge(dsn, task, "precise")
-        gateway = Gateway(dsn)
-        await gateway.start()
-        second = await session.run(gateway, task, turn_for, dsn=dsn)
-        await gateway.close()
-        return first, kinds, judged, second
-
-    first, kinds, judged, second = run(go())
-    assert first["status"] == "budget exhausted" and first["state"]["state"] == "judge"
-    assert kinds == ["task.started", "gateway.refused"]  # refused before any provider was asked
-    assert judged["status"] == "moved"
-    # a turn ran and asked its question, which moved the task to waiting
-    assert second["status"] == "moved" and second["state"]["state"] == "waiting"
-
-
-def test_racing_raises_and_reservations_never_exceed_the_committed_total(dsn):
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=1_000)
-
-        async def reserve(i):
-            async with await db.connect(dsn) as conn:
-                try:
-                    await budget.reserve(conn, task, _call(task, i, 300))
-                    return 300
-                except budget.BudgetRefused:
-                    return 0
-
-        async def give(_):
-            async with await db.connect(dsn) as conn:
-                await budget.raise_budget(conn, task, 500)
-            return 0
-
-        jobs = [reserve(i) for i in range(30)] + [give(i) for i in range(4)]
-        reserved = sum(await asyncio.gather(*jobs))
-        async with await db.connect(dsn) as conn:
-            return reserved, await tasks.status(conn, task)
-
-    reserved, state = run(go())
-    assert state["committed_usd_micros"] == 3_000
-    assert reserved <= 3_000 and reserved == sum(state["open_reservations"].values())
-    assert state["remaining_usd_micros"] == 3_000 - reserved >= 0
-
-
-def test_a_raise_written_without_provenance_folds_and_reads_unknown(dsn):
-
-    async def go():
-        task = await new_task(dsn, budget_usd_micros=100)
-        async with await db.connect(dsn) as conn:
+        b = tasks.Brief(instruction="legacy")
+        async with await db.connect(dsn) as conn, conn.transaction():
             await conn.execute(
-                "INSERT INTO events (task_id, type, payload) VALUES (%s, 'budget.raised', %s)",
-                (task, Jsonb({"raise_id": "r", "usd_micros": 50})),
+                "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
+                (b.id, Jsonb({"id": b.id, "instruction": "legacy", "budget_usd_micros": 1_000})),
             )
-            return await tasks.status(conn, task)
+            for kind, payload in (
+                ("task.started", {"sdlc": 1, "instruction": "legacy", "budget_usd_micros": 1_000}),
+                ("gateway.reserved", {"call_id": f"{b.id}-1", "turn_id": "t", "usd_micros": 900}),
+                ("gateway.charged", {"call_id": f"{b.id}-1", "usd_micros": 950}),
+                ("budget.raised", {"raise_id": "r1", "usd_micros": 2_000, "note": "keep going"}),
+                ("gateway.reserved", {"call_id": f"{b.id}-2", "turn_id": "t", "usd_micros": 1_500}),
+            ):
+                await conn.execute(
+                    "INSERT INTO events (task_id, type, payload) VALUES (%s, %s, %s)",
+                    (b.id, kind, Jsonb(payload)),
+                )
+        async with await db.connect(dsn) as conn:
+            return await tasks.status(conn, b.id), await tasks.brief(conn, b.id)
 
-    state = run(go())
-    assert state["committed_usd_micros"] == 150
-    p = state["attention"][0]["provenance"]
-    assert p["by"] is None and p["via"] is None and p["role_played"] is None and p["at"]
-    assert state["attention_counts"]["budget_raise"] == {"total": 1, "role_played": 0, "unknown": 1}
+    state, brief = run(go())
+    assert brief.instruction == "legacy"  # the old document still loads
+    assert state["spent_usd_micros"] == 950
+    assert state["open_calls"] == {f"{brief.id}-2": 1_500}
+    assert tasks.audit(state) == [f"gateway call {brief.id}-2 opened and never charged"]
+    assert state["attention"] == [] and set(state["attention_counts"]) == set(tasks.ATTENTION_KINDS)
+    assert not {"committed_usd_micros", "remaining_usd_micros"} & set(state)
 
 
 # -- unknown tasks, open questions, one start per task -------------------------------
 
 
-def test_an_unknown_task_has_no_money_and_takes_no_raise(dsn):
-    async def go():
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(KeyError):
-                await budget.reserve(conn, "no-such-task", _call("no-such-task", 1, 1))
-            with pytest.raises(KeyError):
-                await budget.raise_budget(conn, "no-such-task", 1_000)
-            rows = await (
-                await conn.execute("SELECT count(*) FROM events WHERE task_id = 'no-such-task'")
-            ).fetchone()
-            return rows[0]
-
-    assert run(go()) == 0
-
-
-@pytest.mark.parametrize(
-    ("task", "amount", "message"),
-    [
-        ("no-such-task", "5", "no task no-such-task"),
-        (None, "0", "more than zero"),
-        (None, "-1", "more than zero"),
-    ],
-)
-def test_the_cli_raise_refuses_an_unknown_task_and_an_amount_not_above_zero(dsn, task, amount, message):
-    if task is None:
-        task = run(new_task(dsn, budget_usd_micros=10))
-    out = cli("budget", "raise", task, amount)
-    assert out.returncode == 1 and message in out.stderr and "Traceback" not in out.stderr
-
-
 def test_an_open_question_is_listed_and_not_counted(dsn):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0)
+        task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
             async with conn.transaction():
                 await ledger.append(conn, task, "judge.decided", {"verdict": "precise", "leg": "judgement"})
@@ -358,21 +211,20 @@ def test_an_open_question_is_listed_and_not_counted(dsn):
     assert state["attention_counts"]["question"] == {"total": 0, "role_played": 0, "unknown": 0}
 
 
-def test_a_task_is_started_once_so_its_budget_is_set_not_summed(dsn):
-    """`money` sets the budget from `task.started`: `start` writes that row
-    with the task's document, and the document's primary key refuses a
-    second start of the same id, so no task has two."""
+def test_a_task_is_started_once(dsn):
+    """`start` writes `task.started` with the task's document, and the
+    document's primary key refuses a second start of the same id, so no
+    task has two."""
 
     async def go():
-        brief = tasks.Brief(instruction="once", budget_usd_micros=100)
+        brief = tasks.Brief(instruction="once")
         async with await db.connect(dsn) as conn:
             await tasks.start(conn, brief)
             with pytest.raises(psycopg.errors.UniqueViolation):
                 await tasks.start(conn, brief)
             return brief.id, await tasks.status(conn, brief.id)
 
-    task, state = run(go())
-    assert state["committed_usd_micros"] == 100
+    task, _ = run(go())
     rows = run(_types(dsn, task))
     assert rows.count("task.started") == 1
 

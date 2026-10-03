@@ -5,7 +5,7 @@ Non-core components and vendor-dependent tooling.
 ## Scope
 
 - Anything the core can run without: vendor API clients, sandbox and container helpers, ingestion, search.
-- Each tool declares its effect class and reaches the world through the broker. The judgement legs are the exception: `read`-class clients the judgement port calls directly from the kernel process, metered against the task's budget.
+- Each tool declares its effect class and reaches the world through the broker. The judgement legs are the exception: `read`-class clients the judgement port calls directly from the kernel process, metered and recorded on the task.
 - A tool is extracted on a demonstrated second need, never on a first. A tool unused for ninety days is deleted by default.
 
 Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and the broker) and [docs/tech-stack.md](../docs/tech-stack.md) (the broker's performers).

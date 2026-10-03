@@ -10,13 +10,13 @@ what happens to the processes it leaves behind, and the workspace it works in.
 
 `harnesses/` holds the wrappers. `core/runs.py` holds the port and runs one
 turn; `core/session.py` runs a task's turns; `core/signals.py` holds the
-signal channel. The gateway's pricing, reservation, and charging belong to
+signal channel. The gateway's pricing, opening, and charging belong to
 `docs/architecture.md`, as do the task loop's states, the broker, approvals,
 stop, and the execution record. This doc covers the harness's side of each.
 
 ## The harness port
 
-Serves the constraint **bounded authority and spend**: the kernel runs any
+Serves the constraint **bounded authority, metered spending**: the kernel runs any
 harness without knowing which one, so authority never moves into a wrapper.
 
 The port is one value, `TurnCommand`, built fresh for each turn:
@@ -110,7 +110,7 @@ then sets:
 
 - `ANTHROPIC_BASE_URL`: the gateway URL issued for this turn.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: the per-call output cap (32,000 by
-  default), which sets the gateway's worst-case reservation per call.
+  default), which sets the gateway's worst-case estimate per call, the charge only if the provider reports no usage.
 - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a `-p` turn that ends kills
   what it left running in the background, so commands run in the foreground.
   Two of three turns of a baseline run ended idle waiting on killed
@@ -129,7 +129,7 @@ start --project`) or from `--harness-config FILE`, and are stored on the
 task: `sandbox_profile`, `gitconfig`, `gh_config_dir`, `tmpdir`,
 `claude_config_dir`, `env`, and `max_output_tokens`.
 `sandbox_profile` is required: `workspace_turn` raises `Unsandboxed` for a
-task without one, before anything is spawned or reserved, and `python -m
+task without one, before anything is spawned, and `python -m
 core run` reports it. The wrapper prefixes the argv with `sandbox-exec -D
 GATEWAY_PORT=<port> -D VALOR_TURN=<turn id> -f <profile>`.
 
@@ -228,7 +228,7 @@ first long task records both in `turn.ended`.
 ## The signal channel: `.valor/`
 
 Serves Mission item 6 (every question and delivery is a ledger row, so the
-attention a task cost is a fold over its ledger) and the constraint
+attention a task costs is a fold over its ledger) and the constraint
 **bounded authority** (an effect is a request the broker decides).
 
 A turn reaches Tom and the world through files under `.valor/` in its
@@ -278,7 +278,7 @@ describe reality** by giving a verifier more than the turn's own summary.
 Three records of a turn exist:
 
 1. **The ledger.** `turn.started` (argv, Brief, its digest, corrections),
-   the gateway's `gateway.charged` and `gateway.refused` rows for every
+   the gateway's `gateway.opened`, `gateway.charged`, and `gateway.refused` rows for every
    model call, `turn.collected`, `turn.reaped`, and `turn.ended`. Written by
    the kernel; the turn cannot edit it.
 2. **Claude Code's session file**, the JSONL under `projects/` in the
@@ -301,8 +301,8 @@ kind, which needs no migration (`docs/data.md`, documents).
 
 ## Metering through the gateway
 
-Serves the constraint **bounded authority and spend**: every model call a
-turn makes is metered against the task's one budget.
+Serves the constraint **bounded authority, metered spending**: every model call a
+turn makes is metered and its spending recorded on the task.
 
 The wrapper points the harness at the gateway with `ANTHROPIC_BASE_URL`,
 carrying a per-turn token in the path. Claude Code sends every call through
@@ -319,17 +319,17 @@ with a 403: a long-lived token in the kernel key directory when one is there,
 else the machine's Claude Code login read from the Keychain at most once a
 minute (the first 401 after a read allows one more). The kernel never
 refreshes the login, and an expired one fails the call naming the remedy. The
-harness never holds a budget, and a refused call reaches it as an API error.
+harness never holds a credit or a limit, and a call refused because the task is stopped reaches it as an API error.
 
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` bounds each call's output, and the gateway
-reserves each call's worst case from that bound before forwarding. A lower
-cap keeps the reservation close to what a call really costs, so a nearly
-spent budget still admits calls that fit.
+takes each call's worst-case estimate from that bound. The estimate is the
+charge only when the provider reports no usage, so a lower cap keeps that
+fallback close to what a call really costs.
 
 Two points the harness relies on and has to keep true:
 
 - **Every call takes the base URL.** A harness that reaches a provider by
-  another path would spend outside the budget. For Claude Code this held in
+  another path would spend outside the meter. For Claude Code this held in
   every run so far; the sandbox does not enforce it, since a turn reaches
   the public internet (see the sandbox below).
 - **Corrections reaching subagents.** The Brief, corrections included, is in
@@ -340,7 +340,7 @@ Two points the harness relies on and has to keep true:
 
 ## The turn sandbox
 
-Serves the constraint **bounded authority and spend** (a turn cannot perform
+Serves the constraint **bounded authority, metered spending** (a turn cannot perform
 an effect except through the broker), the constraint **a ledger the system
 cannot edit**, and the Evidence item **independent checks** (a replay cannot
 read its answer). The stance is AI Control's: the protocol holds even if the
@@ -426,7 +426,7 @@ Stated so the boundary is drawn where it is [4]:
   outside the gateway, or reach GitHub anonymously. The baseline found no
   such call in any transcript (rebuild-baseline.md, Caveats).
 - Both openings above are accepted (Tom, 2026-10-01): no separate macOS
-  user, and budgets are for visibility and honest metering, not a hard
+  user, and the gateway is for visibility and honest metering, not a hard
   wall.
 - A fresh session's blindness covers the paths the kernel names for the
   builder (Files, above). The working session has its own `TMPDIR` but can
@@ -569,7 +569,7 @@ The design adds a headless browser the turn drives against the dev server on
 a dev port, with screenshots written into the run directory and named in
 `done.md`. Unmeasured: whether a headless Chromium runs under the turn's
 sandbox-exec profile (it brings a sandbox of its own), and its RAM on the
-16 GB machine, which `docs/machine.md` has to budget. The emulator can score
+16 GB machine, which `docs/machine.md` has to plan for. The emulator can score
 it on the UI items (#894, #872, #893) once it exists.
 
 ## Further harnesses: Codex and Pi
@@ -583,7 +583,7 @@ channel, which needs nothing harness-specific beyond writing files.
 **Gap.** The gateway speaks the Anthropic Messages wire format. A harness
 whose provider speaks another format needs a gateway route that meters that
 format before its wrapper can exist, since a turn that bypasses the gateway
-spends outside the budget. The first use is the review seat: an Opus-class
+spends outside the meter. The first use is the review seat: an Opus-class
 model from another vendor reviewing through its own harness. Nothing about
 Codex or Pi has been run here.
 

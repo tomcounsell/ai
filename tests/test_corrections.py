@@ -129,7 +129,7 @@ def test_every_turn_renders_the_corrections_in_force_when_it_starts(dsn, first, 
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="test", budget_usd_micros=0))
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
             later = await corrections.record(conn, "Prefer the smaller diff.", by="tom", via="test")
         gateway = Gateway(dsn)
         await gateway.start()

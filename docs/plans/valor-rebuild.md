@@ -121,8 +121,8 @@ every task.
 
 **Kept from today's kernel.** The ledger and its schema (`core/ledger.py`,
 `core/schema.sql`: append-only by grants and trigger, unique indexes,
-advisory locks), the gateway (`core/gateway.py`), per-call reserve and
-charge (`core/budget.py`), the broker and approvals (`core/broker.py`),
+advisory locks), the gateway (`core/gateway.py`), per-call metering
+and charge (`core/spending.py`), the broker and approvals (`core/broker.py`),
 lossless stop and reaping (`core/runs.py`), the session and turn loop
 (`core/session.py`), corrections (`core/corrections.py`), the `.valor/`
 signal channel (`core/signals.py`), and the Claude Code wrapper
@@ -147,8 +147,9 @@ Tom writes (**Reliable stop, recovery, and correction**; Mission item 6).
 - A fresh `python -m core migrate` holds correction 1.
 - `approval.granted` carries `by`, `via`, `at`, `role_played`; approvals
   appear in the attention fold.
-- `python -m core budget raise TASK N` writes `budget.raised` and the fold
-  of remaining money includes it; one computation of "remaining", not two.
+- One computation of a task's metered spending: the spending fold over its
+  `gateway.charged` rows, which `tasks.status` and the dispatch card both
+  read; it is shown, and nothing refuses on money.
 - A default test run meters a successful streamed call against a local
   upstream replaying a recorded response.
 - One typed settings module with a model-seat registry and prices that
@@ -171,7 +172,7 @@ long streams (until a stream is measured slow).
 ### 1.2 The SDLC state machine
 
 **Goal.** Tom never coordinates the gaps between steps, and nothing merges
-on a model's say-so (Mission item 1, **Bounded authority and spend**).
+on a model's say-so (Mission item 1, **Bounded authority, metered spending**).
 
 **Done.**
 - `State`, `Check`, `VERDICTS`, `TRANSITIONS`, `Candidate`, the join, and
@@ -204,8 +205,8 @@ kernel (**Three tiers**; Mission items 3 and 6).
 **Done.**
 - `JudgementPort` and the router in `core/`; Jev and the open-weight
   fallback as adapters in `tools/`, models pinned by version.
-- Non-Anthropic judgement calls metered against the same task budget,
-  in the kernel process through `core/budget.py`'s reservation and
+- Non-Anthropic judgement calls metered onto the same task's
+  metered spending, in the kernel process through `core/spending.py`'s open and
   charge (the gateway's rows, with no HTTP route, since no turn makes
   them); `judgement.answered` and `judgement.failed` rows.
 - Three sites wired: `intake.underspecified` (the judge state), the
@@ -261,11 +262,11 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
 - Breadth and governance route on the entry check (both legs right on
   every frozen case) and log every row; floors are set from human labels
   once real tasks have produced thirty or more. No calibration-first
-  machinery. Each re-checks Jev's reservation overhead (`tools/jev.py`,
+  machinery. Each re-checks Jev's worst-case overhead (`tools/jev.py`,
   sized from 35 single-question judge calls) against its own rows.
 - Before task 1.4b starts, popoto #191 runs end to end through the
   kernel, judge to held merge, with `python -m core verdict` playing the
-  runners not yet built (under $5). Its record says what the pipeline
+  runners not yet built. Its record says what the pipeline
   did and what Tom would have had to do.
 
 **Absorbs.** Redis left running at replay teardown; replay databases
@@ -292,7 +293,7 @@ it builds anything real (Evidence "Independent checks").
 
 **Done.**
 - The replay scripts move from `scripts/` to `tests/emulator/`; stand-in
-  and judge calls go through the gateway under one budget (no
+  and judge calls go through the gateway and meter onto one task's spending (no
   `costs.jsonl`). The stand-in moves to an Opus-class model.
 - **The takeover gate.** The full pipeline, judge to held merge, carries
   three baseline items: popoto #191 (thin), psyoptimal #872 (precise), and
@@ -317,7 +318,7 @@ and 2.3 send to real people under Valor's name, critique 1 and review 2.
 
 **Goal.** Tom gives Valor work and taps approvals where he already is
 (Mission items 1 and 6), and nothing leaves under Valor's name without
-passing the broker (**Bounded authority and spend**; the one identity in
+passing the broker (**Bounded authority, metered spending**; the one identity in
 [persona.md](../persona.md)).
 
 ### 2.1 The resident kernel and the bridge port
@@ -367,7 +368,7 @@ lines) not carried.
   No local cursor.
 
 **Done.** On Valor's real account during a test window: an inbound message
-starts a task with the $8 default budget; a question reaches Tom and his
+starts a task with its spending metered and shown; a question reaches Tom and his
 reply binds to it; a delivery card's tap releases a held push; a forced
 crash between intent and outcome does not send twice; the bridge's RSS
 after a day connected is measured.
@@ -444,10 +445,10 @@ Self-built.
 Stakes: kernel, critique 2 and review 2.
 
 **Goal.** Tom delegates a feature, then a workflow, then a product
-(Mission item 4); routines draw from period budgets.
+(Mission item 4); each routine's metered spending over its period is reported.
 
-**Done.** A child's budget carved from its parent's remaining and a
-child's ceiling never above its parent's, both shown by property tests;
+**Done.** A child's spending rolls up into its parent's reported spending and a
+child's effect ceiling is never above its parent's, the ceiling shown by a property test;
 stopping a parent refuses the calls and effects of a grandchild; a child's
 report lands where the parent reads it.
 
@@ -471,18 +472,18 @@ with fewer feedback rounds than the demonstration's two.
 
 Stakes: critique 1, review 1.
 
-**Goal.** Scheduled work is a budgeted objective, never a bare script
-(Mission item 5, **Bounded authority and spend**).
+**Goal.** Scheduled work is an objective with metered spending, never a bare script
+(Mission item 5, **Bounded authority, metered spending**).
 
 **Done.** `python -m core routine NAME` runs a routine from its
-`routine.toml` under a 30-day period budget; launchd plists call only that;
+`routine.toml` with its metered spending over a 30-day period reported; launchd plists call only that;
 a routine never makes Tom's task wait for the slot. The first two routines:
 the emulator sweep (including the `routed` arm), which measures and
 reports and blocks nothing (its second need: the demonstration and the
 baseline both ran it by hand), and the ninety-day expiry sweep, which opens
 one deletion branch held for Tom's tap. A read-only page
 in `ui/` shows tasks, spend, pending approvals, the attention log, and
-routine runs against their period budget, since status messages to Tom are
+routine runs with their period spending, since status messages to Tom are
 not sent.
 
 **Leaves out.** Any routine without a demonstrated second need. The cheap

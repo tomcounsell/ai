@@ -216,9 +216,9 @@ class Settings:
     verdict_max_bytes: int = 256 * 1024
 
     # -- tunables -------------------------------------------------------------
-    # Bytes per token for the gateway's input estimate. An underestimate
-    # spends money nobody reserved, so it leans high: English and JSON run
-    # above 3.
+    # Bytes per token for the gateway's input estimate, the worst case a
+    # call with no reported usage is charged. An underestimate charges less
+    # than the invoice, so it leans high: English and JSON run above 3.
     bytes_per_token: int = 3
     # Seconds between SIGTERM and SIGKILL when reaping a turn's processes.
     reap_grace_s: float = 2.0

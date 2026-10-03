@@ -24,7 +24,7 @@ class Ledger:
         self.critique_rounds, self.review_rounds = critique_rounds, review_rounds
         self.plan_digest = None
         self.candidate = None
-        self.add("task.started", {"sdlc": 1, "instruction": "x", "budget_usd_micros": 1})
+        self.add("task.started", {"sdlc": 1, "instruction": "x"})
         if judge:
             self.add("judge.decided", {"verdict": judge, "leg": "manual"})
 
@@ -489,8 +489,8 @@ STARTS = st.sampled_from(
         MISSING,
         "text",
         {"sdlc": "1"},
-        {"calibration": "intake.underspecified", "budget_usd_micros": 1},
-        {"calibration": "intake.underspecified", "sdlc": 1, "budget_usd_micros": 1},
+        {"calibration": "intake.underspecified"},
+        {"calibration": "intake.underspecified", "sdlc": 1},
     ]
 )
 
@@ -621,8 +621,8 @@ def test_a_brief_takes_no_mode_and_an_old_document_with_one_still_loads():
     from core import tasks
 
     with pytest.raises(TypeError):
-        tasks.Brief(instruction="x", budget_usd_micros=0, mode="x")
-    b = tasks.Brief(instruction="x", budget_usd_micros=0)
+        tasks.Brief(instruction="x", mode="x")
+    b = tasks.Brief(instruction="x")
     assert tasks.Brief.load({**tasks.asdict(b), "mode": "bare"}) == b
 
 

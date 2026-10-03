@@ -57,9 +57,7 @@ async def _held_push(dsn: str, ws: dict) -> str:
     async with await db.connect(dsn) as conn:
         task = await tasks.start(
             conn,
-            tasks.Brief(
-                instruction="push", budget_usd_micros=0, max_effect_class="act", workspace=ws["workdir"]
-            ),
+            tasks.Brief(instruction="push", max_effect_class="act", workspace=ws["workdir"]),
         )
         held = await broker.request(
             conn,
@@ -137,9 +135,7 @@ def test_the_driver_checks_a_merge_by_the_url_its_payload_carries(dsn, tmp_path,
         async with await db.connect(dsn) as conn:
             task = await tasks.start(
                 conn,
-                tasks.Brief(
-                    instruction="merge", budget_usd_micros=0, max_effect_class="act", workspace=ws["workdir"]
-                ),
+                tasks.Brief(instruction="merge", max_effect_class="act", workspace=ws["workdir"]),
             )
             payload = {
                 "url": url,
@@ -189,9 +185,7 @@ def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_s
         assert done.returncode == 0, done.stderr
         return done.stdout.strip()
 
-    task = core(
-        "start", "go", "--budget-usd", "1", "--ceiling", "act", "--project", info["spec"], "--base", base
-    )
+    task = core("start", "go", "--ceiling", "act", "--project", info["spec"], "--base", base)
     ws = replay_workspace.attach({**info, "task_id": task}, json.loads(core("workspace", "show", task)))
     assert Path(ws["workdir"]).is_dir() and ws["origin"].endswith("origin.git")
     harness = json.loads(Path(ws["harness_config"]).read_text())

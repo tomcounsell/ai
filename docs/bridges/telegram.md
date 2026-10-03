@@ -24,7 +24,7 @@ implementation keeps and what it hands to `core/`.
 | Receiving Tom's messages anywhere, any time | Mission item 1 (Tom gives work in conversation and never coordinates the gaps) |
 | Questions, deliveries, and approval prompts reaching Tom where he already is | Mission item 6 (attention spent as carefully as money) |
 | Replies bound to the task they answer, by structure | Constraint "Reliable stop, recovery, and correction": corrections and feedback carry provenance |
-| Every send an `act` effect released by the broker | Constraint "Bounded authority and spend"; effect classes [11] |
+| Every send an `act` effect released by the broker | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Idempotent receipt and send, acknowledged only after the ledger commits | Constraint "Reliable stop, recovery, and correction": stop and restart lose nothing |
 | Inbound text treated as data, never as authority | Retrieved content can act as instructions [7]; the kernel decides what a thing may do |
 
@@ -118,8 +118,7 @@ has not passed to it.
 ### Operator notices
 
 Some messages are the kernel speaking to Tom about his own work: a question a
-turn asked, a delivery, a held effect waiting for his tap, a stop, a budget
-spent. These are operator notices.
+turn asked, a delivery, a held effect waiting for his tap, a stop. These are operator notices.
 
 A notice goes only to Tom's operator chat, which is fixed in settings. No
 turn, task, or payload names the recipient, so a notice cannot reach anyone
@@ -245,13 +244,13 @@ A low-confidence call takes its judgement task's abstain route
 being acted on. Where that route reaches Tom it costs attention, so the
 floor is set from the calibration record and the attention log, not once.
 
-A task started from a message takes its money budget and effect ceiling
+A task started from a message takes its effect ceiling
 from settings, never from the message text, which would let a classifier
-set authority: $8 by default, the baseline's per-run budget, with every
-push or send still waiting for Tom's tap (Tom, 2026-10-01).
+set authority, with every push or send still waiting for Tom's tap (Tom,
+2026-10-01).
 
 A correction or exemplar is content, rendered into turns. It never widens a
-ceiling, raises a budget, or grants governance. Those change only through
+ceiling or grants governance. Those change only through
 `core/` commands and approvals.
 
 ### Other people
@@ -318,7 +317,7 @@ once; a send killed after its intent is reconciled by `lookup` on restart; a
 send killed before its intent was never sent and is still in the outbox.
 
 launchd runs the bridge as a resident process and restarts it if it exits.
-Its resident memory counts against the machine budget in
+Its resident memory counts against the RAM plan in
 [machine.md](../machine.md).
 
 ## What the bridge never does

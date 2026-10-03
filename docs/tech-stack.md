@@ -32,7 +32,7 @@ read the kernel at full speed and catch what the model got subtly wrong. So:
 
 The last point is Mission item 5 applied to the stack: extraction on a
 demonstrated second need, never on a first. The first two serve the
-constraint "Bounded authority and spend", because authority a reviewer
+constraint "Bounded authority, metered spending", because authority a reviewer
 cannot read is authority nobody checked. The control stance behind
 enforcing outside the model is AI Control [4].
 
@@ -44,7 +44,7 @@ enforcing outside the model is AI Control [4].
 | Environments and lockfile | uv, `uv.lock` | in use |
 | Runtime dependencies | `psycopg[binary]` 3, `aiohttp` | in use |
 | Tests | pytest, real Postgres, a `spend` marker on every live test | in use |
-| Property tests | Hypothesis: the state machine's fold; budget conservation down the tree next | in use |
+| Property tests | Hypothesis: the state machine's fold; the effect ceiling down the tree next | in use |
 | Schemas | frozen dataclasses in `core/` | in use; Pydantic open |
 | Kernel process | `python -m core`, one process per command, no daemon | in use; a resident process open |
 | Database | Postgres 18, as a document store | in use |
@@ -87,18 +87,18 @@ dependencies. Status: **in use**.
 
 **Tests.** pytest against real Postgres, real `claude -p` turns, and real
 sandbox profiles, with no mocks (`tests/README.md`). Every live test declares
-`@pytest.mark.spend(usd)`, the most money one run may cost. Status: **in use**.
+`@pytest.mark.spend(usd)`, the money one run is expected to cost. Status: **in use**.
 Serves the constraint "Docs describe reality": a test that exercises the real
 thing is evidence, and a mocked one is narration.
 
-**Hypothesis.** The kernel's money invariant is a property: for any sequence
-of reservations, charges, and stops, nothing is spent that was not reserved
-and nothing reserved exceeds what remains. Property tests state that
+**Hypothesis.** The kernel's invariants are properties: for any sequence
+of calls, charges, and stops, every call is opened once and charged once,
+and a stopped task opens no call. Property tests state that
 directly. Status: **in use** for the state machine: every prefix of a
 generated ledger folds to exactly one state (`tests/test_machine.py`), a dev
-dependency. The money property arrives with the objective tree, since
-conservation down a tree is where a sequence of operations can break it and
-one task record barely can. Serves "Bounded authority and spend".
+dependency. The ceiling property arrives with the objective tree, since
+conservation of the effect ceiling down a tree is where a sequence of
+operations can break it and one task record barely can. Serves "Bounded authority, metered spending".
 
 **Schemas.** The kernel's records (the Brief, `TurnCommand`, the gateway
 `Grant`) are frozen dataclasses and JSON payloads. Status: **in use**.
@@ -110,7 +110,7 @@ port's input needs validation the dataclasses cannot give without hand code.
 `python -m core` is the composition root. Each command (`start`, `run`,
 `answer`, `feedback`, `approve`, `release`, `stop`, `status`, `ledger`,
 `correct`) is one short process. `run` starts the gateway on loopback, runs
-the task's turns until a question, a delivery, the budget's end, or a stop,
+the task's turns until a question, a delivery, or a stop,
 and exits. Nothing in the kernel is resident between commands; all state is
 in Postgres. Status: **in use**.
 
@@ -133,7 +133,7 @@ A turn can still read the machine's Claude login from the Keychain, so it
 could call the provider around the gateway with that credential: the
 sandbox profile limits loopback but leaves the public internet open
 (section 6). The gateway is the metered path, not the only path. Tom
-accepted this on 2026-10-01 and it is not to be closed: budgets are for
+accepted this on 2026-10-01 and it is not to be closed: the gateway is for
 visibility and honest metering, not a hard wall, and turns run as the
 machine's user with no separate macOS account.
 
@@ -154,12 +154,12 @@ What the stack contributes to the ledger's integrity:
   connects as the owner. Serves "A ledger the system cannot edit records
   every effect".
 - **Partial unique indexes** make each fold over the ledger total: one
-  reservation and one charge per gateway call, one row of each kind per
+  opening and one charge per gateway call, one row of each kind per
   effect, an approval consumed by at most one intent, one stop per task, one
   correction per number.
 - **Transaction-scoped advisory locks** (`pg_advisory_xact_lock`) serialize
-  budget checks per task. They need no table privilege, so the insert-only
-  grant stays minimal. Serves "Bounded authority and spend".
+  the stop check and the append that opens a call, per task. They need no table privilege, so the insert-only
+  grant stays minimal. Serves "Bounded authority, metered spending".
 - **`LISTEN`/`NOTIFY`** carries a stop to the running turn's process the
   moment `task.stopped` commits. Serves "Stop is immediate and lossless".
 
@@ -224,10 +224,10 @@ at it through `ANTHROPIC_BASE_URL` with a per-turn token in the path, so
 Claude Code's own side calls and subagents are metered too. Status:
 **in use**.
 
-What it does per call (price, reserve the worst case, forward, charge) is
-[architecture.md](architecture.md)'s (Budgets). The stack-specific parts:
-input is estimated at three bytes per token for the reservation, the
-reservation runs under the task's advisory lock, and the response streams
+What it does per call (price, open, forward, charge) is
+[architecture.md](architecture.md)'s (Metered spending). The stack-specific parts:
+input is estimated at three bytes per token for the worst-case estimate, the
+opening runs under the task's advisory lock, and the response streams
 back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path is refused once
@@ -236,10 +236,10 @@ cancels its in-flight calls at once; the stop path calls it before killing
 the turn's process group.
 
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output. The cap is what
-keeps the worst-case reservation close to a call's real cost, so it is part
+keeps the worst-case estimate (the charge when usage goes unreported) close to a call's real cost, so it is part
 of metering, not a tuning knob.
 
-Serves "Bounded authority and spend" and "Stop is immediate and lossless".
+Serves "Bounded authority, metered spending" and "Stop is immediate and lossless".
 Evidence: across 69 calls in the demonstration the gateway's charge and
 Claude Code's own cost report agreed to $0.000024 of $2.97
 (rebuild-demonstration.md, Money). The baseline ran twelve more tasks and a
@@ -277,13 +277,12 @@ reviewer, and light; the judgement legs are pinned beside the seats.
 Ids are pinned, never floating aliases, because a ledger row has to describe
 a fixed thing. Editing the registry is a change inside the trust boundary,
 reviewed like kernel code: whoever can rewrite the reviewer's seat can
-defeat verification without touching an agent. Serves "Bounded authority and
-spend" and the Evidence item "Independent checks".
+defeat verification without touching an agent. Serves "Bounded authority, metered spending" and the Evidence item "Independent checks".
 
 Adopting a new frontier model is one edit, the same day. The system does not
 out-evaluate the labs on capability. A cheaper capable model does not lower
-any ceiling; it buys better outcomes inside the same budget (the constraint
-"Bounded authority and spend").
+any ceiling; it buys better outcomes on the same terms (the constraint
+"Bounded authority, metered spending").
 
 ## 5. The judgement tier
 
@@ -303,10 +302,10 @@ What the stack fixes:
   running fits beside Postgres, a container runtime, a `claude -p` turn, and
   the bridges in 16 GB. Any design that assumes a resident local model is
   wrong for this machine.
-- **Metered like every other call.** Judgement calls are reserved and
-  charged against the task's budget, so their cost shows in the same
-  ledger: in the kernel process through `core/budget.py`, the gateway's
-  rows with `route: judgement`, no HTTP route. Jev's reservation allows for
+- **Metered like every other call.** Judgement calls are opened and
+  charged on the task, so their price shows in the same
+  ledger: in the kernel process through `core/spending.py`, the gateway's
+  rows with `route: judgement`, no HTTP route. Jev's estimate allows for
   the prompt it bills around the request (1.25 times bytes / 3 plus a fixed
   margin, sized from the calibration calls)
   ([judgement-layer.md](judgement-layer.md)).
@@ -367,7 +366,7 @@ persona and the dispatched Brief re-rendered every turn
   credential helper and no token.
 
 Status: **in use**. Serves Mission item 1 (a turn can inspect, edit, test,
-and commit without Tom) inside "Bounded authority and spend". The port is
+and commit without Tom) inside "Bounded authority, metered spending". The port is
 `TurnCommand` in `core/runs.py`: argv, environment, working directory, and a
 result parser. The kernel never knows which harness it runs. Session resume,
 resume cost, and the `.valor/` signal files are
@@ -389,8 +388,7 @@ demonstration). Status: **in use**.
 
 The profile's rules (files, loopback, binding, the `valor.turn.<turn id>`
 mark the reaper uses) are specified in [harnesses.md](harnesses.md) (The
-turn sandbox, Reaping what a turn leaves). Serves "Bounded authority and
-spend" and "Stop is immediate and lossless".
+turn sandbox, Reaping what a turn leaves). Serves "Bounded authority, metered spending" and "Stop is immediate and lossless".
 
 What `sandbox-exec` gives: no RAM overhead, the Mac's native toolchains
 (Homebrew Postgres, uv, Xcode), and a profile a person can read in a minute.
@@ -433,7 +431,7 @@ toolchain (Python, Node, Django with Postgres) into containers is
 **open**; work that needs macOS-native tools (Xcode, iOS builds) stays
 under `sandbox-exec`, since no Linux VM can run it. What closes it: one
 replay item run in a container end to end, with its RAM measured beside a
-turn on the 16 GB machine. Serves "Bounded authority and spend": a sandbox
+turn on the 16 GB machine. Serves "Bounded authority, metered spending": a sandbox
 is where the effect ceiling meets the operating system, since credentials
 and reachable hosts are the effect class in practice [11].
 
@@ -453,7 +451,7 @@ The kernel provisions a task's workspace from a project spec
 
 Status: **in use** (`python -m core start --project`). Serves Mission item
 1 (the turn tests actual use against a real database) inside "Bounded
-authority and spend". How a workspace is provisioned and torn down as part
+authority, metered spending". How a workspace is provisioned and torn down as part
 of a task is [architecture.md](architecture.md); its memory cost is
 [machine.md](machine.md).
 
@@ -495,7 +493,7 @@ remote the turn cannot. Status: **in use**.
   (`tests/performers.py`), for the tests only: a file in the workspace, and
   a local outbox that stands where a bridge's send will.
 
-Serves "Bounded authority and spend": a sandbox holds no credential capable
+Serves "Bounded authority, metered spending": a sandbox holds no credential capable
 of an effect outside it, and every effect that leaves is a typed action [11].
 The effect protocol and approvals are [architecture.md](architecture.md).
 
@@ -527,10 +525,10 @@ ledger, pending approvals, the attention log (`ui/README.md`). Status:
 
 ## 10. Scheduling, secrets, telemetry
 
-**Scheduling.** launchd, one plist per routine, each routine a budgeted
+**Scheduling.** launchd, one plist per routine, each routine an
 objective and never a bare script ([routines.md](routines.md)). Status:
-**chosen, not built**. Serves "Bounded authority and spend": scheduled work
-spends from a budget like any other task.
+**chosen, not built**. Serves "Bounded authority, metered spending": scheduled work
+is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which
 both turn sandbox profiles deny: the kernel databases' passwords in a libpq
@@ -552,7 +550,7 @@ Everything runs Mac native, one install per machine, with a MacBook Air M4
 and 16 GB of RAM as the target (Tom's decision). Valor's four Macs each run
 their own install for the projects they own, with nothing shared between
 them. The demonstration and the baseline ran on a 64 GB Mac, so no
-memory figure from them carries over; the RAM budget per component is
+memory figure from them carries over; the RAM plan per component is
 [machine.md](machine.md). What the target machine fixes in the stack:
 
 - **One `claude -p` at a time.** The baseline ran replays concurrently, with

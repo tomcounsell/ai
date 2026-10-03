@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from core import budget, db, tasks
+from core import db, spending, tasks
 from core.settings import PRICES, SEATS, Settings, resolve_model, settings
 from tests.conftest import TEST_DB
 
@@ -45,14 +45,14 @@ def test_every_price_carries_the_day_it_was_checked_and_every_seat_is_priced():
 
 
 def test_a_dated_model_id_takes_its_undated_entry_and_its_checked_date():
-    price = budget.prices("claude-haiku-4-5-20251001")
+    price = spending.prices("claude-haiku-4-5-20251001")
     assert price["input"] == 1_000_000 and price["output"] == 5_000_000
     assert price["checked"] == PRICES["claude-haiku-4-5"].checked.isoformat()
 
 
 def test_start_takes_a_seat_and_records_its_pinned_id(dsn):
     out = subprocess.run(
-        [sys.executable, "-m", "core", "start", "seat test", "--budget-usd", "0", "--model", "frontier"],
+        [sys.executable, "-m", "core", "start", "seat test", "--model", "frontier"],
         cwd=ROOT,
         env={**os.environ, "VALOR_DB": TEST_DB},
         capture_output=True,

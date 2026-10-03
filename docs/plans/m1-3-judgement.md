@@ -40,9 +40,11 @@ So `critique_rounds: 2`, `review_rounds: 2`.
   review and docs take governance instances as `PATH:LINE` from their caller
   and compute each instance id from the real diff (`git.hunk_at`,
   `Hunk.id`). Nothing asks a model.
-- Money: `budget.reserve` and `budget.charge` write `gateway.reserved` and
+- Money: the module's `reserve` and `charge` (now `core/spending.py`; open
+  and charge) write `gateway.reserved` (now `gateway.opened`) and
   `gateway.charged` under the task's advisory lock; `tasks.money` folds
-  them. `budget.reserve` refuses a stopped task. `PRICES` in
+  them. `reserve` refused a stopped task (it still does; it refuses nothing
+  else now). `PRICES` in
   `core/settings.py` holds Anthropic models only, with a `checked` date.
 - Secrets: [machine.md](../machine.md), Keychain, says secrets live in the
   Keychain and "no secret is in a dotfile", and in the same section says a
@@ -94,7 +96,7 @@ Each is fixed in the doc named, in this build.
 
 | Contract says | This plan | Why | Doc fixed |
 |---|---|---|---|
-| "A gateway route that meters non-Anthropic calls" | metering in the kernel process through `budget.reserve`/`charge`, no HTTP route | the port runs in the kernel, not in a turn; a route would add a hop and a token for no caller that needs one; the rows and the money fold are the gateway's | `valor-rebuild.md` 1.3 Done; judgement-layer.md |
+| "A gateway route that meters non-Anthropic calls" | metering in the kernel process through the module's `reserve`/`charge` (now open/charge), no HTTP route | the port runs in the kernel, not in a turn; a route would add a hop and a token for no caller that needs one; the rows and the money fold are the gateway's | `valor-rebuild.md` 1.3 Done; judgement-layer.md |
 | Under the floor the primary abstains and the fallback answers | the decision is two-sided: a leg that is confident in the cautious action is not second-guessed by the fallback; only the uncertain band goes to the fallback | the fallback can only move a decision toward the less cautious action, so asking it after a confident cautious answer could only take caution away | judgement-layer.md, Confidence gating |
 | Breadth labels `covered`, `gap` | three yes/no questions in one call, one per gap kind | `test.decided` lists behaviors and a judgement returns no prose; one call can report two kinds | judgement-layer.md shape 8; sdlc-state-machine.md |
 | Each task names a `fail_safe` label | breadth and governance leave the branch without a verdict when both legs fail | a provider outage should rerun, not spend Tom's taps or a repair turn (1.4's failed-branch rule) | judgement-layer.md, Task taxonomy |
@@ -215,7 +217,10 @@ class Judgement:
   1. Check `inputs` has exactly the task's fields; render them (below).
   2. Reserve both legs' worst cases up front, primary then fallback, each a
      `gateway.reserved` row. If the second refuses, the first is charged 0
-     at once. A refusal raises `BudgetRefused` before any provider call.
+     at once. A refusal on money raised before any provider call.
+     (Superseded 2026-10-03: metered spending only; nothing refuses on
+     money. The only refusal left is a stopped task, and the worst case is
+     the charge only when the provider reports no usage.)
   3. Ask the primary (unless its input estimate exceeds `max_input_tokens`,
      which is `input_too_large` with no call). Charge it.
   4. Ask the fallback per the table above and charge it; when it is not
@@ -267,9 +272,9 @@ margin, estimated at `bytes_per_token` = 3, which runs high); fallback
 100,000 (its context is 262k; the cap bounds a call's worst case).
 Fallback `max_tokens` 400: the schema's answer is under 100 tokens.
 
-### 2. Metering non-Anthropic calls through `core/budget.py`; the ledger rows
+### 2. Metering non-Anthropic calls through `core/spending.py`; the ledger rows
 
-The port calls `budget.reserve` and `budget.charge` directly (see "Where
+The port calls the module's `reserve` and `charge` directly (see "Where
 this plan differs"). The rows are the same `gateway.reserved` and
 `gateway.charged` rows, so `tasks.money`, the reservation lock, the unique
 index on `call_id`, `status`, and `audit` cover them with no change. Each
@@ -393,9 +398,11 @@ router does not change. One run:
    exists on the task and no `judge.decided` follows it, reuse it (a crash
    between the two costs no second call). Else call `port.judge` with the
    request, the thread (empty), and the project.
-2. `BudgetRefused` returns `{"status": "budget exhausted"}`, writing
-   nothing more; the task stays in `judge` and the next run, after a raise,
-   judges again.
+2. A refusal on money returned the exhausted outcome, writing nothing
+   more; the task stayed in `judge` and the next run, after a raise,
+   judged again. (Superseded 2026-10-03: metered spending only; nothing
+   refuses on money, so this outcome no longer exists. A stopped task still
+   refuses.)
 3. Check `ctx.alive()`, then `verdicts.record_judge(conn, task_id,
    judgement_id)`. The kernel, not the runner, maps the row's action to the
    verdict (proceed `precise`; caution, abstain, or failure `thin`), and
@@ -511,9 +518,10 @@ so.
 leg answering alone: `precise` only when P(precise) is at or above that
 leg's floor, else `thin`. Sub-labels are reported, not scored.
 
-**The run.** `python -m core calibrate SITE CASES.json --budget-usd N`
-(new command). `--budget-usd` is required and refused above $0.50; a cases
-file over 50 cases is refused. It:
+**The run.** `python -m core calibrate SITE CASES.json `
+(new command). It carried a required dollar flag refused above
+$0.50 (removed 2026-10-03: metered spending only; nothing refuses on
+money); a cases file over 50 cases is refused. It:
 
 1. starts a **calibration task**: a task document and a `task.started`
    carrying `calibration: SITE` and no `sdlc` marker. `machine.fold` gives
@@ -521,9 +529,9 @@ file over 50 cases is refused. It:
    returns `calibration task`. Every writer that refuses a legacy task also
    refuses a calibration task by that name (`verdicts._fold`, so every
    verdict; `ensure_merge`; `guards.grant`; `session.answer` and
-   `feedback`), and so do `budget.raise_budget`, `tasks.stop`, and
+   `feedback`), and so did the raise function (since removed), `tasks.stop`, and
    `runs.run_turn` (a calibration task runs no turn). Its `task.started`
-   carries `budget_usd_micros`, which is what `budget.reserve` reads;
+   carried the committed amount the reservation read (no longer written);
    the fold property test generates calibration starts;
 2. calls `ask_leg` for both legs on every case, writing their
    `judgement.answered`/`failed` rows on that task (`ref: {"case": id}`);
@@ -644,8 +652,8 @@ secret is in a dotfile".
 | Primary abstains on a question | the fallback answers; where it also abstains, `on_abstain` | both charged |
 | Primary abstains, fallback fails | the primary's answers stand, abstained questions take `on_abstain` | `judgement.answered` |
 | Both legs fail | judge: thin, to clarify. Breadth and governance: no verdict; the branch reruns on the next run | `judgement.failed` with both reasons |
-| Budget cannot cover both reservations | no provider call; the caller returns `budget exhausted`; the task keeps its state; after `budget raise` the next run asks | `gateway.refused` |
-| Task stopped before the call | `budget.reserve` refuses; the router then sees `stopped` | `gateway.refused` |
+| Committed amount cannot cover both reservations (superseded 2026-10-03: metered spending only; no longer a case) | no provider call; the caller returned the exhausted outcome; the task kept its state; after a raise the next run asked | `gateway.refused` |
+| Task stopped before the call | the open refuses; the router then sees `stopped` | `gateway.refused` |
 | Stop during a call | the call runs out (seconds, under its timeout) and is charged; the verdict write is refused because the task is stopped | charge row, no verdict |
 | Crash after `judgement.answered`, before `judge.decided` | the next run reuses the row, no new call | |
 | Crash between reserve and charge | an open reservation, which `tasks.audit` names, as for the gateway | |
@@ -731,11 +739,13 @@ these: none.
   whose body quotes text appears nowhere in the row.
 - An input over Jev's cap: no Jev request, no Jev reservation, the
   fallback answers.
-- Budget that covers the primary's worst case but not both: zero provider
+- A committed amount that covers the primary's worst case but not both
+  (superseded 2026-10-03: no longer a case): zero provider
   requests, `gateway.refused`, the primary's reservation charged 0, `audit`
   clean.
 - A stopped task: zero provider requests.
-- Twenty concurrent judgements on a budget that fits exactly twelve:
+- Twenty concurrent judgements on a committed amount that fits exactly twelve (superseded 2026-10-03:
+  no longer a case):
   twelve answered, eight refused, never charged past committed.
 - A second outcome row for one `judgement_id`: refused by the index.
 - Every row carries `task_sha256` and `calibrated_sha256`; after a
@@ -769,8 +779,9 @@ the scripted working session:
   records the verdict from that row.
 - `record_judge` refuses an id from another task, from another site, or
   that does not exist; a second `judge.decided` is refused.
-- Budget exhausted at the judge: the run returns `budget exhausted`, the
-  task stays in `judge`; after `budget raise` it moves.
+- Money exhausted at the judge (superseded 2026-10-03: metered spending
+  only; no longer a case): the run returned the exhausted outcome, the
+  task stayed in `judge`; after a raise it moved.
 - Breadth: all false on a green suite is `pass`; `gap_enum` and `gap_bound`
   true together list both; any failure is `red` whatever breadth said; a
   breadth row keyed to an older candidate, after a patch, is refused; a
@@ -789,7 +800,7 @@ the scripted working session:
   lines.
 - A calibration task: the router returns `calibration task`, `verdict`,
   `answer`, `feedback`, and `grant` refuse it by that name; `calibrate`
-  refuses a missing or over-$0.50 budget and a cases file over 50; the
+  refused a missing or over-$0.50 committed amount and a cases file over 50; the
   record's `run` counts up per site.
 - An old task document carrying `mode` loads, and its task folds as before.
 - The emulator's forced arm: `replay.py`'s local upstream answering `thin`
@@ -845,7 +856,7 @@ the kernel checkout:
    from the vault `.env`. Until it exists, `run` refuses to start, naming
    `TYPESAFE_API_KEY`.
 3. One `python -m core calibrate ~/src/valor-demo/items/judgement/intake.underspecified.json
-   --budget-usd 0.05` against the real ledger (about $0.002); its
+   --usd 0.05` (the dollar flag, since removed) against the real ledger (about $0.002); its
    `task_sha256` must equal `JUDGE.calibrated`
    (`32b8245e60649f4884abba82e5d02ea6cfc865acc7ec21f4afb2737af6ff9c21`), and
    its `entry_check` should be true again. Every judgement row carries both
@@ -889,7 +900,7 @@ the kernel checkout:
   the host and quantization in the row's model id.
 - Live spend for the build under $2 total, through the meter, each live
   test declaring its spend.
-- Metering in-process through `budget.reserve`/`charge` with `route:
+- Metering in-process through the module's `reserve`/`charge` with `route:
   judgement`, no HTTP route; both legs reserved before the first call.
 - A second price table for judgement models, apart from the gateway's;
   OpenRouter's float cost converted through `Decimal(str(x))`, rounded up.
@@ -904,7 +915,8 @@ the kernel checkout:
 - Timeouts 10 s and 30 s; input caps 30k and 100k estimated tokens; no
   retries.
 - The calibration task is its own fold flag (`calibration`), not `legacy`.
-- `calibrate`: budget required, at most $0.50; at most 50 cases.
+- `calibrate`: a committed amount required, at most $0.50 (superseded
+  2026-10-03: metered spending only; the flag is gone); at most 50 cases.
 - The cases file and results live in `~/src/valor-demo/`, outside the repo.
 - The builder never writes the kernel key directory: its keys sit in a
   builder-owned directory (`VALOR_PG_PASSFILE=~/.config/valor-kernel-m13/pgpass`,
@@ -933,7 +945,7 @@ Every finding resolved in this revision:
 7. Floors frozen before run 1; only wording changes between runs (as
    built: the rubrics and question, the fallback's system prompt in run 3,
    and a `notes` field in its response schema in run 4).
-8. `calibrate` requires a budget capped at $0.50, refuses over 50 cases,
+8. `calibrate` required an amount capped at $0.50 (since removed), refuses over 50 cases,
    and records the run index.
 9. Forced emulator arms through the scripted local upstream, by endpoint
    setting.
@@ -969,9 +981,9 @@ The rounds were spent, so its findings were resolved in the build:
 6. **Hunks.** Ids and instances from `git.hunks`'s default diff; `-W`
    shapes only the input; one row per hunk id; an unchanged hunk in a
    changed function keeps its id.
-7. **Calibration tasks.** Every legacy-refusing writer, plus raise, stop,
+7. **Calibration tasks.** Every legacy-refusing writer, plus raise (since removed), stop,
    and a turn, refuses them; the property test generates their starts;
-   their `task.started` carries the budget.
+   their `task.started` carried the committed amount.
 8. **CLI bounds** kept: $0.50 and 50 cases.
 
 ## Build record
@@ -985,7 +997,7 @@ Built on `m1.3-judgement` from the plan above and both critique rounds.
    endpoint key rule, one HTTP attempt), `core/judgement_tasks.py` (the
    three declarations), `tools/jev.py`, `tools/open_weight.py`, pins and
    prices in `core/settings.py`.
-2. *Metering and rows.* `budget.judgement_price`, `judgement_worst_case`,
+2. *Metering and rows.* `judgement_price`, `judgement_worst_case`,
    `judgement_cost`, `usd_micros`; `gateway.reserved`/`charged` rows with
    `route: judgement`; `judgement.answered`, `judgement.failed`,
    `judgement.calibrated`; `events_one_judgement` in `core/schema.sql`.
@@ -1062,7 +1074,7 @@ $0.097, under the $2 declared.
 - `uvx ruff check .`: clean. `uvx ruff format --check .`: clean on code;
   it flags a Python block in `docs/bridges/telegram.md`, as on the base.
 - Tests: `tests/test_judgement.py` (the gate, the merge, metering,
-  malformed answers, budget and stop, keys and endpoints, declarations,
+  malformed answers, money and stop, keys and endpoints, declarations,
   decoding by Hypothesis), `tests/test_judgement_sites.py` (the judge
   runner, breadth and governance through `record_check`, calibration
   tasks, the forced arm), `tests/test_live_judgement.py`, and the fold
@@ -1089,7 +1101,7 @@ On top of the docs session's `de2ce902a`. Every finding resolved:
 - **R2, calibration provenance.** `python -m core calibrate` refuses any
   leg endpoint but the provider's, naming it, before it reads a key; every
   `judgement.calibrated` record carries `endpoints` (each leg's host) and
-  prints it. Arguments are checked first (budget, cases file, site).
+  prints it. Arguments are checked first (committed amount, cases file, site).
 - **R4.** The plan, the declaration's comment ("fitted over runs 1 to 5"),
   and judgement-layer.md now say that run 3 changed the fallback's system
   prompt and run 4 its response schema.
@@ -1111,7 +1123,7 @@ On top of the docs session's `de2ce902a`. Every finding resolved:
 - The gate rounds the summed probability to nine places, so a sum a hair
   under its floor from float addition meets it.
 
-Tests added: the gate at and either side of each floor on both legs; normalizing; charging a malformed answer, an unreadable reported cost, and a refusal; the fallback's reservation refused after the primary's (charged 0, unused); calibrate's command refusals and the record's endpoints; budget refusals at breadth and governance; the test-path split; too large for both legs; a new candidate's reruns; caller behaviors refused; two hunks with one id asked once; the plain hunk for a vast function; a changed function re-asking an unchanged hunk; a reviewer's line inside a kernel instance; docs governance over the candidate-to-docs-head range; calibration tasks refusing a turn and review and docs verdicts; a stopped judge; and `tests/test_replay_arms.py` for `judged_as`.
+Tests added: the gate at and either side of each floor on both legs; normalizing; charging a malformed answer, an unreadable reported cost, and a refusal; the fallback's reservation refused after the primary's (charged 0, unused); calibrate's command refusals and the record's endpoints; money refusals at breadth and governance; the test-path split; too large for both legs; a new candidate's reruns; caller behaviors refused; two hunks with one id asked once; the plain hunk for a vast function; a changed function re-asking an unchanged hunk; a reviewer's line inside a kernel instance; docs governance over the candidate-to-docs-head range; calibration tasks refusing a turn and review and docs verdicts; a stopped judge; and `tests/test_replay_arms.py` for `judged_as`.
 
 ## Repair round
 

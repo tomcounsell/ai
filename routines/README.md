@@ -5,7 +5,7 @@ Every scheduled task and runner.
 ## Scope
 
 - launchd plists and the routines they run.
-- Every routine is a budgeted objective in `core/`, with a money budget and an effect ceiling. A routine is never a bare script.
+- Every routine is an objective in `core/` with an effect ceiling. A routine is never a bare script.
 - Extraction follows the mission rule: a routine exists on a demonstrated second need, and one unused for ninety days is deleted by default.
 
 Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [docs/machine.md](../docs/machine.md).
@@ -20,7 +20,7 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 - A routine's ceiling is set when its objective is committed and never widens at run time.
 - Most routines are `read` (sweeps, reports) or `propose` (drafts, branches, proposed memory).
 - An `act` inside a routine needs Tom's tap per action like any other. A schedule is not a standing approval.
-- Spend is metered against the routine's budget; exhausting it stops the routine.
+- Spend is metered on each run's task and the routine's spending over its period is reported; money never stops a routine.
 
 ## Not here
 
@@ -28,5 +28,5 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 
 - Long-running services (bridges, the kernel process). Those are started by launchd but live in their own directories.
 - Watchdogs that kill or restart other processes on heuristics. Stop and recovery are `core/`.
-- Scripts that run outside a budgeted objective.
+- Scripts that run outside an objective in `core/`.
 - Scheduling logic inside `tools/` or `bridges/`.

@@ -5,7 +5,7 @@ migrate [--db NAME]            create the role, the database, the schema, and
 secure-login                   the kernel databases' password file, both roles'
                                passwords, and the pg_hba.conf rules; idempotent
 settings                       every setting, as shell assignments
-start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
+start INSTRUCTION [--ceiling C] [--workspace DIR]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
       [--by B] [--role-played]
                                start a task; prints its id. `--model` takes a
@@ -13,7 +13,7 @@ start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
                                The task starts in judge. The merge lands on
                                `--target-branch` (default: the branch origin's
                                HEAD names) at origin's URL as it is now
-start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] --budget-usd N ...
+start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] ...
                                provision the task's workspace from a project
                                spec (clone at the base, bare origin, kernel
                                mirror, its own Postgres and Redis, setup), then
@@ -31,9 +31,9 @@ judgement-keys                 copy the judgement legs' keys from the vault
                                .env into the kernel's key file (mode 600);
                                prints each name with written, kept, or
                                missing, never a value
-calibrate CASES.json --budget-usd N
+calibrate CASES.json
                                both judgement legs alone on every labelled
-                               case (at most 50, at most $0.50), one
+                               case (at most 50), one
                                calibration task, one judgement.calibrated
                                record on the judgement stream; prints it
 answer TASK_ID TEXT [--by B] [--role-played]
@@ -54,11 +54,9 @@ grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
 status TASK_ID                 the task as a fold over its ledger: its state,
-                               loops, candidate, checks, and the attention log
-                               (questions, answers, feedback, approvals, raises,
-                               manual verdicts, grants) and its counts
-budget raise TASK_ID N [--note T] [--by B] [--via V] [--role-played]
-                               add N US dollars to the task's committed budget
+                               loops, candidate, checks, metered spending, and
+                               the attention log (questions, answers, feedback,
+                               approvals, manual verdicts, grants) and its counts
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task now, wherever its turn runs
 pending                        act-class effects held for Tom
@@ -88,7 +86,6 @@ from pathlib import Path
 from core import (
     backup,
     broker,
-    budget,
     corrections,
     credentials,
     db,
@@ -180,7 +177,7 @@ def _usd(micros: int) -> str:
 
 def _status_line(task_id: str, out: dict) -> str:
     state = out.get("state") or {}
-    spent = f"spent {_usd(state.get('charged_usd_micros', 0))}, remaining {_usd(state.get('remaining_usd_micros', 0))}"
+    spent = f"metered spending: {_usd(state.get('spent_usd_micros', 0))}"
     status = out["status"]
     if status == "waiting":
         q = next(a for a in state["attention"] if a["kind"] == "question" and a["answer"] is None)
@@ -222,7 +219,6 @@ def _status_line(task_id: str, out: dict) -> str:
         "legacy": "this task predates the state machine; it is read-only",
         "already running": "another run of this task is in progress",
         "lock lost": "the run's lock connection died; run again",
-        "budget exhausted": "the budget is spent",
         "failed": f"the turn failed: {turn.get('stderr_tail') or turn.get('result')}",
         "idle": f"{settings.idle_turns} turns ended without their stage's signal",
     }[status]
@@ -293,7 +289,6 @@ async def _start_project(conn, args) -> str:
             brief = tasks.Brief(
                 id=task_id,
                 instruction=args.instruction,
-                budget_usd_micros=round(args.budget_usd * 1_000_000),
                 max_effect_class=args.ceiling,
                 model=resolve_model(args.model),
                 **made.brief_fields(),
@@ -417,7 +412,7 @@ async def _run(args) -> None:
         return
     if args.command == "calibrate":
         try:
-            judgement_sites.check_calibration(args.cases, round(args.budget_usd * 1_000_000))
+            judgement_sites.check_calibration(args.cases)
         except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
         elsewhere = [
@@ -434,10 +429,8 @@ async def _run(args) -> None:
         except (credentials.MissingKey, ValueError) as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
         try:
-            record = await judgement_sites.calibrate(
-                judgement_port, settings.dsn(), args.cases, round(args.budget_usd * 1_000_000)
-            )
-        except (ValueError, budget.BudgetRefused) as exc:
+            record = await judgement_sites.calibrate(judgement_port, settings.dsn(), args.cases)
+        except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
         print(json.dumps(record, indent=2))
         return
@@ -453,7 +446,6 @@ async def _run(args) -> None:
                 raise SystemExit(str(exc)) from None
             brief = tasks.Brief(
                 instruction=args.instruction,
-                budget_usd_micros=round(args.budget_usd * 1_000_000),
                 max_effect_class=args.ceiling,
                 workspace=workspace,
                 model=resolve_model(args.model),
@@ -499,7 +491,9 @@ async def _run(args) -> None:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"granted {args.instance} as {guard_id}; continue with: python -m core run {args.task_id}")
         elif args.command == "status":
-            print(json.dumps(await tasks.status(conn, args.task_id), indent=2))
+            state = await tasks.status(conn, args.task_id)
+            state["metered_spending"] = _usd(state["spent_usd_micros"])
+            print(json.dumps(state, indent=2))
         elif args.command == "ledger":
             print(ledger.render(await ledger.read(conn, args.task_id)))
         elif args.command == "stop":
@@ -548,30 +542,6 @@ async def _run(args) -> None:
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
-        elif args.command == "budget":
-            try:
-                raise_id = await budget.raise_budget(
-                    conn,
-                    args.task_id,
-                    round(args.usd * 1_000_000),
-                    note=args.note,
-                    by=args.by,
-                    via=args.via,
-                    role_played=args.role_played,
-                )
-            except tasks.TaskStopped:
-                raise SystemExit(f"task {args.task_id} is stopped; a stopped task takes no raise") from None
-            except tasks.CalibrationTask as exc:
-                raise SystemExit(str(exc)) from None
-            except KeyError:
-                raise SystemExit(f"no task {args.task_id}") from None
-            except ValueError as exc:
-                raise SystemExit(str(exc)) from None
-            state = await tasks.status(conn, args.task_id)
-            print(
-                f"raise {raise_id} recorded; committed {_usd(state['committed_usd_micros'])}, "
-                f"remaining {_usd(state['remaining_usd_micros'])}"
-            )
 
 
 def _secure_login() -> dict:
@@ -643,7 +613,6 @@ def main() -> None:
     sub.add_parser("migrate").add_argument("--db")
     start = sub.add_parser("start")
     start.add_argument("instruction")
-    start.add_argument("--budget-usd", type=float, required=True)
     start.add_argument("--ceiling", default="propose", choices=list(tasks.EFFECT_RANK))
     start.add_argument("--workspace")
     start.add_argument("--model", default="light")
@@ -715,14 +684,6 @@ def main() -> None:
     sub.add_parser("judgement-keys")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
-    calibrate.add_argument("--budget-usd", type=float, required=True)
-    raise_ = sub.add_parser("budget").add_subparsers(dest="budget_command", required=True).add_parser("raise")
-    raise_.add_argument("task_id")
-    raise_.add_argument("usd", type=float)
-    raise_.add_argument("--note", default="")
-    raise_.add_argument("--by", default="tom")
-    raise_.add_argument("--via", default="the command line")
-    raise_.add_argument("--role-played", action="store_true")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     restore = sub.add_parser("restore")
     restore.add_argument("dump")

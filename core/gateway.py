@@ -5,9 +5,8 @@ pointed at it through `ANTHROPIC_BASE_URL` with a per-turn token in the
 path, so every call the harness makes, including its own side calls, passes
 through here. For each `POST /v1/messages` the gateway:
 
-1. prices the model and reserves the call's worst case against the task's
-   remaining budget (refused, with a ledger row, if it does not fit or the
-   task is stopped);
+1. prices the model and opens the call with a ledger row (refused, with a
+   ledger row, only when the task is stopped);
 2. forwards the request upstream and streams the response back unchanged,
    reading the usage the provider reports as it passes;
 3. charges what the provider reported when the call closes.
@@ -50,7 +49,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from core import binaries, budget, db
+from core import binaries, db, spending, tasks
 from core.ledger import new_id
 from core.settings import settings
 
@@ -359,24 +358,25 @@ class Gateway:
             max_tokens = int(message.get("max_tokens") or 0)
         except ValueError, KeyError, TypeError:
             return _error(400, "invalid_request_error", "gateway could not read the request")
-        price = budget.prices(model)
+        price = spending.prices(model)
         if price is None:
             return _error(400, "invalid_request_error", f"model {model} has no price")
-        estimated = budget.estimate_input(message)
+        estimated = spending.estimate_input(message)
         call_id = new_id()
         call = {
             "call_id": call_id,
             "turn_id": grant.turn_id,
             "model": model,
+            "route": "gateway",
             "estimated_input": estimated,
             "max_tokens": max_tokens,
-            "usd_micros": budget.worst_case(estimated, max_tokens, price),
+            "estimate_usd_micros": spending.worst_case(estimated, max_tokens, price),
         }
         async with await db.connect(self.dsn) as conn:
             try:
-                await budget.reserve(conn, grant.task_id, call)
-            except budget.BudgetRefused as refused:
-                return _error(400, "invalid_request_error", f"budget refused: {refused}")
+                await spending.open_call(conn, grant.task_id, call)
+            except tasks.TaskStopped:
+                return _error(400, "invalid_request_error", "refused: the task is stopped")
 
         meter = Meter()
         status = None
@@ -427,14 +427,14 @@ class Gateway:
         if unsent:
             charged = 0
         elif meter.complete:
-            charged = budget.cost(meter.usage, price)
+            charged = spending.cost(meter.usage, price)
         elif meter.started:
             # Input as reported, every allowed output token: never under the invoice.
-            charged = budget.cost({**meter.usage, "output_tokens": call["max_tokens"]}, price)
+            charged = spending.cost({**meter.usage, "output_tokens": call["max_tokens"]}, price)
         elif status is not None and status >= 400:
             charged = 0  # the provider refused before generating: nothing billed
         else:
-            charged = call["usd_micros"]
+            charged = call["estimate_usd_micros"]  # no usage reported: the worst case
         detail = {
             "turn_id": grant.turn_id,
             "model": call["model"],
@@ -446,7 +446,7 @@ class Gateway:
             "usage": meter.usage,
         }
         async with await db.connect(self.dsn) as conn:
-            await budget.charge(conn, grant.task_id, call["call_id"], charged, detail)
+            await spending.charge(conn, grant.task_id, call["call_id"], charged, detail)
 
 
 def _response_headers(up: aiohttp.ClientResponse) -> dict[str, str]:

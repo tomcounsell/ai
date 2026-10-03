@@ -19,7 +19,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, budget, db, guards, ledger, machine, router, session, tasks, verdicts
+from core import broker, db, guards, ledger, machine, router, session, tasks, verdicts
 from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -202,7 +202,7 @@ def test_an_unborn_origin_head_needs_the_flag_and_a_detached_head_is_refused(tmp
     git(ws, "checkout", "-q", "--detach")
     with pytest.raises(tasks.WorkspaceRefused, match="detached"):
         tasks.resolve_workspace(str(ws), "main")
-    out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--target-branch", "main")
+    out = cli("start", "x", "--workspace", str(ws), "--target-branch", "main")
     assert out.returncode == 1 and "detached" in out.stderr
 
 
@@ -782,8 +782,6 @@ def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
                 await verdicts.record_check(conn, task, Check.TEST, "pass")
             with pytest.raises(LookupError):
                 await guards.grant(conn, task, "i", note="x", incident="i", mission_item="1")
-            with pytest.raises(tasks.TaskStopped):
-                await budget.raise_budget(conn, task, 1_000)
             after = len(await ledger.read(conn, task))
         out = await drive(dsn, task)
         return before, after, out
@@ -816,7 +814,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
     head = git(ws, "rev-parse", "HEAD")
 
     async def go():
-        b = tasks.Brief(instruction="old", budget_usd_micros=0, max_effect_class="act", workspace=str(ws))
+        b = tasks.Brief(instruction="old", max_effect_class="act", workspace=str(ws))
         async with await db.connect(dsn) as conn, conn.transaction():
             await conn.execute(
                 "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
@@ -831,7 +829,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
                     ),
                 ),
             )
-            await ledger.append(conn, b.id, "task.started", {"instruction": "old", "budget_usd_micros": 0,
+            await ledger.append(conn, b.id, "task.started", {"instruction": "old",
                                                              "max_effect_class": "act", "mode": "bare"})  # fmt: skip
             await ledger.append(conn, b.id, "task.delivered", {"turn_id": "t", "summary": "done"})
         broker.register(PushBranch(ws))
@@ -1133,7 +1131,7 @@ def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_p
 
 def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters_provenance(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
-    out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--by", "stand-in", "--role-played")
+    out = cli("start", "x", "--workspace", str(ws), "--by", "stand-in", "--role-played")
     assert out.returncode == 0, out.stderr
     task = out.stdout.strip()
     got = run(rows(dsn, task))
@@ -1142,9 +1140,9 @@ def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters
         got[0]["payload"]["provenance"]["by"] == "stand-in" and got[0]["payload"]["provenance"]["role_played"]
     )
     assert "mode" not in got[0]["payload"]
-    assert cli("start", "x", "--budget-usd", "1", "--mode", "bare").returncode == 2  # the flag is gone
+    assert cli("start", "x", "--mode", "bare").returncode == 2  # the flag is gone
     with pytest.raises(TypeError):
-        tasks.Brief(instruction="x", budget_usd_micros=0, mode="bare")
+        tasks.Brief(instruction="x", mode="bare")
     by_hand = cli("verdict", task, "judge", "precise")
     assert by_hand.returncode == 1 and "judge has a runner" in by_hand.stderr
 
@@ -1678,9 +1676,7 @@ def test_an_outcome_reconcile_wrote_first_stands_over_the_performers(dsn, owner_
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(
-                conn, tasks.Brief(instruction="x", budget_usd_micros=0, max_effect_class="act")
-            )
+            task = await tasks.start(conn, tasks.Brief(instruction="x", max_effect_class="act"))
             held = await broker.request(conn, task, broker.Action("raced", "t", {"n": 1}))
             await broker.approve(conn, held.effect_id, note="go")
             out = await broker.release(conn, held.effect_id)

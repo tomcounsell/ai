@@ -378,7 +378,7 @@ session; the kernel connects directly. Then it folds, and: `waiting`,
 and folds again; a state without one returns `no runner`. In `checks` it
 runs each branch still missing a verdict for the current candidate, one at
 a time (the Air's one turn slot), and returns `no runner` naming the
-branches it could not run. Budget exhaustion, two idle turns, and a failed
+branches it could not run. The money-exhausted outcome (removed 2026-10-03: metered spending only; nothing refuses on money), two idle turns, and a failed
 turn return as today. The router never writes a verdict.
 
 `status` returns the fold: `state` is now the machine state's name, plus
@@ -649,7 +649,7 @@ scripted turns as in `test_session.py`). All spend $0 except the two
 **States and Tom's rows.**
 - A stopped task in every state (each of the eleven reached by its own
   prefix, then stopped): the fold says `stopped`; `run` returns without a
-  turn; `answer`, `feedback`, `verdict`, `grant`, and `budget raise` are
+  turn; `answer`, `feedback`, `verdict`, `grant`, and the raise command (since removed) are
   refused; a row appended after the stop by raw insert changes nothing.
 - `answered` returns to the state named on `question.asked`, for each of
   `clarify`, `plan`, `build`, `patch`, and the next turn's prompt holds

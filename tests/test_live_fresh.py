@@ -42,7 +42,7 @@ def test_a_real_fresh_critique_session_leaves_a_verdict_through_the_gateway(dsn,
     light = resolve_model("light")
 
     async def go():
-        task, b = await scripted.provisioned(dsn, tmp_path, budget_usd_micros=400_000)
+        task, b = await scripted.provisioned(dsn, tmp_path)
         ws = Path(b.workspace)
         gateway = Gateway(dsn, credential=ClaudeLogin())
         await gateway.start()

@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial at $6.09 of $8 in build, no candidate, needs another raise from Tom; then 1.4b, then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial continues on Valor's Mac (build metered $6.09, no candidate; spending never stops it, Tom 2026-10-03) after pull and migrate, with core run 75c0902b6e25; then 1.4b, then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -446,7 +446,7 @@ task id, under a session advisory lock (`workspace:ports`) held through
 the start transaction. Anything that fails before `task.started` is
 written removes the directory and stops its services, and no task row
 exists. `python -m core start INSTRUCTION --project NAME [--base SHA]
---budget-usd N ...` provisions and starts; `--workspace DIR` stays for the
+...` provisions and starts; `--workspace DIR` stays for the
 scripts and the tests that build their own.
 
 **Per repository kind**, what "the app's environment so the suite can
@@ -673,7 +673,7 @@ The mirror fetch:
   safely tolerates, never exhausting its memory) is cut by the size limit
   or the footprint watchdog and leaves no ref.
 
-Services after a crash, on the 16 GB budget:
+Services after a crash, on the 16 GB machine:
 - Task A's run is killed with SIGKILL while its cluster and Redis are up;
   task B's next run stops them first (`services.reaped` lists them), and
   the summed footprint of every service process left on the machine is
@@ -1130,7 +1130,7 @@ as before and stay in the attention log.
 - **RAM.** `verify_memory_mb` (default 2,048) and `verify_cpus` (4). On
   the 16 GB machine the VM runs alone in the turn slot, before the Opus
   turn, with only the kernel, Postgres, and the task's services beside it
-  (about 4.7 GB with the bridges); 2 GB fits the slot's budget. The build
+  (about 4.7 GB with the bridges); 2 GB fits the slot. The build
   measures, on this 64 GB machine, the VM's footprint idle, under this
   repository's suite, and under a Django suite with Postgres, at 1 GB, 2
   GB, and 4 GB limits, plus the container system's resident daemons, and
@@ -1416,7 +1416,7 @@ Evidence: `cd ~/src/valor-rebuild-m14 && VALOR_TEST_DB=valor_rebuild_test_m14
 .venv/bin/python -m pytest -q tests` (see the done note for the counts);
 `uvx ruff check .` and `uvx ruff format --check` on the code clean.
 `VALOR_LIVE=1 ... tests/test_live_fresh.py` passed once, metering $0.034
-(an earlier attempt that ran out of its $0.15 budget metered $0.066).
+(an earlier attempt that stopped at the $0.15 it started with metered $0.066; superseded 2026-10-03: metered spending only; nothing refuses on money).
 `tests/test_live_session.py` was rewritten for `start --project` and the
 critique runner and not run (it now runs an Opus critique, up to $1.00).
 
@@ -1587,14 +1587,15 @@ and docs runners, routing on the entry check, no calibration-first), then
 1.4d (the GitHub credential), with 1.4c (the container verifier) after
 takeover.
 
-## The popoto #191 trial run (stopped at the spend cap)
+## The popoto #191 trial run (stopped at a spending cap)
 
 Run 2026-10-02 on Valor's Mac, in the real ledger, as task `75c0902b6e25`
-(`scripts/replay.py pop-b.json --arm routed --budget 4.5`, the real
+(`scripts/replay.py pop-b.json --arm routed` with $4.50 committed, the real
 judgement legs, Opus 5.5 for every turn). The ledger was dumped to the
-backup disk first. It did not reach a held merge: the build ran out of
-money before it produced a candidate, and finishing would pass the $5 cap
-this plan set. Nothing more is spent on it until Tom answers.
+backup disk first. It did not reach a held merge: the build stopped on its
+per-call reservation before it produced a candidate, and finishing would
+have passed a $5 cap this plan set. Superseded 2026-10-03: metered
+spending only; nothing refuses on money (see Tom's decision below).
 
 What the pipeline did, with the metered spend of each turn:
 
@@ -1609,20 +1610,23 @@ What the pipeline did, with the metered spend of each turn:
 | build, turn 1 | stopped: the next call's reservation ($1.44) exceeded what was left ($1.38) | $0.93 |
 | build, turn 2 | after a $1.75 raise; stopped the same way (reservation $1.74, $1.65 left) | $1.49 |
 
-Total metered: $4.60 of $6.25 committed. The workspace holds about 380
+Total metered: $4.60 of the $6.25 committed to the task. The workspace holds about 380
 uncommitted lines across four files of popoto, with no tests yet.
 
 What Tom would have had to do: nothing up to the build (no question, no
-tap). Then two budget raises, one of which the driving session made under
-this plan's $5 cap (`budget.raised`, role played, with the reason).
+tap). Then two raises of the committed amount, one of which the driving session
+made under this plan's $5 cap (role played, with the reason; both recorded
+in the ledger as the legacy raise rows). Superseded 2026-10-03: metered
+spending only; raises no longer exist.
 
 Findings:
 
-1. **A budget's last $1.40 to $1.75 cannot be spent.** Each Opus call
+1. **The last $1.40 to $1.75 of the committed amount could not be spent.** Each Opus call
    reserves its worst case (32,000 output tokens on the turn's whole
-   context) before it runs, so a turn stops with that much left. The tail
-   grows with the context.
-2. **The build turn starts carrying the whole working session.** The first
+   context) before it runs, so a turn stopped with that much left. The tail
+   grew with the context. It no longer exists: the reservation refusal is
+   removed (see below), and the finding stands as a cost finding only.
+2. **The build turn starts carrying the whole working session.** (Stands as a cost finding for 1.4b.) The first
    build call already sent about 70,000 input tokens (clarify, plan, and the
    revision, resumed), and every call after resends it. The bare baseline
    did this whole item in one turn for $1.57, and its clarify run for $1.75.
@@ -1637,24 +1641,32 @@ Findings:
 4. The judge, clarify, plan, critique, and fresh-session pieces all ran as
    built in 1.4a, with no manual step.
 
-**Recommendation to Tom:** raise this trial's cap to $8 (the default task
-budget) and let the build finish to a held merge, with `verdict` playing
+**Recommendation to Tom (superseded 2026-10-03: metered spending only;
+nothing refuses on money):** raise this trial's cap to $8 and let the build finish to a held merge, with `verdict` playing
 test, review, and docs. The build needs about $1.50 to $2.50 more, and the
 checks and the merge have not yet run on a provisioned task. Findings 1
-and 2 then go into 1.4b's plan as questions about the reservation size and
+and 2 then go into 1.4b's plan as questions about the call's worst-case size and
 whether the build should start a fresh session from the plan.
 
 ### Tom's answer, and the third build turn
 
-Tom raised the cap to $8 (`budget.raised`, by Tom, 2026-10-02). Build turn
+Tom raised the cap to $8 (by Tom, 2026-10-02; the legacy raise row). Build turn
 3 metered $1.49 and stopped the same way, with $1.91 left that the next
-reservation exceeded. Total metered: $6.09 of $8.00. The workspace now
+reservation exceeded. Total metered: $6.09 of the $8.00 then committed. The workspace now
 holds about 460 uncommitted lines across seven files, a new
 `tests/test_capped_list_field.py`, and doc edits, but no candidate yet. The
 task is in `build`; no service of it is running.
 
-Next: with $1.91 left and reservations near $1.75, one more turn gets
-almost nothing. Finishing needs another raise (about $2), which is past the
-$8 Tom set, so it is his call again. Then `python -m core run
-75c0902b6e25`, and at `NO RUNNER` fresh subagents play test, review, and
-docs through `python -m core verdict`, stopping at the held merge.
+Next (before Tom's decision): another raise of about $2 was needed, past the
+$8 Tom had set. Superseded by the decision below.
+
+### Tom's decision, 2026-10-03
+
+Metered spending only: cost is information, and nothing refuses, pauses, or
+asks Tom because of money. The reservation refusal and raises are removed
+from the kernel. The trial continues on Valor's Mac after pulling and
+running `python -m core migrate`, with `python -m core run 75c0902b6e25`.
+Then fresh subagents play test, review, and docs through `python -m core
+verdict`, stopping at the held merge. Findings 1 and 2 stand as cost
+findings: the reservation tail no longer exists, and the context-carrying
+build is still a cost finding for 1.4b.

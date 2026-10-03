@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, budget, db, ledger, router, session, signals, tasks
+from core import broker, db, ledger, router, session, signals, spending, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
 from tests import judgement_upstream, scripted
@@ -214,27 +214,16 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
 
 
-def test_a_spent_budget_runs_no_turn(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-
-    async def go():
-        task = await scripted.start(dsn, ws, budget_usd_micros=0)
-        return await drive(dsn, task)
-
-    assert run(go())["status"] == "budget exhausted"
-    assert scripted.turns(ws) == []
-
-
 def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():
-    price = budget.prices("claude-opus-5-5")
+    price = spending.prices("claude-opus-5-5")
     assert price["input"] == 4_000_000 and price["output"] == 20_000_000
-    assert budget.prices("claude-opus-5-20260101")["input"] == 5_000_000
+    assert spending.prices("claude-opus-5-20260101")["input"] == 5_000_000
     usage = {
         "cache_creation_input_tokens": 1_000_000,
         "cache_creation": {"ephemeral_5m_input_tokens": 250_000, "ephemeral_1h_input_tokens": 750_000},
     }
-    assert budget.cost(usage, price) == round(0.25 * 5_000_000 + 0.75 * 8_000_000)
-    assert budget.cost({"cache_creation_input_tokens": 1_000_000}, price) == 8_000_000
+    assert spending.cost(usage, price) == round(0.25 * 5_000_000 + 0.75 * 8_000_000)
+    assert spending.cost({"cache_creation_input_tokens": 1_000_000}, price) == 8_000_000
 
 
 def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monkeypatch):
@@ -282,7 +271,7 @@ def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_r
         async with await db.connect(dsn) as conn:
             return await tasks.start(
                 conn,
-                tasks.Brief(instruction="x", budget_usd_micros=1_000, workspace=str(tmp_path)),
+                tasks.Brief(instruction="x", workspace=str(tmp_path)),
             )
 
     task = run(start())

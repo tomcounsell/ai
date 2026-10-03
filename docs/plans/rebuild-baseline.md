@@ -17,7 +17,7 @@ demonstration (psyoptimal #894) is included from its own record.
 ## Setup
 
 - Model claude-opus-5-5 for every turn, metered by the kernel's gateway,
-  budget $8 per run, effect ceiling `act`, no governance grant. Pushes went
+  $8 committed per run, effect ceiling `act`, no governance grant. Pushes went
   only to each run's local bare origin.
 - A stand-in for Tom (Sonnet, `scripts/role_play_tom.py`) answered from a
   per-item answer key and reviewed each delivery as project manager, at most

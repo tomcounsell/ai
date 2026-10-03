@@ -4,7 +4,7 @@ The read-only dashboard.
 
 ## Scope
 
-- Views over `core/` read models: tasks, budgets and spend, the ledger, pending approvals, the attention log.
+- Views over `core/` read models: tasks, metered spending, the ledger, pending approvals, the attention log.
 - Read-only. Approvals are given on the approval surface, not here.
 
 Governed by [docs/tech-stack.md](../docs/tech-stack.md) (Surfaces) and [docs/mission.md](../docs/mission.md) (The attention log).

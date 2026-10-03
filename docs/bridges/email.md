@@ -18,7 +18,7 @@ sections say what a conforming implementation keeps and what it hands to
 |---|---|
 | Email as a second door for requests, answers, and feedback | Mission item 1: work arrives the way the people around Tom already send it |
 | Threads bound to tasks through `Message-ID`, `In-Reply-To`, and `References` | Constraint "Reliable stop, recovery, and correction": feedback and answers carry provenance and reach the right task |
-| Every send an `act` effect, with recipients inside the approved digest | Constraint "Bounded authority and spend"; effect classes [11] |
+| Every send an `act` effect, with recipients inside the approved digest | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Receipt acknowledged only after the ledger commits; sends reconciled by `Message-ID` | Constraint "Reliable stop, recovery, and correction": nothing is lost or sent twice |
 | Inbound mail treated as data, never as authority | Retrieved content can act as instructions [7] |
 

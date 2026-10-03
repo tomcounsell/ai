@@ -5,7 +5,7 @@ by `record_messages.py`; see `recorded.json`).
 Every expected charge is worked by hand from the fixture's usage and the
 Haiku 4.5 price checked on 2026-10-01 ($1 input and $5 output per million
 tokens, which is 1 and 5 micro-dollars per token), never computed by
-`budget.cost`.
+`spending.cost`.
 
 Live spend: none.
 """
@@ -17,7 +17,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from core import db, tasks
+from core import db, ledger, spending, tasks
 from core.gateway import Gateway
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -60,7 +60,7 @@ def _call(dsn, body: bytes, *, status: int = 200, content_type: str, chunk: int 
     async def go():
         runner, url = await _upstream(body, status=status, content_type=content_type, chunk=chunk)
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="meter", budget_usd_micros=100_000))
+            task = await tasks.start(conn, tasks.Brief(instruction="meter"))
         gateway = Gateway(dsn, upstream=url)
         await gateway.start()
         base = gateway.issue(task, "turn-1")
@@ -84,10 +84,10 @@ def _call(dsn, body: bytes, *, status: int = 200, content_type: str, chunk: int 
 def _check(result, *, body: bytes, status: int, usd: int, complete: bool):
     (got_status, got_body), state, charged = result
     assert got_status == status and got_body == body  # forwarded byte for byte
-    assert charged["usd_micros"] == usd and state["charged_usd_micros"] == usd
+    assert charged["usd_micros"] == usd and state["spent_usd_micros"] == usd
     assert charged["complete"] is complete
     assert charged["price_checked"] == "2026-10-01"
-    assert not state["open_reservations"] and tasks.audit(state) == []
+    assert not state["open_calls"] and tasks.audit(state) == []
 
 
 def test_a_recorded_stream_is_charged_what_the_provider_reported(dsn):
@@ -99,6 +99,38 @@ def test_a_recorded_stream_is_charged_what_the_provider_reported(dsn):
 def test_the_same_stream_in_seven_byte_chunks_split_mid_line_is_charged_the_same(dsn):
     result = _call(dsn, STREAM, content_type="text/event-stream", chunk=7)
     _check(result, body=STREAM, status=200, usd=COMPLETE, complete=True)
+
+
+def test_a_call_on_a_task_with_any_spend_is_never_refused_for_money(dsn):
+    """Spending is metered, never a wall: a task that has already spent
+    $1,000 and holds a call opened with a $1,000 worst case still has its
+    next call forwarded, opened, and charged."""
+
+    async def go():
+        runner, url = await _upstream(WHOLE, content_type="application/json")
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="spent"))
+            await spending.open_call(
+                conn, task, {"call_id": f"{task}-old", "turn_id": "t", "estimate_usd_micros": 10**9}
+            )
+            await spending.charge(conn, task, f"{task}-earlier", 10**9, {})
+        gateway = Gateway(dsn, upstream=url)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+        body = {**BODY, "max_tokens": 10**8}  # a worst case of $500
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=body) as r:
+            got = r.status
+        await gateway.drain(task)
+        await gateway.close()
+        await runner.cleanup()
+        async with await db.connect(dsn) as conn:
+            return got, await tasks.status(conn, task), [r["type"] for r in await ledger.read(conn, task)]
+
+    got, state, kinds = asyncio.run(go())
+    assert got == 200 and "gateway.refused" not in kinds
+    assert kinds.count("gateway.opened") == 2 and kinds.count("gateway.charged") == 2
+    assert state["spent_usd_micros"] == 10**9 + COMPLETE
+    assert list(state["open_calls"]) == [f"{state['task_id']}-old"]
 
 
 def test_a_recorded_whole_response_is_charged_the_same(dsn):
@@ -146,7 +178,7 @@ def _credentialed_call(dsn, credential, *, status=200, headers=None, path="/v1/m
         await gateway.start()
         try:
             async with await db.connect(dsn) as conn:
-                task = await tasks.start(conn, tasks.Brief(instruction="x", budget_usd_micros=1_000_000))
+                task = await tasks.start(conn, tasks.Brief(instruction="x"))
             base = gateway.issue(task, "turn-1")
             sent = {"authorization": f"Bearer {TURN_TOKEN}", "x-api-key": "sk-turn-key", **(headers or {})}
             async with (
@@ -293,7 +325,7 @@ def _raw_calls(dsn, credential, paths):
         out = {}
         try:
             async with await db.connect(dsn) as conn:
-                task = await tasks.start(conn, tasks.Brief(instruction="x", budget_usd_micros=1_000_000))
+                task = await tasks.start(conn, tasks.Brief(instruction="x"))
             base = gateway.issue(task, "turn-1")
             async with aiohttp.ClientSession() as s:
                 for p in paths:

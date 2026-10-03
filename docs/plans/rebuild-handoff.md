@@ -20,9 +20,12 @@ calibration, the judgement keys, the long-lived Claude token, the demo
 items and results at `~/src/valor-demo`, `GITHUB_PUSH_TOKEN` in the
 vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
 (a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
-Postgres). The popoto #191 trial run (task `75c0902b6e25`) stopped at
-the reservation tail in the build at $6.09 of the $8 Tom set, and waits on Tom for another raise (m1-4-checks.md); then 1.4b, then
-1.4d; 1.4c after takeover. On this Mac a non-interactive shell finds
+Postgres). The popoto #191 trial run (task `75c0902b6e25`) is in `build`
+with $6.09 metered and no candidate; Tom decided on 2026-10-03 that
+spending is metered and never stops a task, and the trial continues on
+Valor's Mac (m1-4-checks.md). After pulling, run `python -m core migrate`
+there (with the `PATH`, `PGPASSFILE`, and `VALOR_BACKUP_DIR` below), then
+`python -m core run 75c0902b6e25`. Then 1.4b, then 1.4d; 1.4c after takeover. On this Mac a non-interactive shell finds
 Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
 `PGPASSFILE`, so commands run with `postgresql@18/bin` first,
 `VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
@@ -65,7 +68,7 @@ switch it off `main`; the rebuild is a separate checkout.
    `~/src/valor-demo/results/` from the built Mac (about 2 MB; they hold
    client request text, so they stay outside the repo). Then
    `.venv/bin/python -m core judgement-keys`, and
-   `.venv/bin/python -m core calibrate ~/src/valor-demo/items/judgement/intake.underspecified.json --budget-usd 0.05`.
+   `.venv/bin/python -m core calibrate ~/src/valor-demo/items/judgement/intake.underspecified.json `.
    Its `task_sha256` must equal `JUDGE.calibrated` in
    `core/judgement_tasks.py` and its `entry_check` must be true.
 7. **The model credential.** The gateway reads the `claude` login from the
@@ -90,8 +93,6 @@ switch it off `main`; the rebuild is a separate checkout.
 
 ## Waiting on Tom
 
-- The popoto #191 trial: raise its budget about $2 past $8 so the build can
-  finish to a held merge, or accept the record as it stands.
 - 1.4d's ruleset is created (2026-10-02, by Tom through his `gh` login):
   ruleset 24370170 on `main` of `tomcounsell/ai`, restrict updates, bypass
   for the repository admin role only, so `valorengels` (push, not admin) is

@@ -24,7 +24,7 @@ Governed by [docs/emulator.md](../docs/emulator.md), [docs/data.md](../docs/data
 
 ## Effect classes
 
-Tests run with the effect classes of what they exercise, under a budget. A test that performs an `act` does so only against a test account, with the ledger recording it like any other.
+Tests run with the effect classes of what they exercise. A test that performs an `act` does so only against a test account, with the ledger recording it like any other.
 
 ## Not here
 

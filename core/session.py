@@ -4,7 +4,7 @@ plan, build, and patch run, each turn resuming the one before.
 Serves Mission item 1 (one working context from inspection to delivery) and
 Mission item 6 (Tom's answer lands in the context that asked). `run` runs
 one state's turns until the task leaves that state, or until there is
-something for Tom: the budget's end, two idle turns, a failed turn, a stop.
+something for Tom: two idle turns, a failed turn, a stop.
 The router (`core/router.py`) decides what runs next.
 
 A turn's prompt is data from the row that moved the task into its state
@@ -53,9 +53,9 @@ async def run(
     gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None = None, alive: Alive = _always
 ) -> dict[str, Any]:
     """Run turns in the task's current working state until it leaves it.
-    Returns `status`: `moved` (the fold left the state), `budget
-    exhausted`, `failed`, `idle`, `stopped`, or `lock lost` (the router's
-    run lock died), with the task's `state` from `tasks.status`."""
+    Returns `status`: `moved` (the fold left the state), `failed`, `idle`,
+    `stopped`, or `lock lost` (the router's run lock died), with the task's
+    `state` from `tasks.status`."""
     dsn = dsn or gateway.dsn
     idle = 0
     async with await db.connect(dsn) as conn:
@@ -69,8 +69,6 @@ async def run(
             now = await tasks.status(conn, task_id)
             if now["state"] != state.value:
                 return {"status": "moved", "state": now}
-            if now["remaining_usd_micros"] <= 0:
-                return {"status": "budget exhausted", "state": now}
             b = await tasks.brief(conn, task_id)
             prompt, resume = await next_prompt(conn, task_id)
         try:
@@ -93,13 +91,10 @@ async def run(
                 brief=b,
             )
             now = await tasks.status(conn, task_id)
-            refused = await _refused_in_turn(conn, task_id, ended["turn_id"])
         if now["state"] == State.STOPPED.value:
             return {"status": "stopped", "state": now, "turn": ended}
         if now["state"] != state.value:
             return {"status": "moved", "state": now, "turn": ended}
-        if refused:
-            return {"status": "budget exhausted", "state": now, "turn": ended}
         if not ok:
             return {"status": "failed", "state": now, "turn": ended}
         idle += 1
@@ -437,14 +432,3 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
         }.get(kind, kind)
         lines.append(f"- {r['action_type']} -> {r['target']} (effect {e['effect_id']}): {said}")
     return "\n".join(lines)
-
-
-async def _refused_in_turn(conn, task_id: str, turn_id: str) -> bool:
-    row = await (
-        await conn.execute(
-            "SELECT 1 FROM events WHERE task_id = %s AND type = 'gateway.refused' "
-            "AND payload->>'turn_id' = %s AND payload->>'reason' <> 'task stopped'",
-            (task_id, turn_id),
-        )
-    ).fetchone()
-    return row is not None

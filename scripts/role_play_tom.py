@@ -13,7 +13,7 @@ the key, at most `--max-feedback` rounds per task; after that it records
 nothing and reports `cap`.
 
 Its model calls run outside the kernel and its sandbox, on this machine's own
-credentials, and are not charged to the task's budget; each is logged to
+credentials, and are not charged to the task; each is logged to
 $VALOR_DEMO/costs.jsonl. The reply goes into the ledger through
 `python -m core answer|feedback --role-played`, by "stand-in (<model>)".
 

@@ -40,9 +40,9 @@ compound the ability to build. Concretely:
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
    regrowing the old system's sprawl.
-6. **Spend attention as carefully as money.** A task carries an attention
-   budget beside its dollar budget. Valor carries routine decisions,
-   investigates failures, and brings consequential choices with evidence and
+6. **Spend attention as carefully as money.** Each task counts the
+   interruptions it costs Tom and shows them beside its metered spending.
+   Valor carries routine decisions, investigates failures, and brings consequential choices with evidence and
    a recommendation. Requiring Tom to adjudicate internal process is a
    product defect.
 
@@ -57,12 +57,13 @@ authority.
 
 Mandatory, verified, and never a place to spend surplus energy.
 
-- **Bounded authority and spend.** Every task carries a money budget and an
-  effect ceiling, conserved down the tree. A classifier decides what a
-  thing is; the kernel decides what it may do. Cheaper capability does not
-  lower the ceiling: it buys better outcomes or lets Tom authorize larger
-  undertakings within the same budget. Scope expansion is Tom's choice;
-  capability gains create that choice.
+- **Bounded authority, metered spending.** Every task carries an effect
+  ceiling, conserved down the tree; every task's spending is metered and
+  shown; spending never stops a task (Tom, 2026-10-03). A classifier decides
+  what a thing is; the kernel decides what it may do. Cheaper capability
+  does not lower the ceiling: it buys better outcomes or lets Tom authorize
+  larger undertakings. Scope expansion is Tom's choice; capability gains
+  create that choice.
 - **Reliable stop, recovery, and correction.** Stop is immediate and lossless.
   A ledger the system cannot edit records every effect. Corrections are
   first-class, carry provenance, and reach every session and agent.
@@ -81,15 +82,23 @@ doc respects (16 GB of RAM, Mac native, Postgres as a document store, one
 identity, three tiers) are owned by `docs/machine.md`, `docs/tech-stack.md`,
 `docs/data.md`, and `docs/persona.md`.
 
-### How "bounded spend" is read
+### How "metered spending" is read
 
-A budget bounds what the gateway meters, and every call a turn makes is
-pointed at the gateway. It is not a wall: a turn that deliberately called
-the provider directly with the machine's Claude login would spend outside
-it, visible only on the provider's invoice. Tom accepted that risk on
-2026-10-01 and chose not to close it, with no separate macOS user for
-turns: budgets are for visibility and honest metering. Bounded authority is
-unchanged by this. Effects on shared targets leave only through the broker,
+Every model call a turn makes is pointed at the gateway, which meters it and
+records its price on its task in the ledger. Metered spending is shown in
+status, delivery, and reports. Nothing refuses, pauses, stops, or asks Tom because
+of money: there is no cap, no committed amount, no remaining amount, and no
+raise. Tom decided this on 2026-10-03: spending is metered, never a gate. The
+popoto #191 trial had stalled three times on an invented cap and a per-call
+refusal, waiting on Tom each time, which is the old system's failure of
+guardrails grinding it to a halt. Stop (`python -m core stop`) is
+unchanged and still refuses every new call on a stopped task.
+
+Metering has one gap. A turn that deliberately called the provider directly
+with the machine's Claude login would spend outside it, visible only on the
+provider's invoice. Tom accepted that risk on 2026-10-01 and chose not to
+close it, with no separate macOS user for turns: the gateway is for
+visibility and honest metering. Bounded authority is unchanged by this. Effects on shared targets leave only through the broker,
 and every `act` waits for Tom's tap.
 
 ### What the governance constraint means in practice
@@ -212,8 +221,8 @@ recovery, and correction**).
 
 What the current kernel does: `question.answered` and `feedback.given`
 carry `by`, `via`, `at`, and `role_played`, and so do `approval.granted`
-and `budget.raised`. `python -m core status` returns the task's `attention`
-list (questions with their answers, feedback, approvals, and raises) in
+and the other attention rows. `python -m core status` returns the task's `attention`
+list (questions with their answers, feedback, and approvals) in
 ledger order, and `attention_counts`, which counts each kind apart, so
 approvals never add to the interruption count of questions and feedback
 (`core/tasks.py`). A row written before a provenance field existed reads it
@@ -231,7 +240,7 @@ Each entry is classified on three axes after the task finishes:
    answer to a question about intent, feedback that sends a delivery back.
    *Authority* is a tap on an `act` effect: a merge, a send, a push. The two
    are counted separately. Authority taps are the price of **Bounded
-   authority and spend** and are not a defect. PM work Valor could have
+   authority, metered spending** and are not a defect. PM work Valor could have
    carried is the defect Mission item 6 names.
 2. **Whether it changed the outcome.** A question whose answer changed what
    got built met the bar Mission item 3 sets. A question whose answer
@@ -256,19 +265,18 @@ result is not progress, and the result shows it: that is what makes attention
 hard to perform against. A count of questions alone is a proxy and would
 drift [14].
 
-### The attention budget
+### The attention cost
 
-Mission item 6 gives each task an attention budget beside its money budget.
-The current kernel's only budget unit is money (`core/tasks.py`, `Brief`);
-attention is recorded and reported. In the design the Brief carries
-`attention_budget`, counted in interruptions: questions and feedback
-rounds, with approvals counted separately, since an approval is the price
+Mission item 6 shows each task's attention cost beside its metered spending.
+The current kernel meters money (`core/spending.py`); attention is recorded and
+reported. In the design a task's attention cost is counted in
+interruptions: questions and feedback rounds, with approvals counted separately, since an approval is the price
 of keeping Valor's authority small rather than a sign it was confused (Tom,
-2026-10-01). The kernel never refuses a question for exceeding it, because a
-refused question makes Valor guess, which costs more attention later;
-crossing it is a ledger row, shown on the delivery. The mechanism is
+2026-10-01). The kernel never refuses a question because of the count, because a
+refused question makes Valor guess, which costs more attention later; the
+count is shown on the delivery. The mechanism is
 `docs/architecture.md`'s (The attention log). Refusing or stopping on the
-attention budget would be a gate, and under the governance constraint it
+attention cost would be a gate, and under the governance constraint it
 would need an incident and Tom's grant.
 
 ## First evidence: the demonstration and the baseline
@@ -293,7 +301,7 @@ be completed."
 | Deliveries | 3; delivery 3 matched all six of Tom's reference answers |
 | Turns | 4, one failed and metered $0 |
 | Model calls | 69 |
-| Spend | $2.97 of a $15.00 budget |
+| Spend | $2.97 |
 | Used | No; a replay of a shipped feature |
 
 Valor inferred three of Tom's six decisions and missed three, and the two

@@ -58,7 +58,7 @@ class Jev:
         return {"model": self.model, "state": dict(inputs), "questions": questions}
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
-        """Input tokens, estimated high enough to reserve: Jev bills a prompt
+        """Input tokens, estimated high enough for a worst case: Jev bills a prompt
         of its own around the request. Over its 35 calibration calls of
         2026-10-02 it billed 0.95 to 1.59 times the body's bytes / 3, and at
         most 189 tokens more (`docs/plans/m1-3-judgement.md`, Patch round 1),

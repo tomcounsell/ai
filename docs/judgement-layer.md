@@ -9,7 +9,7 @@ grants or refuses anything, and never grades frontier work for acceptance.
 
 The tier exists for two reasons. Money (Mission item 6): a closed question
 answered by a frontier model costs dollars where a judgement call costs a
-fraction of a cent. Authority (constraint "Bounded authority and spend"): a
+fraction of a cent. Authority (constraint "Bounded authority, metered spending"): a
 classifier decides what a thing is; the kernel decides what it may do. The
 layer is built so that the second sentence holds by structure.
 
@@ -45,9 +45,9 @@ Any of them can sit behind the port without a change to any caller.
 
 The kernel turns a judgement into an action through a fixed table in kernel
 code. The judgement supplies a label; the table supplies the consequence.
-Serves: constraint "Bounded authority and spend".
+Serves: constraint "Bounded authority, metered spending".
 
-- No judgement changes a budget, an effect ceiling, a `governance_grant`, or
+- No judgement changes an effect ceiling, a `governance_grant`, or
   an approval. Those are kernel facts, and Tom is the only source of the last
   two [11].
 - No `act` proceeds on a judgement. An `act` still needs Tom's tap, one per
@@ -81,7 +81,7 @@ hand.
 Every judgement call site declares one judgement task. The declaration is
 the only per-site choice; nothing about a site is configured elsewhere.
 Serves: Mission item 6 (a site's cost and its error cost are visible in one
-place) and constraint "Bounded authority and spend" (the consumer table is
+place) and constraint "Bounded authority, metered spending" (the consumer table is
 next to the question, so a reader sees what a label can and cannot cause).
 
 | Field | Meaning |
@@ -105,7 +105,7 @@ discovery, so a reader and a test see the same list.
 Two populations are kept apart by tier, not by a field. A call that returns
 one of a closed set of labels is a judgement. A call that returns prose,
 extracts structure, or summarizes is agent work, runs on a frontier model
-inside a task's budget, and is out of this layer.
+inside a task, and is out of this layer.
 
 Error-cost tiers set the landing bar (see "Calibration discipline"):
 
@@ -131,7 +131,7 @@ and Mission item 6 (a failed vendor call does not become a frontier call).
    why, and the consumer applies `on_failure`. It never invents one.
 4. There is no third leg. A judgement never falls back to a frontier model,
    because a fallback that costs a hundred times the primary would turn a
-   vendor outage into a budget event.
+   vendor outage into a spending event.
 
 No leg runs resident on the Mac: 16 GB beside Postgres, one container
 runtime, one `claude -p`, and the bridges leaves no room for a classifier
@@ -194,21 +194,22 @@ endpoint; a missing key refuses `run` or `calibrate`, naming it. Any other
 endpoint must be on loopback and gets a fixed placeholder, so tests and
 the emulator's forced arms need no key; `calibrate` takes only providers.
 
-**Metering.** Every call is metered against its task's money in the
-kernel process, through `core/budget.py`'s `reserve` and `charge`: the
+**Metering.** Every call is metered and recorded on its task in the
+kernel process, through `core/spending.py`'s open and `charge`: the
 gateway's rows with `route: judgement`, and no HTTP route, since no turn
-makes these calls. Both legs' worst cases are reserved before the first
-call: estimated input at the input price plus every output token allowed.
-Input is estimated as bytes / 3 of the request body; for Jev, which bills a
+makes these calls. Each leg's call opens with a `gateway.opened` row whose
+estimate is the worst case: estimated input at the input price plus every
+output token allowed. The estimate gates nothing; it is the charge only
+when billing is unknown. Input is estimated as bytes / 3 of the request body; for Jev, which bills a
 prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
 question, sized from Jev's 35 calibration calls, all single-question judge
 calls of at most 1,016 estimated tokens (`tools/jev.py`); 1.4's breadth and
 governance calibrations re-check it. The unused fallback is charged 0. A
 charge is the usage at the pinned price (`JUDGEMENT_PRICES`) or the
 reported cost if more, rounded up; the
-whole reservation when billing is unknown; 0 when nothing reached the
+worst-case estimate when billing is unknown; 0 when nothing reached the
 provider or it returned an error status. Serves: constraint "Bounded
-authority and spend".
+authority, metered spending".
 
 **Rows.** Each judgement writes one `judgement.answered` or
 `judgement.failed` row to the task's stream (`events_one_judgement`: one
@@ -282,10 +283,10 @@ a stand-in (`role_played`), and how many came from a judge; the pinned model
 of each leg; the floors; the task's `task_sha256`; the run's number for its
 site; and the date.
 
-**How a record is made.** `python -m core calibrate CASES.json --budget-usd
-N` (at most 50 cases and $0.50; provider endpoints only, see Keys) starts
+**How a record is made.** `python -m core calibrate CASES.json` (at most 50
+cases; provider endpoints only, see Keys) starts
 a calibration task, which runs no turn and takes no verdict, answer,
-feedback, grant, raise, or stop; asks each leg alone on every case; and
+feedback, grant, or stop; asks each leg alone on every case; and
 writes and prints one `judgement.calibrated` row on the `judgement` stream,
 with each leg's endpoint host, each case's verdicts, and `entry_check`
 (both legs right on every case).
@@ -350,7 +351,7 @@ holds or redirects work, and so needs a grant. Status says where each stands.
 | 7 | Doc against reality | Does this doc state something this code contradicts? | `consistent`, `contradicted`, `unverifiable` | yes | Constraint: docs describe reality | Required by the plan |
 | 8 | Test breadth | Three booleans in one call: does the change leave unexercised a record in a non-obvious state (`gap_state`), a member of an enumeration the code branches on (`gap_enum`), or an existing test whose bounds encode the old behavior (`gap_bound`)? | `boolean` each | yes | Mission 1 | Built (`checks.test.breadth`), an SDLC stage by Tom's decision of 2026-10-01; its floors are provisional until 1.4's calibration record |
 | 9 | Emulator proxy | On a replayed case, where does the result fall on each scored proxy? | a closed scale per proxy | no | Evidence: independent checks | Owned by `docs/emulator.md` |
-| 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `budget`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
+| 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
 
 Notes per shape:
 
@@ -552,13 +553,12 @@ labels can show whether it generalizes (`docs/plans/m1-3-judgement.md`).
 ### Where it runs
 
 The `judge` state's runner (`judgement_sites.judge_runner`) asks before
-the first turn, charged to the task's budget, so the judgement row sits
+the first turn, charged to the task, so the judgement row sits
 ahead of `turn.started`; after a crash it reuses an unconsumed row. The
 kernel maps the row to `judge.decided` (`verdicts.record_judge`): proceed
 is `precise`, anything else `thin`, with `leg: judgement`, the
-`judgement_id`, `p_precise`, the argmax label, the model, and the cost. A
-budget that cannot cover both legs returns `budget exhausted` and leaves
-the task in `judge`; a stopped task returns `stopped`.
+`judgement_id`, `p_precise`, the argmax label, the model, and the price. A
+stopped task returns `stopped` and leaves the task in `judge`.
 
 ### The guard entry
 

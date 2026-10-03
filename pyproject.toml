@@ -17,7 +17,7 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["spend(usd): the most live money one run of the test may cost"]
+markers = ["spend(usd): the money one run of the test is expected to cost"]
 
 [tool.ruff]
 line-length = 110

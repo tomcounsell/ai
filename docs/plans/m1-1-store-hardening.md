@@ -42,8 +42,9 @@ stored data, so `critique_rounds: 2`, `review_rounds: 2`.
   1 already. Its 19 `approval.granted` rows carry `by: tom` and `note` only,
   including ones the replay driver wrote; 1 `question.answered` and 2
   `feedback.given` rows have no `role_played`.
-- Remaining money is computed twice: `budget.REMAINING_SQL` (budget from the
-  `documents` row) and `tasks.status` (budget from `task.started`).
+- Remaining money was computed twice: `REMAINING_SQL` in the old money
+  module (the committed amount from the `documents` row) and `tasks.status`
+  (the committed amount from `task.started`).
 - No default test meters a successful call; only `test_live_turn.py` does,
   under `VALOR_LIVE=1`.
 - The backup volume `/Volumes/<U+F028>/valor_temp` exists, is exFAT,
@@ -148,7 +149,7 @@ Files: `core/db.py`, `core/corrections.py`, `tests/test_corrections.py`
 - `tasks.status` folds each approval into `attention` as
   `{"kind": "approval", approval_id, effect_id, note, provenance}`.
 - `status` gains `attention_counts`: per kind (`question`, `feedback`,
-  `approval`, `budget_raise`), `{"total": n, "role_played": m, "unknown":
+  `approval`, and the raise kind), `{"total": n, "role_played": m, "unknown":
   k}`, where `unknown` counts rows whose `role_played` is null. Approvals
   are counted apart from questions and feedback, per Tom.
 - data.md and mission.md note that `by` on rows written before this
@@ -159,34 +160,39 @@ Files: `core/db.py`, `core/corrections.py`, `tests/test_corrections.py`
 Files: `core/broker.py`, `core/tasks.py`, `core/__main__.py`,
 `scripts/replay.py`, `docs/data.md`, `docs/mission.md`.
 
-### 4. `budget raise` and one computation of remaining
+### 4. Raising the committed amount and one computation of remaining
 
-- `python -m core budget raise TASK N [--note] [--by] [--via]
-  [--role-played]` appends `budget.raised` `{raise_id, usd_micros, note,
+Superseded 2026-10-03: metered spending only; nothing refuses on money.
+The raise command, its rows' role in the fold, the raise attention kind,
+and the remaining-money computation are removed from the kernel; the fold
+now reports a task's metered spending. What follows is what 1.1 built.
+
+- A raise command (`TASK N [--note] [--by] [--via]
+  [--role-played]`) appended a raise row `{raise_id, usd_micros, note,
   provenance}` under the task's lock. N is US dollars, greater than zero. A
   stopped task refuses it with an error and no row, as it refuses feedback
   (stop is final). A delivered or waiting task takes it.
 - **One computation.** `tasks.money(rows)`, a pure fold over a task's rows:
-  committed = `task.started` budget plus every `budget.raised`; charged;
+  committed = the `task.started` amount plus every raise row; charged;
   open reservations; remaining. `tasks.status` calls it on the rows it
-  already reads; `budget.reserve` reads only the task's `task.started`,
-  `budget.raised`, `gateway.reserved`, and `gateway.charged` rows under the
-  lock and calls the same function. `REMAINING_SQL` and `budget.remaining`
-  are deleted. `tasks.audit` compares charged against committed including
+  already reads; the reservation reads only the task's `task.started`,
+  raise, `gateway.reserved`, and `gateway.charged` rows under the
+  lock and calls the same function. `REMAINING_SQL` and the old remaining function
+  were deleted. `tasks.audit` compares charged against committed including
   raises.
-- `tasks.dispatch` renders "Budget:" as the committed total from the fold,
+- `tasks.dispatch` rendered the committed total from the fold,
   so a turn after a raise is told the real figure.
-- Raises enter `attention` as `kind: "budget_raise"` with provenance: Tom
+- Raises entered `attention` as their own kind with provenance: Tom
   acting on a task is attention (architecture.md, The attention log).
 
-Files: `core/budget.py`, `core/tasks.py`, `core/session.py`,
-`core/__main__.py`.
+Files: the money module (now `core/spending.py`), `core/tasks.py`,
+`core/session.py`, `core/__main__.py`.
 
 ### 5. A default test meters a successful streamed call
 
 - **Recording**, once, by `tests/fixtures/record_messages.py` under
   `VALOR_LIVE=1`: start a `Gateway` on the test database with a task
-  carrying a $0.01 budget, post one streamed and one non-streamed Messages
+  carrying $0.01 committed, post one streamed and one non-streamed Messages
   call to `claude-haiku-4-5` through a turn token (the recorder supplies
   the vault's `ANTHROPIC_API_KEY` as the client header; the kernel never
   reads it), and save the response bodies only, no headers (they carry the
@@ -199,7 +205,7 @@ Files: `core/budget.py`, `core/tasks.py`, `core/session.py`,
   through a turn token, and compares the charge to a micro-dollar figure
   **hard-coded in the test and worked by hand** in a comment from the
   fixture's usage numbers and the dated price, not computed by
-  `budget.cost`.
+  the module's `cost()`.
 
 Files: `tests/fixtures/`, `tests/test_gateway_meter.py`.
 
@@ -234,7 +240,7 @@ typed field with a default for this Mac and a `VALOR_*` override:
   reads `DEMO`, the socket path, the data directory, the credential file,
   `backup_dir`, and `pg_bin` from it.
 
-Files: `core/settings.py`, `core/budget.py`, `core/gateway.py`,
+Files: `core/settings.py`, `core/spending.py`, `core/gateway.py`,
 `core/runs.py`, `core/session.py`, `core/__main__.py`,
 `harnesses/claude_code.py`, `scripts/replay_common.py`,
 `scripts/replay_workspace.py`, `scripts/demo_workspace.sh`,
@@ -252,7 +258,7 @@ schema file as an argument (default `core/schema.sql`):
   `pg_relation_filenode` of `events` and `documents`.
 - Run `db.migrate` on the copy with a test schema: `core/schema.sql` plus a
   nullable column on `events`, a new plain index, and a new partial unique
-  index (on `budget.raised`'s `raise_id`), each an additive change of the
+  index (on the raise row's `raise_id`), each an additive change of the
   kind 1.2 will make.
 - Assert: every existing row's `id`, `xmin`, and digest unchanged; both
   tables' filenodes unchanged; the new column, both indexes, the triggers,
@@ -262,7 +268,7 @@ schema file as an argument (default `core/schema.sql`):
   oracle). Drop the copy.
 - Skipped when `valor_rebuild` does not exist on the machine. Always run:
   the same change and checks over a test database holding one row of every
-  type the kernel writes (the data.md table, `budget.raised`, and both
+  type the kernel writes (the data.md table, the raise row, and both
   approval shapes).
 
 Files: `core/db.py`, `tests/test_migrate_history.py`.
@@ -394,12 +400,13 @@ Default run (no spend), on real Postgres and real processes:
   counts in `total` only; an old-shape approval, an answer, and a feedback
   row inserted without `role_played` each read `role_played: null` and
   count in `unknown`; release still binds to the digest.
-- **Budget raise**: a task exhausted by a reservation, then raised, reserves
+- **Raise** (superseded 2026-10-03: metered spending only; nothing refuses
+  on money): a task exhausted by a reservation, then raised, reserved
   again; `status` and `reserve` agree on remaining at every step; `audit`
-  stays empty with charges above the original budget but within the raised
+  stays empty with charges above the original committed amount but within the raised
   one; a raise on a stopped task errors and writes no row; zero and negative
-  raises are refused; `session.run` on an exhausted task returns `budget
-  exhausted`, and after a raise runs a turn (stand-in harness, as
+  raises are refused; `session.run` on an exhausted task returned the
+  exhausted outcome, and after a raise runs a turn (stand-in harness, as
   `test_session.py` does); racing raises and reservations on one task never
   let reservations exceed the committed total.
 - **Metering** (`test_gateway_meter.py`), each against a hand-worked
@@ -446,7 +453,7 @@ The objective tree; snapshot documents; the state machine, verdicts, and
 guards (1.2); judgement (1.3); checks, the workspace provisioner, the
 GitHub credential (1.4); moving replay scripts into `tests/emulator/` (1.5);
 password authentication on databases other than the kernel's; a migration
-tool beyond the idempotent `schema.sql`; lowering a budget; backing up
+tool beyond the idempotent `schema.sql`; lowering a committed amount; backing up
 anything but the kernel database.
 
 ## Questions for Tom

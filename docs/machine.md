@@ -33,7 +33,7 @@ Two measures appear. *Footprint* is macOS's physical footprint
 (`footprint -p PID`): the memory the process costs, compressed pages
 included. *RSS* is `ps -o rss`: resident pages, which counts shared
 libraries and shared memory in every process that maps them. Footprint is
-the one the budget uses. For Postgres both overcount, because each process
+the one the RAM plan uses. For Postgres both overcount, because each process
 that touched a shared buffer counts it; the true cluster cost is bounded by
 `shared_buffers` plus each process's private memory.
 
@@ -42,10 +42,10 @@ that touched a shared buffer counts it; the true cluster cost is bounded by
 Resident means started by launchd at login and kept alive. Four things, and
 nothing else.
 
-| Component | What it is | Serves | Measured | Budget |
+| Component | What it is | Serves | Measured | Planned |
 |---|---|---|---|---|
-| Postgres, the machine cluster | Postgres 18 holding the kernel's state: tasks, the ledger, approvals, budgets, steering, corrections | Constraint "a ledger the system cannot edit"; Mission item 6 (the attention log lives in the ledger) | Fresh idle cluster: 36 MB footprint summed over 9 processes (58 MB RSS). The kernel's own cluster after 32 hours of light use: 90 MB. One idle client connection: 6 MB (10 MB RSS) | 256 MB, with `shared_buffers` at its default 128 MB |
-| The kernel process | The control loop, the model gateway, and the broker in one Python process | Constraint "bounded authority and spend": every model call passes the gateway, every effect the broker | Python with `core` imported, the gateway listening, one kernel connection open: 41 MB (56 MB RSS). Bare Python 3.14: 16 MB RSS | 150 MB (estimate; streaming calls and the broker's held effects add to the idle figure) |
+| Postgres, the machine cluster | Postgres 18 holding the kernel's state: tasks, the ledger, approvals, metered spending, steering, corrections | Constraint "a ledger the system cannot edit"; Mission item 6 (the attention log lives in the ledger) | Fresh idle cluster: 36 MB footprint summed over 9 processes (58 MB RSS). The kernel's own cluster after 32 hours of light use: 90 MB. One idle client connection: 6 MB (10 MB RSS) | 256 MB, with `shared_buffers` at its default 128 MB |
+| The kernel process | The control loop, the model gateway, and the broker in one Python process | Constraint "bounded authority, metered spending": every model call passes the gateway, every effect the broker | Python with `core` imported, the gateway listening, one kernel connection open: 41 MB (56 MB RSS). Bare Python 3.14: 16 MB RSS | 150 MB (estimate; streaming calls and the broker's held effects add to the idle figure) |
 | Telegram bridge | One Telethon client: receive, normalize, hand to `core/`; deliver what the broker releases | Mission item 1 (Tom talks to one place); constraint "one identity" (every message leaves as Valor) | Telethon imported and a client built, not connected: 80 MB (223 MB RSS) | 250 MB (estimate; a connected client caches entities and grows) |
 | Email bridge | IMAP receive, SMTP deliver, same port | Mission item 1; constraint "one identity" | Python with psycopg, imaplib, smtplib, and ssl imported: 31 MB (45 MB RSS) | 100 MB (estimate) |
 
@@ -64,16 +64,16 @@ yet.
 On demand means started for one run of one task and gone when it ends.
 The kernel starts and stops these; launchd never does.
 
-| Component | When | Serves | Measured | Budget |
+| Component | When | Serves | Measured | Planned |
 |---|---|---|---|---|
 | One `claude -p` turn | Each turn of a task: build, clarify, feedback, and the blind verifier's turn | Mission item 1 (the frontier tier does the hard work) | A safe-mode `claude -p` with no model reply yet: 116 MB (235 MB RSS). Two long interactive Claude Code sessions on the same Mac: 150 MB and 233 MB (430 MB and 535 MB RSS) | 1,000 MB (estimate, covering subagents a turn starts and a long session's growth) |
 | The turn's work | Commands the turn runs: test suites, dev servers on ports 8000 to 8009, package installs, builds | Mission item 1 ("testing actual use") | Not measured | 3,000 MB (estimate; a Django test run with its own Postgres database is the reference load) |
 | The workspace cluster | A Postgres cluster of the workspace's own, separate from the machine cluster, for the app's tests | Constraint "a ledger the system cannot edit": a turn's tests never share a cluster with the kernel's ledger (rebuild-demonstration.md, Kernel findings 1) | Fresh: 36 MB, as above. The replay series' workspace cluster after every run's test suites: 352 MB summed (383 MB RSS), of which the checkpointer and background writer each count the touched shared buffers | 400 MB |
 | A Redis per run | Only when the project under work needs Redis for its tests | Mission item 1 | An idle `redis-server`: 2 MB RSS | 50 MB |
-| One Apple container | Work that needs a VM boundary rather than a process sandbox (see Sandboxes) | Constraint "bounded authority and spend" | Not measured for memory. Boot about 1 s, an exec 65 to 110 ms, a write 45 ms, a read 30 ms, destroy 1.5 s with a one-second grace, export of a 285 MB root filesystem 2.4 to 14.6 s, on apple/container 1.4.1 | 1,024 MB (estimate: the VM's default allocation) |
+| One Apple container | Work that needs a VM boundary rather than a process sandbox (see Sandboxes) | Constraint "bounded authority, metered spending" | Not measured for memory. Boot about 1 s, an exec 65 to 110 ms, a write 45 ms, a read 30 ms, destroy 1.5 s with a one-second grace, export of a 285 MB root filesystem 2.4 to 14.6 s, on apple/container 1.4.1 | 1,024 MB (estimate: the VM's default allocation) |
 | A headless browser | When a turn opens the app it built to look at it | Mission item 1 ("testing actual use"); rebuild-demonstration.md, Recommendations; rebuild-baseline.md, Browser use | Not measured | 600 MB (estimate) |
 | The dashboard (`ui/`) | When Tom opens it | Mission item 6 (the attention log is readable without asking) | Not measured | 100 MB (estimate) |
-| A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's budget: a routine's turn takes the turn slot like any other |
+| A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's line: a routine's turn takes the turn slot like any other |
 | Judgement calls | Every classification, routing, and cheap check | The three-tier constraint: judgement is hosted | HTTP from the kernel process; no local model | Included in the kernel process |
 
 A turn's processes do not outlive it. The kernel names each turn's
@@ -92,7 +92,7 @@ machine only the running task's services are up. Idle, a workspace cluster
 costs 36 MB; after a test suite has filled its buffers it costs ten times
 that, which is why it is stopped rather than left up.
 
-## The RAM budget
+## The RAM plan
 
 | Line | MB |
 |---|---|
@@ -205,9 +205,9 @@ Two isolation mechanisms exist on macOS, and they cost memory differently.
   still running for one more step, while a kill returned in 1.7 s and cut
   the workload's open connection in 265 ms median.
 
-Both serve the constraint "bounded authority and spend" by least privilege
+Both serve the constraint "bounded authority, metered spending" by least privilege
 [11]. On the Air, at most one Apple container runs at a time, in the turn
-slot's budget. Which work runs under which mechanism is
+slot. Which work runs under which mechanism is
 [architecture.md](architecture.md)'s to settle; this doc only fixes that a
 container costs about 1 GB and sandbox-exec costs nothing.
 
@@ -222,7 +222,7 @@ scheduler, supervisor, or watchdog on the machine.
   age or memory; stop and recovery are the kernel's (constraint "reliable
   stop, recovery, and correction").
 - **LaunchAgents with `StartCalendarInterval`**: routines. Each firing
-  starts a budgeted task through the kernel (`python -m core start`), so a
+  starts a task through the kernel (`python -m core start`), so a
   routine's turn takes the turn slot and its spend is metered like any
   other. A schedule is not a standing approval; see
   [routines.md](routines.md).
@@ -247,7 +247,7 @@ sandbox profile denies. They are not in the Keychain, because a turn
 can read the login keychain (below). A secret is read by name when the
 process that needs it starts; a missing name fails the start with the name
 in the error. No secret is in the repository or in a turn's environment.
-This serves the constraint "bounded authority and spend": a credential is
+This serves the constraint "bounded authority, metered spending": a credential is
 authority, and a turn holds none.
 
 | Secret | Read by | Today |
@@ -267,7 +267,7 @@ login keychain on purpose through the `security` tool, the machine's Claude
 login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
 2026-10-01 not to add a separate macOS user for turns: a turn that used the
 login to call the provider around the gateway is an accepted risk, because
-budgets are for visibility and honest metering, not a hard wall.
+the gateway is for visibility and honest metering, not a hard wall.
 
 **The kernel key directory.** The passwords for `valor_kernel` and the
 owner role on the kernel databases live in a libpq password file,

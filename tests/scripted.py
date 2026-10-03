@@ -210,7 +210,6 @@ async def start(dsn: str, ws: Path, judge: str | None = "precise", **kw) -> str:
     where = tasks.resolve_workspace(str(ws), kw.pop("target_branch", None))
     b = tasks.Brief(
         instruction=kw.pop("instruction", "Write Tom a greeting."),
-        budget_usd_micros=kw.pop("budget_usd_micros", 1_000),
         max_effect_class=kw.pop("max_effect_class", "act"),
         workspace=str(ws),
         **where,
@@ -345,7 +344,7 @@ def toy_repo(tmp_path: Path) -> Path:
     return src
 
 
-async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", services=(), budget_usd_micros: int = 1_000,
+async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", services=(),
                       **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
     """A task on a workspace the kernel provisioned from a toy repository,
     under `tmp_path/work`, judged by the real judge runner."""
@@ -370,7 +369,7 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
         ports["redis"] = kws.choose_port((6460, 6499), taken)
     made = kws.provision(task_id, spec, ports, work=tmp_path / "work")
     b = tasks.Brief(
-        id=task_id, instruction="Write Tom a greeting.", budget_usd_micros=budget_usd_micros, max_effect_class="act",
+        id=task_id, instruction="Write Tom a greeting.", max_effect_class="act",
         **made.brief_fields(),
     )  # fmt: skip
     performers(b)

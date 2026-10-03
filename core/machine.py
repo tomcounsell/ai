@@ -197,7 +197,7 @@ class JoinResult:
 class Fold:
     state: State = State.JUDGE
     legacy: bool = False
-    # A calibration task (`python -m core calibrate`): a budget for judgement
+    # A calibration task (`python -m core calibrate`): metered judgement
     # calls and nothing else. No SDLC row applies; every SDLC writer refuses it.
     calibration: bool = False
     return_to: State | None = None

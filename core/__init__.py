@@ -1,1 +1,1 @@
-"""The kernel: budgets, lossless stop, the ledger, and the broker."""
+"""The kernel: metered spending, lossless stop, the ledger, and the broker."""

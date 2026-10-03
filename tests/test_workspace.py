@@ -555,7 +555,7 @@ def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(d
     assert all("redis" in p["command"] or "postgres" in p["command"] for p in found[-1]["processes"])
 
 
-def test_after_the_sweep_the_services_left_fit_the_16_gb_budget(dsn, tmp_path):
+def test_after_the_sweep_the_services_left_fit_in_16_gb(dsn, tmp_path):
     a, b_a = _start(dsn, tmp_path / "a", ["postgres", "redis"])
     b, b_b = _start(dsn, tmp_path / "b", ["postgres"])
     kws.start_services(a, kws.Layout(Path(b_a.mirror).parent), *kws.services_of(b_a))
@@ -814,9 +814,9 @@ def _spec_file(tmp_path, **extra) -> Path:
 def test_start_project_from_the_command_line(dsn, tmp_path):
     spec_path = _spec_file(tmp_path, services=["postgres"])
     for flag in (["--workspace", "x"], ["--harness-config", "x"], ["--target-branch", "x"]):
-        refused = _cli(tmp_path, "start", "go", "--budget-usd", "1", "--project", str(spec_path), *flag)
+        refused = _cli(tmp_path, "start", "go", "--project", str(spec_path), *flag)
         assert refused.returncode == 1 and "takes no --workspace" in refused.stderr
-    bad = _cli(tmp_path, "start", "go", "--budget-usd", "-1", "--project", str(spec_path))
+    bad = _cli(tmp_path, "start", "go", "--project", str(spec_path), "--base", "0" * 40)
     assert bad.returncode == 1 and "start refused" in bad.stderr
     work = tmp_path / "work"
     assert not [
@@ -825,7 +825,7 @@ def test_start_project_from_the_command_line(dsn, tmp_path):
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor(2) as pool:
-        started = list(pool.map(lambda _: _cli(tmp_path, "start", "go", "--budget-usd", "1", "--project",
+        started = list(pool.map(lambda _: _cli(tmp_path, "start", "go", "--project",
                                                str(spec_path), "--branch", "rebuild"), range(2)))  # fmt: skip
     assert all(s.returncode == 0 for s in started), [s.stderr for s in started]
     shown = [json.loads(_cli(tmp_path, "workspace", "show", s.stdout.strip()).stdout) for s in started]
@@ -934,7 +934,7 @@ def _orphan_with_services(tmp_path):
 
 async def _become_task(dsn, task_id):
     async with await db.connect(dsn) as conn:
-        await tasks.start(conn, tasks.Brief(id=task_id, instruction="x", budget_usd_micros=1))
+        await tasks.start(conn, tasks.Brief(id=task_id, instruction="x"))
 
 
 def test_a_directory_that_becomes_a_task_after_the_scan_is_left_to_its_run(dsn, tmp_path):

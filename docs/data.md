@@ -2,7 +2,7 @@
 
 Valor keeps its state in one Postgres database, used as a document store:
 JSONB documents written once, an append-only events table, and no foreign
-keys. Every budget movement, turn, effect, approval, question, answer,
+keys. Every call opened and charged, turn, effect, approval, question, answer,
 piece of feedback, correction, and stop is a row in the events table, and
 everything the kernel knows about a task is computed from those rows when it
 is needed. Postgres is the one store; memory joins it last.
@@ -10,7 +10,7 @@ is needed. Postgres is the one store; memory joins it last.
 This doc owns the storage: tables, roles, the integrity mechanisms, how
 state is read, how a turn's Brief is rendered from the store, test
 databases, and where memory will live. `docs/architecture.md` owns what the
-kernel does with the rows (budgets, the broker, approvals, stop, steering).
+kernel does with the rows (metered spending, the broker, approvals, stop, steering).
 
 ## What serves what
 
@@ -18,8 +18,8 @@ kernel does with the rows (budgets, the broker, approvals, stop, steering).
 |---|---|
 | Append-only events table, locked by grant and trigger | Constraint "Reliable stop, recovery, and correction": a ledger the system cannot edit records every effect |
 | Write-once JSONB documents, no foreign keys | Tom's decision: Postgres only, document strategies |
-| Partial unique indexes | Constraint "Bounded authority and spend" (one charge per call, one tap per effect) and lossless stop (one stop per task) |
-| Per-task advisory locks | Constraint "Bounded authority and spend": two calls racing on one task never spend the same money |
+| Partial unique indexes | Constraint "Bounded authority, metered spending" (one charge per call, one tap per effect) and lossless stop (one stop per task) |
+| Per-task advisory locks | Constraint "Bounded authority, metered spending": a call and a stop racing on one task cannot both win |
 | State as a fold over events | Lossless stop: nothing to reconcile between a stored status and the record |
 | Brief and corrections rendered at turn time | Constraint: corrections reach every session and agent |
 | Questions, answers, feedback, and approvals as rows with provenance | Mission item 6 and the Evidence item "Attention spent" |
@@ -68,7 +68,7 @@ every calibration record.
 
 The primary key is `(kind, id)`. A document is what the kernel commits to
 once and never changes. The `task` document is the Brief as the task
-started: instruction, budget in micro-dollars, effect ceiling,
+started: instruction, effect ceiling,
 `governance_grant`, workspace, model, harness settings, and where a merge
 goes: the target branch, origin's push URL as an absolute path, and the
 workspace's head at start (`core/tasks.py`, `Brief`); for a task the kernel
@@ -95,15 +95,15 @@ payload carries the ids listed; a reader relies on nothing else.
 
 | Writer | Type | Payload | Serves |
 |---|---|---|---|
-| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `budget_usd_micros`, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, budget, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority and spend |
+| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority, metered spending |
 | `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), `leg: judgement`, `judgement_id`, `answered`, `p_precise`, label, `abstained`, model, `usd_micros`, `guard_id` when thin. Rows from before the judge ran carry `leg: manual` and provenance | Mission items 3 and 6 |
 | `core/judgement.py` | `judgement.answered` | `judgement_id`, site, `task_sha256`, `calibrated_sha256`, `inputs_sha256`, `ref`, `usd_micros`, attempts (per leg: model, endpoint host, outcome, `call_id`, charge, latency, and on failure a reason, status, and fixed sentence), answers (per question: label, probabilities, `p_proceed`, decision, the provider's pick, leg, model), action, `abstained`, leg, model | Mission item 6; the routing a judgement causes is legible |
 | `core/judgement.py` | `judgement.failed` | as `judgement.answered` without answers, action, leg, or model; plus `on_failure` and `too_large` | As above |
 | `core/judgement_sites.py` | `judgement.calibrated` | on the `judgement` stream: site, `run`, `task_sha256`, both pinned models, each leg's endpoint host (`endpoints`), floors, `at`, the calibration task's id, `n`, label sources, per leg the Brier score with its n, confusion counts, abstain rate, accuracy, error rate, cost per call, `all_correct`; `entry_check`; every case | Calibration discipline (`docs/judgement-layer.md`) |
 | `core/tasks.py` | `task.stopped` | reason, by | Lossless stop |
-| `core/budget.py` | `gateway.reserved` | `call_id`, `turn_id`, model, `usd_micros` (worst case), estimated input, `max_tokens`. A judgement call's (written through `core/judgement.py`) has `turn_id` null and adds `route: judgement`, `judgement_id`, site, leg | Money conserved per call |
-| `core/budget.py` | `gateway.refused` | the call's fields plus reason | Bounded spend; the refusal is itself recorded |
-| `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Money conserved per call |
+| `core/spending.py` | `gateway.opened` | `call_id`, `turn_id`, model, `route`, estimate (`usd_micros` worst case, estimated input, `max_tokens`). A judgement call's (written through `core/judgement.py`) has `turn_id` null and `route: judgement`, and adds `judgement_id`, site, leg. Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the folds read as this row | Metered spending: every call is on the ledger |
+| `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
+| `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |
 | `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
@@ -122,7 +122,6 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
-| `core/budget.py` | `budget.raised` | `raise_id`, `usd_micros`, note, provenance | Only Tom raises a committed budget |
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id` | Recovery: a kill between intent and outcome leaves a findable row |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
@@ -176,7 +175,7 @@ the kernel code does.
 
 | Index | Unique on | Rows | What it prevents |
 |---|---|---|---|
-| `events_one_call_row` | `(type, payload->>'call_id')` | `gateway.reserved`, `gateway.charged` | A model call reserved or charged twice |
+| `events_one_call_row` | `(type, payload->>'call_id')` | `gateway.opened`, `gateway.reserved`, `gateway.charged` | A model call opened or charged twice (`gateway.reserved` is the legacy name for an opened call) |
 | `events_one_effect_row` | `(type, payload->>'effect_id')` | `effect.held`, `effect.intent`, `effect.outcome`, `effect.refused` | Two intents or two outcomes for one effect |
 | `events_approval_used_once` | `payload->>'approval_id'` | `effect.intent` with an approval | One approval releasing two effects: one tap, one effect |
 | `events_one_correction_number` | `payload->>'number'` | `correction.recorded` | Two corrections sharing a number |
@@ -207,7 +206,7 @@ two charges for one call or two outcomes for one effect and has to choose.
 
 `core/ledger.py`, `lock`, takes `pg_advisory_xact_lock` on a namespaced key
 inside the caller's transaction: `task:<id>` for anything that reads a
-task's state and then appends to it (reserving money, recording a stop,
+task's state and then appends to it (opening a call, recording a stop,
 answering, recording feedback, requesting an effect, collecting a turn),
 and `corrections` for numbering the next correction. The lock is released
 when the transaction ends, including when the process holding it is
@@ -215,13 +214,11 @@ killed, so no unlock code has to run. An advisory lock needs no table
 privilege; a row lock would need `UPDATE`, which the kernel role does not
 have.
 
-Reserving money is the case that matters. Remaining budget is the Brief's
-budget plus every `budget.raised`, minus every charge, minus every open
-reservation, computed by one fold (`core/tasks.py`, `money`) that
-`tasks.status` and `budget.reserve` both call, the latter under the task's
-lock, so two calls racing on one task cannot both reserve the last of it.
-`test_racing_reservations_never_exceed_the_budget` runs that race on real
-Postgres.
+Opening a call is the case that matters. It checks that the task is not
+stopped and appends the `gateway.opened` row under the task's lock, so a
+stop and a call racing on one task cannot both win. Metered spending is one
+fold (`core/tasks.py`, `money`): the sum of the task's charges, with the
+calls still open, which `tasks.status` shows.
 
 ### Transactions as the unit of durability
 
@@ -256,8 +253,8 @@ The kernel stores no status field. A task's state is computed by reading
 its stream in `id` order and folding: `core/machine.py`, `fold`, gives the
 state machine's state (one of eleven; `docs/sdlc-state-machine.md`), and
 `core/tasks.py`, `status`, returns it with the plan, loop counts, the
-current candidate and its checks, the governance instances, committed
-and charged money, open reservations, remaining money, every turn and its
+current candidate and its checks, the governance instances, metered
+spending (charges and open calls), every turn and its
 outcome, every effect and its state, the latest delivery, and the
 attention log. The harness session a turn resumes is folded the same way,
 from the last `turn.ended` result that carried a session id. The fold is
@@ -268,19 +265,18 @@ of generated ledgers to exactly one state (`tests/test_machine.py`).
 This is what makes stop lossless at the storage level. A stop at any
 instant leaves rows that each landed whole or not at all, and no stored
 status that could disagree with them. `tasks.audit` states what a stop
-must leave true, and it is a check over the fold: every reservation
-charged, every turn ended, no effect between intent and outcome, nothing
-charged past the committed budget.
+must leave true, and it is a check over the fold: every opened
+call charged, every turn ended, no effect between intent and outcome.
 
 **Shape changes.** A row is never rewritten, so when an event's payload
 gains a field, readers handle both shapes. A task whose `task.started` has
 no `sdlc` predates the state machine: it folds read-only by the old
 kernel's precedence (stopped; a delivery not reopened by feedback is
 `merge`; an unanswered question is `waiting`; feedback after a delivery is
-`patch`; any turn is `build`; else `judge`), and nothing but stop, budget
-raise, approve, and release writes to it. A calibration task folds with
-`calibration` set and nothing else, and every SDLC writer, stop, budget
-raise, and turn refuses it. The instance so far is
+`patch`; any turn is `build`; else `judge`), and nothing but stop,
+approve, and release writes to it. A calibration task folds with
+`calibration` set and nothing else, and every SDLC writer, stop,
+and turn refuses it. The instance so far is
 provenance (`core/tasks.py`, `provenance`): a field a row never recorded
 reads as null, never as a default. Answers and feedback recorded before
 `role_played` existed read `role_played: null`, and approvals recorded
@@ -339,7 +335,6 @@ are folds over rows the kernel already writes:
 - `feedback.given`: Tom's feedback on a delivery, bound to the delivery it
   answers (`on_delivery`).
 - `approval.granted`: Tom's tap on a held effect, with his literal message.
-- `budget.raised`: Tom's raise of the task's committed budget.
 
 Answers and feedback carry **provenance**: `by` (who wrote it), `via`
 (the channel), `at`, and `role_played` (true when someone stood in for
@@ -349,7 +344,7 @@ the ledger could not say so (rebuild-demonstration.md, Kernel findings 5).
 `tasks.status` returns the attention log as one list, each entry labelled
 by kind with its provenance.
 
-Approvals and raises carry the same provenance as an answer,
+Approvals carry the same provenance as an answer,
 `role_played` included, because two of the demonstration's three pushes
 (rows 204 and 253) were approved under Tom's standing permission for local
 copies rather than by a tap each (rebuild-demonstration.md, Where Tom acted
@@ -360,7 +355,7 @@ the questions and feedback counted as interruptions. The `by` on rows
 written before this shape is unreliable: every earlier approval says
 `tom`, the replay driver's included.
 
-The attention budget a task carries is a field of its Brief in the design
+The attention cost of a task is counted in the design
 (`docs/architecture.md`, The attention log); the attention it spent is the
 fold above.
 
@@ -508,7 +503,7 @@ Memory goes into the same Postgres as everything else. The design rules it
 must keep:
 
 - **Memory grants nothing.** Retrieved content can act as instructions to
-  a model [7], so nothing read from memory changes a budget, a ceiling, or
+  a model [7], so nothing read from memory changes a ceiling or
   an approval. Memory's tables are its own, under a role with no privilege
   on `events` or `documents`.
 - **Memory never writes the ledger.** The kernel reads memory through the

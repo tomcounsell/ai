@@ -52,15 +52,15 @@ reach the public internet, so package installs work. It runs as Tom's user,
 so a deliberate keychain read through the `security` tool is not fenced.
 
 **Authority and money.** Effect ceiling `act`, governance grant none,
-budget $15.00, model Claude Opus 5.5 (`claude-opus-5-5`, $4 input and $20
+$15.00 committed to the task, model Claude Opus 5.5 (`claude-opus-5-5`, $4 input and $20
 output per million tokens). Every model call of every turn, including
 Claude Code's own side calls and subagents, passes through the kernel's
-gateway and is metered against that one budget. Correction 1 (the
+gateway and is metered onto that one task. (Superseded 2026-10-03: metered spending only; nothing refuses on money.) Correction 1 (the
 governance-restraint paragraph, global, direct) renders into every turn's
 Brief.
 
 **How it runs.** `python -m core start` once; then `python -m core run`
-until it prints a question, a delivery, or the budget's end. Each question
+until it prints a question, a delivery, or the end of the committed amount. Each question
 is answered with `python -m core answer`; a held push is approved with
 `python -m core approve` and performed with `python -m core release`.
 
@@ -199,7 +199,7 @@ whether its structure (no helper module, no doc) matters to him.
 
 ## Money
 
-Budget $15.00, effect ceiling `act`, governance grant none. Every model call
+$15.00 committed, effect ceiling `act`, governance grant none. Every model call
 was `claude-opus-5-5`; no other model was used.
 
 | Turn | Rows | Model calls | Gateway metered | Harness reported | Output tokens | Cache read | Cache write |

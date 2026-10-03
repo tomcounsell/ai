@@ -20,7 +20,7 @@ pinned price.
 import json
 from collections.abc import Mapping
 
-from core import budget, judgement
+from core import judgement, spending
 from core.judgement import DATA_ONLY, JudgementTask, LegAnswer, LegError
 from core.settings import (
     OPEN_WEIGHT_MODEL,
@@ -97,7 +97,7 @@ class OpenWeight:
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
         """Input tokens as bytes / 3. Over its 35 calibration calls of
         2026-10-02 the host billed 0.39 to 0.62 of it, and at most 219 of
-        the 400 output tokens the reservation allows. All 35 were
+        the 400 output tokens a call allows. All 35 were
         single-question judge calls of at most 1,406 estimated tokens."""
         return judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
 
@@ -119,7 +119,7 @@ def _usage(payload) -> dict | None:
     for v in (tokens, out):
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
             return None
-    if cost is not None and budget.usd_micros(cost) is None:
+    if cost is not None and spending.usd_micros(cost) is None:
         return None
     return {"input_tokens": tokens, "output_tokens": out, "reported_usd": None if cost is None else str(cost)}
 

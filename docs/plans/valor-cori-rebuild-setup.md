@@ -37,7 +37,7 @@ Six weeks of history on `main` (2026-08-19 to 2026-09-30) read like this:
 The five newest bugs are all one class: a guard fighting another guard
 (a stop hook marking live sessions completed, lost concurrent writes to
 `extra_context`, outbox writers bypassing the persona pipeline, a merge guard
-outliving its hook budget, a watchdog killing processes by age). The core
+outliving its hook's timeout, a watchdog killing processes by age). The core
 path, Telegram to queue to worker to one `claude -p` per turn, is sound. The
 other 180k lines are tooling, hooks, validators, and an improvement stack
 that was specified to refuse automatic promotion on every call.
@@ -46,7 +46,7 @@ Valor's checks and balances all live in the prompt layer: skills, hooks,
 validators, running as the agent's own user on the agent's own machine. They
 can be routed around, and they fight each other. The cori experiment
 (`tomcounsell/cori`, 2026-09-19 onward) put authority in a deterministic
-kernel outside the model's reach: budgets, effect classes, blind verification,
+kernel outside the model's reach: metered spending, effect classes, blind verification,
 an append-only ledger. That is the design difference worth rebuilding for.
 Cori's build process, however, reproduced Valor's ceremony within eleven days
 (339 commits, 148 logged findings, 53 review-round commits, 15 session crashes
@@ -85,8 +85,8 @@ compound the ability to build. Concretely:
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
    regrowing the archive.
-6. **Spend attention as carefully as money.** A task carries an attention
-   budget beside its dollar budget. Valor carries routine decisions,
+6. **Spend attention as carefully as money.** Each task counts the
+   interruptions it costs Tom and shows them beside its metered spending. Valor carries routine decisions,
    investigates failures, and brings consequential choices with evidence and
    a recommendation. Requiring Tom to adjudicate internal process is a
    product defect.
@@ -95,11 +95,12 @@ compound the ability to build. Concretely:
 
 Mandatory, verified, and never a place to spend surplus energy.
 
-- **Bounded authority and spend.** Every task carries a money budget and an
-   effect ceiling, conserved down the tree. A classifier decides what a
+- **Bounded authority, metered spending.** Every task carries an effect
+   ceiling, conserved down the tree, and its spending is metered and shown;
+   cost never stops a task (Tom, 2026-10-03). A classifier decides what a
    thing is; the kernel decides what it may do. Cheaper capability does not
    lower the ceiling: it buys better outcomes or lets Tom authorize larger
-   undertakings within the same budget. Scope expansion is Tom's choice;
+   undertakings. Scope expansion is Tom's choice;
    capability gains create that choice.
 - **Reliable stop, recovery, and correction.** Stop is immediate and lossless.
    A ledger the system cannot edit records every effect. Corrections are
@@ -182,13 +183,13 @@ navigating an SDLC does not.
   (cori spike 06), Keychain for secrets. No Linux assumptions.
 - **Postgres as a document store.** JSONB documents, an append-only events
   table, no foreign-key lattice. The kernel's state (objective tree, ledger,
-  approvals, budgets, steering) lives there from day one. Memory arrives last.
+  approvals, metered spending, steering) lives there from day one. Memory arrives last.
 - **One identity.** Every outbound message and PR leaves as Valor. Cori's
   "acts as the person" mode is dropped, and with it the per-space sending
   identity field.
 - **Three tiers.** Deterministic kernel for authority. Jev-class judgement
   for every decision that is not authority, confidence-gated to a human.
-  Frontier agents for the hard work, budgeted. A classifier decides what a
+  Frontier agents for the hard work, with spending metered. A classifier decides what a
   thing is; it never decides what a thing may do.
 
 ## Target top-level structure
@@ -199,13 +200,13 @@ draft; step 3 materializes it.
 
 | Directory | Scope | Imports from |
 |---|---|---|
-| `core/` | The kernel and the control loop. Objective tree, budgets, effect classes and the broker, approvals, the ledger, steering, the supervisor turn, the SDLC state machine as a typed state model, the judgement layer's task taxonomy and router. No LLM call decides authority here | nothing above it |
+| `core/` | The kernel and the control loop. Objective tree, metered spending, effect classes and the broker, approvals, the ledger, steering, the supervisor turn, the SDLC state machine as a typed state model, the judgement layer's task taxonomy and router. No LLM call decides authority here | nothing above it |
 | `memory/` | Operator record, corrections ledger, episodic memory. Built last, on popoto over Postgres. Until then the directory holds its README and the port the core reads through | `core/` ports only |
 | `persona/` | Everything that defines Valor: identity, voice, conduct, what "acting as Valor" means for tone and for what may be sent. One persona. Rendered into every prompt the core builds | `core/` |
 | `bridges/` | Self-contained comms modules: `telegram/`, `email/`, later others. I/O and the outbox only. Each conforms to one port in `core/`. No routing, triage, or judgement lives here | `core/` ports only |
 | `harnesses/` | Wrappers and logic for running work via a harness: Claude Code, Codex, Pi, and any future one. Turn execution, session resume, transcript capture, per-harness skill rendering | `core/` |
 | `skills/` | Versioned skills. Structure deferred until Tom's requirements are gathered. Holds a README naming that deferral and nothing else in this phase | deferred |
-| `routines/` | Every scheduled task and runner. Replaces `reflections/`. launchd plists and the routines they run. Every routine is a budgeted objective, never a bare script | `core/` |
+| `routines/` | Every scheduled task and runner. Replaces `reflections/`. launchd plists and the routines they run. Every routine is an objective with metered spending, never a bare script | `core/` |
 | `tools/` | Non-core components and vendor-dependent tooling. Anything the core can run without. A tool declares its effect class and reaches the world through the broker | `core/` |
 | `api/` | Programmatic interfaces: MCP servers, any HTTP surface. Reserved; README only in this phase | `core/` |
 | `ui/` | The read-only dashboard | `core/` read models only |
@@ -308,7 +309,7 @@ its code already carries the four bounds a demonstration needs:
 
 | Bound | Source in the archive | What it gives the demonstration |
 |---|---|---|
-| Money budget, conserved | `gateway/budget.py`, spike 01 | Every model call metered against a committed number |
+| Metered spending | the archive gateway's money module, spike 01 | Every model call metered and its cost recorded (the archive conserved it against a committed number; superseded 2026-10-03: metered spending only; nothing refuses on money) |
 | Lossless stop | `kernel/runs.py`, spike 03 | Tom can kill it at any instant and nothing is lost |
 | Effect ledger | `broker/ledger.py`, `kernel/events.py` | A record the system cannot edit |
 | Effect classes on the broker | `broker/actions.py`, spike 05 | Nothing irreversible leaves without Tom's tap |
@@ -318,7 +319,7 @@ Postgres as a document store, with `governance_grant` (default none) added
 to the Brief schema so the constraint above is a kernel fact from the first
 turn, and with nothing else: no objective tree
 beyond a single task record, no verifier, no scribe, no space model. It is
-done when a script can start a task with a budget, run one `claude -p` turn
+done when a script can start a task, run one `claude -p` turn
 through the gateway, record an effect, be stopped mid-turn, and show the
 ledger.
 
@@ -380,7 +381,7 @@ Target docs:
 
 | Doc | Holds | Primary source |
 |---|---|---|
-| `docs/architecture.md` | The kernel and control loop: supervisor turn, objective tree, budgets, effect classes, broker, approvals, ledger, stop, execution records, verification, the judgement tier | `_archive_/cori/docs/architecture.md`, identity mode and every "Cori" reference removed, judgement tier added, revised by what the demonstration showed |
+| `docs/architecture.md` | The kernel and control loop: supervisor turn, objective tree, metered spending, effect classes, broker, approvals, ledger, stop, execution records, verification, the judgement tier | `_archive_/cori/docs/architecture.md`, identity mode and every "Cori" reference removed, judgement tier added, revised by what the demonstration showed |
 | `docs/tech-stack.md` | What each part is built from, with a status on every choice, and the M4 Air constraints | `_archive_/cori/docs/tech-stack.md` |
 | `docs/mission.md` | Mission, constraints, evidence, the acceptance question, the attention log | this plan |
 | `docs/judgement-layer.md` | Task taxonomy, router, decisions port, calibration discipline, confidence gating, the boundary with the kernel, the ten use shapes | `_archive_/agent/llm/tasks.py`, `router.py`, `backends/decisions.py`, `_archive_/docs/features/llm-task-taxonomy.md` |
@@ -389,9 +390,9 @@ Target docs:
 | `docs/data.md` | Postgres as a document store: events table, JSONB documents, per-turn rendering, why no relational lattice | cori migrations and architecture, Tom's decision |
 | `docs/persona.md` | The one identity: voice, conduct, what may leave under Valor's name | `_archive_/config/identity.json`, `config/personas/`, `_archive_/cori/VOICE.md` |
 | `docs/harnesses.md` | The harness port and per-harness wrappers | `_archive_/worker/`, `_archive_/docs/features/headless-session-runner.md` |
-| `docs/routines.md` | Scheduled work as budgeted objectives under launchd | `_archive_/reflections/`, launchd plists |
+| `docs/routines.md` | Scheduled work as objectives with metered spending under launchd | `_archive_/reflections/`, launchd plists |
 | `docs/emulator.md` | The outward-facing fitness function: human-originated historical requests, labelled by the human merge or review decision, proxies scored by cheap judgement, run on every skill change, seeded by the demonstration | this conversation |
-| `docs/machine.md` | The M4 Air: what runs resident, what runs on demand, the RAM budget per component | new |
+| `docs/machine.md` | The M4 Air: what runs resident, what runs on demand, the RAM plan per component | new |
 | `docs/conventions/*.md` | Only the conventions the triage marks `rewrite` | archive |
 
 Writing rules for every agent:
@@ -425,7 +426,7 @@ Questions already known to need Tom's answer:
 3. **Skills.** Tom's requirements for the versioned skill system and the
    cross-repo refactoring skills, gathered before `skills/` is designed.
 4. **Emulator seeding.** Repos, date range, the human-originated filter,
-   budget per run.
+   spending per run, shown.
 5. **Judgement vendor.** Jev as the primary decisions leg; the open-weight
    fallback behind the port, and where it runs given 16 GB.
 6. **Archive deletion.** After Tom confirms the docs and the demonstration

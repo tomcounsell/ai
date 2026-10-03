@@ -129,7 +129,7 @@ findings", 3). Turns run with web fetch and search off.
 the kernel (`python -m core workspace remove`), which stops its services
 and frees their ports.
 
-This serves the constraint "Bounded authority and spend" for replays (a turn holds
+This serves the constraint "Bounded authority, metered spending" for replays (a turn holds
 no credential that reaches the world) and the validity of the measurement:
 a turn that can read the answer is not being measured.
 
@@ -137,8 +137,7 @@ a turn that can read the answer is not being measured.
 
 `replay.py ITEM.json --arm bare|clarify|routed [--judge]` builds the
 workspace's spec, starts a kernel task (`python -m core start --project SPEC
---base SHA`) at effect ceiling `act`, no governance grant, with the item's
-budget (default $8.00, Opus 5.5), and loops `python -m core run` until one
+--base SHA`) at effect ceiling `act`, no governance grant, with Opus 5.5 as the model, and loops `python -m core run` until one
 of the outcomes below. The kernel has no switch for the arm. For `bare` and
 `clarify` the driver starts the local judgement upstream (`python -m
 tests.judgement_upstream --answer precise|thin`) and points the kernel's leg
@@ -152,14 +151,13 @@ keys in the kernel key directory.
 |---|---|
 | `accepted` | the stand-in accepts a delivery (the task in `merge`) |
 | `feedback rounds used up` | a delivery arrives after the stand-in has given its maximum feedback (default 2) |
-| `budget exhausted` | the gateway refuses the next call |
 | `stopped` | the task was stopped |
 | `failed` | more than two runs of the task failed |
 | `run cap` | sixteen `core run` calls without an outcome |
 | `an effect other than a local push is held for Tom` | any held effect the driver may not release |
 | `NO RUNNER ...` | the router reached a stage with no runner (the checks, until milestone 1.4); the driver records no verdict for them |
 
-Critique runs as the kernel's fresh session, charged to the run's budget.
+Critique runs as the kernel's fresh session, metered and recorded on the run's task.
 Until the check runners exist, a replay whose build writes a candidate ends
 with `NO RUNNER`, and no replay reaches a delivery.
 
@@ -253,7 +251,7 @@ installs, cleared (rebuild-baseline.md, "Caveats").
 
 Each run writes `results/<run>.json`, atomically, after every step:
 
-- the item, arm, model, budget, stand-in model, and feedback cap;
+- the item, arm, model, stand-in model, and feedback cap;
 - the task id, the workspace (`replay.json`), and the outcome;
 - `questions` (each with its answer and provenance) and `feedback` (each with
   the delivery it answers and its provenance), read from the kernel's
@@ -261,7 +259,7 @@ Each run writes `results/<run>.json`, atomically, after every step:
 - `deliveries`, the delivery note of every `task.delivered` row;
 - `turns`, each with its outcome, its gateway-metered dollars, and the
   harness's own cumulative figure;
-- `spend`: gateway dollars, committed dollars, stand-in dollars;
+- `spend`: gateway dollars and stand-in dollars;
 - `final`: the branch and commit of the last push to the bare origin, or the
   workspace head if nothing was pushed; the diff stat against the base;
 - `judge`: scores, divergences, rationale, every verification command's exit
@@ -405,13 +403,13 @@ A run costs about $1.73 all in, so a sweep of the six baseline items in two
 arms, three repetitions each, is about $62, over the $25 cap per full run
 (see Growing the item set).
 
-**Bounded spend.** Valor's turns are bounded by the task budget through the
-kernel's gateway. The stand-in and the judge are not: they call `claude -p`
-outside the kernel on the machine's own credentials, and their cost goes to
-`costs.jsonl` only. The design runs every emulator call under one budget: a
-sweep is a budgeted objective (`docs/routines.md`), and the stand-in's and
-judge's calls pass through the gateway charged to it. Until then the
-emulator spends outside "Bounded authority and spend", and this doc says so.
+**Metered spending.** Valor's turns are metered by the kernel's gateway and
+recorded on the task. The stand-in and the judge are not: they call `claude -p`
+outside the kernel on the machine's own credentials, and their price goes to
+`costs.jsonl` only. The design runs every emulator call through the
+gateway: a sweep is a routine objective (`docs/routines.md`) whose metered
+spending covers the stand-in's and judge's calls too. Until then the
+emulator spends outside "Bounded authority, metered spending", and this doc says so.
 
 ## When it runs
 
@@ -419,7 +417,7 @@ The design runs the emulator on every change to a skill and on every change
 to the text a turn is rendered with (the persona and the Brief), because
 those changes alter behavior without changing kernel code and nothing else
 measures them. It also runs on any change to the request-underspecification
-classifier (below). A sweep is a budgeted routine, its result is a report to Tom
+classifier (below). A sweep is a routine, its result is a report to Tom
 comparing the change against the last sweep on the same items, and the
 decision to keep the change is his. Today it runs by hand, one item at a
 time.
@@ -470,7 +468,7 @@ An item qualifies when:
   answers;
 - a clean base exists or can be rebuilt;
 - its verification runs locally without production secrets;
-- it is a size Valor can finish in one budget (the baseline's references were
+- it is a size Valor can finish in one task (the baseline's references were
   +149 to +683 lines).
 
 Agent-authored requests, items whose only verification needs a browser or a
@@ -482,7 +480,7 @@ months, and $25 per full emulator run, which at about $1.73 a run is about
 
 ## Boundary with the kernel's tests
 
-The kernel's integration tests under `tests/` check that budgets, stop, the
+The kernel's integration tests under `tests/` check that metering, stop, the
 ledger, and the broker hold. The emulator measures outcomes, on Tom's other
 codebases, against a human's decision. The model stays fixed across arms, so
 the arm is the variable.

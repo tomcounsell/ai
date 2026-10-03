@@ -31,9 +31,9 @@ compound the ability to build. Concretely:
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
    regrowing the old system's sprawl.
-6. **Spend attention as carefully as money.** A task carries an attention
-   budget beside its dollar budget. Valor carries routine decisions,
-   investigates failures, and brings consequential choices with evidence and
+6. **Spend attention as carefully as money.** Each task counts the
+   interruptions it costs Tom and shows them beside its metered spending.
+   Valor carries routine decisions, investigates failures, and brings consequential choices with evidence and
    a recommendation. Requiring Tom to adjudicate internal process is a
    product defect.
 
@@ -46,14 +46,14 @@ The alignment survey by Ji et al. [1] names four objectives of alignment, RICE: 
 Valor commits to four properties.
 
 - **Stoppable.** Stop is immediate and lossless. Permission is checked at the boundary where an action touches the world, and any grant can be revoked.
-- **Bounded.** Every task carries a money budget and an effect ceiling, conserved down the tree. A classifier decides what a thing is; the kernel decides what it may do.
+- **Bounded.** Every task carries an effect ceiling, conserved down the tree, and every task's spending is metered and shown; spending never stops a task. A classifier decides what a thing is; the kernel decides what it may do.
 - **Legible.** Every effect and every correction is recorded by the system in a ledger it cannot edit, readable after the fact.
 - **Correctable.** Corrections are first-class, carry provenance, and reach every session and every agent. The persona that defines voice and conduct lives in git and changes by review.
 
 | RICE objective | What alignment asks of a model | Valor's property | What Valor enforces instead | What enforcement cannot do |
 |----------------|-------------------------------|------------------|-----------------------------|----------------------------|
 | **Controllability** | the model wants to accept correction [2] | **Stoppable** | stop is immediate and lossless; permission is checked at the boundary where an action touches the world; any grant can be revoked | stop a model that finds a side channel |
-| **Robustness** | behavior holds under distribution shift | **Bounded** | a budget in money on every task, conserved down the tree; a deadline and an effect ceiling on every task and every agent beneath it | make the model's own judgement robust |
+| **Robustness** | behavior holds under distribution shift | **Bounded** | an effect ceiling on every task and every agent beneath it, conserved down the tree, and a deadline; every model call metered and its spending shown | make the model's own judgement robust |
 | **Interpretability** | reasoning is inspectable | **Legible** | a ledger of every effect and every correction, written by the system, readable after the fact | detect a model that narrates well and acts otherwise [6] |
 | **Ethicality** | the model has learned good values | **Correctable** | a voice-and-conduct document in git, changed by review, plus a corrections ledger that every session and every agent reads | fix a bad prior |
 
@@ -91,9 +91,9 @@ The full bibliography is [REFERENCES.md](REFERENCES.md). Numbers here and in `do
 
 ## Three tiers
 
-- **Kernel.** Deterministic code that holds authority: budgets, effect classes and the broker, approvals, the ledger, stop, and steering. No LLM call decides what a thing may do.
+- **Kernel.** Deterministic code that holds authority: effect classes and the broker, approvals, the ledger, stop, and steering. No LLM call decides what a thing may do.
 - **Judgement.** A hosted Jev-class model handles every decision that is not authority: classification, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as the fallback. Low-confidence calls go to a human. A classifier decides what a thing is; it never decides what a thing may do.
-- **Agents.** Frontier agents do the hard work, one `claude -p` turn at a time, each inside a committed budget and an effect ceiling set by the kernel.
+- **Agents.** Frontier agents do the hard work, one `claude -p` turn at a time, each inside an effect ceiling set by the kernel, every call metered.
 
 Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for scheduling, Apple containers for sandboxes, the Keychain and a kernel key directory no turn can read for secrets, and Postgres as a document store (JSONB documents and an append-only events table) for the kernel's state.
 
@@ -105,7 +105,7 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`bridges/`](bridges/README.md): self-contained comms modules (`telegram/`, `email/`), I/O and the outbox only.
 - [`harnesses/`](harnesses/README.md): wrappers for running work via a harness such as Claude Code, Codex, or Pi.
 - [`skills/`](skills/README.md): versioned skills; structure deferred until requirements are gathered.
-- [`routines/`](routines/README.md): every scheduled task and runner, each a budgeted objective under launchd.
+- [`routines/`](routines/README.md): every scheduled task and runner, each an objective with its metered spending reported, under launchd.
 - [`tools/`](tools/README.md): non-core and vendor-dependent tooling, each declaring its effect class and acting through the broker.
 - [`api/`](api/README.md): programmatic interfaces such as MCP servers and HTTP surfaces; reserved.
 - [`ui/`](ui/README.md): the read-only dashboard.

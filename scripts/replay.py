@@ -1,6 +1,6 @@
 """Replay one item in one arm: build its workspace, start the task, and run
 it with a stand-in for Tom until the stand-in accepts a delivery, the
-feedback rounds run out, or the budget does. Writes the record to
+feedback rounds run out, or the runs do. Writes the record to
 $VALOR_DEMO/results/<run>.json.
 
     .venv/bin/python scripts/replay.py ITEM.json --arm bare|clarify|routed [--judge]
@@ -40,8 +40,8 @@ the run ends. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine slo
 ($VALOR_DEMO/claude-turn.lock.N) for its whole run. A run whose result file has no outcome yet is resumed: the
 driver continues its task instead of starting another.
 
-Live spend: up to the task's budget (default $8.00, Opus 5.5) through the
-kernel's gateway, plus the stand-in's and judge's calls, logged in
+Live spend: the task's metered spending (Opus 5.5) through the kernel's
+gateway, plus the stand-in's and judge's calls, logged in
 $VALOR_DEMO/costs.jsonl.
 """
 
@@ -169,8 +169,7 @@ def summarize(result: dict, item: dict, ws: dict) -> None:
         for t in ended
     ]
     result["spend"] = {
-        "gateway_usd": state["charged_usd_micros"] / 1e6,
-        "committed_usd": state["committed_usd_micros"] / 1e6,
+        "gateway_usd": state["spent_usd_micros"] / 1e6,
         "stand_in_usd": round(sum(s.get("usd") or 0 for s in result["log"] if s["step"] == "stand-in"), 6),
     }
     pushes = [
@@ -266,7 +265,6 @@ def _replay(item: dict, arm: str, args) -> dict:
                 "item": item,
                 "arm": arm,
                 "model": args.model,
-                "budget_usd": args.budget,
                 "stand_in_model": args.stand_in_model,
                 "max_feedback": args.max_feedback,
                 "workspace": ws,
@@ -279,8 +277,6 @@ def _replay(item: dict, arm: str, args) -> dict:
             result["task_id"] = core(
                 "start",
                 item["request"],
-                "--budget-usd",
-                str(args.budget),
                 "--ceiling",
                 "act",
                 "--project",
@@ -335,8 +331,6 @@ def _replay(item: dict, arm: str, args) -> dict:
                     result["outcome"] = "feedback rounds used up"
             elif state["state"] == "stopped":
                 result["outcome"] = "stopped"
-            elif line.startswith("BUDGET EXHAUSTED") or state["remaining_usd_micros"] <= 0:
-                result["outcome"] = "budget exhausted"
             elif line.startswith("FAILED"):
                 failed += 1
                 if failed > MAX_FAILED_RUNS:
@@ -359,7 +353,6 @@ def main() -> None:
     parser.add_argument("item")
     parser.add_argument("--arm", required=True, choices=["bare", "clarify", "routed"])
     parser.add_argument("--model", default="claude-opus-5-5")
-    parser.add_argument("--budget", type=float, default=8.0)
     parser.add_argument("--stand-in-model", default="sonnet")
     parser.add_argument("--max-feedback", type=int, default=2)
     parser.add_argument(

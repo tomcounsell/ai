@@ -35,10 +35,10 @@ The Step 5 Pass 2 consistency pass over the thirteen docs (`docs/*.md`,
 
 | Mechanism | Owner | Others now point to it |
 |---|---|---|
-| Kernel, broker, approvals, stop, steering, verifier, attention budget | architecture.md | mission.md, data.md, tech-stack.md |
+| Kernel, broker, approvals, stop, steering, verifier, attention cost | architecture.md | mission.md, data.md, tech-stack.md |
 | Which sandbox runs which work | architecture.md | tech-stack.md (candidate table removed), harnesses.md, data.md, machine.md |
 | Sandbox profile rules and the reaper's marks | harnesses.md | architecture.md (guarantees only), tech-stack.md (rule list removed) |
-| Gateway per-call algorithm | architecture.md (Budgets) | tech-stack.md (keeps only the stack-specific parts) |
+| Gateway per-call algorithm | architecture.md (Metered spending) | tech-stack.md (keeps only the stack-specific parts) |
 | Bridge port | bridges/telegram.md | architecture.md, bridges/email.md |
 | Corrections and exemplar streams | `core/` (architecture.md, data.md) | memory/README.md, core/README.md, README.md |
 | Judgement router and fallback placement | judgement-layer.md | tech-stack.md, machine.md (sizes the local alternative) |
@@ -54,7 +54,7 @@ The Step 5 Pass 2 consistency pass over the thirteen docs (`docs/*.md`,
 - **`task.delivered`.** architecture.md, data.md, harnesses.md, and
   sdlc-state-machine.md state the built behaviour (a `done.md` writes it)
   and the design (a candidate, written only after `verify` passes).
-- **Attention budget.** mission.md and data.md now follow architecture.md:
+- **Attention cost.** mission.md and data.md now follow architecture.md:
   counted in escalations, recorded and shown, never refusing. Flagged (D1),
   with the approvals-as-escalations tension (D3).
 - **Bridge port.** One owner, telegram.md; architecture.md points to it.
@@ -85,8 +85,8 @@ The Step 5 Pass 2 consistency pass over the thirteen docs (`docs/*.md`,
   pointer; corrections ownership; pointer to harnesses.md for profile rules.
 - sdlc-state-machine.md: `judgement.answered` row; breadth names use shape 8.
 - judgement-layer.md: shape 8 note resolved; fallback "never resident".
-- mission.md: attention budget follows architecture.md; shape 5 labels axes.
-- data.md: `task.delivered` note; attention budget pointer; one sandbox
+- mission.md: attention cost follows architecture.md; shape 5 labels axes.
+- data.md: `task.delivered` note; attention cost pointer; one sandbox
   owner; corrections ownership; history wording removed.
 - harnesses.md: `done.md` is a candidate; sandbox pointer to architecture.md;
   transcript storage pointer; "now" removed.

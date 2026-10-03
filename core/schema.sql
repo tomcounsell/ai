@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS documents (
     PRIMARY KEY (kind, id)
 );
 
--- The ledger. Every budget movement, turn, stop, effect, and approval is a
--- row here, and a row is never changed.
+-- The ledger. Every model call and its charge, turn, stop, effect, and
+-- approval is a row here, and a row is never changed.
 CREATE TABLE IF NOT EXISTS events (
     id      bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id text        NOT NULL,
@@ -23,13 +23,17 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_task_idx ON events (task_id, id);
 CREATE INDEX IF NOT EXISTS events_payload_gin ON events USING gin (payload jsonb_path_ops);
 
--- One reservation and one charge per gateway call, one of each effect row
--- per effect, an approval consumed by at most one intent, and one correction
+-- One open and one charge per gateway call, one of each effect row per
+-- effect, an approval consumed by at most one intent, and one correction
 -- per number. These make
 -- every fold over the ledger total.
-CREATE UNIQUE INDEX IF NOT EXISTS events_one_call_row
+-- `gateway.reserved` is how ledgers written before 2026-10-03 opened a call.
+-- The index replaced `events_one_call_row`, which covered only the legacy
+-- open and the charge; migrate drops that one.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_gateway_row
     ON events (type, (payload->>'call_id'))
-    WHERE type IN ('gateway.reserved', 'gateway.charged');
+    WHERE type IN ('gateway.opened', 'gateway.reserved', 'gateway.charged');
+DROP INDEX IF EXISTS events_one_call_row;
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_effect_row
     ON events (type, (payload->>'effect_id'))
     WHERE type IN ('effect.held', 'effect.intent', 'effect.outcome', 'effect.refused');

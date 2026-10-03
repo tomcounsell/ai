@@ -3,7 +3,7 @@
 This document says what the kernel and its control loop are made of and
 which mission item or constraint each part answers to. The mission,
 constraints, and evidence are in [mission.md](mission.md). What each part
-is built from is in [tech-stack.md](tech-stack.md); the RAM budget is in
+is built from is in [tech-stack.md](tech-stack.md); the RAM plan is in
 [machine.md](machine.md). Citations in brackets point to
 [REFERENCES.md](../REFERENCES.md).
 
@@ -18,7 +18,7 @@ the rebuild adds, with the evidence that justifies it.
 
 | Tier | Decides | Never decides |
 |---|---|---|
-| Kernel (`core/`, deterministic code) | what a thing may do: budget, effect ceiling, approval, stop | what a request means |
+| Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, approval, stop | what a request means |
 | Judgement (a hosted Jev-class model behind one port, open-weight fallback behind the same port) | what a thing is: is this request underspecified, does this diff add governance | whether it may proceed |
 | Agents (frontier models, one `claude -p` turn at a time) | how to do the work | anything about their own authority |
 
@@ -38,7 +38,7 @@ prompt layer.
 **Built.** One Postgres table, `events`, append-only: an `UPDATE`, `DELETE`,
 or `TRUNCATE` raises, and the kernel's role `valor_kernel` is granted
 `SELECT` and `INSERT` only. Grants are the first lock, the trigger the
-second. Unique indexes make every fold total: one reservation and one charge
+second. Unique indexes make every fold total: one opening and one charge
 per model call, one row of each kind per effect, one stop per task, an
 approval consumed by at most one effect, one correction per number, one
 judge verdict per task, one row of each kind per turn, and one grant per
@@ -62,7 +62,6 @@ the task starts:
 | Field | Meaning |
 |---|---|
 | `instruction` | the request, verbatim |
-| `budget_usd_micros` | the money budget, integer micro-dollars, the only budget unit |
 | `max_effect_class` | `read`, `propose`, or `act`; no effect under the task may exceed it |
 | `governance_grant` | Tom's grant for this task to add governance; default none |
 | `workspace` | the directory the task's turns work in |
@@ -83,15 +82,14 @@ turn was told is a lookup.
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
 Stop is final. A run (`core/router.py`) ends when the task needs Tom
 (`waiting`, `merge`, `merged`, `stopped`), reaches a stage with no runner,
-spends its budget, has a turn fail, or has two turns in a row end without
+has a turn fail, or has two turns in a row end without
 their stage's signal (the idle bound).
 
-**Design.** The Brief gains an `attention_budget` (see The attention log)
-and, once tasks nest, a `parent_id` and a deadline.
+**Design.** The Brief gains, once tasks nest, a `parent_id` and a deadline.
 
-## Budgets
+## Metered spending
 
-**Built.** A budget is money and nothing else. The gateway is a local
+**Built.** Every model call is metered and its price recorded on its task. The gateway is a local
 HTTP proxy speaking the Anthropic Messages wire format; each turn is pointed
 at it through `ANTHROPIC_BASE_URL` with a per-turn token in the path. For
 every model call it:
@@ -100,22 +98,22 @@ every model call it:
    carrying the day it was checked against the provider's page (an
    unpriced model is refused, since it cannot be metered; the charge row
    records `price_checked`);
-2. reserves the call's worst case, every input token at the most expensive
-   input rate plus every output token the call may produce, under the
-   task's lock, refusing with a `gateway.refused` row if it exceeds what
-   remains or the task is stopped;
+2. opens the call with a `gateway.opened` row (call id, turn id, model,
+   route, and an estimate), refusing with a `gateway.refused` row of reason
+   `stopped` if the task is stopped; nothing else refuses a call;
 3. forwards the call with the kernel's own Claude credential (harnesses.md,
    Metering through the gateway) and streams the response back unchanged,
    reading the provider's reported usage as it passes;
 4. charges what the provider reported in a `gateway.charged` row. A call
-   cut before its usage arrives is charged its input plus every output
-   token it was allowed, so the ledger never records less than the invoice.
+   cut before its usage arrives is charged the worst-case estimate (every
+   input token at the most expensive input rate plus every output token it
+   was allowed), so the ledger never records less than the invoice. The
+   estimate is only that fallback charge, never a gate.
 
-Remaining money is always derived from the ledger, by one fold
-(`tasks.money`) that `status` and every reservation use: committed (the
-Brief's budget plus every `budget.raised`), minus charges, minus open
-reservations. The per-call output cap (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`)
-keeps the reservation close to what a call can cost.
+Metered spending is always derived from the ledger, by one fold
+(`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of
+the task's charges, with the calls still open. The arithmetic is in
+`core/spending.py`.
 
 Because the harness's base URL points at the gateway, every call the turn
 makes passes through it, Claude Code's own side calls and any subagents it
@@ -123,19 +121,19 @@ starts included. In the first demonstration 69 calls were metered at
 $2.972649 against a harness-reported $2.972625 (rebuild-demonstration.md,
 Money): the meter sees what Claude Code spends on its own account.
 
-Serves bounded authority and spend. Only Tom raises a committed budget
-(`python -m core budget raise TASK N`, a `budget.raised` row with his
-provenance; a stopped task takes none); a turn that hits a refusal ends the
-run as `budget exhausted`, and the next run after a raise continues. The
-budget meters what passes the gateway and is not a wall around the
-provider (see Limits). Judgement calls are reserved and charged the same
-way in the kernel process, with no HTTP route (judgement-layer.md).
+Serves bounded authority, metered spending. Money never refuses, pauses,
+or stops a task, and nothing asks Tom because of it; the metering sees what
+passes the gateway and is not a wall around the provider (see Limits).
+Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the
+folds read as `gateway.opened`, and rows the folds ignore. Judgement calls
+are opened and charged the same way in the kernel process, with no HTTP
+route (judgement-layer.md).
 
-**Design.** Conservation down the tree (see The objective tree). Overrun
-is a question to Tom: a task that runs out ends with what it spent, what it
-produced, and what it asks for; Tom's grant raises the root, and exhaustion
-is never silence. A hung tool spends no money, so a per-task wall-clock
-deadline catches what money cannot; the idle bound plays that part.
+**Design.** A child's spending rolls up into its parent's reported
+spending (see The objective tree). A task that ends reports what it spent, what it
+produced, and what it asks for. A hung tool spends no money, so a per-task
+wall-clock deadline catches what metering cannot; the idle bound plays that
+part.
 
 ## Effect classes and the broker
 
@@ -187,7 +185,7 @@ refuses a workspace whose config names a program, redirects a push, sets any
 `push.*` or `http.*`, or includes other config (`core/git.py`;
 [tech-stack.md](tech-stack.md), the broker's performers).
 
-The constraint it enforces: bounded authority and spend. In the first
+The constraint it enforces: bounded authority, metered spending. In the first
 demonstration all three deliveries went out as held pushes that landed only
 after Tom's approval (rebuild-demonstration.md, Where Tom acted as project
 manager).
@@ -233,9 +231,8 @@ does hear it:
 4. reaps what the turn left behind (see The turn sandbox and reaping);
 5. writes `turn.ended` with outcome `stopped`.
 
-`tasks.audit` states what a stop must leave true: every reserved call
-charged, every started turn ended, no effect between intent and outcome,
-nothing charged past the committed budget. `tests/test_live_turn.py`
+`tasks.audit` states what a stop must leave true: every opened call
+charged, every started turn ended, no effect between intent and outcome. `tests/test_live_turn.py`
 stops a real task mid-turn and asserts the audit is empty.
 
 When a sandbox rule failed a turn mid-demonstration, it failed cleanly,
@@ -282,7 +279,7 @@ Three records say what happened in a turn:
 
 | Record | Written by | Holds | Built |
 |---|---|---|---|
-| Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, reservation, charge, usage | yes |
+| Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage | yes |
 | Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
@@ -376,19 +373,18 @@ costs a turn.
 
 ## The attention log
 
-Attention spent is a ledger item. Mission item 6 puts it on the same
-footing as money, and the Evidence section calls it "the one outcome number
+Attention spent is a ledger item. Mission item 6 puts it beside
+metered spending, and the Evidence section calls it "the one outcome number
 the system cannot perform against".
 
 **Built.** Every question is a `question.asked` row and its answer a
 `question.answered` row; every piece of feedback on a delivery is a
 `feedback.given` row naming the delivery it answers; every tap is an
-`approval.granted` row, every raise of the budget a `budget.raised` row,
-every verdict recorded by hand a verdict row with `leg: manual`, and every
+`approval.granted` row, every verdict recorded by hand a verdict row with `leg: manual`, and every
 governance grant a `guard.granted` row. Each carries provenance: `by`,
 `via`, `at`, and `role_played`, true when someone stood in for Tom.
 `tasks.status` folds these into the task's attention log, in ledger order,
-labelled by kind (`question`, `feedback`, `approval`, `budget_raise`,
+labelled by kind (`question`, `feedback`, `approval`,
 `verdict`, `grant`), and counts each kind apart in `attention_counts`, with
 how many were role-played and how many are unknown (a field a row never
 recorded reads as null). `role_played` exists because the first
@@ -401,12 +397,12 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
   outcome or the authority required, the two columns of the demonstration's
   attention log. Valor proposes the label in its next delivery; Tom's
   correction overrides it.
-- **An attention budget.** The Brief carries `attention_budget`, counted
-  in interruptions: questions and feedback rounds, with approvals counted
-  separately (Tom, 2026-10-01). The kernel never refuses a question for
-  exceeding it, because a refused question makes Valor guess, which costs
-  more attention later. Crossing it is a ledger row, shown on the delivery. Per-task attention against budget,
-  with dollars against budget, is the pair Mission item 6 asks for.
+- **An attention cost.** Each task counts its interruptions: questions and
+  feedback rounds, with approvals counted separately (Tom, 2026-10-01). The
+  kernel never refuses a question because of the count, because a refused
+  question makes Valor guess, which costs more attention later. The count
+  is shown on the delivery. Per-task attention beside metered spending is
+  the pair Mission item 6 asks for.
 
 ## The judgement tier in the loop
 
@@ -488,14 +484,13 @@ product.
 **Design.** A task is a node; a node too large for one session is split
 into children, each a task with its own Brief. Rules the kernel enforces:
 
-- A child's budget is carved from its parent's remaining, and the sum of
-  children never exceeds it. Only Tom raises the root.
+- A child's spending rolls up into its parent's reported spending; no
+  money is carved from a parent.
 - A child's effect ceiling never exceeds its parent's; capabilities are
   attenuated on dispatch and the kernel refuses a request it cannot meet in
   full rather than clipping it [11].
 - Decomposition cuts by outcome [13], one agent per leaf. Fan-out and depth
-  are bounded by money and the leaf criterion (one session, inside its
-  budget), never by a count.
+  are bounded by the leaf criterion (one session), never by a count.
 - A child's report lands in the tree and the parent reads its summary.
 - Stopping a node fences its subtree by generation (see Stop).
 
@@ -532,8 +527,7 @@ by email. The bridge port is owned by [bridges/telegram.md](bridges/telegram.md)
 ## How a task flows from request to merge
 
 1. **Intake.** Tom's message reaches the kernel through a bridge, which
-   starts a task: a money budget ($8 by default from Telegram), an
-   attention budget, an effect ceiling (`act` for work that pushes),
+   starts a task: an effect ceiling (`act` for work that pushes),
    governance grant none, and a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
 3. **Plan.** The working session writes the plan: approach, stakes, the
@@ -560,7 +554,6 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 
 | Failure | Caught by | Serves |
 |---|---|---|
-| Runaway spend | per-call reservation in money against the task's remaining; only Tom raises it | bounded spend |
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
@@ -571,7 +564,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling merge intent reconciled from the target | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
-| A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
+| A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
@@ -590,7 +583,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
   Setup, Isolation), and the public internet is reachable, so a turn set
   on it could reach the provider with the machine's Claude login and
   bypass the meter. Tom accepted this on 2026-10-01 and chose no separate
-  macOS user for turns: budgets give visibility and honest metering, not a
+  macOS user for turns: the gateway gives visibility and honest metering, not a
   hard wall. Effects on shared targets still leave only through the
   broker, which runs outside the sandbox.
 - **One provider today.** Until a second is metered, the reviewer is the

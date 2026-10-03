@@ -39,9 +39,7 @@ def test_one_live_judgement_per_leg_is_answered_and_charged_by_its_usage(dsn, le
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(
-                conn, tasks.Brief(instruction="live judgement", budget_usd_micros=10_000)
-            )
+            task = await tasks.start(conn, tasks.Brief(instruction="live judgement"))
         j = await port().ask_leg(leg, JUDGE, REQUEST, task_id=task, ref={"live": leg}, dsn=dsn)
         async with await db.connect(dsn) as conn:
             charged = [r["payload"] for r in await ledger.read(conn, task) if r["type"] == "gateway.charged"]

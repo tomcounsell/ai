@@ -123,7 +123,7 @@ def _cli(*args, env=None) -> subprocess.CompletedProcess:
 def populated(dsn):
     async def go():
         async with await db.connect(dsn) as conn:
-            await tasks.start(conn, tasks.Brief(instruction="backed up", budget_usd_micros=5))
+            await tasks.start(conn, tasks.Brief(instruction="backed up"))
 
     asyncio.run(go())
     return dsn
@@ -208,7 +208,7 @@ def test_rows_appended_while_dumping_do_not_break_the_match(populated, backups, 
 
     async def append():
         async with await db.connect(populated) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="during", budget_usd_micros=1))
+            task = await tasks.start(conn, tasks.Brief(instruction="during"))
             while dumping.is_alive():
                 async with conn.transaction():
                     await ledger.append(conn, task, "turn.started", {"turn_id": ledger.new_id()})

@@ -17,10 +17,10 @@ legs abstain on takes the task's abstain route; when both legs fail there
 is no answer, and the consumer applies the task's failure route. There is
 no third leg and never a frontier model.
 
-Every call is metered against the task's money: both legs' worst cases are
-reserved before the first call (so a refusal comes before any provider is
-asked) and each is charged what it cost when it returns, as
-`gateway.reserved` and `gateway.charged` rows with `route: judgement`.
+Every call is metered on the task: both legs' calls are opened before the
+first call (so a stopped task's refusal comes before any provider is asked)
+and each is charged what it cost when it returns, as `gateway.opened` and
+`gateway.charged` rows with `route: judgement`.
 Each judgement writes one `judgement.answered` or `judgement.failed` row.
 
 Adapters live in `tools/` and come in through `JudgementPort(legs, ...)`;
@@ -37,7 +37,7 @@ from ipaddress import ip_address
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from core import budget, db, ledger
+from core import db, ledger, spending, tasks
 from core.settings import settings
 
 # The sentence every rendering puts after a question, before any input.
@@ -261,7 +261,7 @@ class JudgementPort:
         self.legs = dict(legs)
         self.dsn = dsn
         for leg in self.legs.values():
-            if budget.judgement_price(leg.model) is None:
+            if spending.judgement_price(leg.model) is None:
                 raise ValueError(f"judgement model {leg.model} has no price; it cannot be metered")
 
     def models(self) -> dict[str, str]:
@@ -287,13 +287,13 @@ class JudgementPort:
         ref: dict[str, Any],
         dsn: str | None = None,
     ) -> Judgement:
-        """Ask the task's questions. Raises `budget.BudgetRefused` (before any
-        provider call) when the task's money cannot cover both legs."""
+        """Ask the task's questions. Raises `tasks.TaskStopped` (before any
+        provider call) when the task is stopped."""
         _check_inputs(task, inputs)
         dsn = self._dsn(dsn)
         primary, fallback = (self.legs[n] for n in route(task))
         jid = ledger.new_id()
-        calls = await self._reserve(dsn, task, inputs, task_id, jid, [primary, fallback])
+        calls = await self._open(dsn, task, inputs, task_id, jid, [primary, fallback])
         first = await self._call(dsn, task, inputs, task_id, primary, calls[primary.name], "primary")
         need = _need_fallback(task, first)
         if need:
@@ -317,17 +317,17 @@ class JudgementPort:
         dsn = self._dsn(dsn)
         leg = self.legs[leg_name]
         jid = ledger.new_id()
-        calls = await self._reserve(dsn, task, inputs, task_id, jid, [leg])
+        calls = await self._open(dsn, task, inputs, task_id, jid, [leg])
         role = "primary" if leg_name == route(task)[0] else "fallback"
         attempt = await self._call(dsn, task, inputs, task_id, leg, calls[leg.name], role)
         return await self._record(dsn, task, inputs, task_id, ref, jid, [attempt], merge=False)
 
     # -- the steps ----------------------------------------------------------
 
-    async def _reserve(self, dsn, task, inputs, task_id, jid, legs) -> dict[str, dict | None]:
-        """Reserve each leg's worst case, in order, under the task's lock.
-        A leg whose inputs are over its cap reserves nothing (it will not be
-        called). A refusal charges what was already reserved 0 and raises."""
+    async def _open(self, dsn, task, inputs, task_id, jid, legs) -> dict[str, dict | None]:
+        """Open each leg's call, in order. A leg whose inputs are over its
+        cap opens nothing (it will not be called). A stopped task's refusal
+        charges what was already opened 0 and raises."""
         calls: dict[str, dict | None] = {}
         async with await db.connect(dsn) as conn:
             for leg in legs:
@@ -335,7 +335,7 @@ class JudgementPort:
                 if estimated > leg.max_input_tokens:
                     calls[leg.name] = None
                     continue
-                price = budget.judgement_price(leg.model)
+                price = spending.judgement_price(leg.model)
                 call = {
                     "call_id": ledger.new_id(),
                     "turn_id": None,
@@ -346,14 +346,16 @@ class JudgementPort:
                     "model": leg.model,
                     "estimated_input": estimated,
                     "max_tokens": leg.max_output_tokens,
-                    "usd_micros": budget.judgement_worst_case(estimated, leg.max_output_tokens, price),
+                    "estimate_usd_micros": spending.judgement_worst_case(
+                        estimated, leg.max_output_tokens, price
+                    ),
                 }
                 try:
-                    await budget.reserve(conn, task_id, call)
-                except budget.BudgetRefused:
+                    await spending.open_call(conn, task_id, call)
+                except tasks.TaskStopped:
                     for done in calls.values():
                         if done is not None:
-                            await budget.charge(
+                            await spending.charge(
                                 conn, task_id, done["call_id"], 0, {**_detail(done), "unused": True}
                             )
                     raise
@@ -401,7 +403,7 @@ class JudgementPort:
         if call is not None:
             charged, detail = _charge_for(call, got, usage)
             async with await db.connect(dsn) as conn:
-                await budget.charge(conn, task_id, call["call_id"], charged, {**_detail(call), **detail})
+                await spending.charge(conn, task_id, call["call_id"], charged, {**_detail(call), **detail})
             attempt.update({"call_id": call["call_id"], "usd_micros": charged, "usage": usage})
         else:
             attempt.update({"call_id": None, "usd_micros": 0, "usage": None})
@@ -411,7 +413,7 @@ class JudgementPort:
     async def _unused(self, dsn, task_id, leg, call) -> dict[str, Any]:
         if call is not None:
             async with await db.connect(dsn) as conn:
-                await budget.charge(conn, task_id, call["call_id"], 0, {**_detail(call), "unused": True})
+                await spending.charge(conn, task_id, call["call_id"], 0, {**_detail(call), "unused": True})
         return {
             "leg": leg.name,
             "role": "fallback",
@@ -532,24 +534,24 @@ def _usage_ok(usage) -> bool:
         v = usage.get(key)
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
             return False
-    return usage.get("reported_usd") is None or budget.usd_micros(usage["reported_usd"]) is not None
+    return usage.get("reported_usd") is None or spending.usd_micros(usage["reported_usd"]) is not None
 
 
 def _charge_for(call: dict, got: LegAnswer | LegError, usage) -> tuple[int, dict[str, Any]]:
     """The charge for one call, by the gateway's rules: what the usage says
-    (or the reported cost, if more); the whole reservation when the
+    (or the reported cost, if more); the call's worst case when the
     provider may have billed and said nothing readable; 0 when nothing
     reached the provider or it refused before generating."""
-    price = budget.judgement_price(call["model"])
+    price = spending.judgement_price(call["model"])
     detail: dict[str, Any] = {"price_checked": price["checked"]}
     if isinstance(got, LegError) and got.billed == "none":
         detail.update({"unsent": got.status is None, "status": got.status})
         return 0, detail
     if _usage_ok(usage):
         detail["usage"] = usage
-        return budget.judgement_cost(usage, price), detail
+        return spending.judgement_cost(usage, price), detail
     detail.update({"usage_missing": True, "billed": "unknown"})
-    return call["usd_micros"], detail
+    return call["estimate_usd_micros"], detail
 
 
 # -- reading judgement rows (for the kernel's consumers) ----------------------

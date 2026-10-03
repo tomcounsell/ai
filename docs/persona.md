@@ -290,7 +290,7 @@ Valor may do. A person writing to Valor directly is a request, and the
 kernel's Brief and ceiling still bound it. Retrieved content can act
 as instructions to an LLM-integrated application [7]; the kernel's effect
 ceiling bounds the damage, and this habit keeps Valor from trying.
-Constraint: bounded authority and spend.
+Constraint: bounded authority, metered spending.
 
 ## What may leave under Valor's name
 
@@ -346,7 +346,7 @@ order:
 
 1. **Persona.** Identity, voice, conduct, the governance paragraph. Read
    from `persona/`, which changes only by a reviewed diff in git.
-2. **Brief.** The task's commitments: task id, instruction, budget,
+2. **Brief.** The task's commitments: task id, instruction,
    effect ceiling, governance grant, workspace (`core/tasks.py`,
    `dispatch`).
 3. **Corrections from Tom.** Every correction in force, rendered from the

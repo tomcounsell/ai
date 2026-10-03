@@ -1,13 +1,13 @@
 # Routines
 
 A routine is work Valor does on a schedule instead of on request. Each run is
-a task like any other: a Brief with a money budget, an effect ceiling, and a
+a task like any other: a Brief with an effect ceiling and a
 governance grant (default none), committed by the kernel before the first
 turn, metered by the gateway, recorded in the ledger, and stoppable at any
 instant. launchd supplies the time. The kernel supplies everything else. A
 routine is never a bare script, because a script outside the kernel has no
-budget, no ceiling, and no ledger, and so sits outside the constraint
-"Bounded authority and spend" (`docs/mission.md`).
+metering, no ceiling, and no ledger, and so sits outside the constraint
+"Bounded authority, metered spending" (`docs/mission.md`).
 
 The code lives in `routines/`; its README states the scope and the import
 rules.
@@ -19,7 +19,7 @@ git and both changed only by a reviewed diff:
 
 | File | Holds | Serves |
 |---|---|---|
-| `routine.toml` | the instruction, the per-run budget, the period budget, the effect ceiling, the model, the mission item it serves, the two task ids that show its second need, and the date it was created | Bounded authority and spend; Mission item 5 |
+| `routine.toml` | the instruction, the effect ceiling, the model, the mission item it serves, the two task ids that show its second need, and the date it was created | Bounded authority, metered spending; Mission item 5 |
 | `<label>.plist` | the launchd job: a `StartCalendarInterval` or `StartInterval` and one program argument list that calls the kernel CLI with the routine's name | Mac native (launchd for scheduling) |
 
 The plist never names a script of its own. Its program is the kernel's entry
@@ -35,35 +35,34 @@ the broker calls (Mac native: Keychain for secrets).
 ## How a run starts
 
 Design: launchd runs `python -m core routine <name>`. The kernel reads
-`routine.toml`, checks the routine's period budget in the ledger, commits a
-Brief for this run whose budget is drawn from that period budget, and runs
-its turns exactly as `python -m core run` does. The run ends the way any
-task ends: a delivery, a question, the budget spent, or a stop. One
+`routine.toml`, commits a Brief for this run, and runs its turns exactly as
+`python -m core run` does. The run ends the way any task ends: a delivery,
+a question, or a stop. One
 `python -m core stop <task>` stops it.
 
 The current kernel has no `routine` command and no routine record. It has
 `start` and `run`, which already give a scheduled job everything that
-matters: a plist that calls `python -m core start ... --budget-usd N
---ceiling read` and then `python -m core run <task>` gets a committed budget,
-a ceiling, the gateway, and the ledger. What it lacks is the routine's
+matters: a plist that calls `python -m core start ...
+--ceiling read` and then `python -m core run <task>` gets a
+ceiling, the gateway, and the ledger. What it lacks is the routine's
 identity on the task (so the ledger can say which routine a run belongs to)
-and the period budget.
+and the period report of spending.
 
-## Budget and ceiling
+## Metered spending and ceiling
 
-**Per-run budget.** Every run carries a money budget in its Brief, metered
-by the gateway against every model call the run makes. Exhausting it stops
-the run. A routine that makes no model call still runs as a task with a
-budget of zero, so its effects still pass through the broker and land in the
-ledger. Constraint: Bounded authority and spend.
+**Per-run spending.** Every model call a run makes is metered by the
+gateway and recorded on the run's task, and money never stops the run. A
+routine that makes no model call still runs as a task with metered spending
+of zero, so its effects still pass through the broker and land in the
+ledger. Constraint: Bounded authority, metered spending.
 
-**Period budget.** Design: a routine is a standing objective with a budget
-for a thirty-day period, and each run is a child whose budget is drawn from
-it. Money is conserved down the tree, so a routine that runs more often than
-expected spends its period budget early and stops being started until the
-next period, instead of spending without limit. The current kernel has a
-single task record and no objective tree, so the period budget is design.
-Constraint: Bounded authority and spend.
+**Period spending.** Design: a routine is a standing objective, and each
+run is a child whose metered spending rolls up into the routine's. The
+routine's spending over its thirty-day period is reported, so a routine that
+runs more often than expected shows it; nothing stops it on money. The
+current kernel has a single task record and no objective tree, so the
+period report is design.
+Constraint: Bounded authority, metered spending.
 
 **Ceiling.** The ceiling is set in `routine.toml`, copied into each run's
 Brief, and never widens at run time. Least privilege [11] sets the default:
@@ -84,7 +83,7 @@ kernel does not serialize turns across tasks.
 | Class | Examples | Who authorizes |
 |---|---|---|
 | `read` | run a test suite against real Postgres and report; read error reports from a service; list workspaces whose branches have merged | the routine's committed Brief |
-| `propose` | open a branch with a fix for a failure it found; draft a summary; start a child task, inside its own budget and ceiling, to investigate a failure; remove a workspace whose commits are already on the origin | the Brief; the performer declares the class |
+| `propose` | open a branch with a fix for a failure it found; draft a summary; start a child task, inside its own ceiling, to investigate a failure; remove a workspace whose commits are already on the origin | the Brief; the performer declares the class |
 | `act` | merge, send, deploy, pay, delete anything not recoverable elsewhere | Tom, one approval per action, through the same approval surface as any task |
 
 A schedule is not a standing approval. An `act` requested by a routine is
@@ -109,8 +108,8 @@ The kinds of scheduled work this design carries:
 
 ## What a routine may not do
 
-- Widen its ceiling, add to its budget, or start a child with more of either
-  than it holds. The kernel refuses; a routine has no path to ask for more
+- Widen its ceiling, or start a child with a higher one than it holds.
+  The kernel refuses; a routine has no path to ask for more
   except a question to Tom.
 - Send Tom a status message. Status is read on the dashboard. A message to
   Tom is a question with a decision in it, ledgered as attention, or it is
@@ -139,8 +138,8 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 - **The ledger.** Every run is a task, so its start, its turns, its spend,
   its effects, and its end are ledger rows like any task's. A run's result
   is its delivery, read with `python -m core status <task>`.
-- **The dashboard.** `ui/` shows routine runs beside Tom's tasks: spend
-  against the period budget, last run, last result. Read-only.
+- **The dashboard.** `ui/` shows routine runs beside Tom's tasks: spending
+  over the period, last run, last result. Read-only.
 - **Attention.** A question from a routine reaches Tom through the same
   path as any task's question and is ledgered with its answer and
   provenance. A held `act` appears in the pending approvals.
@@ -170,7 +169,7 @@ constraint).
 ## Gaps
 
 - The `routine` command, the routine identity on a task, and the period
-  budget do not exist in the current kernel.
+  spending report do not exist in the current kernel.
 - Serializing turns across tasks so a routine never runs beside Tom's work
   is design; the current kernel does not do it.
 - Whether the expiry sweep's deletion branch should merge without a tap is

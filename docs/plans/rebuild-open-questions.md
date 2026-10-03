@@ -6,8 +6,8 @@ Questions Tom answered in the 2026-10-01 interview carry his answer under
 them; the rest are still open.
 Terms used throughout: a **tap** is your one-time approval of one specific
 action (a push, a merge, a message). The **gateway** is the local proxy that
-every Claude call goes through so its cost is counted against the task's
-budget. A **cheap judgement model** is a small hosted model (Jev, or OpenAI's
+every Claude call goes through so its cost is counted onto the task's
+metered spending. A **cheap judgement model** is a small hosted model (Jev, or OpenAI's
 Decisions API) that answers yes/no style questions for under a cent.
 
 ## Blocks the rebuild plan
@@ -42,7 +42,7 @@ final commit. On the 16 GB Air the three run back to back with the same
 result. (docs/sdlc-state-machine.md, docs/machine.md)
 
 ### 2. Is this the build order?
-*Example:* the kernel (task, budget, ledger, approvals) and its database first;
+*Example:* the kernel (task, metered spending, ledger, approvals) and its database first;
 Telegram and email second; the `claude` CLI wrapper third; persona and
 scheduled routines fourth; tools as needed; memory last, once popoto ships
 Postgres.
@@ -58,13 +58,13 @@ routines, tools on demand, memory last.
 *Example:* in the #894 demonstration Valor's sandbox ran as your user, so a
 deliberate `security` command could have read your keychain, and the open
 internet meant it could have called Claude with your Claude Code login,
-skipping the $15 budget entirely.
+skipping the gateway's metering entirely.
 - **A.** Yes, in the first kernel milestone: Valor runs as a separate macOS user, and only the gateway holds the Claude key. **(Recommended)** It closes both holes by construction instead of by sandbox rules.
 - **B.** Later; keep the current sandbox for now.
 (docs/machine.md, docs/tech-stack.md, docs/architecture.md)
 
 **Answered 2026-10-01 by Tom: neither; accepted as a risk.** No separate
-macOS user for turns, and the direct-call hole stays open. Budgets are for
+macOS user for turns, and the direct-call hole stays open. Metered spending is for
 visibility and honest metering, not a hard wall.
 
 ### 4. Is the MacBook Air dedicated to Valor?
@@ -72,7 +72,7 @@ visibility and honest metering, not a hard wall.
 6 GB of RAM is left. Chrome, Slack, and other desktop apps would take about
 half of that.
 - **A.** Yes, dedicated. **(Recommended)** The memory plan only works with that headroom.
-- **B.** No, you also use it day to day; the plan budgets for desktop apps.
+- **B.** No, you also use it day to day; the plan makes room for desktop apps.
 (docs/machine.md)
 
 **Answered 2026-10-01 by Tom.** Design for one machine. Valor has four
@@ -162,19 +162,19 @@ approvals, that is 5 interruptions; not counting them, 2.
 Questions and feedback rounds count as interruptions, approvals separately;
 counted and shown, never blocking.
 
-### 12. When you start a task from a Telegram message, what budget does it get?
+### 12. When you start a task from a Telegram message, what spending does it start with?
 *Example:* you message "list() in popoto hydrates every row twice, fix it".
-- **A.** A fixed default from settings ($8, the baseline's per-run budget; every replay spent under $2.20), with every push or send still waiting for your tap. **(Recommended)** A message should never be able to grant itself more money or authority.
-- **B.** Let you write a budget in the message ("budget $20").
+- **A.** No amount at all: spending is metered and shown, never a limit (the baseline's runs started with $8 committed and every replay spent under $2.20; superseded 2026-10-03: metered spending only), with every push or send still waiting for your tap. **(Recommended)** A message should never be able to grant itself more authority.
+- **B.** Let you write an amount in the message ("$20").
 (docs/bridges/telegram.md)
 
-**Answered 2026-10-01 by Tom: A** (default, not objected to): $8.
+**Answered 2026-10-01 by Tom: A** (default, not objected to): $8. Superseded 2026-10-03: metered spending only; no amount is set and nothing refuses on money.
 
 ### 13. Which past work should Valor replay to test itself, and how much per run of the test set?
 *Example:* the baseline replayed 6 requests from psyoptimal, popoto, and
 cuttlefish for about $22 in total.
 - **A.** Those three repos, requests you wrote in the last 12 months, $25 per run. **(Recommended)** Same repos as the baseline, so results compare.
-- **B.** Different repos, dates, or budget (say which).
+- **B.** Different repos, dates, or run size (say which).
 (docs/emulator.md)
 
 **Answered 2026-10-01 by Tom: A.** psyoptimal, popoto, and cuttlefish;
@@ -244,14 +244,14 @@ Tom's confirmation.
 - Your feedback on a delivery goes straight to rework, without a judgement call. (docs/sdlc-state-machine.md)
 - The judgement model's accuracy bars are set from its first measured results. (docs/judgement-layer.md)
 - A code summary is added to the judgement model's input only if replays show it helps. (docs/judgement-layer.md)
-- Running out of budget ends the task with a question to you asking for more; never silence. (docs/architecture.md)
+- Running out of committed money ended the task with a question to you asking for more; never silence. (docs/architecture.md) Superseded 2026-10-03: metered spending only; nothing refuses or asks on money.
 - A doc found contradicting the code opens a fix task; it blocks nothing. (docs/judgement-layer.md)
 - Approvals record whether you tapped or someone stood in for you. (docs/architecture.md, docs/data.md)
 - A correction is withdrawn by a later correction naming it. (docs/architecture.md)
 - The kernel gets its own database login that only it holds. (docs/data.md)
 - An always-on kernel process is built together with the bridges. (docs/tech-stack.md, docs/routines.md)
 - Telegram uses Telethon; email uses Python's built-in IMAP and SMTP, adapted from existing code. (docs/tech-stack.md)
-- Replay costs (stand-in and judge calls) go through the gateway under one budget. (docs/emulator.md)
+- Replay costs (stand-in and judge calls) go through the gateway onto one task's spending. (docs/emulator.md)
 - The stand-in for you in replays moves to a stronger model, since Sonnet accepted every run. (docs/emulator.md)
 - Valor's full persona is built with `persona/` in step four; the kernel says "You are Valor." until then. (docs/persona.md)
 - Codex and other agent CLIs wait until the gateway supports their providers. (docs/harnesses.md)
