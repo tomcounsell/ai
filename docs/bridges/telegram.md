@@ -94,8 +94,8 @@ whether the message with that idempotency key exists.
 | Action type | Class | Target | Payload |
 |---|---|---|---|
 | `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `files` (each a path and its sha256) |
-| `telegram.send_poll` | `act` | chat id (groups only) | `question`, `options`, `correlation` |
-| `email.send` | `act` | the first recipient | see [email.md](email.md) |
+| `telegram.send_poll` | `act` | chat id (groups only) | `question`, `options`, `correlation`; designed, not yet declared in `core/bridge.py` |
+| `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
 reply target, and each file's bytes, so what leaves is what he saw.
@@ -111,8 +111,7 @@ of the bridge's action types that carry an unused `approval.granted` and no
 `effect.intent` yet. Where [architecture.md](../architecture.md) separates
 release from approval, the query also requires the release.
 
-The bridge listens on a Postgres notification channel (the same mechanism
-`core/tasks.py` uses for stop on `valor_stop`), and on each wake it calls
+The bridge listens on a Postgres notification channel (`valor_events`, notified by every new row), and on each wake it calls
 `broker.release` for each such effect in its own process. Release reads the
 `task.stopped` fence, binds the unused approval, writes the intent, calls the
 performer, and writes the outcome. The bridge performs nothing the broker
@@ -121,7 +120,7 @@ has not passed to it.
 ### Operator notices
 
 Some messages are the kernel speaking to Tom about his own work: a question a
-turn asked, a delivery, a held effect waiting for his tap, a stop. These are operator notices.
+turn asked, a delivery, a held effect waiting for his tap, a failed workspace, a message that was not acted on. These are operator notices.
 
 A notice goes only to Tom's operator chat, which is fixed in settings. No
 turn, task, or payload names the recipient, so a notice cannot reach anyone
@@ -299,7 +298,7 @@ schedule.
 In a group, a question with a short list of answers can go out as a native
 Telegram poll: Tom taps once instead of typing (Mission item 6). `core/`
 chooses the poll form; the bridge renders it through `telegram.send_poll`
-when `limits` says the chat supports it.
+when the chat supports it.
 
 Protocol facts the bridge works within:
 

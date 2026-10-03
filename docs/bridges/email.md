@@ -94,8 +94,8 @@ rebuild-baseline.md (popoto #191 and #188).
 
 ## Sending
 
-**The performer.** `email.send` is `act`. Its target is the first `To`
-address, and its payload is the whole message:
+**The performer.** `email.send` is `act`. Its target is the `To`
+addresses, lowercased, sorted, and comma-joined, and its payload is the whole message:
 
 | Payload field | Meaning |
 |---|---|

@@ -46,7 +46,7 @@ enforcing outside the model is AI Control [4].
 | Tests | pytest, real Postgres, a `spend` marker on every live test | in use |
 | Property tests | Hypothesis: the state machine's fold; the effect ceiling down the tree next | in use |
 | Schemas | frozen dataclasses in `core/` | in use; Pydantic open |
-| Kernel process | `python -m core`, one process per command, no daemon | in use; a resident process open |
+| Kernel process | `python -m core serve`, resident under launchd; every other `python -m core` command is one short process | in use |
 | Database | Postgres 18, as a document store | in use |
 | Driver and schema | psycopg 3 async, hand-written SQL, one idempotent `core/schema.sql` | in use |
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
@@ -158,7 +158,8 @@ What the stack contributes to the ledger's integrity:
   the stop check and the append that opens a call, per task. They need no table privilege, so the insert-only
   grant stays minimal. Serves "Bounded authority, metered spending".
 - **`LISTEN`/`NOTIFY`** carries a stop to the running turn's process the
-  moment `task.stopped` commits. Serves "Stop is immediate and lossless".
+  moment `task.stopped` commits, and every new row (`valor_events`) to the
+  resident kernel and the bridges. Serves "Stop is immediate and lossless".
 
 **Driver.** psycopg 3, async, autocommit by default so every
 `conn.transaction()` block is a real transaction. SQL is hand-written and
@@ -560,7 +561,7 @@ memory figure from them carries over; the RAM plan per component is
   with their task and stop with it.
 - **No resident model.** Judgement is hosted (section 5). The open-weight
   fallback is hosted too (Parasail, through OpenRouter).
-- **Bridges resident, everything else on demand.** The bridges are the only
+- **The kernel and the bridges resident, everything else on demand.** They are the only
   components that must be up when Tom is not at the machine. Routines start
   under launchd and exit.
 - **No Linux assumptions.** launchd, not cron or systemd; Keychain, not a
