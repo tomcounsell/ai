@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4u-caps
 type: bug
-status: planned
+status: delivered-not-passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -524,3 +524,30 @@ On top of the docs commit `936c377ae`. Every finding resolved:
   `test_calibrate_refuses_too_many_cases`.
 - **T2.** The early-leave 401 is a test (30); with the invalidate moved
   back after `handle`'s await it fails.
+
+## Checks after patch round 1, at c580e0b51 (review round 2 of 2)
+
+- Review: `changes`; governance boolean no. Round 1's findings and the
+  bare 6000 are fixed. Keeping the signal handlers and absorbing further
+  cancels holds: with a 1.5 second cleanup and three signals, the cleanup
+  finished, `provision:<task>` was released, and `asyncio.run` returned.
+  Suite 543 passed, 7 skipped.
+- Docs: `updated`, f3c990ac7 on `m1-4u-docs2` ("The workspace" and
+  "Per-task services" moved from `docs/harnesses.md` to `docs/workspace.md`).
+- Test: not completed; the machine stopped during the run.
+
+The finding: `SETUP_TAIL = 1500` (`core/workspace.py:721`) has no source
+and no function. The result lands in `project.setup_result` in the task's
+row, which no message size limits, and only tests read it. It cuts away the
+start of a failed setup's output, where the error usually is, and the
+output's only copy is a temporary file removed on close. The same kind of
+unsourced cut of error output sits in merged code in `runs.py`, `git.py`,
+`workspace.py`, `harnesses/claude_code.py`, and `ledger.py`.
+
+## Delivery: delivered-not-passed
+
+Review rounds are spent. Recommendation: accept one more patch that writes
+each setup command's output to `<task root>/setup/<n>.log`, outside every
+path a turn can write, carries `{command, exit, output: path}` in the
+result, drops the constant and the seek, and removes the other unsourced
+error-output cuts the same way; rerun the three checks; merge if they pass.
