@@ -39,7 +39,7 @@ github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
 merge-target add URL BRANCH --note TEXT
                                Tom's grant of a (URL, branch) pair a merge
                                may land on; https only; always his
-merge-target remove URL BRANCH --note TEXT [--by B]
+merge-target remove URL BRANCH --note TEXT --by B
                                revoke a pair
 merge-target list              the granted pairs
 calibrate CASES.json
@@ -768,7 +768,7 @@ def main() -> None:
     remove_target.add_argument("url")
     remove_target.add_argument("branch")
     remove_target.add_argument("--note", required=True)
-    remove_target.add_argument("--by", default="tom")
+    remove_target.add_argument("--by", required=True)
     remove_target.add_argument("--via", default="the command line")
     target_cmd.add_parser("list")
     calibrate = sub.add_parser("calibrate")

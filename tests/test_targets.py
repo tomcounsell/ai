@@ -158,6 +158,9 @@ def test_merge_target_add_is_tom_s_and_remove_is_anyone_s(dsn, tmp_path):
     added = cli(tmp_path, "merge-target", "add", url, branch, "--note", "the rebuild")
     assert added.returncode == 0, added.stderr
     assert f"{url}  {branch}  the rebuild" in cli(tmp_path, "merge-target", "list").stdout
+    nameless = cli(tmp_path, "merge-target", "remove", url, branch, "--note", "done")
+    assert nameless.returncode == 2 and "--by" in nameless.stderr
+    assert url in cli(tmp_path, "merge-target", "list").stdout
     removed = cli(tmp_path, "merge-target", "remove", url, branch, "--note", "done", "--by", "valor")
     assert removed.returncode == 0, removed.stderr
     assert url not in cli(tmp_path, "merge-target", "list").stdout

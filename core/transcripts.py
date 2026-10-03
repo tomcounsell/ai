@@ -17,8 +17,9 @@ Copied after the turn's processes are reaped, stopped turns included,
 before `turn.ended`. Stored as documents of kind `transcript`, id
 `<turn_id>/<name>/<n>`, body `{turn_id, name, offset, chunk, base64}`:
 base64 of the raw bytes, `CHUNK` raw bytes per document, no size cap. Each
-file is streamed from its descriptor one chunk at a time, every read and
-digest in a worker thread, so the event loop never waits on the disk. A
+file is streamed from its descriptor one chunk at a time, every read,
+digest, base64 encoding, and JSON dump in a worker thread, so the event
+loop never waits on the disk or on a chunk's encoding. A
 file the task's last copy covers is stored from where that copy ended,
 when its first bytes still hash to that copy's digest; otherwise whole,
 with `prefix_changed`. `sha256` and `bytes` are always the whole file's.
@@ -32,12 +33,11 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from psycopg.types.json import Jsonb
 
 CHUNK = 64 * 1024 * 1024
 KIND = "transcript"
@@ -162,10 +162,22 @@ def _hash_prefix(fd: int, length: int):
     return h, pos
 
 
-def _read_chunk(fd: int, pos: int, whole) -> bytes:
+def _read_chunk(fd: int, pos: int, n: int, whole, turn_id: str, name: str) -> tuple[int, str | None]:
+    """Read, digest, base64-encode, and serialize one chunk, all in the
+    caller's worker thread: its length, and its document body as JSON text
+    (None at the end of the file)."""
     chunk = os.pread(fd, CHUNK, pos)
+    if not chunk:
+        return 0, None
     whole.update(chunk)
-    return chunk
+    body = {
+        "turn_id": turn_id,
+        "name": name,
+        "offset": pos,
+        "chunk": n,
+        "base64": base64.b64encode(chunk).decode(),
+    }
+    return len(chunk), json.dumps(body)
 
 
 async def _store(conn, turn_id: str, name: str, fd: int, prev: dict[str, Any] | None) -> dict[str, Any]:
@@ -177,24 +189,15 @@ async def _store(conn, turn_id: str, name: str, fd: int, prev: dict[str, Any] | 
         if read == prev["bytes"] and prefix.hexdigest() == prev["sha256"]:
             whole, offset, changed = prefix, prev["bytes"], False
     pos, n = offset, 0
-    while chunk := await asyncio.to_thread(_read_chunk, fd, pos, whole):
+    while True:
+        length, body = await asyncio.to_thread(_read_chunk, fd, pos, n, whole, turn_id, name)
+        if body is None:
+            break
         await conn.execute(
-            "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s)",
-            (
-                KIND,
-                f"{turn_id}/{name}/{n}",
-                Jsonb(
-                    {
-                        "turn_id": turn_id,
-                        "name": name,
-                        "offset": pos,
-                        "chunk": n,
-                        "base64": base64.b64encode(chunk).decode(),
-                    }
-                ),
-            ),
+            "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s::jsonb)",
+            (KIND, f"{turn_id}/{name}/{n}", body),
         )
-        pos += len(chunk)
+        pos += length
         n += 1
     return {
         "name": name,

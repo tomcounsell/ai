@@ -108,7 +108,15 @@ class PushBranch:
 
 
 ROTATE = "GitHub refused the credential; rotate it"
-_REFUSED = ("401", "403", "could not read Username", "Authentication failed", "Invalid username or password")
+# Git's own phrases for a refused credential, never a bare status code: a
+# rejected push prints full SHAs, and a SHA can hold "401" or "403".
+_REFUSED = (
+    "The requested URL returned error: 401",
+    "The requested URL returned error: 403",
+    "could not read Username",
+    "Authentication failed",
+    "Invalid username or password",
+)
 
 
 class Merge(PushBranch):

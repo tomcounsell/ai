@@ -139,8 +139,10 @@ What the kernel must never do:
   request header; a test checks it.
 - **Rotation.** Tom creates a new token and replaces it in the vault
   `.env`; the build session runs `python -m core github-key` (it prints
-  `written`); Tom revokes the old one. A push GitHub refuses (stderr names
-  401 or 403) fails the merge with "GitHub refused the credential; rotate
+  `written`); Tom revokes the old one. A push GitHub refuses (git's stderr
+  says "The requested URL returned error: 401" or "...: 403", or names
+  failed authentication; never a bare status code, which a SHA can hold)
+  fails the merge with "GitHub refused the credential; rotate
   it", and the next run requests the merge again.
 - **A missing key** fails the merge with the `MissingKey` text and pushes
   nothing. It never refuses `start`.
@@ -155,8 +157,9 @@ What the kernel must never do:
   grant with `provenance.by = "tom"`, `role_played: false`, always; no
   `--by` or `--role-played`, like `grant`. It refuses a URL `url_ok`
   refuses and a branch `git check-ref-format --branch` refuses.
-- **`merge-target remove URL BRANCH --note TEXT [--by NAME]`** writes a
-  revocation; it takes authority away, so anyone running the kernel may.
+- **`merge-target remove URL BRANCH --note TEXT --by NAME`** writes a
+  revocation; it takes authority away, so anyone running the kernel may,
+  and `--by` is required, so the row names who ran it.
   **`merge-target list`** prints the granted pairs.
 - **`targets.local(url)`**: no scheme and no `host:path` form is a local
   path, always allowed; every other target must be granted.
@@ -273,7 +276,8 @@ What the kernel must never do:
   link that is not sparse (`st_blocks * 512 < st_size` is refused), or
   nothing and a reason, or `(None, None)` when it does not exist. The
   kernel streams it from that descriptor, from its offset, one chunk at a
-  time, each read and digest in a worker thread off the event loop. Subagent files are the regular `agent-*.jsonl`
+  time, each read, digest, base64 encoding, and JSON dump in a worker thread
+  off the event loop. Subagent files are the regular `agent-*.jsonl`
   entries of `<session_id>/subagents/`. A file is named by its path
   relative to `projects/<dir>`, such as
   `<session>/subagents/agent-x.jsonl`, so different sessions' files never
@@ -347,7 +351,8 @@ redirect to a second loopback server, and logs every header.
 **Credential**: a released merge to a granted loopback target lands with
 the header, from the mirror; with the key file missing the merge fails
 with the `github-key` text and no request carried a header; a wrong token
-fails with "GitHub refused the credential; rotate it"; `push_branch` in the
+fails with "GitHub refused the credential; rotate it", and a rejected push
+whose SHA holds "403" fails with git's rejection, not that; `push_branch` in the
 same task sends no header and lands on the local origin; a `--workspace`
 task whose origin is a granted loopback URL merges with no header (401),
 and its `push_branch` sends none; a mirror holding an `http.` or `url.` key

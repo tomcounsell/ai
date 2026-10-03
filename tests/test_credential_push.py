@@ -129,6 +129,24 @@ def test_a_merge_lands_from_the_mirror_with_the_header_and_push_branch_sends_non
     assert leftovers(keyfile) == []
 
 
+def test_a_rejected_push_whose_sha_holds_403_is_not_read_as_a_refused_credential(tmp_path, keyfile, token):
+    with Server(tmp_path / "remote", token=token) as server:
+        bare = remote(server, toy(tmp_path))
+        url = server.url("ai.git")
+        made = provision(tmp_path, url)
+        moved = candidate(made.mirror, made.base_sha, "moved on")
+        sh(made.mirror, "push", "-q", str(bare), f"{moved}:refs/heads/rebuild")
+        n = 0
+        while "403" not in (sha := candidate(made.mirror, made.base_sha, f"candidate {n}")):
+            n += 1
+        merge = Merge(made.mirror, url=url, branch="rebuild", credential=keyfile, loopback=True)
+        with pytest.raises(git.GitError) as exc:
+            run(merge.perform(merge_action(url, "rebuild", sha), "k"))
+    assert sha in str(exc.value) and "rejected" in str(exc.value)
+    assert ROTATE not in str(exc.value)
+    assert sh(bare, "rev-parse", "rebuild") == moved
+
+
 def test_without_the_key_the_merge_fails_naming_the_command_and_sends_nothing(tmp_path, keyfile, token):
     keyfile.unlink()
     with Server(tmp_path / "remote", token=token) as server:

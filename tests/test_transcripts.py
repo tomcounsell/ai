@@ -199,7 +199,7 @@ def test_a_sparse_file_is_skipped_without_reading_its_holes(dsn, tmp_path):
     assert len(run(stored(dsn, turn_id))) == 1
 
 
-def test_every_read_and_digest_runs_off_the_event_loop(dsn, tmp_path, monkeypatch):
+def test_every_read_digest_and_encoding_runs_off_the_event_loop(dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(transcripts, "CHUNK", 4)
     lay = Layout(tmp_path)
     lay.session.write_bytes(b"0123456789")
@@ -213,9 +213,23 @@ def test_every_read_and_digest_runs_off_the_event_loop(dsn, tmp_path, monkeypatc
         threads.append(threading.current_thread() is threading.main_thread())
         return real(fd, n, offset)
 
+    real_b64, real_dumps = transcripts.base64.b64encode, transcripts.json.dumps
+    encoded = []
+
+    def b64encode(data):
+        encoded.append(threading.current_thread() is threading.main_thread())
+        return real_b64(data)
+
+    def dumps(obj, **kw):
+        encoded.append(threading.current_thread() is threading.main_thread())
+        return real_dumps(obj, **kw)
+
     monkeypatch.setattr(transcripts.os, "pread", pread)
+    monkeypatch.setattr(transcripts.base64, "b64encode", b64encode)
+    monkeypatch.setattr(transcripts.json, "dumps", dumps)
     turn_id, out = run(copy(dsn, task, lay.t))
     assert threads and not any(threads)
+    assert len(encoded) >= 4 and not any(encoded)
     rec = by_name(out)[lay.session_name]
     assert rec["offset"] == 10 and rec["documents"] == 2
     assert run(joined(dsn, turn_id, lay.session_name)) == b"abcdef"
