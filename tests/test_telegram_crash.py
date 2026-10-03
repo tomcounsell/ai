@@ -91,7 +91,7 @@ def test_killed_before_a_tick_covered_a_dropped_update(emu, tmp_path):
 
     async def restart():
         s = StandIn(store, owned=[CHAT])
-        async with connected(emu.url, [CHAT], store=s):
+        async with connected(emu.url, [CHAT], store=s, seen=Path(str(store) + ".seen")):
             return sorted(s.ids(CHAT), key=int)
 
     assert asyncio.run(restart()) == [str(dropped), str(after)]

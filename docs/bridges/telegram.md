@@ -194,8 +194,10 @@ what it could not read. Transcribing or describing media is not the bridge's
 work.
 
 **After downtime.** The bridge fills the gap itself, on every connect and
-every tick: it pages back through each owned chat and receives every
-message `intake.recorded` does not list. The receipt index makes each
+every tick: it pages back through each owned chat to the newest message
+id its last pass saw, kept in `telegram-seen.json` in the key directory,
+and receives every message `intake.recorded` does not list. Message ids
+in a Telegram chat only grow, so nothing newer is skipped. The receipt index makes each
 replay land once.
 
 ## How a message becomes work

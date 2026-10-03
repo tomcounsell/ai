@@ -28,7 +28,12 @@ def env(tmp_path):
 
 def cli(env, *args):
     return subprocess.run(
-        [sys.executable, "-m", "bridges.telegram", *args], env=env, capture_output=True, text=True, timeout=60
+        [sys.executable, "-m", "bridges.telegram", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
 
 
@@ -57,10 +62,14 @@ def test_a_missing_key_names_both_variables_and_the_keys_command(env):
 
 
 def test_the_plist_runs_the_bridge_and_carries_no_key(env):
-    e, keys = env
+    e, _ = env
     cli(e, "keys")
     out = subprocess.run(
-        [sys.executable, "-m", "bridges.telegram", "--plist"], env=e, capture_output=True, timeout=60
+        [sys.executable, "-m", "bridges.telegram", "--plist"],
+        env=e,
+        capture_output=True,
+        timeout=60,
+        check=True,
     )
     job = plistlib.loads(out.stdout)
     assert job["Label"] == "com.valor.kernel.telegram"

@@ -13,14 +13,15 @@ returns.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import random
 import signal
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bridges.telegram import gap, inbound
-from bridges.telegram.send import CLOCK_MARGIN, Sender
+from bridges.telegram.send import Sender
 from bridges.telegram.wire import FloodWait, Msg, Wire, WireError
 
 log = logging.getLogger("valor.telegram")
@@ -31,14 +32,16 @@ BACKOFF_CAP_S = 256  # carried from main's connect loop; it never stops trying
 class TelegramBridge:
     channel = "telegram"
 
-    def __init__(self, wire: Wire, kernel, *, timeout=inbound.media_timeout):
+    def __init__(self, wire: Wire, kernel, *, timeout=inbound.media_timeout, seen: Path | None = None):
         self.wire = wire
         self.kernel = kernel
         self.sender = Sender(wire, kernel)
         self.timeout = timeout
-        self._passed: dict[int, datetime] = {}  # chat -> start of its last pass
-        self._first: dict[int, datetime] = {}  # chat -> floor of its first pass
-        self._connected_at: datetime | None = None
+        # chat -> newest id its last completed pass saw, kept in `seen` across restarts
+        self._seen_path = seen
+        self._seen: dict[int, int] = {}
+        if seen is not None and seen.exists():
+            self._seen = {int(k): v for k, v in json.loads(seen.read_text()).items()}
         self._busy = False
         self._filling = asyncio.Lock()
         wire.on_message(self.handle)
@@ -54,7 +57,7 @@ class TelegramBridge:
         loop = asyncio.get_running_loop()
         try:
             loop.add_signal_handler(signal.SIGTERM, stop.set)
-        except (NotImplementedError, RuntimeError):
+        except NotImplementedError, RuntimeError:
             pass
         consume = asyncio.create_task(self._consume(outbox))
         keep = asyncio.create_task(self._keep_connected())
@@ -107,7 +110,6 @@ class TelegramBridge:
                 log.warning("connect failed (%s); next try in %.0f s", e, delay)
                 await asyncio.sleep(delay)
                 n += 1
-        self._connected_at = datetime.now(UTC)
         await self.fill()
 
     async def _keep_connected(self) -> None:
@@ -153,34 +155,29 @@ class TelegramBridge:
                 await self.wire.disconnect()
 
     async def _fill_chat(self, chat: int) -> None:
-        started = datetime.now(UTC)
-        floor, stop_id = await self._floor(chat)
+        stop_id = self._seen.get(chat)
+        if stop_id is None:
+            async with self.kernel.conn() as conn:
+                stop_id = await self.kernel.highest(conn, "telegram", str(chat))
+        if stop_id is None:
+            # No rows: nothing before this connect is wanted.
+            page = await self.wire.history(chat, limit=1)
+            self._mark(chat, page[0].id if page else 0)
+            return
 
         async def recorded(ids: list[str]) -> set[str]:
             async with self.kernel.conn() as conn:
                 return await self.kernel.recorded(conn, "telegram", str(chat), ids)
 
-        for msg in await gap.missing(self.wire, chat, floor=floor, stop_id=stop_id, recorded=recorded):
+        found, top = await gap.missing(self.wire, chat, stop_id=stop_id, recorded=recorded)
+        for msg in found:
             if inbound.wanted(msg):
                 await self._receive(msg)
-        self._passed[chat] = started
+        self._mark(chat, top)
 
-    async def _floor(self, chat: int) -> tuple[datetime, int | None]:
-        if chat in self._passed:
-            return max(self._passed[chat] - CLOCK_MARGIN, self._first[chat]), None
-        floor, stop_id = await self._first_floor(chat)
-        self._first[chat] = floor
-        return floor, stop_id
-
-    async def _first_floor(self, chat: int) -> tuple[datetime, int | None]:
-        """A chat with no rows starts at the first connect; otherwise the
-        pass reaches back past the highest recorded message."""
-        async with self.kernel.conn() as conn:
-            highest = await self.kernel.highest(conn, "telegram", str(chat))
-        if highest is None:
-            return self._connected_at or datetime.now(UTC), None
-        found = (await self.wire.get(chat, [highest]))[0]
-        if found is None:
-            return datetime.now(UTC), highest
-        floor = found.date - timedelta(seconds=self.kernel.serve_tick_s) - CLOCK_MARGIN
-        return floor, highest
+    def _mark(self, chat: int, top: int) -> None:
+        self._seen[chat] = top
+        if self._seen_path is not None:
+            tmp = self._seen_path.with_name(self._seen_path.name + ".tmp")
+            tmp.write_text(json.dumps(self._seen))
+            os.replace(tmp, self._seen_path)
