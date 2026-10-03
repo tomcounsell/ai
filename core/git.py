@@ -29,6 +29,10 @@ name drivers; a driver's program comes from config. So every call:
   and signing off on its command line, which overrides the repository's
   config; a push also passes `--no-follow-tags --no-recurse-submodules
   --no-signed`, so it sends exactly the one commit Tom's approval binds;
+- on a call carrying the GitHub credential, also pins
+  `http.followRedirects=false` and an empty `http.proxy`, at the general
+  scope and the URL's own (`credential_pins`), so the header reaches the
+  granted URL and nothing else whatever the repository's config says;
 - passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
   submodules in `status`;
 - and first refuses the workspace outright (`GitError`) when its local or
@@ -116,6 +120,20 @@ PINNED = [
     "-c", "submodule.recurse=false",
     "-c", "advice.graftFileDeprecated=false",
 ]  # fmt: skip
+
+
+def credential_pins(url: str) -> list[str]:
+    """Pinned on every call that carries the GitHub credential to `url`, on
+    the command line, which outranks the repository's config and the header
+    file, at both the general and the URL's own scope (a key scoped to the
+    URL beats a general one wherever it is set): no redirect is followed and
+    no proxy is used, so the header reaches the granted URL and nothing
+    else. `url` is one `targets.url_ok` accepted, so it holds no `=`."""
+    pins = []
+    for key, value in (("followRedirects", "false"), ("proxy", "")):
+        pins += ["-c", f"http.{key}={value}", "-c", f"http.{url}.{key}={value}"]
+    return pins
+
 
 # Local or worktree config keys (lowercased) the kernel will not run git
 # under: by prefix, or by a `remote.<name>.` / `diff.<name>.` /
@@ -225,12 +243,17 @@ def hostile(workspace: str | Path) -> list[str]:
 
 
 def run(
-    workspace: str | Path, *args: str, text: bool = True, credential: Path | None = None
+    workspace: str | Path,
+    *args: str,
+    text: bool = True,
+    credential: Path | None = None,
+    url: str | None = None,
 ) -> subprocess.CompletedProcess:
     """One git call in the workspace, refused before it runs when the
     workspace's config is hostile. With `credential`, the per-call config
     file `core.credentials.header_file` wrote, git reads it as its global
-    config, which carries the merge's pinned header and nothing else."""
+    config, which carries the merge's pinned header for `url`, and the call
+    also passes `credential_pins(url)`."""
     found = hostile(workspace)
     if found:
         raise GitError(
@@ -238,7 +261,12 @@ def run(
             "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
             "key is refused): " + "; ".join(found)
         )
-    return _git(workspace, *args, text=text, extra_env=_credential_env(credential))
+    pins = []
+    if credential is not None:
+        if url is None:
+            raise ValueError("a call carrying the credential names its URL")
+        pins = credential_pins(url)
+    return _git(workspace, *pins, *args, text=text, extra_env=_credential_env(credential))
 
 
 def _credential_env(credential: Path | None) -> dict[str, str] | None:
@@ -256,8 +284,8 @@ def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None
     return done.stdout.strip()
 
 
-def out(workspace: str | Path, *args: str, credential: Path | None = None) -> str:
-    done = run(workspace, *args, credential=credential)
+def out(workspace: str | Path, *args: str, credential: Path | None = None, url: str | None = None) -> str:
+    done = run(workspace, *args, credential=credential, url=url)
     if done.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {done.stderr.strip()}")
     return done.stdout.strip()
@@ -339,6 +367,7 @@ def remote_head(workspace: str | Path, url: str, credential: Path | None = None)
         url,
         "HEAD",
         credential=credential,
+        url=url,
     )
     if listed.returncode != 0:
         raise GitError(listed.stderr.strip()[:300])
@@ -366,6 +395,7 @@ def push(workspace: str | Path, url: str, sha: str, branch_name: str, credential
         url,
         f"{sha}:refs/heads/{branch_name}",
         credential=credential,
+        url=url,
     )
 
 
@@ -382,6 +412,7 @@ def remote_sha(
         url,
         f"refs/heads/{branch_name}",
         credential=credential,
+        url=url,
     )
     if listed.returncode != 0:
         raise GitError(f"ls-remote {url}: {listed.stderr.strip()[:200]}")
@@ -410,6 +441,7 @@ def holds(
         "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
         "--upload-pack=git-upload-pack", url, f"+refs/heads/{branch_name}:{LOOKUP_REF}",
         credential=credential,
+        url=url,
     )  # fmt: skip
     return is_ancestor(workspace, sha, LOOKUP_REF)
 

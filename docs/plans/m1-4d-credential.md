@@ -115,8 +115,8 @@ What the kernel must never do:
   It is passed as `GIT_CONFIG_GLOBAL` for that call through `_git`'s
   `extra_env` and deleted in a `finally` in the same worker thread when
   git exits. Git matches `http.<url>.*` against the URL, so the header
-  goes to that repository URL only, and with redirects off git never
-  carries it to a redirect's target. It is a pinned header (helpers stay
+  goes to that repository URL only; with redirects and proxies pinned off
+  (in the file and on the command line) git never carries it elsewhere. It is a pinned header (helpers stay
   refused, the PATH stays system-only), delivered as a file because
   arguments are readable by a running turn (m1-4-checks.md Questions, 4).
 - **The URL's shape.** `targets.url_ok(url, loopback=False)` parses the
@@ -354,7 +354,11 @@ and its `push_branch` sends none; a mirror holding an `http.` or `url.` key
 is refused before any request; on a redirect the second server never
 receives the header (left to itself, git 2.39.5 follows the first redirect,
 `http.followRedirects=initial`, and sends the header there; the header file
-pins `followRedirects=false`, so the push fails at the redirect); no leak:
+and the command line pin `followRedirects=false`, so the push fails at the
+redirect); a mirror whose config sets a redirect, a proxy (each general and
+for the URL), a URL rewrite, a push URL, a second header, or a credential
+helper sends nothing, and with `git.run`'s refusal switched off still sends
+no header anywhere but the granted URL; no leak:
 while the server holds
 a push open, `ps -E -ww` from the kernel and `pgrep -lf` and `ps -E -ww`
 from a probe under `turn.sb` show no process whose arguments or environment
@@ -478,14 +482,25 @@ Each is reversible and was decided by the build session:
 - No transcript from a turn without its own config directory.
 - Base64 of raw bytes, one document per file per 64 MiB chunk.
 - The live push branch `valor/push-check`, kept afterwards.
-- `http.followRedirects=false` in the header file, so on every git call
-  that carries the credential the header reaches only the granted URL.
+- No redirect and no proxy on a call carrying the credential:
+  `http.followRedirects=false` in the header file, and on the command line
+  `-c http.followRedirects=false` and `-c http.proxy=`, each also at the
+  URL's own scope (`git.credential_pins`). The command line outranks the
+  repository's config, and a key scoped to the URL outranks a general one.
   The threat model says the token goes nowhere but the recorded remote;
-  git's default follows the first redirect and sends the header there, as
-  the redirect test shows. The pin makes the code do what the threat model
-  states: it configures the transport, as dropping `Authorization` on a
-  cross-host redirect does on the gateway, inspects nothing about the
-  work, and refuses nothing a turn asked for. It is a fix, not a guard.
+  git's default follows the first redirect, and a proxy key sends the
+  header to the proxy, as the tests show. The pins make the code do what
+  the threat model states: they configure the transport, as dropping
+  `Authorization` on a cross-host redirect does on the gateway, inspect
+  nothing about the work, and refuse nothing a turn asked for. A fix, not
+  a guard. Of the other keys a repository's config could set, a URL
+  rewrite, a push URL, a second `extraHeader`, and a credential helper do
+  not move the header (the header is scoped to the granted URL, the push
+  names its URL, and the helper is pinned empty); the TLS keys
+  (`http.sslVerify`, `http.sslCAInfo`, `http.curloptResolve`) are not
+  pinned, since pinning a CA path would replace the system's trust store,
+  and are covered as every `http.*` key is: `git.run` refuses a
+  repository whose config sets one, and the mirror is the kernel's.
 
 ## Critique round 1 (of 2): revise
 

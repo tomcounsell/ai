@@ -210,7 +210,8 @@ def test_a_mirror_whose_config_names_http_is_refused_before_any_request(tmp_path
 
 def test_a_redirect_never_carries_the_header_to_the_second_server(tmp_path, keyfile, token):
     """Left to itself git follows the first redirect and sends the header
-    there; the header file pins `http.followRedirects=false`."""
+    there; the header file and the command line pin
+    `http.followRedirects=false`."""
     with Server(tmp_path / "second", token=token) as second:
         remote(second, toy(tmp_path))
         with Server(tmp_path / "first", token=token, redirect_to=f"http://127.0.0.1:{second.port}") as first:
@@ -222,6 +223,57 @@ def test_a_redirect_never_carries_the_header_to_the_second_server(tmp_path, keyf
                 run(merge.perform(merge_action(url, "rebuild", sha), "k"))
         assert first.authorized()  # the header went to the granted URL
         assert second.authorized() == []
+
+
+# The keys a mirror's own config could set to steer the credential. `run`
+# refuses every one before git starts; with that refusal switched off, the
+# command line pins and the URL-scoped header still keep the token on the
+# granted URL.
+STEERING = {
+    "redirect": lambda url, second: ("http.followRedirects", "true"),
+    "redirect for the url": lambda url, second: (f"http.{url}.followRedirects", "true"),
+    "proxy": lambda url, second: ("http.proxy", f"http://127.0.0.1:{second.port}"),
+    "proxy for the url": lambda url, second: (f"http.{url}.proxy", f"http://127.0.0.1:{second.port}"),
+    "rewrite": lambda url, second: (f"url.{second.url('ai.git')}.insteadOf", url),
+    "push url": lambda url, second: ("remote.origin.pushurl", second.url("ai.git")),
+    "second header": lambda url, second: ("http.extraHeader", "X-Planted: 1"),
+    "helper": lambda url, second: ("credential.helper", "!f() { echo username=u; echo password=p; }; f"),
+}
+
+
+@pytest.mark.parametrize("refusal", ["on", "off"])
+@pytest.mark.parametrize("case", sorted(STEERING))
+def test_a_mirror_config_never_steers_the_header_to_another_server(case, refusal, tmp_path, keyfile, token,
+                                                                   monkeypatch):  # fmt: skip
+    if refusal == "off":
+        monkeypatch.setattr(git, "hostile", lambda workspace: [])
+    with Server(tmp_path / "second", token=token) as second:
+        remote(second, toy(tmp_path))
+        redirect = f"http://127.0.0.1:{second.port}" if case.startswith("redirect") else None
+        with Server(tmp_path / "first", token=token, redirect_to=redirect) as first:
+            if redirect is None:
+                remote(first, toy(tmp_path))
+            url = first.url("ai.git")
+            made = provision(tmp_path, url)
+            sha = candidate(made.mirror, made.base_sha)
+            sh(made.mirror, "config", *STEERING[case](url, second))
+            before = (len(first.log), len(second.log))
+            merge = Merge(made.mirror, url=url, branch="rebuild", credential=keyfile, loopback=True)
+            with contextlib.suppress(git.GitError, ValueError):
+                run(merge.perform(merge_action(url, "rebuild", sha), "k"))
+        if refusal == "on":
+            assert (len(first.log), len(second.log)) == before
+        assert second.authorized() == []
+    assert leftovers(keyfile) == []
+
+
+def test_every_call_carrying_the_credential_pins_redirects_and_proxy_at_both_scopes():
+    url = "https://github.com/tomcounsell/ai.git"
+    pins = git.credential_pins(url)
+    for key in ("followRedirects=false", "proxy="):
+        assert f"http.{key}" in pins and f"http.{url}.{key}" in pins
+    with pytest.raises(ValueError, match="names its URL"):
+        git.run(".", "status", credential=Path("/nonexistent"))
 
 
 # -- no leak ---------------------------------------------------------------------------------
