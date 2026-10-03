@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-pi-harness
 type: build
-status: planned
+status: delivered-not-passed
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -86,7 +86,8 @@ Two Done items of milestone 3 wait on work outside this task:
 - Pi reads configuration from places a candidate or the machine user
   controls: `~/.pi/agent/` (the machine user's auth, settings, extensions,
   and skills), and a project's `.pi/settings.json`, `.pi/extensions/`,
-  `.pi/skills/`, and `.pi/prompts/` inside the clone. A candidate could
+  `.pi/skills/`, `.pi/prompts/`, `.pi/SYSTEM.md`, and `.pi/APPEND_SYSTEM.md`
+  inside the clone, and `AGENTS.md` and `CLAUDE.md`. A candidate could
   plant an extension that runs at Pi's start, settings that disable
   compaction or point a provider elsewhere, or a skill that rewrites the
   system prompt.
@@ -95,12 +96,13 @@ Two Done items of milestone 3 wait on work outside this task:
   provider, the gateway; `~/.pi` is denied to every workspace profile, so
   the machine user's `auth.json` is unreadable; Pi starts with
   `--no-extensions --no-skills --no-prompt-templates --no-themes`, so
-  nothing under the clone's `.pi/` loads code or prompts. A project's
-  `.pi/settings.json` is still read by Pi; the build checks which of its
-  keys can change the provider, the tools, or the system prompt, and if
-  any can, the kernel moves the clone's `.pi/settings.json` aside for the
-  turn or Pi's own flag that ignores it is used. The result goes in the
-  build report and `docs/harnesses.md`.
+  nothing under the clone's `.pi/` loads code or prompts. Every turn also
+  passes `--system-prompt` (the kernel's own, so `.pi/SYSTEM.md` is not
+  read) and `--no-context-files` (`AGENTS.md` and `CLAUDE.md` are not
+  read). A project's `.pi/settings.json` is still read by Pi; the build
+  settles from Pi's source which keys can matter. A blind checkout leaves
+  `.pi/` out of the tree for every harness, and a working clone is never
+  edited. The result is in `docs/pi.md`.
 - The kernel never reads a directory the turn owns to learn the harness's
   version: it reads the installed package's own files, which every turn
   profile denies writing.
@@ -115,7 +117,8 @@ builder `build(base_url, brief, turn_id) -> TurnCommand`, matching
 `harness["sandbox_profile"]`, as Claude Code's does.
 
 - **Binary.** `settings.pi`, default `/opt/homebrew/bin/pi`, at the
-  version pinned in `harnesses/pi.py` (`PINNED`). Pi lives in Homebrew's
+  version pinned in `harnesses/pi.py` (`PINNED`), a release that has
+  `--system-prompt` and `--no-context-files`. Pi lives in Homebrew's
   prefix, which a turn's profile denies writing but the machine user can
   write, so the kernel runs it only inside the sandbox, as it runs
   `claude`.
@@ -125,9 +128,10 @@ builder `build(base_url, brief, turn_id) -> TurnCommand`, matching
   `models.json` there: one provider `valor`, `api: "openai-responses"`,
   `baseUrl: "<base_url>/openai/v1"`, `apiKey` the placeholder
   `TURN_TOKEN` (the gateway sets the real key), and one model entry for
-  the resolved model with `contextWindow`, `maxTokens`, and `cost` copied
-  from `spending.OPENAI_PRICES`, so Pi's own reported cost uses the
-  kernel's prices. It writes `settings.json` with compaction on at Pi's
+  the resolved model with `maxTokens` from `harness["max_output_tokens"]`,
+  `contextWindow` from the price table's `context_window`, and `cost` copied from
+  `spending.openai_prices`. Pi's own reported cost is an approximation of
+  the price; the gateway's meter is the record. It writes `settings.json` with compaction on at Pi's
   defaults and retries at Pi's defaults. The files are written through
   descriptors that follow no link, as `.valor` inputs are.
 - **Environment.** The allowlist `KEEP_ENV` that Claude Code's wrapper
@@ -136,9 +140,11 @@ builder `build(base_url, brief, turn_id) -> TurnCommand`, matching
   wrapper sets.
 - **Argv.** `/usr/bin/sandbox-exec -D GATEWAY_PORT=.. -D VALOR_TURN=..
   -f <profile> <pi> --no-extensions --no-skills --no-prompt-templates
-  --no-themes --offline --provider valor --model <model> --mode json -p
-  --session-dir <agent dir>/sessions [--session <id>]
-  --append-system-prompt <persona and Brief> -- <prompt>`. Pi's default
+  --no-themes --no-context-files --offline --provider valor --model
+  <model> --mode json -p --session-dir <agent dir>/sessions [--session
+  <id>] --system-prompt <the kernel's> --append-system-prompt <the
+  Brief>`, with the prompt on stdin (`TurnCommand.stdin`), so a prompt
+  starting with `-` or `@` is never read as an option or a file. Pi's default
   tools are read, bash, edit, and write; it has no web tools.
 - **Resume.** By session id. Pi looks the id up in its own session
   directory, inside the sandbox, so the kernel never opens a file the turn
@@ -169,19 +175,18 @@ builder `build(base_url, brief, turn_id) -> TurnCommand`, matching
 
 - `settings.SEATS` maps a seat to a `(harness, model)` pair:
   `frontier`, `reviewer`, and `light` keep Claude Code and their models;
-  `reviewer_openai` is `("pi", "gpt-6.1")`. `resolve_model` keeps its
+  `reviewer_openai` is `("pi", "gpt-6.1-sol")`. `resolve_model` keeps its
   signature and returns the model; `resolve_seat(seat)` returns both.
 - `python -m core start --harness {claude_code,pi}` (default
-  `claude_code`) records the harness name in the Brief's `harness`
-  settings as `name`. A model the chosen harness cannot speak (a Claude
-  model on Pi, a GPT model on Claude Code) is refused at start with the
-  reason, since the turn could only fail at its first call.
+  `claude_code`) records the harness name in its own Brief field,
+  `harness_name`.
 - `HARNESSES = {"claude_code": claude_code, "pi": pi}` in the composition
   root. `_turn_for` picks the wrapper from the Brief's harness name;
   `_fresh_for` from the seat's harness.
 - `fresh.SEATS` keeps `review: "reviewer"`. The Pi seat is chosen per
-  call (`seat="reviewer_openai"`) by whoever runs the review, so the pair
-  of reviews on one candidate is two calls with two seats.
+  call: `fresh.critique_runner` takes a `seat` and passes the harness
+  name into `_fresh_for`. 1.4c's review runner (branch `m1-4c-verifier`)
+  needs the same; whichever of the two merges second carries it.
 - Provisioning (`core/workspace.py`) makes `work_state/pi` and the fresh
   session's `pi` directory, and adds `.pi` to `HOME_DENIED`.
 
@@ -253,11 +258,8 @@ compaction call, and the turn's total charge per harness.
 
 ## Tech debt absorbed
 
-- `claude_code.turn()`, the tool-less unsandboxed turn, is used only by
-  one test (`test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt`).
-  The test moves onto `workspace_turn` with a scratch profile and
-  `turn()` is deleted, with the passage of `docs/harnesses.md` that names
-  it as the one exception.
+- `claude_code.turn()` stays: tests and the docs still name it as the one
+  tool-less unsandboxed turn.
 - Corrections reaching subagents leaves the gap lists of
   `docs/architecture.md`, `docs/harnesses.md`, `docs/persona.md`, and
   `docs/data.md`, replaced by the contract case's result.
@@ -276,8 +278,8 @@ compaction call, and the turn's total charge per harness.
 
 The contract suite above, and:
 
-- `harnesses/pi.py` argv: every isolation flag present; the prompt after
-  `--`, including one that starts with a dash; `--session` present only
+- `harnesses/pi.py` argv: every isolation flag present; the prompt on stdin, including one that starts with a dash or `@`, run
+  against the real binary; `--session` present only
   on resume; `Unsandboxed` without a profile.
 - `models.json`: the base URL is the gateway's, the key is the
   placeholder, the cost matches `OPENAI_PRICES`; a link planted at the
@@ -288,8 +290,7 @@ The contract suite above, and:
   `session_id` None and `is_error`.
 - `harness_version`: the package's version for Pi; Claude Code's from its
   install path; None for a binary in an unrecognized layout.
-- `start --harness pi --model frontier` refused; `start --harness pi
-  --model gpt-6.1` accepted; `reviewer_openai` resolves to Pi and GPT-6.1.
+- `reviewer_openai` resolves to Pi and GPT-6.1.
 - `.pi` in `HOME_DENIED`, read by a sandboxed `cat` of a scratch
   `~/.pi/agent/auth.json` failing.
 - Live (`VALOR_LIVE=1`): one Pi working turn on GPT-6.1 through the real
@@ -301,8 +302,7 @@ The existing suite runs and passes, Claude Code's turns unchanged.
 
 ## Files it changes
 
-- `harnesses/pi.py` (new wrapper), `harnesses/claude_code.py` (version,
-  `turn()` removed), `harnesses/README.md`.
+- `harnesses/pi.py` (new wrapper), `harnesses/claude_code.py` (version), `harnesses/README.md`.
 - `core/runs.py` (`harness_version` on `TurnCommand` and `turn.started`).
 - `core/settings.py` (`SEATS` pairs, `resolve_seat`, `settings.pi`).
 - `core/__main__.py` (`HARNESSES`, `_turn_for`, `_fresh_for`,
@@ -313,8 +313,7 @@ The existing suite runs and passes, Claude Code's turns unchanged.
   provisioning and for a fresh session).
 - `tests/test_harness_contract.py`, `tests/scripted_upstream.py`,
   `tests/test_pi.py`, `tests/test_compaction_live.py`,
-  `tests/fixtures/pi/` (recorded JSONL streams), `tests/test_session.py`
-  (the moved test).
+  `tests/fixtures/pi/` (recorded JSONL streams).
 - `docs/harnesses.md`, `docs/architecture.md`, `docs/persona.md`,
   `docs/data.md`, `docs/machine.md` (Pi's install and pin).
 
@@ -361,8 +360,107 @@ come to about ten dollars, most of it the two long compaction sessions.
   previous `turn.ended`, and never reads the session file.
 - **The version from installed files, not from running the binary.** The
   kernel runs no harness outside the sandbox.
-- **A wrong harness and model pair is refused at start.** It is not a
-  check on the work; the turn could not make a call.
 - **The subagent case asserts what is true.** A failing assertion would
   leave the suite red over a fact about Claude Code; the docs carry the
   gap if there is one.
+
+## Build record
+
+Built on branch `m3b-pi`, against 3a's interface (branch `m3-harnesses`,
+not yet merged).
+
+- **Pi.** Pinned at 0.73.1 (`PINNED`), selected with the `VALOR_PI`
+  setting. The prompt goes on stdin; the system prompt and
+  `--no-context-files` are always passed. The contract case plants
+  `.pi/SYSTEM.md`, `.pi/APPEND_SYSTEM.md`, `AGENTS.md`, `CLAUDE.md`, and
+  `.pi/settings.json` and asserts none reaches the model. A blind checkout
+  leaves `.pi/` out of the tree for every harness (the diff and both
+  commits keep it); a working clone is untouched.
+- **Contract suite.** `tests/test_harness_contract.py`, both harnesses
+  against the real binaries under real turn profiles, a real gateway, and
+  `tests/scripted_upstream.py`. The Pi parameter skips unless the gateway
+  has an OpenAI route (3a) and Pi is at `PINNED`; it passes with 3a's
+  gateway overlaid.
+- **Corrections and subagents.** A Claude Code subagent does not receive
+  the correction: the case asserts that absence, and the docs name the
+  gap. A fix is a kernel decision (disallow the Task tool, or put
+  corrections in the subagent's prompt) and is not added.
+- **Compaction.** In Pi's print mode the stream ends on `compaction_start`
+  while the session still saves the compaction entry; `parse` records a
+  start as unfinished and upgrades it on `compaction_end`. Measured live
+  (`tests/test_compaction_live.py`): Pi compacted at 914,292 input tokens
+  against a threshold of 905,616, ran on at 316,591, and the session cost
+  $8.87 at the gateway against $2.63 Pi reported. Claude Code's calls fell
+  from 947,155 to 75,066 at its compaction, in 38 calls for $17.27.
+- **Context window.** Pi's `contextWindow` is the price table's
+  `context_window` less its `max_output`, 922,000, from `pi.context_window`.
+  The API refuses a request above that (901,587 input tokens accepted,
+  950,000 refused), so the whole 1,050,000 would have Pi compact only
+  after a failed call. No second constant.
+- **Assumptions about 3a.** Model id `gpt-6.1-sol`; `openai_prices`
+  returns tiers (`tiers.default.base`); `Gateway(openai_upstream=,
+  openai_credential=)`; route `<gateway>/t/<token>/openai/v1`. Rebased
+  onto 3a at 2861e2f5b, then again onto 3a's final head b1fbdffcb; they
+  held. `pi.context_window` finds the model through `openai_prices`
+  (exact or dated id), and a test covers a dated id and `-pro`.
+- **Live runs.** One Pi turn on GPT-6.1 (Pi reported $0.0083, the gateway
+  charged $0.0093), a critique at `reviewer_openai` on a recorded candidate
+  (verdict `revise`, $0.0086), and the two compaction sessions above. Total
+  live spend about $77, much of it failed attempts while the compaction
+  sessions were being sized (a Claude Code reader that stopped at truncated
+  output, a Pi session that quit early, two Pi attempts that overflowed the
+  window): metered by the gateway, nothing else.
+- **Not run.** Rollout steps 3 and 4 (the pair of reviews after 1.4c, popoto
+  #633 after 1.5).
+
+### Patch round 1
+
+From the review (`changes`) and the test check (`gaps`):
+
+- **Blind checkout.** The sparse pattern is `!/.pi`, so a committed `.pi`
+  link is left out as well as a directory; a test commits `.pi` as a link
+  to a directory.
+- **Pi install.** `settings.pi` defaults to `/opt/homebrew/bin/pi`, not a
+  PATH lookup. Every turn profile denies writing the directory above the
+  first `node_modules` of the resolved `VALOR_PI` (`workspace.pi_install`),
+  with a test. `docs/pi.md` says both. The machine's own Pi (0.66.1) is
+  not upgraded here; that is rollout step 1.
+- **Stop and reap.** The case runs a `sleep` the turn backgrounds, records
+  its PID and process group before the stop, and asserts after it that the
+  PID and every process of the group are gone.
+- **Docs.** An unknown session exits 1 (`docs/pi.md`, `parse`). The Files
+  list no longer names a moved `test_session.py` test.
+- **Test gaps.** The `~/.pi` denial is tested under the workspace profile
+  too; the metered case asserts the turn token header. `docs/pi.md` says
+  how to run the Pi cases (`VALOR_PI`).
+- **Evidence.** The Pi cases ran with `VALOR_PI` set to
+  `~/.cache/valor-pi-0.73.1/node_modules/.bin/pi`: `tests/test_pi.py` and
+  `tests/test_harness_contract.py` 62 passed, 1 skipped (Pi has no
+  subagents).
+
+## Checks after patch round 1, at 74431ce59 (review round 1 of 1)
+
+- Test: `gaps`. With `VALOR_PI` at the 0.73.1 install, 693 passed and 14
+  skipped; the default run skips about 20 Pi cases on the version
+  mismatch. Real `sandbox-exec` refuses writes to the Pi install under
+  both profiles. The `~/.pi` test passes with the denial removed: it runs
+  `sandbox-exec` without `-D GATEWAY_PORT` and `-D VALOR_TURN`, so the
+  profile fails to load before `cat` runs. Pass the `-D` flags as
+  `tests/test_demo_sandbox.py` does.
+- Review: `changes`; governance boolean no; no invented caps. `_node()`
+  finds `node` with `shutil.which`, and `~/.bun/bin` and `~/.opencode/bin`
+  come before `/opt/homebrew/bin` on the kernel's PATH; a turn can write
+  both, so a planted `node` runs the `reviewer_openai` Pi session, which
+  writes the verdict. Minor: `pi_install()` returns nothing when the Pi
+  path has no `node_modules`, and does not cover a `VALOR_PI` that is a
+  link outside the install.
+- Docs: `updated`, 0c3d8a438 on `m3b-docs2`.
+
+## Delivery: delivered, not passed
+
+The review rounds are spent. The recommendation is one more patch:
+`node` at a fixed path, as 1.4v does for `claude` and the Postgres
+programs (`docs/plans/m1-4v-binary-paths.md`); `pi_install()` covering an
+install with no `node_modules` and the resolved target of `VALOR_PI`; the
+`~/.pi` test given its `-D` flags.
+

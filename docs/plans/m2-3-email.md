@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-3-email
 type: build
-status: planned
+status: delivered-not-passed (record in m2-3-email-record.md)
 critique_rounds: 1
 review_rounds: 2
 governance_grant: open question 17 (Tom, 2026-10-01), the DMARC verified check in core/intake.py
@@ -24,8 +24,8 @@ people under Valor's name, and decides which mail is verified as Tom's. A
 mistake sends a message twice, sends bytes Tom did not approve, or lets a
 forged `From` start work. Its kernel changes are small and named: one
 guard seed, settings, the DMARC test in `core/intake.py`, the
-`email.send` declaration's usage text and settle time, and the reply-all
-expansion.
+`email.send` declaration's usage text and size function, and the
+reply-all expansion.
 
 ## Done, as evidence
 
@@ -37,20 +37,23 @@ confirms what the provider does.
 ### Shown now, against local test servers
 
 The local servers are Dovecot (IMAP, run as the agent's user from a
-config written under the test's temporary directory, a self-signed test
-CA, a password file of test users, a folder flagged `\Sent`) and a small
-SMTP server in `tests/mailserver.py` built on `aiosmtpd` (STARTTLS, AUTH,
-a recipient it can be told to refuse, a reading rate it can be told to
-hold, a hook after DATA, a delay it can put before the 250 reply, and
+config written under the test's temporary directory, a password file of
+test users, a folder flagged `\Sent`), reached over TLS through a small
+terminator whose certificate a test CA signs, with a second terminator
+whose certificate it did not sign; and a small asyncio SMTP server in
+`tests/mailserver.py` (STARTTLS, AUTH, a recipient it can be told to refuse, a reading rate it can be told to
+hold, a delay before each read of the body, hooks on connect and after
+DATA, a delay it can put before the 250 reply, and
 every accepted message appended to the sender's `\Sent` folder in
-Dovecot, as Gmail files it). Ports are free ones the OS gives each run.
+Dovecot, as Gmail files it). Ports come from `VALOR_TEST_PORTS` (a
+build's assigned range, such as `6521-6529`) when set, else the OS.
 
 | Done item | Evidence here |
 |---|---|
 | A mail from Tom passing DMARC starts a task | A message delivered into the Dovecot inbox with the headers Gmail writes (topmost `Authentication-Results: mx.google.com; ... dmarc=pass ... header.from=<Tom's domain>`) and `From` Tom's address lands as one `message.received` row with `verified: true` and starts one task, its metered spending shown in `status`. The forgeries in "Tests" that reach the inbox from an owned address land as one row each with `verified: false` and start nothing |
 | A reply-all is held and released once | A task requests `email.send` with `reply_to` naming Tom's message (which had a `Cc`). The held effect's payload names the sender plus every `To` and `Cc` address minus Valor's own, a `Re:` subject, `In-Reply-To`, and the whole `References` chain. `core approve` then `core release` lead the bridge process to send it; the local server receives exactly one copy with the Message-ID derived from the broker key; a second `release` returns the recorded outcome and sends nothing |
-| A crash between SMTP and outcome does not double-send | The exactly-one case: the after-DATA hook kills the bridge process by its PID once the message is stored, before the 250 reply; the restarted bridge's sweep finds the message in `\Sent` by its Message-ID, writes `effect.outcome` `done` with `reconciled: true`, and the server holds one copy. The upload case: the test terminates the performing connection's backend (its pid from `pg_stat_activity` where `application_name = 'valor-email-perform'`) while a 9 MB upload is in flight; after restart and settle, the server holds at most one copy, and the outcome is `done` exactly when it holds one |
-| A 9 MB attachment sends | A 9 MB file sends through a server reading at 1 MB/s with `smtp_timeout_s` set to 2 s for the test: the deadline, scaled by the encoded length, lets it finish, and the received attachment's sha256 equals the approved one. The same send with the deadline unscaled times out mid-body: the performer raises `broker.Unknown` naming the timeout, no outcome is written, and the next sweep after `settle_after_s` writes `failed`, since the server stored nothing |
+| A crash between SMTP and outcome does not double-send | The bridge runs as a process of its own (`tests/email_child.py`) and the test kills it by its PID (SIGKILL). Killed once the message is stored, before the 250 reply: reconcile finds the message in `\Sent` by its Message-ID, writes `effect.outcome` `done` with `reconciled: true`, and the server holds one copy. Killed mid-body, or before the server's greeting: reconcile writes `failed` and the server holds nothing. Each outcome is written once no process performs the send, with no wait |
+| A 9 MB attachment sends | A 9 MB file sends through a server reading at 4 MB/s with the data block timeout set to 1 s for the test: each send call has its own timer (RFC 5321 4.5.3.2.5), so a body longer in transit than any one timer goes, and the received attachment's sha256 equals the approved one. A server that stops reading mid-body: the timer fires before the end of data line has gone, the performer raises a definite refusal, and the server holds nothing (RFC 5321 4.1.1.4) |
 
 ### Waits for Tom's test window on Valor's real mailbox
 
@@ -66,10 +69,10 @@ filing delay, the 9 MB upload rate, and the bridge's RSS.
 
 ## Threat model
 
-Senders control every byte of an inbound message except the headers the
-receiving server prepends: `From`, the ids, any `Authentication-Results`
-inside, MIME structure, charsets, sizes, and filenames. A turn controls
-the `email.send` it requests and every file in its workspace, any time.
+Senders control every byte of a message except the headers the receiving
+server prepends: `From`, ids, inner `Authentication-Results`, MIME,
+charsets, sizes, filenames. A turn controls its `email.send` and its
+workspace files, any time.
 
 What the kernel must never do with any of it:
 
@@ -111,16 +114,19 @@ From [m2-1-port.md](m2-1-port.md), which wins where this plan differs:
   the raw `From` and `Authentication-Results` headers.
 - `core.bridge`: `Bridge` (`performers()` returning `(perform,
   lookup)`, `run(outbox)`), `ChannelLimits` (`int | None` fields),
-  `Declared` whose `settle_after_s` may be a function of the action
-  (D37), and `serve`, which holds `bridge:email:<machine>`, sets `application_name` to `valor-email`
-  (`valor-email-perform` on the performing connection), and reconciles
-  `broker.dangling` at start and on every `serve_tick_s` wake.
+  `Declared` (email's declares no settle time of its own), and
+  `serve`, which holds `bridge:email:<machine>`, sets
+  `application_name` to `valor-email` (`valor-email-perform` on the
+  performing connection), and reconciles `broker.dangling` at start and
+  on every `serve_tick_s` wake. Limits live in `core/bridge.py`, one
+  entry per channel (D15c); email's carries a size function.
 - `Outbox`: iterate, `perform(Release)`, never `broker.release`; email
   ignores `NoticeDue`, since `operator_channel` is Telegram.
 - `email.send`: target the `to` list, lowercased, sorted, comma-joined;
   payload `to`, `cc`, `subject`, `body`, `in_reply_to`, `references`,
-  `files: [{path, sha256}]`; refused at request time when the encoded
-  message exceeds `max_file_bytes`, the protocol limit the reason (15b).
+  `files: [{path, sha256}]`; refused at request time when the channel
+  entry's size function, applied to the whole message, exceeds
+  `max_file_bytes`, the protocol limit the reason (D15b, D15c).
 - Results carrying `sent: [{channel, chat_id, message_id}]`; binding on
   `(channel, chat_id, message_id)`. Email binds only `answer`, `steer`,
   and `start`; an `In-Reply-To` matching no sent message is not a reply;
@@ -157,13 +163,16 @@ server's `INTERNALDATE` when `Date` does not parse. `headers` carries
 lists of the raw header values as received, topmost first, `to` and `cc`
 as address lists, and `uid` and `uidvalidity`.
 
-### `bridges/email/imap.py`: the poll, adapted from `_poll_imap`
+### `bridges/email/imap.py`: the watch, adapted from `_poll_imap`
 
-One connection per poll, every `email_poll_s` seconds (30, main's value),
-under `imaplib.IMAP4_SSL` with `ssl.create_default_context()` (main
-passes no context, so certificates go unverified there) and a socket
-timeout of `imap_timeout_s` (30, main's `IMAP_SOCKET_TIMEOUT`): a hung
-server ends one poll.
+One held connection under `imaplib.IMAP4_SSL` with
+`ssl.create_default_context()` (main passes no context, so certificates go
+unverified there) and no socket timeout. On connecting, and after each
+wait, the steps below run; then the connection waits in IDLE (RFC 2177)
+until the server's `EXISTS` reports new mail, so mail arrives as an event.
+RFC 3501 section 5.4 lets a server log out a client idle for 30 minutes,
+so IDLE is ended and issued again every 29 minutes (`IDLE_REISSUE_S`, RFC
+2177's advice), the only read bound while idling.
 
 1. `SELECT INBOX`; read `UIDVALIDITY`.
 2. `UID SEARCH UNSEEN SINCE <email_since>` with an `OR` tree of `FROM`
@@ -181,48 +190,58 @@ server ends one poll.
    inbound)`, and only after it returns, `UID STORE +FLAGS.SILENT
    (\Seen)`.
 
-A duplicate `receive` reports is marked seen too. A message whose parse, persist, or receive
-raises is logged with its UID and stays unseen, and the poll goes on to
-the next UID, so one bad message never blocks later mail. A failed login
-or connection is one failed poll in the log, and the next poll runs on
-schedule; there is no backoff, alert key, or retry state. Main's batch
-cap of 20 goes.
+A duplicate is marked seen too. A message whose parse, persist, or
+receive raises is logged with its UID and stays unseen, and the search goes
+on, so one bad message never blocks later mail. A failed login, a failed
+or dropped connection, is one line in the log, and the watch connects
+again on the outbox's next wake (`Bridge.tick()`); there is no backoff,
+alert key, or retry state. Main's batch cap of 20 goes.
 
 ### `bridges/email/smtp.py`: the performer
 
 Adapted from `_build_reply_mime` and `_send_smtp` (`bridge/email_bridge.py`)
 and `_send_smtp_sync` (`bridge/email_relay.py`).
 
-- **Files.** `perform` reads each payload file once into memory, hashes
-  those bytes, and compares with the payload's `sha256` (the broker's
-  digest binding, not a new check). A mismatch or a missing file raises
-  before SMTP connects, and nothing is sent. The MIME
-  is built from the bytes it hashed, so a file changed between Tom's tap
-  and the send never leaves.
+- **Files.** `perform` reads each payload file once, hashes those bytes,
+  and compares with the payload's `sha256` (the broker's digest binding,
+  not a new check). A mismatch or a missing file raises before SMTP
+  connects. The MIME is built from the bytes it hashed, so a file changed
+  after Tom's tap never leaves.
 - **MIME.** `EmailMessage`, a `text/plain` UTF-8 body, files as
   `multipart/mixed` parts. The subject is the payload's, unchanged (main's
   `force_reply_prefix` goes). `References` is the payload's whole chain.
   Headers added: `From` (`email_address`), `To`, `Cc`, `Date`, and
   `Message-ID` = `<valor.<first 32 hex of sha256(key)>@<Valor's domain>>`,
   so a retry of one effect repeats its id and two effects never share one.
-- **Send.** `smtplib.SMTP` with `smtp_timeout_s` (30, main's `smtp_s`),
-  `starttls` with the default context, login, then the socket's timeout
-  set to the deadline, `smtp_timeout_s + encoded_bytes /
-  smtp_floor_bytes_per_s`, before `send_message`. `encoded_bytes` is the
-  length of the serialized message, base64 included, the unit #3601
-  measured in. One attempt.
-- **Refused or in doubt.** A refused login, every recipient refused, or a
-  refusal of the message at `MAIL` (an over-`SIZE` message included),
-  `RCPT`, or the reply to `DATA`'s start raise with the server's reply,
-  and the effect is `failed`. Once the body has started to go, anything
-  that ends the send without a final reply raises `broker.Unknown` and
-  the effect stays open for `reconcile`: the deadline firing mid-body, a
-  lost connection, or a timeout waiting for the reply after the body.
-  The server may have stored the message, so none of these is `failed`.
-  smtplib reports a timeout as `SMTPServerDisconnected`; the raised
-  `Unknown` includes the exception's `__context__`, so the timeout is
-  named. Some recipients refused: `done`, with `refused` listing each
-  address and its reply.
+- **Send.** `smtplib.SMTP`, `starttls` with the default context, login,
+  `MAIL FROM` with `SIZE`, `RCPT` for each address, `DATA`, the
+  dot-stuffed body, then the end of data line `.` on its own, sent apart.
+  One attempt. Each step the section names waits under its timeout, the
+  minimums RFC 5321 section 4.5.3.2 gives a client (`config.SMTPTimeouts`):
+  the 220 greeting 5 minutes; `MAIL` and `RCPT` 5 minutes; EHLO,
+  STARTTLS, and AUTH, which it gives no value, wait with no timer; after
+  the 250, `QUIT` is sent and its reply not awaited; `DATA`'s 354 2 minutes; each send call of the body 3
+  minutes; the final 250 10 minutes. The body goes in send calls of at
+  most one TLS record, 16,384 bytes (RFC 8446 section 5.1), since a TLS
+  socket writes all it is handed in one call and the timer must apply to
+  each; so no timer spans the upload, and its time follows its size
+  (4.5.3.2: "a timer for each SEND call", not the whole transaction).
+  A stop kills the send with the bridge process.
+- **Refused or in doubt.** The server accepts a message only on the end
+  of data line, with a 250, or refuses it (RFC 5321 section 4.1.1.4). So
+  a refused login, every recipient refused, a refusal at `MAIL` (an
+  over-`SIZE` message included), `RCPT`, or the reply to `DATA`'s start,
+  and any error, timeout, or failed write (EPIPE) before the end of data
+  line has gone in full, raise a definite refusal (`broker.Failed`), and
+  the effect is `failed` with no lookup. After it, a 4xx or 5xx reply is
+  also definite (section 4.2.1). Anything else that ends the send (no
+  reply, the 10 minute timeout, a garbled reply `smtplib` reads as code
+  -1, a reply line too long to read, another code) raises
+  `broker.Unknown`, naming the exception's `__context__`; the server may
+  have stored the message (RFC 5321 section 6.1), so this is never
+  `failed` on its own. Some
+  recipients refused: `done`, with `refused` listing each address and its
+  reply.
 - **Result.** `message_id`, `accepted`, `refused`, and one `sent` entry
   whose `chat_id` is the thread root (the first `references` id, else the
   own Message-ID), so a reply from any recipient binds.
@@ -232,41 +251,43 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
   `X-GM-EXT-1`, `UID SEARCH X-GM-RAW "rfc822msgid:<id> after:<that
   date>"`; the day covers the clock margin and IMAP's date-only `SINCE`.
   The key-derived Message-ID needs no scan, so `intake.claimed` is not
-  consulted. Found: the result rebuilt with
-  `sent`. Not found: `None`. A connection or login failure raises
-  `broker.Unknown`.
-- **settle_after_s**, on `email.send`'s `Declared` in `core/bridge.py`,
-  a function of the action (D37): twice the action's deadline, from
-  `email_encoded_bytes`, plus `email_sent_settle_s`, the time Gmail takes
-  to file a sent message. A text reply waits about 3 minutes, a 25 MB
-  message about 20. `email_sent_settle_s` is 120 until the window
-  measures it. The wait only delays reading a missing message as never
-  sent; it refuses nothing.
-- **limits.** `max_text` is `None`; `max_file_bytes` is 25,000,000,
-  Gmail's limit on the whole encoded message ("Gmail sending limits in
-  Google Workspace", Admin Help: maximum email size 25 MB), compared
-  with `email_encoded_bytes(payload)` in `core/bridge.py` (body, MIME
-  headers, files base64 at 76 characters a line plus CRLF), which the
-  request-time refusal and `settle_after_s` both use. The window records
+  consulted. Found: the result rebuilt with `sent`. Not found, or a
+  connection or login failure, raises `broker.Unknown`.
+- **Settle time.** None. A 250 settles `done` in `perform`, and a
+  definite refusal settles `failed`; neither reads Sent Mail. Only a send
+  in doubt, or one whose process died, is settled from Sent Mail:
+  reconcile runs on each outbox wake once the effect's performing lock is
+  free, reads Sent Mail by Message-ID, and writes `done` when it is
+  there. Gmail copies a message sent through SMTP into Sent Mail ("Choose
+  your IMAP email client settings for Gmail", Gmail Help, answer 78892);
+  no document gives the time that filing takes, so a miss is `Unknown`
+  (the port's contract: the intent stays in flight and a later wake
+  settles it), never `failed`, and no wait is added.
+- **limits.** Email's entry in `core/bridge.py`'s channel table:
+  `max_text` `None`; `max_message_bytes` 25,000,000, Gmail's limit on the
+  whole encoded message ("Gmail sending limits in Google Workspace",
+  Admin Help: maximum email size 25 MB); and the size function
+  `message_bytes`, `email_encoded_bytes(payload)` from `core/mail.py`,
+  the length of the message `core/mail.py` builds from the payload's
+  files, which the request-time refusal uses. The performer
+  builds with the same function, which the bridge reaches through
+  `core.bridge` (D30), so the two lengths are equal by construction. The window records
   the `SIZE` smtp.gmail.com advertises, which replaces 25,000,000 if it
   differs. `MAIL FROM` carries `SIZE`, so an oversize message is refused
   before the body, a definite `failed`.
 
-`smtp_floor_bytes_per_s` is 50,000, a provisional value below #3601's
-measured rate (9.0 MB in 45.6 s); the window's measured 9 MB rate
-replaces it. A lower floor only lengthens the deadline, so it never
-refuses a send.
-
-Main's retry counters, dead letters, relay loop, drafter, history cache,
-and `react` are not carried.
+Main's retries, dead letters, relay loop, drafter, history, and `react`
+are not carried.
 
 ### `bridges/email/__init__.py` and `__main__.py`
 
-`EmailBridge` with `channel = "email"`, `limits`, `performers()`
-returning `{"email.send": (perform, lookup)}`, and `run(outbox)`, which
-runs the poll (`intake`'s functions on its own connection) beside `async
-for item in outbox: await outbox.perform(item)` for each `Release`. The blocking IMAP and
-SMTP calls run in a thread (`asyncio.to_thread`). `__main__` has three
+`EmailBridge`: `channel = "email"`, `limits`, `performers()` returning
+`{"email.send": (perform, lookup)}`, `tick()`, which lets a failed watch
+reconnect, and `run(outbox)`: the watch on its own connection beside `await outbox.perform(item)` for each `Release`.
+Blocking IMAP and SMTP calls run in a worker thread through the
+module's `in_thread`, the performing lock's thread runner where the
+kernel has one (1.4d's `performing.in_thread`, which holds the effect's
+lock for as long as the thread runs), `asyncio.to_thread` until then. `__main__` has three
 verbs: `run` (`asyncio.run(bridge.serve(EmailBridge()))`), `keys` (the
 credential copy below), and `--plist`, which prints the launchd job
 (`KeepAlive`, logs under `settings.log_dir`) for Tom to load, as
@@ -278,18 +299,25 @@ credential copy below), and `--plist`, which prints the launchd job
 model: true only when `headers["from"]` is one header holding one
 address, the first entry of `headers["authentication_results"]` has
 authserv-id `email_authserv_id`, a `dmarc=pass` result, and
-`header.from` equal to that address's domain, compared without case. `receive` calls it for an
-email record and sets `verified`; the bridge never sets it.
+`header.from` equal to that address's domain, compared without case.
+2.1 builds `verified` and the hook in `receive` that sets it false for
+email; 2.3 builds this function under its Brief's `governance_grant`
+and the hook calls it (D11a). The bridge never sets `verified`.
 
-### `core/mail.py`: reply-all
+### `core/mail.py`: reply-all and the message
+
+`email_message(payload, blobs, message_id, sender, date)` builds the
+MIME (below); `email_encoded_bytes(payload)` is the length of that
+message built from the payload's files, with an id and date of fixed
+width.
 
 `reply_all(row, own)`, pure: `to` is the sender; `cc` is every `To` and
 `Cc` address minus Valor's own and minus the sender, lowercased, in
 order, without repeats; `subject` gains `Re: ` unless it starts with
 `re:` in any case, and an empty one is `Re: (no subject)`; `in_reply_to`
 is the row's `message_id`; `references` is the ids in the row's
-`thread` plus its `message_id`. `core/session.py`'s request collection calls it for an
-`email.send` that names `reply_to` (a received `received_id` or
+`thread` plus its `message_id`. `core/session.py`'s request collection
+calls it for an `email.send` that names `reply_to` (a received `received_id` or
 `message_id`), merges in the turn's `body` and `files`, drops `reply_to`,
 and passes the result to `request`, so Tom's approval covers the final
 recipients. `email.send`'s usage text in `core/bridge.py` offers both
@@ -319,40 +347,35 @@ guard on the `guards` stream, once, through `migrate`:
 | `provenance` | `by: tom`, `via: open question 17, default A standing, seeded by migrate`, `role_played: false` |
 
 `seeded_payload` takes the guard's own `note` and `provenance.via` when
-the guard carries them, and the pipeline values otherwise. It fires when
-a record from `operator_email` has `verified: false`, read from the
-`message.received` row, so no new row type is added. Once DMARC is
-published it fires only on a forgery or a misconfiguration, so the
-expiry sweep will likely offer to delete it; deleted, no email record is
-verified and email starts nothing. That deletion is Tom's tap, and the
-window notes tell him so.
+present. It fires when a record from `operator_email` has `verified:
+false`, read from the `message.received` row; no new row type. Once
+DMARC is published it fires only on a forgery or a misconfiguration, so
+expiry will likely offer to delete it; deleted, no email is verified and
+email starts nothing. That is Tom's tap, and the window notes say so.
 
 ### Settings and the credential
 
 `core/settings.py` gains: `email_address` (Valor's), `email_since` (a
 date), `email_authserv_id` (`mx.google.com`), `imap_host`, `imap_port`
-(993), `smtp_host`, `smtp_port` (587), `email_poll_s` (30),
-`imap_timeout_s` (30), `smtp_timeout_s` (30), `smtp_floor_bytes_per_s`
-(50,000), `email_sent_settle_s` (120), and `mail_cafile` (unset; tests
-point it at their CA). Tom's address is 2.1's `operator_email`.
+(993), `smtp_host`, `smtp_port` (587), and `mail_cafile` (unset; tests
+point it at their CA). There is no poll interval and no IMAP timeout. The SMTP timeouts are RFC 5321's,
+in `bridges/email/config.py`, not settings. Tom's address is 2.1's `operator_email`.
 
 `python -m bridges.email keys` copies `IMAP_USER`, `IMAP_PASSWORD`,
 `SMTP_USER`, and `SMTP_PASSWORD` from the vault `.env` into `mail-keys`
-in the kernel key directory (mode 600), through the copy in
-`core/credentials.py` that `judgement-keys` uses, printing each name with
-`written`, `kept`, or `missing`, never a value. `credentials.read_key`
-takes the command that owns the file, so its errors name
-`python -m bridges.email keys` or `judgement-keys` as fits. The bridge reads the file when it starts; a
-missing name fails the start, naming it. The password is held in the
+in the kernel key directory (mode 600) through `credentials.copy_keys`,
+printing each name with `written`, `kept`, or `missing`, never a value.
+`credentials.read_key` takes the owning command, so its errors name
+`python -m bridges.email keys` or `judgement-keys`. The bridge reads the
+file at start; a missing name fails the start, naming it. The password is held in the
 IMAP and SMTP config objects only.
 
 ## Tech debt absorbed
 
 - #3601: the SMTP timeout bounds the whole upload on `main`, so large
-  attachments fail; the deadline scales with the encoded size. The other
+  attachments fail; here each send call has its own timer. The other
   three items in #3601 go with the code not carried.
-- #3124 and #2160: moot. Sends are held for Tom and carry exactly what he
-  approved; steering is in `core/`.
+- #3124 and #2160: moot; sends are held for Tom, steering is in `core/`.
 - On `main`: unverified certificates, `_extract_body` raising on an
   unknown charset, the HTML regex, dropped empty-body and no-`From`
   mail, and `\Seen` set before the fetch; each is fixed above.
@@ -361,23 +384,23 @@ IMAP and SMTP config objects only.
 
 ## Left out
 
-- Mail someone opens in Valor's webmail before a poll is not received.
-  Marking it unread brings it in on the next poll.
+- Mail someone opens in Valor's webmail before the watch searches is not
+  received. Marking it unread brings it in after the next wait.
 - Mail from senders this machine does not own is never received, so
   replies to Valor's mail from anyone else are not recorded as thread
   context. email.md says so.
 - Inbound attachment caps (main's 25 MiB and 50 parts): Gmail bounds
   inbound size, and a kernel cap has no incident.
-- Operator notices, approvals, and stops by email; IMAP IDLE; alerts on
-  a failing login, backoff, and a health key. Subject coalescing, the vault mirror, the Redis history and dead
-  letters, the relay's retries, per-sender project routing, the
-  customer-service handler, the drafter, `gws` drafts, standing grants,
-  and folders other than `INBOX`.
+- Operator notices, approvals, and stops by email; alerts,
+  backoff, and a health key; subject coalescing, the vault mirror, the
+  Redis history and dead letters, the relay's retries, per-sender
+  project routing, the customer-service handler, the drafter, `gws`
+  drafts, standing grants, and folders other than `INBOX`.
 
 ## Tests
 
 Real Postgres (`VALOR_TEST_DB`), real Dovecot, the local SMTP server, no
-mocks. Tests needing Dovecot or `aiosmtpd` fail naming what is missing.
+mocks. Tests needing Dovecot or `openssl` fail naming what is missing.
 
 **Parsing** (`tests/test_email_parse.py`, fixtures in
 `tests/fixtures/mail/`):
@@ -414,9 +437,9 @@ for the first case:
 
 **The bridge** (`tests/test_email_bridge.py`):
 
-- One mail lands as one row, then is `\Seen`; a second poll records
+- One mail lands as one row, then is `\Seen`; a second search records
   nothing. Receive without the `\Seen` store (as a crash would leave
-  it), then a full poll: one row, no body fetch (`intake.recorded`),
+  it), then a full search: one row, no body fetch (`intake.recorded`),
   then seen.
 - UIDVALIDITY change (`doveadm mailbox update --uid-validity`): mail
   received and seen before is not received again; mail received but not
@@ -430,7 +453,10 @@ for the first case:
   before `email_since` is not received.
 - A message whose persist raises (the inbound directory made read-only
   for that one key): logged, left unseen, and the next message in the
-  same poll is received.
+  same search is received.
+- Mail delivered while the watch is in IDLE is received; IDLE returns on
+  `EXISTS`; a connection dropped under IDLE ends it; a watch that cannot
+  connect connects on the next tick.
 - A mail from Tom passing the test, in no chat a spec lists, starts one
   task under `valor`. Tom's reply to a mail Valor sent binds to that task
   as a steer, through the sent entry's thread root; a reply whose text is
@@ -442,22 +468,24 @@ for the first case:
 - A file swapped in the workspace after approval, before release:
   nothing sent, the outcome `failed` or `effect.refused`, never `done`.
   A stopped task's held send: release refused, nothing sent.
-- Crash between SMTP and outcome: both cases in Done. The upload case
-  asserts the invariant (at most one copy; `done` exactly when one).
-- The 250 reply delayed past the deadline, the message stored: the
-  performer raises `Unknown`, no outcome is written, and the next sweep
-  after `settle_after_s` writes `done` with `reconciled: true`, never
-  `failed`.
-- Crash after the intent, before SMTP connects (killed by PID from a hook
-  on connect): a sweep after `settle_after_s` (set short in the test)
-  writes `failed`, and nothing is sent.
+- Crash between SMTP and outcome, the bridge process killed by PID:
+  after the message is stored, `done` with `reconciled: true`, one copy;
+  before the server took the body, nothing stored and the effect still
+  in flight (Sent Mail does not hold it, which is `Unknown`).
+- The 250 reply later than its timeout, the message stored: the
+  performer raises `Unknown`, and the lookup finds the message.
+- Crash after the intent, before the server's greeting (a port that
+  accepts and never greets): in flight, and nothing is sent.
 - Lookup with the IMAP server down: `Unknown`, nothing written.
 - 9 MB send through the held reading rate: done, attachment byte-equal.
-  Unscaled, the deadline fires mid-body: `Unknown` naming the timeout, no
-  outcome at once, `failed` from the sweep after `settle_after_s`.
+  A server that stops reading mid-body: a definite refusal before the
+  end of data line, nothing stored. A server that hangs up after `354`
+  (EPIPE before the end of data line): a definite refusal, no lookup.
+  After the end of data line: `554` is a definite refusal; a garbled
+  reply, a `251`, or a line too long is `Unknown`.
 - `email_encoded_bytes` equals the length of the message the performer
   serializes, for no files, one, and three of odd sizes; a request just
-  over 25,000,000 encoded is refused, one just under is held.
+  over 25,000,000 encoded is refused, one of exactly 25,000,000 is held.
 - One recipient refused: `done` with it in `refused`. All refused:
   `failed`. Wrong password: `failed` with the server's reply.
 - A server whose certificate the test CA did not sign: IMAP and SMTP
@@ -479,12 +507,11 @@ Valor's mailbox, driven by the steps below.
 
 New:
 
-- `bridges/email/__init__.py`, `__main__.py`, `parse.py`, `imap.py`,
-  `smtp.py`
-- `core/mail.py`
-- `tests/mailserver.py` (Dovecot and SMTP fixtures),
-  `tests/test_email_parse.py`, `tests/test_intake_dmarc.py`,
-  `tests/test_email_bridge.py`, `tests/test_live_email.py`,
+- `bridges/email/__init__.py`, `__main__.py`, `config.py`, `parse.py`,
+  `imap.py`, `smtp.py`
+- `core/mail.py`; `tests/mailserver.py` (Dovecot and SMTP fixtures);
+  `tests/test_` `email_parse`, `intake_dmarc`, `email_smtp`, `email_imap`,
+  `mail`, `email_bridge`, and `live_email` (`.py`);
   `tests/fixtures/mail/*.eml`
 
 Changed:
@@ -493,9 +520,10 @@ Changed:
   `note` and `via`), `core/credentials.py` (the key copy shared with
   `judgement-keys`, the owning command in errors)
 - `core/intake.py` (`dmarc_verified`, called at receive),
-  `core/session.py` (the reply-all call), and `core/bridge.py`
-  (`email.send`'s usage text and `settle_after_s`), all 2.1's
-- `pyproject.toml` (`aiosmtpd` in the dev group)
+  `core/session.py` (the reply-all call), and `core/bridge.py` (email's
+  limits entry and `email.send`'s usage), all 2.1's; 2.1's fake bridges sit
+  in `tests/fake_bridges.py`, a name that does not shadow the `bridges`
+  package
 - Docs: `docs/bridges/email.md` (status, `verified` set in `core/`, the
   `sha256:` id, owned senders and `email_since`, no inbound caps, the
   key directory), `docs/machine.md` (the mail credentials row),
@@ -509,8 +537,7 @@ and rebases before its checks.
 
 ## Rollout
 
-1. `python -m core backup`. Merge; on the build Mac, pull and
-   `python -m core migrate` (seeds `email.dmarc`).
+1. `python -m core backup`; merge; pull and `python -m core migrate`.
 2. `brew install dovecot` on any machine that runs the suite.
 3. `python -m bridges.email keys`; set `email_address` and `email_since`
    (the window's date) in the bridge's launchd environment, and confirm
@@ -546,8 +573,8 @@ The test window, with Tom:
    The bridge restarts, a sweep settles the effect, and each inbox holds
    at most one copy, with `done` exactly when it holds one.
 5. Record the Sent Mail lookup form that works, Gmail's filing delay
-   (it replaces `email_sent_settle_s`), the 9 MB upload rate (it replaces
-   `smtp_floor_bytes_per_s`), and the bridge's RSS. Note for Tom that the
+   (from the 250 to the message in Sent Mail), the 9 MB upload rate,
+   and the bridge's RSS. Note for Tom that the
    `email.dmarc` guard rarely fires and its expiry tap decides whether
    email can start work.
 6. Unload the new bridge and enable the email bridge on `main` on both
@@ -555,45 +582,13 @@ The test window, with Tom:
    replayed; mail between windows stays with `main` because
    `email_since` moves to each window's date.
 
-## Decided by default
-
-- **One process of its own**, `python -m bridges.email` under launchd,
-  so an IMAP or SMTP stall never holds the kernel.
-- **Only owned senders are read**, through `owns`, so no Mac marks seen
-  mail another Mac's bridge waits for. Receive scope, not a gate.
-- **`email_since`** keeps the backlog of unseen mail from arriving as new
-  on the first poll, and marks the boundary with `main`'s bridge.
-- **No UID cursor**, so a UIDVALIDITY change or a gap between windows
-  replays nothing.
-- **The mail credential in the kernel key directory**, as machine.md
-  settles for kernel-held secrets.
-- **The local servers are Dovecot and `aiosmtpd`**, Dovecot because UID
-  and UIDVALIDITY behavior is the thing under test, and it runs as the
-  agent's user with no root.
-
 ## Questions for Tom
 
-None in 2.3. Which addresses count as Tom, and which second address of
-his is cc'd in the window, go to 2.1's identity question. Where the app
-password lives is settled by machine.md. The DMARC record and the
-`Authentication-Results` report are Tom's rollout steps above.
+None. Tom's addresses and the cc'd second one are 2.1's identity
+question; the password's place is machine.md's; the DMARC record and the
+`Authentication-Results` report are Tom's rollout steps.
 
-## Critique round 1 (of 1): revise, rounds spent
+## The record
 
-| Finding | Handled |
-|---|---|
-| 1. Port does not match 2.1 | "Port used" written to the lead's port decisions: `core/bridge.py`; `verified` set by `core/intake.py` from raw headers; `chat_id` the thread root, ownership and start on `sender_id`; `thread` dicts; `inbound_dir`; `operator_email`; `sent` in results; binding on `(channel, chat_id, message_id)` |
-| 2. No file store; check-then-read race | Store dropped; `perform` reads, hashes, compares, and sends the same bytes; swap test added |
-| 3. UID cursor replays old mail | Cursor dropped; `UNSEEN SINCE` per owned sender only; webmail-opened mail under Left out |
-| 4. In-doubt sends written `failed` | The performer raises `broker.Unknown` once the body has started; delayed-250 test; the broker side is port decision 24 |
-| 5. No later reconcile | Port decisions 22 and 23; `settle_after_s` includes `email_sent_settle_s`, measured in the window |
-| 6. Sender filter and `email_since` | Filter built from `owns` and `owned`; contradictions fixed (other addresses not received; forgeries tested from owned addresses); `xtom@` test; cost under Left out |
-| 7. Guard row | Incident restated; `mission_items` `[6]`; `source` added; per-guard `note` and `via` overrides; `GUARD_DMARC` in `guards.py`; expiry note in the window |
-| 8. DMARC on intra-domain mail | Tom's pre-window step 1; DKIM key in step 2 |
-| 9. Which backend to terminate | `valor-email-perform`; invariant asserted; exactly-one shown by the after-DATA hook |
-| 10. `LIST (SPECIAL-USE)` on Gmail | Plain `LIST`; `X-GM-RAW` when `X-GM-EXT-1`; the window records which works |
-| 11. Size arithmetic | Inbound caps dropped; `max_file_bytes` is Gmail's cited 25 MB encoded limit, compared with the encoded size; deadline on encoded length; a mid-body timeout is `Unknown` with `__context__` named |
-| 12. Poison message | Logged, left unseen, poll continues; test added |
-| 13. Recipient claim | Threat model reworded: Tom's tap on the full card is the control |
-| 14. Premise slips | Both SMTP sources named; `read_key` names the owning command; imports per port decision 30 |
-| 15. Limits | Floor rate provisional, replaced by the window's measurement; IMAP socket timeout added from main's value |
+What is decided by default, the critique round, and the build are
+recorded in [m2-3-email-record.md](m2-3-email-record.md).

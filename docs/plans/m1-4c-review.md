@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-review
 type: build
-status: planned; revised after critique round 2 (both rounds spent)
+status: passed; merge held for Tom's tap (records in m1-4c-review-records.md)
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -73,7 +73,12 @@ What the kernel must never do with any of it:
 
 - Run candidate code outside the check profile, or past a stop. The head
   run, the reviewer checkout's setup, and the lint are 1.4b's runs:
-  marked, time-limited, their group killed on a stop.
+  marked, with no time limit, their group killed on a stop, which alone
+  ends them. A stop written before a run's `LISTEN` is read from
+  `tasks.is_stopped` after it, before the run starts.
+- Follow a path inside a checkout after candidate code ran there. A
+  `.valor` or a link the reviewer checkout's setup leaves makes
+  `write_inputs` refuse; the kernel removes nothing in the checkout.
 - Give the reviewer the task's live services. Its turn runs inside
   `check_services`, so its `DATABASE_URL`, `PGPASSFILE`, and `REDIS_*`
   name fresh instances; the live ones are stopped for the duration.
@@ -122,13 +127,14 @@ it.
    is told to build the key this way; if it lands without the role, this
    part adds it in `core/checks.py`.
    Then **the lint**, when the spec has one, in the same checkout under
-   the same profile and mark, with its own `settings.suite_timeout_s`:
+   the same profile and mark, with no timeout (a stop ends it):
    - `lint: null` when the spec's `lint` is `None`;
    - otherwise the exit code and duration, always;
    - for kind `python-uv`, locations parsed from ruff's concise lines
      (`path:line:col: CODE`): path, line, and rule, the message dropped;
-     the command is run with `--output-format concise` appended when it
-     is a `ruff check` command;
+     each `ruff check` invocation in the command gets
+     `--output-format concise` right after it, so no other command in a
+     compound line gets the flag;
    - for any other kind, the exit code only.
    `compare(base, head, removed)` against the task's usable base run
    gives failures, `failing_at_base`, and `deleted_at_head`. One
@@ -155,8 +161,8 @@ it.
    - `plan.md`: the stakes header `critique_inputs` writes, then the plan
      file's bytes from `git show <f.plan["commit"]>:<path>` in the mirror;
    - `diff.patch` (base to candidate, from the mirror);
-   - `verify.json` (the `verify.ran` fields and `reviewer_setup_exit`, no
-     free text);
+   - `verify.json` (the `verify.ran` fields and `reviewer_setup_exit`: ids,
+     counts, codes, and lint locations; no message or output tail);
    - `governance.json`: each kernel instance (id, path, start and end
      line, the hunk's added lines, granted or not), the abstentions, and
      the unjudged hunks;
@@ -285,7 +291,7 @@ registering commit. In it:
 | The governance judge is down | step 1 fails before any run; `failed`, no verdict, retried |
 | Both governance legs failed, reruns left | `record_check` refuses as unanswered; `failed`, retried |
 | A fresh service will not start, or a stop | `cause: kernel`; `failed` or `stopped`, nothing recorded |
-| The candidate's suite hangs or its setup fails | `cause: commit`; the reviewer sees it in `verify.json` |
+| The candidate's suite or its setup fails | `cause: commit`; the reviewer sees it in `verify.json` |
 | The reviewer checkout's setup fails | `reviewer_setup_exit` says so; the turn runs |
 | A forged JUnit file or exit 0 from `conftest.py` | recorded as the candidate's claim; the reviewer reads the diff |
 | `verdict.json` missing, malformed, or with another verdict value | `Malformed`, no verdict, the branch reruns |
@@ -338,8 +344,10 @@ Unit and router tests run with `VALOR_TEST_DB` and the scripted session.
 - The reviewer's checkout holds no builder `.valor/`, and its profile
   refuses reading the builder clone's `.valor/done.md`, the builder's
   `TMPDIR`, `~/.claude`, and the test branch's check directory.
-- `verify.json` carries no free text: a failure message the candidate's
-  test prints, and a ruff message, do not appear in it.
+- `verify.json` carries no message or output tail: a failure message the
+  candidate's test prints, and a ruff message, do not appear in it. The
+  lint paths in it are the candidate's own, so they are the one
+  candidate-chosen string in the file.
 - The lint record: a spec with no `lint` gives `lint: null`; ruff concise
   output gives path, line, and rule; a lint of another kind gives the
   exit code only.
@@ -427,8 +435,9 @@ Reversible calls made by the build session, not questions for Tom.
 3. **The reviewer's `changes` outranks `governance_refused`.** Tom's tap
    is not spent on code about to change; the merge stays blocked until
    every instance is granted.
-4. **`verify.json` carries no free text.** Failure and lint messages are
-   candidate-controlled and could carry narration aimed at the reviewer;
+4. **`verify.json` carries no message or output tail.** Failure and lint
+   messages are candidate-controlled and could carry narration aimed at
+   the reviewer; lint paths stay, since a location needs one;
    the reviewer's checkout is set up, so it can rerun any test to read
    one.
 5. **The reviewer gets fresh services and a set-up checkout.**
@@ -447,74 +456,20 @@ Reversible calls made by the build session, not questions for Tom.
    cause is input to the reviewer and a `kernel` cause records nothing. If
    a rerun result ever forced `changes` on its own, that would be a new
    gate and would need a grant.
+10. **A failed setup in the reviewer's checkout still runs the turn.**
+    The reviewer sees `reviewer_setup_exit` and the head run's own setup
+    result (`cause: commit` when setup fails at head) in `verify.json`,
+    and judges with them. 1.4b's test check turns a failed setup into
+    its verdict; the review's kernel results are input to the reviewer,
+    never a verdict alone (item 9), so a setup failure that forced
+    `changes` would be the new gate item 9 rules out.
 
 ## Questions for Tom
 
 None. No identity or credential choice is involved, and the intent
 questions are answered by the docs above.
 
-## Critique round 1 (of 2): revise
+## Records
 
-The report covered both parts. The lead split the task: findings 1, 2, 3,
-5, 6, 11, 12, and 13 are handled here; 4, 7, 8, 9, 10, 14, 15, 16, and 17
-in m1-4c-verifier.md.
-
-1. A reviewer and the kernel disagreeing on governance left the task stuck:
-   `governance.json` is an input, the runner normalizes reviewer instances
-   and notes into findings, and `record_check` computes the verdict, with
-   a test per case (Design, The recorded verdict; Tests).
-2. Deleting `verdict` could strand docs: `verdict` goes only with docs
-   registered (Registration; registration itself settled in round 2).
-3. The gate would measure a hand-played review: this part reruns on the
-   host with 1.4b's machinery and merges before the 1.5 gate; the Done
-   line is not amended.
-5. The reviewer got the builder's live database: its turn runs inside
-   `check_services` (Design, step 3; Threat model; Tests).
-6. The candidate controlled the plan the reviewer reads: `plan.md` is the
-   bytes at `f.plan["commit"]`; effect payloads are quoted and their
-   fields listed (Design, step 3).
-11. "Both counts" contradicted "no test-branch result": the reviewer gets
-    only the review's own run (Design, step 2); part two adds the
-    `macos`-skipped count.
-12. The runner signature lacked the judgement port: it is
-    `(fresh_for, port, model=None, seat="reviewer")`.
-13. The `core/verdicts.py` row was incomplete: `record_critique`'s manual
-    default, `tests/scripted.py`'s `**MANUAL`, and the new `record_check`
-    fields are listed; `--behavior` is 1.4b's (Files, Registration).
-
-## Critique round 2 (of 2): revise
-
-Both rounds are spent; every finding is folded in. Findings 1 to 11 are
-this part's; 12 is part two's.
-
-1. Review waited on governance's calibration, so the gate could still
-   measure a hand-played review: review is registered unconditionally,
-   calibration is information (the lead's call under Tom's rule against
-   invented safeguards); 1.4b registers docs the same way, so `verdict`
-   goes in the same commit (Registration; Decided by default 6).
-2. The advisory lock: part two's.
-3. The head run's reuse key lacked the role: it includes the role, base
-   runs stay shared, and 1.4b is told (Design, step 2; Files).
-4. No seat and no path for a second seat's review: `seat="reviewer"`,
-   `fresh_for` takes the seat, the model is `resolve_model(seat)` passed
-   through `fresh_for`, and another seat appends `review.compared`
-   (Design, step 6).
-5. `governance_refused` outranked `changes`: `changes` is recorded with
-   the ungranted instances as findings; `governance_refused` only on a
-   `pass` (The recorded verdict; Decided by default 3).
-6. The reviewer's checkout was never set up: seed cache cloned and
-   `run_setup` run by the kernel before the turn, with an offline test
-   (Design, step 3).
-7. The live-port test was false: it asserts the live pid gone, no builder
-   table, and the live instance back afterwards (Tests).
-8. Docs wrong between the merges: m1-4-checks.md's rows and outline and
-   valor-rebuild.md:257 are fixed in this part (Docs fixed).
-9. A reviewer path reached git as a pathspec: it must equal a diff path,
-   and `hunk_at` uses `--literal-pathspecs`, tested with `"."` (Design,
-   step 5; The recorded verdict).
-10. The lint record: `null` with no command, exit and duration always,
-    ruff concise locations for `python-uv` without the message, exit only
-    otherwise, under its own `suite_timeout_s` (Design, step 2).
-11. The manual-leg refusals: the verdict is computed for the session leg
-    only, and both refusals stay for `leg="manual"` until deletion (The
-    recorded verdict).
+The critique rounds, the build record, and the patch rounds are in
+[m1-4c-review-records.md](m1-4c-review-records.md).

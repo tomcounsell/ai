@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: planned; critique rounds 1 and 2 built in; building
+status: delivered-not-passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -229,7 +229,9 @@ notification is delivered at commit. The trigger refuses nothing;
   too. 1.4d builds to this shape.
 - **Settle time.** `Declared.settle_after_s` is a number or a function of
   the action; `bridge.serve` resolves it against the intent's action and
-  passes the number to `reconcile`.
+  passes the number to `reconcile`. Reconcile runs once the effect's
+  performing lock is free, then reads the remote; it waits on no age.
+  2.3 sets email's settle function and size function.
 - **`broker.Unknown` after a failed perform** (raised by `perform`, or by
   the `lookup` the broker asks next) leaves the intent in flight with no
   outcome, for reconcile. 2.2 relies on this (port item 24).
@@ -342,7 +344,7 @@ bridge performers.
   charge lands.
 - `test_kill_between_intent_and_outcome`: a push hangs after its intent;
   SIGKILL; restart: `done` when the target holds the commit, nothing while
-  `lookup` raises `Unknown`, `failed` only after `reconcile_after_s`.
+  `lookup` raises `Unknown`, `failed` when the target answers without it.
 - `test_merge_restarts_its_kernel`: SIGTERM after a merge's intent;
   restart; `lookup` finds the merge; the outcome is written.
 - `test_dangling_propose_intent`: a propose-class intent with no outcome
@@ -490,6 +492,26 @@ bridge performers.
 - The email cc: Tom's primary address (`operator_email`'s first entry),
   reversible in settings.
 - A chat spec with no `machine` belongs to `settings.default_machine`.
+- A release refused before `release.requested` exists writes no row;
+  `core release` raises with nothing written.
+- Performers reach the kernel's code through the `broker.CURRENT`
+  contextvar, beside the `performers=` keyword.
+- A task started by message has `workspace=None`; its provision job
+  writes `workspace.provisioned`, which `tasks.brief` lays over the
+  Brief; a failure writes `workspace.failed` and a notice, retried only
+  on a later `message.steered`. It runs at ceiling `propose` on
+  `resolve_model("light")`.
+- The gateway's call holder is `run:<task>`; `spending.HOLDER` holds the
+  same for judgement calls.
+- A declared performer is one with an `owner` and no `perform`.
+- Binding notices go by Telegram; other notices to `operator_chat`.
+- One router step per task per wake with new rows; `notice.requested`
+  and `notice.sent` rows wake no step; stopped tasks are skipped;
+  services go down in a settled state or `merge`.
+- Recollect covers the last non-fresh turn with a state.
+- `core run` refuses a task whose `services:<task>` another process
+  holds: one holder is a scheduling fact.
+- The test helpers are `tests/bridges.py`.
 
 ## Questions for Tom
 
@@ -498,79 +520,7 @@ bridge performers.
    (decision 16), not a direct chat. Assumed: the user id and addresses
    `main`'s bridge configuration names for Tom.
 
-## Critique round 1 (of 2): revise
+## Record
 
-Each finding of critique-2-1-r1.md, and how this revision handles it.
-
-- F1, performers per process: Performers per task from the Brief, in
-  `step` and per effect in recover; 1.4d's signatures and async `refuse`;
-  `declared_performers()` in every task.
-- F2, signals lost after `turn.ended`: recover re-collects through
-  `read_turn_file`; test added.
-- F3, live calls charged: `holder` on `gateway.opened`; only free holders
-  are charged; test added.
-- F4, schema not re-runnable: `IF NOT EXISTS`, `OR REPLACE`, drop then
-  create the trigger; `test_migrate_twice`.
-- F5, nested `sent`: one GIN index over `COALESCE` of both paths; test.
-- F6, refused releases yielded forever: yielded only with no intent,
-  outcome, or `effect.refused`; the bridge release appends it once;
-  `release.requested` on the task stream.
-- F7, approval then release in `bind`: `bind` writes the approval and
-  `release.requested` together; `schedule` releases kernel ones; merge
-  self-restart and approve-after-stop covered.
-- F8, propose-class reconcile: `reconcile` reads the intent row; test.
-- F9, sweep stops kept services: `services:<task>` lock; sweep needs both
-  locks free; 1.4b noted.
-- F10, steering spent by fresh turns: only working-session turns spend
-  it; test during checks.
-- F11, binding: the port's decisions 10 to 14.
-- F12, context identity: `kernel_commit` and `offered` on `turn.started`;
-  the claim restated; fresh-process test.
-- F13, the slot: `core/slot.py`, per turn, FIFO, shared with `core run`
-  and the checks; 4.3 adds its sort key and preemption.
-- F14, the port: [m2-1-port.md](m2-1-port.md), written to the lead's
-  decisions.
-- F15, the operator group: settings, `valor.toml`, rollout step 2, and Q1
-  narrowed to identities.
-- F16: `Spec` fields, the plist `PATH`, plists printed for Tom (decision
-  31), the caffeinate limit, a connection per concurrent intake call,
-  notices deduplicated across kernels.
-- F17: no governance added (the DMARC check is 2.3's, round 2 E).
-- F18: Q2 decided by default (decision 15).
-- F19: limits cited as protocol facts with split and request-time refusal
-  (decision 15b); near-miss notices (15a); the start rule widened to
-  `valor` for unlisted chats.
-
-## Critique round 2 (of 2): revise
-
-Each finding of critique-2-1-r2.md and how it is built in.
-
-- A: the intent carries the action; reconcile reads it, falling back to
-  `effect.held`; 1.4d builds to the shape; test added.
-- B: `slot.held` is reentrant within a process; test added.
-- C: a binding that raises binds `none` and owes a notice; `approve`
-  reads the effect first (port item 39); test added.
-- D: a refused kernel release appends `effect.refused` once and owes a
-  notice (item 40); test added.
-- E: the DMARC check is 2.3's, under its grant (item 11a); email is
-  `verified: false` until it lands.
-- F: a provision job off the loop; a failure owes a notice; test added.
-- G: `settle_after_s` is a number or a function (item 37).
-- H, I: the limits live in `core/bridge.py`; Telegram counts UTF-16
-  units; email's limit is the whole message through a size function
-  (item 15c).
-- J: `Bridge.tick()` (item 38).
-- K: every MTProto record is verified; operator status is decided at
-  bind; chat ids are marked strings in records and in `sent`.
-- L: a steer no runner reads owes a notice.
-- M: `recollect` reads `handled/` and what remains in `.valor/`, and
-  rebuilds `state` and `finished` from the turn rows; test added.
-- N: one services handle per task in `serve`; the reap runs when it
-  first starts them; `core run` refuses a task the kernel holds.
-- Low 1: an absent `machine` is `settings.default_machine`. Low 2: the
-  start rule cites 2.3's rollout. Low 3: 4.1 dropped from the schema
-  row. Low 4: 4.3 is told the slot is `core/slot.py`. Low 5: `offered`
-  is recorded after narrowing. Low 6: the port says how a lookup finds
-  the intent's `at`. Low 7: `step` takes a Performers factory. Low 8:
-  the cc is decided by default. Low 9: an email near-approve notice says
-  approvals come by Telegram.
+The critique rounds and patch rounds, each finding and how it is built
+in, are in [m2-1-resident-kernel-record.md](m2-1-resident-kernel-record.md).
