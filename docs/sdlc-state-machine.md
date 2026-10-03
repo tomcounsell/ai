@@ -292,7 +292,9 @@ serve the request, loop counts too low for the stakes.
 **Exit evidence.** `critique.decided`: the plan digest it read, the
 verdict, the findings, any raised counts, the model and cost. `sound` goes
 to `build`. `revise` goes back to `plan` while critique rounds remain, and
-otherwise to `build` with the findings in the prompt.
+otherwise to `build` with the findings in the prompt. A plan commit holding a
+`.valor` entry has no checkout; the kernel records `revise` naming it (leg
+`kernel`), and critique never reruns.
 
 **Why.** Mission item 1. Incident: on popoto #633 the clarify arm built on
 a wrong premise nothing read before code existed, and correctness fell from
@@ -374,11 +376,10 @@ A candidate whose tree holds a `.valor` entry has no checkout: the run is
 recorded as the commit's own fault, red at head, and never rerun (the base's
 tree is never checked out, so its entries do not count). A JUnit report that
 is not XML, or declares an encoding the parser cannot read, gives no
-per-test result. A test with parameters counts as gone when the diff removes
-or inserts inside what feeds its `parametrize` decorator: the decorator, a
-module or class level binding of a name it uses (followed through the names
-those use), a module a used name is imported from, or a file a string there
-names.
+per-test result. A test with parameters counts as gone when the diff touches
+what feeds them: its `parametrize` decorators, `pytestmark`, the `params=` of
+fixtures it requests (also in a `conftest.py`), `pytest_generate_tests`, the
+bindings those use (an `if` holding one counts whole), files they name.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
 at head that do not fail at base, `deleted_at_head` (tests that passed at

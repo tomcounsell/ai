@@ -302,7 +302,7 @@ What the stack fixes:
   charged on the task, so their price shows in the same
   ledger: in the kernel process through `core/spending.py`, the gateway's
   rows with `route: judgement`, no HTTP route. Jev's estimate allows for
-  the prompt it bills around the request (1.25 times bytes / 3 plus a fixed
+  the prompt it bills around the request (1.25 times bytes / 2 plus a fixed
   margin, sized from the calibration calls)
   ([judgement-layer.md](judgement-layer.md)).
 - **First use: the request judge.** Each incoming request is read by the

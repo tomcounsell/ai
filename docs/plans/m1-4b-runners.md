@@ -385,10 +385,8 @@ base's setup runs again to make it, without the suite.
      removes. For Python, `removed_definitions(mirror, base, head)` reads
      the diff in the mirror: a deleted test file, or a removed line that
      defines the test's function or class name (parametrized ids reduced
-     to the name); a diff touching what feeds a test's parametrize
-     decorator (its lines, bindings of names it uses, followed through
-     theirs, a module they come from, a file a string there names) counts
-     its missing ids as deleted. For other kinds, an id whose name
+     to the name); a diff touching what feeds a test's parameters
+     (`_feeds_parametrize`) counts its missing ids as deleted. For other kinds, an id whose name
      string the diff removes is deleted; other missing ids are failures.
    - `failing_at_base`: ids failing or erroring at both base and head.
      They are not counted at head and are listed for the reviewer and Tom,
@@ -413,7 +411,9 @@ base's setup runs again to make it, without the suite.
 The test runner runs no model turn, so it has no turn id. `_session_leg`
 takes a third leg, `kernel`, which names the `suite.ran` rows it read in
 place of a turn; breadth's model, confidence, cost, and guard id come from
-the breadth row inside `record_check`, as today.
+the breadth row inside `record_check`, as today. `record_critique` takes
+`kernel` with no turn for the critique runner's own `revise` on a plan
+commit whose tree holds `.valor` (`ValorInTree`), so critique never reruns.
 
 ### The docs runner (`core/fresh.py`)
 

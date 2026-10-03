@@ -313,3 +313,56 @@ route estimates input with the same `settings.bytes_per_token`, which is
 Suite on `ca620a91f` plus this round: 798 passed, 13 skipped (build
 database, ports 6450 to 6459). `ruff check` clean; `ruff format --check`
 flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Patch round 3 (Valor's call, 2026-10-03)
+
+From review-1-4b-p2 (changes) and the test check (gaps) at `e3e48dccb`.
+
+1. `workspace.rmtree` works through directory descriptors with no
+   recursion. Each directory is made 0700 through its parent's descriptor
+   (`follow_symlinks=False`) and opened `O_DIRECTORY | O_NOFOLLOW`; every
+   directory found below the root is moved up to sit directly in the root
+   before it is emptied. No path grows past one level, at most two
+   directories are open at once, and a link is unlinked, never followed.
+   This replaces an explicit stack of descriptors: a stack holds one open
+   descriptor per level, and a deep tree would exhaust the process's
+   descriptors; moving directories up needs none. Tests: 600 nested 0000
+   directories; 400 readable levels (1600 bytes of path) above one
+   directory at 0000, 0500, 0300 or 0444; a 0444 directory inside a check
+   directory; links to a directory outside the tree, whose mode is kept.
+   Each fails on the previous code. A 2000-deep 0000 chain is removed in
+   0.6 s.
+2. Parametrize feeds outside the decorator are covered (not the broader
+   rule: a fixture's `params=` in a `conftest.py` lies outside the test's
+   file, so "any line removed in that file" would still miss it, and round
+   1's review asked for the narrower rule). `_feeds_parametrize` seeds from
+   the test's and its classes' `parametrize` decorators, a `pytestmark`
+   binding that parametrizes, the `params=` decorator of every fixture the
+   test requests (by argument, `usefixtures` or `autouse`, followed through
+   the fixtures those request) in its classes, its module and each
+   `conftest.py` from its directory up, and `pytest_generate_tests` there;
+   from each it follows bindings as before, per file. A binding inside a
+   module or class level `if`, `try`, `with` or loop is that whole
+   statement. Tests: a fixture's `params=` name, the same fixture through
+   another fixture, a conftest fixture, a list bound in an `if`, a
+   `pytestmark`, `pytest_generate_tests`, and an edit to a fixture with no
+   `params=` that deletes nothing.
+3. `tech-stack.md` says bytes / 2 for Jev's estimate; `judgement-layer.md`
+   already did.
+4. The critique checkout settles on `ValorInTree`: the kernel records
+   `revise` with the refusal as the finding (`leg: kernel`, no turn), so
+   the plan goes back with the reason while rounds remain and otherwise
+   to build with it, and critique does not rerun. Test: a plan commit with
+   `.valor` whose clone-side read is hidden goes plan, then build, with
+   no critique turn and the finding in the build prompt.
+
+Not taken: the string over-match (a decorator string equal to a base
+file's name), and the docs runner's `.valor` refusal in `docs_clone`, which
+returns `failed`. The join waits on all three branches, so a candidate
+whose `.valor` the clone hides reruns docs on every wake. Settling it needs
+a docs verdict the kernel records with no turn and no governance
+judgements, which `record_check` refuses today; left for the lead to scope.
+
+Suite on `3d692d7b5` plus this round: 813 passed, 13 skipped (build
+database, ports 6720 to 6729). `ruff check` clean; `ruff format --check`
+flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.

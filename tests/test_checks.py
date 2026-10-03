@@ -408,6 +408,100 @@ def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorato
     assert not gone(f"tests.test_r::{kept}")
 
 
+F_BASE = (
+    "FIX = [1, 2]\n"
+    "if True:\n"
+    "    NESTED = [1, 2]\n"
+    "\n"
+    "\n"
+    "@pytest.fixture(params=FIX)\n"
+    "def fx(request):\n"
+    "    return request.param\n"
+    "\n"
+    "\n"
+    "@pytest.fixture\n"
+    "def dep(fx):\n"
+    "    return fx\n"
+    "\n"
+    "\n"
+    "@pytest.fixture\n"
+    "def plain():\n"
+    "    return 1\n"
+    "\n"
+    "\n"
+    "def test_fx(fx):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "def test_dep(dep):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "def test_cf(cf):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    '@pytest.mark.parametrize("x", NESTED)\n'
+    "def test_n(x):\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    '@pytest.mark.parametrize("x", [1, 2])\n'
+    "def test_u(x, plain):\n"
+    "    pass\n"
+)
+M_BASE = 'MARKED = [1, 2]\npytestmark = pytest.mark.parametrize("x", MARKED)\n\n\ndef test_m(x):\n    pass\n'
+G_BASE = (
+    "def pytest_generate_tests(metafunc):\n"
+    '    metafunc.parametrize("x", [1, 2])\n'
+    "\n"
+    "\n"
+    "def test_g(x):\n"
+    "    pass\n"
+)
+CONFTEST = "@pytest.fixture(params=[1, 2])\ndef cf(request):\n    return request.param\n"
+
+
+@pytest.mark.parametrize(
+    ("edit", "dropped", "kept"),
+    [
+        # A fixture's params=, followed through the name it uses.
+        ({"tests/test_f.py": F_BASE.replace("FIX = [1, 2]", "FIX = [1]")}, "test_f::test_fx[2]", "test_f::test_u[2]"),
+        # The same fixture requested through another fixture.
+        ({"tests/test_f.py": F_BASE.replace("FIX = [1, 2]", "FIX = [1]")}, "test_f::test_dep[2]", "test_f::test_n[2]"),
+        # A fixture with params= in a conftest.py above the test.
+        ({"tests/conftest.py": CONFTEST.replace("[1, 2]", "[1]")}, "test_f::test_cf[2]", "test_f::test_fx[2]"),
+        # A list bound inside a module-level if.
+        ({"tests/test_f.py": F_BASE.replace("    NESTED = [1, 2]", "    NESTED = [1]")},
+         "test_f::test_n[2]", "test_f::test_fx[2]"),
+        # A module-level pytestmark that parametrizes.
+        ({"tests/test_m.py": M_BASE.replace("MARKED = [1, 2]", "MARKED = [1]")}, "test_m::test_m[2]", "test_g::test_g[2]"),
+        # pytest_generate_tests.
+        ({"tests/test_g.py": G_BASE.replace("[1, 2]", "[1]")}, "test_g::test_g[2]", "test_m::test_m[2]"),
+        # A fixture with no params= feeds no case.
+        ({"tests/test_f.py": F_BASE.replace("    return 1\n", "    return 2\n")}, None, "test_f::test_u[2]"),
+    ],
+)  # fmt: skip
+def test_a_dropped_case_is_deleted_when_the_diff_touches_a_feed_outside_the_decorator(
+    tmp_path, edit, dropped, kept
+):
+    repo = scripted.toy_repo(tmp_path)
+    for path, text in {
+        "tests/test_f.py": F_BASE,
+        "tests/test_m.py": M_BASE,
+        "tests/test_g.py": G_BASE,
+        "tests/conftest.py": CONFTEST,
+    }.items():
+        scripted.commit(repo, path, text)
+    base = scripted.git(repo, "rev-parse", "HEAD")
+    for path, text in edit.items():
+        scripted.commit(repo, path, text)
+    gone = checks.removed_definitions(repo, base, scripted.git(repo, "rev-parse", "HEAD"))
+    if dropped:
+        assert gone(f"tests.{dropped}")
+    assert not gone(f"tests.{kept}")
+
+
 # -- the environment digest ---------------------------------------------------------------------
 
 

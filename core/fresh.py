@@ -173,6 +173,24 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None):
             made = workspace.blind_checkout(b.mirror, b.base_sha, f.plan["commit"], checkout)
             diff = git.trusted(checkout, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                                made["base"], made["candidate"])  # fmt: skip
+        except workspace.ValorInTree as exc:
+            # The plan commit's own tree: no rerun would ever check it out,
+            # so the plan goes back with the reason, as any revise does.
+            if not await ctx.alive():
+                return {"status": "lock lost"}
+            try:
+                async with await db.connect(ctx.dsn) as conn:
+                    await verdicts.record_critique(
+                        conn,
+                        ctx.task_id,
+                        "revise",
+                        findings=[{"kind": "commit", "text": f"no critique checkout: {exc}"}],
+                        leg="kernel",
+                        plan_sha256=plan_sha,
+                    )
+            except verdicts.VerdictRefused as refused:
+                return {"status": "failed", "state": state, "turn": {"result": f"verdict refused: {refused}"}}
+            return {"status": "moved"}
         except git.GitError as exc:
             return {"status": "failed", "state": state, "turn": {"result": f"critique checkout: {exc}"}}
         try:

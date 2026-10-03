@@ -1030,3 +1030,72 @@ def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
     (check / "repo" / "x").chmod(0o555)
     assert kws.fresh_dir(check) == check
     assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+
+
+def _chain(top: Path, depth: int, name: str, mode: int, bottom: int | None = None) -> None:
+    """`depth` nested `name` directories under `top`, each left at `mode`
+    (the deepest at `bottom` when given) with a file and a link to
+    `top`'s parent at the bottom, built through descriptors since the
+    path outgrows PATH_MAX."""
+    top.mkdir(parents=True)
+    cur = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    for i in range(depth):
+        os.mkdir(name, dir_fd=cur)
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+        os.fchmod(cur, mode)
+        os.close(cur)
+        cur = child
+    fd = os.open("f", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=cur)
+    os.close(fd)
+    os.symlink(str(top.parent), "out", dir_fd=cur)
+    os.fchmod(cur, mode if bottom is None else bottom)
+    os.close(cur)
+
+
+def test_rmtree_removes_a_deep_chain_of_directories_with_no_mode_bits(tmp_path):
+    """600 nested 0000 directories (300 overflowed the recursion that
+    removed them one level at a time)."""
+    (tmp_path / "keep").write_text("outside")
+    _chain(tmp_path / "top", 600, "a", 0o000)
+    kws.rmtree(tmp_path / "top")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep"]
+    assert (tmp_path / "keep").read_text() == "outside"
+
+
+@pytest.mark.parametrize("bottom", [0o000, 0o500, 0o300, 0o444])
+def test_rmtree_removes_a_locked_directory_past_path_max(tmp_path, bottom):
+    """400 readable levels, 1600 bytes of path, then one directory a
+    path-based chmod could not reach or that could be listed but not
+    searched."""
+    (tmp_path / "keep").write_text("outside")
+    _chain(tmp_path / "top", 400, "abc", 0o755, bottom=bottom)
+    kws.rmtree(tmp_path / "top")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep"]
+
+
+def test_rmtree_removes_a_directory_that_can_be_listed_but_not_searched(tmp_path):
+    check = tmp_path / "checks" / "test-head-abc"
+    (check / "repo" / "a" / "b").mkdir(parents=True)
+    (check / "repo" / "a" / "b" / "f").write_text("x")
+    (check / "repo" / "a").chmod(0o444)
+    assert kws.fresh_dir(check) == check
+    assert sorted(p.name for p in check.iterdir()) == ["claude", "tmp"]
+
+
+def test_rmtree_unlinks_a_link_and_never_touches_its_target(tmp_path):
+    target = tmp_path / "target"
+    (target / "d").mkdir(parents=True)
+    target.chmod(0o500)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "to_target").symlink_to(target)
+    (tree / "sub").mkdir()
+    (tree / "sub" / "to_target").symlink_to(target / "d")
+    kws.rmtree(tree)
+    assert not tree.exists()
+    assert (target / "d").is_dir() and target.stat().st_mode & 0o777 == 0o500
+    target.chmod(0o700)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    kws.rmtree(link)
+    assert not link.is_symlink() and (target / "d").is_dir()

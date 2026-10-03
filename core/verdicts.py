@@ -144,7 +144,9 @@ async def record_critique(
     plan_sha256: str | None = None,
 ) -> int:  # fmt: skip
     """`plan_sha256`, when given, is the plan the session read; a verdict on
-    a plan that is no longer the current one is refused."""
+    a plan that is no longer the current one is refused. A `kernel` verdict
+    is the critique runner's own, when the plan commit's tree cannot be
+    checked out (`workspace.ValorInTree`); it names no turn."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CRITIQUE)
@@ -158,7 +160,7 @@ async def record_critique(
             "leg": leg,
             "model": model,
             "usd_micros": usd_micros,
-            **_session_leg(leg, turn_id, model),
+            **({} if leg == "kernel" else _session_leg(leg, turn_id, model)),
             **_manual(leg, by, via, role_played),
         }
         sent_back = verdict == "revise" and _would(rows, "critique.decided", payload).state is State.PLAN

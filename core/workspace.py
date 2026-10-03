@@ -1483,29 +1483,67 @@ def clone_tree(src: Path, dest: Path) -> None:
 
 
 def rmtree(path: Path) -> None:
-    """Remove a tree a sandboxed program wrote, read-only entries included,
-    never following a link."""
-    if path.is_symlink():
+    """Remove a tree a sandboxed program wrote, entries of any mode
+    included, never following a link. Works through directory descriptors
+    with no recursion: each directory found below `path` is moved up to sit
+    directly in `path` before it is emptied, so no path grows past one
+    level and at most two directories are open at once, however deep the
+    tree."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
         path.unlink()
         return
-    if not path.exists():
-        return
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        root = _open_own_dir(path.name, parent)
+        try:
+            _empty_dir(root)
+        finally:
+            os.close(root)
+        os.rmdir(path.name, dir_fd=parent)
+    finally:
+        os.close(parent)
 
-    def writable(func, p, _exc):
-        parent = os.path.dirname(p)
-        os.chmod(parent, 0o700)
-        if os.path.islink(p) or not os.path.isdir(p):
-            func(p)
-            return
-        os.chmod(p, 0o700)
-        if func in (os.open, os.scandir):
-            # A directory with no read bit could not be opened or listed, so
-            # its entries were never reached: remove it as a tree of its own.
-            rmtree(Path(p))
-        else:
-            func(p)
 
-    shutil.rmtree(path, onexc=writable)
+def _open_own_dir(name: str, dir_fd: int) -> int:
+    """The directory `name` under `dir_fd`, made 0700 first so it can be
+    listed, searched and emptied; a link there is never followed."""
+    os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+
+
+def _is_dir(name: str, dir_fd: int) -> bool:
+    return stat.S_ISDIR(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+
+
+def _empty_dir(root: int) -> None:
+    moved = 0
+    while names := os.listdir(root):
+        for name in names:
+            if not _is_dir(name, root):
+                os.unlink(name, dir_fd=root)
+                continue
+            fd = _open_own_dir(name, root)
+            try:
+                for sub in os.listdir(fd):
+                    if not _is_dir(sub, fd):
+                        os.unlink(sub, dir_fd=fd)
+                        continue
+                    # Moving a directory to a new parent rewrites its `..`.
+                    os.chmod(sub, 0o700, dir_fd=fd, follow_symlinks=False)
+                    while True:
+                        moved += 1
+                        try:
+                            os.stat(f".rm{moved}", dir_fd=root, follow_symlinks=False)
+                        except FileNotFoundError:
+                            break
+                    os.rename(sub, f".rm{moved}", src_dir_fd=fd, dst_dir_fd=root)
+            finally:
+                os.close(fd)
+            os.rmdir(name, dir_fd=root)
 
 
 def remove(task_id: str, lay: Layout | None = None) -> None:

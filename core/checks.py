@@ -31,6 +31,7 @@ the verdict.
 
 import ast
 import asyncio
+import functools
 import hashlib
 import os
 import re
@@ -158,7 +159,7 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
     dotted prefix as a path): the file was deleted; or a line defining the
     test's function or one of its classes was removed and not added back in
     the same file; or the id carries parameters and the diff touches what
-    feeds that test's `parametrize` decorator at base (a dropped case, see
+    feeds that test's parameters at base (a dropped case, see
     `_feeds_parametrize`). Any other id is removed when a line the diff
     removes holds its name."""
     deleted: set[str] = set()
@@ -214,6 +215,13 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
                 return candidate, parts[k:]
         return None
 
+    @functools.cache
+    def read(p: str) -> str | None:
+        try:
+            return git.trusted(mirror, "show", f"{base}:{p}")
+        except git.GitError:
+            return None
+
     def gone(test_id: str) -> bool:
         name = _name(test_id)
         where = located(test_id)
@@ -229,34 +237,44 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
                 return True
         if "[" not in test_id.rsplit("::", 1)[-1]:
             return False
-        try:
-            source = git.trusted(mirror, "show", f"{base}:{path}")
-        except git.GitError:
-            return False
-        blocks, files = _feeds_parametrize(source, path, classes, name, base_files)
-        lines, after = touched.get(path, (set(), set()))
-        return bool(files & changed) or any(
-            lines & set(range(lo, hi + 1)) or any(lo <= n < hi for n in after) for lo, hi in blocks
-        )
+        spans, files = _feeds_parametrize(read, path, classes, name, base_files)
+        if files & changed:
+            return True
+        for where_, lo, hi in spans:
+            lines, after = touched.get(where_, (set(), set()))
+            if lines & set(range(lo, hi + 1)) or any(lo <= n < hi for n in after):
+                return True
+        return False
 
     return gone
 
 
 def _feeds_parametrize(
-    source: str, path: str, classes: list[str], name: str, base_files: set[str]
-) -> tuple[list[tuple[int, int]], set[str]]:
-    """What feeds the `parametrize` decorators of the test function `name`
-    (inside `classes`) in `source`, the base text of `path`: the line spans
-    (first, last) of each decorator and of every binding in the module or
-    an enclosing class of a name they use, followed through those bindings'
-    own names; and the base files they draw on, a module a used name is
-    imported from or a file a string in them names (a case file).
+    read: Callable[[str], str | None], path: str, classes: list[str], name: str, base_files: set[str]
+) -> tuple[list[tuple[str, int, int]], set[str]]:
+    """What feeds the parameters of the test function `name` (inside
+    `classes`) in `path`, read at base through `read`. The seeds:
 
-    A line removed inside a span, or inserted between two of its lines,
-    touches it; an insertion just after the span's last line does not."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError, ValueError:
+    - the `parametrize` decorators on the function and its classes, and
+      each `pytestmark` binding in its module or classes that parametrizes;
+    - the `params=` decorator of every fixture the test requests (by
+      argument, `usefixtures`, or `autouse`), followed through the
+      fixtures those request, found in its classes, its module, and the
+      `conftest.py` of its directory and of each one above it;
+    - each `pytest_generate_tests` in those places.
+
+    From each seed, the binding in its module or class of every name it
+    uses (a binding inside an `if`, `try`, `with` or loop there is that
+    whole statement), followed through those bindings' own names.
+
+    Returned: the line spans (file, first, last) of the seeds and bindings,
+    and the base files they draw on, a module a used name is imported from
+    or a file a string in them names (a case file). A line removed inside a
+    span, or inserted between two of its lines, touches it; an insertion
+    just after the span's last line does not."""
+    places: list[tuple[str, list[list[ast.stmt]]]] = []
+    tree = _parse(read(path))
+    if tree is None:
         return [], set()
     scopes: list[list[ast.stmt]] = [tree.body]
     decorators: list[ast.expr] = []
@@ -266,43 +284,114 @@ def _feeds_parametrize(
             return [], set()
         decorators += found[0].decorator_list
         scopes.append(found[0].body)
-    for node in scopes[-1]:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            decorators += node.decorator_list
-    decorators = [d for d in decorators if "parametrize" in ast.unparse(d)]
-    bindings: dict[str, list[ast.stmt]] = {}
-    for scope in scopes:
-        for stmt in scope:
-            for bound in _binds(stmt):
-                bindings.setdefault(bound, []).append(stmt)
-    here = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
-    blocks: list[tuple[int, int]] = []
-    files: set[str] = set()
-    seen: set[str] = set()
-    todo: list[ast.AST] = list(decorators)
-    while todo:
-        node = todo.pop()
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            files |= _module_files(node, here) & base_files
+    func = [
+        n for n in scopes[-1] if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+    ]
+    places.append((path, scopes))
+    parts = path.split("/")[:-1]
+    for k in range(len(parts), -1, -1):
+        conftest = "/".join([*parts[:k], "conftest.py"])
+        if conftest in base_files and (other := _parse(read(conftest))) is not None:
+            places.append((conftest, [other.body]))
+
+    seeds: list[tuple[str, ast.AST]] = []
+    wanted: list[str] = []
+    marks = [s for scope in scopes for s in scope if "pytestmark" in _binds(s)]
+    for node in [*decorators, *(d for f in func for d in f.decorator_list), *marks]:
+        text = ast.unparse(node)
+        if "parametrize" in text:
+            seeds.append((path, node))
+        if "usefixtures" in text:
+            wanted += [
+                c.value for c in ast.walk(node) if isinstance(c, ast.Constant) and isinstance(c.value, str)
+            ]
+    for f in func:
+        wanted += [a.arg for a in (*f.args.posonlyargs, *f.args.args, *f.args.kwonlyargs)]
+    fixtures: dict[str, list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]] = {}
+    for where, place_scopes in places:
+        for scope in place_scopes:
+            for stmt in scope:
+                if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if stmt.name == "pytest_generate_tests":
+                    seeds.append((where, stmt))
+                for d in stmt.decorator_list:
+                    if "fixture" not in ast.unparse(d):
+                        continue
+                    kw = {k.arg: k.value for k in d.keywords} if isinstance(d, ast.Call) else {}
+                    named = kw.get("name")
+                    called = named.value if isinstance(named, ast.Constant) else stmt.name
+                    fixtures.setdefault(called, []).append((where, stmt, d))
+                    if "autouse" in kw:
+                        wanted.append(called)
+    asked: set[str] = set()
+    while wanted:
+        fixture = wanted.pop()
+        if fixture in asked:
             continue
-        blocks.append((node.lineno, node.end_lineno or node.lineno))
+        asked.add(fixture)
+        for where, stmt, d in fixtures.get(fixture, []):
+            if isinstance(d, ast.Call) and any(k.arg == "params" for k in d.keywords):
+                seeds.append((where, d))
+            wanted += [a.arg for a in (*stmt.args.posonlyargs, *stmt.args.args, *stmt.args.kwonlyargs)]
+
+    bindings: dict[str, dict[str, list[ast.stmt]]] = {}
+    for where, place_scopes in places:
+        for scope in place_scopes:
+            for stmt in scope:
+                for bound in _binds(stmt):
+                    bindings.setdefault(where, {}).setdefault(bound, []).append(stmt)
+    spans: list[tuple[str, int, int]] = []
+    files: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    todo = seeds
+    while todo:
+        where, node = todo.pop()
+        here = where.rsplit("/", 1)[0] + "/" if "/" in where else ""
+        spans.append((where, node.lineno, node.end_lineno or node.lineno))
         for sub in ast.walk(node):
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                files |= _module_files(sub, here) & base_files
+            elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
                 files |= {
                     f for f in base_files if f in (sub.value, here + sub.value) or f.endswith("/" + sub.value)
                 }
-            elif isinstance(sub, ast.Name) and sub.id not in seen:
-                seen.add(sub.id)
-                todo += bindings.get(sub.id, [])
-    return blocks, files
+            elif isinstance(sub, ast.Name) and (where, sub.id) not in seen:
+                seen.add((where, sub.id))
+                todo += [(where, b) for b in bindings.get(where, {}).get(sub.id, [])]
+    return spans, files
+
+
+def _parse(source: str | None) -> ast.Module | None:
+    if source is None:
+        return None
+    try:
+        return ast.parse(source)
+    except SyntaxError, ValueError:
+        return None
 
 
 def _binds(stmt: ast.stmt) -> list[str]:
-    """The names a module or class level statement binds."""
+    """The names a module or class level statement binds, an `if`, `try`,
+    `with` or loop counted with every name bound inside it."""
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return [stmt.name]
     if isinstance(stmt, (ast.Import, ast.ImportFrom)):
         return [(a.asname or a.name).split(".", 1)[0] for a in stmt.names]
+    if isinstance(
+        stmt, (ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
+    ):
+        targets: list[ast.AST] = []
+        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+            targets.append(stmt.target)
+        if isinstance(stmt, (ast.With, ast.AsyncWith)):
+            targets += [i.optional_vars for i in stmt.items if i.optional_vars is not None]
+        inner = [*stmt.body, *getattr(stmt, "orelse", []), *getattr(stmt, "finalbody", [])]
+        for h in getattr(stmt, "handlers", []):
+            inner += h.body
+        return [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)] + [
+            b for s in inner for b in _binds(s)
+        ]
     targets = (
         stmt.targets
         if isinstance(stmt, ast.Assign)

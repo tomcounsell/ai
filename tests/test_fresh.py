@@ -297,6 +297,27 @@ def test_a_plan_that_commits_a_valor_entry_is_no_plan_and_nothing_is_written_thr
     assert [p["turn_id"] for p in plans] == [collected[1]["turn_id"]]  # the next plan turn's, not this one's
 
 
+def test_a_plan_whose_tree_holds_valor_goes_back_with_the_reason_and_critique_does_not_rerun(
+    dsn, tmp_path, monkeypatch
+):
+    from core import workspace as kws
+
+    # The builder's clone hides the entry from the kernel's look there (a
+    # replace ref would), so the mirror holds a plan commit with `.valor`.
+    seen = kws.tree_has_valor
+    monkeypatch.setattr(
+        kws, "tree_has_valor", lambda *a, trusted, **k: trusted and seen(*a, trusted=trusted, **k)
+    )
+    task, _b, ws = planned(dsn, tmp_path, plan="valor_verdict")
+    out = run(drive(dsn, task, scripted.fresh_runners(ws)))
+    assert out["status"] == "no runner" and out["missing"] == ["test", "review", "docs"], out
+    assert [t["stage"] for t in scripted.turns(ws)] == ["plan", "build"]  # no critique turn ran
+    decided = next(r["payload"] for r in run(rows(dsn, task)) if r["type"] == "critique.decided")
+    assert decided["verdict"] == "revise" and decided["leg"] == "kernel"
+    assert "holds a .valor entry" in decided["findings"][0]["text"]
+    assert "holds a .valor entry" in scripted.turns(ws)[-1]["prompt"]
+
+
 def test_a_blind_checkout_refuses_a_tree_with_valor_and_inputs_never_overwrite(dsn, tmp_path):
     from core import git as kgit
     from core import workspace as kws
