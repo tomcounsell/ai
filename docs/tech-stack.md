@@ -124,8 +124,8 @@ and correction".
 **Credential boundaries.** The kernel holds the database connection as
 `valor_kernel` and performs effects through the broker. The gateway sets the
 Claude credential on every Anthropic call (`claude-token` in the kernel key
-directory when present, else Claude Code's own login read from the Keychain)
-and the kernel's OpenAI key on the OpenAI route. A turn's
+directory, else Claude Code's own Keychain login) and its OpenAI key on the
+OpenAI route. A turn's
 environment is an allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`,
 locale, terminal) with no tokens, no agent sockets, and only a placeholder
 Claude credential. Status: **in use**.
@@ -223,8 +223,7 @@ server on `127.0.0.1` at an OS-assigned port, with an Anthropic Messages
 route and an OpenAI Responses route under `openai/` (`core/gateway.py`). A
 turn is pointed at it through `ANTHROPIC_BASE_URL` with a per-turn token in
 the path, so Claude Code's own side calls and subagents are metered too.
-Status:
-**in use**.
+Status: **in use**.
 
 What it does per call (price, open, forward, charge) is
 [architecture.md](architecture.md)'s (Metered spending). The stack-specific parts:
@@ -233,8 +232,7 @@ opening runs under the task's advisory lock, and the response streams
 back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path is refused once
-the gateway holds the credential, and on the OpenAI route only `v1/responses`
-and `v1/models` are forwarded. `revoke` retires the task's tokens and
+the gateway holds the credential. `revoke` retires the task's tokens and
 cancels its in-flight calls at once; the stop path calls it before killing
 the turn's process group.
 
@@ -534,8 +532,9 @@ is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which
 both turn sandbox profiles deny: the kernel databases' passwords in a libpq
-password file, the judgement keys in `judgement-keys` and the OpenAI key in `openai-key` beside it, copied
-from the vault `.env` by `python -m core judgement-keys` and `python -m core openai-key` ([machine.md](machine.md),
+password file, the judgement keys in `judgement-keys` and the OpenAI key in `openai-key`
+beside it, copied from the vault `.env` by `python -m core judgement-keys` and
+`python -m core openai-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. The bridges'
 secrets go in the macOS Keychain: **chosen, not built**. Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
