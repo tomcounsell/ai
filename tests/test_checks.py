@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -406,6 +407,18 @@ def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorato
     if dropped:
         assert gone(f"tests.test_r::{dropped}")
     assert not gone(f"tests.test_r::{kept}")
+
+
+def test_a_dropped_case_is_found_in_a_base_file_that_starts_with_blank_lines(tmp_path):
+    """The base text keeps its leading lines, so the decorator's span
+    counts the lines the diff's hunks count."""
+    repo = scripted.toy_repo(tmp_path)
+    text = '\n\n\n@pytest.mark.parametrize("x", [1, 2])\ndef test_b(x):\n    pass\n'
+    scripted.commit(repo, "tests/test_b.py", text)
+    base = scripted.git(repo, "rev-parse", "HEAD")
+    scripted.commit(repo, "tests/test_b.py", text.replace("[1, 2]", "[1]"))
+    gone = checks.removed_definitions(repo, base, scripted.git(repo, "rev-parse", "HEAD"))
+    assert gone("tests.test_b::test_b[2]")
 
 
 F_BASE = (
@@ -898,6 +911,28 @@ def test_the_check_layout_profile_and_a_planted_pgpass_link(dsn, tmp_path):
         pass
     assert not (tmp_path / "elsewhere").exists()
     assert kws._connects(b.project["ports"]["postgres"])  # the task's own came back up
+    kws.stop_services(task, lay)
+
+
+def test_the_tasks_own_services_come_back_when_the_check_services_removal_raises(dsn, tmp_path, monkeypatch):
+    async def go():
+        return await scripted.provisioned(dsn, tmp_path, services=["postgres"])
+
+    task, b = run(go())
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = kws.fresh_dir(lay.checks / "test-head-x")
+    with kws.check_services(lay, check_dir, b.project, task):
+        svc = lay.checks / f"test-head-x{kws.SVC_SUFFIX}"
+        os.chflags(svc / "home" / "profiles" / "service.sb", stat.UF_IMMUTABLE)
+    assert not svc.exists()  # a locked entry no longer stops the removal
+
+    def refuse(path):
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(kws, "rmtree", refuse)
+    with pytest.raises(PermissionError), kws.check_services(lay, check_dir, b.project, task):
+        pass
+    assert kws._connects(b.project["ports"]["postgres"])
     kws.stop_services(task, lay)
 
 

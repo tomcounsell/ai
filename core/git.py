@@ -252,15 +252,16 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
     return _git(workspace, *args, text=text)
 
 
-def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None) -> str:
+def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None, strip: bool = True) -> str:
     """One git call in a repository only the kernel writes (its cache, a
     task's mirror and bare origin, a checkout it is making), with no hostile
     check: no turn can have written its config. Raises `GitError` on a
-    non-zero exit."""
+    non-zero exit. `strip=False` keeps the output whole, as a file's text
+    whose line numbers count."""
     done = _git(cwd, *args, extra_env=extra_env)
     if done.returncode != 0:
         raise GitError(f"git {' '.join(args[:3])}: {done.stderr.strip()[:300]}")
-    return done.stdout.strip()
+    return done.stdout.strip() if strip else done.stdout
 
 
 def out(workspace: str | Path, *args: str) -> str:

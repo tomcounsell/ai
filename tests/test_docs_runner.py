@@ -297,6 +297,24 @@ def test_a_session_docs_head_must_be_one_the_kernel_kept(dsn, tmp_path):
     run(go())
 
 
+def test_a_kernel_docs_verdict_is_changes_on_a_candidate_whose_tree_holds_valor_and_nothing_else(
+    dsn, tmp_path
+):
+    async def go():
+        task, _b, _ws = await at_checks(dsn, tmp_path)
+        async with await db.connect(dsn) as conn:
+            for verdict in (None, "updated", "no_change"):
+                with pytest.raises(verdicts.VerdictRefused, match="kernel leg says changes"):
+                    await verdicts.record_check(conn, task, Check.DOCS, verdict, leg="kernel")
+            with pytest.raises(verdicts.VerdictRefused, match="whose tree holds .valor"):
+                await verdicts.record_check(conn, task, Check.DOCS, "changes", leg="kernel")
+            with pytest.raises(verdicts.VerdictRefused, match="only the test and docs branches"):
+                await verdicts.record_check(conn, task, Check.REVIEW, "changes", leg="kernel")
+        return await rows(dsn, task)
+
+    assert not [r for r in run(go()) if r["type"] == "docs.decided"]
+
+
 # -- the config read runs under the profile --------------------------------------------------
 
 

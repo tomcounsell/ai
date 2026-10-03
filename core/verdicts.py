@@ -22,7 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks
+from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks, workspace
 from core.machine import Check, State
 
 MANUAL_STAGES: dict[str, State | Check] = {"review": Check.REVIEW}
@@ -215,8 +215,9 @@ async def record_check(
     information only: listed under `breadth.information` and in the
     delivery, never `gaps`. A test, review, or docs verdict not recorded by
     hand must name its judgements (`breadth`, `governance_from`), except
-    the docs runner's own `kernel` verdict on a candidate whose tree holds
-    `.valor`, which names no turn and no judgement.
+    the docs runner's own `kernel` verdict, `changes` on a candidate whose
+    tree holds `.valor` with the candidate as its head, which names no turn
+    and no judgement; any other kernel docs verdict is refused.
     A docs head not recorded by hand must already sit in the mirror under
     a `refs/valor/docs/` ref (the docs runner fetched it and cut it to the
     commits it keeps; `dropped` lists the rest); nothing is fetched here.
@@ -236,6 +237,8 @@ async def record_check(
         raise VerdictRefused(f"a {check.value} verdict not recorded by hand names its governance judgements")
     if leg == "kernel" and check is Check.REVIEW:
         raise VerdictRefused("only the test and docs branches have a kernel leg")
+    if leg == "kernel" and check is Check.DOCS and verdict != "changes":
+        raise VerdictRefused("the docs branch's kernel leg says changes")
     if verdict is None and leg != "kernel":
         raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
     async with conn.transaction():
@@ -297,6 +300,12 @@ async def record_check(
         try:
             if check is Check.DOCS:
                 head = head or c.sha
+                if leg == "kernel" and (
+                    head != c.sha or not workspace.tree_has_valor(repo, c.sha, trusted=bool(b.mirror))
+                ):
+                    raise VerdictRefused(
+                        "the docs branch's kernel leg is for a candidate whose tree holds .valor"
+                    )
                 if head != c.sha:
                     # The docs runner fetched and cut the head; it must sit under a docs ref.
                     if b.mirror and (

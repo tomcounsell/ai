@@ -58,6 +58,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import time
 import tomllib
@@ -1434,8 +1435,9 @@ def check_services(
     empty Redis. The password file is copied to `<check_dir>/tmp/pgpass`
     (`O_NOFOLLOW | O_EXCL`). Yields the check's environment
     (`harness_env` over the fresh instances). On exit the check's instances
-    are stopped, their directory removed, and the task's own started again;
-    the task's Postgres keeps its data, its Redis starts empty."""
+    are stopped, their directory removed, and the task's own started again,
+    even when the stop or the removal raises; the task's Postgres keeps its
+    data, its Redis starts empty."""
     spec = spec_of(project)
     names = list(spec.services)
     ports = {k: int(v) for k, v in (project.get("ports") or {}).items()}
@@ -1459,10 +1461,12 @@ def check_services(
         start_services(task_id, svc, names, ports)
         yield harness_env(svc, spec, ports, passwords, bin_dir=work / "bin", passfile=passfile)
     finally:
-        stop_services(task_id, svc)
-        rmtree(svc.root)
-        if names:
-            start_services(task_id, lay, names, ports)
+        try:
+            stop_services(task_id, svc)
+            rmtree(svc.root)
+        finally:
+            if names:
+                start_services(task_id, lay, names, ports)
 
 
 def copy_new(src: Path, dest: Path) -> None:
@@ -1484,21 +1488,23 @@ def clone_tree(src: Path, dest: Path) -> None:
 
 def rmtree(path: Path) -> None:
     """Remove a tree a sandboxed program wrote, entries of any mode
-    included, never following a link. Works through directory descriptors
-    with no recursion: each directory found below `path` is moved up to sit
-    directly in `path` before it is emptied, so no path grows past one
-    level and at most two directories are open at once, however deep the
-    tree."""
+    included, never following a link. An entry's user flags `uchg` and
+    `uappnd` and its ACL are cleared before it is opened, moved or
+    unlinked, since a mode alone leaves either one in the way. Works
+    through directory descriptors with no recursion: each directory found
+    below `path` is moved up to sit directly in `path` before it is
+    emptied, so no path grows past one level and at most two directories
+    are open at once, however deep the tree."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return
-    if not stat.S_ISDIR(st.st_mode):
-        path.unlink()
-        return
     parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        root = _open_own_dir(path.name, parent)
+        if not stat.S_ISDIR(st.st_mode):
+            _unlink(path.name, parent, st)
+            return
+        root = _open_own_dir(path.name, parent, st)
         try:
             _empty_dir(root)
         finally:
@@ -1508,31 +1514,75 @@ def rmtree(path: Path) -> None:
         os.close(parent)
 
 
-def _open_own_dir(name: str, dir_fd: int) -> int:
-    """The directory `name` under `dir_fd`, made 0700 first so it can be
-    listed, searched and emptied; a link there is never followed."""
+# setattrlistat(2): `struct attrlist` naming ATTR_CMN_FLAGS (0x40000) and
+# ATTR_CMN_EXTENDED_SECURITY (0x400000); the value buffer is the flags,
+# then an attrreference to a `kauth_filesec` whose entry count is
+# KAUTH_FILESEC_NOACL, which removes the ACL. FSOPT_NOFOLLOW is 1.
+_ATTRS = struct.pack("=HHIIIII", 5, 0, 0x40000 | 0x400000, 0, 0, 0, 0)
+_NO_ACL = struct.pack("=I16s16sII", 0x012CC16D, b"", b"", 0xFFFFFFFF, 0)
+
+
+@functools.cache
+def _setattrlistat():
+    fn = ctypes.CDLL(None, use_errno=True).setattrlistat
+    fn.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_uint32,
+    ]
+    fn.restype = ctypes.c_int
+    return fn
+
+
+def _clear(name: str, dir_fd: int, st: os.stat_result) -> None:
+    """Clear `uchg` and `uappnd` and remove the ACL of the entry `name`
+    under `dir_fd`, never following a link: the owner may always do both."""
+    values = (
+        struct.pack("=IiI", st.st_flags & ~(stat.UF_IMMUTABLE | stat.UF_APPEND), 8, len(_NO_ACL)) + _NO_ACL
+    )
+    if _setattrlistat()(dir_fd, os.fsencode(name), _ATTRS, values, len(values), 1) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), name)
+
+
+def _unlink(name: str, dir_fd: int, st: os.stat_result) -> None:
+    _clear(name, dir_fd, st)
+    os.unlink(name, dir_fd=dir_fd)
+
+
+def _open_own_dir(name: str, dir_fd: int, st: os.stat_result) -> int:
+    """The directory `name` under `dir_fd`, cleared and made 0700 first so
+    it can be listed, searched and emptied; a link there is never
+    followed."""
+    _clear(name, dir_fd, st)
     os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
 
 
-def _is_dir(name: str, dir_fd: int) -> bool:
-    return stat.S_ISDIR(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+def _lstat(name: str, dir_fd: int) -> os.stat_result:
+    return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 
 
 def _empty_dir(root: int) -> None:
     moved = 0
     while names := os.listdir(root):
         for name in names:
-            if not _is_dir(name, root):
-                os.unlink(name, dir_fd=root)
+            st = _lstat(name, root)
+            if not stat.S_ISDIR(st.st_mode):
+                _unlink(name, root, st)
                 continue
-            fd = _open_own_dir(name, root)
+            fd = _open_own_dir(name, root, st)
             try:
                 for sub in os.listdir(fd):
-                    if not _is_dir(sub, fd):
-                        os.unlink(sub, dir_fd=fd)
+                    sub_st = _lstat(sub, fd)
+                    if not stat.S_ISDIR(sub_st.st_mode):
+                        _unlink(sub, fd, sub_st)
                         continue
                     # Moving a directory to a new parent rewrites its `..`.
+                    _clear(sub, fd, sub_st)
                     os.chmod(sub, 0o700, dir_fd=fd, follow_symlinks=False)
                     while True:
                         moved += 1

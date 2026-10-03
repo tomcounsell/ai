@@ -218,7 +218,7 @@ def removed_definitions(mirror: str | Path, base: str, head: str) -> Callable[[s
     @functools.cache
     def read(p: str) -> str | None:
         try:
-            return git.trusted(mirror, "show", f"{base}:{p}")
+            return git.trusted(mirror, "show", f"{base}:{p}", strip=False)
         except git.GitError:
             return None
 

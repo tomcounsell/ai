@@ -1099,3 +1099,57 @@ def test_rmtree_unlinks_a_link_and_never_touches_its_target(tmp_path):
     link.symlink_to(target)
     kws.rmtree(link)
     assert not link.is_symlink() and (target / "d").is_dir()
+
+
+def _locked_by_a_turn(tmp_path: Path, script: str) -> Path:
+    """A tree under `tmp_path/tree` that `script` (sh, run in it) locked
+    under the real turn profile, the checkout its one writable place."""
+    tree = tmp_path / "tree"
+    (tree / "a" / "b").mkdir(parents=True)
+    (tree / "a" / "f").write_text("x")
+    (tree / "a" / "b" / "f").write_text("x")
+    profile = tmp_path / "turn.sb"
+    profile.write_text(kws.profile(rw=[tree], work=tmp_path))
+    subprocess.run(
+        ["/usr/bin/sandbox-exec", "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile),
+         "/bin/sh", "-ec", script],
+        cwd=tree, capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin"},
+    )  # fmt: skip
+    return tree
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "chflags uchg a/f",
+        "chflags uchg a/b/f a/b a",
+        "chflags uappnd a/b a",
+        "chflags -h uchg a/link",
+        'chmod +a "everyone deny delete" a/f a/b/f',
+        'chmod +a "everyone deny list,search,delete_child" a/b a',
+        'chmod +a "everyone deny delete" a/b a',
+        'chmod +a "everyone deny delete,writesecurity,writeattr" a/b/f; chflags uchg a/b/f',
+    ],
+    ids=[
+        "uchg-file",
+        "uchg-dirs",
+        "uappnd-dirs",
+        "uchg-link",
+        "acl-file",
+        "acl-list",
+        "acl-dir",
+        "acl-and-flag",
+    ],
+)
+def test_rmtree_clears_the_flags_and_acls_a_turn_sets(tmp_path, script):
+    """A turn may set `uchg`, `uappnd` or an ACL deny entry on anything in
+    its checkout; a mode alone moved none of them, and every rerun of a
+    check named by its sha met the same tree."""
+    (tmp_path / "keep").write_text("outside")
+    tree = _locked_by_a_turn(tmp_path, f"ln -s {tmp_path / 'keep'} a/link; {script}")
+    # `rm -rf` takes what nothing locks and stops at the rest.
+    assert subprocess.run(["/bin/rm", "-rf", str(tree)], capture_output=True, check=False).returncode != 0
+    kws.rmtree(tree)
+    assert not tree.exists()
+    assert (tmp_path / "keep").read_text() == "outside"
+    assert os.stat(tmp_path / "keep").st_flags == 0
