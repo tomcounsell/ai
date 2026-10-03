@@ -35,7 +35,7 @@ import pytest
 from aiohttp import web
 from yarl import URL
 
-from core import db, ledger, tasks
+from core import db, ledger, spending, tasks
 from core.gateway import ClaudeLogin, Gateway, OpenAIKey, openai_credentialed
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -204,6 +204,7 @@ def exchange(
             opened=opened[0] if opened else None,
             charged=charged[0] if charged else None,
             state=state,
+            task=task,
         )
 
     return asyncio.run(go())
@@ -437,6 +438,28 @@ def test_a_hosted_tool_with_max_tool_calls_estimates_that_many_windows_plus_one(
     assert out.charged["bounded"] is True
 
 
+def test_a_worst_case_past_bigint_is_recorded_and_summed_exactly(dsn, tmp_path):
+    # The turn may ask for any max_tool_calls; the ledger's JSON numbers and
+    # the turn's sum hold the resulting worst case exactly.
+    calls = 2**70
+    sent = body(stream=True, tools=[{"type": "web_search"}], max_tool_calls=calls, max_output_tokens=1000)
+    upstream = Upstream(
+        data=_until("stream_text.sse", "event: response.output_text.delta"), content_type=SSE, hang=True
+    )
+    out = exchange(dsn, upstream, sent, tmp_path=tmp_path, stop_after_first_bytes=True)
+    worst = (calls + 1) * WINDOW * 10 + 1000 * 30 + calls * 10_000
+    assert worst > 2**63
+    assert out.opened["estimate_usd_micros"] == worst and type(out.opened["estimate_usd_micros"]) is int
+    assert out.charged["cut"] is True and out.charged["usd_micros"] == worst
+    assert out.state["spent_usd_micros"] == worst
+
+    async def summed():
+        async with await db.connect(dsn) as conn:
+            return await spending.turn_spent(conn, out.task, "turn-1")
+
+    assert asyncio.run(summed()) == worst
+
+
 def test_a_negative_max_tool_calls_counts_as_none_allowed(dsn, tmp_path):
     sent = body(stream=True, tools=[{"type": "web_search"}], max_tool_calls=-5, max_output_tokens=1000)
     out = charged(dsn, tmp_path, fixture("web_search.sse"), sent)
@@ -526,6 +549,34 @@ def test_unlisted_openai_paths_are_a_403_with_nothing_sent(dsn, tmp_path, path, 
 def test_unsafe_tails_are_a_400(dsn, tmp_path, path):
     out = exchange(dsn, Upstream(), body(), path=path, tmp_path=tmp_path)
     assert out.status == 400 and not out.seen
+
+
+@pytest.mark.parametrize(
+    ("model", "priced"),
+    [
+        (MODEL, True),
+        (f"{MODEL}-2026-09-30", True),
+        (f"{MODEL}-pro", False),
+        (f"{MODEL}-pro-2026-09-30", False),
+        (f"{MODEL}-mini", False),
+        (f"{MODEL}-2026-09", False),
+    ],
+)
+def test_only_the_exact_id_or_a_dated_one_is_priced(model, priced):
+    assert (spending.openai_prices(model) is not None) is priced
+
+
+def test_a_variant_of_a_priced_id_is_a_400_with_nothing_sent(dsn, tmp_path):
+    out = exchange(dsn, Upstream(data=fixture("whole.json")), body(model=f"{MODEL}-pro"), tmp_path=tmp_path)
+    assert out.status == 400 and json.loads(out.body)["error"]["message"] == f"model {MODEL}-pro has no price"
+    assert not out.seen and out.opened is None
+
+
+def test_a_dated_id_is_forwarded_and_charged_at_its_rates(dsn, tmp_path):
+    out = exchange(
+        dsn, Upstream(data=fixture("whole.json")), body(model=f"{MODEL}-2026-09-30"), tmp_path=tmp_path
+    )
+    assert out.status == 200 and len(out.seen) == 1 and out.charged["usd_micros"] == 76
 
 
 def test_the_listed_paths():

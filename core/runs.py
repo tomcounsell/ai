@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from core import binaries, db, ledger, machine, tasks
+from core import binaries, db, ledger, machine, spending, tasks
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -139,15 +139,7 @@ async def run_turn(
         "stderr_tail": stderr.decode(errors="replace")[-400:],
     }
     async with await db.connect(dsn) as conn:
-        row = await (
-            await conn.execute(
-                "SELECT COALESCE(sum((payload->>'usd_micros')::bigint), 0) FROM events "
-                "WHERE task_id = %s AND type = 'gateway.charged' "
-                "AND payload->>'turn_id' = %s",
-                (task_id, turn_id),
-            )
-        ).fetchone()
-        ended["metered_usd_micros"] = int(row[0])
+        ended["metered_usd_micros"] = await spending.turn_spent(conn, task_id, turn_id)
         async with conn.transaction():
             if reaped:
                 await ledger.append(conn, task_id, "turn.reaped", {"turn_id": turn_id, "processes": reaped})
