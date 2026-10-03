@@ -32,7 +32,7 @@ from core import db, tasks
 from core.settings import SEATS
 from tests.emulator.common import DEMO, Meter, claude_json, core, mirror_diff, review_rev, status
 
-DIFF_LIMIT = 80_000  # the baseline's value, kept so results compare with it
+DIFF_LIMIT = 80_000  # the baseline's value, kept so scores compare (scripts/role_play_tom.py:37)
 MODEL = SEATS["frontier"]
 
 ANSWER_SYSTEM = """You are standing in for Tom, who made the request below and is the product owner. \
