@@ -822,15 +822,17 @@ was decided by default. It has no questions for Tom.
 ### Transcripts
 
 When any turn ends (working or fresh), the kernel copies its Claude Code
-session file into a `transcript` document (id: the turn id) and records
-`transcript: {document, sha256, bytes, offset, prefix_changed}` on
-`turn.ended`. With the per-turn config directory (1.4a) the session file
-is under the turn's own `<config dir>/projects/`. Subagents a turn starts
+session file into `transcript` documents (one per file per chunk) and
+records `transcript: {files: [{name, documents, sha256, bytes, offset,
+prefix_changed}]}` on `turn.ended`. The kernel chooses the session id
+(`--session-id`), and the session file is under the turn's own
+`<config dir>/projects/`, reached without following a link from the
+directory holding the config root. Subagents a turn starts
 write their transcripts as separate files beside the session's (in the
 session's directory), and those are copied too, each with its own digest,
 listed on the same `turn.ended`. Each file is opened component by
 component without following symlinks (as `verdict.json` is), must be a
-regular file under that directory, and is stored as base64 of its raw
+regular file with one link, and is stored as base64 of its raw
 bytes, one document per file, chunked to stay under the `jsonb` string
 limit, with no size cap. A failed copy still records `turn.ended`, with
 the reason. A
