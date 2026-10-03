@@ -140,9 +140,8 @@ finding of the three branches together.
   recommendation.
 - **The repair round.** A join in which review passed but test said `red`
   or `gaps`, or docs said `changes`, may send the work to `patch` once, a
-  fixed allowance the plan does not set. It spends no review
-  round: the reviewer accepted the change, and what is left is mechanical
-  (a failing test, an untested behavior, a doc the code contradicts).
+  fixed allowance the plan does not set. It spends no review round: the
+  reviewer accepted the change; what is left is mechanical.
 
 So a task patches at most `review_rounds` plus one times before Tom sees
 it; the join table below gives every case. The counts bound every

@@ -327,7 +327,7 @@ writer may request the merge.
 
 ### 5. The working-session runner: `core/session.py`
 
-Kept: the turn loop, resume, money checks, idle counting, the rule that an
+Kept: the turn loop, resume, money checks, the rule that an
 answer, feedback, or findings are spent only by a turn that finishes, and
 the effects report. Changed:
 
