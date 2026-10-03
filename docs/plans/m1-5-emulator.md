@@ -582,3 +582,15 @@ spent.
 7. `--stand-in-model` named, default the seat.
 8. Step 7 runs its own emulator task into a new result; a hand-recorded
    verdict reads a `blind_checkout` from the mirror.
+
+Build: the plan built as written, with three readings.
+
+- `JUDGE_MODEL` is `claude-sonnet-5-5`, the priced Sonnet id; the probe
+  that it is what the baseline's `sonnet` alias resolved to is rollout
+  step 2.
+- The driver's ends are tested through `step` with the fold and the core
+  command stubbed, one case each, not through scripted tasks driven to
+  each state; `review_rev`, `release_pushes`, and metering run against
+  real ledger rows.
+- `release_pushes` keeps its check that a push's URL is the workspace's
+  own origin before it releases one.

@@ -1,9 +1,10 @@
 """Replay one item in one arm: build its workspace, start the task, and run
-it with a stand-in for Tom until the stand-in accepts a delivery, the
-feedback rounds run out, or the runs do. Writes the record to
-$VALOR_DEMO/results/<run>.json.
+it with a stand-in for Tom until the task reaches a held merge the
+stand-in accepts (or its feedback rounds are spent), stops, or is handed
+to Tom. Writes the record to $VALOR_DEMO/results/<run>.json.
 
-    .venv/bin/python scripts/replay.py ITEM.json --arm bare|clarify|routed [--judge]
+    .venv/bin/python -m tests.emulator.replay ITEM.json --arm bare|clarify|routed \
+        [--run NAME] [--judge]
 
 The arm is what the kernel's judge decides. `routed` uses the real
 judgement legs. `bare` and `clarify` force it without any switch in the
@@ -17,7 +18,7 @@ a placeholder key, never a real one.
 An item is a JSON file:
 
     {
-      "name": "psyoptimal-894",          run names are <name>-<arm>
+      "name": "psyoptimal-894",          run names default to <name>-<arm>
       "repo": "yudame/psyoptimal",       OWNER/NAME, or a local repository path
       "base": "<sha>",                   the commit the request was made against
       "pr": 894,                         the merged reference PR (for the judge)
@@ -25,7 +26,7 @@ An item is a JSON file:
       "services": ["postgres"],          postgres, redis, or []
       "request": "Tom's request, verbatim",
       "answer_key": "psyoptimal-894.key.md",
-      "verify": ["shell commands the judge runs in the workspace, sandboxed"]
+      "verify": ["shell commands the judge runs on the final commit, sandboxed"]
     }
 
 Relative paths are relative to the item file. Keep items and answer keys
@@ -35,37 +36,58 @@ sandbox lets it read its own run and nothing else in $VALOR_DEMO.
 The task runs at effect ceiling `act` with no governance grant. Every held
 `push_branch` is approved and released by this driver under Tom's standing
 permission for pushes to local bare origins, and only when the workspace's
-push URL is the run's own `origin.git`; any other held effect stays held and
-the run ends. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine slots
-($VALOR_DEMO/claude-turn.lock.N) for its whole run. A run whose result file has no outcome yet is resumed: the
-driver continues its task instead of starting another.
+push URL is the run's own `origin.git`. The driver never answers a merge:
+every `merge` effect of the task is skipped, the current one and any a later
+candidate superseded. Any other held effect stays held and the run ends.
 
-Live spend: the task's metered spending (Opus 5.5) through the kernel's
-gateway, plus the stand-in's and judge's calls, logged in
-$VALOR_DEMO/costs.jsonl.
+A task in `merge` is read from its status, in this order: a delivery that
+did not pass ends the run `to tom`; a governance instance not granted, or
+a join of `governance_refused`, exits the driver to await Tom's grant; a
+refused merge ends the run `to tom`; a held merge goes to the stand-in,
+whose accept or spent feedback rounds end the run `held`; otherwise the
+task runs on. A stopped task ends the run `stopped`.
+
+`NO RUNNER` (a check stage with no runner) and a failed run exit the driver
+with the outcome unset and say why; the next invocation resumes the same
+task. A run whose result has an outcome is refused unless `--rebuild` is
+given. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine
+slots ($VALOR_DEMO/claude-turn.lock.N) for its whole invocation.
+
+Spend: the item task's metered spending through the kernel's gateway
+(`kernel_spend_usd`), and the stand-in's and judge's calls, metered through
+a gateway of the driver's own onto the run's emulator task, a calibration
+task (`emulator_spend_usd`). Both are read from the ledger and reported;
+nothing stops on them.
 """
 
 import argparse
-import asyncio
 import json
 import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tests.emulator import workspace as replay_workspace
+from tests.emulator.common import (
+    DEMO,
+    Meter,
+    core,
+    machine_lock,
+    mirror_diff,
+    now,
+    review_rev,
+    rows,
+    spend_of,
+    start_emulator_task,
+    status,
+    ws_git,
+)
+from tests.emulator.stand_in import MODEL as STAND_IN_MODEL
+from tests.emulator.stand_in import stand_in
 
-import replay_workspace
-from replay_common import DEMO, core, git, machine_lock, now, status, ws_git
-from role_play_tom import stand_in
-
-from core import db, ledger
-
-MAX_RUNS = 16
-MAX_FAILED_RUNS = 2
 PUSH_NOTE = (
     "Tom's standing permission: pushes to a replay workspace's local bare origin are "
     "pre-authorized (replay driver)"
@@ -100,23 +122,19 @@ def _save(result: dict) -> None:
 
 def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
     """Approve and release every held push of the task whose push URL is
-    the run's own bare origin, and a held merge whose payload names that
-    origin (the URL the kernel recorded at start, which the approval binds,
-    not whatever the workspace's config says now). Returns the held effects
-    left alone."""
+    the run's own bare origin. Every merge effect is skipped: the driver
+    never answers a merge. Returns the held effects left alone."""
     left = []
     for line in core("pending").splitlines():
         effect_id, owner, action, *_ = line.split()
-        if owner != task_id:
+        if owner != task_id or action == "merge":
             continue
-        if action == "merge":
-            payload = json.loads(line.split(None, 5)[5])
-            urls = [payload.get("url")]
-        else:
-            urls = ws_git(
-                ws["workdir"], "remote", "get-url", "--push", "--all", "origin", check=False
-            ).split()
-        if action not in ("push_branch", "merge") or urls != [ws["origin"]]:
+        urls = (
+            ws_git(ws["workdir"], "remote", "get-url", "--push", "--all", "origin", check=False).split()
+            if action == "push_branch"
+            else []
+        )
+        if action != "push_branch" or urls != [ws["origin"]]:
             left.append(effect_id)
             log.append({"at": now(), "step": "held effect left for Tom", "effect": line, "push_urls": urls})
             continue
@@ -136,16 +154,30 @@ def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
     return left
 
 
-async def _rows(task_id: str) -> list[dict]:
-    async with await db.connect() as conn:
-        return await ledger.read(conn, task_id)
+def merge_case(state: dict) -> str:
+    """What a task in `merge` waits on: `to tom`, `awaiting a grant`,
+    `held`, or `run`."""
+    if (state.get("delivery") or {}).get("outcome") == "did_not_pass":
+        return "to tom"
+    join = state.get("join") or {}
+    if (
+        any(not g["granted"] for g in state.get("governance") or [])
+        or join.get("outcome") == "governance_refused"
+    ):
+        return "awaiting a grant"
+    effect = state.get("merge_effect") or {}
+    if effect.get("state") == "refused":
+        return "to tom"
+    if effect.get("state") == "held":
+        return "held"
+    return "run"
 
 
-def summarize(result: dict, item: dict, ws: dict) -> None:
-    """Fill in the record from the ledger and the bare origin."""
+def summarize(result: dict, meter: Meter | None = None) -> None:
+    """Fill in the record from the ledger."""
     task_id = result["task_id"]
     state = status(task_id)
-    rows = asyncio.run(_rows(task_id))
+    ledger_rows = rows(task_id)
     result["questions"] = [
         {"question": a["question"], "answer": a["answer"], "provenance": a.get("provenance")}
         for a in state["attention"]
@@ -157,8 +189,8 @@ def summarize(result: dict, item: dict, ws: dict) -> None:
         if a["kind"] == "feedback"
     ]
     result["feedback_rounds"] = len(result["feedback"])
-    result["deliveries"] = [r["payload"]["summary"] for r in rows if r["type"] == "task.delivered"]
-    ended = [r["payload"] for r in rows if r["type"] == "turn.ended"]
+    result["attention"] = dict(Counter(a["kind"] for a in state["attention"]))
+    result["deliveries"] = [r["payload"]["summary"] for r in ledger_rows if r["type"] == "task.delivered"]
     result["turns"] = [
         {
             "turn_id": t["turn_id"],
@@ -166,33 +198,18 @@ def summarize(result: dict, item: dict, ws: dict) -> None:
             "metered_usd": t.get("metered_usd_micros", 0) / 1e6,
             "harness_session_cumulative_usd": (t.get("result") or {}).get("harness_reported_usd"),
         }
-        for t in ended
+        for t in (r["payload"] for r in ledger_rows if r["type"] == "turn.ended")
     ]
-    result["spend"] = {
-        "gateway_usd": state["spent_usd_micros"] / 1e6,
-        "stand_in_usd": round(sum(s.get("usd") or 0 for s in result["log"] if s["step"] == "stand-in"), 6),
-    }
-    pushes = [
-        r["payload"]["result"]
-        for r in rows
-        if r["type"] == "effect.outcome"
-        and r["payload"]["kind"] == "done"
-        and "sha" in r["payload"]["result"]
-    ]
-    origin = ws["origin"]
-    final = None
-    if pushes:
-        final = {"branch": pushes[-1]["branch"], "sha": pushes[-1]["sha"], "pushed": True}
-    head = ws_git(ws["workdir"], "rev-parse", "HEAD", check=False)
-    if final is None and head and head != ws["base"]:
-        final = {"branch": ws_git(ws["workdir"], "branch", "--show-current"), "sha": head, "pushed": False}
-    result["final"] = final
-    result["workspace_head"] = head
-    if final:
-        repo = origin if final["pushed"] else ws["workdir"]
-        g = git if final["pushed"] else ws_git
-        result["diff_stat"] = g(repo, "diff", "--no-ext-diff", "--stat", ws["base"], final["sha"])
-        result["diff_shortstat"] = g(repo, "diff", "--no-ext-diff", "--shortstat", ws["base"], final["sha"])
+    result["kernel_spend_usd"] = state["spent_usd_micros"] / 1e6
+    spent = meter.spend() if meter else spend_of(result["emulator_task"])
+    result["emulator_spend_usd"] = spent["usd"]
+    result["open_calls"] = spent["open_calls"]
+    result["merge_effect_id"] = (state.get("merge_effect") or {}).get("effect_id")
+    result["final_rev"] = review_rev(task_id, state)
+    ws = result["workspace"]
+    if result["final_rev"]:
+        result["diff_stat"] = mirror_diff(ws["mirror"], ws["base"], result["final_rev"], "--stat")
+        result["diff_shortstat"] = mirror_diff(ws["mirror"], ws["base"], result["final_rev"], "--shortstat")
     else:
         result["diff_stat"] = result["diff_shortstat"] = ""
 
@@ -208,7 +225,7 @@ def judged_as(arm: str):
     if arm not in FORCED:
         yield
         return
-    root = Path(__file__).resolve().parent.parent
+    root = Path(__file__).resolve().parent.parent.parent
     proc = subprocess.Popen(
         [sys.executable, "-m", "tests.judgement_upstream", "--answer", FORCED[arm]],
         cwd=root,
@@ -235,7 +252,7 @@ def replay(item: dict, arm: str, args) -> dict:
 
 
 def _replay(item: dict, arm: str, args) -> dict:
-    run_name = f"{item['name']}-{arm}"
+    run_name = args.run or f"{item['name']}-{arm}"
     result_file = DEMO / "results" / f"{run_name}.json"
     result = json.loads(result_file.read_text()) if result_file.exists() else None
     if result and result.get("outcome") and not args.rebuild:
@@ -291,59 +308,79 @@ def _replay(item: dict, arm: str, args) -> dict:
             )
             result["workspace"] = ws
             _save(result)
-        task_id, log = result["task_id"], result["log"]
-        print(f"{run_name}: task {task_id}", file=sys.stderr)
-
-        runs = failed = 0
-        while result["outcome"] is None:
-            if runs >= MAX_RUNS:
-                result["outcome"] = "run cap"
-                break
-            line = core("run", task_id)
-            runs += 1
-            log.append({"at": now(), "step": "run", "said": line[:2000]})
-            print(f"{run_name}: {line.splitlines()[0]}", file=sys.stderr)
-            if release_pushes(task_id, ws, log):
-                result["outcome"] = "an effect other than a local push is held for Tom"
-                break
-            state = status(task_id)
-            if line.startswith("NO RUNNER"):
-                # The checks have no runner until milestones 1.4b and 1.4c;
-                # the driver never records a verdict for them.
-                result["outcome"] = line.splitlines()[0]
-                break
-            if state["state"] in ("waiting", "merge"):
-                reply = stand_in(
-                    task_id,
-                    item["answer_key"],
-                    model=args.stand_in_model,
-                    max_feedback=args.max_feedback,
-                    base=ws["base"],
-                )
-                log.append({"at": now(), "step": "stand-in", **reply})
-                print(
-                    f"{run_name}: stand-in {reply['kind']}: {(reply['text'] or reply['reason'] or '')[:200]}",
-                    file=sys.stderr,
-                )
-                if reply["kind"] == "accept":
-                    result["outcome"] = "accepted"
-                elif reply["kind"] == "cap":
-                    result["outcome"] = "feedback rounds used up"
-            elif state["state"] == "stopped":
-                result["outcome"] = "stopped"
-            elif line.startswith("FAILED"):
-                failed += 1
-                if failed > MAX_FAILED_RUNS:
-                    result["outcome"] = "failed"
-            result["wall_seconds"] = round(result["wall_seconds"] + time.monotonic() - started, 1)
-            started = time.monotonic()
+        if not result.get("emulator_task"):
+            result["emulator_task"] = start_emulator_task(run_name, result["task_id"])
             _save(result)
+        result.pop("paused", None)
+        task_id = result["task_id"]
+        print(f"{run_name}: task {task_id}, emulator task {result['emulator_task']}", file=sys.stderr)
 
-        result["ended_at"] = now()
-        result["wall_seconds"] = round(result["wall_seconds"] + time.monotonic() - started, 1)
-        summarize(result, item, ws)
+        with Meter(result["emulator_task"]) as meter:
+            while result["outcome"] is None and not result.get("paused"):
+                step(result, item, ws, args, meter)
+                result["wall_seconds"] = round(result["wall_seconds"] + time.monotonic() - started, 1)
+                started = time.monotonic()
+                _save(result)
+            if result["outcome"] is not None:
+                result["ended_at"] = now()
+            summarize(result, meter)
         _save(result)
+    if result.get("paused"):
+        print(f"{run_name}: paused, outcome unset: {result['paused']}", file=sys.stderr)
     return result
+
+
+def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
+    """One move of the run: answer the stand-in's part, end the run, pause
+    the driver, or run the task once."""
+    task_id, log, run_name = result["task_id"], result["log"], result["run"]
+    state = status(task_id)
+    if state["state"] in ("stopped", "merged"):
+        result["outcome"] = state["state"]
+        return
+    case = merge_case(state) if state["state"] == "merge" else None
+    if case == "to tom":
+        result["outcome"] = "to tom"
+        return
+    if case == "awaiting a grant":
+        result["paused"] = "awaiting a grant"
+        return
+    if state["state"] == "waiting" or case == "held":
+        reply = stand_in(
+            task_id,
+            item["answer_key"],
+            meter=meter,
+            mirror=ws["mirror"],
+            base=ws["base"],
+            model=args.stand_in_model,
+            max_feedback=args.max_feedback,
+            workdir=Path(ws["run_dir"]),
+        )
+        log.append({"at": now(), "step": "stand-in", **reply})
+        print(
+            f"{run_name}: stand-in {reply['kind']}: {(reply['text'] or reply['reason'] or '')[:200]}",
+            file=sys.stderr,
+        )
+        if reply["kind"] in ("accept", "cap"):
+            result["outcome"] = "held"
+        if reply["kind"] != "nothing":
+            return
+    try:
+        line = core("run", task_id)
+    except RuntimeError as exc:
+        log.append({"at": now(), "step": "run failed", "error": str(exc)[:2000]})
+        result["paused"] = f"failed: {str(exc).splitlines()[0][:300]}"
+        return
+    log.append({"at": now(), "step": "run", "said": line[:2000]})
+    print(f"{run_name}: {line.splitlines()[0] if line else ''}", file=sys.stderr)
+    if release_pushes(task_id, ws, log):
+        result["outcome"] = "an effect other than a local push is held for Tom"
+    elif line.startswith("NO RUNNER"):
+        # A check stage with no runner: a verdict recorded by hand, from a
+        # blind checkout of the mirror, lets the next invocation resume.
+        result["paused"] = line.splitlines()[0]
+    elif line.startswith("FAILED"):
+        result["paused"] = line.splitlines()[0]
 
 
 def main() -> None:
@@ -352,23 +389,36 @@ def main() -> None:
     )
     parser.add_argument("item")
     parser.add_argument("--arm", required=True, choices=["bare", "clarify", "routed"])
-    parser.add_argument("--model", default="claude-opus-5-5")
-    parser.add_argument("--stand-in-model", default="sonnet")
+    parser.add_argument("--run", help="the run's name; default <item>-<arm>")
+    parser.add_argument("--model", default="claude-opus-5-5", help="the working turn's model")
+    parser.add_argument("--stand-in-model", default=STAND_IN_MODEL)
     parser.add_argument("--max-feedback", type=int, default=2)
     parser.add_argument(
         "--max-output-tokens", type=int, help="per-call output cap for the turn's model calls"
     )
     parser.add_argument("--rebuild", action="store_true", help="delete the run and its result and start over")
     parser.add_argument("--judge", action="store_true", help="judge the result when the run ends")
-    parser.add_argument("--judge-model", default="sonnet")
     args = parser.parse_args()
     item = load_item(args.item)
     result = replay(item, args.arm, args)
-    if args.judge:
-        from judge_replay import judge
+    if args.judge and result.get("outcome"):
+        from tests.emulator.judge import judge
 
-        result = judge(result["result_file"], model=args.judge_model)
-    shown = {k: result.get(k) for k in ("run", "task_id", "outcome", "feedback_rounds", "spend", "final")}
+        result = judge(result["result_file"])
+    shown = {
+        k: result.get(k)
+        for k in (
+            "run",
+            "task_id",
+            "emulator_task",
+            "outcome",
+            "paused",
+            "feedback_rounds",
+            "kernel_spend_usd",
+            "emulator_spend_usd",
+            "final_rev",
+        )
+    }
     shown["questions"] = len(result.get("questions", []))
     shown["diff"] = result.get("diff_shortstat")
     if "judge" in result:

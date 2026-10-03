@@ -7,7 +7,7 @@ file, and libpq reads the file itself, so no password passes through this
 process as a string.
 
 `python -m core.settings` (or `python -m core settings`) prints every value
-as a shell assignment (`SETTING_PGHOST=/tmp`), which is how `scripts/demo_workspace.sh` reads them.
+as a shell assignment (`SETTING_PGHOST=/tmp`), for a shell script to read.
 """
 
 import getpass

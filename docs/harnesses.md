@@ -347,11 +347,9 @@ read its answer). The stance is AI Control's: the protocol holds even if the
 model tries to get around it [4].
 
 A workspace turn runs under a sandbox-exec profile written for its workspace
-by `core/workspace.py` (every task the kernel provisions, replays included) or
-`scripts/demo_workspace.sh` (the demonstration, whose profile allows back its
-run directory and its one `~/.claude/projects/` directory in place of the
-allow rules below). The profile starts from `(allow default)` and denies what
-a turn must not reach. It runs as Tom's user.
+by `core/workspace.py` (every task the kernel provisions, replays
+included). The profile starts from `(allow default)` and denies what a turn
+must not reach. It runs as Tom's user.
 
 ### Files
 
@@ -361,9 +359,12 @@ a turn must not reach. It runs as Tom's user.
   `~/.claude/projects` and `history.jsonl`, and the whole work directory
   (`work_dir`), other tasks included.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
-  clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config); for
-  a fresh session, only its own check directory, with `/private/tmp`,
-  `/private/var/tmp`, `/private/var/folders`, and `~/.claude*` denied.
+  clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config),
+  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders`
+  denied, so no two tasks share a temp directory; for a fresh session, only
+  its own check directory, with the same three and `~/.claude*` denied. The
+  emulator's verification runs the working profile with the temp
+  directories shared and its own tree added, as its baseline did.
 - **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
   working session, its task's `home/` and bare origin. **Stat only:** the
   allowed directories' ancestors (not listable), so real paths resolve.
@@ -429,9 +430,8 @@ Stated so the boundary is drawn where it is [4]:
   user, and the gateway is for visibility and honest metering, not a hard
   wall.
 - A fresh session's blindness covers the paths the kernel names for the
-  builder (Files, above). The working session has its own `TMPDIR` but can
-  still write `/tmp`, which every task shares (common file names recurred
-  across items in the baseline), and places such as `~/Library/Caches`,
+  builder (Files, above). The working session writes only its own `TMPDIR`,
+  never a shared temp directory, but can write places such as `~/Library/Caches`,
   `~/.cache`, or `/Users/Shared`, which a fresh session can read, so a builder
   could leave a note there for a reviewer. Nothing reads one on purpose;
   independence rests on the inputs, the checkout, and the reviewer's own
@@ -507,7 +507,7 @@ Serves Mission item 1 (delivering within authority) and the constraint
 `core/workspace.py` provisions a task's workspace from a project spec
 (`projects/`) under `work_dir/<task id>/` before the task starts, cloning from
 a bare cache per repository URL (keyed by the URL's digest); a replay writes
-its spec (`scripts/replay_workspace.py`).
+its spec (`tests/emulator/workspace.py`).
 
 | Part | What it is |
 |---|---|

@@ -142,11 +142,22 @@ async def start(
     return brief.id
 
 
-async def start_calibration(conn, site: str, *, by: str = "tom") -> str:
+async def start_calibration(
+    conn,
+    site: str,
+    *,
+    by: str = "tom",
+    via: str = "python -m core calibrate",
+    detail: dict[str, Any] | None = None,
+) -> str:
     """A calibration task: a document and a `task.started` carrying the site
     its judgement calls are metered on, and no `sdlc` marker. It folds as
-    `calibration`, and every SDLC writer refuses it."""
-    b = Brief(instruction=f"calibrate {site}", max_effect_class="read")
+    `calibration`, and every SDLC writer refuses it, so it is a task that
+    only meters. `detail` is merged into the `task.started` payload (its
+    `instruction`, when given, names the task); `via` is the command its
+    provenance records. The emulator meters its stand-in and judge on one."""
+    detail = dict(detail or {})
+    b = Brief(instruction=detail.pop("instruction", f"calibrate {site}"), max_effect_class="read")
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)", (b.id, Jsonb(asdict(b)))
@@ -156,10 +167,11 @@ async def start_calibration(conn, site: str, *, by: str = "tom") -> str:
             b.id,
             "task.started",
             {
+                **detail,
                 "calibration": site,
                 "instruction": b.instruction,
                 "max_effect_class": "read",
-                "provenance": ledger.provenance(by, "python -m core calibrate", False),
+                "provenance": ledger.provenance(by, via, False),
             },
         )
     return b.id

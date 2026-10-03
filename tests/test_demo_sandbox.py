@@ -1,14 +1,16 @@
-"""The workspace sandbox-exec profiles under the real `sandbox-exec`: the
-demonstration's, as `scripts/demo_workspace.sh` writes it, and a kernel
-task's working session's, as `core/workspace.py` writes it.
+"""The workspace sandbox-exec profiles under the real `sandbox-exec`: a
+kernel task's working session's, as `core/workspace.py` writes it, and the
+emulator's verification profile built from it.
 
 A turn's gateway listens on whatever port the OS hands it, so a profile has
 to admit the gateway at every port, not only the one a first turn happened to
 get. It must still keep the machine's Postgres (5432, TCP and socket), its
-Redis (6379), and the rest of loopback out of reach, while a replay reaches
-the replays' own Postgres (5439) and Redis (6390). A replay's turn reads and
-writes its own run and nothing else in the replay directory, and reads and
-runs the shared binaries in its `bin/`.
+Redis (6379), and the rest of loopback out of reach, while a task reaches
+its own Postgres and Redis. A task's turn reads and writes its own clone,
+caches, and state and nothing else in the work directory, and reads and
+runs the shared binaries in its `bin/`. It writes no shared temp directory
+(`/private/tmp`, `/private/var/tmp`, `/private/var/folders`); its own
+`TMPDIR` lives in its state.
 
 Neither profile lets a turn read or write the kernel's password file, the
 machine cluster's data directory (its `pg_hba.conf` and heap files), or the
@@ -23,7 +25,6 @@ kernel reaps whatever a turn leaves running (tests/test_reap.py).
 Live spend: none.
 """
 
-import re
 import shutil
 import socket
 import subprocess
@@ -36,9 +37,6 @@ pytestmark = [
     pytest.mark.spend(usd=0),
     pytest.mark.skipif(shutil.which("sandbox-exec") is None, reason="needs macOS sandbox-exec"),
 ]
-
-SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-SCRIPT = SCRIPTS / "demo_workspace.sh"
 
 from core import workspace as kws
 from core.settings import settings
@@ -127,32 +125,6 @@ def _kernel_probes(paths: dict[str, Path]) -> list[str]:
     return [f"{mode}:{f}" for f in files for mode in ("read", "write")] + [f"list:{paths['backup']}"]
 
 
-def _profile(tmp_path: Path) -> Path:
-    """The profile text from the script's heredoc, expanded by bash with the
-    script's own variables pointed at `tmp_path`."""
-    heredoc = re.search(r"cat > home/sandbox\.sb <<EOF\n(.*?)\nEOF\n", SCRIPT.read_text(), re.DOTALL)
-    assert heredoc
-    out = tmp_path / "sandbox.sb"
-    kernel = _kernel(tmp_path)
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "H": str(tmp_path / "home"),
-        "DEMO": str(tmp_path / "demo"),
-        "PG": str(tmp_path / "demo" / "pg"),
-        "PG_PORT": "5439",
-        "PG_SOCKET": settings.pg_socket_real,
-        "KERNEL_SOCKET": settings.pg_socket,
-        "TRANSCRIPTS": str(tmp_path / "transcripts"),
-        "KERNEL_PASSDIR": str(kernel["passdir"]),
-        "KERNEL_PGDATA": str(kernel["pgdata"]),
-        "BACKUP_DIR": str(kernel["backup"]),
-    }
-    subprocess.run(
-        ["bash", "-c", f'cat > "$0" <<EOF\n{heredoc.group(1)}\nEOF', str(out)], env=env, check=True
-    )
-    return out
-
-
 def _probe(profile: Path, gateway_port: int, *targets) -> list[str]:
     sandbox = ["sandbox-exec", "-D", f"GATEWAY_PORT={gateway_port}", "-D", "VALOR_TURN=t", "-f", str(profile)]
     run = subprocess.run(
@@ -162,31 +134,6 @@ def _probe(profile: Path, gateway_port: int, *targets) -> list[str]:
         check=True,
     )
     return run.stdout.split()
-
-
-def test_the_gateway_is_reachable_at_any_port_and_the_rest_of_loopback_is_not(tmp_path):
-    profile = _profile(tmp_path)
-    listeners = []
-    for _ in range(24):
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        s.listen()
-        listeners.append(s)
-    try:
-        ports = [s.getsockname()[1] for s in listeners]
-        for i, port in enumerate(ports):
-            other = ports[i - 1]
-            assert _probe(profile, port, port, 5439, settings.pgport, 6379, settings.pg_socket, other) == [
-                "open",
-                "open",
-                "denied",
-                "denied",
-                "denied",
-                "denied",
-            ], f"gateway port {port}"
-    finally:
-        for s in listeners:
-            s.close()
 
 
 def _task(tmp_path: Path, name: str = "abcdef000001") -> kws.Layout:
@@ -298,27 +245,11 @@ def _binds(own_dir: Path) -> dict[str, str]:
     }
 
 
-def test_the_demo_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
-    profile = _profile(tmp_path)
-    (tmp_path / "demo").mkdir()
-    binds = _binds(tmp_path / "demo")
-    assert dict(zip(binds, _probe(profile, 1, *binds))) == binds
-
-
 def test_a_task_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
     lay = _task(tmp_path)
     profile = _turn_profile(tmp_path, lay, [5545, 6445])
     binds = _binds(lay.repo)
     assert dict(zip(binds, _probe(profile, 1, *binds), strict=True)) == binds
-
-
-def test_the_demo_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
-    profile = _profile(tmp_path)
-    (tmp_path / "demo").mkdir(exist_ok=True)
-    (tmp_path / "demo" / "own.txt").write_text("x")
-    probes = _kernel_probes(_kernel(tmp_path))
-    found = _probe(profile, 1, *probes, f"read:{tmp_path / 'demo' / 'own.txt'}")
-    assert found == ["denied"] * len(probes) + ["open"]
 
 
 def test_a_task_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
@@ -343,3 +274,55 @@ def test_by_default_a_task_profile_denies_the_kernel_paths_its_settings_name(tmp
     probes = [f"read:{p}" for p in [Path(settings.pg_data_dir) / "PG_VERSION"] if p.exists()]
     probes += [f"list:{p}" for p in [Path(settings.backup_dir)] if p.is_dir()]
     assert _probe(profile, 1, *probes) == ["denied"] * len(probes)
+
+
+def test_a_task_turn_writes_no_shared_temp_directory_and_its_own_tmpdir(tmp_path):
+    lay = _task(tmp_path)
+    profile = _turn_profile(tmp_path, lay, [])
+    own = lay.work_state / "tmp"
+    own.mkdir()
+    name = f"valor-tmp-probe-{lay.root.name}"
+    folders = Path(subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True,
+                                  check=True).stdout.strip()).resolve()  # fmt: skip
+    found = _probe(
+        profile,
+        1,
+        f"write:/private/tmp/{name}",
+        f"write:/private/var/tmp/{name}",
+        f"write:{folders / name}",
+        "list:/private/tmp",
+        f"write:{own / name}",
+    )
+    assert found == ["denied", "denied", "denied", "denied", "open"]
+    assert not Path(f"/private/tmp/{name}").exists()
+
+
+def test_two_tasks_cannot_meet_in_tmp(tmp_path):
+    """Neither of two tasks' turns can write the same `/tmp` name, so
+    neither can read what the other left there."""
+    one, two = _task(tmp_path), _task(tmp_path, "abcdef000002")
+    name = Path(f"/private/tmp/valor-shared-{one.root.name}")
+    name.write_text("left by something outside both tasks")
+    try:
+        assert _probe(_turn_profile(tmp_path, one, []), 1, f"write:{name}") == ["denied"]
+        assert _probe(_turn_profile(tmp_path, two, []), 1, f"read:{name}") == ["denied"]
+    finally:
+        name.unlink()
+
+
+def test_the_verification_profile_shares_tmp_and_adds_its_tree(tmp_path):
+    """The emulator's verification runs under the working profile as the
+    baseline ran it, with the temp directories shared, plus its own tree
+    under `checks/`; the working profile itself cannot write that tree."""
+    lay = _task(tmp_path)
+    tree = lay.checks / "verify-run"
+    tree.mkdir(parents=True)
+    working = _turn_profile(tmp_path, lay, [])
+    verifying = tmp_path / "verify.sb"
+    verifying.write_text(kws.turn_profile(lay, [], home=tmp_path / "home", tmp=True, rw=[tree]))
+    name = f"/private/tmp/valor-verify-{lay.root.name}"
+    try:
+        assert _probe(working, 1, f"write:{tree / 'x'}") == ["denied"]
+        assert _probe(verifying, 1, f"write:{tree / 'x'}", f"write:{name}") == ["open", "open"]
+    finally:
+        Path(name).unlink(missing_ok=True)

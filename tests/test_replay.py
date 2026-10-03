@@ -1,7 +1,8 @@
 """The replay driver's push rule, on real Postgres and real git: a held
 `push_branch` is approved and released when the workspace pushes to the
 run's own bare origin, and left held for Tom when its push URL points
-anywhere else.
+anywhere else. Every merge effect is skipped: the driver never answers a
+merge, and a held merge is not an effect left for Tom.
 
 The driver reaches the kernel through `python -m core`, pointed here at the
 test database with `VALOR_DB`.
@@ -18,10 +19,9 @@ import pytest
 from conftest import TEST_DB
 
 from core import broker, db, tasks
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
-import replay
+from tests.emulator import common as replay_common
+from tests.emulator import replay
+from tests.emulator import workspace as replay_workspace
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -100,8 +100,6 @@ def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
     import threading
     import time
 
-    import replay_common
-
     monkeypatch.setattr(replay_common, "DEMO", tmp_path)
     monkeypatch.setattr(replay_common, "LOCK", tmp_path / "claude-turn.lock")
     monkeypatch.setattr(replay_common, "SLOTS", 2)
@@ -121,51 +119,76 @@ def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
     assert entered and entered[0] >= released
 
 
-def test_the_driver_checks_a_merge_by_the_url_its_payload_carries(dsn, tmp_path, monkeypatch):
-    """A held merge is released when its payload names the run's own origin
-    (the URL the kernel recorded at start, which the approval binds), and
-    left held when it names any other, whatever the workspace's config
-    says now."""
+async def _held_merge(conn, task: str, url: str, head: str = "x") -> str:
     from core import ledger
 
+    effect_id = ledger.new_id()
+    payload = {
+        "url": url,
+        "target_branch": "main",
+        "head_sha": head,
+        "candidate": {"sha": head, "turn_id": "t"},
+    }
+    await ledger.append(
+        conn,
+        task,
+        "effect.held",
+        {"effect_id": effect_id, "action_type": "merge", "effect_class": "act", "target": "main",
+         "payload": payload, "payload_sha256": ledger.digest(payload), "idempotency_key": ledger.new_id(),
+         "adds_governance": False},
+    )  # fmt: skip
+    return effect_id
+
+
+def test_the_driver_skips_every_merge_and_leaves_any_other_held_effect(dsn, tmp_path, monkeypatch):
+    """A held merge, whatever URL it carries, is neither answered nor an
+    effect left for Tom; neither is an earlier one a second held merge
+    superseded. A held effect of another action is left, and ends the run."""
     monkeypatch.setenv("VALOR_DB", TEST_DB)
     ws = _run(tmp_path, "merge")
 
-    async def held(url: str) -> str:
+    async def held() -> tuple[str, str]:
         async with await db.connect(dsn) as conn:
             task = await tasks.start(
-                conn,
-                tasks.Brief(instruction="merge", max_effect_class="act", workspace=ws["workdir"]),
+                conn, tasks.Brief(instruction="merge", max_effect_class="act", workspace=ws["workdir"])
             )
-            payload = {
-                "url": url,
-                "target_branch": "main",
-                "head_sha": "x",
-                "candidate": {"sha": "x", "turn_id": "t"},
-            }
+            await _held_merge(conn, task, str(tmp_path / "stranger.git"), head="a" * 40)
+            await _held_merge(conn, task, ws["origin"], head="b" * 40)
+            return task
+
+    task = asyncio.run(held())
+    log: list = []
+    assert replay.release_pushes(task, ws, log) == [] and log == []
+    pending = [line for line in replay.core("pending").splitlines() if task in line]
+    assert len(pending) == 2  # both still held: nothing answered them
+
+    async def other() -> str:
+        from core import ledger
+
+        async with await db.connect(dsn) as conn:
+            payload = {"text": "hi"}
             await ledger.append(
                 conn,
                 task,
                 "effect.held",
-                {"effect_id": ledger.new_id(), "action_type": "merge", "effect_class": "act", "target": "main",
-                 "payload": payload, "payload_sha256": ledger.digest(payload), "idempotency_key": ledger.new_id(),
-                 "adds_governance": False},
+                {"effect_id": ledger.new_id(), "action_type": "send_message", "effect_class": "act",
+                 "target": "tom", "payload": payload, "payload_sha256": ledger.digest(payload),
+                 "idempotency_key": ledger.new_id(), "adds_governance": False},
             )  # fmt: skip
-            return task
 
-    elsewhere = asyncio.run(held(str(tmp_path / "stranger.git")))
-    log: list = []
-    left = replay.release_pushes(elsewhere, ws, log)
-    assert len(left) == 1 and log[-1]["step"] == "held effect left for Tom"
-    assert log[-1]["push_urls"] == [str(tmp_path / "stranger.git")]
+    asyncio.run(other())
+    left = replay.release_pushes(task, ws, log)
+    assert (
+        len(left) == 1
+        and log[-1]["step"] == "held effect left for Tom"
+        and "send_message" in log[-1]["effect"]
+    )
 
 
 def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_shared_cluster(
     dsn, tmp_path, monkeypatch
 ):
     import json
-
-    import replay_workspace
 
     from tests import scripted
 

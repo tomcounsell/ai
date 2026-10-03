@@ -1,14 +1,14 @@
 """A replay's workspace, provisioned by the kernel (`core/workspace.py`):
-this script fetches the repository into a cache of its own (through `gh`
+this module fetches the repository into a cache of its own (through `gh`
 for a GitHub repository, as Tom) and writes the project spec the kernel
 provisions the task from. The kernel then makes the clone at the base, the
 bare origin, the kernel mirror, a Postgres cluster and Redis of the task's
 own (password auth, its own ports), and the sandbox profiles, under the
 `work_dir` setting.
 
-    .venv/bin/python scripts/replay_workspace.py OWNER/NAME BASE_SHA RUN_NAME \
+    .venv/bin/python -m tests.emulator.workspace OWNER/NAME BASE_SHA RUN_NAME \
         [--services postgres,redis | none] [--rebuild]
-    .venv/bin/python scripts/replay_workspace.py --teardown RUN_NAME
+    .venv/bin/python -m tests.emulator.workspace --teardown RUN_NAME
 
 OWNER/NAME may also be a local git repository's path (the smoke's toy repo).
 
@@ -37,12 +37,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from replay_common import DEMO, git, now, ok, sh
+from tests.emulator.common import DEMO, git, now, ok, sh
 
 SERVICES = ("postgres", "redis")
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # -- the cache -----------------------------------------------------------------
@@ -166,7 +164,13 @@ def teardown(run_name: str) -> None:
     if task:
         _core("stop", task, "--reason", "replay teardown")
         removed = _core(
-            "workspace", "remove", task, "--by", "replay driver", "--via", "scripts/replay_workspace.py"
+            "workspace",
+            "remove",
+            task,
+            "--by",
+            "replay driver",
+            "--via",
+            "python -m tests.emulator.workspace",
         )
         if removed.returncode != 0 and "has no workspace" not in removed.stderr:
             raise SystemExit(f"removing task {task}'s workspace: {removed.stderr.strip()}")

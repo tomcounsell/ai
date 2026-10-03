@@ -383,8 +383,7 @@ added on a second real need (Mission item 5).
 ### Sandbox: what runs today
 
 Every workspace turn runs under a **`sandbox-exec`** profile generated per
-workspace (`core/workspace.py`; `scripts/demo_workspace.sh` for the
-demonstration). Status: **in use**.
+workspace (`core/workspace.py`). Status: **in use**.
 
 The profile's rules (files, loopback, binding, the `valor.turn.<turn id>`
 mark the reaper uses) are specified in [harnesses.md](harnesses.md) (The
