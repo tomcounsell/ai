@@ -254,7 +254,7 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     ]
     assert argv[argv.index("--resume") + 1] == "abc"
     assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
-    assert argv[argv.index("--append-system-prompt") + 1] == "You are Valor.\n\n# Brief"
+    assert argv[argv.index("--append-system-prompt") + 1] == "# Brief"
     assert "GH_TOKEN" not in command.env and "SSH_AUTH_SOCK" not in command.env
     assert command.env["GH_CONFIG_DIR"] == "/gh" and command.env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert command.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4321/t/token"

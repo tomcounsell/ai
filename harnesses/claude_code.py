@@ -20,8 +20,9 @@ turn started from inside a Claude Code session is still a fresh process,
 and so is every libpq variable (`PG*`, including a `PGPASSFILE` naming the
 kernel's password file) and every `VALOR_PG*` override, so a turn never
 learns where the kernel's credential is.
-The dispatched Brief, Tom's corrections included, follows the persona in the
-system prompt.
+The dispatched text (the persona, the Brief, Tom's corrections, the
+channel and the stage, rendered by `core.tasks.dispatch`) is the whole
+system prompt the kernel adds, byte for byte what `turn.started` records.
 """
 
 import json
@@ -46,7 +47,6 @@ def turn(
     *,
     cwd: str,
     model: str = "haiku",
-    system_prompt: str = "You are Valor.",
     tools: str = "",
     max_output_tokens: int = 1024,
 ):
@@ -70,7 +70,7 @@ def turn(
             "--strict-mcp-config",
             "--no-session-persistence",
             "--system-prompt",
-            f"{system_prompt}\n\n{brief}",
+            brief,
             "--tools",
             tools,
             "--",
@@ -109,13 +109,12 @@ def workspace_turn(
     resume: str | None = None,
     model: str = "haiku",
     harness: dict | None = None,
-    system_prompt: str = "You are Valor.",
     max_output_tokens: int = 32000,
 ):
     """A builder for one turn of a task that works in `cwd`.
 
     The turn keeps Claude Code's own system prompt and tools, with the
-    persona and the dispatched Brief appended and re-rendered on every turn
+    dispatched text (the persona first, then the Brief) appended and re-rendered on every turn
     (`--system-prompt-snapshot off`), and resumes `resume` when given. It
     edits files and runs commands without asking (`bypassPermissions`): the
     kernel bounds it, not a permission prompt nobody is there to answer.
@@ -189,7 +188,7 @@ def workspace_turn(
             "--system-prompt-snapshot",
             "off",
             "--append-system-prompt",
-            f"{system_prompt}\n\n{brief}",
+            brief,
         ]
         if resume:
             argv += ["--resume", resume]

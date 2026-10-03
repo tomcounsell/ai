@@ -4,9 +4,10 @@ instant.
 The harness port is `TurnCommand`: the argv, environment, and working
 directory that run one turn against a given gateway base URL, the
 dispatched Brief, and the turn's id, plus how to read the result from
-stdout. `core` never knows which harness it runs. The dispatched Brief is
-rendered from the ledger as the turn starts, Tom's corrections included,
-and recorded whole in `turn.started`, so the ledger shows exactly what the
+stdout. `core` never knows which harness it runs. The dispatched text is
+rendered as the turn starts, the persona first and Tom's corrections from
+the ledger, and recorded whole in `turn.started` with its digest and the
+persona's, so the ledger shows exactly what the
 turn was given.
 
 Stop is lossless because nothing the turn owns lives only in this process.
@@ -77,33 +78,39 @@ async def run_turn(
     try:
         await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
         base_url = gateway.issue(task_id, turn_id)
-        async with await db.connect(dsn) as conn, conn.transaction():
-            await ledger.lock(conn, f"task:{task_id}")
-            if await tasks.is_calibration(conn, task_id):
-                gateway.retire(task_id)
-                raise tasks.CalibrationTask(f"task {task_id} is a calibration task; it runs no turn")
-            if await tasks.is_stopped(conn, task_id):
-                gateway.retire(task_id)
-                raise tasks.TaskStopped(task_id)
-            dispatched = await tasks.dispatch(
-                conn, task_id, state=machine.State(state) if state else None, fresh=fresh
-            )
-            command = build(base_url, dispatched["text"], turn_id)
-            await ledger.append(
-                conn,
-                task_id,
-                "turn.started",
-                {
-                    "turn_id": turn_id,
-                    "state": state,
-                    **({"fresh": True, "stage": fresh} if fresh else {}),
-                    "harness": command.harness,
-                    "argv": command.argv,
-                    "brief": dispatched["text"],
-                    "brief_sha256": dispatched["sha256"],
-                    "corrections": dispatched["corrections"],
-                },
-            )
+        # The grant is issued before the dispatch; a turn that never starts
+        # (stopped, calibration, a persona that cannot be read) leaves none.
+        try:
+            async with await db.connect(dsn) as conn, conn.transaction():
+                await ledger.lock(conn, f"task:{task_id}")
+                if await tasks.is_calibration(conn, task_id):
+                    raise tasks.CalibrationTask(f"task {task_id} is a calibration task; it runs no turn")
+                if await tasks.is_stopped(conn, task_id):
+                    raise tasks.TaskStopped(task_id)
+                dispatched = await tasks.dispatch(
+                    conn, task_id, state=machine.State(state) if state else None, fresh=fresh
+                )
+                command = build(base_url, dispatched["text"], turn_id)
+                await ledger.append(
+                    conn,
+                    task_id,
+                    "turn.started",
+                    {
+                        "turn_id": turn_id,
+                        "state": state,
+                        **({"fresh": True, "stage": fresh} if fresh else {}),
+                        "harness": command.harness,
+                        "argv": command.argv,
+                        "brief": dispatched["text"],
+                        "brief_sha256": dispatched["sha256"],
+                        "corrections": dispatched["corrections"],
+                        "persona_sha256": dispatched["persona_sha256"],
+                        "persona_bytes": dispatched["persona_bytes"],
+                    },
+                )
+        except BaseException:
+            gateway.retire(task_id)
+            raise
         proc = await asyncio.create_subprocess_exec(
             *command.argv,
             env={**command.env, TURN_ENV: turn_id},

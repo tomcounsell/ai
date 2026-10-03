@@ -6,7 +6,8 @@ Everything that defines Valor as one identity.
 
 - Identity, voice, and conduct.
 - What acting as Valor means for tone and for what may be sent under Valor's name.
-- One persona. `core/` renders it into every prompt it builds, supervisor and brief alike.
+- One persona: `identity.toml`, `turn.md`, `voice.md`, `conduct.md`, and `delivery.md`. `core/persona.py` renders them, with the governance paragraph read from `CLAUDE.md`, at the head of every turn's text. The fresh critique session gets the same persona.
+- This README is not rendered.
 
 Every outbound message and PR leaves as Valor. There is no per-space identity and no mode that sends as anyone else.
 
@@ -14,8 +15,8 @@ Governed by [docs/persona.md](../docs/persona.md).
 
 ## Imports
 
-- May import: `core/`.
-- Imported by: `core/` (the prompt builder) and `harnesses/` where a harness renders it.
+- Imports nothing. It holds text, not code.
+- Read by: `core/persona.py`, which `core/tasks.py` calls when it renders a turn. Nothing else reads these files.
 
 ## Effect classes
 

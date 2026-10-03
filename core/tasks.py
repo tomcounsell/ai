@@ -13,7 +13,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from core import corrections, git, ledger, machine
+from core import corrections, git, ledger, machine, persona
 from core.settings import settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
@@ -208,7 +208,9 @@ def verdict_text() -> str:
 async def dispatch(
     conn, task_id: str, state: machine.State | None = None, *, fresh: str | None = None
 ) -> dict[str, Any]:
-    """The Brief as a turn receives it: the task's commitments plus every
+    """The text a turn receives: the persona first (`persona/`, rendered
+    now from the kernel's own checkout, never from the workspace), then the
+    Brief: the task's commitments plus every
     correction in force, rendered from the ledger now, never from a copy
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing the effects the
@@ -217,7 +219,9 @@ async def dispatch(
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file. Returns the text, the
-    correction numbers it carries, and the text's digest."""
+    correction numbers it carries, the text's digest, and the persona's
+    digest and size. A persona that cannot be read raises
+    `persona.PersonaUnreadable`; there is no fallback text."""
     from core import broker
 
     b = await brief(conn, task_id)
@@ -225,6 +229,7 @@ async def dispatch(
     f = machine.fold(rows)
     state = state or f.state
     standing = await corrections.in_force(conn)
+    rendered = persona.render(settings.persona_dir)
     head = (
         "# Brief\n\n"
         f"Task: {b.id}\n"
@@ -236,7 +241,7 @@ async def dispatch(
         head += f"\nWorkspace: {b.workspace}"
     if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN) and not fresh:
         head += f"\nPlan: {f.plan['path']} at {f.plan['commit']}"
-    sections = [head, corrections.render(standing)]
+    sections = [rendered, head, corrections.render(standing)]
     if fresh:
         sections.append(verdict_text())
         stage = stage_text(fresh)
@@ -252,6 +257,8 @@ async def dispatch(
         "text": text,
         "corrections": [c["number"] for c in standing],
         "sha256": ledger.digest(text),
+        "persona_sha256": persona.digest(rendered),
+        "persona_bytes": len(rendered.encode()),
     }
 
 
