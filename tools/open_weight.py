@@ -95,10 +95,12 @@ class OpenWeight:
         }
 
     def estimate(self, task: JudgementTask, inputs: Mapping[str, str]) -> int:
-        """Input tokens as bytes / 3. Over its 35 calibration calls of
-        2026-10-02 the host billed 0.39 to 0.62 of it, and at most 219 of
-        the 400 output tokens a call allows. All 35 were
-        single-question judge calls of at most 1,406 estimated tokens."""
+        """Input tokens as bytes / `bytes_per_token` (2). Over its 35
+        calibration calls of 2026-10-02 the host billed 0.39 to 0.62 of
+        bytes / 3, and at most 219 of the 400 output tokens a call allows.
+        Over the 50 governance calls of 2026-10-03 it billed up to 1.36 times
+        bytes / 3 on hunks of lock-file hashes
+        (`tests/fixtures/judgement_hash_dense.json`)."""
         return judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
 
     async def ask(self, task: JudgementTask, inputs: Mapping[str, str]) -> LegAnswer | LegError:

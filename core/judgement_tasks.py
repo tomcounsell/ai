@@ -132,12 +132,14 @@ GOVERNANCE = JudgementTask(
             id="adds",
             text=(
                 "Does this hunk add a check, gate, hook, validator, review round, or approval step: "
-                "anything that holds, redirects, or refuses work, or a step someone must pass?"
+                "anything that holds, redirects, or refuses work, or a step someone must pass? "
+                "Tests and the code that serves them (fixtures, helpers, scripted stand-ins, recording scripts) "
+                "are none of these, even where they exit early or refuse to run."
             ),
             kind=Kind.BOOLEAN,
             labels={
                 "true": "it adds a check, gate, hook, validator, review round, or approval step",
-                "false": "it adds none of these",
+                "false": "it adds none of these, or adds only tests and the code that serves them",
             },
             proceed=frozenset({"false"}),
         ),
