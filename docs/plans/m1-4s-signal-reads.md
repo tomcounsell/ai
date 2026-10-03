@@ -75,15 +75,14 @@ stdout.
 One helper in `core/workspace.py`, the shape task 1.4b names
 (`docs/plans/m1-4b-runners.md`, The test runner, step 4):
 
-- `read_turn_file(dir_fd, relpath, max_bytes) -> (bytes | None, why | None)`:
+- `read_turn_file(dir_fd, relpath) -> (bytes | None, why | None)`:
   `relpath` split on `/`; an empty, `.`, or `..` component, or an absolute
   path, is refused. Each directory is opened relative to its parent's
   descriptor with `O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK |
   O_CLOEXEC`, the file with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK |
-  O_CLOEXEC`. `fstat` must say `S_ISREG` and `st_nlink == 1`; the size must
-  be within `max_bytes` when one is given. Anything else returns `None` and
-  a reason ("is a link", "is not a regular file", "has 2 links", "is over
-  N bytes"), and nothing is read.
+  O_CLOEXEC`. `fstat` must say `S_ISREG` and `st_nlink == 1`, and the whole file is
+  read. Anything else returns `None` and a reason ("is a link", "is not a
+  regular file", "has 2 links"), and nothing is read. No size cap.
 - `open_turn_dir(dir_fd, relpath) -> (fd | None, why | None)`: the same
   walk for a directory, used for the workspace root, `.valor`, and
   `.valor/effects`. The workspace root itself is opened with `O_NOFOLLOW`
@@ -100,17 +99,18 @@ Callers:
 1. `signals.collect` opens the workspace, then `.valor`; a missing `.valor`
    is no signals, any other refusal is one `unreadable` entry and nothing
    else is touched. Each text signal and `plan.json` goes through
-   `read_turn_file` with no size bound (the reads carry no bound; this
-   fix adds none). `effects` is opened with `open_turn_dir` and
+   `read_turn_file`. `effects` is opened with `open_turn_dir` and
    listed with `os.listdir(fd)`; each `*.json` name is read with
    `read_turn_file`. `Signals` gains `unreadable: list[str]`; a refused
    effect keeps its shape (`{"file", "error"}`); a refused `plan.json`
    sets `plan_error`. `session.record` adds `found.unreadable` to the
    `errors` of `turn.collected`, so no schema change.
 2. `session._plan` reads `path` with `read_turn_file` relative to the
-   workspace descriptor, bounded by `len(body) + 1`, and compares; a
+   workspace descriptor and compares; a
    refusal is "`path` cannot be read: why".
-3. `read_verdict` uses `read_turn_file` (gains `st_nlink == 1`).
+3. `read_verdict` uses `read_turn_file` (gains `st_nlink == 1`), and its
+   size cap goes with the walk, as in 1.4b: `settings.verdict_max_bytes`
+   is removed.
 4. `fetch_into_mirror` opens `.git` with `open_turn_dir` and looks up each
    of the four names with an `lstat` walk relative to descriptors; an entry
    or a link at any component counts as present and refuses the fetch.
@@ -121,8 +121,8 @@ Callers:
 `read_junit`. Whichever task merges second rebases onto the first's helper
 and keeps one: if 1.4b is first, this task adds `st_nlink == 1`, the
 component refusals, and `open_turn_dir` to its `read_turn_file`; if this
-task is first, 1.4b calls this one for `read_junit` with
-`settings.junit_max_bytes`. The signature is the same in both.
+task is first, 1.4b calls this one for `read_junit`. The signature,
+`read_turn_file(dir_fd, relpath)` with no size cap, is the same in both.
 
 ## Done, as evidence
 
@@ -171,7 +171,8 @@ No test opens a real key or password file; the outside files are
 
 ## Files changed
 
-`core/workspace.py`, `core/signals.py`, `core/session.py`, `core/git.py`;
+`core/workspace.py`, `core/signals.py`, `core/session.py`, `core/git.py`,
+`core/settings.py` (drops `verdict_max_bytes`);
 `tests/test_signals.py` (new), `tests/test_session.py`,
 `tests/test_workspace.py`. Docs: the signal channel paragraph in
 `docs/architecture.md`, the signal sentence in `core/README.md`, and
@@ -185,9 +186,9 @@ stops accepting `..` in a plan path.
 
 ## Leaves out
 
-Size bounds on signal files (they carry none; not this fix). Git's own reads of
-the workspace, which `git.py` governs. Service directories (`pg`, `redis`),
-written by services under their own profile, not by a turn.
+Git's own reads of the workspace, which `git.py` governs. Service
+directories (`pg`, `redis`), written by services under their own profile,
+not by a turn.
 
 ## Decided by default
 
@@ -198,7 +199,8 @@ written by services under their own profile, not by a turn.
   writing its own signal never makes one.
 - An unreadable `question.md` or `done.md` counts as absent: the task does
   not wait on a question it cannot show Tom.
-- No new setting: text signals and `plan.json` carry no size bound.
+- No size cap, setting, or stop is added: the reads are made safe and
+  nothing else (Tom's standing rule on invented caps).
 
 ## Questions for Tom
 
