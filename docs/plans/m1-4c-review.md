@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-review
 type: build
-status: built, patch round 1 done (records in m1-4c-review-records.md); critique rounds spent
+status: passed; merge held for Tom's tap (records in m1-4c-review-records.md)
 critique_rounds: 2
 review_rounds: 2
 ---

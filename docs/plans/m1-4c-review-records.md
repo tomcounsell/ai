@@ -147,3 +147,37 @@ check-1-4c1-docs (`updated`, fast-forwarded onto 3a176d498).
 5. The threat model says these runs have no time limit.
 6. The stop test covers a stop during the lint: no `verify.ran`, every
    marked process gone.
+
+## Checks, round 1 (of 2), at c56fce056
+
+- Docs: updated, 3a176d498 (harnesses.md, judgement-layer.md, emulator.md).
+- Test: pass, 620 passed, 11 skipped.
+- Review: changes. The kernel's `rmtree(checkout/.valor)` followed a `repo`
+  link that setup planted; a stop written before the reviewer setup
+  listened was missed. Governance boolean: no. Patch round 1 above.
+
+## Checks, round 2 (of 2), at c6f787946
+
+- Docs: updated, 5fcc81e6b. "No free text" in `verify.json` now reads "no
+  message or output tail"; the lint paths are the one string the candidate
+  chooses.
+- Test: pass. 623 passed, 11 skipped. A planted link leaves its target
+  untouched; a stop before setup is heard; the concise flag lands only
+  after each `ruff check` under `&&`, `;`, `||`, newlines and `uvx`; a stop
+  during the lint reaps the group; a setup exit of 3 reaches
+  `verify.json` as `reviewer_setup_exit`.
+- Review: pass. Governance boolean: no. No invented caps. Decided by
+  default 10 holds: a forced `changes` would be a new gate, and `failed`
+  would rerun with no way to Tom. No path left where the kernel follows a
+  link in the checkout.
+
+## Delivery: merge held for Tom's tap
+
+Notes for the merge:
+
+- It is built on 3e1b97989, the tip of 1.4b's docs branch, and 1.4b is
+  delivered, not passed. It merges after 1.4b; if 1.4b is patched, this
+  rebases and its checks run again on the new head.
+- Not blocking: a reviewer setup that exits nonzero has no committed test;
+  a lint command that already passes `--output-format` gets the flag
+  twice and ruff exits 2 (the valor spec does not).
