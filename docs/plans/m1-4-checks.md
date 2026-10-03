@@ -115,7 +115,7 @@ whole pipeline on its own branch, stacked on the one before.
 |---|---|---|---|
 | **1.4a** | Kernel workspace provisioning (per-task clone, bare origin, kernel mirror read by the merge, `push_url`, per-task Postgres and Redis, project specs, `start --project`); per-turn `TMPDIR` and Claude Code config; fresh-session machinery; the critique runner; the fold fix; absorbs the replay teardown, shared role, and test-performer debts | nothing (waits for, or carries, 1.2's replace-ref fix) | `critique` |
 | **1.4b** | Frozen case sets for breadth and governance, routing on the entry check; the test runner (breadth, then suite at base and head in fresh checkouts) and the docs runner (own checkout, path drop, governance after the turn) | nothing (live judgement spend metered, expected about $1, through the builder's own key directory) | `test`, `docs` |
-| **1.4d** | The GitHub credential for the merge, held in the kernel key directory; the merge-target list; `merge_url` honoured; transcript copies with digests; performers registered per task; awaitable performers | choosing Valor's account or his own, creating the token, and writing the merge-target list, for the one live push; everything else is built and tested against a local smart-HTTP server | none |
+| **1.4d** | The GitHub credential for the merge, held in the kernel key directory; the merge-target list; `merge_url` honoured; transcript copies with digests; performers registered per task; awaitable performers | granting the merge targets for the one live push (the token is in the vault); everything else is built and tested against a local smart-HTTP server | none |
 | **1.4c** | The container verifier (kernel-built images, a fresh VM per verification, RAM measured) and the review runner (Opus, blind, governance first); the `verdict` command deleted | installing `container` and Rosetta, starting the container system | `review`; the command is deleted |
 
 **Order: a, b, d, c.** 1.4a first because every runner needs provisioned
@@ -755,23 +755,14 @@ was decided by default. It has no questions for Tom.
 
 ### The credential
 
-- **Whose token: two rollout options, Tom chooses** (Questions, 3). The
-  code is the same for both; only who owns the token differs.
-  - **Recommended (the driving session's decision, Tom to confirm): a
-    GitHub account of Valor's own**, added to `tomcounsell/ai` as a
-    collaborator with write access, holding a fine-grained token for that
-    repository (Contents read and write; Metadata read is implied; nothing
-    else; 90-day expiry; named `valor-kernel-push`). Because it is not
-    Tom, a repository ruleset on `main` (restrict updates, Valor not on the
-    bypass list) makes GitHub itself refuse any push of Valor's to `main`,
-    whatever the kernel does. A second ruleset may let Valor update only
-    the rebuild branch.
-  - **Fallback: Tom's own fine-grained token** with the same scope. No
-    ruleset can refuse a push Tom himself could make, so with this token
-    only the kernel's restrictions keep it off `main`.
-  - Either way the kernel refuses `main` on its own (below). A classic
-    token's `repo` scope reaches every repository its owner has; a GitHub
-    App is more machinery than one repository needs.
+- **Whose token** (Questions, 3, answered): Valor's own account
+  `valorengels`, a collaborator with write access to `tomcounsell/ai`,
+  holding a classic token with the `repo` scope that expires 2026-12-31.
+  A fine-grained token cannot reach a repository of a user account. The
+  classic token reaches every repository the account can write to, so the
+  merge-target list and the default-branch refusal are the restriction,
+  plus a ruleset on `main` with `valorengels` off the bypass list once Tom
+  adds it. Full design: [m1-4d-credential.md](m1-4d-credential.md).
 - **Where the merge may land.** Only a (URL, branch) pair granted by a
   `merge_target.granted` ledger row (`python -m core merge-target add URL
   BRANCH --note TEXT`, Tom's alone, never role-played; see Project specs),
@@ -981,15 +972,11 @@ on a toy candidate with a container rerun.
    `container system start`, which registers its launch agents and asks to
    download its default Linux kernel. Before 1.4c's build. The builder
    then pulls the pinned Debian base image once.
-3. **The GitHub credential, one of two options** (1.4d; Questions, 3).
-   *Recommended:* create a GitHub account for Valor, add it to
-   `tomcounsell/ai` as a collaborator with write access, add a repository
-   ruleset on `main` restricting updates with Valor not on the bypass list,
-   and create Valor's fine-grained token for the one repository.
-   *Fallback:* create Tom's own fine-grained token with the same scope.
-   Either way, put it in the vault `.env` as `GITHUB_PUSH_TOKEN` and run
-   `python -m core github-key` from the kernel checkout. Needed only for
-   1.4d's live push and for the first real merge.
+3. **The GitHub credential** (1.4d; Questions, 3): the token is in the
+   vault `.env` as `GITHUB_PUSH_TOKEN`; the build session runs
+   `python -m core github-key` from the kernel checkout at 1.4d's rollout.
+   Tom adds a ruleset on `main` with `valorengels` off the bypass list when
+   he can; nothing waits for it.
 4. **Grant the merge targets**: `python -m core merge-target add
    https://github.com/tomcounsell/ai.git <rebuild branch> --note "..."` (and
    the scratch branch for the live test), from the kernel checkout. Needed
@@ -1113,8 +1100,8 @@ on a toy candidate with a container rerun.
 - Container: 2 GB and 4 CPUs per VM by default, no network at run time,
   three dependency images kept per project.
 - Transcripts: deltas per turn, 50 MB cap per copy.
-- The token: fine-grained, one repository, Contents read and write, 90
-  days, owned by Valor's account unless Tom picks his own.
+- The token: Valor's classic `repo` token (Tom's answer to Questions, 3),
+  restricted by the merge-target list and the default-branch refusal.
 - Live spend for the milestone's builds is metered, expected about $8 in
   all, each live test declaring its spend; nothing refuses or pauses on
   money.
