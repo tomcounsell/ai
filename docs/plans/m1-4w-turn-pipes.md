@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4w-turn-pipes
 type: bug
-status: built
+status: merged
 ---
 
 # 1.4w A turn's output through pipes
@@ -109,3 +109,24 @@ with `stdout=PIPE`, `stderr=STDOUT`, unbuffered; a thread copies the pipe
 into `setup/<n>.log`; after `wait()` the `finally` reaps the mark, then
 joins the copy. The new node setup test failed on the old code (exit -6,
 SIGABRT) and passes. Suite 1011 passed, 19 skipped; `ruff check` clean; `ruff format --check` flags only the two known docs files. No live spend this round.
+
+## Merged
+
+- Checks on 8d6ecd008, base 460943b8a: test pass (base 1007 passed, 19
+  skipped; head green; probes of a stop mid-turn, a setsid child holding
+  the pipes, stderr-only and empty output, unread stdin, and an
+  interrupted setup command all pass), review pass (governance no), docs
+  no_change.
+- Live: the critique at `reviewer_openai` on Pi passes in a provisioned
+  task ($0.0157), and a working Pi turn passes ($0.0182). This closes the
+  3b rollout's failed live case. Build round 1 spent $0.0156.
+- Suite at merge: 1011 passed, 19 skipped; `ruff check` clean;
+  `ruff format --check` flags only `docs/bridges/telegram.md` and
+  `docs/plans/m2-1-port.md`.
+- Backup before merge: `valor_rebuild-20261003T223601Z.dump`.
+- Fast-forwarded `valor-cori-rebuild` to 8d6ecd008. No rollout steps.
+- Follow-ups: a cancelled `run_turn` leaves the harness running, as
+  before, and it now blocks once its pipe fills; a write error in the
+  setup copy thread leaves the log short without the step saying so; an
+  unsandboxed setsid platform binary holding the pipes would hold the
+  turn, which no harness can reach.
