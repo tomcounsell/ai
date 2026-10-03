@@ -69,15 +69,15 @@ the task starts:
 | `harness` | the harness's settings for the task, its isolation included |
 | `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
-The text a turn receives is **dispatched**: rendered as the turn starts,
-the persona first (`persona/`, from the kernel's checkout), then the Brief
-with the task's commitments, every correction in force, the signal channel
-(how the turn reaches Tom, listing the effects the registered performers
-offer), and the stage file for the state the turn runs in
-(`skills/sdlc/<state>.md`); a fresh session gets the verdict channel
-(`skills/sdlc/verdict.md`) instead. `turn.started` records the dispatched
-text whole, its SHA-256, the persona's SHA-256 and size, and the correction
-numbers it carried, so what a turn was told is a lookup.
+The text a turn receives is **dispatched**: rendered as the turn starts, the
+persona first (`persona/`, from the kernel's checkout), then the Brief with
+the task's commitments, every correction in force, the signal channel (how
+the turn reaches Tom, with the registered performers' effects), and the
+stage file for its state (`skills/sdlc/<state>.md`); a fresh session gets
+the verdict channel (`skills/sdlc/verdict.md`) instead. `turn.started`
+records the dispatched text whole, its SHA-256, the persona's SHA-256 and
+size, and the correction numbers it carried, so what a turn was told is a
+lookup.
 
 **State.** A task's state is the SDLC state machine's, folded from its
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
@@ -595,6 +595,5 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
   macOS user for turns: the gateway gives visibility and honest metering, not a
   hard wall. Effects on shared targets still leave only through the
   broker, which runs outside the sandbox.
-- **One provider today.** Until a second is metered, the reviewer is the
-  builder's model in a blind fresh session, and the audit sample carries
-  more weight.
+- **One harness today.** The reviewer is the builder's model in a blind
+  fresh session, so the audit sample carries more weight.
