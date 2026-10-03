@@ -140,6 +140,13 @@ def commit(cwd, path: str, text: str, message: str = "change") -> str:
     return git(cwd, "rev-parse", "HEAD")
 
 
+def keep_docs(b, cwd, head: str) -> str:
+    """A docs head kept in the mirror under `refs/valor/docs/`, as the docs
+    runner keeps one, for tests that record a docs verdict by hand."""
+    git(b.mirror, "fetch", "-q", str(cwd), f"{head}:refs/valor/docs/{head}")
+    return head
+
+
 def workspace(tmp_path: Path) -> tuple[Path, Path]:
     """A work branch at the base commit and a bare origin with `main` at the
     base and HEAD naming `main`, as `scripts/replay_workspace.py` makes."""

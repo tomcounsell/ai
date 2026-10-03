@@ -159,8 +159,8 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
-    """The runner for each state and check this kernel can run. Review and
-    docs have none: their verdicts are recorded by hand (`verdict`)."""
+    """The runner for each state and check this kernel can run. Review has
+    none: its verdict is recorded by hand (`verdict`)."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
@@ -169,6 +169,7 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         State.PATCH: _working,
         State.CRITIQUE: fresh.critique_runner(_fresh_for),
         Check.TEST: checks.test_runner(judgement_port),
+        Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port),
     }
 
 
@@ -399,7 +400,6 @@ async def _verdict(conn, args) -> str:
         args.verdict,
         findings=args.finding,
         governance=[_instance(g, args) for g in args.governance],
-        head=args.head,
         **who,
     )
     await verdicts_.ensure_merge(conn, args.task_id)
@@ -646,7 +646,6 @@ def main() -> None:
     verdict.add_argument("--summary")
     verdict.add_argument("--incident")
     verdict.add_argument("--mission-item")
-    verdict.add_argument("--head")
     verdict.add_argument("--by", default="tom")
     verdict.add_argument("--via", default="the command line")
     verdict.add_argument("--role-played", action="store_true")
