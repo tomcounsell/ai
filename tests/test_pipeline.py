@@ -1157,9 +1157,7 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
     async def test_runner(ctx: router.Context) -> dict:
         ran.append(ctx.check)
         async with await db.connect(ctx.dsn) as conn:
-            await verdicts.record_check(
-                conn, ctx.task_id, Check.TEST, "pass", leg="test runner", turn_id="t1", model="m"
-            )
+            await verdicts.record_check(conn, ctx.task_id, Check.TEST, "pass", **scripted.MANUAL)
         return {"status": "moved"}
 
     async def go():

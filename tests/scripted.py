@@ -351,10 +351,13 @@ def toy_repo(tmp_path: Path) -> Path:
 
 
 async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", services=(),
-                      **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
+                      files: dict[str, str] | None = None, **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
     """A task on a workspace the kernel provisioned from a toy repository,
-    under `tmp_path/work`, judged by the real judge runner."""
+    under `tmp_path/work`, judged by the real judge runner. `files` are
+    committed to the toy repository first, so the base holds them."""
     src = toy_repo(tmp_path)
+    for path, text in (files or {}).items():
+        commit(src, path, text, f"add {path}")
     spec = kws.Spec.from_dict(
         {
             "name": "toy",

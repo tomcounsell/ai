@@ -22,7 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import broker, git, judgement, judgement_sites, ledger, machine, tasks, workspace
+from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks, workspace
 from core.machine import Check, State
 
 MANUAL_STAGES: dict[str, State | Check] = {
@@ -74,11 +74,19 @@ def _manual(leg: str, by: str, via: str, role_played: bool) -> dict[str, Any]:
     return {"provenance": ledger.provenance(by, via, role_played)} if leg == "manual" else {}
 
 
-def _session_leg(leg: str, turn_id: str | None, model: str | None) -> dict[str, Any]:
+def _session_leg(
+    leg: str, turn_id: str | None, model: str | None, suites: list[int] | None = None
+) -> dict[str, Any]:
     """A verdict a fresh session's turn produced names that turn and its
-    model; one with neither is refused."""
+    model; one with neither is refused. A `kernel` verdict (the test
+    runner's, which runs no model turn) names the `suite.ran` rows it read
+    in place of a turn."""
     if leg == "manual":
         return {}
+    if leg == "kernel":
+        if not suites:
+            raise VerdictRefused("a kernel verdict names the suite.ran rows it read")
+        return {"suites": list(suites)}
     if not turn_id or not model:
         raise VerdictRefused(f"a {leg} verdict names the turn that produced it and its model")
     return {"turn_id": turn_id}
@@ -187,12 +195,14 @@ def _instances(workspace: str, older: str, newer: str, specs: Iterable[InstanceS
 
 
 async def record_check(
-    conn, task_id: str, check: Check, verdict: str, *, findings: Iterable = (),
+    conn, task_id: str, check: Check, verdict: str | None, *, findings: Iterable = (),
     governance: Iterable[InstanceSpec] = (), head: str | None = None, command: str | None = None,
     failures: Iterable[str] = (), behaviors: Iterable[str] = (), leg: str = "manual",
     model: str | None = None, usd_micros: int = 0, by: str = "tom", via: str = "the command line",
     role_played: bool = False, breadth: str | None = None, governance_from: Iterable[str] | None = None,
     notes: Mapping[str, Mapping[str, Any]] | None = None, turn_id: str | None = None,
+    deleted_at_head: Iterable[str] = (), failing_at_base: Iterable[str] = (),
+    suites: Iterable[int] | None = None,
 ) -> machine.Fold:  # fmt: skip
     """Record one branch's verdict on the current candidate. Returns the
     fold after it; when it completes a join to `merge`, `task.delivered` is
@@ -201,7 +211,13 @@ async def record_check(
     `breadth` (test only) names the candidate's breadth judgement: the
     listed behaviors come from it and the verdict is computed (any failure
     `red`, else any behavior `gaps`, else `pass`); a `verdict` that
-    disagrees is refused. `governance_from` (review and docs) names one
+    disagrees is refused; a `kernel` verdict (the test runner's) may pass
+    `verdict` None and have it computed. While breadth has no calibration
+    record (`judgement_tasks.BREADTH.calibrated` is None) its behaviors are
+    information only: listed under `breadth.information` and in the
+    delivery, never `gaps`. A test, review, or docs verdict not recorded by
+    hand must name its judgements (`breadth`, `governance_from`).
+    `governance_from` (review and docs) names one
     governance judgement per hunk of the check's diff: the instances are the
     hunks the kernel's table makes instances, together with any `governance`
     the reviewer named (a reviewer adds caution, never removes it), and
@@ -210,6 +226,15 @@ async def record_check(
     verdict as unanswered, so the branch has none and the next run asks
     again."""
     failures, behaviors = list(failures), list(behaviors)  # once: a generator is read one time
+    suites = list(suites) if suites is not None else None
+    if leg != "manual" and check is Check.TEST and breadth is None:
+        raise VerdictRefused("a test verdict not recorded by hand names its breadth judgement")
+    if leg != "manual" and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
+        raise VerdictRefused(f"a {check.value} verdict not recorded by hand names its governance judgements")
+    if leg == "kernel" and check is not Check.TEST:
+        raise VerdictRefused("only the test branch has a kernel leg")
+    if verdict is None and leg != "kernel":
+        raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CHECKS)
@@ -222,7 +247,7 @@ async def record_check(
             "leg": leg,
             "model": model,
             "usd_micros": usd_micros,
-            **_session_leg(leg, turn_id, model),
+            **_session_leg(leg, turn_id, model, suites),
             **_manual(leg, by, via, role_played),
         }
         specs = list(governance)
@@ -242,17 +267,26 @@ async def record_check(
                 raise VerdictRefused(
                     "with a breadth judgement the behaviors come from it, not from the caller"
                 )
-            behaviors = found["behaviors"]
+            calibrated = judgement_tasks.BREADTH.calibrated is not None
+            behaviors = found["behaviors"] if calibrated else []
             computed = "red" if failures else ("gaps" if behaviors else "pass")
+            if verdict is None:
+                verdict = payload["verdict"] = computed
             if verdict != computed:
                 raise VerdictRefused(
                     f"with these failures and this breadth judgement the verdict is {computed}"
                 )
             payload["breadth"] = {k: found[k] for k in ("judgement_id", "actions", "abstained", "model",
                                                          "usd_micros", "guard_id")}  # fmt: skip
+            if not calibrated:
+                # Breadth has no calibration record yet: what it lists is shown, never acted on.
+                payload["breadth"]["information"] = found["behaviors"]
+                payload["breadth"]["guard_id"] = None
         if check is Check.TEST:
             payload["command"] = command
             payload["failures"] = failures
+            payload["deleted_at_head"] = list(deleted_at_head)
+            payload["failing_at_base"] = list(failing_at_base)
             payload["behaviors"] = behaviors
             payload["findings"] += [{"kind": "test failure", "text": t} for t in failures]
             payload["findings"] += [{"kind": "untested behavior", "text": t} for t in behaviors]
@@ -396,6 +430,7 @@ def _delivery(f: machine.Fold, rows: list[dict], event_id: int) -> dict[str, Any
         "verdicts": {ch.value: {"verdict": v.verdict, "event_id": v.event_id} for ch, v in f.checks.items()},
         "findings": [{"source": x.source, "kind": x.kind, "text": x.text} for x in f.join.findings],
         "gaps": (test.payload.get("behaviors") if test else None) or [],
+        "information": ((test.payload.get("breadth") or {}).get("information") if test else None) or [],
         "scope": (f.plan or {}).get("scope") or [],
         "awaiting_grant": [{"id": i.id, "path": i.path, "summary": i.summary} for i in f.ungranted()],
     }

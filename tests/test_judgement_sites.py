@@ -9,6 +9,7 @@ Live spend: none.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import subprocess
@@ -22,6 +23,7 @@ from core import (
     guards,
     judgement,
     judgement_sites,
+    judgement_tasks,
     ledger,
     machine,
     router,
@@ -206,6 +208,16 @@ async def record_test(dsn, task, judgement_id, verdict, failures=()):
         )
 
 
+@pytest.fixture
+def breadth_calibrated(monkeypatch):
+    """Breadth as it is once its calibration record has landed: its
+    behaviors decide `gaps`. Uncalibrated, they are information only."""
+    monkeypatch.setattr(
+        judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
+    )
+
+
+@pytest.mark.usefixtures("breadth_calibrated")
 @pytest.mark.parametrize(
     ("answer", "failures", "verdict", "listed"),
     [
@@ -242,6 +254,7 @@ def test_the_test_verdict_is_computed_from_the_failures_and_the_breadth_row(
         assert decided["guard_id"] == machine.GUARD_BREADTH
 
 
+@pytest.mark.usefixtures("breadth_calibrated")
 def test_breadth_left_unanswered_reruns_then_lists_breadth_not_judged(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"status": 503})
@@ -627,6 +640,7 @@ def test_breadth_splits_test_paths_from_the_rest():
     assert not any(judgement_sites.is_test_path(p) for p in code)
 
 
+@pytest.mark.usefixtures("breadth_calibrated")
 def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": gaps()})
