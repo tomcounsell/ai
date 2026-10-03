@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4u-caps
 type: bug
-status: delivered-not-passed
+status: merged; see m1-4u-records.md, Merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -593,3 +593,5 @@ Scope: the review of patch round 2 (`changes`, F1 and F2), and the remaining uns
 - **F2.** The Done rows for the fallback leg and the service programs, and items 3 and 11, describe the code as it is and name the tests that exist.
 - **Remaining unsourced limits.** Recorded under Decided by default; not changed here.
 - No new cap, guard or retry.
+
+Merged; the record is in [m1-4u-records.md](m1-4u-records.md).
