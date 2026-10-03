@@ -87,7 +87,7 @@ def owned(channel: str) -> list[str]: ...
   marked form (`-100...` for a group), so the `sent` index matches.
 - **`highest` (D3)** is the largest `message_id` recorded for the chat,
   compared as an integer, for channels with integer ids; a paging hint
-  only. Email has no cursor; it polls UNSEEN SINCE for owned senders.
+  only. Email has no cursor; it searches UNSEEN SINCE for owned senders after each IDLE wake.
 - **`lowest` (D32)** is the smallest integer `message_id` recorded for
   the chat, or None: a gap fill of a chat with no seen entry stops there,
   by membership, not at the high-water mark.
