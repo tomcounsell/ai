@@ -78,8 +78,8 @@ What the kernel must never do with any of it:
   claim. Both are read through `read_turn_file`. When the build shows the
   suite's user can write `/out`, `verify.json` says the result is the
   candidate's claim (`result_owner: "candidate"`).
-- Leave a VM, a builder, or the container system running past a stop, a
-  timeout, or a killed kernel.
+- Leave a VM, a builder, or the container system running past a stop, an
+  interrupt, or a killed kernel.
 
 ## Design
 
@@ -166,9 +166,9 @@ kernel-written `spec.json`. The build runs the spec's own setup commands
 with the network open, uv commands given `--no-install-project` (so a
 spec's `uv sync --frozen --extra dev` installs its extras). Each build
 runs in a fresh builder with `--no-cache`, labelled `valor.build`, deleted
-after. The build is an async subprocess raced against `runs._stop_heard`
-and `settings.setup_timeout_s`; a stop or a timeout kills and deletes the
-builder.
+after. The build has no timeout: it is an async subprocess in its own
+process group, raced against `runs._stop_heard`, and a stop or an
+interrupt kills the group, then kills and deletes the builder.
 
 **Base and head images.** The base runs in the dependency image of the
 base's manifests; the candidate in the image of its own. When the two
@@ -218,9 +218,10 @@ null and a memory kill is read from an exit of 137 with the kernel's OOM
 line in `dmesg`.
 
 The CLI call is an async subprocess in its own session, raced against
-`runs._stop_heard` and `settings.setup_timeout_s` plus twice
-`settings.suite_timeout_s`, one for the suite and one for the lint
-(1.4b's settings, as part one times them; no new limit). On a stop or a timeout:
+`runs._stop_heard`. Setup in the VM has no timeout; `run.sh` runs the
+suite and the lint each under `timeout` with `settings.suite_timeout_s`
+(passed in `spec.json`, as part one times them; no new limit), and a
+timed-out suite or lint is `cause: commit`. On a stop or an interrupt:
 `container kill`, then `container delete --force`, never a graceful stop
 (machine.md: a graceful stop left the workload running). Every run ends
 in `container delete --force`.
@@ -280,7 +281,8 @@ host run covers all of them.
 
 `verify_memory_mb` (`VALOR_VERIFY_MEMORY_MB`, default 2,048, then set from
 the measurement) and `verify_cpus` (`VALOR_VERIFY_CPUS`, 4). The VM needs
-both to start; neither is a cap on work. Timeouts are 1.4b's.
+both to start; neither is a cap on work. The only timeout is 1.4b's
+suite timeout, on the suite and the lint.
 
 ### RAM, measured
 
@@ -509,7 +511,7 @@ item 7 in part one).
    Images).
 8. Orphan cleanup was too narrow: any task's run start reaps every
    labelled VM and builder when the lock is free; builds are raced
-   against a stop and timed (Runtime; Images).
+   against a stop (Runtime; Images).
 9. The spec's source was wrong and its rendering unspecified: the spec is
    the task document's, written into the VM as `spec.json`; `run.sh`
    renders `env`, `{port}`, `{passfile}`, and the roles; dependency images
@@ -543,6 +545,8 @@ are part one's (m1-4c-review.md); 2 and 12 are handled here.
     VM is reused by base sha, base image digest, `memory_mb`, and
     `where`; part one's key carries `where`, so no host result is reused
     for a VM run; `memory_mb` in every VM key, so a raised default reruns
-    a memory kill; the run's time limit adds lint's `suite_timeout_s`;
+    a memory kill; the lint runs under its own `suite_timeout_s` inside the
+    VM (image builds and setup have no timeout, `setup_timeout_s` being
+    removed by 1.4u);
     `read_turn_file` is cited for its walk only (Runtime; The run;
     Reading the result).
