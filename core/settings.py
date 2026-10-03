@@ -51,6 +51,9 @@ class Price:
     cache_write_1h: float
     cache_read: float
     checked: date
+    # US dollars per thousand server-side web searches
+    # (`usage.server_tool_use.web_search_requests`).
+    web_search_per_1k: float = 10.00
 
 
 # Checked against https://platform.claude.com/docs/en/about-claude/pricing.
@@ -64,6 +67,79 @@ PRICES: dict[str, Price] = {
     "claude-sonnet-5": Price(2.00, 10.00, 2.50, 4.00, 0.20, date(2026, 10, 1)),
     "claude-haiku-4-5": Price(1.00, 5.00, 1.25, 2.00, 0.10, date(2026, 10, 1)),
 }
+
+
+@dataclass(frozen=True)
+class OpenAIRates:
+    """US dollars per million tokens at one service tier: input, cached
+    input (a cache read), a cache write, and output."""
+
+    input: float
+    cached: float
+    cache_write: float
+    output: float
+
+
+@dataclass(frozen=True)
+class OpenAIPrice:
+    """One OpenAI model's prices: per service tier, the rates up to the
+    long-context threshold and the rates for a whole request whose input is
+    above it; the model's context window and maximum output; the day they
+    were checked."""
+
+    tiers: dict[str, tuple[OpenAIRates, OpenAIRates]]
+    long_context_above: int
+    context_window: int
+    max_output: int
+    checked: date
+
+
+# Checked against https://developers.openai.com/api/docs/pricing and
+# https://developers.openai.com/api/docs/models/gpt-6.1-sol. Kept apart from
+# `PRICES`, so the Anthropic route never prices an OpenAI model. A model
+# absent here, or a tier absent from its entry, has no price, and the
+# gateway answers its request with a 400.
+OPENAI_PRICES: dict[str, OpenAIPrice] = {
+    "gpt-6.1-sol": OpenAIPrice(
+        tiers={
+            "default": (OpenAIRates(2.00, 0.10, 2.50, 10.00), OpenAIRates(4.00, 0.20, 5.00, 15.00)),
+            "flex": (OpenAIRates(1.00, 0.05, 1.25, 5.00), OpenAIRates(2.00, 0.10, 2.50, 7.50)),
+            "fast": (OpenAIRates(4.00, 0.20, 5.00, 20.00), OpenAIRates(8.00, 0.40, 10.00, 30.00)),
+        },
+        long_context_above=272_000,
+        context_window=1_050_000,
+        max_output=128_000,
+        checked=date(2026, 10, 3),
+    ),
+}
+# Tier names the API accepts for a priced tier.
+OPENAI_TIER_ALIASES: dict[str, str] = {"priority": "fast"}
+
+
+@dataclass(frozen=True)
+class OpenAIToolFee:
+    """A hosted tool OpenAI bills per call: US dollars per thousand calls,
+    the output item type each call shows as, and the day it was checked."""
+
+    usd_per_1k: float
+    item: str
+    checked: date
+
+
+# Same page. A tool type matches its line exactly or by a dated or preview
+# suffix (`web_search_preview`). A tool billed by something the response
+# does not count (a container session, an image model's own rates) has no
+# line, so a request using it has no price.
+OPENAI_TOOL_FEES: dict[str, OpenAIToolFee] = {
+    "web_search": OpenAIToolFee(10.00, "web_search_call", date(2026, 10, 3)),
+    "file_search": OpenAIToolFee(2.50, "file_search_call", date(2026, 10, 3)),
+}
+# Tools billed only as the model's tokens. `shell` is here only with a
+# local environment; a hosted one runs in a billed container.
+OPENAI_TOKEN_TOOLS = frozenset({"function", "custom", "mcp", "computer_use_preview", "local_shell"})
+# Hosted tools that can sample the model several times in one call.
+OPENAI_LOOPING_TOOLS = frozenset({"web_search", "file_search", "mcp"})
+
 
 # The seats a model fills, by pinned id, never a floating alias: a ledger row
 # has to describe a fixed thing. Editing this is a change inside the trust
@@ -142,6 +218,9 @@ class Settings:
 
     # -- the model provider ---------------------------------------------------
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
+    openai_upstream: str = field(
+        default_factory=lambda: _env("VALOR_OPENAI_UPSTREAM", "https://api.openai.com")
+    )
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", _claude()))
 
     # -- git, as the kernel runs it: a root-owned install, never looked up on
@@ -248,6 +327,13 @@ class Settings:
         directory, which the gateway sends upstream in place of the dummy a
         turn carries. Absent, the gateway reads the Keychain login."""
         return str(Path(self.pg_passfile).parent / "claude-token")
+
+    @property
+    def openai_keyfile(self) -> str:
+        """The kernel's OpenAI key (`OPENAI_API_KEY=`), in the kernel key
+        directory, which the gateway sends upstream on the OpenAI route.
+        Absent, the route forwards the turn's own key."""
+        return str(Path(self.pg_passfile).parent / "openai-key")
 
     @property
     def pg_socket(self) -> str:

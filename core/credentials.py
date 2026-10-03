@@ -223,26 +223,32 @@ def _parse_env(text: str) -> dict[str, str]:
     return out
 
 
-def read_key(keyfile: str | Path, name: str) -> str:
-    """One key from the kernel's key file, or `MissingKey` naming it."""
+def read_key(keyfile: str | Path, name: str, command: str = "judgement-keys") -> str:
+    """One key from a kernel key file, or `MissingKey` naming it and the
+    command that writes that file."""
     path = Path(keyfile)
     try:
         found = _parse_env(path.read_text())
     except FileNotFoundError:
         raise MissingKey(
-            f"{name}: the key file {path} does not exist; run `python -m core judgement-keys`"
+            f"{name}: the key file {path} does not exist; run `python -m core {command}`"
         ) from None
     value = found.get(name)
     if not value:
-        raise MissingKey(f"{name} is not in {path}; run `python -m core judgement-keys`")
+        raise MissingKey(f"{name} is not in {path}; run `python -m core {command}`")
     return value
 
 
-def copy_keys(vault_env: str | Path, keyfile: str | Path, names: list[str]) -> dict[str, str]:
+def copy_keys(
+    vault_env: str | Path, keyfile: str | Path, names: list[str], sources: dict[str, str] | None = None
+) -> dict[str, str]:
     """Copy `names` from the vault `.env` into the key file (mode 600, its
-    directory 700), atomically. Returns each name's `written`, `kept`, or
-    `missing`; whether a value changed is decided by SHA-256 digest, and no
-    value or part of one is returned."""
+    directory 700), atomically, each read from the vault name `sources`
+    gives it (its own name by default) and stored under its own, replacing
+    any value it had. Returns each name's `written`, `kept`, or `missing`;
+    whether a value changed is decided by SHA-256 digest, and no value or
+    part of one is returned."""
+    sources = sources or {}
     keyfile = Path(keyfile)
     vault = _parse_env(Path(vault_env).read_text())
     keyfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -251,7 +257,7 @@ def copy_keys(vault_env: str | Path, keyfile: str | Path, names: list[str]) -> d
         current = _parse_env(keyfile.read_text()) if keyfile.exists() else {}
         status: dict[str, str] = {}
         for name in names:
-            new = vault.get(name)
+            new = vault.get(sources.get(name, name))
             if not new:
                 status[name] = "missing"
                 continue
