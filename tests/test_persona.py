@@ -25,7 +25,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 ROOT = Path(__file__).resolve().parent.parent
 PERSONA = ROOT / "persona"
-RENDERED = ("identity.toml", "turn.md", "voice.md", "conduct.md", "delivery.md")
+RENDERED = ("identity.toml", "turn.md", "voice.md", "conduct.md", "governance.md", "delivery.md")
 GOVERNANCE = next(
     line for line in (ROOT / "CLAUDE.md").read_text().splitlines() if line.startswith("**Governance")
 )
@@ -94,7 +94,12 @@ def test_the_same_files_render_the_same_bytes():
 
 
 def test_the_governance_paragraph_is_claude_mds_and_follows_it(tmp_path, monkeypatch):
-    assert GOVERNANCE in persona.render(PERSONA)
+    text = persona.render(PERSONA)
+    assert GOVERNANCE in text
+    # Under its own heading, after the conduct and before the delivery format.
+    section = text[text.index("\n## Governance\n") : text.index("\n## Delivery format")]
+    assert GOVERNANCE in section and "### " not in section
+    assert text.index("## Conduct") < text.index("## Governance")
     edited = tmp_path / "CLAUDE.md"
     changed = GOVERNANCE.replace("structure, not sentiment", "structure, never sentiment")
     edited.write_text("# CLAUDE.md\n\n" + changed + "\n")
