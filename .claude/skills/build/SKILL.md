@@ -100,6 +100,10 @@ show.
 | build, patch, stakes 0 or 1 (2.2, 2.3, Pi, 4.2, 4.3) | `sonnet` |
 | test, docs | `sonnet` |
 
+A builder keeps its model across stages when resumed, since its context
+is worth more than the difference. A builder spawned for a stakes 0 or 1
+task is spawned on `sonnet` from its plan stage.
+
 **Names.** Each agent gets a `name` of role and task (`builder-2-1`,
 `critic-2-1-r1`, `test-2-1`, `review-2-1-p1`), so SendMessage reaches it
 and its reports say whose they are.
@@ -110,8 +114,9 @@ and its reports say whose they are.
   builders on `m<id>-<slug>`, docs on `m<id>-docs`;
 - test database, `VALOR_TEST_DB=valor_rebuild_test_<id><role>` with the
   id's dots removed;
-- service ports: Redis and any other server on `64<nn>` where `nn` is the
-  agent's number in this session's list, never 6379 (the live Redis);
+- service ports: a block of ten the lead assigns from 6430 up (6430 to
+  6439, 6440 to 6449, ...), kept in the running table, never 6379 (the
+  live Redis);
 - `unset VIRTUAL_ENV` and only its worktree's own `.venv`.
 
 **Plan files live on `valor-cori-rebuild`.** A builder commits its plan
