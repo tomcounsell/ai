@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from bridges.telegram import inbound
 from tests.telegram_emulator import Emulator
 from tests.telegram_port import chat, connected, emu_chat, machine, received, until
 
@@ -17,7 +16,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 @pytest.fixture(scope="module")
 def emu():
-    e = Emulator(6531).start()
+    e = Emulator().start()
     yield e
     e.stop()
 
@@ -112,29 +111,32 @@ def test_sender_file_name_never_reaches_disk(emu, dsn, tmp_path, c):
     run(go())
 
 
-def test_media_timeout_scales_with_size():
-    assert inbound.media_timeout(0) == 10
-    assert inbound.media_timeout(500_000_000) > 500
-
-
-def test_download_timing_out_twice_is_skipped_with_reason(emu, dsn, tmp_path, c):
+def test_a_stalled_download_holds_up_no_later_message(emu, dsn, tmp_path, c):
     async def go():
-        async with connected(emu.url, dsn, tmp_path, timeout=lambda size: 0.1):
-            emu.inject(
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            slow = emu.inject(
                 int(c.group),
                 "slow",
-                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 1},
+                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
                 data_b64=base64.b64encode(b"x").decode(),
             )
+            after = emu.inject(int(c.group), "after", sender_id=7)
             await until(lambda: received(dsn, c.group))
-            [att] = (await received(dsn, c.group))[0]["attachments"]
-            assert att["skipped"].startswith("download timed out")
-            assert "path" not in att
+            assert [r["message_id"] for r in await received(dsn, c.group)] == [str(after)]
+            assert (int(c.group), slow) in bridge._inflight
+
+            # A pass while the download runs does not mark the chat seen past it.
+            await bridge.fill()
+            assert bridge._seen.get(c.group) < slow
+
+        # The bridge stopped mid-download; the next start's pass takes it again.
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            assert (int(c.group), slow) in bridge._inflight
 
     run(go())
 
 
-def test_a_non_timeout_download_error_is_not_retried(emu, dsn, tmp_path, c):
+def test_a_refused_download_is_listed_skipped_and_not_tried_again(emu, dsn, tmp_path, c):
     async def go():
         async with connected(emu.url, dsn, tmp_path) as bridge:
             calls = []
@@ -188,13 +190,14 @@ def test_reply_chain(emu, dsn, tmp_path, c):
             await until(lambda: _is(newest, orphan))
             assert (await newest())["thread"] == []
 
-            # The walk stops at CHAIN_HOPS.
-            prev = emu.inject(int(c.group), "root", live=False)
-            for i in range(inbound.CHAIN_HOPS + 5):
+            # The walk goes to the root, however long the chain.
+            root = prev = emu.inject(int(c.group), "root", live=False)
+            for i in range(40):
                 prev = emu.inject(int(c.group), f"hop {i}", reply_to=prev, live=False)
             leaf = emu.inject(int(c.group), "leaf", reply_to=prev)
             await until(lambda: _is(newest, leaf))
-            assert len((await newest())["thread"]) == inbound.CHAIN_HOPS
+            chain = (await newest())["thread"]
+            assert len(chain) == 41 and chain[0]["id"] == str(root)
             assert third
 
     run(go())

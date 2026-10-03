@@ -7,22 +7,13 @@ named by its sha256, never by anything the sender chose.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
-from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
 from typing import Any
 
-from bridges.telegram.wire import Msg, Wire
-
-CHAIN_HOPS = 20  # telegram.md: the reply chain is fetched a fixed number of hops
-
-
-def media_timeout(size: int) -> float:
-    """Seconds to wait for a download: ten, or five plus one per MB."""
-    return max(10.0, 5.0 + size / 1_000_000)
+from bridges.telegram.wire import FloodWait, Msg, NotConnected, Wire
 
 
 def topic_and_reply(msg: Msg) -> tuple[str | None, str | None]:
@@ -43,25 +34,17 @@ def skipped(msg: Msg, reason: str) -> dict[str, Any]:
     return {"name": m.name or m.kind, "mime": m.mime, "bytes": m.size, "skipped": reason}
 
 
-async def attachment(
-    wire: Wire, msg: Msg, inbound_dir: Path, *, timeout: Callable[[int], float] = media_timeout
-) -> dict[str, Any]:
+async def attachment(wire: Wire, msg: Msg, inbound_dir: Path) -> dict[str, Any]:
     """Download the message's file into `inbound_dir/telegram/`, named by its
-    sha256. A download that times out is tried once more with twice the
-    time; any other failure, or a second timeout, lists the file as
-    skipped with the reason."""
-    leash = timeout(msg.media.size)
-    data = None
-    for wait in (leash, leash * 2):
-        try:
-            data = await asyncio.wait_for(wire.download(msg), wait)
-            break
-        except TimeoutError:
-            continue
-        except Exception as e:  # noqa: BLE001 - the message is recorded either way
-            return skipped(msg, f"download failed: {type(e).__name__}")
-    if data is None:
-        return skipped(msg, f"download timed out after {leash * 2:.0f} s")
+    sha256. A lost connection or a flood wait is raised, so the message is
+    taken again; Telegram refusing the file lists it as skipped with the
+    reason."""
+    try:
+        data = await wire.download(msg)
+    except NotConnected, FloodWait:
+        raise
+    except Exception as e:  # noqa: BLE001 - the message is recorded either way
+        return skipped(msg, f"download failed: {type(e).__name__}")
     digest = hashlib.sha256(data).hexdigest()
     folder = Path(inbound_dir) / "telegram"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -76,12 +59,12 @@ async def attachment(
 
 async def thread(wire: Wire, msg: Msg) -> list[dict[str, Any]]:
     """The messages this one replies to, oldest first: `{id, text,
-    attachments}`, nothing downloaded. The walk stops at a deleted
-    message, a cycle, or `CHAIN_HOPS`."""
+    attachments}`, nothing downloaded. The walk goes to the root of the
+    chain, and stops early at a deleted message or a cycle."""
     chain: list[dict[str, Any]] = []
     seen = {msg.id}
     nxt = topic_and_reply(msg)[1]
-    while nxt and len(chain) < CHAIN_HOPS:
+    while nxt:
         found = (await wire.get(msg.chat_id, [int(nxt)]))[0]
         if found is None or found.id in seen:
             break
@@ -119,9 +102,7 @@ def fields(msg: Msg, chain: list[dict[str, Any]], attachments: list[dict[str, An
     }
 
 
-async def build(
-    wire: Wire, msg: Msg, inbound_dir: Path, *, timeout: Callable[[int], float] = media_timeout
-) -> dict[str, Any]:
+async def build(wire: Wire, msg: Msg, inbound_dir: Path) -> dict[str, Any]:
     chain = await thread(wire, msg)
-    files = [await attachment(wire, msg, inbound_dir, timeout=timeout)] if msg.media else []
+    files = [await attachment(wire, msg, inbound_dir)] if msg.media else []
     return fields(msg, chain, files)

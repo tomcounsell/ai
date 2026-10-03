@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import time
 
 import pytest
@@ -31,7 +32,7 @@ MAX_TEXT = LIMITS["telegram"].max_text
 
 @pytest.fixture
 def emu():
-    e = Emulator(6533).start()
+    e = Emulator().start()
     yield e
     e.stop()
 
@@ -205,14 +206,14 @@ def test_lookup(emu, dsn, tmp_path, c):
             with pytest.raises(Unknown):
                 await lookup(send(group, "twice"), "t:e4", at)
 
-            # Half of a split send: Unknown.
+            # Half of a split send on screen: the rest is sent, and the whole is found.
             long = "c" * 3000 + " " + "d" * 3000
+            first, second = (p.strip() for p in split_text("telegram", long))
             await perform_fn(send(group, "x"), "t:e5")  # records the start
-            emu.inject(
-                int(group), split_text("telegram", long)[0].strip(), out=True, sender_id=1000, live=False
-            )
-            with pytest.raises(Unknown):
-                await lookup(send(group, long), "t:e5", at)
+            one = emu.inject(int(group), first, out=True, sender_id=1000, live=False)
+            found = await lookup(send(group, long), "t:e5", at)
+            [two] = [m["id"] for m in emu.own(int(group)) if m["text"] == second]
+            assert [e["message_id"] for e in found["sent"]] == [str(one), str(two)]
 
             # Telegram unreachable: Unknown, never None.
             emu.control(down=True)
@@ -259,5 +260,94 @@ def test_clock_skew_a_send_dated_before_the_intent_is_found(emu, dsn, tmp_path, 
             assert m["date"] < at
             found = await lookup(send(group, "skewed"), "t:skew", at)
             assert found["sent"][0]["message_id"] == str(m["id"])
+
+    run(go())
+
+
+def test_a_flood_wait_after_the_first_part_is_waited_out_and_the_send_finishes(emu, dsn, tmp_path, c):
+    group, _ = c
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            long = "e" * 3000 + " " + "f" * 3000
+            effect = await release(dsn, send(group, long))
+            emu.control(flood_send=1, send_after=1)
+            started = time.monotonic()
+            assert (await perform(dsn, bridge, effect)).kind == "done"
+            assert time.monotonic() - started >= 0.9
+            texts = [m["text"] for m in emu.own(int(group))]
+            assert texts == [p.strip() for p in split_text("telegram", long)]
+
+    run(go())
+
+
+def test_a_split_send_cut_off_after_the_first_part_is_finished_by_reconcile(emu, dsn, tmp_path, c):
+    group, _ = c
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            long = "g" * 3000 + " " + "h" * 3000
+            parts = [p.strip() for p in split_text("telegram", long)]
+            effect = await release(dsn, send(group, long))
+            emu.control(lose_send_next=True, send_after=1)
+            assert (await perform(dsn, bridge, effect)).kind == "unknown"
+            assert [m["text"] for m in emu.own(int(group))] == parts[:1]
+            assert (await reconcile(dsn, bridge, effect)).kind == "done"
+            own = emu.own(int(group))
+            assert [m["text"] for m in own] == parts
+            sent = (await outcome(dsn, effect))["result"]["sent"]
+            assert [e["message_id"] for e in sent] == [str(m["id"]) for m in own]
+
+    run(go())
+
+
+class Box:
+    """What `tidy` reads of the outbox: its action types and its due items."""
+
+    def types(self):
+        return [SEND]
+
+    async def due(self):
+        return []
+
+
+def test_a_send_record_is_dropped_once_the_ledger_settles_it(emu, dsn, tmp_path, c):
+    group, _ = c
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            bridge._outbox = Box()
+            effect = await release(dsn, send(group, "in doubt"))
+            emu.control(drop_reply_next=True)
+            assert (await perform(dsn, bridge, effect)).kind == "unknown"
+            await bridge.tidy()
+            assert bridge.sender.starts.names() == [effect]  # still in flight
+            assert (await reconcile(dsn, bridge, effect)).kind == "done"
+            await bridge.tidy()
+            assert bridge.sender.starts.names() == []
+        assert json.loads((tmp_path / "telegram-sends.json").read_text()) == {}
+
+    run(go())
+
+
+def test_an_unreadable_sends_file_is_set_aside_and_reconcile_reads_the_whole_chat(emu, dsn, tmp_path, c):
+    group, _ = c
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            effect = await release(dsn, send(group, "before the file broke"))
+            emu.control(drop_reply_next=True)
+            assert (await perform(dsn, bridge, effect)).kind == "unknown"
+        (tmp_path / "telegram-sends.json").write_text("")
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            assert bridge.sender.starts.lost
+            assert (tmp_path / "telegram-sends.json.unreadable").exists()
+            assert (await reconcile(dsn, bridge, effect)).kind == "done"
+            [m] = emu.own(int(group))
+            assert (await outcome(dsn, effect))["result"]["sent"][0]["message_id"] == str(m["id"])
+            bridge._outbox = Box()
+            await bridge.tidy()
+            # Settled: dropped. (Sends other tests left in doubt are still in flight.)
+            assert not bridge.sender.starts.lost and effect not in bridge.sender.starts.names()
 
     run(go())

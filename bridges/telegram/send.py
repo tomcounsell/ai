@@ -8,16 +8,24 @@ effect id) and its position, so a repeat of one effect repeats its ids and
 two identical effects differ.
 
 What a failure means, as the broker reads it:
-- a definite refusal (`FloodWait`, `Refused`, `NotConnected`) is raised as
-  is: the broker asks `lookup`, finds nothing, and writes `failed`;
+- a definite refusal (`FloodWait`, `Refused`, `NotConnected`) of the first
+  message is raised as is: the broker asks `lookup`, finds nothing, and
+  writes `failed`;
+- a flood wait on a later message, once earlier ones are on screen, is
+  waited out for exactly the seconds Telegram gives, and the send goes on;
 - a send in doubt (`InDoubt`, `DuplicateRandomId`) raises `broker.Unknown`:
   no outcome is written and the outbox's reconcile settles it through
   `lookup`.
 
-Before a key's first send, the chat's newest message id is recorded in
-`telegram-sends.json`. `lookup` scans the account's own messages above
-that id: message ids within a chat only grow, so the send is there
-whatever the Mac's clock and Telegram's dates say.
+Before a send's first message, the chat's newest message id is recorded
+in `telegram-sends.json` under the effect id (or `notice:<id>`). `lookup`
+reads the chat's history above that id and keeps the account's own
+messages: message ids within a chat only grow, so the send is there
+whatever the Mac's clock and Telegram's dates say. When some of a send's
+messages are on screen and the rest are not, `lookup` sends the rest,
+each under its own `random_id`, so a message Telegram already holds is
+refused as a duplicate rather than shown twice; the send then settles as
+done. A notice is finished the same way.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from bridges.telegram.wire import (
     FloodWait,
     InDoubt,
     Msg,
+    Refused,
     Wire,
     WireError,
 )
@@ -87,15 +96,24 @@ def read_file(entry: dict[str, str]) -> tuple[str, bytes]:
     return path.name, data
 
 
+@dataclass(frozen=True)
+class Part:
+    kind: str  # "text" or "file"
+    text: str = ""
+    name: str = ""
+    data: bytes = b""
+
+
 class Sender:
     def __init__(self, wire: Wire, kernel, starts):
         self.wire = wire
         self.kernel = kernel
-        # key -> [chat, the newest message id in it before the key's first send]
+        # effect id or `notice:<id>` -> the newest message id in the chat
+        # before the send's first message
         self.starts = starts
         self.split = kernel.split_text
         self.flood = Flood()
-        self._attempts: dict[str, int] = {}
+        self._attempts: dict[tuple[str, int], int] = {}
         self._logged: set[str] = set()
 
     # -- the performer -----------------------------------------------------
@@ -103,70 +121,117 @@ class Sender:
     async def perform(self, action, key: str) -> dict[str, Any]:
         chat = int(action.target)
         p = action.payload
-        files = [read_file(f) for f in p.get("files") or []]
+        parts = self._parts(p.get("text") or "", p.get("files") or [])
         reply = int(p["reply_to"]) if p.get("reply_to") else None
         topic = int(p["topic_id"]) if p.get("topic_id") else None
+        await self._start(effect_of(key), chat)
         sent = []
-        n = 0
         try:
-            await self._start(key, chat)
-            for part in self.split(p.get("text") or ""):
-                await self.flood.wait()
-                mid = await self.wire.send_text(
-                    chat,
-                    part,
-                    random_id=random_id(key, n),
-                    reply_to=reply if n == 0 else None,
-                    topic_id=topic,
+            for n, part in enumerate(parts):
+                sent.append(
+                    await self._put(
+                        chat, part, random_id(key, n), reply if n == 0 else None, topic, wait_out=n > 0
+                    )
                 )
-                sent.append(self._entry(chat, mid))
-                n += 1
-            for name, data in files:
-                await self.flood.wait()
-                mid = await self.wire.send_file(
-                    chat,
-                    data,
-                    name,
-                    random_id=random_id(key, n),
-                    reply_to=reply if n == 0 else None,
-                    topic_id=topic,
-                )
-                sent.append(self._entry(chat, mid))
-                n += 1
-        except FloodWait as e:
-            self.flood.hit(e.seconds)
-            raise
         except (InDoubt, DuplicateRandomId) as e:
             raise self.kernel.Unknown(f"send in doubt: {e}") from None
         return {"sent": sent}
 
     async def lookup(self, action, key: str, since: str) -> dict[str, Any] | None:
-        """The send under `key`, found by message id. `since` is not
-        needed: ids within a chat only grow, so the scan starts above the
-        newest id recorded before the key's first send, whatever the
-        clocks say. No record: nothing was sent under the key, because
-        the record is written before the first send."""
+        """The send under `key`, found by message id; `since` is not read.
+        None when no message of it is on screen; when some are, the rest
+        are sent under their own `random_id`s and the whole is returned."""
         p = action.payload
-        expected = self._expected(
-            p.get("text") or "", p.get("files") or [], p.get("reply_to"), p.get("topic_id")
-        )
+        chat = int(action.target)
+        reply, topic = p.get("reply_to"), p.get("topic_id")
+        expected = self._expected(p.get("text") or "", p.get("files") or [], reply, topic)
         try:
-            return await self._scan_key(key, expected)
+            after = self._after(effect_of(key))
+            if after is None:
+                return None  # the record is written before the first message
+            found = await self._scan(chat, expected, after)
+            if all(f is None for f in found):
+                return None
+            if all(f is not None for f in found):
+                return {"sent": found}
+            try:
+                parts = self._parts(p.get("text") or "", p.get("files") or [])
+            except (OSError, ValueError) as e:
+                log.warning("send %s cannot be finished: %s", key, e)
+                return None
+            return {"sent": await self._finish(chat, parts, found, key, reply, topic)}
+        except Refused as e:
+            log.warning("send %s cannot be finished: %s", key, e)
+            return None
         except WireError as e:
+            if isinstance(e, FloodWait):
+                self.flood.hit(e.seconds)
             raise self.kernel.Unknown(f"lookup could not read Telegram: {e}") from None
+
+    async def _finish(self, chat, parts, found, key, reply, topic) -> list[dict[str, str]]:
+        """Send the parts not on screen, each under its own `random_id`."""
+        out = list(found)
+        for n, part in enumerate(parts):
+            if out[n] is not None:
+                continue
+            try:
+                out[n] = await self._put(
+                    chat,
+                    part,
+                    random_id(key, n),
+                    int(reply) if (reply and n == 0) else None,
+                    int(topic) if topic else None,
+                    wait_out=False,
+                )
+            except (InDoubt, DuplicateRandomId) as e:
+                raise self.kernel.Unknown(f"finishing the send is in doubt: {e}") from None
+        return out
+
+    async def _put(self, chat, part: Part, rid: int, reply, topic, *, wait_out: bool) -> dict[str, str]:
+        """One message. With `wait_out` (a later message of a send whose
+        earlier ones are on screen) a flood wait is waited out for exactly
+        Telegram's seconds and the message sent; without it the flood wait
+        is raised."""
+        while True:
+            await self.flood.wait()
+            try:
+                if part.kind == "text":
+                    mid = await self.wire.send_text(
+                        chat, part.text, random_id=rid, reply_to=reply, topic_id=topic
+                    )
+                else:
+                    mid = await self.wire.send_file(
+                        chat, part.data, part.name, random_id=rid, reply_to=reply, topic_id=topic
+                    )
+                return self._entry(chat, mid)
+            except FloodWait as e:
+                self.flood.hit(e.seconds)
+                if not wait_out:
+                    raise
+
+    def _parts(self, text: str, files: list[dict]) -> list[Part]:
+        out = [Part("text", text=t) for t in self.split(text)]
+        for f in files:
+            name, data = read_file(f)
+            out.append(Part("file", name=name, data=data))
+        return out
 
     # -- notices -----------------------------------------------------------
 
     async def notice(self, item, outbox) -> None:
-        """Send one due notice to the chat its row names, unless it is
-        already on screen; mark it sent through the outbox."""
+        """Send one due notice to the chat its row names, finishing what
+        is already on screen; mark it sent through the outbox."""
         chat = int(item.chat_id)
-        reply = item.reply_to
-        expected = self._expected(item.text, [], reply, None)
+        key = notice_key(item.notice_id)
+        expected = self._expected(item.text, [], item.reply_to, None)
         try:
-            found = await self._scan_key(self._notice_key(item), expected)
-            if found is None:
-                found = await self._send_notice(item, chat, reply, expected)
+            after = self._after(key)
+            if after is None:
+                await self._start(key, chat)
+                found = [None] * len(expected)
+            else:
+                found = await self._scan(chat, expected, after)
+            sent = await self._finish_notice(item, chat, key, expected, found)
         except self.kernel.Unknown as e:
             self._log_once(item.notice_id, f"notice {item.notice_id}: {e}")
             return
@@ -175,40 +240,62 @@ class Sender:
                 self.flood.hit(e.seconds)
             self._log_once(item.notice_id, f"notice {item.notice_id} not sent: {e}")
             return
-        await outbox.sent(item, found["sent"])
-        self._attempts.pop(item.notice_id, None)
+        await outbox.sent(item, sent)
+        self.starts.drop([key])
 
-    def _notice_key(self, item) -> str:
-        return f"notice:{item.notice_id}"
-
-    async def _send_notice(self, item, chat: int, reply, expected) -> dict[str, Any]:
-        await self._start(self._notice_key(item), chat)
-        while True:
-            attempt = self._attempts.get(item.notice_id, 0)
-            key = f"notice:{item.notice_id}" if attempt == 0 else f"notice:{item.notice_id}:{attempt}"
-            sent = []
-            try:
-                for n, part in enumerate(self.split(item.text)):
+    async def _finish_notice(self, item, chat, key, expected, found) -> list[dict[str, str]]:
+        """Send each part not on screen. A part Telegram holds under its
+        `random_id` but that is not on screen goes again under a new id,
+        so Tom sees it."""
+        out = list(found)
+        reply = int(item.reply_to) if item.reply_to else None
+        for n, part in enumerate(self.split(item.text)):
+            while out[n] is None:
+                attempt = self._attempts.get((item.notice_id, n), 0)
+                rid = random_id(key if attempt == 0 else f"{key}:{attempt}", n)
+                try:
                     await self.flood.wait()
                     mid = await self.wire.send_text(
-                        chat,
-                        part,
-                        random_id=random_id(key, n),
-                        reply_to=int(reply) if (reply and n == 0) else None,
-                        topic_id=None,
+                        chat, part, random_id=rid, reply_to=reply if n == 0 else None, topic_id=None
                     )
-                    sent.append(self._entry(chat, mid))
-            except DuplicateRandomId:
-                found = await self._scan_key(self._notice_key(item), expected)
-                if found is not None:
-                    return found
-                # Telegram holds the id but the notice is not on screen: send
-                # it again under a new id, so Tom sees it.
-                self._attempts[item.notice_id] = attempt + 1
-                continue
-            except InDoubt as e:
-                raise self.kernel.Unknown(f"send in doubt: {e}") from None
-            return {"sent": sent}
+                    out[n] = self._entry(chat, mid)
+                except DuplicateRandomId:
+                    again = await self._scan(chat, expected, self._after(key) or 0)
+                    if again[n] is None:
+                        self._attempts[(item.notice_id, n)] = attempt + 1
+                    out[n] = again[n]
+                except InDoubt as e:
+                    raise self.kernel.Unknown(f"send in doubt: {e}") from None
+        for n in range(len(out)):
+            self._attempts.pop((item.notice_id, n), None)
+        return out
+
+    # -- the records -------------------------------------------------------
+
+    async def _start(self, key: str, chat: int) -> None:
+        """Record the chat's newest message id before the send's first message."""
+        if self.starts.get(key) is None:
+            page = await self.wire.history(chat, limit=1)
+            self.starts.set(key, page[0].id if page else 0)
+
+    def _after(self, key: str) -> int | None:
+        """The id a scan for `key` starts above. With the file lost, a key
+        with no record scans the whole chat: only Telegram can say."""
+        after = self.starts.get(key)
+        if after is None and self.starts.lost:
+            return 0
+        return after
+
+    def keep_only(self, in_flight: set[str]) -> None:
+        """Drop the record of every send the ledger has settled. The
+        records of sends still in flight, when the file was lost, start
+        at the beginning of the chat."""
+        if self.starts.lost:
+            for key in in_flight:
+                if self.starts.get(key) is None:
+                    self.starts.set(key, 0)
+            self.starts.lost = False
+        self.starts.drop([k for k in self.starts.names() if k not in in_flight])
 
     # -- scanning ----------------------------------------------------------
 
@@ -230,43 +317,26 @@ class Sender:
             )
         return out
 
-    async def _start(self, key: str, chat: int) -> None:
-        """Record the chat's newest message id before the key's first send."""
-        if self.starts.get(key) is None:
-            page = await self.wire.history(chat, limit=1)
-            self.starts.set(key, [chat, page[0].id if page else 0])
-
-    async def _scan_key(self, key: str, expected: list[Expected]) -> dict[str, Any] | None:
-        start = self.starts.get(key)
-        if start is None:
-            return None
-        chat, after_id = start
-        return await self._scan(chat, expected, after_id)
-
-    async def _scan(self, chat: int, expected: list[Expected], after_id: int) -> dict[str, Any] | None:
-        """The messages that carry `expected`, found among the account's own
-        messages with ids above `after_id` and not already claimed by a
-        recorded send. One match each: found. None at all: None. Two
-        matches for one, or some found and some not: `broker.Unknown`."""
+    async def _scan(self, chat: int, expected: list[Expected], after_id: int) -> list[dict[str, str] | None]:
+        """For each expected part, the message that carries it among the
+        account's own messages with ids above `after_id` and not already
+        claimed by a recorded send, or None. Two matches for one part:
+        `broker.Unknown`."""
         own = await self.wire.own(chat, after_id=after_id)
         async with self.kernel.conn() as conn:
             claimed = await self.kernel.claimed(conn, "telegram", str(chat))
         pool = [m for m in reversed(own) if str(m.id) not in claimed]  # oldest first
-        sent: list[dict[str, str] | None] = []
+        found: list[dict[str, str] | None] = []
         for exp in expected:
             matches = [m for m in pool if _matches(m, exp)]
             if len(matches) > 1:
                 raise self.kernel.Unknown(f"{len(matches)} messages in chat {chat} match one part")
             if matches:
                 pool.remove(matches[0])
-                sent.append(self._entry(chat, matches[0].id))
+                found.append(self._entry(chat, matches[0].id))
             else:
-                sent.append(None)
-        if all(s is None for s in sent):
-            return None
-        if any(s is None for s in sent):
-            raise self.kernel.Unknown(f"only some parts of the send are in chat {chat}")
-        return {"sent": sent}
+                found.append(None)
+        return found
 
     def _entry(self, chat: int, message_id: int) -> dict[str, str]:
         return {"channel": "telegram", "chat_id": str(chat), "message_id": str(message_id)}
@@ -275,6 +345,15 @@ class Sender:
         if notice_id not in self._logged:
             self._logged.add(notice_id)
             log.warning(text)
+
+
+def effect_of(key: str) -> str:
+    """The effect id a broker key ends in."""
+    return key.rsplit(":", 1)[-1]
+
+
+def notice_key(notice_id: str) -> str:
+    return f"notice:{notice_id}"
 
 
 def _matches(m: Msg, exp: Expected) -> bool:

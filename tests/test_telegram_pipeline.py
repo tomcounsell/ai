@@ -38,7 +38,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 @pytest.fixture
 def emu():
-    e = Emulator(6536).start()
+    e = Emulator().start()
     yield e
     e.stop()
 

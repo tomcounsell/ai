@@ -193,8 +193,10 @@ class TelethonWire:
         out = []
 
         async def scan():
-            async for m in self.client.iter_messages(chat_id, from_user="me", min_id=after_id):
-                out.append(await self._msg(m))
+            # History, not search: search reads an index that can lag a send.
+            async for m in self.client.iter_messages(chat_id, min_id=after_id):
+                if m.out:
+                    out.append(await self._msg(m))
 
         await self._call(scan())
         return out
@@ -204,7 +206,14 @@ class TelethonWire:
         return [await self._msg(m) if m is not None else None for m in found]
 
     async def download(self, msg: Msg) -> bytes:
-        return await self._call(self.client.download_media(msg.raw, file=bytes))
+        try:
+            return await self._call(self.client.download_media(msg.raw, file=bytes))
+        except asyncio.CancelledError:
+            # Telethon cancels a dropped connection's pending requests; only
+            # a cancel of this task is a stop.
+            if asyncio.current_task().cancelling():
+                raise
+            raise NotConnected("the connection dropped during the download") from None
 
     async def mark_read(self, chat_id: int, max_id: int) -> None:
         await self._call(self.client.send_read_acknowledge(chat_id, max_id=max_id))

@@ -26,6 +26,7 @@ class Kernel:
     claimed: Any
     owns: Any
     owned: Any
+    dangling: Any  # effects with an intent and no outcome
     conn: Any  # an async context manager giving one connection
     inbound_dir: str
     serve_tick_s: float
@@ -56,6 +57,7 @@ def from_core(dsn: str | None = None) -> Kernel:
         claimed=intake.claimed,
         owns=intake.owns,
         owned=intake.owned,
+        dangling=broker.dangling,
         conn=conn,
         inbound_dir=str(Path(settings.inbound_dir).expanduser()),
         serve_tick_s=settings.serve_tick_s,
@@ -80,7 +82,7 @@ def seen_path() -> Path:
 
 
 def sends_path() -> Path:
-    """For each send's key, the chat and its newest message id before the send."""
+    """For each send in flight, its chat's newest message id before its first message."""
     return key_dir() / "telegram-sends.json"
 
 

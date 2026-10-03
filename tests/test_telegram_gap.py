@@ -16,7 +16,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 @pytest.fixture
 def emu():
-    e = Emulator(6532).start()
+    e = Emulator().start()
     yield e
     e.stop()
 
@@ -167,7 +167,7 @@ def test_a_failed_receive_drops_the_connection_and_the_reconnect_records_it(emu,
                     raise RuntimeError("the database is down")
                 return await real(conn, inbound)
 
-            bridge.kernel = dataclasses.replace(bridge.kernel, receive=down_once)
+            bridge.kernel = dataclasses.replace(bridge.kernel, receive=down_once, serve_tick_s=0.1)
             mid = emu.inject(int(dm), "while the database is down")
             await until(lambda: not bridge.wire.connected())
             assert await received(dsn, dm) == []
@@ -205,6 +205,61 @@ def test_a_flood_wait_in_gap_fill_holds_later_passes(emu, dsn, tmp_path):
             emu.inject(int(dm), "missed", live=False)
             await bridge.tick()
             assert await received(dsn, dm) == []
+
+    with machine(tmp_path, [dm]):
+        run(go())
+
+
+def test_a_receive_that_keeps_failing_reconnects_once_a_tick_until_a_pass_completes(emu, dsn, tmp_path):
+    dm = chat("dm")
+    emu.control(chats=[emu_chat(dm)])
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            real = bridge.kernel.conn
+            broken = [True]
+
+            def conn():
+                if broken:
+                    raise RuntimeError("the database is down")
+                return real()
+
+            bridge.kernel = dataclasses.replace(bridge.kernel, conn=conn, serve_tick_s=0.25)
+            connects = []
+            wire_connect = bridge.wire.connect
+
+            async def counting():
+                connects.append(1)
+                await wire_connect()
+
+            bridge.wire.connect = counting
+            keep = asyncio.create_task(bridge._keep_connected())
+            mid = emu.inject(int(dm), "while the database is down")
+            await asyncio.sleep(1.1)
+            assert 1 <= len(connects) <= 5  # one per 0.25 s tick, not a tight loop
+            broken.clear()
+            await until(lambda: ids(dsn, dm))
+            assert await ids(dsn, dm) == [str(mid)]
+            assert not bridge._failing
+            keep.cancel()
+
+    with machine(tmp_path, [dm]):
+        run(go())
+
+
+def test_an_unreadable_seen_file_is_set_aside_and_the_pass_starts_at_the_ledger(emu, dsn, tmp_path):
+    dm = chat("dm")
+    emu.control(chats=[emu_chat(dm)])
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path):
+            first = emu.inject(int(dm), "recorded")
+            await until(lambda: ids(dsn, dm))
+        missed = emu.inject(int(dm), "while down", live=False)
+        (tmp_path / "telegram-seen.json").write_text('{"cut sho')
+        async with connected(emu.url, dsn, tmp_path):
+            assert (tmp_path / "telegram-seen.json.unreadable").exists()
+            assert await ids(dsn, dm) == [str(first), str(missed)]
 
     with machine(tmp_path, [dm]):
         run(go())

@@ -7,9 +7,13 @@ by private chats and basic groups (so a chat's ids have gaps), `random_id`
 duplicate detection, and Telegram's trim of leading and trailing
 whitespace. A test injects messages from others (with or without a live
 update), flood waits, a lost connection, a send accepted and its answer
-dropped, and a pause after a send is accepted.
+dropped, a send lost before Telegram takes it, and a pause after a send
+is accepted. `send_after` lets that many sends through before a send fault
+applies.
 
-    python -m tests.telegram_emulator --port 6531
+    python -m tests.telegram_emulator
+
+The server listens on a free port and prints it as its first line.
 
 `EmulatorWire` implements `bridges.telegram.wire.Wire` over it: live
 updates by long poll, handled one at a time; a lost connection on a send
@@ -19,10 +23,10 @@ as a child process and drives it from a test.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import base64
 import json
+import socket
 import subprocess
 import sys
 import time
@@ -55,6 +59,8 @@ class State:
         self.randoms: dict[tuple[int, int], int] = {}
         self.dedup = True
         self.flood_send = 0
+        self.send_after = 0
+        self.lose_send_next = False
         self.flood_connect = 0
         self.flood_history = 0
         self.drop_reply_next = False
@@ -125,6 +131,8 @@ def make_app() -> web.Application:
         for k in (
             "dedup",
             "flood_send",
+            "send_after",
+            "lose_send_next",
             "flood_connect",
             "flood_history",
             "drop_reply_next",
@@ -196,9 +204,16 @@ def make_app() -> web.Application:
         guard()
         b = await body(request)
         chat, rid = b["chat"], b["random_id"]
-        if s.flood_send:
+        if s.send_after and (s.flood_send or s.lose_send_next):
+            s.send_after -= 1
+        elif s.flood_send:
             secs, s.flood_send = s.flood_send, 0
             return err("FLOOD_WAIT", seconds=secs)
+        elif s.lose_send_next:
+            s.lose_send_next = False
+            request.transport.close()
+            await asyncio.sleep(0.05)
+            raise web.HTTPServiceUnavailable()
         if s.dedup and (chat, rid) in s.randoms:
             return err("RANDOM_ID_DUPLICATE")
         text = (b.get("text") or "").strip()
@@ -440,15 +455,20 @@ class EmulatorWire:
 class Emulator:
     """The server as a child process of the test, driven over HTTP."""
 
-    def __init__(self, port: int):
-        self.port = port
-        self.url = f"http://127.0.0.1:{port}"
+    def __init__(self):
+        self.port = 0
+        self.url = ""
         self.proc: subprocess.Popen | None = None
 
     def start(self) -> Emulator:
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tests.telegram_emulator", "--port", str(self.port)]
+            [sys.executable, "-m", "tests.telegram_emulator"], stdout=subprocess.PIPE, text=True
         )
+        line = self.proc.stdout.readline()
+        if not line.strip().isdigit():
+            raise RuntimeError("the emulator did not report its port")
+        self.port = int(line)
+        self.url = f"http://127.0.0.1:{self.port}"
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
@@ -484,10 +504,10 @@ class Emulator:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=6531)
-    args = parser.parse_args()
-    web.run_app(make_app(), host="127.0.0.1", port=args.port, print=None, shutdown_timeout=1)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1], flush=True)
+    web.run_app(make_app(), sock=sock, print=None, shutdown_timeout=1)
 
 
 if __name__ == "__main__":
