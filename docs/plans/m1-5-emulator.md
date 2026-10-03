@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-5-emulator
 type: build
-status: planned; revised after critique round 1, awaiting round 2
+status: building; critique rounds spent
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -143,10 +143,11 @@ reuses it on resume. Nothing else in `core/` changes for it.
 
 The driver is synchronous. It starts its own `Gateway(dsn,
 credential=ClaudeLogin())` on an ephemeral loopback port, on an asyncio
-event loop in a background thread that lives for the invocation; `issue`
-and `retire` are called on that loop through
-`asyncio.run_coroutine_threadsafe`, and the thread closes the gateway on
-exit. `claude_json` becomes:
+event loop in a background thread that lives for the invocation. `issue`
+and `retire` are plain methods, so the driver calls them on that loop by
+wrapping each in a small coroutine handed to
+`asyncio.run_coroutine_threadsafe`; `drain` is a coroutine and goes the
+same way. The thread closes the gateway on exit. `claude_json` becomes:
 
 1. `url = issue(emulator_task, call_id)`, `call_id` a fresh id naming
    the role and round (`stand-in.answer.2`, `judge`).
@@ -157,6 +158,11 @@ exit. `claude_json` becomes:
    `PG`, `VALOR_PG`) and `AI_AGENT` dropped, the same safe-mode,
    tool-less, no-persistence flags as now, and `--model` the pinned id.
 3. `retire(emulator_task)` in a `finally`.
+
+Before any spend is read, and before the gateway closes, the driver runs
+`drain(emulator_task)`, since a call's `gateway.charged` row is written
+after its response ends and can land after the child exits. The result
+records the task's `open_calls`, expected empty.
 
 The call stays a Claude Code call, not a direct API call, because the
 login credential is proven only through Claude Code. `costs.jsonl`, its
@@ -169,8 +175,9 @@ still be judged.
 ### Models (`tests/emulator/stand_in.py`, `tests/emulator/judge.py`)
 
 - The stand-in uses `settings.SEATS["frontier"]` (`claude-opus-5-5`). The
-  `--model` flag stays for a deliberate comparison run and defaults to the
-  seat.
+  driver's `--stand-in-model` flag stays for a deliberate comparison run,
+  its default the seat. The driver's `--model` is the working turn's model
+  and is unchanged.
 - The judge uses a pinned Sonnet id, `JUDGE_MODEL` in `judge.py`. At build
   the alias `sonnet` is resolved once (one tool-less `claude -p --model
   sonnet` call through the gateway, its charged row's model read back),
@@ -183,28 +190,37 @@ still be judged.
 The rev read is the merge's `head_sha` when a merge is held, else the
 candidate. `head_sha` is taken from the payload of the task's
 `effect.held` ledger row whose effect id is `status.merge_effect.effect_id`;
-the candidate from `tasks.status`. `core/` gets no change for this.
-`workspace.blind_checkout(mirror, base, rev, dest)` writes the tree, and
-the stand-in's delivery diff is taken there.
+the candidate from `tasks.status`. `core/` gets no change for this. Diffs
+are taken with `git.trusted` in the task's kernel mirror, a repository no
+turn writes, between the base and that rev.
 
-The judge's diff is base to that rev with `docs/plans/` left out, so it
-compares with the baseline's diffs, which carried no plan document. Each
-result records the diff's size in characters and lines, the paths left
-out, and whether the judge's 70,000 character truncation cut it. The
-pipeline's docs commits stay in the diff; the gate record notes that the
-baseline's diffs had none.
+The judge's diff leaves out one path: the task's own plan document,
+`status.plan.path` (for the #191 trial, `docs/plans/capped-list-field.md`).
+Every other path stays, an edit to a plan document the project already
+holds included. The baseline's candidate diffs carried no plan document
+of the task's own (the reference diffs do carry one). Each result records
+the diff's size in characters and lines, the path left out, and whether
+the judge's 70,000 character truncation cut it. The pipeline's docs
+commits stay in the diff; the gate record notes that the baseline's
+candidate diffs had none.
 
-### The hidden-test tree (`tests/emulator/judge.py`)
+### The hidden-test tree and its profile (`tests/emulator/judge.py`)
 
 The tree lives at `<task_dir>/checks/verify-<run>/`, made fresh by the
-driver with `workspace.fresh_dir` before each verification. `checks/` is
-written only by the kernel and no turn profile lists it, so no turn can
-write the tree. Verification runs the item's `verify` commands under the
-working turn's profile with that one directory added read-write and its
-`TMPDIR` set inside it, with the task's services started, as the baseline
-did. Only the source tree moves, from the turn's `state/work/tmp/verify`
-to this directory; the commands, services, and timeout are the
-baseline's.
+driver before each verification and filled by `git archive` of the rev
+from the kernel mirror, as the baseline's export was. `checks/` is written
+only by the kernel and no turn profile lists it, so no turn can write the
+tree.
+
+Verification runs under the baseline's profile: the working turn profile
+as the baseline ran it, with the temp directories shared, plus that one
+directory read-write and its `TMPDIR` set inside it, with the task's
+services started. `core/workspace.py`'s `turn_profile` takes `tmp`
+(whether the temp roots are shared; default not) and `rw` (paths added
+read-write) for this. The commands, services, timeout, and profile are the
+baseline's, so pop-a's and pso-a's second commands, which write
+`/tmp/*_$$.txt`, run as they did; only the source tree moves, from the
+turn's `state/work/tmp/verify` to this directory.
 
 ### The driver (`tests/emulator/replay.py`)
 
@@ -216,27 +232,35 @@ baseline's.
 - `MAX_FAILED_RUNS` goes. A failed run exits the driver with the outcome
   unset and the failure printed; the next invocation resumes, as an unset
   outcome already does.
+- `release_pushes` approves and releases a held `push_branch` to the
+  run's own origin, and skips every `merge` effect of the task: the
+  current one and every earlier one a later candidate superseded (nothing
+  withdraws them). The exit "an effect other than a local push is held
+  for Tom" fires only for a held effect that is neither.
 - `NO RUNNER` exits the driver with the outcome unset and the stage named.
-  This covers every stage left in `verdicts.MANUAL_STAGES` with no
-  runner registered at gate time: test, review, or docs (docs stays
-  manual while governance's entry check fails). The verdict is recorded
-  through `python -m core verdict` by a fresh Opus subagent, and the next
-  invocation resumes the same task.
-- A task in `merge` whose merge effect is not held (a governance instance
-  awaiting Tom's tap, or a refused payload) exits the driver with the
-  outcome unset and the reason named; it resumes after Tom's tap. The
-  stand-in reviews only when `merge_effect.state == "held"`.
-- At a held merge the stand-in reviews: accept, or its two feedback rounds
-  spent, ends the run with `outcome: held`, the feedback count recorded.
-  Feedback inside the two rounds is recorded and sends the task to patch.
-- A stopped task ends the run with `outcome: stopped`. A task handed to
-  Tom after its loops are spent ends it with `outcome: to tom`.
-- `release_pushes` keeps approving `push_branch` to the local origin and
-  never answers a merge.
+  This covers every stage left in `verdicts.MANUAL_STAGES` with no runner
+  registered at gate time. A fresh Opus subagent records the verdict
+  through `python -m core verdict`, reading a `blind_checkout` from the
+  kernel mirror at the candidate (test, review) or at the docs head
+  (docs), never the turn's workdir. The next invocation resumes the same
+  task.
+- A task in `merge` is read from `tasks.status`, in this order:
+  - `delivery.outcome == "did_not_pass"`: the run ends `outcome: to tom`;
+  - a governance instance not granted, or `join.outcome ==
+    "governance_refused"`: the driver exits with the outcome unset,
+    "awaiting a grant", and resumes after Tom's tap;
+  - `merge_effect.state == "refused"`: the run ends `outcome: to tom`,
+    since no tap re-requests the same payload unless something is granted;
+  - `merge_effect.state == "held"`: the stand-in reviews. Accept, or its
+    two feedback rounds spent, ends the run with `outcome: held`, the
+    feedback count recorded. Feedback inside the two rounds is recorded
+    and sends the task to patch.
+  - otherwise (no merge effect yet): the next `core run`.
+- A stopped task ends the run with `outcome: stopped`.
 - The result gains `emulator_task`, `emulator_spend_usd`,
-  `kernel_spend_usd`, `judge_model`, `stand_in_model`, `attention`
-  (counts by kind), `final_rev`, `merge_effect_id`, and the judge diff's
-  size, exclusions, and truncation.
+  `kernel_spend_usd`, `open_calls`, `judge_model`, `stand_in_model`,
+  `attention` (counts by kind), `final_rev`, `merge_effect_id`, and the
+  judge diff's size, exclusion, and truncation.
 
 ### `/tmp` (`core/workspace.py`)
 
@@ -275,14 +299,17 @@ sockets under the task directory, so nothing the suite needs lives in
 | The `/tmp` profile change and its tests | now |
 | Driver ends, `--run`, result fields | now |
 | Rebase over 1.4b's edits to `replay.py` and `replay_workspace.py` (the item's `project` key) | after 1.4b merges |
-| The equal-counts check under both profiles | after 1.4b (check environments) |
-| The gate runs | after 1.4b, 1.4d, and 1.4c's review runner merge |
+| The equal-output check at both tree locations | after 1.4b (check environments) |
+| The gate runs | after 1.4b, 1.4s, 1.4c part one (the review runner), and 1.4d merge |
 | Merge of this branch | after 1.4d, per the fan-out table |
 
-1.4c's review runner (a host rerun on 1.4b's machinery) merges before the
-gate runs, so review has a runner at gate time. Any stage still in
-`MANUAL_STAGES` without a runner then is handled by the driver's
-`NO RUNNER` exit above.
+1.4c part one (the review runner, a host rerun on 1.4b's machinery)
+registers review unconditionally and merges before the gate runs, so
+review has a runner at gate time. Any stage still in `MANUAL_STAGES`
+without a runner then (docs, while governance's entry check fails) is
+handled by the driver's `NO RUNNER` exit, and the gate record names it as
+hand-played. `python -m core verdict` stays while any check lacks a
+runner, so that exit is usable exactly when it is needed.
 
 1.4b edits `scripts/replay.py` and `scripts/replay_workspace.py`. This
 branch moves them with `git mv` in a commit of its own containing no
@@ -341,6 +368,9 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
   - the gateway runs on its background thread while the driver calls
     synchronously; the token is refused after the call returns and after
     the call raises (retired from the driver's thread);
+  - a fake provider that delays the end of its stream after the body is
+    sent: after `drain`, the spend read equals the charge and
+    `open_calls` is empty;
   - no `costs.jsonl` exists after a run.
 - The emulator task: it folds as calibration; `runs`, `session`,
   `guards`, `verdicts`, and `stop` refuse it; its `task.started` carries
@@ -355,22 +385,30 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
   call still succeeds and returns the same diff; a workdir commit newer
   than the candidate does not appear in it. A second, refused merge
   effect does not change which `effect.held` row is read.
-- Judge diff: a candidate carrying `docs/plans/x.md` yields a diff without
-  it and a result naming it as left out; a diff over 70,000 characters is
-  recorded as truncated with its full size.
-- Hidden-test tree: it is created under `<task_dir>/checks/verify-<run>/`;
-  a write to it under the working turn profile (without the added path)
-  is refused; the verification profile allows it.
+- Judge diff: a candidate adding the task's own `plan.path` and editing
+  another `docs/plans/` file yields a diff without the first and with the
+  second, and a result naming the first as left out; a diff over 70,000
+  characters is recorded as truncated with its full size.
+- Hidden-test tree: it is created under `<task_dir>/checks/verify-<run>/`
+  from the mirror; a write to it under the working turn profile (without
+  the added path) is refused; the verification profile allows it and a
+  write to `/tmp`, as the baseline's did.
 - Driver ends, each with a scripted task:
   - a failed run leaves the outcome unset; the next invocation resumes
     the same task and the same emulator task;
   - `NO RUNNER` for review leaves the outcome unset and names the stage;
     after a `verdict` row the next invocation continues;
-  - a task in `merge` with an ungranted governance instance leaves the
-    outcome unset and the stand-in is not called;
+  - a task in `merge` with an ungranted governance instance, and one
+    whose join is `governance_refused`, leave the outcome unset and the
+    stand-in is not called;
+  - a task whose delivery did not pass ends `to tom`; one whose merge
+    effect was refused ends `to tom`;
   - a held merge with the stand-in accepting ends `held`; one with its
     feedback rounds spent ends `held` with the count; neither answers the
     merge;
+  - a held merge does not trip the left-effect exit; after feedback and a
+    second held merge, the first still does not, and the rev is read from
+    the second; a held effect of another action does trip it;
   - a stopped task ends `stopped`;
   - `--run` names the result file; a name with an outcome is refused
     without `--rebuild`.
@@ -380,9 +418,11 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
   cannot see each other's file, because neither can write it.
 - Non-obvious, run once on this machine after 1.4b and recorded, not in
   the suite: for each gate item, its `verify` commands on base plus
-  `ref/<item>.ref.diff`, from the new tree location, under the old
-  working profile and the new one, give equal hidden-test counts. This is
-  what shows the `/tmp` change does not move a gate number.
+  `ref/<item>.ref.diff`, under the baseline's profile, from the baseline's
+  tree location and from the new one, give the same whole output (the
+  hidden-test counts and the broad suite's base-failure comparison, with
+  paths, timings, and process ids normalised). This is what shows the
+  move of the tree does not move a gate number.
 
 ## Files it changes
 
@@ -404,7 +444,7 @@ Other tasks also change `core/`; the edits here are small and named.
 | `tests/scripted.py`, `tests/test_pipeline.py` | docstring paths |
 | `tests/README.md` | the emulator's place |
 | `core/tasks.py` | `start_calibration` takes optional `via` and `detail` |
-| `core/workspace.py` | the working turn profile denies the temp directories |
+| `core/workspace.py` | the working turn profile denies the temp directories; `turn_profile` takes `tmp` and `rw` for verification |
 | `core/settings.py` | docstring only |
 | `docs/plans/valor-rebuild.md` | the gate line's spend sentence |
 | `docs/emulator.md`, `docs/architecture.md`, `docs/harnesses.md`, `docs/tech-stack.md` | as in Docs fixed |
@@ -418,9 +458,9 @@ Other tasks also change `core/`; the edits here are small and named.
 2. Resolve the judge's Sonnet id once and commit it in `JUDGE_MODEL`.
 3. When 1.4b merges, rebase; confirm the `project` key handling survived
    the rename and the items carry their `project` key. Run the
-   equal-counts check under both profiles and record it.
+   equal-output check and record it.
 4. When 1.4d merges, rebase again. Suite green.
-5. When 1.4c's review runner merges, rebase. Suite green.
+5. When 1.4s and 1.4c part one merge, rebase. Suite green.
 6. Run the gate: `python -m tests.emulator.replay ITEM.json --arm routed
    --run ITEM-gate` for pop-b, pso-a, pop-a, one at a time. On a
    `NO RUNNER` exit a fresh Opus subagent records the named stage's
@@ -428,7 +468,9 @@ Other tasks also change `core/`; the edits here are small and named.
    once an item with no passing run, as `ITEM-gate-2`.
 7. Score the #191 trial's held merge (task `75c0902b6e25`, candidate
    `aeb94f19`, head `1cfb6000`) once with the same judge and hidden
-   tests, as information beside the gate, not as a gate run.
+   tests, as information beside the gate, not as a gate run. It starts an
+   emulator task of its own and writes a new result,
+   `pop-b-trial-scored.json`, leaving `pop-b-routed.json` as it is.
 8. Write the gate record into this file: per item, scores, hidden tests,
    attention, both spends, task ids, held merge ids, judge diff sizes and
    truncation; the judge id; the stand-in change; which verdicts were
@@ -451,11 +493,16 @@ Other tasks also change `core/`; the edits here are small and named.
 - The stand-in is the `frontier` seat; the judge is one pinned Sonnet id
   resolved from the baseline's alias.
 - `head_sha` is read from the `effect.held` row, not added to the fold.
-- The judge's diff leaves out `docs/plans/`; its size and any truncation
-  are recorded.
+- The judge's diff leaves out only the task's own `plan.path`; its size
+  and any truncation are recorded.
 - The hidden-test tree lives at `<task_dir>/checks/verify-<run>/`.
 - `MAX_RUNS` and `MAX_FAILED_RUNS` are removed; a failed run, a
-  `NO RUNNER` stage, and an awaited grant each exit for a resume.
+  `NO RUNNER` stage, and an awaited grant each exit for a resume; a
+  delivery that did not pass and a refused merge end `to tom`.
+- The gate waits for review's runner: 1.4c part one registers it
+  unconditionally, under Tom's rule against invented safeguards. A stage
+  still manual at gate time (docs, while governance's entry check fails)
+  is hand-played, and the gate record names it.
 - The stand-in's two feedback rounds are kept; spending them at a held
   merge still ends `held`.
 - Gate runs use the `routed` arm and are named `<item>-gate`.
@@ -464,10 +511,14 @@ Other tasks also change `core/`; the edits here are small and named.
   milestone states.
 - Inferred key lines are listed in a sidecar; the keys stay
   byte-identical.
-- Hidden verification keeps the baseline's commands, profile, and
-  services; only its source tree moves.
+- Hidden verification keeps the baseline's commands, profile (temp
+  directories shared), services, and timeout; only its source tree moves.
 - The working turn profile denies the temp directories outright rather
-  than per-task subdirectories of them.
+  than per-task subdirectories of them; verification keeps the baseline's
+  shared temp directories.
+- Diffs are read with `git.trusted` in the kernel mirror; the
+  verification tree is a `git archive` from it; a hand-recorded verdict
+  reads a `blind_checkout` from it.
 - The #191 trial's held merge is scored once as information.
 - The carried session cost is reported, not changed.
 
@@ -509,3 +560,25 @@ Critique round 1 (of 2): revise. Every finding accepted.
     recorded.
 14. Hand-recorded verdicts named as unmetered; the #191 trial's held
     merge scored once as information.
+
+Critique round 2 (of 2): revise. Every finding accepted; both rounds
+spent.
+
+1. Verification runs under the baseline's profile (temp directories
+   shared) plus the tree directory; the check compares the whole output
+   at the baseline's and the new tree location; the Design and Decided by
+   default agree.
+2. `release_pushes` skips every merge effect of the task; the left-effect
+   exit fires only for other effects; tests for a superseded merge.
+3. `merge` split by `delivery.outcome`, ungranted instances,
+   `join.outcome`, and the merge effect's state; a test for each.
+4. `issue` and `retire` wrapped in coroutines on the gateway's loop;
+   `drain` before spend is read; `open_calls` recorded; a delayed-stream
+   test.
+5. 1.4c part one registers review unconditionally; the gate waits for it
+   and for 1.4s; any stage still manual is named.
+6. Only the task's own `plan.path` is left out of the judge's diff; the
+   note is about candidate diffs.
+7. `--stand-in-model` named, default the seat.
+8. Step 7 runs its own emulator task into a new result; a hand-recorded
+   verdict reads a `blind_checkout` from the mirror.
