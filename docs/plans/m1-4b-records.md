@@ -498,3 +498,49 @@ keeps writing into a depth-1 directory; five parametrize feed gaps;
 overloads for the `text` parameter of `git.trusted` and `git.out`.
 
 The rollout steps are recorded below as they run.
+
+### Rollout (2026-10-04)
+
+Backup before the rollout: `valor_rebuild-20261003T191726Z.dump` (315
+events).
+
+1. **Items.** The `project` key the replay spec names for popoto #191
+   (`python-uv`, setup `uv sync --frozen --extra dev`, env `UV_PYTHON =
+   "3.12"`, suite `uv run pytest -p no:cacheprovider -q -m 'not slow and
+   not benchmark' --junitxml={junit} tests`) is added to the three popoto
+   items, `pop-a`, `pop-b`, and `pop-c`, which share its repository, setup,
+   and suite. The replay spec names no key for cut-a (cuttlefish), the
+   psyoptimal items (pso-a, pso-a2, pso-b; Django's own runner, no JUnit
+   report), or toy-greeter, so they keep `kind = "plain"` and `suite =
+   "true"`. Follow-up: a key for psyoptimal before the takeover gate
+   scores #872.
+2. **Calibration on the real ledger.**
+   - `checks.test.breadth.json`: task `ac3e8fca8199`, event 325,
+     `task_sha256` `6d40ad2d94bb363e31b49a12ed59716247e581093b6f6b4299f7dba842d8ba36`,
+     n 2, every label drafted, entry check false. `BREADTH.calibrated`
+     is `None`, so there is no landed digest to compare; breadth's
+     behaviors stay information. Jev answered neither case
+     (`input_too_large` twice); the open-weight leg answered both.
+   - `governance.adds.json`: task `405d06d5bb53`, event 627, `task_sha256`
+     `e47a2161d4dd2cc39bedb7a4d0883d95f62e5048030040479040829540f11e6f`,
+     the same digest as the landed `GOVERNANCE.calibrated` (compared by
+     hand). n 50 (32 labelled by Tom, 18 drafted). Jev's leg passes its
+     entry check; the open-weight leg fails it: one case Tom labelled
+     `false` (`db2241e95:tests/scripted.py:222`) it answered `caution`
+     (p_proceed 0.15). Entry check false.
+   - Metered spend: breadth $0.00526 (open weight; Jev charged nothing
+     for its two failures), governance $0.02042 (Jev $0.00346, open
+     weight $0.01697); $0.02568 in all.
+3. **Governance failed its entry check on the real ledger**, so the docs
+   runner is unregistered: `runners()` no longer holds `Check.DOCS`, and
+   `docs` is back in `verdicts.MANUAL_STAGES`, recorded by hand with
+   `python -m core verdict TASK docs VERDICT` at the candidate's head.
+   The docs runner's code stays. `tests/test_pipeline.py` records docs by
+   hand through the command line, and `tests/test_live_session.py`
+   records review and docs by hand. `core/README.md` and
+   `docs/sdlc-state-machine.md` say so. `GOVERNANCE.calibrated` keeps its
+   digest, as the rollout names only the unregistering. Suite on the
+   commit: 835 passed, 13 skipped; `ruff check` clean, `ruff format
+   --check` flags only the two known docs files.
+4. No resident kernel to restart: `com.valor.kernel` does not exist until
+   task 2.1 merges.

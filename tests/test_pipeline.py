@@ -740,10 +740,9 @@ def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_pat
     run(scripted.check(dsn, task, "test", "pass"))
     out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
     assert out.returncode == 0, out.stderr
-    refused = cli("verdict", task, "docs", "no_change", *who)
-    assert refused.returncode == 1 and "docs has a runner" in refused.stderr
+    out = cli("verdict", task, "docs", "no_change", *who)
+    assert out.returncode == 0, out.stderr
     assert "unrecognized arguments: --head" in cli("verdict", task, "review", "pass", "--head", "x").stderr
-    run(scripted.check(dsn, task, "docs", "no_change"))
     assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
     run(drive(dsn, task))
     run(scripted.check(dsn, task, "test", "pass"))

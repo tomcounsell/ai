@@ -25,7 +25,10 @@ from typing import Any
 from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks
 from core.machine import Check, State
 
-MANUAL_STAGES: dict[str, State | Check] = {"review": Check.REVIEW}
+MANUAL_STAGES: dict[str, State | Check] = {
+    "review": Check.REVIEW,
+    "docs": Check.DOCS,
+}
 
 
 class VerdictRefused(LookupError):

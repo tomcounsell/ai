@@ -4,16 +4,16 @@ says precise (through the local judgement upstream, the way the emulator
 forces an arm); run until Valor asks Tom a question; answer; run through the
 plan, the fresh critique session, and the build until Valor builds a
 candidate and requests a push; the test runner over the spec's suite
-(`true`, so the suite was not run); review by hand; the fresh docs session
-through the docs runner; approve and release the push and the merge; the
+(`true`, so the suite was not run); review and docs by hand; approve and
+release the push and the merge; the
 bare origin gets both; every turn's Brief carried the corrections and its
 stage.
 
 Every turn runs under the kernel's sandbox profiles, with its own Claude Code
 config directory and the gateway supplying the credential.
 
-Live spend: about $1.50 per run, metered by the gateway: Haiku working
-turns, one Opus critique, and one Opus docs session. Runs only when
+Live spend: under $1.50 per run, metered by the gateway: Haiku working
+turns and one Opus critique. Runs only when
 `VALOR_LIVE=1`.
 """
 
@@ -100,8 +100,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     state = json.loads(core("status", task))
     candidate = state["candidate"]["sha"]
     core("verdict", task, "review", "pass", *who)
-    # The docs runner's fresh session, kept by the kernel, completes the join.
-    core("run", task)
+    core("verdict", task, "docs", "no_change", *who)
     state = json.loads(core("status", task))
     assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
     # The plan and the build stages may each push their own commits; every
@@ -130,7 +129,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     tested = rows("test.decided")[0]
     assert tested["leg"] == "kernel" and tested["command"] == "true" and tested["verdict"] == "pass"
     documented = rows("docs.decided")[0]
-    assert documented["leg"] == "session" and documented["usd_micros"] > 0
+    assert documented["leg"] == "manual" and documented["verdict"] == "no_change"
     started = rows("turn.started")
     assert len(started) >= 3
     assert "# Stage: plan" in started[0]["brief"]
