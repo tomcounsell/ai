@@ -475,3 +475,7 @@ Follow-ups, recorded and not code: a process still writing into a
 depth-1 directory while `rmtree` runs makes it raise `ENOTEMPTY` (a
 retry would be an invented cap; the next rerun removes the tree once the
 writer is gone); the five parametrize feed gaps of round 4.
+
+Suite on `2f773b1d4`: 835 passed, 13 skipped (build database, ports 6720 to
+6729). `ruff check` clean; `ruff format --check` flags only
+`docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
