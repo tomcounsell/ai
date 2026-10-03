@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4b-runners
 type: build
-status: planned; awaiting critique round 1 of 2
+status: planned; revised after critique round 1, awaiting round 2
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -35,11 +35,11 @@ From valor-rebuild.md, 1.4:
 
 | Done item | What closes it here |
 |---|---|
-| Fresh sessions for critique, review, and docs as runners in `RUNNERS`; each stage removed from `verdict` as its runner lands | the docs runner (`fresh.docs_runner`) and the test runner (`checks.test_runner`) are registered; `test` and `docs` leave `verdicts.MANUAL_STAGES`, so `verdict` takes only `review` |
+| Fresh sessions for critique, review, and docs as runners in `RUNNERS`; each stage removed from `verdict` as its runner lands | the docs runner (`fresh.docs_runner`) and the test runner (`checks.test_runner`) land; each is registered, and its stage leaves `verdicts.MANUAL_STAGES`, in the commit that lands its site's passing calibration record; a site whose entry check fails keeps its stage manual (see Landing) |
 | Through the router: docs commits outside `machine.is_doc_path` dropped at turn end and recorded as a `changes` finding; a failed or stopped branch leaves no verdict and the next run reruns only it; docs commits do not ride into the next candidate | the docs runner's kept prefix, router tests with the scripted session |
 | `checks.test` runs the suite at head and base and the breadth call; `test.decided` carries the command, the failures at head that do not fail at base, the behaviors, and breadth's model, confidence, cost, and guard id; the order settled | the test runner; order settled as breadth, then base, then head (the build fixes the Done line's "then the breadth call" to match) |
-| The review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | `record_check` refuses a session-leg test verdict without `breadth` and a session-leg review or docs verdict without `governance_from` (review's runner is 1.4c's) |
-| Breadth and governance route on the entry check (both legs right on every frozen case) and log every row; floors set from human labels once real tasks have produced thirty or more; no calibration-first machinery; each re-checks Jev's worst-case overhead against its own rows | case shapes for both sites in `judgement_sites.calibrate`, one frozen case set per site, the entry check in the record, the estimate ratio in the record |
+| The review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | `record_check` refuses a kernel-leg test verdict without `breadth` and a session-leg review or docs verdict without `governance_from` (review's runner is 1.4c's) |
+| Breadth and governance route on the entry check (both legs right on every frozen case) and log every row; floors set from human labels once real tasks have produced thirty or more; no calibration-first machinery; each re-checks Jev's worst-case overhead against its own rows | case shapes for both sites in `judgement_sites.calibrate`, every question scored, one frozen case set per site, the entry check in the record (both legs right on every case a human labelled, with both label directions present per question; the build amends the Done line to say so, see Calibration), the estimate ratio in the record |
 | The kernel provisions each task's workspace, including the app's environment so the suite can run | each check's checkout runs the spec's setup from the lockfile, with fresh services on the task's ports |
 
 `python -m core verdict` loses `test` and `docs`. It keeps `review` until
@@ -60,22 +60,32 @@ What the turns control:
 
 What the kernel must never do with any of it:
 
-- Run git with a checkout's config or hooks. The only git that touches a
-  turn-owned repository is `fetch_into_mirror`'s sandboxed `upload-pack`,
-  behind its hostile-config refusal. Every later read (ancestry, paths,
+- Run git with a checkout's config or hooks outside a sandbox. Two git
+  commands touch a turn-owned repository, both in `fetch_into_mirror` and
+  both under the sandbox profile the caller names (the check's own profile
+  for docs): the hostile-config read (`git.hostile`, `git config --list
+  --show-scope --includes`), and `upload-pack`, which runs only when that
+  read finds nothing hostile. Every later read (ancestry, paths,
   diffs, `.valor` in a tree) runs in the kernel mirror. Breadth and
   governance read the mirror, never `b.workspace`.
-- Follow a link a turn could plant. `verdict.json` and the JUnit file are
-  read relative to a descriptor with `O_NOFOLLOW`, bounded in size; a
-  JUnit file with a `DOCTYPE` is a suite with no per-test result.
-- Run candidate code outside the check profile. Setup and suite both run
-  under it, marked, reaped, and time-limited.
+- Follow a link or block on a file a turn could plant. `verdict.json` and
+  the JUnit file are read by the same walk: each path component opened
+  relative to its parent's descriptor with `O_NOFOLLOW`, the file with
+  `O_NONBLOCK`, `fstat` required to say a regular file, bounded in size. A
+  FIFO, a link, or a JUnit file with a `DOCTYPE` is a suite with no
+  per-test result.
+- Run candidate code outside the check profile, or past a stop. Setup and
+  suite both run under it, marked, time-limited, and killed as a process
+  group when the task is stopped; whatever is left under the mark is
+  reaped.
 - Give a check the caller's environment, the builder's caches, or the
   task's live services. The check gets `turn_environment`'s allowlist, so
   no `VIRTUAL_ENV`; its own cache copy; and fresh service instances.
 - Let anything one run writes reach another run. Each run's cache copy is
   cloned from the seed and deleted, and each run's services are made fresh
-  and deleted.
+  and deleted, including after a kernel killed mid-suite.
+- Share an object file with a turn. The docs clone is made over
+  `file://`, so the mirror's objects are copied into it, never hardlinked.
 - Take the docs head from anywhere but the docs checkout, or write it into
   the builder's clone.
 - Treat the head suite's report as more than the candidate's own claim. A
@@ -121,17 +131,22 @@ and gains the two sites' case shapes:
 
 `CASE_ACTIONS` is replaced by each question's own `proceed` set: a label
 `false` expects `proceed`, `true` expects `caution`. Each case is asked
-once per leg; every question of a multi-question task is scored on its
-own. Sources are `reference` (a merged human-written test settles it),
-`tom` (a decision of Tom's settles it), or `drafted`.
+once per leg. `calibrate` and `_record` read and score every question of
+the task (today both read only `task.questions[0]`), so breadth's three
+questions are three scores per case. Sources are `reference` (a merged
+human-written test settles it), `tom` (a decision of Tom's settles it), or
+`drafted`.
 
 `_record` gains, per leg:
 
 - `per_question`: confusion counts per question, with n.
-- `entry_check`: true when the leg is right on every question of every
-  case whose label is not `drafted`. Right counts both directions: a wrong
-  `false` lets a gap or a governance hunk through, a wrong `true` sends
-  every candidate to repair or puts a tap on every diff of that kind.
+- `entry_check`: true when, for every question, the case set holds at
+  least one non-drafted `true` label and one non-drafted `false` label,
+  and the leg is right on every non-drafted label. A question missing
+  either direction makes the entry check false, so an empty or one-sided
+  set never passes. Right counts both directions: a wrong `false` lets a
+  gap or a governance hunk through, a wrong `true` sends every candidate
+  to repair or puts a tap on every diff of that kind.
 - `drafted`: the same counts for drafted labels, as information.
 - `estimate`: from the calibration task's own `gateway.opened` and
   `gateway.charged` rows, the largest and the median ratio of billed input
@@ -145,54 +160,101 @@ own. Sources are `reference` (a merged human-written test settles it),
 The record's top-level `entry_check` is every leg's. Brier scores stay
 information beside their n.
 
+**A departure from the Done item, stated.** valor-rebuild.md's 1.4 Done
+says "both legs right on every frozen case". Drafted labels are not
+counted (Decided by default, 3: what counts as governance is Tom's call),
+so the entry check is "both legs right on every frozen case a human
+labelled, with both directions present for every question". The build
+amends the Done line to say so.
+
 **The frozen case sets** live outside the repo under
 `~/src/valor-demo/items/judgement/`, beside `intake.underspecified.json`:
 
-- `checks.test.breadth.json`: every baseline run and demonstration
-  delivery whose item has hidden reference tests, except the items 1.5's
-  takeover gate scores (popoto #191, psyoptimal #872, popoto #633). Each
-  case is the candidate diff split as breadth splits it. Labels come from
-  the reference tests: `true` for a kind where a hidden reference test
-  failed on the candidate and exercises that kind, `false` for every kind
-  when every hidden test passed. Where the reference does not settle the
-  kind, the label is `drafted`.
-- `governance.adds.json`, at most 50 hunks, five per commit in diff order:
-  positives, source `tom`, from the commits of 1.2 and 1.3 that seed or
-  route the checkpoints Tom granted on 2026-10-01, and from the commits on
-  `main` that add a file under `.claude/hooks/validators/` or a hook
-  registration (the kinds his paragraph names); negatives, source `tom`,
-  from hunks that add only tests (his paragraph: "Tests are not
-  governance"); every other hunk, source `drafted`.
+- `checks.test.breadth.json`. Hidden reference tests exist under
+  `~/src/valor-demo/items/ref/` for cut-a, pop-a (popoto #633), pop-b
+  (popoto #191), and pso-a and pso-a2 (psyoptimal #872). The takeover gate
+  scores #191, #872, and #633, so they are excluded, which leaves cut-a's
+  two runs (`results/cut-a-bare.json`, `results/cut-a-clarify.json`). Their
+  workspaces lived under `/Users/tomcounsell/`, not on this Mac, and the
+  results files hold only `workspace_head` and a diff stat. So the set is:
+  - cut-a, both runs, recovered by replaying the item at its base with the
+    same arm (`scripts/replay.py cut-a.json --arm bare` and `--arm
+    clarify`) into a build database; the replayed candidates are new
+    diffs, and their labels come from running `ref/cut-a.hidden_test.py`
+    on them. A kind gets a `reference` label `true` only where a hidden
+    test fails on the candidate and that test exercises exactly that kind;
+    every other label is `drafted`. "Every hidden test passed" says
+    nothing about coverage, so it labels nothing `false`.
+  - the popoto #191 trial's two breadth rounds, candidates `543c1395` and
+    `aeb94f19`, read from `/Users/valorengels/valor-tasks/75c0902b6e25/
+    kernel.git`, with the behaviors the hand-played test checker listed
+    as evidence. #191 is a gate item, so these are labelled `drafted`
+    unless Tom labels them, and they are excluded from the entry check
+    until he does.
+  With only these cases, every breadth question is expected to lack a
+  non-drafted `false` label, so breadth's entry check is expected to be
+  false and `checks.test` to stay manual (Landing, below) until labels
+  from Tom or from new reference-tested items fill both directions.
+- `governance.adds.json`, at most 50 hunks, labelled by hunk, never by
+  commit:
+  - positives, source `tom`: only the hunks that add or register a check,
+    gate, hook, or validator. From `b9e4e17da` (milestone 1.2), the hunks
+    of `core/guards.py` that seed the granted guards; from `337aba233`
+    (milestone 1.3), the hunks that route breadth and governance through
+    their guards (`core/guards.py`, the guard ids in
+    `core/judgement_tasks.py`); from `origin/main`, the hunk that adds the
+    validator file and, where the commit has one, the hunk that registers it in `.claude/settings.json`
+    in `920b6f392`, `8bb12c001`, `e2a623a44`, `1b8c9a27e`, `315ff6ef2`,
+    and `c472e875f` (each adds a file under `.claude/hooks/validators/`).
+    Every other hunk of these commits (tests, docs, refactors) is
+    `drafted`.
+  - negatives, source `tom`: hunks under `tests/` of `b9e4e17da`,
+    `337aba233`, and `a30c03350` (1.4a), by his paragraph's "Tests are not
+    governance", five per commit in diff order.
+  - negatives, source `drafted`: the hunks of the dependency bumps and
+    plan commits on `origin/main` before 2026-10-01 (`b4251b748`,
+    `d950ca9e7`, `d14ba954e`, `c170d81da`, `7396b10f3`, `5368faebe`).
+  Five hunks per commit in diff order, until 50.
 
 The case files' SHA-256 digests go into the build record before the first
 run. After run 1 no case is added, removed, or relabelled; between runs
 only a question's wording or a leg's fixed rendering changes, each change
-listed.
+listed. **Each site gets at most five runs per frozen case set.** A set
+whose fifth run fails its entry check is closed: the site stays manual,
+and the record goes into the plan file as information for Tom. That is
+not a stop. A new case set (new labels from Tom, new reference-tested
+items) is a new frozen set, with its own digest and its own five runs.
 
-**Landing.** A site whose record passes its entry check lands with
+**Landing.** Registration is a code change made by the build, never a
+read at run time. A site whose record passes its entry check lands with
 `BREADTH.calibrated` or `GOVERNANCE.calibrated` set to the record's
-`task_sha256`, and its runner registered. The floors keep their values;
+`task_sha256`, and its runner registered in `core/__main__.runners`. The floors keep their values;
 the comment "provisional: set by 1.4's calibration record" becomes "set
 from human labels once real tasks have produced thirty or more rows",
 which is the Done item. A site whose entry check fails still lands its
 runner code, but the runner is not registered and its stage stays on the
-manual `verdict` path until the entry check passes. The failure is
-recorded in the build record; the build does not stop or ask Tom. Nothing
-in the kernel reads the record at run time; whether a runner is
-registered follows the latest record's entry check.
+manual `verdict` path until a record of its passes the entry check and a
+later commit registers it. The failure is recorded in the build record;
+the build does not stop or ask Tom. Nothing in the kernel reads a record
+at run time.
 
 ### The check environment (`core/workspace.py`)
 
 **Fresh services per suite run** (finding 5). New `check_services(lay,
 check_dir, project, task_id)`, a context manager:
 
-1. `stop_services(task_id, lay)`: the task's live instances stop, so their
-   ports are free and nothing the builder left in them is read.
+1. `stop_services(task_id, lay)`, which reaps every process under the
+   mark `valor.service.<task>`, whichever layout started it, and then
+   every `checks/*-svc/` directory is removed. The task's live instances
+   stop, so their ports are free and nothing the builder left in them is
+   read; a check's instances left by a kernel killed mid-suite go too.
 2. A `Layout` rooted at `checks/<name>-svc/` (outside the check's own
    directory, so the suite cannot touch the data files). On it,
    `_init_postgres` with the project's roles and a new password, and
    `start_services` on the task's own ports. Redis starts with an empty
-   directory.
+   directory. The check's `service.sb` is written by `check_services` at
+   `<svc>/home/profiles/service.sb`, from `service_profile(svc_lay, task,
+   ports, work=<task work dir>)`.
 3. The pgpass file is copied into `<check_dir>/tmp/pgpass` with
    `O_NOFOLLOW | O_EXCL`; `harness_env` builds the environment from that
    layout with `PGPASSFILE` and the spec's `{passfile}` pointed at the
@@ -201,6 +263,23 @@ check_dir, project, task_id)`, a context manager:
 4. On exit: `stop_services(task_id, svc_layout)`, the `-svc` directory
    removed, and `start_services(task_id, lay, ...)` again, so the router's
    view of the task's services holds for the next runner.
+
+**Paths are passed, never derived from the layout's root** (critique
+finding 7). Today `harness_env` takes `bin_dir = lay.root.parent / "bin"`
+and `service_profile` and `check_profile` take `work=lay.root.parent`,
+which is right only for the task's own layout; for a `-svc` layout the
+parent is `checks/`. `harness_env` and `service_profile` gain explicit
+`work_dir` and `bin_dir` parameters, and every caller passes the task's
+work directory and its `bin/`. A test builds the check layout and asserts
+the profile and the environment name the task's `bin/` and work directory.
+
+**The same reap at run start** (critique finding 6). Before the router
+brings the task's services up for a run (`_Services`), it calls the same
+`stop_services(task, lay)` and removes stale `checks/*-svc/` directories.
+`_start_redis` returns early when its pidfile's process is alive and
+counts success once the port connects, so without this a check's Redis
+left on the task's port by a SIGKILL would be taken for the task's own.
+This is cleanup inside the code that starts services, not a new check.
 
 The service mark stays `valor.service.<task>`; the task's own instances
 are down while a check's are up, so the reap at step 4 takes only the
@@ -249,22 +328,44 @@ base's setup runs again to make it, without the suite.
    profile, marked `test-<task>-<role>`, reaped, with
    `settings.suite_timeout_s` (default 1,800, `VALOR_SUITE_TIMEOUT_S`).
    `ctx.alive()` is checked before each suite and before each write.
+   **A stop reaches a running suite** (critique finding 9). Setup and
+   suite each run as `asyncio.create_subprocess_exec(...,
+   start_new_session=True)`, and `asyncio.wait` races the process against
+   `runs._stop_heard(listener, task)` on `tasks.STOP_CHANNEL` and the
+   timeout, as `runs.run_turn` does for a turn. On a stop, `os.killpg`
+   kills the group, `runs.reap(mark)` takes anything that left it, nothing
+   is recorded, and the runner returns `stopped`.
 3. Each run appends `suite.ran`: commit, role, command, environment
    digest, exit code, test ids by outcome (passed, failed, errored,
-   skipped), duration, output tail, peak footprint, and `infrastructure`
-   (setup failed, killed or stopped, timed out, a service would not start,
-   or no JUnit file while the exit code says the runner itself failed).
+   skipped), duration, output tail, peak footprint, and `cause`.
+   **Failures are classed by who controls them** (critique finding 2).
+   `cause: "kernel"` is only what the kernel controls: a service that
+   would not start, a stop, or a kernel killed mid-run. Such a run is never
+   reused, records no verdict, and the runner returns `failed`, so the
+   branch reruns. Everything the commit's own code controls is `cause:
+   "commit"`: setup failed, the suite timed out, or no JUnit file while
+   the exit code says the runner itself failed. At head, with the base
+   run usable, that is `red` with the failure as a finding (the
+   candidate's setup or suite is broken, which is what the check exists to
+   say). At base it is recorded and reused as a base run with no per-test
+   results, so the exit-code rule in step 5 decides. A commit's own fault
+   never sends the branch round again, so no failure loops and no retry
+   limit is needed.
    The environment digest covers the lockfiles at that commit (read with
    `git show` in the mirror), the setup commands, the spec's `env`, and the
    bytes of each file in the work directory's `bin/`. A `suite.ran` with
-   the same commit, command, and digest and `infrastructure: false` is
+   the same commit, command, and digest and `cause` other than `kernel` is
    reused, so the base runs once per task and a crash after a suite does
-   not rerun it. One with `infrastructure: true` is never reused.
-4. `read_junit(check_dir)`: opened relative to the check directory's
-   descriptor with `O_NOFOLLOW`, at most `settings.junit_max_bytes`
-   (default 50 MB), refused if it holds a `DOCTYPE`, parsed with
-   `xml.etree.ElementTree`. Any failure is "no per-test result", never a
-   crash. Test ids are `classname::name`.
+   not rerun it.
+4. `read_junit(check_dir)` reads the file through the same walk as
+   `read_verdict` (critique finding 8), lifted into a shared
+   `read_turn_file(dir_fd, relpath, max_bytes)`: each component opened with
+   `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`, `fstat` must
+   say `S_ISREG`, at most `settings.junit_max_bytes` (default 50 MB). So a
+   FIFO, a socket, a link, or a device at the path is refused without
+   blocking. A file holding a `DOCTYPE` is refused; the rest is parsed
+   with `xml.etree.ElementTree`. Any refusal is "no per-test result",
+   never a crash or a hang. Test ids are `classname::name`.
 5. `compare(base, head, removed)` gives three lists:
    - `failures`: ids failing or erroring at head that passed or did not
      exist at base, and every id that passed at base and is absent or
@@ -291,8 +392,9 @@ base's setup runs again to make it, without the suite.
    command=..., failures=..., deleted_at_head=..., failing_at_base=...,
    suites=[base_event, head_event], head=candidate, leg="kernel")`. The
    kernel computes the verdict as today: red if any failure, else gaps if
-   breadth lists a behavior, else pass. An infrastructure failure at head
-   records nothing and returns `failed`, so the branch reruns.
+   breadth lists a behavior, else pass. A `kernel` failure records nothing
+   and returns `failed`, so the branch reruns; a `commit` failure at head
+   is recorded `red` here like any other failure.
 
 The test runner runs no model turn, so it has no turn id. `_session_leg`
 takes a third leg, `kernel`, which names the `suite.ran` rows it read in
@@ -307,7 +409,13 @@ the breadth row inside `record_check`, as today.
 1. Fold; `b.mirror` required. `check_dir =
    workspace.fresh_dir(lay.checks / f"docs-{candidate[:12]}")`. A real
    clone (not a blind checkout) of the candidate from the mirror, made by
-   the kernel with `git.trusted`, refusing a top-level `.valor`. Git
+   the kernel with `git.trusted`, refusing a top-level `.valor`. The clone
+   shares no object file with the mirror (critique finding 1): a temporary
+   `refs/heads/valor-docs/<turn>` is set in the mirror to the candidate,
+   the clone is made from `file://<mirror>` with `--single-branch
+   --branch valor-docs/<turn> --no-tags`, which copies objects through the
+   pack protocol and never hardlinks them, and the ref is deleted, as
+   `workspace.provision` does for the builder's clone. Git
    identity through the environment (`GIT_AUTHOR_NAME`, `GIT_COMMITTER_*`:
    "Valor docs"). Inputs under `.valor/inputs/`: `request.md`, `plan.md`
    (the plan commit's file, from the mirror), `diff.patch` (base to
@@ -321,8 +429,12 @@ the breadth row inside `record_check`, as today.
 3. When `head` differs from the candidate: `fetch_into_mirror(b.mirror,
    checkout, head, f"refs/valor/docs-raw/{turn_id}", check profile, mark)`
    (finding 6: the head is fetched from where the session committed, with
-   the check's own profile as the `upload-pack` sandbox). Then, in the
-   mirror only:
+   the check's own profile as the sandbox for both git commands it runs
+   over the session's clone). The config read, `git.hostile` (`git config
+   --list --show-scope --includes`), runs today through `_git` with only a
+   timeout; it gains a `profile` parameter and runs under the profile
+   `fetch_into_mirror` is given (critique finding 11), so the threat
+   model's claim holds for both commands. Then, in the mirror only:
    - the candidate must be an ancestor of the head, and `rev-list --merges
      candidate..head` must be empty;
    - walking `rev-list --reverse candidate..head`, each commit's paths
@@ -353,10 +465,13 @@ path.
 
 ### Registration and the manual path (`core/__main__.py`, `core/verdicts.py`)
 
-`runners(judgement_port)` adds `Check.TEST: checks.test_runner(port)` and
-`Check.DOCS: fresh.docs_runner(_fresh_for, port)`. `MANUAL_STAGES` becomes
-`{"review": Check.REVIEW}`; the parser's `--suite-command`, `--failure`,
-`--behavior`, and `--head` options go with the test and docs paths.
+When both sites' records pass, `runners(judgement_port)` adds `Check.TEST:
+checks.test_runner(port)` and `Check.DOCS: fresh.docs_runner(_fresh_for,
+port)`, and `MANUAL_STAGES` becomes `{"review": Check.REVIEW}`; the
+parser's `--suite-command`, `--failure`, `--behavior`, and `--head`
+options go with the test and docs paths. Each runner is registered, and
+its stage and options leave the manual path, only in the commit that lands
+its own site's passing record (breadth for test, governance for docs).
 `record_check` raises `VerdictRefused` for a non-manual TEST without
 `breadth` and a non-manual REVIEW or DOCS without `governance_from`.
 
@@ -399,8 +514,8 @@ tests`.
 - **Finding 8 (setup from the lock).** Every check checkout runs the
   spec's setup, and the replay spec carries the item's setup (`uv sync
   --frozen`), so pandas resolves to the lock's 2.3.3 at base and head.
-- **Finding 2 (a fresh build session).** A question for Tom (Questions,
-  1). Assumed: no change in 1.4b.
+- **Finding 2 (a fresh build session).** No change in 1.4b (Decided by
+  default, 1).
 - **Finding 3** (the build turn did not use the task's Redis) and
   **finding 7** (breadth keeps finding gaps) need nothing here: the turn's
   environment already carries `REDIS_URL`, and row 7 delivering with the
@@ -423,7 +538,7 @@ tests`.
   the test branch's (valor-rebuild.md); the container verifier stays after
   takeover. m1-4-checks.md's split table still describes 1.4c with a
   container; that row is 1.4c's to settle.
-- A fresh build session from the plan (Questions, 1).
+- A fresh build session from the plan (Decided by default, 1).
 - Floors set from human labels: they wait for thirty or more real rows.
 - Running checks in parallel: the router runs them one at a time.
 - Any change to the working session's services or caches.
@@ -439,10 +554,13 @@ Judgement sites and calibration:
 - Breadth and governance answer when the builder's clone has lost the
   candidate (its objects removed after the fetch): they read the mirror.
 - Governance over a docs diff whose head exists only in the mirror.
-- `calibrate` on a breadth case file scores each question on its own; a
-  drafted label counts in `drafted`, never in `entry_check`; one wrong
-  `true` on a governance negative fails the entry check, and one wrong
-  `false` on a positive does too.
+- `calibrate` on a breadth case file scores every question, not only the
+  first; a drafted label counts in `drafted`, never in `entry_check`; one
+  wrong `true` on a governance negative fails the entry check, and one
+  wrong `false` on a positive does too.
+- A case set whose non-drafted labels for a question are all `false` (or
+  all `true`) gives `entry_check: false` with both legs right on every
+  case.
 - The record's `estimate` block: a fixture leg billing more input than
   estimated shows in `over_estimate`.
 
@@ -458,8 +576,22 @@ The check environment:
   builder's data intact.
 - `PGPASSFILE` names `<check_dir>/tmp/pgpass`; a link planted at that path
   before the copy is refused.
-- Setup runs in each check checkout; a setup failure is `infrastructure`
-  and reruns.
+- Setup runs in each check checkout.
+- Failures classed by who controls them: a head setup failure, a head
+  suite past its timeout, and a head with no JUnit file and a runner
+  failure exit, each with a usable base, record `red` with the failure as
+  a finding, and the next run does not rerun the test branch. A base
+  setup failure is recorded once, reused by the next candidate's run
+  without running again, and decided by the exit codes. A service that
+  will not start records nothing and returns `failed`.
+- A kernel SIGKILLed mid-suite (the test sends `SIGKILL` to a kernel
+  subprocess while the check's Redis is up): on the next run the task's
+  Redis on its port holds the key the builder wrote and not the key the
+  suite wrote, no process under `valor.service.<task>` from the check
+  layout is alive, and no `checks/*-svc/` directory is left.
+- The check layout's `service.sb` sits at `<svc>/home/profiles/service.sb`
+  and names the task's work directory and `bin/`; the suite's `PATH`
+  holds the task's `bin/`, never `checks/bin`.
 - A head suite that writes into its cache leaves the next head's run
   unaffected: a planted file is absent from the next clone of the seed.
 - Changing a byte of a file in `bin/` changes the environment digest and
@@ -470,8 +602,12 @@ The test runner:
 - The base suite runs once across two candidates; a `suite.ran` that timed
   out or was stopped is run again, never reused.
 - Breadth with both legs failing returns `failed` before any `suite.ran`.
-- A JUnit file that is not XML, holds a `DOCTYPE`, is a symlink, or is
-  over the size bound is "no per-test result", never a crash.
+- A JUnit file that is not XML, holds a `DOCTYPE`, is a symlink, is a
+  FIFO with no writer (the read returns at once), or is over the size
+  bound is "no per-test result", never a crash or a hang.
+- A stop published while the suite sleeps: the suite's process group is
+  gone (a child it forked included), no `suite.ran` is written for that
+  run, and the runner returns `stopped` well before the suite's timeout.
 - A candidate whose `conftest.py` exits 0 before collecting is red (every
   base test absent at head).
 - One that marks a failing test `skip` is red.
@@ -500,6 +636,13 @@ The docs runner, through the router:
   id, is malformed: no verdict, and the next run reruns docs only.
 - The builder's clone has the same refs and objects before and after the
   docs runner.
+- The docs clone shares no inode with the mirror: no file under the
+  clone's `.git/objects` has the same `(st_dev, st_ino)` as any file under
+  the mirror's `objects`, and the temporary `valor-docs/<turn>` ref is gone
+  from the mirror.
+- `git.hostile` over a checkout runs under the profile passed: a config
+  `include.path` naming a file the profile denies fails the read, and the
+  fetch keeps nothing.
 - After a send-back the next candidate does not contain the docs commits,
   and the next docs session's inputs hold `previous-docs.patch`.
 - A docs runner stopped mid-turn leaves no verdict; the next run reruns
@@ -566,3 +709,45 @@ Reversible calls made by the build session, not questions for Tom.
 6. **The kernel computes the docs verdict from the commits it kept, and
    the session's own `changes` stands.** The turn's verdict file is
    turn-owned and only adds caution; it never removes it.
+
+## Critique round 1 (of 2)
+
+1. The docs clone could hardlink the mirror's objects: it is made from
+   `file://<mirror>` through a temporary `valor-docs/<turn>` ref, and a
+   test checks that no inode is shared (The docs runner, step 1).
+2. A candidate's own failure looped as infrastructure: failures are
+   classed by who controls them; a head setup failure, timeout, or missing
+   JUnit file with a usable base is `red`, a base one is a reusable run
+   decided by exit codes, and only kernel causes rerun (The test runner,
+   step 3).
+3. The breadth case set did not exist as described: the real cases are
+   named (cut-a by replay, pop-a, pop-b, pso-a, pso-a2), a label `true`
+   needs a failing hidden test of that kind, "every hidden test passed"
+   labels nothing `false`, the #191 candidates are drafted, and both label
+   directions are required (Calibration).
+4. No run limit, and registration read like a run-time read: at most five
+   runs per site per frozen case set, a closed set is recorded for Tom and
+   is not a stop, and registration is a build-time code change (Calibration,
+   Landing, Registration).
+5. Governance labelled by commit: labelled by hunk, the guard and
+   validator hunks positive, `tests/` hunks negative, the negative commits
+   named (Calibration).
+6. A SIGKILL could leave a check's services on the task's ports: the
+   router's service start and `check_services` both reap the task's mark
+   and remove stale `-svc` directories first, with a SIGKILL test (The
+   check environment).
+7. The `-svc` layout broke the `root.parent` assumptions: `harness_env`
+   and `service_profile` take the work and bin directories explicitly, and
+   `check_services` writes the check's `service.sb` (The check environment).
+8. `read_junit` could block on a FIFO: it reads through `read_verdict`'s
+   walk, lifted into `read_turn_file`, with a FIFO test (The test runner,
+   step 4).
+9. Nothing stopped a running suite: setup and suite run as async
+   subprocesses in their own session, raced against the stop channel, and
+   a stop kills the group (The test runner, step 2).
+10. The entry check departed from the Done item, and only the first
+    question was scored: the departure is stated and the build amends the
+    Done line; every question is scored (Calibration, Done items).
+11. The threat model's git claim was false while `git.hostile` ran
+    unsandboxed: it takes the caller's profile, and the claim is restated
+    for both commands (Threat model, The docs runner, step 3).
