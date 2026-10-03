@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4d-credential
 type: build
-status: planned
+status: planned; revised after critique round 1, awaiting round 2
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -15,7 +15,7 @@ Task 1.4d of [m1-4-checks.md](m1-4-checks.md), milestone 1.4 of
 plan lifts them and settles what they leave open. It is built beside 1.4b
 and merges after it (the waves table in `.claude/skills/build/SKILL.md`).
 It has no migration: new rows are new event types on new or existing
-streams, and the transcript is a new document kind in `documents`.
+streams, and transcripts are a new document kind in `documents`.
 
 ## Stakes
 
@@ -33,8 +33,8 @@ From valor-rebuild.md, 1.4:
 
 | Done item | What closes it here |
 |---|---|
-| `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | `github-key` copies the token into the kernel key directory; the `merge` performer sends it as a pinned header through a per-call config file, only to a granted (URL, branch) pair; the live push at rollout lands a commit on a scratch branch of `tomcounsell/ai`, and the first released merge after rollout lands on the rebuild branch |
-| Transcript copies kept in the store with a digest | `core/transcripts.py` copies each turn's session file and its subagents' files into a `transcript` document, and `turn.ended` records each file's digest, size, offset, and `prefix_changed` |
+| `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | `github-key` copies the token into the kernel key directory; the `merge` performer of a task with a kernel mirror sends it as a pinned header through a per-call config file, only to a granted (URL, branch) pair; the live push at rollout lands a commit on `valor/push-check` of `tomcounsell/ai` through the same performer, and `holds` confirms it |
+| Transcript copies kept in the store with a digest | `core/transcripts.py` copies each turn's session file and its subagents' files, as base64 of the raw bytes, into `transcript` documents, and `turn.ended` records each file's SHA-256, size, offset, and `prefix_changed` |
 | Absorbs: the broker's synchronous `perform` (made awaitable) | `perform`, `lookup`, and `refuse` are `async`; git runs in a worker thread |
 | Absorbs: performers registered in a module-global dict (keyed per task) | `broker.PERFORMERS` and `broker.register` are deleted; the composition root builds a `broker.Performers` per task and passes it to every broker call and to `tasks.dispatch` |
 
@@ -46,12 +46,13 @@ Also from the outline: the merge-target list, and `merge_url` honoured by
 What a turn controls:
 
 - **Its own clone**: config, hooks, refs, objects, and the commits it
-  offers as a candidate. It never controls the kernel mirror, which no
-  turn writes, and the merge pushes from the mirror.
+  offers as a candidate. For a `--workspace` task the clone is the
+  workspace itself. It never controls the kernel mirror or the kernel's
+  cache clone, which no turn writes.
 - **Its Claude Code config directory** (`state/work/claude`, or
   `checks/<name>/claude` for a fresh session): every file under it,
-  transcripts included, and any link it plants there. It controls the
-  `session_id` it prints on stdout.
+  transcripts included, any byte in them (NUL included), and any link it
+  plants there. It controls the `session_id` it prints on stdout.
 - **Spec edits through candidates**: a candidate may change
   `projects/valor.toml`, and once Tom merges it later tasks read the edit.
 - **Process listing**: a running turn can read other processes' arguments
@@ -65,14 +66,18 @@ What the kernel must never do:
 - Put the token in any path a sandbox profile allows; the kernel key
   directory is denied by every profile (turn, fresh session, suite,
   service) and no environment a turn gets names it.
+- Hand the credential file to git running in a repository a turn writes:
+  only a task with a kernel mirror gets it, and only for git run in the
+  mirror or the cache clone.
 - Send the token on `push_branch`, to a pair not in the merge-target list,
-  to the remote's default branch, to a URL outside the GitHub prefix, or
-  after a redirect.
+  or to the remote's default branch.
+- Write a granted URL into a config file without checking its shape, so a
+  URL cannot add config lines of its own.
 - Follow a link, or read anything but a regular file, under a turn's
   config directory; use the turn's `session_id` in a path before checking
   its shape.
-- Let a transcript decide anything: it is a record, and nothing reads it
-  to make a decision.
+- Let a transcript decide anything, or let a transcript keep `turn.ended`
+  from being written.
 - Let a task's performers push to another task's origin.
 
 ## Design
@@ -83,9 +88,10 @@ What the kernel must never do:
   the `repo` scope, expiring 2026-12-31 (Tom's answer to m1-4-checks.md
   Questions, 3). Its durable copy is the vault `.env` as
   `GITHUB_PUSH_TOKEN` (and 1Password, "GitHub Push Token"). It reaches
-  every repository the account can write to, so the kernel's restrictions
-  below, and a ruleset on `main` with `valorengels` off the bypass list
-  once Tom adds it, are what keep it to the rebuild branch.
+  every repository the account can write to, so the merge-target list and
+  the default-branch refusal below, and a ruleset on `main` with
+  `valorengels` off the bypass list once Tom adds it, keep it to the
+  rebuild branch.
 - **`python -m core github-key`** calls
   `credentials.copy_keys(settings.vault_env, settings.github_keyfile,
   ["GITHUB_PUSH_TOKEN"])`, the same code `judgement-keys` uses, and prints
@@ -100,27 +106,36 @@ What the kernel must never do:
   ```
   [http "<the granted URL>"]
       extraHeader = Authorization: Basic <base64 of x-access-token:TOKEN>
-      followRedirects = false
   ```
 
   It is passed as `GIT_CONFIG_GLOBAL` for that one git call through
-  `_git`'s `extra_env`, and deleted in a `finally` when the call returns.
-  Git matches `http.<url>.*` against the URL being fetched or pushed, so
-  the header goes to that one repository URL only. It is a pinned header
-  (credential helpers stay refused, the PATH stays system-only), and a
-  file rather than `-c http.<url>.extraHeader=...` because arguments are
-  readable by a running turn (m1-4-checks.md Questions, 4).
-- **The prefix.** The token is attached only when the target URL starts
-  with `settings.github_url_prefix` (default `https://github.com/`). Tests
-  set it to the loopback smart-HTTP server's `http://127.0.0.1:<port>/`.
-  A granted URL outside the prefix is pushed to with no header.
+  `_git`'s `extra_env`, and deleted in a `finally` in the same worker
+  thread when git exits. Git matches `http.<url>.*` against the URL being
+  fetched or pushed, so the header goes to that one repository URL only.
+  It is a pinned header (credential helpers stay refused, the PATH stays
+  system-only), and a file rather than `-c http.<url>.extraHeader=...`
+  because arguments are readable by a running turn (m1-4-checks.md
+  Questions, 4).
+- **The URL's shape.** `targets.url_ok(url)` parses the URL and requires
+  `https://<host>/<path>` (or `http://127.0.0.1:<port>/<path>` for tests),
+  host made of letters, digits, `.` and `-`, path matching
+  `[A-Za-z0-9._/-]+` with no `.` or `..` segment, and no user info, query,
+  fragment, whitespace, quote, backslash, or bracket. `merge-target add`
+  refuses any other URL, and the header writer checks again before
+  writing, so no URL can add a line or a section to the file.
+- **Crash leftovers.** Before writing its own file, the writer removes
+  `github-push-*.gitconfig` files in the key directory whose mtime is
+  older than twice `git_timeout_s`. No live call's file can be that old,
+  since every kernel git call is killed at `git_timeout_s`.
 - **`git.py`**: `push`, `remote_head`, `remote_sha`, and `holds` take an
   optional `credential: Path | None`; with it, `GIT_CONFIG_GLOBAL` is that
-  file instead of `/dev/null`. `PINNED` gains `http.followRedirects=false`
-  for every call. `hostile` already refuses `http.`, `credential`, `url.`,
-  and `push.` keys in the mirror's config, so the mirror cannot add a
-  header, a helper, or a rewrite of its own. `git.GitError` messages carry
-  git's stderr, which never echoes a request header; a test checks it.
+  file instead of `/dev/null`. `hostile` already refuses `http.`,
+  `credential`, `url.`, and `push.` keys in the mirror's config, so the
+  mirror cannot add a header, a helper, or a rewrite of its own.
+  `remote_head` checks git's exit code: a failed `ls-remote` raises
+  `GitError`, and an unborn `HEAD` returns `None`, so a refusal can say
+  which. `git.GitError` messages carry git's stderr, which never echoes a
+  request header; a test checks it.
 - **Rotation.** Tom creates a new token, replaces it in the vault `.env`,
   the build session runs `python -m core github-key` (it prints `written`),
   and Tom revokes the old one. A push GitHub refuses (git's stderr names
@@ -129,8 +144,7 @@ What the kernel must never do:
   failed outcome does.
 - **A missing key.** `credentials.read_key` raises `MissingKey`; the merge
   effect fails with "no GitHub credential: run `python -m core
-  github-key`", and `start` refuses a granted GitHub target with the same
-  text, so a task never runs to the merge only to find no key.
+  github-key`" and pushes nothing.
 
 ### The merge-target list (`core/targets.py`, new)
 
@@ -141,10 +155,8 @@ What the kernel must never do:
   grant. Rows never change.
 - **`python -m core merge-target add URL BRANCH --note TEXT`** writes a
   grant, `provenance.by = "tom"`, `role_played: false`, always; the command
-  has no `--by` or `--role-played`, like `grant`. It refuses a URL that is
-  not `https://`, or `http://` to a loopback address (for tests), a URL
-  carrying user info (`user@` or `user:pass@`), a query, or a fragment,
-  and a branch `git check-ref-format --branch` refuses.
+  has no `--by` or `--role-played`, like `grant`. It refuses a URL
+  `url_ok` refuses and a branch `git check-ref-format --branch` refuses.
 - **`python -m core merge-target remove URL BRANCH --note TEXT [--by
   NAME]`** writes a revocation. It takes authority away, so anyone running
   the kernel may (provenance records who).
@@ -156,32 +168,46 @@ What the kernel must never do:
   `None`, reading only the ledger. It is called at `start`, at the merge
   request, and at release.
 - **The default branch.** For a non-local target the kernel reads the
-  remote's `HEAD` (`git.remote_head` from the mirror, with the credential)
-  and refuses a target branch equal to it, even if granted, so `main` of
-  `tomcounsell/ai` can never be a target. A remote whose `HEAD` cannot be
-  read is refused too. This read is a network call, so it runs at `start`
-  and inside `perform` immediately before the push (same worker thread,
-  same credential file), never inside a ledger transaction. A merge it
-  refuses fails with "the target is the remote's default branch" and
-  pushes nothing.
+  remote's `HEAD` and refuses a target branch equal to it, even if
+  granted, so `main` of `tomcounsell/ai` can never be a target. The read
+  runs in a kernel-owned repository: at `start`, the spec's cache clone
+  (`<work>/cache/<name>.git`, which `start --project` fetches before it
+  provisions); inside `perform`, the mirror, immediately before the push,
+  in the same worker thread with the same credential file. A failed read
+  refuses with "cannot read the remote's HEAD: <git's stderr>"; an unborn
+  `HEAD` refuses with "the remote's HEAD names no branch". The read is a
+  network call, so it never runs inside a ledger transaction. If Tom ever
+  makes the rebuild branch the repository's default, every merge to it is
+  refused until he changes it back or grants another branch; docs/machine.md
+  says so.
 
-### `merge_url` honoured (`core/workspace.py`, `core/__main__.py`, `core/tasks.py`)
+### `merge_url` honoured (`core/workspace.py`, `core/__main__.py`)
 
 - `start --project NAME` sets `Provisioned.origin_url = spec.merge_url`
   when the spec has one and `(merge_url, target_branch)` passes
   `targets.check` and the default-branch read; otherwise it refuses
   before provisioning, naming the `merge-target add` command to run. A
   spec without `merge_url` keeps the local origin.
-- `start --workspace PATH` resolves `origin_url` from `git.push_url`; a
-  non-local URL there goes through the same check.
-- `push_url` stays the task's local `origin.git`, so `push_branch` never
-  reaches GitHub. Only the merge pushes to `origin_url`, from the mirror,
-  and only the commit and branch Tom's approval binds.
+- `start --workspace PATH` is unchanged: `origin_url` comes from the
+  workspace's own remote, and the task has no mirror. `_performers` gives
+  `Merge` the credential only when `b.mirror` is set, so a `--workspace`
+  task with a non-local origin merges without the header (a public remote
+  refuses an unauthenticated push; a test checks no header is sent). The
+  merge-target list applies to non-local `--workspace` targets too, at the
+  merge request and at release.
+- `push_url` stays the task's local `origin.git` for provisioned tasks,
+  so their `push_branch` never reaches GitHub. Only the merge pushes to
+  `origin_url`, from the mirror, and only the commit and branch Tom's
+  approval binds. `push_branch` never takes a credential, so a
+  `--workspace` task's `push_branch`, which falls back to `origin_url`,
+  never carries the token.
 - `verdicts.merge_action` keeps building `{url, target_branch, head_sha,
   candidate}` from the Brief, and `Merge.refuse` checks the payload's
   `url` and `target_branch` against the Brief's `origin_url` and
   `target_branch` and against `targets.check`, so neither a changed spec
   nor a forged request moves the target.
+- `workspace.py`'s refusal for a source that needs a credential to fetch
+  says "private repositories are not fetched", the status quo after 1.4d.
 
 ### Performers per task, awaitable (`core/broker.py`, `tools/push_branch.py`)
 
@@ -200,23 +226,31 @@ What the kernel must never do:
 - **Signatures**: `broker.request(conn, performers, task_id, action)`,
   `broker.release(conn, performers, effect_id)`,
   `broker.reconcile(conn, performers, effect_id, settle_after_s=None)`,
+  `runs.run_turn(..., offered=())`, which hands it to
   `tasks.dispatch(conn, task_id, state=None, *, fresh=None, offered=())`.
   `PERFORMERS`, `register`, and module-level `offered` are deleted.
 - **The composition root**: `__main__._performers(b)` returns
   `Performers(PushBranch(b.workspace, url=b.push_url or b.origin_url,
-  protected=b.target_branch), Merge(b.mirror or b.workspace))`. For
+  protected=b.target_branch), Merge(b.mirror or b.workspace,
+  credential=settings.github_keyfile if b.mirror else None))`. For
   `release`, it reads the effect's task id from the held row first and
   builds that task's performers. The router's `Context` gains a
   `performers` field; `router.run` takes it; the runners pass it to
   `session` (turn effect requests), `verdicts.ensure_merge`, and
-  `broker.reconcile`, and `runs.run_turn` gains `offered`, which session
-  and fresh pass as `performers.offered()` and it hands to `tasks.dispatch`.
+  `broker.reconcile`, and session and fresh pass `performers.offered()` to
+  `run_turn`.
 - **`tools/push_branch.py`**: `perform` and `lookup` run the git work in
   `asyncio.to_thread`, setting `git.deadline` inside the thread function
   (the deadline is a contextvar, and `to_thread` copies the context).
-  `Merge` gains the credential path and the prefix from settings; it
-  writes and removes the per-call config file around the push and around
-  `holds` and `remote_head`. `PushBranch` never takes a credential.
+  `Merge` writes and removes the per-call config file around the push and
+  around `holds` and `remote_head`, all inside the thread.
+- **Cancellation.** `asyncio.to_thread` cannot stop a running thread. A
+  cancelled `release` leaves the push running to its git deadline, the
+  credential file in place until git exits, and an intent with no
+  outcome; the effect lock frees with the session, and `reconcile`
+  settles the intent (it waits `reconcile_after_s`, twice the git
+  deadline, before it concludes `failed`). A test cancels a release
+  mid-push and reconciles.
 - **`tests/performers.py`**: `WorkspaceWrite` and `OutboxAppend` become
   async, and the tests that called `broker.register` build a `Performers`
   instead (`tests/test_kernel.py`, `test_pipeline.py`, `test_attention.py`,
@@ -225,42 +259,52 @@ What the kernel must never do:
 
 ### Transcripts (`core/transcripts.py`, new; `core/runs.py`; `harnesses/claude_code.py`)
 
-- **Where they are.** The harness knows its own layout, so
-  `TurnCommand` gains `transcripts: Callable[[dict], Transcripts | None]`,
-  default none. Claude Code's returns, from the parsed result: the config
-  root (the turn's `CLAUDE_CONFIG_DIR`), the session file
-  `projects/<encoded cwd>/<session_id>.jsonl`, and the subagent directory
-  `projects/<encoded cwd>/<session_id>/subagents/`, whose `agent-*.jsonl`
-  files are copied. The encoded cwd replaces every non-alphanumeric
-  character of the turn's cwd with `-`. A `session_id` that is not a UUID
-  (lowercase hex, 8-4-4-4-12) gives none, recorded as `no_transcript:
-  "session id is not a UUID"`. A turn with no config directory of its own
-  (a task started with `--workspace`) copies
-  nothing and records why: the kernel never reads Tom's own `~/.claude`.
+- **Where they are.** The harness knows its own layout, so `TurnCommand`
+  gains `transcripts: Callable[[dict], Transcripts | None]`, default none.
+  Claude Code's returns, from the parsed result, the config root (the
+  turn's `CLAUDE_CONFIG_DIR`) and the session id. The kernel does not
+  rebuild Claude Code's encoding of the cwd (which shortens and hashes
+  long paths): it lists `projects/` through a descriptor and takes the one
+  child directory, not a link, that holds `<session_id>.jsonl` as a
+  regular file; then `<session_id>/subagents/agent-*.jsonl` beside it. No
+  match, or more than one, records why. A `session_id` that is not a UUID
+  (lowercase hex, 8-4-4-4-12) records `no_transcript: "session id is not
+  a UUID"`. A turn with no config directory of its own (a task started
+  with `--workspace`) copies nothing and records why: the kernel never
+  reads Tom's own `~/.claude`.
 - **When.** In `runs.run_turn`, after `reap` (no process of the turn is
   left to write) and before `turn.ended`, in a worker thread.
 - **How it reads.** 1.4b leaves `read_turn_file(dir_fd, relpath,
   max_bytes)` in `core/workspace.py`, the no-follow component walk of
-  `read_verdict`; transcripts reuse it. Each component is opened with
-  `O_NOFOLLOW`, the final file must be regular, and the subagent directory
-  is listed through its own descriptor, taking only regular files named
-  `agent-*.jsonl`. A link, a non-regular file, or a missing file stores
-  nothing for that file and records the reason.
-- **What is stored.** One `transcript` document per turn (id: the turn
-  id), body `{session: {...}, subagents: {name: {...}}}`, each entry
-  holding the text (decoded UTF-8 with replacement) of the bytes stored.
-  `turn.ended` gains `transcript: {document, files: [{name, sha256, bytes,
-  offset, prefix_changed}]}` or `no_transcript: reason`.
+  `read_verdict`; transcripts reuse its walk. Each component is opened
+  with `O_NOFOLLOW`, the final file must be regular, and the subagent
+  directory is listed through its own descriptor, taking only regular
+  files named `agent-*.jsonl`. The file is hashed and copied by streaming
+  from the open descriptor. A link, a non-regular file, or a missing file
+  stores nothing for that file and records the reason.
+- **What is stored.** One document per file per turn, kind `transcript`,
+  id `<turn_id>/<name>/<n>`, body `{turn_id, name, offset, chunk: n,
+  base64}`: base64 of the raw bytes stored, so NUL bytes and split
+  multibyte characters store as they are and the bytes can be checked
+  against the digest. A file whose stored bytes would pass the `jsonb`
+  string limit is split into chunks of 64 MiB of raw bytes, `n` counting
+  from 0; there is no size cap. `turn.ended` gains `transcript: {files:
+  [{name, documents, sha256, bytes, offset, prefix_changed}]}`, or
+  `no_transcript: reason`.
+- **Failure.** The documents are written in their own transaction before
+  `turn.ended`. If that transaction fails (or the read raises), it is
+  rolled back and `turn.ended` is written with `no_transcript: <the
+  error's class and message>`; a transcript can never keep a turn's end
+  from being recorded.
 - **Deltas.** A resumed session's file grows. For each file the kernel
-  finds the last `turn.ended` of the task that recorded the same name and
-  session; when the first `bytes` bytes of the file now have that row's
-  `sha256`, it stores only the bytes from `offset = bytes` on; otherwise
-  it stores the whole file with `prefix_changed: true`, the sign that
-  something rewrote it (compaction, or the turn). `sha256` and `bytes` are
-  always the whole file's.
-- **Size.** A file over 50 MB keeps its digest and size, and its text is
-  not stored (`stored: false`, reason `over 50 MB`). The 50 MB is the
-  outline's.
+  finds the last `turn.ended` of the task that recorded the same name;
+  when the first `bytes` bytes of the file now have that row's `sha256`,
+  it stores only the bytes from `offset = bytes` on; otherwise it stores
+  the whole file with `prefix_changed: true`, the sign that something
+  rewrote it (compaction, or the turn). `sha256` and `bytes` are always
+  the whole file's. Joining a file's documents in turn order from the last
+  `prefix_changed` (or the first copy) gives the bytes whose digest is the
+  latest `sha256`.
 - **Fresh sessions** run through `run_turn` too, so critique (and 1.4b's
   docs, 1.4c's review) transcripts are copied the same way from their own
   config directory.
@@ -269,17 +313,18 @@ What the kernel must never do:
 
 - `docs/machine.md`: the secrets table row for Git hosting tokens says
   where the token lives, `github-key`, the per-call config file, and the
-  merge-target list.
+  merge-target list; and that the remote's default branch is always
+  refused, the rebuild branch included if Tom ever makes it the default.
 - `docs/harnesses.md`: the transcript paragraph describes what the kernel
-  does, with the paths above.
+  does.
 - `docs/architecture.md`: the records table's transcript row and the merge
   sentence say where a merge lands.
 - `core/README.md`: `github-key`, `merge-target`, transcripts, and the
   per-task performers, replacing "registered performers".
 - `projects/valor.toml`: the header comment says the merge lands on
   `merge_url` when granted.
-- `docs/plans/m1-4-checks.md`: the token text matches Tom's answer (done
-  in this plan's commit).
+- `docs/plans/m1-4-checks.md`: the 1.4d outline matches this plan (done in
+  this plan's commits).
 
 ## Tech debt absorbed
 
@@ -291,14 +336,19 @@ What the kernel must never do:
 - `Provisioned.origin_url` always the local origin, with its comment, and
   the matching comment in `projects/valor.toml`: deleted when `merge_url`
   is honoured.
+- `remote_head` ignoring git's exit code.
 
 ## Left out
 
+- Fetching private repositories at provisioning. `tomcounsell/ai` is
+  public (default branch `main`), so nothing needs it; the refusal text
+  says so.
 - At takeover, a released merge that touches `core/` pulling the kernel
   checkout, migrating, and restarting (valor-rebuild.md, Execution): not a
   1.4 Done item; it lands with takeover.
 - The ruleset on `main` of `tomcounsell/ai`: Tom's to add on GitHub; the
   kernel does not create or check it.
+- A credential for `--workspace` tasks' merges.
 - Deleting a remote branch, or any push other than the merge, with the
   credential.
 - Client project targets (milestone 2); they use the same list.
@@ -313,7 +363,7 @@ The smart-HTTP server is a loopback `http.server` in the test process that
 runs the trusted git's `git http-backend` as CGI for one bare repository,
 refuses any request without the expected `Authorization` header with 401,
 can answer with a 302 to another loopback port, and logs every header it
-receives.
+receives. Tests grant `http://127.0.0.1:<port>/...` URLs directly.
 
 **Credential**
 
@@ -325,11 +375,13 @@ receives.
   "GitHub refused the credential; rotate it".
 - `push_branch` in the same task never sends the header (server log), and
   lands on the local origin.
+- A `--workspace` task whose origin is a granted loopback URL merges with
+  no header (the server refuses it with 401), and its `push_branch` sends
+  no header.
 - A mirror whose config holds an `http.` or `url.` key is refused before
   any request.
-- The server redirects the push to a second loopback server: the second
-  never receives the header, and the push fails.
-- A granted URL outside `github_url_prefix` is pushed to with no header.
+- Git's own redirect handling: the server redirects the push to a second
+  loopback server, and the second never receives the header.
 - No leak: while the server holds a push open, `ps -E -ww` from the
   kernel and `pgrep -lf` and `ps -E -ww` from a probe under `turn.sb` show
   no process whose arguments or environment contain the token, its base64
@@ -338,6 +390,8 @@ receives.
 - Afterwards no `github-push-*.gitconfig` file remains, and the token, its
   base64 form, and its SHA-256 appear in no `events` payload, no
   `documents` body, and no captured log or exception text.
+- A leftover config file older than twice `git_timeout_s` is removed by
+  the next merge; a younger one is kept.
 - `github-key` prints `written`, then `kept`, then `missing` for a vault
   without the name, and never prints the value.
 
@@ -349,7 +403,8 @@ receives.
 - A granted pair naming the server repository's `HEAD` branch is refused
   at `start`, and, when `HEAD` is moved onto it after `start`, the merge
   fails before any push (server log).
-- A remote whose `HEAD` cannot be read refuses at `start`.
+- A remote that cannot be read refuses at `start` with git's stderr; an
+  unborn `HEAD` refuses with its own text.
 - A pair revoked after the merge was held is refused at release.
 - A candidate that edits `projects/valor.toml` to name another URL or
   branch changes nothing for the running task; a later task started from
@@ -358,7 +413,9 @@ receives.
   it is), and a merge payload whose `url` differs from the Brief's
   `origin_url` is refused by `Merge.refuse`.
 - `merge-target add` refuses `user:pass@` URLs, `ssh` URLs, a query, a
-  fragment, and a malformed branch; it has no `--role-played`.
+  fragment, a URL holding `"`, `\`, `]`, a newline, or a space, a `..`
+  segment, and a malformed branch; it has no `--role-played`. The header
+  writer refuses the same URLs if handed one directly.
 - A local origin is allowed without a grant, and its symbolic `HEAD`
   (which names the target branch) does not trigger the default-branch
   refusal.
@@ -371,6 +428,9 @@ receives.
   (a timer task ticks during the push).
 - `git.deadline` applies inside the worker thread: a push the server
   stalls fails at `git_timeout_s` (set small in the test).
+- A release cancelled mid-push leaves an intent with no outcome;
+  `reconcile` settles it `done` once the push lands, and the config file
+  is gone after git exits.
 - `reconcile` of a dangling merge intent uses the task's own performers
   and its credential for `holds`.
 - `tasks.dispatch` lists the task's offered action types.
@@ -380,46 +440,54 @@ receives.
 **Transcripts**
 
 - A scripted turn whose config directory holds a session file and two
-  subagent files: one document, three entries, digests equal to the
-  files' SHA-256.
+  subagent files: three documents, digests equal to the files' SHA-256,
+  and the decoded base64 equal to the files' bytes.
 - A second turn resuming the session stores only the appended bytes, with
-  `offset` equal to the first copy's `bytes`.
+  `offset` equal to the first copy's `bytes`, and the joined bytes hash to
+  the latest `sha256`.
 - An edited earlier line shows `prefix_changed: true` and the whole file
   stored.
+- A file holding a NUL byte, and a delta whose offset splits a multibyte
+  character, store and round-trip exactly.
+- A document insert made to fail (a test hook on the writer) leaves no
+  transcript documents and `turn.ended` with `no_transcript`.
+- A file larger than one chunk (the chunk size set small in the test)
+  stores in several documents that join to the file.
 - A turn that replaces its session file with a symlink to a scratch
-  secret, and one that makes a directory component a symlink, store
-  nothing for it and record why; the secret's text is in no row or
-  document.
+  secret, and one that makes `projects/<dir>` a symlink, store nothing for
+  it and record why; the secret's bytes are in no row or document.
 - A FIFO or a directory named `agent-x.jsonl` is skipped with a reason
   and does not block.
 - A `session_id` of `../../x` or with a slash records `no_transcript`.
-- A 51 MB file keeps digest and size with no text.
+- A turn run from a cwd longer than 200 characters has its transcript
+  found (the real Claude Code layout, checked in the live test too).
 - Live (`VALOR_LIVE=1`, metered, expected about $0.30): a real turn that
   starts a subagent has the subagent's transcript copied with its own
   digest.
 
 **Live push at rollout** (`VALOR_LIVE=1`, `VALOR_LIVE_GITHUB=1`, no model
 spend): with the real key file and the pair `https://github.com/
-tomcounsell/ai.git`, `valor/push-check` granted, a merge performer pushes
-a commit whose parent is that branch's head (or the rebuild branch's head
-when the branch does not exist) and `holds` confirms it.
+tomcounsell/ai.git`, `valor/push-check` granted, the `Merge` performer
+pushes from a kernel-owned bare repository a commit whose parent is that
+branch's head (or the rebuild branch's head when the branch does not
+exist), and `holds` confirms it.
 
 ## Files it changes
 
 | File | Change | Also changed by |
 |---|---|---|
 | `core/broker.py` | `Performers`, async protocol, signatures, registry deleted | 1.5, 2.1 |
-| `core/git.py` | `credential` parameter, `followRedirects` pinned | 1.4b (`hostile` profile) |
-| `core/credentials.py` | the header file writer | |
-| `core/settings.py` | `github_keyfile`, `github_url_prefix` | 1.4b, 1.5 |
+| `core/git.py` | `credential` parameter; `remote_head` checks the exit code | 1.4b (`hostile` profile) |
+| `core/credentials.py` | the header file writer, leftover removal | |
+| `core/settings.py` | `github_keyfile` | 1.4b, 1.5 |
 | `core/targets.py` | new | |
 | `core/transcripts.py` | new | |
 | `core/runs.py` | transcript copy before `turn.ended`; `TurnCommand.transcripts`; `run_turn(offered=)` | 1.5 |
-| `core/tasks.py` | `dispatch(offered=)`; `origin_url` check for `--workspace` | 1.5, 2.1 |
-| `core/workspace.py` | `origin_url = merge_url` when granted | 1.4b |
+| `core/tasks.py` | `dispatch(offered=)` | 1.5, 2.1 |
+| `core/workspace.py` | `origin_url = merge_url` when granted; the private-repository refusal text | 1.4b |
 | `core/__main__.py` | `github-key`, `merge-target`, `_performers`, release and run wiring | 1.4b |
 | `core/router.py` | `Context.performers`, `reconcile` call | 1.4b (`_Services` reap) |
-| `core/session.py` | `request` with performers | 1.5 |
+| `core/session.py` | `request` with performers; `offered` to `run_turn` | 1.5 |
 | `core/verdicts.py` | `ensure_merge` with performers | 1.4b |
 | `core/fresh.py` | passes `offered` to `run_turn` | 1.4b |
 | `tools/push_branch.py` | async, credential for `Merge` | |
@@ -437,7 +505,7 @@ after 1.4b lands.
    `uv sync`. No migration.
 2. The build session runs `python -m core github-key` from the kernel
    checkout; it prints `written`.
-3. Tom runs, from the kernel checkout:
+3. **Tom**, from the kernel checkout:
    `python -m core merge-target add https://github.com/tomcounsell/ai.git
    <rebuild branch> --note "the rebuild's merges"` and
    `python -m core merge-target add https://github.com/tomcounsell/ai.git
@@ -446,9 +514,10 @@ after 1.4b lands.
    `python -m core merge-target remove ... valor/push-check --by valor
    --note "live push done"`. The branch `valor/push-check` stays on GitHub
    for Tom to delete or keep.
-5. The next task started with `--project valor` merges to the rebuild
-   branch on GitHub when Tom approves it.
-6. Tom adds the ruleset on `main` when he can; nothing waits for it.
+5. **Tom**, on GitHub, when he can: a ruleset on `main` of
+   `tomcounsell/ai` restricting updates, with `valorengels` off the bypass
+   list. Nothing waits for it; the kernel's default-branch refusal holds
+   either way.
 
 ## Decided by default
 
@@ -456,19 +525,15 @@ Each is reversible and was decided by the build session:
 
 - **A per-call config file, not a static one written by `github-key`.**
   Scoped to the exact granted URL of each push; nothing on disk outside a
-  call but the key file. A crash between write and delete leaves one file
-  at mode 600 in the denied key directory, the same exposure as the key
-  file; no sweep removes others, since a sweep could delete a concurrent
-  call's file.
+  call but the key file and any leftover a crash left, which the next
+  merge removes.
 - **Basic auth with the user `x-access-token`.** GitHub accepts a classic
   token with any user name over HTTPS; the live push confirms it.
-- **`http.followRedirects=false` pinned on every kernel git call.** No
-  kernel git call needs a redirect.
-- **The GitHub prefix setting.** It keeps the token off every other host
-  even if a non-GitHub URL is granted, and lets tests use loopback.
 - **The default-branch read at `start` and inside `perform`, not in
   `refuse`.** A network call stays out of a ledger transaction holding the
   task lock; `perform` is the latest moment before the push.
+- **`--workspace` tasks merge without the credential** (the lead's call
+  on critique finding 1). Only the mirror is free of turn writes.
 - **`merge-target remove` exists and anyone may run it.** It only takes
   authority away; provenance records who.
 - **Performers passed explicitly** (a router `Context` field threaded to
@@ -476,25 +541,49 @@ Each is reversible and was decided by the build session:
   exactly which performers a call used.
 - **`refuse` is async and takes `conn`.** The target list is ledger data
   and must be read in the same transaction as the intent.
-- **The harness locates transcripts.** `core` never knows Claude Code's
-  directory layout; another harness supplies its own locator or none.
+- **The harness supplies the config root and session id; the kernel finds
+  the directory by listing.** `core` never knows Claude Code's cwd
+  encoding.
 - **A UUID check on `session_id`**, not a general path check: a session id
   never needs anything else.
 - **No transcript from a turn without its own config directory**: the
   kernel never reads Tom's `~/.claude`.
-- **Transcript text stored decoded with replacement**: a `jsonb` string
-  body needs no migration; the digest is over the raw bytes.
+- **Base64 of the raw bytes, one document per file, 64 MiB chunks**: no
+  migration, exact bytes, under the `jsonb` string limit.
 - **The live push branch `valor/push-check`**, created by the test, kept
   afterwards.
 
-## Questions for Tom
+## Critique round 1 (of 2): revise
 
-Only credential and scope choices are his:
+Each finding is accepted and handled in this revision:
 
-1. **The two grants at rollout** (step 3): the rebuild branch and
-   `valor/push-check` on `tomcounsell/ai`. Assumed: yes, both, run by Tom
-   from the kernel checkout when the build reaches rollout; the scratch
-   grant is revoked after the live push.
-2. **The ruleset on `main`** with `valorengels` off the bypass list.
-   Assumed: Tom adds it when he can; the build does not wait for it, and
-   the kernel's default-branch refusal holds either way.
+1. **`--workspace` tasks and the token.** `merge_url` is honoured only for
+   `--project`; `Merge` gets the credential only when `b.mirror` is set; a
+   `--workspace` task with a non-local origin merges without the header,
+   and `push_branch` never takes a credential. Tested.
+2. **A transcript could take `turn.ended` down.** Raw bytes stored as
+   base64; the documents' transaction failing leaves `turn.ended` with
+   `no_transcript`. NUL byte and split multibyte tests added.
+3. **The 50 MB cap.** Dropped. One document per file, chunked at 64 MiB
+   of raw bytes to stay under the `jsonb` string limit, hashed by
+   streaming, deltas kept.
+4. **Guards with no incident.** `http.followRedirects=false`, the GitHub
+   prefix, and the start-time key check are dropped. The redirect test
+   stays as a test of git's own behaviour.
+5. **Config-file injection.** `targets.url_ok` fixes the URL's shape, at
+   `merge-target add` and again in the header writer. Tested.
+6. **The `start` read had no repository.** It runs in the spec's cache
+   clone; `remote_head` checks the exit code, and the two refusals say
+   which happened.
+7. **The outline.** m1-4-checks.md's 1.4d outline matches this plan, in
+   the same commit; private-repository fetching is under Left out and its
+   refusal text is corrected.
+8. **Missed cases.** Cancellation is stated and tested; leftover config
+   files older than twice `git_timeout_s` are removed; a Tom-made default
+   branch change is documented; the transcript directory is found by
+   listing, not by rebuilding Claude Code's cwd encoding, with a long-cwd
+   test.
+9. **Future evidence.** The Done item's evidence is the live push to
+   `valor/push-check` and `holds`.
+10. **The two questions.** They are rollout steps 3 and 5 for Tom; no
+    question for Tom remains.

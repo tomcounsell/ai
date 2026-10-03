@@ -737,7 +737,8 @@ paragraph verbatim.
 ### Out of scope for 1.4a
 
 The test, review, and docs runners; calibration; the container; the GitHub
-credential and fetching private repositories; transcripts; the performer
+credential; transcripts; fetching private repositories (left out of
+1.4d too: `tomcounsell/ai` is public); the performer
 registry. Concurrent runs of two tasks' turns (one slot, machine.md).
 
 ## 1.4b in full: calibration, the test runner, the docs runner
@@ -770,18 +771,17 @@ was decided by default. It has no questions for Tom.
   request, and at release. A candidate's edit to `projects/valor.toml` cannot add a target.
 - **Where it lives.** The vault `.env` holds the durable copy as
   `GITHUB_PUSH_TOKEN`, beside the judgement keys. `python -m core
-  github-key` reads it and writes one file in the kernel key directory,
-  `github-push.gitconfig` (mode 600, path derived from `pg_passfile` like
-  `judgement-keys`), holding only
-  `[http "https://github.com/tomcounsell/ai.git"] extraHeader =
-  Authorization: Basic <base64 of x-access-token:TOKEN>`, scoped by git's
-  URL matching to that one repository. It prints `written`, `kept`, or
-  `missing`, never a value, comparing SHA-256 digests. It is the only code
-  that writes the file.
-- **How it reaches only the push.** `core/git.py`'s push and its remote
-  reads take an optional credential file, used as `GIT_CONFIG_GLOBAL` for
-  that one call instead of `/dev/null`. Only the `merge` performer passes
-  it, only when the merge URL matches the file's URL. The header is a
+  github-key` copies it into `github-keys` in the kernel key directory
+  (mode 600, path derived from `pg_passfile` like `judgement-keys`),
+  printing `written`, `kept`, or `missing`, never a value.
+- **How it reaches only the push.** For each merge push or remote read,
+  the kernel writes a config file of its own in the key directory (mode
+  600, deleted when git exits) holding only `[http "<granted URL>"]
+  extraHeader = Authorization: Basic <base64 of x-access-token:TOKEN>`,
+  and passes it as `GIT_CONFIG_GLOBAL` for that one call instead of
+  `/dev/null`. Only the `merge` performer of a task with a kernel mirror
+  gets it; a `--workspace` task merges without it. The granted URL's
+  shape is checked before it is written. The header is a
   pinned header, as 1.2's review proposed, since credential helpers are
   refused and the PATH is system-only; it is delivered as a file path
   rather than as `-c http.<url>.extraHeader=...` on the command line,
@@ -830,8 +830,10 @@ write their transcripts as separate files beside the session's (in the
 session's directory), and those are copied too, each with its own digest,
 listed on the same `turn.ended`. Each file is opened component by
 component without following symlinks (as `verdict.json` is), must be a
-regular file under that directory, and is
-capped at 50 MB (over that, the digest is kept and the text is not). A
+regular file under that directory, and is stored as base64 of its raw
+bytes, one document per file, chunked to stay under the `jsonb` string
+limit, with no size cap. A failed copy still records `turn.ended`, with
+the reason. A
 resumed session's file grows, so each copy stores the bytes appended since
 the previous copy when the earlier prefix still has the digest recorded
 for it; otherwise it stores the whole file and marks `prefix_changed`,
@@ -1099,7 +1101,7 @@ on a toy candidate with a container rerun.
   the diff deletes its definition.
 - Container: 2 GB and 4 CPUs per VM by default, no network at run time,
   three dependency images kept per project.
-- Transcripts: deltas per turn, 50 MB cap per copy.
+- Transcripts: deltas per turn, raw bytes as base64, no size cap.
 - The token: Valor's classic `repo` token (Tom's answer to Questions, 3),
   restricted by the merge-target list and the default-branch refusal.
 - Live spend for the milestone's builds is metered, expected about $8 in
