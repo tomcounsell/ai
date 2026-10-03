@@ -194,14 +194,11 @@ the candidate from `tasks.status`. `core/` gets no change for this. Diffs
 are taken with `git.trusted` in the task's kernel mirror, a repository no
 turn writes, between the base and that rev.
 
-The judge's diff leaves out one path: the task's own plan document,
-`status.plan.path` (for the #191 trial, `docs/plans/capped-list-field.md`).
-Every other path stays, an edit to a plan document the project already
-holds included. The baseline's candidate diffs carried no plan document
-of the task's own (the reference diffs do carry one). Each result records
-the diff's size in characters and lines, the path left out, and whether
-the judge's 70,000 character truncation cut it. The pipeline's docs
-commits stay in the diff; the gate record notes that the baseline's
+The judge's diff is the whole diff, as the baseline judge's was
+(`5d90b4776:scripts/judge_replay.py`); no path the turn chose is read.
+Each result records the diff's size in characters and lines and whether
+the judge's 70,000 character truncation cut it. The pipeline's plan and
+docs commits stay in the diff; the gate record notes that the baseline's
 candidate diffs had none.
 
 ### The hidden-test tree and its profile (`tests/emulator/judge.py`)
@@ -229,11 +226,16 @@ turn's `state/work/tmp/verify` to this directory.
   given. Gate runs are named `<item>-gate` and `<item>-gate-2`, so
   `pop-b-routed.json` stays as it is.
 - `MAX_RUNS` goes. The pipeline's own loop endings end a task.
-- `MAX_FAILED_RUNS` goes. A failed run exits the driver with the outcome
-  unset and the failure printed; the next invocation resumes, as an unset
-  outcome already does.
-- `release_pushes` approves and releases a held `push_branch` to the
-  run's own origin, and skips every `merge` effect of the task: the
+- `MAX_FAILED_RUNS` goes. After each `core run` the driver reads its
+  answer's first word: `QUESTION`, `DELIVERED`, `STOPPED`, `MERGED` go on;
+  `ALREADY RUNNING` blocks on the task's run lock (`pg_advisory_lock` on
+  `run:<task>`), lets it go, and goes on; `FAILED`, `IDLE`, `LOCK LOST`,
+  `LEGACY` and any other answer exit with the outcome unset and the answer
+  as the reason. The next invocation resumes, as an unset outcome does.
+- `release_pushes` approves and releases a held `push_branch` when the push
+  URL in the kernel's record (`core workspace show`) is the bare origin the
+  kernel provisioned in the task's directory; it never reads the turn's
+  git config. It skips every `merge` effect of the task: the
   current one and every earlier one a later candidate superseded (nothing
   withdraws them). The exit "an effect other than a local push is held
   for Tom" fires only for a held effect that is neither.
@@ -260,15 +262,18 @@ turn's `state/work/tmp/verify` to this directory.
 - The result gains `emulator_task`, `emulator_spend_usd`,
   `kernel_spend_usd`, `open_calls`, `judge_model`, `stand_in_model`,
   `attention` (counts by kind), `final_rev`, `merge_effect_id`, and the
-  judge diff's size, exclusion, and truncation.
+  judge diff's size and truncation.
 
 ### `/tmp` (`core/workspace.py`)
 
 The working turn profile denies `/private/tmp`, `/private/var/tmp`, and
 `/private/var/folders` as the fresh-session profile does. `TMPDIR` is
-already per turn. The check environment's services keep their own
-sockets under the task directory, so nothing the suite needs lives in
-`/tmp`.
+already per turn, but macOS `mktemp` and `/usr/bin`'s `git` and `python3`
+shims use the user temp directory whatever it says. The kernel writes a
+`mktemp` into the shared `bin/` that hands it `-p "$TMPDIR"` when the
+caller names no directory and no template, and puts the trusted git's
+directory after `bin/` on the turn's `PATH`. Services keep their sockets
+under the task directory.
 
 ### Docs fixed in the same build
 
@@ -385,10 +390,9 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
   call still succeeds and returns the same diff; a workdir commit newer
   than the candidate does not appear in it. A second, refused merge
   effect does not change which `effect.held` row is read.
-- Judge diff: a candidate adding the task's own `plan.path` and editing
-  another `docs/plans/` file yields a diff without the first and with the
-  second, and a result naming the first as left out; a diff over 70,000
-  characters is recorded as truncated with its full size.
+- Judge diff: a task whose plan names `app.py` still shows its change to
+  `app.py`; a diff over 70,000 characters is recorded as truncated with its
+  full size.
 - Hidden-test tree: it is created under `<task_dir>/checks/verify-<run>/`
   from the mirror; a write to it under the working turn profile (without
   the added path) is refused; the verification profile allows it and a
@@ -410,12 +414,18 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
     second held merge, the first still does not, and the rev is read from
     the second; a held effect of another action does trip it;
   - a stopped task ends `stopped`;
+  - with the real router and its answer line: `IDLE`, `LOCK LOST` and
+    `LEGACY` exit with the answer as the reason; `ALREADY RUNNING` waits
+    until the holder lets the lock go, then returns with nothing set;
+  - a push is released only when the record's URL is the kernel's origin;
   - `--run` names the result file; a name with an outcome is refused
     without `--rebuild`.
 - `/tmp`: the working turn profile denies a write to `/private/tmp/x` and
   under `/private/var/folders`, and allows one under the turn's `TMPDIR`.
   Non-obvious: two turns of different tasks writing the same `/tmp` name
-  cannot see each other's file, because neither can write it.
+  cannot see each other's file, because neither can write it. Under the
+  profile with the turn's `PATH`, `mktemp` (bare, `-d`, `-t`) makes its
+  file in `TMPDIR`, and `git` and `python3` print nothing on stderr.
 - Non-obvious, run once on this machine after 1.4b and recorded, not in
   the suite: for each gate item, its `verify` commands on base plus
   `ref/<item>.ref.diff`, under the baseline's profile, from the baseline's
@@ -440,11 +450,11 @@ Other tasks also change `core/`; the edits here are small and named.
 | `tests/test_emulator_package.py` | new |
 | `tests/test_emulator_metering.py` | new |
 | `tests/test_replay.py`, `tests/test_replay_arms.py` | imports, the `--help` path, the driver cases |
-| `tests/test_demo_sandbox.py` | the `demo_workspace.sh` cases removed; `/tmp` and hidden-test tree cases added |
+| `tests/test_demo_sandbox.py` | the `demo_workspace.sh` cases removed; `/tmp`, `mktemp`, `git`, and hidden-test tree cases added |
 | `tests/scripted.py`, `tests/test_pipeline.py` | docstring paths |
 | `tests/README.md` | the emulator's place |
 | `core/tasks.py` | `start_calibration` takes optional `via` and `detail` |
-| `core/workspace.py` | the working turn profile denies the temp directories; `turn_profile` takes `tmp` and `rw` for verification |
+| `core/workspace.py` | the working turn profile denies the temp directories; `turn_profile` takes `tmp` and `rw` for verification; `bin/mktemp` and the trusted git's directory on the turn's `PATH` |
 | `core/settings.py` | docstring only |
 | `docs/plans/valor-rebuild.md` | the gate line's spend sentence |
 | `docs/emulator.md`, `docs/architecture.md`, `docs/harnesses.md`, `docs/tech-stack.md` | as in Docs fixed |
@@ -490,15 +500,26 @@ Other tasks also change `core/`; the edits here are small and named.
 - The driver runs its own gateway on an ephemeral port on a background
   event-loop thread, rather than a long-lived one.
 - Stand-in and judge stay `claude -p` calls, not direct API calls.
-- The stand-in is the `frontier` seat; the judge is one pinned Sonnet id
-  resolved from the baseline's alias.
+- The stand-in is the `frontier` seat; the judge is `claude-sonnet-5-5`,
+  the id Claude Code 2.1.288's catalog gives the baseline's alias `sonnet`.
+  The baseline did not record its CLI version, so that is the nearest
+  source.
 - `head_sha` is read from the `effect.held` row, not added to the fold.
-- The judge's diff leaves out only the task's own `plan.path`; its size
-  and any truncation are recorded.
+- The judge's diff is the whole diff: the baseline judge excluded nothing,
+  so there is no pathspec to make literal. Size and truncation are recorded.
 - The hidden-test tree lives at `<task_dir>/checks/verify-<run>/`.
 - `MAX_RUNS` and `MAX_FAILED_RUNS` are removed; a failed run, a
-  `NO RUNNER` stage, and an awaited grant each exit for a resume; a
-  delivery that did not pass and a refused merge end `to tom`.
+  `NO RUNNER` stage, `IDLE`, `LOCK LOST`, `LEGACY`, an unknown answer and
+  an awaited grant each exit for a resume; a delivery that did not pass
+  and a refused merge end `to tom`. `ALREADY RUNNING` blocks on the run
+  lock, not a sleep loop, and takes nothing for itself.
+- The push rule compares the record's push URL with `Layout(task_dir)
+  .origin`, both the kernel's; a run whose record names another URL leaves
+  its pushes held.
+- `TMPDIR` alone does not fix the turn's tools on macOS: `mktemp` and the
+  `xcrun` shims read the user temp directory from the system, not
+  `TMPDIR`. The fix is the `mktemp` in `bin/` and the trusted git's
+  directory on `PATH`, the developer tools' own `git` and `python3`.
 - The gate waits for review's runner: 1.4c part one registers it
   unconditionally, under Tom's rule against invented safeguards. A stage
   still manual at gate time (docs, while governance's entry check fails)
@@ -532,65 +553,45 @@ Other tasks also change `core/`; the edits here are small and named.
 
 ## Record
 
-Critique round 1 (of 2): revise. Every finding accepted.
-
-1. Driver ends: `held` only on `merge_effect.state == "held"`, accepted or
-   rounds spent; `NO RUNNER` and an awaited grant exit unset with the
-   stage or reason named; stopped and to-Tom outcomes; every manual stage
-   named; `--run` in the design. 1.4c's review runner merges before the
-   gate.
-2. `head_sha` read from the `effect.held` row; no `core/` change.
-3. The tree at `<task_dir>/checks/verify-<run>/`, kernel-written, added
-   to the verification profile only.
-4. The equal-counts check: `verify` on base plus the ref diff, both
-   profiles, on this machine.
-5. Spend read from `python -m core status` and `tasks.spending` over rows.
-6. A sidecar for inferred lines; keys byte-identical; path
-   `items/*.key.md`.
-7. valor-rebuild.md's spend line and docs/emulator.md lines 15, 156, 403,
-   426 to 428, and 478 to 479 fixed in the build.
-8. The unmet gate goes to Tom as a delivery not passed; either run meeting
-   both bars passes; #191's F at least 2 stated.
-9. Q1 kept; Q2 moved to Decided by default.
-10. `start_calibration` takes `via` and `detail`.
-11. `DROP_ENV` reused, `PGPASSFILE` seeded in the test; the gateway on a
-    background event-loop thread.
-12. `tests/test_gateway_meter.py`; `@pytest.mark.spend(usd=0)`.
-13. The judge's diff leaves out `docs/plans/`; size and truncation
-    recorded.
-14. Hand-recorded verdicts named as unmetered; the #191 trial's held
-    merge scored once as information.
+Critique round 1 (of 2): revise. Every finding accepted. (1) Driver ends:
+`held` only on a held merge, accepted or rounds spent; `NO RUNNER` and an
+awaited grant exit unset; stopped and to-Tom outcomes; manual stages
+named; `--run`. (2) `head_sha` from the `effect.held` row. (3) The tree at
+`<task_dir>/checks/verify-<run>/`. (4) The equal-counts check on this
+machine. (5) Spend from `core status` and `tasks.spending`. (6) A sidecar
+for inferred key lines. (7) valor-rebuild.md's spend line and
+docs/emulator.md fixed in the build. (8) The unmet gate goes to Tom as a
+delivery not passed; either run meeting both bars passes. (9) Q2 moved to
+Decided by default. (10) `start_calibration` takes `via` and `detail`.
+(11) `DROP_ENV` reused; the gateway on a background loop thread.
+(12) `tests/test_gateway_meter.py`; the spend mark. (13) The judge diff's
+size and truncation recorded. (14) Hand-recorded verdicts named as
+unmetered; the #191 trial scored once as information.
 
 Critique round 2 (of 2): revise. Every finding accepted; both rounds
-spent.
+spent. (1) Verification under the baseline's profile plus the tree; the
+check compares the whole output. (2) `release_pushes` skips every merge
+effect. (3) `merge` split by delivery, grants, join and the merge effect.
+(4) `issue` and `retire` on the gateway's loop; `drain` before spend.
+(5) The gate waits for review's runner. (6) The judge diff's plan
+exclusion (removed in patch round 1). (7) `--stand-in-model`. (8) Step 7's
+own emulator task; hand-recorded verdicts read a `blind_checkout`.
 
-1. Verification runs under the baseline's profile (temp directories
-   shared) plus the tree directory; the check compares the whole output
-   at the baseline's and the new tree location; the Design and Decided by
-   default agree.
-2. `release_pushes` skips every merge effect of the task; the left-effect
-   exit fires only for other effects; tests for a superseded merge.
-3. `merge` split by `delivery.outcome`, ungranted instances,
-   `join.outcome`, and the merge effect's state; a test for each.
-4. `issue` and `retire` wrapped in coroutines on the gateway's loop;
-   `drain` before spend is read; `open_calls` recorded; a delayed-stream
-   test.
-5. 1.4c part one registers review unconditionally; the gate waits for it
-   and for 1.4s; any stage still manual is named.
-6. Only the task's own `plan.path` is left out of the judge's diff; the
-   note is about candidate diffs.
-7. `--stand-in-model` named, default the seat.
-8. Step 7 runs its own emulator task into a new result; a hand-recorded
-   verdict reads a `blind_checkout` from the mirror.
+Build: the plan built as written, with three readings. `JUDGE_MODEL` is
+`claude-sonnet-5-5`, the priced Sonnet id. The driver's ends are tested
+through `step` with the fold and `core` stubbed (patch round 1 adds
+scripted tasks for the router's answers). `release_pushes` checks that a
+push's URL is the run's own origin before it releases one.
 
-Build: the plan built as written, with three readings.
+Patch round 1: review `changes`, test `gaps`; every finding fixed.
 
-- `JUDGE_MODEL` is `claude-sonnet-5-5`, the priced Sonnet id; the probe
-  that it is what the baseline's `sonnet` alias resolved to is rollout
-  step 2.
-- The driver's ends are tested through `step` with the fold and the core
-  command stubbed, one case each, not through scripted tasks driven to
-  each state; `review_rev`, `release_pushes`, and metering run against
-  real ledger rows.
-- `release_pushes` keeps its check that a push's URL is the workspace's
-  own origin before it releases one.
+1. The driver gives every `core run` answer an ending: `IDLE`, `LOCK
+   LOST`, `LEGACY` and unknown answers exit unset with the answer as the
+   reason; `ALREADY RUNNING` waits on the run lock. Tested with scripted
+   tasks through the real router.
+2. `release_pushes` reads no workdir config; the URL is the kernel's.
+3. The judge diff reads no turn-owned path; it is the whole diff.
+4. The `mktemp` in `bin/` and the trusted git's directory on the turn's
+   `PATH`; tested under the real profile.
+5. `JUDGE_MODEL` cited to Claude Code 2.1.288's catalog.
+6. `--base` in the stand-in's usage; baseline citations name 5d90b4776.

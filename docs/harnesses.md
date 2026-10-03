@@ -360,14 +360,16 @@ must not reach. It runs as Tom's user.
   (`work_dir`), other tasks included.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
   clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config),
-  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders`
-  denied, so no two tasks share a temp directory; for a fresh session, only
-  its own check directory, with the same three and `~/.claude*` denied. The
-  emulator's verification runs the working profile with the temp
-  directories shared and its own tree added, as its baseline did.
-- **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
-  working session, its task's `home/` and bare origin. **Stat only:** the
-  allowed directories' ancestors (not listable), so real paths resolve.
+  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders` denied,
+  so no two tasks share a temp directory; for a fresh session, its own check
+  directory, the same three and `~/.claude*` denied. The emulator's
+  verification shares the temp directories and adds its tree, as its baseline did.
+- **Read only:** the shared `bin/` (uv, and the kernel's `mktemp`, which hands
+  macOS `mktemp` the turn's `TMPDIR`), first on the turn's `PATH`, then the
+  trusted git's directory, so `git` and `python3` are not `/usr/bin`'s shims,
+  which cache in the user temp directory; for the working session, its task's
+  `home/` and bare origin. **Stat only:** the allowed directories'
+  ancestors (not listable), so real paths resolve.
 - **Denied entirely:** the kernel's own paths, each named by its setting: the
   kernel key directory (`pg_passfile`'s), the machine cluster's data directory
   (`pg_data_dir`), and the backup disk (`backup_dir`).
@@ -426,16 +428,14 @@ Stated so the boundary is drawn where it is [4]:
 - The public internet is open, so a turn could reach a provider directly,
   outside the gateway, or reach GitHub anonymously. The baseline found no
   such call in any transcript (rebuild-baseline.md, Caveats).
-- Both openings above are accepted (Tom, 2026-10-01): no separate macOS
-  user, and the gateway is for visibility and honest metering, not a hard
-  wall.
+- Both openings above are accepted (Tom, 2026-10-01): no separate macOS user,
+  and the gateway is for visibility and honest metering, not a hard wall.
 - A fresh session's blindness covers the paths the kernel names for the
   builder (Files, above). The working session writes only its own `TMPDIR`,
   never a shared temp directory, but can write places such as `~/Library/Caches`,
   `~/.cache`, or `/Users/Shared`, which a fresh session can read, so a builder
   could leave a note there for a reviewer. Nothing reads one on purpose;
-  independence rests on the inputs, the checkout, and the reviewer's own
-  reruns.
+  independence rests on the inputs, the checkout, and the reviewer's own reruns.
 - Narrowed for kernel workspaces, not closed: their profiles deny writes to
   the machine user's startup places, `~/.local/bin` (which the user's PATH
   puts before `/usr/bin`), `~/Library/LaunchAgents`, the shell's rc files

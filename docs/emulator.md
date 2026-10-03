@@ -161,16 +161,24 @@ keys in the kernel key directory.
 A task in `merge` is read from its status in this order: a delivery that
 did not pass, then a governance instance not granted or a join of
 `governance_refused`, then a refused merge, then a held merge, and
-otherwise it runs on. Three cases exit the driver with the outcome unset
-and say why: a stage awaiting Tom's grant, `NO RUNNER` (a check stage with
-no runner, whose verdict is recorded by hand from a blind checkout of the
-kernel mirror), and a failed run. The next invocation resumes the same
-task.
+otherwise it runs on.
+
+After each `core run` the driver reads the first word of its answer.
+`QUESTION`, `DELIVERED`, `STOPPED` and `MERGED` go on to the next step.
+`ALREADY RUNNING` waits on the task's run lock until it is free, then goes
+on. Every other answer exits the driver with the outcome unset and the
+answer recorded as the reason: `NO RUNNER` (a check stage with no runner,
+whose verdict is recorded by hand from a blind checkout of the kernel
+mirror), `FAILED`, `IDLE` (turns that ended without their stage's signal),
+`LOCK LOST`, `LEGACY`, and any answer the driver does not know. A stage
+awaiting Tom's grant exits the same way. The next invocation resumes the
+same task.
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
 
-The driver approves and releases a held `push_branch` only when the
-workspace's push URL is exactly the run's own bare origin, under Tom's
+The driver approves and releases a held `push_branch` only when the push
+URL in the kernel's record of the task (`core workspace show`) is exactly
+the bare origin the kernel provisioned in the task's directory, under Tom's
 standing permission for pushes to local copies; it records that permission
 in the approval note. It never answers a merge: every merge effect of the
 task is skipped, the current one and any a later candidate superseded, and
@@ -225,9 +233,10 @@ a virtualenv included, is absent: an item's commands set up what they need.
 Then one model call, blind to the arm, sees the request, the answer key, the
 reference diff, the candidate's diff from the mirror, and the verification
 output, and nothing that names the arm, the questions, or the feedback. The
-candidate's diff leaves out the task's own plan document (`plan.path`); the
-result records the diff's size, the path left out, and whether the 70,000
-character limit cut it. The model is `JUDGE_MODEL`, one pinned Sonnet id. It scores 0 to 5:
+candidate's diff is the whole diff, as the baseline judge's was; the result
+records its size and whether the 70,000 character limit cut it. The model is
+`JUDGE_MODEL`, `claude-sonnet-5-5`: Claude Code 2.1.288's model catalog
+resolves the baseline judge's alias `sonnet` to it. It scores 0 to 5:
 
 - **Fidelity.** Does it build what the requester intended, at the intended
   scope? The answer key is the authority; the reference shows one accepted
