@@ -257,8 +257,9 @@ sockets under the task directory, so nothing the suite needs lives in
     merge... None has been named") say the takeover gate is milestone
     1.5's one-time Done item, set by Tom, not a standing rule;
   - line 156 (`run cap`, `failed`) describes the driver's ends as above;
-  - line 403 ("$25 cap per full run") says spend is metered and reported
-    with no cap.
+  - line 403 ("$25 cap per full run") and lines 478 to 479 ("$25 per
+    full emulator run ... about 14 runs") say spend is metered and
+    reported only, and stops nothing.
 - `tests/README.md`, `docs/architecture.md`, `docs/harnesses.md`,
   `docs/tech-stack.md`, and the `core/settings.py` docstring that names
   `scripts/demo_workspace.sh`.
@@ -496,7 +497,7 @@ Critique round 1 (of 2): revise. Every finding accepted.
 6. A sidecar for inferred lines; keys byte-identical; path
    `items/*.key.md`.
 7. valor-rebuild.md's spend line and docs/emulator.md lines 15, 156, 403,
-   426 to 428 fixed in the build.
+   426 to 428, and 478 to 479 fixed in the build.
 8. The unmet gate goes to Tom as a delivery not passed; either run meeting
    both bars passes; #191's F at least 2 stated.
 9. Q1 kept; Q2 moved to Decided by default.

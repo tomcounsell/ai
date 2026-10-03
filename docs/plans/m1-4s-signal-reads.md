@@ -28,7 +28,9 @@ the same way. Only `workspace.read_verdict` walks by descriptor with
 ## Threat model
 
 The turn controls everything under its workspace (`<task>/repo`), its
-cache, and `state/work`; a fresh session controls its check directory. It
+cache, and `state/work`; a fresh session controls its check directory
+(`<task>/checks/<stage>-<key>`), the entry itself included, since its
+profile's `subpath` rule covers that path. It
 can leave any entry type there: a symbolic link to any path, a hard link to
 a file on the same volume, a FIFO, a socket, a directory where a file is
 expected, and it can name paths in `plan.json`. The kernel must never read,
@@ -54,8 +56,8 @@ Every place code outside a sandboxed turn (`core/`, `tools/`,
 | `core/session.py:124-125` | `_plan`: `(workspace/path).is_file()`, `read_bytes()`, `path` taken from `plan.json` | yes, and `..` in `path` is not refused |
 | `core/git.py:263` | `is_repo`: `Path(workspace).is_dir()` | yes (stat only) |
 | `core/workspace.py:1033-1037` | `fetch_into_mirror`: `.git` `is_symlink()`/`exists()`/`is_dir()`, then `exists()` on `objects/info/alternates`, `objects/info/http-alternates`, `shallow`, `commondir` | the last component of `.git` is checked; the four names are stat'ed through a linked `objects` or `info` directory (existence only) |
-| `core/workspace.py:1224-1269` | `read_verdict` on a fresh session's `.valor/verdict.json` | no; but a hard link is read |
-| `core/workspace.py:1272-1293` | `_file_away` into `.valor/handled/<turn>/` | no |
+| `core/workspace.py:1224-1269` | `read_verdict` on a fresh session's `.valor/verdict.json` | the checkout's last component and below are not followed, but the check directory above it is: a session that swaps `critique-<sha>` for a link makes the kernel read a verdict and create `handled/` wherever it points; and a hard link is read |
+| `core/workspace.py:1272-1293` | `_file_away` into `.valor/handled/<turn>/` | no; but an `OSError` from its `os.rename` (a directory planted at the destination name) raises out of the caller |
 | `core/workspace.py:1114-1122` | `fresh_dir`: `is_symlink()`, `rmtree` of a check directory a fresh session wrote | no: `shutil.rmtree.avoids_symlink_attacks` is true on this Python |
 | `core/workspace.py:1179-1199` | `write_inputs` into a checkout | no |
 
@@ -84,15 +86,18 @@ One helper in `core/workspace.py`, the shape task 1.4b names
   read. Anything else returns `None` and a reason ("is a link", "is not a
   regular file", "has 2 links"), and nothing is read. No size cap.
 - `open_turn_dir(dir_fd, relpath) -> (fd | None, why | None)`: the same
-  walk for a directory, used for the workspace root, `.valor`, and
-  `.valor/effects`. The workspace root itself is opened with `O_NOFOLLOW`
-  too, as `read_verdict` opens its checkout.
+  walk for a directory, used for `.valor`, `.valor/effects`, `.git`, and
+  the check directory's `<stage>-<key>/repo`. The turn workspace root is
+  opened with `O_NOFOLLOW | O_DIRECTORY`; its parent `<task>/` is the
+  kernel's, so the last component is the only one a turn can replace.
 - `_file_away(src_fd, name, valor_fd, turn_id, sub=())` (the existing one,
   generalized): makes and opens `handled/<turn>/<sub...>` relative to
   descriptors, refusing a link at any of them, then
   `os.rename(name, name, src_dir_fd=..., dst_dir_fd=...)`, which moves the
   entry itself and never what it points at. A link, FIFO, or hard link is
-  moved like a file so it is reported once, never read.
+  moved like a file so it is reported once, never read. An `OSError` from
+  the rename (a directory or other entry the turn planted at the
+  destination) returns a reason like every other refusal, never raises.
 
 Callers:
 
@@ -100,20 +105,35 @@ Callers:
    is no signals, any other refusal is one `unreadable` entry and nothing
    else is touched. Each text signal and `plan.json` goes through
    `read_turn_file`. `effects` is opened with `open_turn_dir` and
-   listed with `os.listdir(fd)`; each `*.json` name is read with
-   `read_turn_file`. `Signals` gains `unreadable: list[str]`; a refused
+   listed with `sorted(n for n in os.listdir(fd) if n.endswith(".json"))`,
+   so the ledger's order of effects stays deterministic; each name is read
+   with `read_turn_file`. `Signals` gains `unreadable: list[str]`; a refused
    effect keeps its shape (`{"file", "error"}`); a refused `plan.json`
-   sets `plan_error`. `session.record` adds `found.unreadable` to the
+   sets `plan_error`. A signal that cannot be filed away counts as
+   unreadable: its contents are dropped and the reason recorded, so no
+   signal is read twice. `session.record` adds `found.unreadable` to the
    `errors` of `turn.collected`, so no schema change.
 2. `session._plan` reads `path` with `read_turn_file` relative to the
    workspace descriptor and compares; a
    refusal is "`path` cannot be read: why".
-3. `read_verdict` uses `read_turn_file` (gains `st_nlink == 1`), and its
-   size cap goes with the walk, as in 1.4b: `settings.verdict_max_bytes`
-   is removed.
-4. `fetch_into_mirror` opens `.git` with `open_turn_dir` and looks up each
-   of the four names with an `lstat` walk relative to descriptors; an entry
-   or a link at any component counts as present and refuses the fetch.
+3. `read_verdict(checks, name, turn_id)` takes the kernel-owned checks
+   directory (`lay.checks`) and the check directory's name, opens `checks`
+   with `O_NOFOLLOW | O_DIRECTORY`, walks `<name>/repo/.valor` with
+   `open_turn_dir`, and reads `verdict.json` with `read_turn_file` (gains
+   `st_nlink == 1`). So a check directory swapped for a link gives no
+   verdict and a reason, and nothing is read or made where it points.
+   `fresh.py` passes `lay.checks` and `check_dir.name`. Its size cap goes
+   with the walk, as in 1.4b: `settings.verdict_max_bytes` is removed, and
+   a verdict of any size is read whole.
+4. `fetch_into_mirror` opens the workspace with `O_NOFOLLOW |
+   O_DIRECTORY` (a linked workspace refuses the fetch), then `.git` with
+   `open_turn_dir`. A missing `.git` (`FileNotFoundError`) keeps the
+   existing fallback: the four names are looked up from the workspace
+   descriptor. Any other refusal of `.git` keeps the existing
+   `FetchRefused` wording, "the clone's .git is not a directory (a gitfile
+   moves the real one elsewhere)". Each of the four names is looked up
+   with an `lstat` walk relative to descriptors; an entry or a link at any
+   component counts as present and refuses the fetch.
 5. `git.is_repo` uses `os.lstat` and `S_ISDIR`, so a linked workspace is
    "not a git repository".
 
@@ -121,8 +141,12 @@ Callers:
 `read_junit`. Whichever task merges second rebases onto the first's helper
 and keeps one: if 1.4b is first, this task adds `st_nlink == 1`, the
 component refusals, and `open_turn_dir` to its `read_turn_file`; if this
-task is first, 1.4b calls this one for `read_junit`. The signature,
-`read_turn_file(dir_fd, relpath)` with no size cap, is the same in both.
+task is first, 1.4b calls this one for `read_junit`. The signature that
+survives is this plan's, `read_turn_file(dir_fd, relpath)`: no
+`max_bytes`, no `then=` callback (a caller that moves the file afterwards
+calls `_file_away` itself), and no `settings.junit_max_bytes`. 1.4b's
+review and docs checks read from the same check-directory layout, so
+`read_junit` walks from `lay.checks` the same way `read_verdict` does.
 
 ## Done, as evidence
 
@@ -147,8 +171,10 @@ proves the link was not opened.
 5. `.valor/effects` linked to an outside directory holding `a.json`: no
    effect, one reason, the outside directory unchanged.
 6. `.valor/handled` and, separately, `.valor/handled/<turn>` linked to an
-   outside directory: the signal is read, the move is refused with a
-   reason, nothing is created outside.
+   outside directory, and a non-empty directory planted at
+   `.valor/handled/<turn>/question.md`: the move is refused with a reason,
+   the signal counts as unreadable (its text in no field of `Signals`),
+   `collect` raises nothing, and nothing is created outside.
 7. The workspace path itself a link: nothing read.
 8. A directory named `question.md` and one named `effects/b.json`: refused,
    not read.
@@ -159,12 +185,19 @@ Elsewhere:
 10. `tests/test_session.py`: an `unreadable` reason appears in
     `turn.collected`'s `errors` (test database), and `_plan` with a
     committed `plan.json` path that is a link to the outside FIFO, and one
-    with `..`, returns a reason within the limit.
+    with `..`, returns a reason within the thread's 5 second join.
 11. `tests/test_workspace.py`: `read_verdict` refuses a hard-linked
-    `verdict.json`; `fetch_into_mirror` refuses a clone whose
-    `.git/objects` is a link to a directory holding `info/alternates`;
-    `git.is_repo` is false on a linked workspace.
-12. The full suite green, ruff clean.
+    `verdict.json`; a `critique-<sha>` that is a link to an outside
+    directory holding `repo/.valor/verdict.json` gives no verdict, a
+    reason, and nothing created outside; `fetch_into_mirror` refuses a
+    clone whose `.git/objects` is a link to a directory holding
+    `info/alternates`, refuses a linked workspace, and with no `.git` still
+    looks up the four names in the workspace; `git.is_repo` is false on a
+    linked workspace.
+12. `tests/test_fresh.py`: the `big` case and its act in
+    `tests/scripted.py` are deleted (a big verdict is read whole); the
+    other cases' reasons match the helper's wording.
+13. The full suite green, ruff clean.
 
 No test opens a real key or password file; the outside files are
 `tmp_path` files with a marker.
@@ -172,12 +205,15 @@ No test opens a real key or password file; the outside files are
 ## Files changed
 
 `core/workspace.py`, `core/signals.py`, `core/session.py`, `core/git.py`,
-`core/settings.py` (drops `verdict_max_bytes`);
-`tests/test_signals.py` (new), `tests/test_session.py`,
-`tests/test_workspace.py`. Docs: the signal channel paragraph in
-`docs/architecture.md`, the signal sentence in `core/README.md`, and
+`core/fresh.py` (the `read_verdict` call), `core/settings.py` (drops
+`verdict_max_bytes`); `tests/test_signals.py` (new),
+`tests/test_session.py`, `tests/test_workspace.py`, `tests/test_fresh.py`,
+`tests/scripted.py`. Docs: the signal channel paragraph in
+`docs/architecture.md`, the signal sentence in `core/README.md`,
 `skills/sdlc/channel.md` if it describes what the kernel does with a file
-it cannot read.
+it cannot read, and `docs/plans/m1-4-checks.md` lines 331, 624, and 1091,
+where "at most 256 KB" and "over 256 KB" become "a regular file with one
+link".
 
 ## Absorbs
 
@@ -197,6 +233,9 @@ not by a turn.
   `effects` directory is not moved: it is reported and left.
 - A hard link is refused even when it points inside the workspace; a turn
   writing its own signal never makes one.
+- A signal whose move to `handled/<turn>/` is refused counts as
+  unreadable: its contents are dropped and the reason recorded, so it is
+  never read on a later turn.
 - An unreadable `question.md` or `done.md` counts as absent: the task does
   not wait on a question it cannot show Tom.
 - No size cap, setting, or stop is added: the reads are made safe and
