@@ -11,7 +11,7 @@ Serves Mission item 1 (delivering within authority) and the constraint
 `core/workspace.py` provisions a task's workspace from a project spec
 (`projects/`) under `work_dir/<task id>/` before the task starts, cloning from
 a bare cache per repository URL (keyed by the URL's digest); a replay writes
-its spec (`scripts/replay_workspace.py`).
+its spec (`tests/emulator/workspace.py`).
 
 | Part | What it is |
 |---|---|

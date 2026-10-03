@@ -1,8 +1,8 @@
-"""Judge a finished replay: its final branch against the merged reference
+"""Judge a finished replay: its final commit against the merged reference
 PR and the answer key, by an LLM judge blind to the arm, plus the item's
-verification commands run in the workspace under its sandbox.
+verification commands run on that commit under the baseline's profile.
 
-    .venv/bin/python scripts/judge_replay.py $VALOR_DEMO/results/<run>.json [--model sonnet]
+    .venv/bin/python -m tests.emulator.judge $VALOR_DEMO/results/<run>.json
 
 The reference is `gh pr diff <pr>` (read-only) or the item's
 `reference_diff` file. The judge sees the request, the answer key, the
@@ -13,16 +13,26 @@ correctness and tests, and simplicity, and lists the divergences from the
 reference. The verdict goes into the result file under `judge` (an earlier
 verdict moves to `judge_history`).
 
-Verification commands run on the final commit and nothing else: it is
-fetched into a repository of the judge's own ($VALOR_DEMO/judge/<run>.git,
-so no git config or hook the turn wrote applies) and exported to a clean
-tree at runs/<run>/verify/<name>, where the commands run with the turn's own
-sandbox profile, environment, and services, and whatever a command leaves
-running (a test setup's daemonized redis-server) is stopped after it and
-listed under `reaped`. Anything the turn left uncommitted, a virtualenv
-included, is not there: an item's commands set up what they need.
+The final commit is the result's `final_rev` (the held merge's head, else
+the candidate). Everything is read from the task's kernel mirror, a
+repository no turn writes, never from the turn's workdir. The candidate's
+diff leaves out the task's own plan document (`plan.path`); the result
+records the diff's size, the path left out, and whether the judge's
+truncation cut it.
 
-Live spend: one judge call (default Sonnet), logged in $VALOR_DEMO/costs.jsonl.
+Verification commands run in a tree of the final commit at
+`<task_dir>/checks/verify-<run>/<repo>`, made fresh from the mirror with
+`git archive`. `checks/` is written only by the kernel, so no turn can
+write the tree. They run under the working turn's profile as the baseline
+ran it: the temp directories shared, the verification directory added
+read-write, `TMPDIR` inside it, the task's environment and services.
+Whatever a command leaves running (a test setup's daemonized redis-server)
+is stopped after it and listed under `reaped`. Anything the turn left
+uncommitted, a virtualenv included, is not there: an item's commands set
+up what they need.
+
+The judge model is `JUDGE_MODEL`, one pinned Sonnet id. Its one call goes
+through the kernel's gateway and is metered on the run's emulator task.
 """
 
 import argparse
@@ -30,18 +40,14 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from replay_common import DEMO, claude_json, git, machine_lock, now, sh, ws_git
 
 from core import ledger, runs
 from core import workspace as kws
 from harnesses.claude_code import KEEP_ENV
+from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh, status
 
+JUDGE_MODEL = "claude-sonnet-5-5"
 DIFF_LIMIT = 70_000
 OUTPUT_TAIL = 4_000
 VERIFY_TIMEOUT = 1_800
@@ -81,42 +87,57 @@ def reference_diff(item: dict) -> str:
     return ""
 
 
-def candidate_diff(result: dict) -> str:
-    final, ws = result.get("final"), result["workspace"]
-    if not final:
-        return ""
-    if final["pushed"]:
-        return git(ws["origin"], "diff", "--no-ext-diff", "--no-textconv", ws["base"], final["sha"])
-    return ws_git(ws["workdir"], "diff", "--no-ext-diff", "--no-textconv", ws["base"], final["sha"])
+def candidate_diff(result: dict) -> tuple[str, dict]:
+    """The final commit's diff against the base, from the mirror, without
+    the task's own plan document; and what the result records of it."""
+    ws, rev = result["workspace"], result.get("final_rev")
+    plan = (status(result["task_id"]).get("plan") or {}).get("path")
+    diff = mirror_diff(ws["mirror"], ws["base"], rev, exclude=plan) if rev else ""
+    return diff, {
+        "chars": len(diff),
+        "lines": diff.count("\n") + 1 if diff else 0,
+        "left_out": plan,
+        "truncated": len(diff) > DIFF_LIMIT,
+    }
 
 
-def export_final(result: dict) -> Path:
-    """A clean tree of the final commit inside the run directory."""
-    ws, final = result["workspace"], result["final"]
-    store = DEMO / "judge" / f"{result['run']}.git"
-    if not store.exists():
-        sh("git", "init", "--quiet", "--bare", str(store))
-    source = ws["origin"] if final["pushed"] else ws["workdir"]
-    git(store, "fetch", "--quiet", "--no-tags", source, "+refs/heads/*:refs/remotes/candidate/*")
-    git(store, "cat-file", "-e", f"{final['sha']}^{{commit}}")
-    # Inside the task's own state, where its working session's profile lets
-    # the verification commands read and write.
-    tree = Path(ws["task_dir"]) / "state" / "work" / "tmp" / "verify" / Path(ws["workdir"]).name
-    if tree.exists():
-        shutil.rmtree(tree)
+def export_final(result: dict) -> tuple[Path, Path]:
+    """A fresh verification directory under the task's `checks/`, holding a
+    tree of the final commit from the mirror and a `tmp`. Returns the
+    directory and the tree."""
+    ws = result["workspace"]
+    lay = kws.Layout(Path(ws["task_dir"]))
+    root = lay.checks / f"verify-{result['run']}"
+    if root.is_symlink():
+        root.unlink()
+    elif root.exists():
+        shutil.rmtree(root)
+    tree = root / Path(ws["workdir"]).name
     tree.mkdir(parents=True)
+    (root / "tmp").mkdir()
     archive = subprocess.run(
-        ["git", "-C", str(store), "archive", final["sha"]], capture_output=True, check=True
+        ["git", "-C", ws["mirror"], "archive", result["final_rev"]], capture_output=True, check=True
     ).stdout
     subprocess.run(["tar", "-x", "-C", str(tree)], input=archive, check=True)
-    return tree
+    return root, tree
+
+
+def verify_profile(lay: kws.Layout, ports: list[int], root: Path) -> str:
+    """The baseline's verification profile: the working turn's, with the
+    temp directories shared and `root` added read-write."""
+    return kws.turn_profile(lay, ports, tmp=True, rw=[root])
 
 
 def verify(result: dict) -> list[dict]:
     item, ws = result["item"], result["workspace"]
-    if not item.get("verify") or not result.get("final"):
+    if not item.get("verify") or not result.get("final_rev"):
         return []
-    tree = export_final(result)
+    root, tree = export_final(result)
+    lay = kws.Layout(Path(ws["task_dir"]))
+    project = ws.get("project") or {}
+    services, ports = project.get("services") or [], project.get("ports") or {}
+    profile = lay.checks / f"verify-{result['run']}.sb"
+    profile.write_text(verify_profile(lay, [ports[s] for s in services], root))
     harness = json.loads(Path(ws["harness_config"]).read_text())
     env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
     env.update(harness.get("env", {}))
@@ -126,59 +147,66 @@ def verify(result: dict) -> list[dict]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GH_CONFIG_DIR": harness["gh_config_dir"],
             "GIT_TERMINAL_PROMPT": "0",
-            **({"TMPDIR": harness["tmpdir"]} if harness.get("tmpdir") else {}),
+            "TMPDIR": str(root / "tmp"),
         }
     )
-    project = ws.get("project") or {}
-    services, ports = project.get("services") or [], project.get("ports") or {}
-    lay = kws.Layout(Path(ws["task_dir"]))
     kws.start_services(ws["task_id"], lay, services, ports)
     out = []
-    for command in item["verify"]:
-        mark = ledger.new_id()
-        argv = [
-            "/usr/bin/sandbox-exec",
-            "-D",
-            "GATEWAY_PORT=1",
-            "-D",
-            f"VALOR_TURN={mark}",
-            "-f",
-            harness["sandbox_profile"],
-            "/bin/bash",
-            "-c",
-            command,
-        ]
-        try:
-            ran = subprocess.run(
-                argv,
-                cwd=tree,
-                env={**env, runs.TURN_ENV: mark},
-                capture_output=True,
-                text=True,
-                timeout=VERIFY_TIMEOUT,
-                check=False,
+    try:
+        for command in item["verify"]:
+            mark = ledger.new_id()
+            argv = [
+                "/usr/bin/sandbox-exec",
+                "-D",
+                "GATEWAY_PORT=1",
+                "-D",
+                f"VALOR_TURN={mark}",
+                "-f",
+                str(profile),
+                "/bin/bash",
+                "-c",
+                command,
+            ]
+            try:
+                ran = subprocess.run(
+                    argv,
+                    cwd=tree,
+                    env={**env, runs.TURN_ENV: mark},
+                    capture_output=True,
+                    text=True,
+                    timeout=VERIFY_TIMEOUT,
+                    check=False,
+                )
+                code, text = ran.returncode, (ran.stdout + ran.stderr)
+            except subprocess.TimeoutExpired as exc:
+                code, text = "timeout", f"{exc.stdout or ''}{exc.stderr or ''}"
+                text = text.decode(errors="replace") if isinstance(text, bytes) else text
+            reaped = runs.reap(mark)
+            out.append(
+                {"command": command, "exit": code, "output_tail": text[-OUTPUT_TAIL:], "reaped": reaped}
             )
-            code, text = ran.returncode, (ran.stdout + ran.stderr)
-        except subprocess.TimeoutExpired as exc:
-            code, text = "timeout", f"{exc.stdout or ''}{exc.stderr or ''}"
-            text = text.decode(errors="replace") if isinstance(text, bytes) else text
-        reaped = runs.reap(mark)
-        out.append({"command": command, "exit": code, "output_tail": text[-OUTPUT_TAIL:], "reaped": reaped})
-    kws.stop_services(ws["task_id"], lay)
+    finally:
+        kws.stop_services(ws["task_id"], lay)
     return out
 
 
-def judge(result_file: str, *, model: str = "sonnet") -> dict:
-    with machine_lock(f"judge {Path(result_file).stem}"):
-        return _judge(Path(result_file), model)
+def judge(result_file: str, *, meter: Meter | None = None, model: str = JUDGE_MODEL) -> dict:
+    """Judge the run. `meter` is the driver's, when it judges at the end of
+    a run; otherwise the judge meters on the result's emulator task itself."""
+    path = Path(result_file)
+    with machine_lock(f"judge {path.stem}"):
+        if meter is not None:
+            return _judge(path, model, meter)
+        result = json.loads(path.read_text())
+        with Meter(result["emulator_task"]) as own:
+            return _judge(path, model, own)
 
 
-def _judge(path: Path, model: str) -> dict:
+def _judge(path: Path, model: str, meter: Meter) -> dict:
     result = json.loads(path.read_text())
-    item, ws = result["item"], result["workspace"]
-    head = ws_git(ws["workdir"], "rev-parse", "HEAD", check=False)
+    item = result["item"]
     checks = verify(result)
-    candidate = candidate_diff(result)
+    candidate, diff = candidate_diff(result)
     verification = (
         "\n\n".join(f"$ {c['command']}\n(exit {c['exit']})\n{c['output_tail']}" for c in checks)
         or "(no verification commands ran)"
@@ -192,21 +220,26 @@ def _judge(path: Path, model: str) -> dict:
             f"# Verification of the candidate\n\n{verification}",
         ]
     )
-    reply = claude_json(prompt, system=SYSTEM, model=model, purpose="judge", subject=result["run"])
+    workdir = Path(result.get("workspace", {}).get("run_dir") or DEMO)
+    reply = claude_json(prompt, system=SYSTEM, model=model, meter=meter, call_id="judge", workdir=workdir)
     verdict = reply["json"] or {"unparsed": reply["text"]}
     if "judge" in result:
         result.setdefault("judge_history", []).append(result["judge"])
+    result["judge_model"] = model
     result["judge"] = {
         "at": now(),
         "model": model,
-        "usd": reply["usd"],
+        "rev": result.get("final_rev"),
+        "diff": diff,
         "scores": verdict.get("scores"),
         "divergences": verdict.get("divergences"),
         "rationale": verdict.get("rationale"),
         "verification": checks,
-        "workspace_head": head,
         **({"unparsed": verdict["unparsed"]} if "unparsed" in verdict else {}),
     }
+    spent = meter.spend()
+    result["emulator_spend_usd"] = spent["usd"]
+    result["open_calls"] = spent["open_calls"]
     path.write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -216,10 +249,10 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("result_file")
-    parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--model", default=JUDGE_MODEL, help="a full model id, for a deliberate comparison")
     args = parser.parse_args()
     result = judge(args.result_file, model=args.model)
-    print(json.dumps({k: result["judge"][k] for k in ("scores", "divergences", "usd")}, indent=2))
+    print(json.dumps({k: result["judge"][k] for k in ("scores", "divergences", "diff")}, indent=2))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ The rule: integration first, no mocks.
 - Local performers the tests register live here (`tests/performers.py`: `workspace_write`, `outbox_send`), never in `tools/`.
 - Every test declares its live spend: the money it may cost per run (`pytest.mark.spend`). Live tests run only with `VALOR_LIVE=1`.
 
-The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) runs today from `scripts/` while it is an experiment, and moves here in the design. It uses one module here: `scripts/replay.py` forces its `bare` and `clarify` arms by running `tests/judgement_upstream.py` (`python -m tests.judgement_upstream --answer precise|thin`) and pointing the kernel's judgement legs at it.
+The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) lives in `tests/emulator/`, a package run as modules (`python -m tests.emulator.replay`), never collected by pytest. Its stand-in and judge calls go through the kernel's gateway onto an emulator task's spending. `tests/emulator/replay.py` forces its `bare` and `clarify` arms by running `tests/judgement_upstream.py` (`python -m tests.judgement_upstream --answer precise|thin`) and pointing the kernel's judgement legs at it.
 
 Governed by [docs/emulator.md](../docs/emulator.md), [docs/data.md](../docs/data.md) (Test databases), and [docs/tech-stack.md](../docs/tech-stack.md) (Tests).
 

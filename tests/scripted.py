@@ -5,7 +5,7 @@ writing `.valor/` files and committing to a real git workspace, the way a
 (outside the work tree, so it never dirties a candidate), and every turn is
 logged to `.git/valor-turns.jsonl`.
 
-Also: a workspace laid out the way `scripts/replay_workspace.py` lays one
+Also: a workspace laid out the way `tests/emulator/workspace.py` lays one
 out (a work branch at the base, a bare origin whose HEAD names `main`), a
 task started on it and judged by the real judge runner against the local
 judgement upstream (`tests/judgement_upstream.py`), the router with the
@@ -149,7 +149,7 @@ def keep_docs(b, cwd, head: str) -> str:
 
 def workspace(tmp_path: Path) -> tuple[Path, Path]:
     """A work branch at the base commit and a bare origin with `main` at the
-    base and HEAD naming `main`, as `scripts/replay_workspace.py` makes."""
+    base and HEAD naming `main`, as `tests/emulator/workspace.py` makes."""
     origin, ws = tmp_path / "origin.git", tmp_path / "ws"
     subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
     git(origin, "symbolic-ref", "HEAD", "refs/heads/main")

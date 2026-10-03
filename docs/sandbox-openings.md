@@ -15,9 +15,8 @@ Stated so the boundary is drawn where it is [4]:
   user, and the gateway is for visibility and honest metering, not a hard
   wall.
 - A fresh session's blindness covers the paths the kernel names for the
-  builder (Files, in [harnesses.md](harnesses.md)). The working session has its own `TMPDIR` but can
-  still write `/tmp`, which every task shares (common file names recurred
-  across items in the baseline), and places such as `~/Library/Caches`,
+  builder (Files, in [harnesses.md](harnesses.md)). The working session writes only its own
+  `TMPDIR`, never a shared temp directory, but can write places such as `~/Library/Caches`,
   `~/.cache`, or `/Users/Shared`, which a fresh session can read, so a builder
   could leave a note there for a reviewer. Nothing reads one on purpose;
   independence rests on the inputs, the checkout, and the reviewer's own

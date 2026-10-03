@@ -207,7 +207,7 @@ def test_an_unborn_origin_head_needs_the_flag_and_a_detached_head_is_refused(tmp
 
 
 def test_a_replay_workspace_resolves_main(tmp_path):
-    """The commands `scripts/replay_workspace.py` runs for a run's origin."""
+    """The commands `tests/emulator/workspace.py` runs for a run's origin."""
     origin, ws = tmp_path / "origin.git", tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", "--bare", str(origin)], check=True)
     git(origin, "symbolic-ref", "HEAD", "refs/heads/main")

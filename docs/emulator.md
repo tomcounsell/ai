@@ -12,15 +12,17 @@ It serves the Evidence section of the mission ("Independent checks: blind
 verification, the emulator's human-labelled cases, and the audit sample") and
 measures Mission items 1 (own the whole job), 3 (absorb ambiguity, ask only
 when it matters), and 6 (attention spent as carefully as money). It is a
-measurement. It refuses nothing and gates nothing; what it reports goes to
-Tom as evidence for his decision.
+measurement. It refuses nothing on its own; what it reports goes to Tom as
+evidence for his decision. The one gate read from it is milestone 1.5's
+takeover gate in docs/plans/valor-rebuild.md, a one-time Done item Tom set,
+not a standing rule.
 
 ## Terms
 
 | Term | Meaning |
 |---|---|
 | Item | One historical request, as a JSON file: the repository, the clean base commit, the request verbatim, the answer key, the reference, the services its tests need, and the verification commands |
-| Run | One item replayed in one arm, in its own workspace, as one kernel task. Named `<item>-<arm>` |
+| Run | One item replayed in one arm, in its own workspace, as one kernel task. Named `<item>-<arm>` unless `--run` names it |
 | Arm | The condition a run is replayed under: `bare` (the judge decides `precise`, so the request goes straight to the plan), `clarify` (the judge decides `thin`, so Valor inspects, then sends its material questions and intended approach before editing), or `routed` (the real judgement legs decide) |
 | Clean base | A commit holding the repository as it stood when Tom asked, with nothing that already states the answer |
 | Answer key | Tom's recorded intent for the item: his words where they exist (an issue comment, a Notion card, his review), and inferences from the merged code, marked as such, where they do not |
@@ -56,9 +58,10 @@ answer to a question.
 
 ## The machinery
 
-Four scripts in `scripts/`, sharing `scripts/replay_common.py`. The design
-places the emulator under `tests/` (see `tests/README.md`); it lives in
-`scripts/` while it is an experiment. Items, answer keys, results, and each
+A package, `tests/emulator/`, run as modules (`python -m
+tests.emulator.replay`) and never collected by pytest: `replay.py` (the
+driver), `workspace.py`, `stand_in.py`, and `judge.py`, sharing
+`common.py`. Items, answer keys, results, and each
 run's spec live in the experiment directory, `valor-demo`, outside the
 repository, set by `VALOR_DEMO`; the kernel keeps each run's workspace
 under its `work_dir` setting (`~/valor-tasks`).
@@ -93,7 +96,7 @@ compares against the base's own failure list. An item names opaque labels
 (`pso-a`, `pop-b`), so nothing in a run directory names the PR; the mapping
 lives in an index beside the items.
 
-### The workspace: `scripts/replay_workspace.py`
+### The workspace: `tests/emulator/workspace.py`
 
 Fetches the item's repository into a bare cache of the experiment's own
 (through `gh`, as Tom) and writes the run's project spec,
@@ -133,9 +136,10 @@ This serves the constraint "Bounded authority, metered spending" for replays (a 
 no credential that reaches the world) and the validity of the measurement:
 a turn that can read the answer is not being measured.
 
-### The driver: `scripts/replay.py`
+### The driver: `tests/emulator/replay.py`
 
-`replay.py ITEM.json --arm bare|clarify|routed [--judge]` builds the
+`python -m tests.emulator.replay ITEM.json --arm bare|clarify|routed
+[--run NAME] [--judge]` builds the
 workspace's spec, starts a kernel task (`python -m core start --project SPEC
 --base SHA`) at effect ceiling `act`, no governance grant, with Opus 5.5 as the model, and loops `python -m core run` until one
 of the outcomes below. The kernel has no switch for the arm. For `bare` and
@@ -149,44 +153,54 @@ keys in the kernel key directory.
 
 | Outcome | When |
 |---|---|
-| `accepted` | the stand-in accepts a delivery (the task in `merge`) |
-| `feedback rounds used up` | a delivery arrives after the stand-in has given its maximum feedback (default 2) |
+| `held` | the task holds its merge and the stand-in accepted it, or its feedback rounds (default 2) are spent; the feedback count is recorded |
+| `to tom` | the delivery did not pass, or the merge was refused: the pipeline hands the task to Tom |
 | `stopped` | the task was stopped |
-| `failed` | more than two runs of the task failed |
-| `run cap` | sixteen `core run` calls without an outcome |
-| `an effect other than a local push is held for Tom` | any held effect the driver may not release |
-| `NO RUNNER ...` | the router reached a stage with no runner (the checks, until milestone 1.4); the driver records no verdict for them |
+| `an effect other than a local push is held for Tom` | a held effect that is neither a `push_branch` nor a merge |
+
+A task in `merge` is read from its status in this order: a delivery that
+did not pass, then a governance instance not granted or a join of
+`governance_refused`, then a refused merge, then a held merge, and
+otherwise it runs on. Three cases exit the driver with the outcome unset
+and say why: a stage awaiting Tom's grant, `NO RUNNER` (a check stage with
+no runner, whose verdict is recorded by hand from a blind checkout of the
+kernel mirror), and a failed run. The next invocation resumes the same
+task.
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
-Until the check runners exist, a replay whose build writes a candidate ends
-with `NO RUNNER`, and no replay reaches a delivery.
 
 The driver approves and releases a held `push_branch` only when the
-workspace's push URL is exactly the run's own bare origin, and a held
-`merge` only when the origin URL its payload names is, under Tom's
-standing permission for pushes to local copies; it records that permission in
-the approval note. Any other held effect stays held and ends the run. This is
-the effect-class constraint applied to the driver: it holds authority only
-for pushes to the run's own local origin, which Tom pre-authorized.
+workspace's push URL is exactly the run's own bare origin, under Tom's
+standing permission for pushes to local copies; it records that permission
+in the approval note. It never answers a merge: every merge effect of the
+task is skipped, the current one and any a later candidate superseded, and
+the held merge is the run's evidence. Any other held effect stays held and
+ends the run. This is the effect-class constraint applied to the driver: it
+holds authority only for pushes to the run's own local origin, which Tom
+pre-authorized.
 
-A run whose result file has no outcome resumes its task. Each driver holds
-one of `VALOR_DEMO_SLOTS` lock files for its whole run, so at most that many
+A run whose result file has no outcome resumes its task; one with an
+outcome is refused unless `--rebuild` is given. Each driver holds one of
+`VALOR_DEMO_SLOTS` lock files for its whole invocation, so at most that many
 replays run turns at once. The experiments ran three on a 64 GB machine; on
 the 16 GB M4 Air the slot count is one, matching the constraint of one
 `claude -p` at a time.
 
-### The stand-in: `scripts/role_play_tom.py`
+### The stand-in: `tests/emulator/stand_in.py`
 
 Plays Tom from the answer key, never beyond it. On a question it answers
 briefly, by number, reveals only what was asked, and says "Your call." where
 the key is silent. If Valor states an approach that contradicts the key on
 something that changes what gets built, it adds the single most important
-correction. On a delivery it reads Valor's delivery note and the diff since
-the base and either accepts, when the delivery does what the key asks in
+correction. At a held merge it reads Valor's delivery note and the diff
+from the base to the merge's head, taken from the task's kernel mirror and
+never the turn's workdir, and either accepts, when the delivery does what the key asks in
 substance, or gives one point of project-manager feedback: the single most
 important divergence, in one to three sentences.
 
-Every reply enters the ledger through `python -m core answer|feedback
+Its model is the `frontier` seat (`claude-opus-5-5`); the driver's
+`--stand-in-model` names another for a deliberate comparison. Every reply
+enters the ledger through `python -m core answer|feedback
 --role-played`, with `by` set to `stand-in (<model>)`. The attention a run
 spends is therefore real ledger data with honest provenance: the emulator
 counts questions and feedback rounds the same way the attention log counts
@@ -195,18 +209,25 @@ This serves Mission item 6 and the requirement of the constraint "Reliable
 stop, recovery, and correction" that corrections carry provenance (rebuild-demonstration.md, "Kernel findings",
 5).
 
-### The judge: `scripts/judge_replay.py`
+### The judge: `tests/emulator/judge.py`
 
-Runs the item's verification on the final commit and nothing else. The
-commit is fetched into a repository of the judge's own, so no git config or
-hook the turn wrote applies, and exported to a clean tree; each command runs
-there under the turn's own sandbox profile, environment, and services, and
-whatever a command leaves running is reaped and listed. Uncommitted work,
+Runs the item's verification on the final commit (the held merge's head,
+else the candidate) and nothing else. The commit is exported with `git
+archive` from the task's kernel mirror into a fresh tree at
+`<task_dir>/checks/verify-<run>/`, which only the kernel writes, so no turn
+can write it. Each command runs there under the working turn's profile as
+the baseline ran it (the temp directories shared, the verification
+directory added read-write, `TMPDIR` inside it), with the task's
+environment and services, and whatever a command leaves running is reaped
+and listed. Uncommitted work,
 a virtualenv included, is absent: an item's commands set up what they need.
 
 Then one model call, blind to the arm, sees the request, the answer key, the
-reference diff, the candidate's diff, and the verification output, and
-nothing that names the arm, the questions, or the feedback. It scores 0 to 5:
+reference diff, the candidate's diff from the mirror, and the verification
+output, and nothing that names the arm, the questions, or the feedback. The
+candidate's diff leaves out the task's own plan document (`plan.path`); the
+result records the diff's size, the path left out, and whether the 70,000
+character limit cut it. The model is `JUDGE_MODEL`, one pinned Sonnet id. It scores 0 to 5:
 
 - **Fidelity.** Does it build what the requester intended, at the intended
   scope? The answer key is the authority; the reference shows one accepted
@@ -232,9 +253,8 @@ Two layers, because a turn that finds the answer measures nothing.
 
 - **Before the run: the base tree.** A search of the base for the feature's
   own terms and for any plan or spec document touching it, plus the count of
-  commits after the base and the list of refs. `scripts/demo_workspace.sh`
-  ran this for the first demonstration; for the baseline items it was run by
-  hand when each clean base was chosen.
+  commits after the base and the list of refs, run by hand when each clean
+  base is chosen.
 - **After the run: the transcripts.** A scan of every tool call in the run's
   Claude Code transcripts for the upstream repository's URL, the GitHub API,
   `gh` subcommands that read issues or PRs, `curl` or `git fetch` against
@@ -252,22 +272,38 @@ installs, cleared (rebuild-baseline.md, "Caveats").
 Each run writes `results/<run>.json`, atomically, after every step:
 
 - the item, arm, model, stand-in model, and feedback cap;
-- the task id, the workspace (`replay.json`), and the outcome;
+- the task id, the emulator task, the workspace (`replay.json`), and the
+  outcome;
 - `questions` (each with its answer and provenance) and `feedback` (each with
   the delivery it answers and its provenance), read from the kernel's
-  attention state; `feedback_rounds`;
+  attention state; `feedback_rounds`; `attention`, counts by kind;
 - `deliveries`, the delivery note of every `task.delivered` row;
 - `turns`, each with its outcome, its gateway-metered dollars, and the
   harness's own cumulative figure;
-- `spend`: gateway dollars and stand-in dollars;
-- `final`: the branch and commit of the last push to the bare origin, or the
-  workspace head if nothing was pushed; the diff stat against the base;
-- `judge`: scores, divergences, rationale, every verification command's exit
-  code and output tail, reaped processes, and the judge's cost;
+- `kernel_spend_usd`, the item task's metered spending, and
+  `emulator_spend_usd`, the emulator task's, with its `open_calls`;
+- `final_rev`, the held merge's head or the candidate, `merge_effect_id`,
+  and the diff stat against the base, from the mirror;
+- `judge_model`, and `judge`: scores, divergences, rationale, the diff's
+  size, exclusion, and truncation, every verification command's exit code
+  and output tail, and reaped processes;
 - the leak check's fields.
 
-Every stand-in and judge call is also appended to `costs.jsonl` with its
-purpose, subject, model, dollars, seconds, and error flag.
+### Metering
+
+Every stand-in and judge call goes through the kernel's gateway, which the
+driver runs on an event loop in a thread of its own. Each run has one
+emulator task, a calibration task (`tasks.start_calibration`, its
+`task.started` naming the run and the item task): it only meters, and
+every SDLC writer refuses it. Each call is issued a token on that task,
+runs `claude -p` tool-less with the gateway's placeholder token, a fresh
+empty Claude Code config under the run's directory, and the kernel's
+`DROP_ENV` applied, and has its token retired after it however it ends. The
+gateway sets the kernel's login on the way out and writes a
+`gateway.opened` and a `gateway.charged` row per call. The driver drains
+the gateway before reading spend, since a charge lands after the response
+ends. A separate task keeps the item task's spending comparable with the
+baseline's kernel column. A check verdict recorded by hand is not metered.
 
 ## What the first runs showed
 
@@ -400,16 +436,15 @@ A baseline run cost $0.48 to $2.13 of Valor's turns (mean $1.42) and $0.10 to
 $0.92 of stand-in and judge. Wall time was 3 to 36 minutes per run with three
 in parallel; on one slot the thirteen runs take about two and a half hours.
 A run costs about $1.73 all in, so a sweep of the six baseline items in two
-arms, three repetitions each, is about $62, over the $25 cap per full run
-(see Growing the item set).
+arms, three repetitions each, is about $62. Spend is metered and reported,
+and stops nothing.
 
 **Metered spending.** Valor's turns are metered by the kernel's gateway and
-recorded on the task. The stand-in and the judge are not: they call `claude -p`
-outside the kernel on the machine's own credentials, and their price goes to
-`costs.jsonl` only. The design runs every emulator call through the
-gateway: a sweep is a routine objective (`docs/routines.md`) whose metered
-spending covers the stand-in's and judge's calls too. Until then the
-emulator spends outside "Bounded authority, metered spending", and this doc says so.
+recorded on the item task. The stand-in's and judge's calls are metered by
+the same gateway onto the run's emulator task (Metering, above), so a run's
+whole model spend is in the ledger, apart from any check verdict recorded by
+hand. The baseline's stand-in and judge figures above were logged outside
+the ledger.
 
 ## When it runs
 
@@ -422,9 +457,10 @@ comparing the change against the last sweep on the same items, and the
 decision to keep the change is his. Today it runs by hand, one item at a
 time.
 
-The emulator refuses no merge. A rule that refused a merge on a score would
-be a gate, and under the governance constraint a gate needs an incident and
-a mission item and Tom's grant. None has been named.
+The emulator refuses no merge. Milestone 1.5's takeover gate (three items
+reaching a held merge at the baseline's bars) is a one-time Done item Tom
+set for the rebuild, read from emulator runs by the build; it is not a
+standing rule, and no merge is refused on a score.
 
 ## Measuring the request-underspecification classifier
 
@@ -475,8 +511,7 @@ Agent-authored requests, items whose only verification needs a browser or a
 device the workspace lacks, and items whose answers live nowhere are set
 aside, not scored with a guess. Tom set the scope on 2026-10-01: items
 from psyoptimal, popoto, and cuttlefish, requests he wrote in the last 12
-months, and $25 per full emulator run, which at about $1.73 a run is about
-14 runs.
+months. Spend is metered and reported only, and stops nothing.
 
 ## Boundary with the kernel's tests
 

@@ -316,7 +316,8 @@ it builds anything real (Evidence "Independent checks").
   held to its clarify run (fidelity 3, 7 of 11 hidden tests), since its
   bare run set no bar. One rerun per item is allowed before the gate
   fails, since n = 1 differences of a point are noise. The attention each
-  took is logged. Spend within the $25 per-run cap.
+  took is logged. Spend is metered and reported in the gate record, with no
+  cap.
 
 **Absorbs.** `/tmp` shared between runs; answer keys for cuttlefish #646,
 popoto #191, and popoto #188 confirmed by Tom (open item).

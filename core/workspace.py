@@ -375,14 +375,18 @@ def profile(
     work: Path | None = None,
     home: Path = HOME,
     fresh: bool = False,
+    tmp: bool = True,
     kernel: list[Path] | None = None,
     service: str | None = None,
     bind_ports: list[int] = (),
 ) -> str:
     """A sandbox-exec profile. `rw` and `ro` are allowed back after the
     denies; `work` (the work directory) is denied as a whole first. A
-    `fresh` profile also denies `/private/tmp`, `/private/var/folders`, and
-    the user's Claude Code state, since a fresh session has its own. A
+    profile without `tmp` denies the shared temp directories
+    (`/private/tmp`, `/private/var/tmp`, `/private/var/folders`), so nothing
+    passes between runs through them; its `TMPDIR` is its own. A `fresh`
+    profile denies them too, and the user's Claude Code state, since a
+    fresh session has its own. A
     `service` profile is marked by the mach name `valor.service.<service>`
     and may bind `bind_ports` only; a turn's profile is marked by
     `valor.turn.<VALOR_TURN>`, may bind the dev ports, and reaches the
@@ -399,17 +403,18 @@ def profile(
         f'    (subpath "{home / ".claude" / "projects"}")',
         f'    (literal "{home / ".claude" / "history.jsonl"}"))',
     ]
-    if fresh:
+    if fresh or not tmp:
         hidden += [Path("/private/tmp"), Path("/private/var/tmp"), Path("/private/var/folders")]
-        hidden += [home / ".claude", home / ".claude.json"]
         lines += [
             "(deny file-read* file-write*",
             '    (subpath "/private/tmp")',
             '    (subpath "/private/var/tmp")',
             '    (subpath "/private/var/folders")',
-            f'    (subpath "{home / ".claude"}")',
-            f'    (literal "{home / ".claude.json"}"))',
         ]
+        if fresh:
+            hidden += [home / ".claude", home / ".claude.json"]
+            lines += [f'    (subpath "{home / ".claude"}")', f'    (literal "{home / ".claude.json"}")']
+        lines[-1] += ")"
     kernel = kernel if kernel is not None else kernel_paths()
     write_denied = [home / d for d in HOME_WRITE_DENIED] + [home / f for f in HOME_WRITE_DENIED_FILES]
     write_denied += [Path(p) for p in SYSTEM_WRITE_DENIED]
@@ -492,16 +497,25 @@ def profile(
 
 
 def turn_profile(
-    lay: Layout, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
+    lay: Layout,
+    ports: list[int],
+    *,
+    home: Path = HOME,
+    kernel: list[Path] | None = None,
+    tmp: bool = False,
+    rw: list[Path] = (),
 ) -> str:
     """The working session's (and provisioning setup's) profile: its clone,
-    its caches, its own state; its task's home and origin read-only."""
+    its caches, its own state; its task's home and origin read-only; no
+    shared temp directory. The emulator's verification passes `tmp` and
+    its own tree in `rw`, to run as its baseline did."""
     return profile(
-        rw=[lay.repo, lay.cache, lay.work_state],
+        rw=[lay.repo, lay.cache, lay.work_state, *rw],
         ro=[lay.home, lay.origin, lay.root.parent / "bin"],
         ports=ports,
         work=lay.root.parent,
         home=home,
+        tmp=tmp,
         kernel=kernel,
     )
 
