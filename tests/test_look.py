@@ -159,7 +159,7 @@ def test_a_port_with_nothing_listening_exits_non_zero_and_says_so(tmp_path):
 
 
 @needs_browser
-def test_a_server_error_exits_non_zero(tmp_path):
+def test_a_server_error_is_rendered_and_kept_and_exits_non_zero(tmp_path):
     lay, _ = provision(tmp_path)
     with Server(status=500) as server:
         profile = turn_profile(lay, tmp_path, server.port)
@@ -167,7 +167,17 @@ def test_a_server_error_exits_non_zero(tmp_path):
             profile, lay.repo, lay.work_state / "tmp", lay.root.parent / "bin" / "look", server.url + "/"
         )
     assert done.returncode != 0
-    assert "answered 500" in done.stderr
+    assert "status 500" in done.stdout
+    assert (
+        "hello look"
+        in (
+            lay.repo
+            / ".valor"
+            / "screens"
+            / next(p.name for p in (lay.repo / ".valor" / "screens").glob("*.html"))
+        ).read_text()
+    )
+    assert list((lay.repo / ".valor" / "screens").glob("*.png"))
 
 
 @needs_browser
