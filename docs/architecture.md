@@ -70,10 +70,10 @@ the task starts:
 | `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
 The text a turn receives is **dispatched**: rendered as the turn starts,
-the persona first (`persona/`, read from the kernel's own checkout), then
-the Brief, carrying the task's commitments, every correction in force, the
-signal channel (how the turn reaches Tom, listing the effects the registered
-performers offer), and the stage file for the state the turn runs in
+the persona first (`persona/`, from the kernel's checkout), then the Brief
+with the task's commitments, every correction in force, the signal channel
+(how the turn reaches Tom, listing the effects the registered performers
+offer), and the stage file for the state the turn runs in
 (`skills/sdlc/<state>.md`); a fresh session gets the verdict channel
 (`skills/sdlc/verdict.md`) instead. `turn.started` records the dispatched
 text whole, its SHA-256, the persona's SHA-256 and size, and the correction
