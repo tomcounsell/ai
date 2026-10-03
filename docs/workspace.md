@@ -30,7 +30,7 @@ behind is reaped by the command's mark before the copy waits for EOF. A failure 
 the Brief (`project.setup_result`) and the task still starts. A command's whole output, stdout
 and stderr, goes to `setup/<n>.log`, and its result is `{command, exit, output}`, `output` naming
 that file. Provisioning's git calls have no time limit either, and git's output, like a service
-program's, goes to a file the kernel holds, not a pipe, so a call ends when git exits. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
+program's, goes to a file the kernel holds, not a pipe, so a call ends when git exits. Those files are made in `output/` under `settings.performing_dir` (mode 0700), a kernel path every task profile denies, so no turn, setup command, or service can open, list, or truncate one. A profile denies each kernel path both as written and with symlinks resolved, since the sandbox matches the resolved path. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
 process groups get TERM, then KILL after `reap_grace_s`, the clone's temporary ref is removed, and
 provisioning is refused as interrupted. Nothing reaches GitHub, and the clone has no PR, issue, or
 later commit to read. A second signal during that cleanup does not end it: provisioning waits until the
@@ -40,7 +40,7 @@ cleanup is done, so `provision:<task>` is held until then.
 checked first; a gitfile, `commondir`, alternates, and shallow clones refused;
 the sending side inside the turn's sandbox; the receiving git with fsck, one
 pack under a size limit, a footprint watchdog, and replace refs and grafts
-off. A tree holding a top-level `.valor` (any case) is refused, since the
+off. The receiving git's file-size limit covers its stderr file too, so a fetch whose stderr passes the limit is killed. A tree holding a top-level `.valor` (any case) is refused, since the
 kernel makes `.valor` itself for a fresh session's inputs, written through
 descriptors that follow no link and overwrite no file. A refused plan,
 candidate, or docs head does not count.
@@ -60,7 +60,7 @@ with no time limit of Valor's; `pg_ctl` waits up to its own default of 60
 seconds. A run starts the services before its first runner, and a stop of
 the task (or a cancel of the run) interrupts the start the way an interrupt
 of `start` ends provisioning; whatever had started is stopped when the run
-returns. A program's refusal carries its whole stderr.
+returns. A program's output goes to a file in that same `output/` directory. A program's refusal carries its stderr, up to the file-size limit.
 
 - **Postgres.** A cluster of the task's own on `127.0.0.1` only (no unix
   socket), port 5440 to 5599, scram-sha-256 on every login; the superuser
