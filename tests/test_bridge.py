@@ -3,12 +3,22 @@ declared send types, their refusals and limits, and reconcile."""
 
 import asyncio
 import hashlib
+from unittest import mock
 
 import pytest
 
+from core import bridge as core_bridge
 from core import broker, db, notices, tasks
 from core.__main__ import _performers
-from core.bridge import DECLARED, EMAIL_MESSAGE_BYTES, Declared, NoticeDue, Release, split_text
+from core.bridge import (
+    DECLARED,
+    EMAIL_MESSAGE_BYTES,
+    Declared,
+    NoticeDue,
+    Release,
+    email_encoded_bytes,
+    split_text,
+)
 from tests import bridges
 from tests.bridges import FakeBridge, declared, new_task, of_type
 
@@ -210,26 +220,25 @@ def test_file_hash_mismatch(dsn, op, tmp_path):
 
 def test_oversize_file_refused_at_request(dsn, op, tmp_path):
     f = tmp_path / "a.bin"
-    f.write_bytes(b"x" * 100)
+    f.write_bytes(b"x" * 3000)
     sha = hashlib.sha256(f.read_bytes()).hexdigest()
     to = bridges.OPERATOR_EMAIL
 
-    def email(body: str) -> broker.Action:
-        return broker.Action(
-            "email.send",
-            to,
-            {"to": [to], "subject": "s", "body": body, "files": [{"path": str(f), "sha256": sha}]},
-        )
+    def email(body: str, files: bool = True) -> broker.Action:
+        attached = [{"path": str(f), "sha256": sha}] if files else []
+        return broker.Action("email.send", to, {"to": [to], "subject": "s", "body": body, "files": attached})
+
+    # A 3000-byte file is carried as base64, so the encoded size counts more
+    # than its raw bytes.
+    assert email_encoded_bytes(email("")) - email_encoded_bytes(email("", files=False)) >= 4000
 
     async def go():
         task = await new_task(dsn)
+        limit = email_encoded_bytes(email("b" * 1000))
         async with await db.connect(dsn) as conn:
-            over = await broker.request(
-                conn, task, email("b" * (EMAIL_MESSAGE_BYTES - 50)), performers=declared()
-            )
-            under = await broker.request(
-                conn, task, email("b" * (EMAIL_MESSAGE_BYTES - 200)), performers=declared()
-            )
+            with mock.patch.object(core_bridge, "EMAIL_MESSAGE_BYTES", limit):
+                over = await broker.request(conn, task, email("b" * 1100), performers=declared())
+                under = await broker.request(conn, task, email("b" * 1000), performers=declared())
             nobody = await broker.request(
                 conn, task, broker.Action("email.send", to, {"to": [], "body": "x"}), performers=declared()
             )
@@ -239,6 +248,7 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
     assert over.kind == "refused" and "over email's limit" in over.error
     assert under.kind == "pending"
     assert nobody.kind == "refused" and "no recipient" in nobody.error
+    assert EMAIL_MESSAGE_BYTES == 25_000_000
 
 
 def test_telegram_refuses_a_chat_it_does_not_receive_and_an_empty_send(dsn, op):
@@ -307,7 +317,8 @@ def test_tick_called(dsn, op):
 def test_settle_after_function(dsn, tmp_path):
     action = broker.Action("email.send", "a@b.c", {"to": ["a@b.c"], "subject": "s", "body": "b" * 1_000_000})
     with bridges.operator(tmp_path) as s:
-        expect = s.reconcile_after_s + (1_000_001) * 8 / 1_000_000
+        expect = s.reconcile_after_s + email_encoded_bytes(action) * 8 / 1_000_000
+        assert email_encoded_bytes(action) > 1_000_000
         assert DECLARED["email.send"].settle(action) == pytest.approx(expect)
         assert DECLARED["telegram.send_message"].settle(action) is None
         assert Declared("x", "act", "", "email", settle_after_s=5.0).settle(action) == 5.0

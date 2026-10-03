@@ -155,13 +155,14 @@ importing a bridge, and bridges read them from there:
   upload limit, 2000 MiB (Telegram's file upload documentation: 4000
   parts of 512 KiB).
 - Email: `max_text` None. The limit is on the whole message: Gmail
-  refuses a message over 25 MB encoded, which 2.3 states as 18,000,000
-  raw bytes; `message_bytes` is 2.3's `email_encoded_bytes` once it
-  lands, and until then the raw sum of the body and every file.
+  refuses a message over 25 MB, counted as 25,000,000 bytes of the whole
+  encoded message (D15c). `message_bytes` is `email_encoded_bytes` in
+  `core/bridge.py`, the encoded MIME message's length; 2.3 makes it the
+  exact message its performer sends.
 `split_text` splits a text over `max_text`, counting in the channel's
 units, into several messages, so `sent` is a list. A send over the
 limit (a Telegram file over `max_file_bytes`, an email whose
-`message_bytes` exceeds 18,000,000) is refused at request time, with
+`message_bytes` exceeds 25,000,000) is refused at request time, with
 the protocol limit as the reason, so Tom never approves an impossible
 send.
 
