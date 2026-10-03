@@ -21,7 +21,7 @@ its spec (`scripts/replay_workspace.py`).
 | `home/` | git config (Valor's identity, no credential helper), an empty gh config, `pgpass`, and the profiles: `turn.sb`, each fresh session's, and `service.sb` |
 | `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's `TMPDIR` and Claude Code config; each fresh session's checkout, `tmp/`, and `claude/`; each suite run's blind checkout and its own copy of the caches, cloned from `checks/seed/` (the base's setup output) |
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
-| `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr; no turn can write them |
+| `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr; no turn can read or write them |
 
 The setup commands run once in `repo/` under `turn.sb`, with no time limit. A command's stdout and
 stderr are one pipe the kernel copies into its log, since node aborts at startup when its stdout is a

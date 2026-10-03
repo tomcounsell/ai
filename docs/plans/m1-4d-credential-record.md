@@ -97,15 +97,14 @@ From the test check and the lead:
 
 The candidate is `m1-4d-docs2`. Notes from the checks, not blocking:
 
-- A program git starts that calls `setsid` and keeps git's output pipes
-  open survives the group kill; after a stop the caller returns at once,
-  but the worker thread holds the lock until that program exits.
+- A program git starts that calls `setsid` and keeps git's output open no
+  longer holds the call: git's output goes to files the kernel holds (patch
+  round 3).
 - A cancelled push whose pack the remote already had settles `failed`
   and the remote may then apply it. A new merge request and one more tap
   re-push and settle `done`.
-- `kernel_paths()` does not list `settings.performing_dir`, so a turn is
-  kept out of the lock directory only at its default location under the
-  key directory. Listing it fixes the sandbox profile.
+- `kernel_paths()` lists `settings.performing_dir`, so a turn is kept out of
+  the lock directory wherever it is set (patch round 3).
 - Whichever of 1.4d and 2.1 lands second follows the lock-based reconcile
   in `core/bridge.py` and the three tests that read `reconcile_after_s`.
 
@@ -139,8 +138,7 @@ dispatch's retire on failure, and adds `offered`; the command list has
 `openai-key`, `github-key`, and `merge-target`; `copy_keys` keeps
 `sources`; `remote_head`'s stderr and the transcript failure text are
 whole, per 1.4u. The caller of a cancelled `git.threaded` now waits for
-the thread, so the setsid case in the delivery notes delays the stop
-until that program exits.
+the thread; patch round 3 makes that wait end when git exits.
 
 ## Patch round 3: output in files, the stop's log, the lock directory
 

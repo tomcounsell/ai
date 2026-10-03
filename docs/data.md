@@ -247,7 +247,8 @@ An effect's `effect.intent` row commits before its performer runs, and its
 `effect.outcome` row after. A kill between the two leaves an intent with no
 outcome. The process performing an effect holds a session advisory lock on
 it from before the intent to the outcome, and a `flock` on the effect's
-lock file (`core/performing.py`, in the kernel key directory), which its
+lock file (`core/performing.py`, in `settings.performing_dir`, the kernel key
+directory unless moved, and a kernel path no workspace profile reads or writes), which its
 worker thread and every git that thread runs hold too, so both are free
 only when that process died and every git it started has exited.
 `broker.reconcile`
