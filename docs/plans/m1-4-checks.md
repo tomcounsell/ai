@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; next 1.4b, then 1.4d; 1.4c after takeover
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b planned (m1-4b-runners.md), awaiting critique round 1 of 2; then 1.4d; 1.4c after takeover
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -114,14 +114,14 @@ whole pipeline on its own branch, stacked on the one before.
 | Task | What it lands | Needs Tom first | Closes in `verdict` |
 |---|---|---|---|
 | **1.4a** | Kernel workspace provisioning (per-task clone, bare origin, kernel mirror read by the merge, `push_url`, per-task Postgres and Redis, project specs, `start --project`); per-turn `TMPDIR` and Claude Code config; fresh-session machinery; the critique runner; the fold fix; absorbs the replay teardown, shared role, and test-performer debts | nothing (waits for, or carries, 1.2's replace-ref fix) | `critique` |
-| **1.4b** | Calibration records for breadth and governance (floors frozen first); then the test runner (breadth, then suite at base and head in fresh checkouts) and the docs runner (own checkout, path drop, governance after the turn) | nothing (live judgement spend under $1, through the builder's own key directory) | `test`, `docs` |
+| **1.4b** | Frozen case sets for breadth and governance, routing on the entry check; the test runner (breadth, then suite at base and head in fresh checkouts) and the docs runner (own checkout, path drop, governance after the turn) | nothing (live judgement spend metered, expected about $1, through the builder's own key directory) | `test`, `docs` |
 | **1.4d** | The GitHub credential for the merge, held in the kernel key directory; the merge-target list; `merge_url` honoured; transcript copies with digests; performers registered per task; awaitable performers | choosing Valor's account or his own, creating the token, and writing the merge-target list, for the one live push; everything else is built and tested against a local smart-HTTP server | none |
 | **1.4c** | The container verifier (kernel-built images, a fresh VM per verification, RAM measured) and the review runner (Opus, blind, governance first); the `verdict` command deleted | installing `container` and Rosetta, starting the container system | `review`; the command is deleted |
 
 **Order: a, b, d, c.** 1.4a first because every runner needs provisioned
 checkouts and the fresh-session machinery. 1.4b next because its runners
-cannot route work until breadth and governance have calibration records,
-and the review runner (1.4c) depends on the governance record too. 1.4d
+route on breadth's and governance's entry checks, and the review runner
+(1.4c) routes on governance's too. 1.4d
 before 1.4c because it can be built and tested in full without Tom (the
 live push is a rollout step), while 1.4c cannot be built at all until the
 container runtime is on the machine (no mocks). If Tom installs the
@@ -144,7 +144,7 @@ added to it.
 | `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | d (`push_url` split in a) | `tools/push_branch.py`, `core/git.py`, `core/credentials.py`, `core/__main__.py` (`github-key`), the merge-target list |
 | Transcript copies kept in the store with a digest | d | `core/transcripts.py` (new), `core/runs.py` |
 | Review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | b (test, docs), c (review) | `core/verdicts.py` |
-| Calibration records for breadth and governance, setting their floors, before either routes work; each re-checks Jev's reservation overhead against its own rows | b | `core/judgement_tasks.py`, `tools/jev.py`, cases under `~/src/valor-demo/items/judgement/` |
+| Breadth and governance route on the entry check over frozen cases and log every row; floors from human labels once real tasks have produced thirty or more; each re-checks Jev's estimate overhead against its own rows | b | `core/judgement_tasks.py`, `tools/jev.py`, cases under `~/src/valor-demo/items/judgement/` |
 | Absorbs: Redis left running at replay teardown | a | `core/workspace.py` |
 | Absorbs: replay databases sharing one `test` role | a | `core/workspace.py` (a cluster and role per task) |
 | Absorbs: `tools/workspace.py` test-only performers moved to `tests/` | a | `tests/performers.py` |
@@ -740,202 +740,16 @@ The test, review, and docs runners; calibration; the container; the GitHub
 credential and fetching private repositories; transcripts; the performer
 registry. Concurrent runs of two tasks' turns (one slot, machine.md).
 
-## 1.4b outline: calibration, then the test and docs runners
+## 1.4b in full: calibration, the test runner, the docs runner
 
-### Calibration first
-
-Neither breadth nor governance routes work before its record exists, so
-the records come first in the task, against a build database
-(`valor_rebuild_m14_calib`) with the builder's own key directory
-(`VALOR_PG_PASSFILE=~/.config/valor-kernel-m14/pgpass`), never the
-kernel's. judgement-layer.md binds: labels come from humans, and the
-landing bars per tier are Tom's to set.
-
-- **Frozen before run 1, by digest.** The floors (as 1.3 left them:
-  breadth 0.70 primary, 0.75 fallback; governance 0.65 primary, 0.70
-  fallback), the case set, and every label are written to the cases files
-  and their SHA-256 digests recorded in the build record before the first
-  call. Up to five runs per site; between runs only wording and a leg's
-  fixed rendering change, each listed. No case is added, removed, or
-  relabelled after run 1.
-- **Breadth cases** (`checks.test.breadth.json`, outside the repo). Rule:
-  every baseline run and demonstration delivery whose item has hidden
-  reference tests, **except the three items 1.5's takeover gate scores**
-  (popoto #191, psyoptimal #872, popoto #633), so the gate is not measured
-  on cases the classifier was tuned on. Each case is the candidate diff
-  with three labels (`gap_state`, `gap_enum`, `gap_bound`). Labels come
-  from the merged reference work, which humans wrote: a gap where a hidden
-  reference test failed on the candidate, by what that test exercises; no
-  gap where every hidden test passed. Source `reference`, with an evidence
-  pointer per label. Where the reference does not settle which of the
-  three kinds a failure is, that label is `drafted`.
-- **Governance cases** (`governance.adds.json`, at most 50 hunks). Rule:
-  every hunk with added lines in (a) the commits of 1.2 and 1.3 that seed
-  or route the checkpoints Tom granted on 2026-10-01 (positives by his
-  grant), (b) the commits on `main` that added a file under
-  `.claude/hooks/validators/` or a hook registration (positives, the kind
-  his paragraph names), and (c) the ten most recent commits on `main`
-  before 2026-10-01 that touch none of those paths (negatives), taking at
-  most five hunks per commit in diff order until 50. A label with a
-  decision of Tom's behind it (his grant, his paragraph's named kinds) is
-  source `tom`; every other label, all of (c) included, is `drafted`.
-- **Drafted labels count in neither bar** unless Tom confirms them. The
-  build sends Tom one message listing the drafted labels (case, hunk or
-  diff, proposed label, why), not a labelling session; each he confirms
-  becomes source `tom` in a new cases file and a new record. Until then the
-  record reports drafted cases' results as information only.
-- **The bars go to Tom** (Questions, 5). Until he sets them, a site routes
-  on its **entry check**: both legs right on every non-drafted case of
-  the record. For governance, "right" counts both directions: a wrong
-  `false` lets governance through without a tap, and a wrong `true` puts a
-  tap on every diff that touches that kind of code, so a false positive
-  fails the entry check as surely as a false negative. Brier scores and
-  confusion counts are recorded with n, as information.
-- **When a record misses its bar** (or its entry check, while the bars are
-  open): the site does not route. Its dependent runners are not
-  registered in `RUNNERS`, so those stages keep the manual `verdict` path
-  and the router stops at them with `no runner`, as today; nothing is set
-  to caution by default, because caution on every breadth question would
-  send every candidate to the repair round and caution on every hunk
-  would ask Tom for a tap per hunk. Concretely: breadth missing keeps
-  `test` manual; governance missing keeps `docs` manual in 1.4b and
-  `review` manual in 1.4c, and the `verdict` command is then not deleted.
-  The build stops and asks Tom, as 1.3 did for the judge.
-- **Jev's reservation overhead re-checked** from the records' own rows:
-  every charge at most its reservation, and the largest billed over
-  estimated ratio reported per site. Breadth inputs run to thousands of
-  tokens against the judge's 1,016, so if any charge exceeds its
-  reservation the estimate in `tools/jev.py` changes and the record is
-  made again.
-- **Landing**: `BREADTH.calibrated` and `GOVERNANCE.calibrated` hold the
-  records' `task_sha256`. At rollout one more run writes each record to
-  the real ledger and the digests are compared by hand, as 1.3 did.
-
-### The order: breadth, then the suite
-
-Settled: **breadth first, then the suite at base, then at head.** Breadth
-reads only the diff, costs under a cent and seconds, and is reused on a
-rerun by candidate; the suite costs minutes and the largest slice of the
-16 GB machine (machine.md, "The turn's work", 3,000 MB). An outage in both
-judgement legs then costs no suite run, and a red suite costs one wasted
-breadth call. If breadth is unanswered with reruns left, the runner stops
-before the suite and the branch reruns.
-
-### The test runner: `core/checks.py` (new), `Check.TEST`
-
-1. `judgement_sites.breadth(port, dsn, task)`, reused if answered for this
-   candidate.
-2. A fresh checkout at the base and one at the candidate (from the
-   mirror), each with the checks' pgpass copy and its own `tmp/`.
-   **Caches.** The builder's caches are never used. The base's setup runs
-   first, with `checks/seed/` writable, and fills it; the base is the
-   merged commit the task started from, so nothing a candidate wrote is in
-   the seed. Every later run (each head, and a base rerun) gets its own
-   copy-on-write clone of the seed (APFS `clonefile`, near free on disk),
-   writable during its setup and its suite (a read-only cache breaks
-   `uv run`, which syncs first; the test runs the real suite command), and
-   deleted after the run. So a
-   candidate's setup or suite can write only its own copy, and nothing it
-   writes reaches the next candidate's run.
-3. The suite under the check profile, marked and reaped, with a time limit
-   (`suite_timeout_s`, default 1,800), writing JUnit XML to a path the
-   kernel gives (`{junit}`). Each run writes `suite.ran`: commit, role
-   (`base` or `head`), command, an environment digest (lockfile digests,
-   the setup commands, the spec's `env`, and the versions of the tools in
-   `bin/`, uv's included), exit code, test ids by outcome (passed, failed,
-   errored, skipped), duration, output tail, peak footprint, and an
-   `infrastructure` flag. A `suite.ran` with the same commit, command, and
-   environment digest is reused, so the base runs once per task and a
-   crash after a suite does not rerun it, **except** one that timed out or
-   failed for an infrastructure reason (setup failed, the run was killed or
-   stopped, the task's Postgres was down, the JUnit file is missing or
-   unreadable while the exit code says the runner itself failed): those are
-   never reused, and run again.
-4. Failures: test ids failing or erroring at head that passed (or did not
-   exist) at base; and **every test that passed at base and is absent or
-   skipped at head**, unless the diff deletes its definition (the test's
-   file is deleted, or a removed line in the diff of that file defines the
-   test's function or class name, parametrized ids reduced to the name).
-   A skip is counted as an absence because a candidate can skip a failing
-   test as easily as delete it. When the diff touches a test's
-   parametrize decorator, its ids missing at head count as deleted. For
-   non-Python kinds the rule is per kind: where the JUnit id names a test
-   whose name string the diff removes, it is deleted; otherwise the missing
-   ids are listed for the reviewer and Tom rather than judged. Deleted
-   definitions are listed on
-   `test.decided` as `deleted_at_head`, for the reviewer and Tom. A suite
-   that gives no per-test result (no JUnit file) falls back to the exit
-   code: red when head fails and base passes, and red with "the suite
-   fails at base too, and without per-test results no failure at head can
-   be told apart" when both fail. This defines how the existing
-   `checks.test` question ("the suite passes at head where it passed at
-   base") is answered; it adds no check, and the build record says so.
-5. `record_check(TEST, verdict, breadth=id, command=..., failures=...,
-   leg="session"... )`; the kernel computes the verdict.
-
-### The docs runner: `Check.DOCS`
-
-1. A real clone of the candidate from the mirror, under its own profile.
-   Inputs: request, plan, `diff.patch`, and `previous-docs.patch` (the
-   docs commits on the previous candidate, if any, so the session keeps
-   what still holds).
-2. One fresh turn (seat `frontier`); `verdict.json` gives the verdict and
-   findings; the commits are read from git, never from the file.
-3. The kernel reads the commits from the candidate to the checkout's head
-   (refusing a hostile config, a head that does not descend, or a merge
-   commit: each is a `changes` finding, so the branch ends), keeps the
-   longest run of commits from the candidate that touch only doc paths
-   (`machine.is_doc_path`, `git diff --no-renames`), and drops the first
-   commit outside doc paths and every one after it, each dropped commit a
-   `changes` finding naming its paths. The kept head is fetched into the
-   mirror under `refs/valor/docs/<turn>`, never into the builder's clone.
-4. Governance over the kept docs diff (candidate to head), asked after the
-   turn because the diff exists only then: `judgement_sites.governance`.
-   This follows sdlc-state-machine.md (the governance boolean "over their
-   diff") and overrides valor-rebuild.md's 1.4 Done line, which says one
-   governance judgement per hunk "asked before the reviewer's or docs
-   turn": before is impossible for docs, whose diff the turn makes. The
-   build fixes valor-rebuild.md to say before the reviewer's turn and
-   after the docs turn.
-5. `record_check(DOCS, verdict, head=kept, governance_from=ids, ...)`; any
-   dropped commit makes the verdict `changes`.
-
-Every fresh checkout in 1.4b and 1.4c (test, docs, review) is made the way
-1.4a's critique checkout is after its patch: a candidate whose tree holds a
-top-level `.valor` (any letter case) is refused at collection and at
-checkout, `.valor` must not exist before the kernel makes it, inputs and
-any password-file copy are written relative to a descriptor with
-`O_NOFOLLOW` and `O_EXCL`, no verdict file may exist before the turn, and
-any turn-chosen text the kernel embeds in a file it writes is JSON-quoted.
-For docs, whose checkout is a real clone, the same refusal covers the docs
-session's own commits.
-
-`record_check` refuses a non-manual test verdict without `breadth` and a
-non-manual review or docs verdict without `governance_from`. `test` and
-`docs` leave `MANUAL_STAGES`.
-
-### Tests (outline)
-
-Every join row through the router with real runners and the scripted
-session; a docs commit touching `core/` dropped and later doc-only commits
-dropped with it; `CLAUDE.md` and `Skills/x.md` (case) dropped; after a
-send-back the next candidate does not contain the docs commits and the
-next docs session sees `previous-docs.patch`; a test runner whose head
-suite is stopped leaves no verdict, and the next run reruns test only
-while review's verdict stands; breadth both legs failing stops before any
-suite runs; the base suite runs once across two candidates; a JUnit file
-that is not XML, or a symlink, is a suite with no per-test result, never
-a crash; a candidate whose `conftest.py` exits 0 before collecting is red
-(every base test absent at head); one that marks a failing test `skip` is
-red; one that deletes a test's definition is not red and lists it under
-`deleted_at_head`; one that deletes a test's file but keeps the function
-elsewhere under the same name is judged by the name's removal; a head
-suite that writes into its cache leaves the next candidate's run
-unaffected (the next run's copy is cloned from the seed, and a planted
-file is absent from it); a `suite.ran` that timed out is run again, never
-reused; changing a tool's version in `bin/` changes the environment digest
-and reruns the base;
-calibration records' digests equal the declarations'.
+The whole plan is [m1-4b-runners.md](m1-4b-runners.md): the Done items it
+closes, its threat model, the frozen case sets breadth and governance
+route on, the test runner (breadth, then the suite at base and at head,
+each in a fresh checkout with setup from the lock and fresh services on
+the task's ports), the docs runner (its own clone, the head fetched from
+it into the mirror, the doc-path prefix kept, governance after the turn),
+the answers to the popoto #191 trial's findings, tests, rollout, and
+questions for Tom.
 
 ## 1.4d outline: the GitHub credential, transcripts, the performer registry
 
@@ -1034,7 +848,7 @@ which is itself the sign that something rewrote the transcript (compaction
 or the turn). Tests: a turn that replaces its transcript with a symlink to
 a scratch secret stores nothing and records why; an edited earlier line
 shows `prefix_changed`; a live turn that starts a subagent (`VALOR_LIVE`,
-under $0.30) has the subagent's transcript copied with its own digest.
+metered, expected about $0.30) has the subagent's transcript copied with its own digest.
 
 ### The performer registry, awaitable
 
@@ -1154,7 +968,7 @@ like the runtime's in `~/Library/LaunchAgents` and reading the data
 directory are refused; the review verdict's governance comes from the judgement
 rows, and a reviewer's line merges into a kernel instance; a review
 rerun after a grant reuses `verify.ran`; `verdict` is gone from the
-command line; live (`VALOR_LIVE=1`, under $3): one real blind Opus review
+command line; live (`VALOR_LIVE=1`, metered, expected about $3): one real blind Opus review
 on a toy candidate with a container rerun.
 
 ## Machine changes needing Tom (rollout steps, none done in a build)
@@ -1301,8 +1115,9 @@ on a toy candidate with a container rerun.
 - Transcripts: deltas per turn, 50 MB cap per copy.
 - The token: fine-grained, one repository, Contents read and write, 90
   days, owned by Valor's account unless Tom picks his own.
-- Live spend for the whole milestone's builds under $8, each live test
-  declaring its spend.
+- Live spend for the milestone's builds is metered, expected about $8 in
+  all, each live test declaring its spend; nothing refuses or pauses on
+  money.
 
 ## Critique round 1 (of 2)
 
