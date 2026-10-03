@@ -343,7 +343,7 @@ reaches the agent; it is never the thing that enforces it.
 Every turn's system prompt is rendered fresh as the turn starts, in this
 order:
 
-1. **Persona.** Identity, voice, conduct, the governance paragraph. Read
+1. **Persona.** Identity, voice, conduct, the governance paragraphs. Read
    from `persona/`, which changes only by a reviewed diff in git.
 2. **Brief.** The task's commitments: task id, instruction,
    effect ceiling, governance grant, workspace (`core/tasks.py`,
@@ -374,9 +374,12 @@ persona change reaches a running session at its next turn
 dispatch, from the kernel's own checkout (`settings.persona_dir`, never the
 workspace): "You are Valor Engels.", the identity fields, `turn.md`,
 `voice.md`, `conduct.md`, `governance.md` with the governance paragraph
-read from `CLAUDE.md` under it, then `delivery.md`. The harness adds
-nothing ahead of the dispatched text. A persona that cannot be read fails
-the dispatch; there is no fallback text. The governance paragraph also
+and the "Tests are not governance." paragraph read from `CLAUDE.md` under
+it, then `delivery.md`. Every fresh session (critique, review, docs) gets
+the same persona. The harness adds nothing ahead of the dispatched text.
+A persona that cannot be read fails the dispatch, whether a persona file
+or identity field is missing or `CLAUDE.md` is missing or lacks either
+paragraph; there is no fallback text. The governance paragraph also
 reaches every turn as correction 1 (global scope, source class `direct`)
 (rebuild-demonstration.md, "Correction 1 rendering, verified").
 
@@ -394,7 +397,7 @@ Whether the appended system prompt reaches them is unverified (see
 
 ## What the persona holds and what it leaves out
 
-The persona holds identity, voice, conduct, and the governance paragraph.
+The persona holds identity, voice, conduct, and the governance paragraphs.
 It holds no tool instructions, no skill bodies, no SDLC stage rules, no
 channel-specific behavior, and no rule deciding what may be sent:
 
