@@ -253,9 +253,9 @@ Each price carries the day it was checked against that page, and every
 `gateway.charged` row records it as `price_checked`, so a price change
 upstream is visible in the ledger. Status: **in use**.
 
-**Providers.** Anthropic for frontier turns, and OpenAI's Responses API
-through its own gateway route. Status: **in use**. Another provider arrives
-when Tom asks for one; the gateway meters a provider before any turn uses it.
+**Providers.** Anthropic for frontier turns, OpenAI's Responses API through
+its own gateway route. Status: **in use**. Another provider arrives when Tom
+asks, metered by the gateway before any turn uses it.
 
 ### Model seats
 
