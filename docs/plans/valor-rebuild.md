@@ -96,6 +96,14 @@ running kernel is a separate checkout. Releasing a merge that touches
 `core/` also pulls that checkout, applies any schema change, and restarts
 the kernel service, as part of the same tapped effect.
 
+**Fan-out (Tom's decision of 2026-10-03).** Every remaining task is
+planned at once, and every task whose code does not wait on another is
+built in parallel, each through its own pipeline, by Opus and Sonnet
+subagents from the driving session. Tasks that change the same kernel
+files merge one at a time. The waves, the models per role, and each
+agent's isolation are in `.claude/skills/build/SKILL.md`. The takeover
+gate still measures the pipeline before Valor carries tasks itself.
+
 **Phase B, self-built (milestones 2 to 6).** A driving session steps in
 only to repair the kernel when Valor cannot run its pipeline at all. Such
 a repair is a task in the ledger like any other once the kernel runs
