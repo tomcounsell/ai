@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-2-persona
 type: build
-status: passed; merge held for Tom's tap
+status: merged
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -562,3 +562,15 @@ a stage section ends the text, which a turn with no workspace lacks.
 Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped.
+
+## Merged
+
+Merged 2026-10-03 at `5582c4bf2`: the docs head (candidate `9b65a74fe`) rebased onto 3c's merge. Two doc tables (`docs/architecture.md` execution records, `docs/data.md` `turn.started` and `turn.ended`) were folded by hand to carry both 3a's and 4.2's fields; `docs/architecture.md` was brought to 599 lines by rewording the dispatch paragraph and the one-provider limit (the gateway meters OpenAI now; the reviewer is still one harness). Suite on the folded head: 698 passed, 11 skipped, 2 failed with "the task's Postgres did not start" (the known port race while ten builders ran suites); both passed alone. Ruff as above. Backup first: `valor_rebuild-20261003T133820Z.dump`.
+
+Rollout:
+
+1. Backup: done.
+2. Fast-forwarded and pushed; the kernel checkout is `~/src/valor-rebuild` itself, `uv sync` run.
+3. No schema change and no restart.
+4. The next real turn: the 3c live turn on the merged head, three turns (critique, build, build), each `turn.started` with `persona_sha256` `f64edfd3fe0e3c0bdd9b29c91d2bd36fee21aee53143246f5031acd204851392` and `persona_bytes` 10,390; `core.persona.digest(core.persona.render(settings.persona_dir))` in the checkout gives the same digest and size. Equal.
+5. Emulator evidence: waits on 1.5's merge, as the plan says; the lead runs it then and records it under "Emulator runs".

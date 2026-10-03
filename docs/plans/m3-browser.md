@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-browser
 type: build
-status: passed; merge held for Tom's tap
+status: merged
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -364,3 +364,12 @@ built in.
 Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped.
+
+## Merged
+
+Merged 2026-10-03 at `956c00aa2`: the docs head (candidate `da33cd37e`) rebased onto `valor-cori-rebuild` after 3a merged, with no conflict. Suite on the rebased head: 681 passed, 10 skipped; ruff check clean; ruff format flags only the two known files (`docs/bridges/telegram.md`, a 2.1 plan). Backup first: `valor_rebuild-20261003T133820Z.dump`.
+
+Rollout:
+
+1. Nothing on the machine beyond `uv sync` in the kernel checkout.
+2. The memory figure (peak 372 MB a render) and the sandbox finding (`--no-sandbox`, Chromium's own sandbox cannot start inside the turn profile) stand as recorded in the build. The live turn ran again on the merged head (with 4.2 merged on top): `VALOR_LIVE=1 pytest tests/test_look.py -k live` passed in 104 s; `turn.collected` held `20261003-203933.png` (7,574 bytes) and `20261003-203933.html` (60 bytes). Spend for the run: 541,913 micro-dollars.
