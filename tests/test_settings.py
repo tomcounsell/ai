@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from core import db, spending, tasks
-from core.settings import PRICES, SEATS, Settings, resolve_model, settings
+from core.settings import PRICES, SEATS, Settings, resolve_model, resolve_seat, settings
 from tests.conftest import TEST_DB
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -38,10 +38,17 @@ def test_a_connection_string_names_the_password_file_and_holds_no_password():
 
 def test_every_price_carries_the_day_it_was_checked_and_every_seat_is_priced():
     assert all(isinstance(p.checked, date) for p in PRICES.values())
-    for seat, model in SEATS.items():
-        assert model in PRICES, seat
-        assert resolve_model(seat) == model
+    for seat, (harness, model) in SEATS.items():
+        assert harness in ("claude_code", "pi"), seat
+        if harness == "claude_code":
+            assert model in PRICES, seat
+        assert resolve_seat(seat) == (harness, model) and resolve_model(seat) == model
     assert resolve_model("claude-sonnet-5") == "claude-sonnet-5"
+    assert resolve_seat("claude-sonnet-5") == ("claude_code", "claude-sonnet-5")
+
+
+def test_the_openai_reviewer_seat_is_pi_on_gpt():
+    assert resolve_seat("reviewer_openai") == ("pi", "gpt-6.1-sol")
 
 
 def test_a_dated_model_id_takes_its_undated_entry_and_its_checked_date():
@@ -64,7 +71,7 @@ def test_start_takes_a_seat_and_records_its_pinned_id(dsn):
         async with await db.connect(dsn) as conn:
             return await tasks.brief(conn, out)
 
-    assert asyncio.run(brief()).model == SEATS["frontier"]
+    assert asyncio.run(brief()).model == SEATS["frontier"][1]
 
 
 def test_the_settings_command_prints_shell_assignments_bash_can_read():

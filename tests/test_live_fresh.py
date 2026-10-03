@@ -32,7 +32,7 @@ pytestmark = [
 ]
 
 
-def fresh_for(prompt, checkout, model, harness):
+def fresh_for(prompt, checkout, model, harness, harness_name="claude_code"):
     return claude_code.workspace_turn(
         prompt, cwd=checkout, model=model, harness={**harness, "max_output_tokens": 2048}
     )

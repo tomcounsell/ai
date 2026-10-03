@@ -7,7 +7,7 @@ secure-login                   the kernel databases' password file, both roles'
 settings                       every setting, as shell assignments
 start INSTRUCTION [--ceiling C] [--workspace DIR]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
-      [--by B] [--role-played]
+      [--by B] [--role-played] [--harness {claude_code,pi}]
                                start a task; prints its id. `--model` takes a
                                seat (frontier, reviewer, light) or a model id.
                                The task starts in judge. The merge lands on
@@ -106,7 +106,15 @@ from core import (
 )
 from core import verdicts as verdicts_
 from core.machine import State
-from core.settings import JEV_KEY, JEV_URL, OPEN_WEIGHT_KEY, OPEN_WEIGHT_URL, resolve_model, settings
+from core.settings import (
+    JEV_KEY,
+    JEV_URL,
+    OPEN_WEIGHT_KEY,
+    OPEN_WEIGHT_URL,
+    resolve_model,
+    resolve_seat,
+    settings,
+)
 
 
 def _performers(b: tasks.Brief) -> None:
@@ -119,18 +127,20 @@ def _performers(b: tasks.Brief) -> None:
         broker.register(Merge(b.mirror or b.workspace))
 
 
-def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
-    from harnesses import claude_code
+def _harnesses() -> dict:
+    from harnesses import claude_code, pi
 
-    return claude_code.workspace_turn(
+    return {"claude_code": claude_code, "pi": pi}
+
+
+def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
+    return _harnesses()[b.harness_name].workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=b.harness
     )
 
 
-def _fresh_for(prompt: str, checkout: str, model: str, harness: dict):
-    from harnesses import claude_code
-
-    return claude_code.workspace_turn(prompt, cwd=checkout, model=model, harness=harness)
+def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_name: str = "claude_code"):
+    return _harnesses()[harness_name].workspace_turn(prompt, cwd=checkout, model=model, harness=harness)
 
 
 async def _working(ctx: router.Context) -> dict:
@@ -295,6 +305,7 @@ async def _start_project(conn, args) -> str:
                 instruction=args.instruction,
                 max_effect_class=args.ceiling,
                 model=resolve_model(args.model),
+                harness_name=args.harness or resolve_seat(args.model)[0],
                 **made.brief_fields(),
             )
             return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
@@ -453,6 +464,7 @@ async def _run(args) -> None:
                 max_effect_class=args.ceiling,
                 workspace=workspace,
                 model=resolve_model(args.model),
+                harness_name=args.harness or resolve_seat(args.model)[0],
                 harness=harness,
                 **where,
             )
@@ -630,6 +642,7 @@ def main() -> None:
     start.add_argument("--ceiling", default="propose", choices=list(tasks.EFFECT_RANK))
     start.add_argument("--workspace")
     start.add_argument("--model", default="light")
+    start.add_argument("--harness", choices=("claude_code", "pi"))
     start.add_argument("--harness-config")
     start.add_argument("--target-branch")
     start.add_argument(

@@ -34,7 +34,8 @@ class Brief:
     not.
 
     `workspace` is the directory a turn works in, `model` the model it runs,
-    and `harness` the harness's own settings for the task (its isolation).
+    `harness_name` the harness that runs it (`claude_code` or `pi`), and
+    `harness` the harness's own settings for the task (its isolation).
     `target_branch` is the branch a merge
     lands on, `origin_url` the absolute push URL of the workspace's origin
     as it was at start (the merge goes there, whatever the workspace's
@@ -52,6 +53,7 @@ class Brief:
     governance_grant: str | None = None
     workspace: str | None = None
     model: str = "haiku"
+    harness_name: str = "claude_code"
     harness: dict[str, Any] = field(default_factory=dict)
     target_branch: str | None = None
     origin_url: str | None = None

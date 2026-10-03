@@ -317,7 +317,7 @@ the recorded Brief and in the system prompt argument that reached
 `claude -p` (rebuild-demonstration.md, Correction 1 rendering, verified).
 The same store state renders a byte-identical Brief, which is why the four
 turns shared one digest and why the prompt cache can hold across turns.
-Subagents a harness starts inside a turn were not checked; that gap is
+Subagents Claude Code starts inside a turn do not get the Brief; that gap is
 `docs/architecture.md`'s.
 
 Rendering is the one place stored data becomes prompt text. Memory, when

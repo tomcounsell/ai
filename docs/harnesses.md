@@ -1,12 +1,12 @@
 # Harnesses
 
-A harness is the agent program that does a turn's work: Claude Code today,
-Codex and Pi later. It sits in the agents tier of the three (README, "Three
-tiers"): the kernel decides what a turn may do and pays for it, and the
-harness does the work inside those bounds. This doc covers the port every
-harness conforms to, the Claude Code wrapper, how a task's turns share one
-session, how a turn talks back to the kernel, the sandbox a turn runs under,
-what happens to the processes it leaves behind, and the workspace it works in.
+A harness is the agent program that does a turn's work: Claude Code and Pi.
+It sits in the agents tier of the three (README, "Three tiers"): the kernel
+decides what a turn may do and pays for it, and the harness does the work
+inside those bounds. This doc covers the port every harness conforms to, the
+Claude Code wrapper, how a task's turns share one session, how a turn talks
+back to the kernel, the sandbox a turn runs under, what happens to the
+processes it leaves behind, and the workspace it works in.
 
 `harnesses/` holds the wrappers. `core/runs.py` holds the port and runs one
 turn; `core/session.py` runs a task's turns; `core/signals.py` holds the
@@ -27,6 +27,8 @@ The port is one value, `TurnCommand`, built fresh for each turn:
 | `env` | the turn's whole environment; nothing is inherited past it |
 | `cwd` | the workspace the turn works in |
 | `harness` | the harness's name, recorded in `turn.started` |
+| `harness_version` | the installed release, read from its files and recorded in `turn.started` |
+| `stdin` | the prompt, for a harness that takes it on standard input; none otherwise |
 | `parse` | reads the harness's stdout into the fields the ledger keeps |
 
 A wrapper supplies a builder. The kernel calls it with three values only it
@@ -221,9 +223,9 @@ followed promptly (rebuild-demonstration.md, Money).
 When it nears the model's context limit it is compacted in place, by
 Claude Code's own compaction, and resumed; it is never swapped for a fresh
 session seeded with a summary. The demonstration and the baseline ran on
-resume throughout (rebuild-baseline.md, Aggregate). **Gap:** no run here
-has reached compaction, so its cost and what it drops are unmeasured; the
-first long task records both in `turn.ended`.
+resume throughout (rebuild-baseline.md, Aggregate). Measured live
+(`tests/test_compaction_live.py`): Claude Code's calls fell from 947,155
+input tokens to 75,066 at its compaction; Pi's, in `docs/pi.md`.
 
 ## The signal channel: `.valor/`
 
@@ -333,10 +335,13 @@ Two points the harness relies on and has to keep true:
   every run so far; the sandbox does not enforce it, since a turn reaches
   the public internet (see the sandbox below).
 - **Corrections reaching subagents.** The Brief, corrections included, is in
-  the system prompt of the main session. Whether a subagent Claude Code
-  starts inside a turn sees it was not checked
-  (rebuild-demonstration.md, Correction 1 rendering). **Gap**: the plan says
-  corrections reach every agent; for Claude Code subagents that is unverified.
+  the system prompt of the main session. A subagent Claude Code starts
+  inside a turn (`cc_is_subagent=true` on its requests) gets Claude Code's
+  own subagent system prompt and only the prompt the parent wrote, so the
+  Brief and the corrections in it stop at the main session. The contract
+  suite pins this (`test_corrections_do_not_reach_a_claude_code_subagent`).
+  **Gap**: the plan says corrections reach every agent; for Claude Code
+  subagents they do not. Pi starts no subagents.
 
 ## The turn sandbox
 
@@ -572,19 +577,15 @@ sandbox-exec profile (it brings a sandbox of its own), and its RAM on the
 16 GB machine, which `docs/machine.md` has to plan for. The emulator can score
 it on the UI items (#894, #872, #893) once it exists.
 
-## Further harnesses: Codex and Pi
+## Pi, and further harnesses
 
-A second harness conforms to the same port. Its wrapper builds argv, env,
-and cwd from the base URL, Brief, and turn id; parses a result carrying
-`text`, `is_error`, and a session id; resumes by that id; runs under the same
-sandbox profile with the same `VALOR_TURN` mark; and honors the signal
-channel, which needs nothing harness-specific beyond writing files.
+Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`
+mark (`docs/pi.md`). Every harness meets `tests/test_harness_contract.py`,
+run against its real binary. Codex has not been run here.
 
 The gateway meters two formats: Anthropic's Messages API, and OpenAI's
 Responses API at `<gateway>/t/<token>/openai/v1` (architecture.md, Metered
-spending). A harness whose provider speaks another format needs a route that
-meters it before its wrapper can exist. Nothing about Codex or Pi has been
-run here.
+spending). A harness on another format needs a route that meters it first.
 
 ## Skill rendering
 
@@ -593,6 +594,6 @@ skill system is deferred until Tom's requirements are gathered
 (`skills/README.md`). Until then a workspace turn loads no skills from this
 machine (safe mode). The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
-text, so they need nothing harness-specific. A repository's own `CLAUDE.md` and `.claude/` stay in
-the clone as files the turn can read, as they did in the baseline
-(rebuild-baseline.md, Setup).
+text, so they need nothing harness-specific. A repository's own `CLAUDE.md`
+and `.claude/` stay in the clone as files the turn can read, as they did in
+the baseline (rebuild-baseline.md, Setup).

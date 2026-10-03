@@ -372,8 +372,8 @@ mistakes and never what excellent looks like. Serves: Evidence, "Tom's
 feedback, both directions"; Mission item 2; and corrections that are
 first-class, carry provenance, and reach every session and agent.
 
-**Design.** Corrections reaching subagents is unverified, a gap
-(rebuild-demonstration.md, Correction 1 rendering, last line). A later row
+**Design.** Corrections do not reach the subagents Claude Code starts
+inside a turn, a gap (`docs/harnesses.md`); Pi starts none. A later row
 naming a correction withdraws or replaces it. A scope beyond `global`, and
 rendering by relevance, arrive when one is needed or length measurably
 costs a turn.

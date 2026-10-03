@@ -86,6 +86,7 @@ HOME_DENIED = (
     "Library/Messages",
     ".ssh",
     ".config/gh",
+    ".pi",
 )
 # Writes denied to every workspace sandbox: where a later unsandboxed
 # process of the user would run what a turn left.
@@ -626,7 +627,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
-              lay.work_state / "claude", lay.checks):  # fmt: skip
+              lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
     (lay.root.parent / "bin").mkdir(exist_ok=True)
     # The clone: history up to the base only, no tags, one work branch.
@@ -674,6 +675,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "gh_config_dir": str(lay.home / "gh"),
         "tmpdir": str(lay.work_state / "tmp"),
         "claude_config_dir": str(lay.work_state / "claude"),
+        "pi_agent_dir": str(lay.work_state / "pi"),
         "env": env,
         **({"max_output_tokens": spec.max_output_tokens} if spec.max_output_tokens else {}),
     }
@@ -1117,9 +1119,15 @@ def fresh_dir(check_dir: Path) -> Path:
         check_dir.unlink()
     elif check_dir.exists():
         shutil.rmtree(check_dir)
-    for d in (check_dir / "tmp", check_dir / "claude"):
+    for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi"):
         d.mkdir(parents=True)
     return check_dir
+
+
+# Directories a blind checkout leaves out of the working tree, for every
+# harness: Pi reads `<cwd>/.pi/settings.json` whatever flags it is given, and
+# a candidate must not set what the verifier's session runs with.
+BLIND_LEFT_OUT = (".pi",)
 
 
 def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[str, str]:
@@ -1140,6 +1148,16 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
     second = git.trusted(dest, "commit-tree", rev_tree, "-p", first, "-m", "candidate", extra_env=borrow)
     git.trusted(dest, "update-ref", "refs/heads/main", second, extra_env=borrow)
     git.trusted(dest, "repack", "-a", "-d", "-q", extra_env=borrow)
+    # What a harness reads from the project, to steer the session it runs
+    # there (Pi's `.pi/settings.json` has no flag against it), is left out of
+    # the working tree. Both commits keep it, so the diff the reviewer is
+    # given still shows a candidate's change to it.
+    git.trusted(dest, "config", "core.sparseCheckout", "true")
+    git.trusted(dest, "config", "core.sparseCheckoutCone", "false")
+    (dest / ".git" / "info").mkdir(exist_ok=True)
+    (dest / ".git" / "info" / "sparse-checkout").write_text(
+        "/*\n" + "".join(f"!/{d}/\n" for d in BLIND_LEFT_OUT)
+    )
     git.trusted(dest, "checkout", "-q", "-f", "main")
     with (dest / ".git" / "info" / "exclude").open("a") as f:
         f.write(".valor/\n")
@@ -1172,6 +1190,7 @@ def check_harness(
         "sandbox_profile": str(path),
         "tmpdir": str(check_dir / "tmp"),
         "claude_config_dir": str(check_dir / "claude"),
+        "pi_agent_dir": str(check_dir / "pi"),
         "env": fresh_env,
     }
 

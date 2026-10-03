@@ -369,12 +369,12 @@ resume cost, and the `.valor/` signal files are
 [harnesses.md](harnesses.md).
 
 **Harness version.** The `claude` CLI is installed per machine and not
-pinned by the repository. Status: **open**. A replay compared across months
-is only comparable if the harness version is recorded in `turn.started`;
-that record is the cheap first step.
+pinned by the repository; the version it runs as is recorded in
+`turn.started`, so a replay compared across months says which release
+produced each turn. Pi is pinned in `harnesses/pi.py`. Status: **in use**.
 
-**Other harnesses.** Codex and Pi behind the same port. Status: **open**,
-added on a second real need (Mission item 5).
+**Other harnesses.** Pi runs behind the same port on GPT-6.1 through the
+gateway's OpenAI route ([pi.md](pi.md)): **in use**. Codex is **open**.
 
 ### Sandbox: what runs today
 
