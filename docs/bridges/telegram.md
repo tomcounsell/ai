@@ -82,7 +82,7 @@ work" below), in a separate step that reads `message.received` rows.
 
 Every outbound operation is a broker performer, with the same shape as the
 `push_branch` performer that exists today: an `action_type`, a declared
-`effect_class`, `perform(action, key)`, and `lookup(action, key)`. The broker
+`effect_class`, and the coroutines `perform(action, key)` and `lookup(action, key)`. The broker
 holds every `act` request until Tom approves it, writes `effect.intent`
 before `perform` runs, and writes `effect.outcome` after. A kill between the
 two leaves a dangling intent, which `lookup` reconciles by asking the platform

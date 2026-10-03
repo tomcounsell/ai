@@ -72,7 +72,7 @@ the task starts:
 The text a turn receives is **dispatched**: rendered as the turn starts, the
 persona first (`persona/`, from the kernel's checkout), then the Brief with
 the task's commitments, every correction in force, the signal channel (how
-the turn reaches Tom, with the registered performers' effects), and the
+the turn reaches Tom, with the task's own performers' effects), and the
 stage file for its state (`skills/sdlc/<state>.md`); a fresh session gets
 the verdict channel (`skills/sdlc/verdict.md`) instead. `turn.started`
 records the dispatched text whole, its SHA-256, the persona's SHA-256 and
