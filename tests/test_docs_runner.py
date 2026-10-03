@@ -374,3 +374,31 @@ def test_every_join_row_through_the_router(
         assert f.state is State.PATCH and f.join.row == row, f.join
     else:
         assert f.state is State.MERGE and joined and joined[-1]["join_row"] == row, joined
+
+
+def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_docs_does_not_rerun(
+    dsn, tmp_path, monkeypatch
+):
+    # The builder's clone hides the entry from the kernel's look there (a
+    # replace ref would), so the mirror holds a candidate with `.valor`.
+    seen = kws.tree_has_valor
+    monkeypatch.setattr(
+        kws, "tree_has_valor", lambda *a, trusted, **k: trusted and seen(*a, trusted=trusted, **k)
+    )
+
+    async def go():
+        task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes={".VALOR/x": "x"})
+        out = await drive(dsn, task, scripted.fresh_runners(ws))
+        assert out["missing"] == ["test", "review", "docs"], out
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "review", "pass")
+        await drive(dsn, task, docs_runners(ws))
+        return await rows(dsn, task)
+
+    got = run(go())
+    first = next(r["payload"] for r in got if r["type"] == "docs.decided")
+    assert first["verdict"] == "changes" and first["leg"] == "kernel" and "turn_id" not in first
+    assert "holds a .valor entry" in first["findings"][0]["text"]
+    assert not fresh_docs_turns(got)  # no docs session ran
+    at = next(i for i, r in enumerate(got) if r["type"] == "docs.decided")
+    assert machine.fold(got[: at + 1]).state is State.PATCH  # the join moved on: the repair round

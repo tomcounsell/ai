@@ -291,10 +291,9 @@ serve the request, loop counts too low for the stakes.
 
 **Exit evidence.** `critique.decided`: the plan digest it read, the
 verdict, the findings, any raised counts, the model and cost. `sound` goes
-to `build`. `revise` goes back to `plan` while critique rounds remain, and
-otherwise to `build` with the findings in the prompt. A plan commit holding a
-`.valor` entry has no checkout; the kernel records `revise` naming it (leg
-`kernel`), and critique never reruns.
+to `build`. `revise` goes back to `plan` while critique rounds remain, else
+to `build` with the findings in the prompt. A plan holding `.valor` has no
+checkout: the kernel records `revise` naming it (leg `kernel`), no rerun.
 
 **Why.** Mission item 1. Incident: on popoto #633 the clarify arm built on
 a wrong premise nothing read before code existed, and correctness fell from
@@ -455,9 +454,10 @@ candidate, the kept head, the dropped commits and their paths, the
 governance answer, and the verdict it computes. `updated` or `no_change`
 passes. `changes` means a doc states something the code should still honor
 and the candidate breaks it, a doc cannot be made true without a code
-change, or the kernel dropped a commit. Docs commits belong to their
-candidate: after a send-back they are not merged, and the next docs session
-reads them as `previous-docs.patch`, keeping what holds.
+change, the kernel dropped a commit, or the candidate's tree holds `.valor`
+(no clone or session; the kernel records it, leg `kernel`). Docs commits
+belong to their candidate: after a send-back they are not merged, and the
+next docs session reads them as `previous-docs.patch`, keeping what holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 

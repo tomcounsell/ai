@@ -214,7 +214,9 @@ async def record_check(
     record (`judgement_tasks.BREADTH.calibrated` is None) its behaviors are
     information only: listed under `breadth.information` and in the
     delivery, never `gaps`. A test, review, or docs verdict not recorded by
-    hand must name its judgements (`breadth`, `governance_from`).
+    hand must name its judgements (`breadth`, `governance_from`), except
+    the docs runner's own `kernel` verdict on a candidate whose tree holds
+    `.valor`, which names no turn and no judgement.
     A docs head not recorded by hand must already sit in the mirror under
     a `refs/valor/docs/` ref (the docs runner fetched it and cut it to the
     commits it keeps; `dropped` lists the rest); nothing is fetched here.
@@ -230,10 +232,10 @@ async def record_check(
     suites = list(suites) if suites is not None else None
     if leg != "manual" and check is Check.TEST and breadth is None:
         raise VerdictRefused("a test verdict not recorded by hand names its breadth judgement")
-    if leg != "manual" and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
+    if leg not in ("manual", "kernel") and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
         raise VerdictRefused(f"a {check.value} verdict not recorded by hand names its governance judgements")
-    if leg == "kernel" and check is not Check.TEST:
-        raise VerdictRefused("only the test branch has a kernel leg")
+    if leg == "kernel" and check is Check.REVIEW:
+        raise VerdictRefused("only the test and docs branches have a kernel leg")
     if verdict is None and leg != "kernel":
         raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
     async with conn.transaction():
@@ -248,7 +250,7 @@ async def record_check(
             "leg": leg,
             "model": model,
             "usd_micros": usd_micros,
-            **_session_leg(leg, turn_id, model, suites),
+            **({} if leg == "kernel" and check is Check.DOCS else _session_leg(leg, turn_id, model, suites)),
             **_manual(leg, by, via, role_played),
         }
         specs = list(governance)

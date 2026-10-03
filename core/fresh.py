@@ -263,10 +263,10 @@ def docs_clone(mirror: str | Path, candidate: str, dest: Path, key: str) -> None
     the pack protocol (`file://`), so it shares no object file with the
     mirror. A temporary branch names the candidate in the mirror for the
     clone and is deleted after it. A candidate whose tree holds `.valor` is
-    refused (`git.GitError`)."""
+    refused (`workspace.ValorInTree`)."""
     mirror = Path(mirror)
     if workspace.tree_has_valor(mirror, candidate, trusted=True):
-        raise git.GitError(f"{candidate[:12]}'s tree holds a .valor entry")
+        raise workspace.ValorInTree(candidate)
     ref = f"refs/heads/valor-docs/{key}"
     git.trusted(mirror, "update-ref", ref, candidate)
     try:
@@ -483,6 +483,20 @@ async def _docs_turn(
     try:
         docs_clone(b.mirror, c.sha, checkout, f"{ctx.task_id}-{c.sha[:12]}")
         files = docs_inputs(checkout, rows, f, b, b.mirror)
+    except workspace.ValorInTree as exc:
+        # The candidate's own tree: no rerun would ever clone it, so docs
+        # says `changes` with the reason and the join moves on.
+        if not await ctx.alive():
+            return {"status": "lock lost"}
+        try:
+            async with await db.connect(ctx.dsn) as conn:
+                await verdicts.record_check(
+                    conn, ctx.task_id, machine.Check.DOCS, "changes", head=c.sha, leg="kernel",
+                    findings=[{"kind": "commit", "text": f"no docs clone: {exc}"}],
+                )  # fmt: skip
+        except verdicts.VerdictRefused as refused:
+            return {"status": "failed", "state": state, "turn": {"result": f"verdict refused: {refused}"}}
+        return {"status": "moved"}
     except (git.GitError, OSError, ValueError) as exc:
         return {"status": "failed", "state": state, "turn": {"result": f"docs checkout: {exc}"}}
     env = {**b.harness.get("env", {}), **DOCS_IDENTITY}

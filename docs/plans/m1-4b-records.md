@@ -356,13 +356,18 @@ From review-1-4b-p2 (changes) and the test check (gaps) at `e3e48dccb`.
    `.valor` whose clone-side read is hidden goes plan, then build, with
    no critique turn and the finding in the build prompt.
 
-Not taken: the string over-match (a decorator string equal to a base
-file's name), and the docs runner's `.valor` refusal in `docs_clone`, which
-returns `failed`. The join waits on all three branches, so a candidate
-whose `.valor` the clone hides reruns docs on every wake. Settling it needs
-a docs verdict the kernel records with no turn and no governance
-judgements, which `record_check` refuses today; left for the lead to scope.
+5. The docs runner settles on `ValorInTree` (Valor's call: the same loop
+   as 4, and the join waits on all three branches). `docs_clone` raises
+   `ValorInTree`; the runner records `changes` with the refusal as the
+   finding, `leg: kernel`, head the candidate, no turn and no governance
+   judgements, which `record_check` takes for docs. Review keeps no kernel
+   leg. Test: a candidate with `.VALOR/x` whose clone-side read is hidden
+   gets `changes` from the kernel, no docs session runs, and the join
+   goes to patch.
 
-Suite on `3d692d7b5` plus this round: 813 passed, 13 skipped (build
+Not taken: the string over-match (a decorator string equal to a base
+file's name).
+
+Suite on `3d692d7b5` plus this round: 814 passed, 13 skipped (build
 database, ports 6720 to 6729). `ruff check` clean; `ruff format --check`
 flags only `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.

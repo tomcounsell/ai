@@ -412,8 +412,8 @@ The test runner runs no model turn, so it has no turn id. `_session_leg`
 takes a third leg, `kernel`, which names the `suite.ran` rows it read in
 place of a turn; breadth's model, confidence, cost, and guard id come from
 the breadth row inside `record_check`, as today. `record_critique` takes
-`kernel` with no turn for the critique runner's own `revise` on a plan
-commit whose tree holds `.valor` (`ValorInTree`), so critique never reruns.
+`kernel` for critique's `revise` on a plan holding `.valor` (`ValorInTree`),
+and `record_check` for docs' `changes` on such a candidate: neither reruns.
 
 ### The docs runner (`core/fresh.py`)
 
