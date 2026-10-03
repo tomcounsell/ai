@@ -200,11 +200,11 @@ gateway's rows with `route: judgement`, and no HTTP route, since no turn
 makes these calls. Each leg's call opens with a `gateway.opened` row whose
 estimate is the worst case: estimated input at the input price plus every
 output token allowed. The estimate gates nothing; it is the charge only
-when billing is unknown. Input is estimated as bytes / 3 of the request body; for Jev, which bills a
-prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
-question, sized from Jev's 35 calibration calls, all single-question judge
-calls of at most 1,016 estimated tokens (`tools/jev.py`); 1.4's breadth and
-governance calibrations re-check it. The unused fallback is charged 0. A
+when billing is unknown. Input is estimated as bytes / 2 of the request body
+(`settings.bytes_per_token`, as at the gateway); for Jev, which bills a prompt of its own around it, 1.25 times that plus 300
+tokens and 50 per question (`tools/jev.py`), sized from its single-question
+calibration calls and governance calls on lock-file hashes (near 1.5 bytes
+per token). The unused fallback is charged 0. A
 charge is the usage at the pinned price (`JUDGEMENT_PRICES`) or the
 reported cost if more, rounded up; the
 worst-case estimate when billing is unknown; 0 when nothing reached the

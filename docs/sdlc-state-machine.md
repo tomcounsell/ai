@@ -370,6 +370,15 @@ candidate's head, each in a blind checkout from the kernel mirror with its
 own copy of the caches and fresh Postgres and Redis on the task's ports
 (`core/checks.py`). A base run whose setup failed is never reused. No
 setup command or suite has a time limit; a stop ends a running one.
+A candidate whose tree holds a `.valor` entry has no checkout: the run is
+recorded as the commit's own fault, red at head, and never rerun (the base's
+tree is never checked out, so its entries do not count). A JUnit report that
+is not XML, or declares an encoding the parser cannot read, gives no
+per-test result. A test with parameters counts as gone when the diff removes
+or inserts inside what feeds its `parametrize` decorator: the decorator, a
+module or class level binding of a name it uses (followed through the names
+those use), a module a used name is imported from, or a file a string there
+names.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
 at head that do not fail at base, `deleted_at_head` (tests that passed at
