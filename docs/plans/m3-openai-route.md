@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-openai-route
 type: build
-status: building; critique rounds spent, round 2's findings built in
+status: built; awaiting review
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -526,3 +526,13 @@ optional action in Rollout.
      out; the Anthropic code execution gap named.
   Cap audit: a 403 when the kernel holds no OpenAI key was a refusal; the
   route forwards the turn's key instead, recorded `credential: "turn"`.
+- Build: `gpt-6.1-sol` confirmed in `v1/models` through the gateway; ten
+  recordings made through the gateway on the turn's key, about $0.04.
+  Live call on the kernel-key path (a scratch key file copied from the
+  vault, never the machine's key directory): request
+  `req_d87b7dde7fb24fc8b38da42354599866`, usage 13 input and 5 output at
+  the default tier, priced by hand at 13 x $2 + 5 x $10 per million =
+  76 micro-dollars, charged 76. The Usage API comparison is not done:
+  the vault holds no admin key. A web search call reports
+  `tool_usage.web_search.num_requests`; the meter takes the larger of it
+  and the call items.

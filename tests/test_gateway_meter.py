@@ -138,6 +138,18 @@ def test_a_recorded_whole_response_is_charged_the_same(dsn):
     _check(result, body=WHOLE, status=200, usd=COMPLETE, complete=True)
 
 
+def test_server_web_searches_are_charged_per_search(dsn):
+    # Edit: the recorded whole response's usage given two server-side web
+    # searches. Anthropic bills $10 per 1,000 searches: 10,000 micro-dollars each.
+    import json
+
+    message = json.loads(WHOLE)
+    message["usage"]["server_tool_use"] = {"web_search_requests": 2}
+    searched = json.dumps(message).encode()
+    result = _call(dsn, searched, content_type="application/json")
+    _check(result, body=searched, status=200, usd=COMPLETE + 2 * 10_000, complete=True)
+
+
 def test_a_stream_cut_before_its_final_usage_is_charged_every_allowed_output_token(dsn):
     cut = STREAM[: STREAM.index(b"event: message_delta")]
     result = _call(dsn, cut, content_type="text/event-stream")

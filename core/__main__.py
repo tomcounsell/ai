@@ -31,6 +31,10 @@ judgement-keys                 copy the judgement legs' keys from the vault
                                .env into the kernel's key file (mode 600);
                                prints each name with written, kept, or
                                missing, never a value
+openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
+                               into the kernel's OpenAI key file (mode 600),
+                               replacing the key there; prints written,
+                               kept, or missing, never a value
 calibrate CASES.json
                                both judgement legs alone on every labelled
                                case (at most 50), one
@@ -226,7 +230,7 @@ def _status_line(task_id: str, out: dict) -> str:
 
 
 async def _run_task(task_id: str) -> str:
-    from core.gateway import ClaudeLogin, Gateway
+    from core.gateway import ClaudeLogin, Gateway, OpenAIKey
 
     async with await db.connect() as conn:
         b = await tasks.brief(conn, task_id)
@@ -237,7 +241,7 @@ async def _run_task(task_id: str) -> str:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
         raise SystemExit(f"run refused: {exc}") from None
-    gateway = Gateway(credential=ClaudeLogin())
+    gateway = Gateway(credential=ClaudeLogin(), openai_credential=OpenAIKey())
     await gateway.start()
     try:
         out = await router.run(gateway, task_id, runners(judgement_port))
@@ -573,6 +577,16 @@ def _sync(args) -> bool:
             raise SystemExit(f"no vault .env at {settings.vault_env}") from None
         for name, what in status.items():
             print(f"{name}: {what}")
+    elif args.command == "openai-key":
+        from core.gateway import OPENAI_KEY_NAME
+
+        try:
+            status = credentials.copy_keys(
+                settings.vault_env, settings.openai_keyfile, [OPENAI_KEY_NAME], {OPENAI_KEY_NAME: args.name}
+            )
+        except FileNotFoundError:
+            raise SystemExit(f"no vault .env at {settings.vault_env}") from None
+        print(f"{OPENAI_KEY_NAME} (from {args.name}): {status[OPENAI_KEY_NAME]}")
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -682,6 +696,7 @@ def main() -> None:
     sub.add_parser("secure-login")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
+    sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     sub.add_parser("backup").add_argument("--plist", action="store_true")

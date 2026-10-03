@@ -89,10 +89,10 @@ their stage's signal (the idle bound).
 
 ## Metered spending
 
-**Built.** Every model call is metered and its price recorded on its task. The gateway is a local
-HTTP proxy speaking the Anthropic Messages wire format; each turn is pointed
-at it through `ANTHROPIC_BASE_URL` with a per-turn token in the path. For
-every model call it:
+**Built.** Every model call is metered and its price recorded on its task.
+The gateway is a local HTTP proxy with two routes, Anthropic's Messages API
+(`route: gateway`) and OpenAI's Responses API under `openai/` (`route:
+openai`), reached with a per-turn token in the path. For every call it:
 
 1. prices the model from the table in `core/settings.py`, each price
    carrying the day it was checked against the provider's page (an
@@ -109,6 +109,14 @@ every model call it:
    input token at the most expensive input rate plus every output token it
    was allowed), so the ledger never records less than the invoice. The
    estimate is only that fallback charge, never a gate.
+
+The OpenAI route sends the kernel's key (`python -m core openai-key`), or the
+turn's own (`credential: turn`) when the kernel holds none, only to
+`v1/responses` and `v1/models`. It charges at the reported tier, with cached,
+cache-write, long-context, and per-search rates; an unpriced model, tier,
+tool, or stored prompt is a 400 with no row. Content referenced by id or URL,
+or a hosted tool with no `max_tool_calls`, can leave a cut call short of the
+bill (`referenced`, `bounded: false`). Anthropic code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
 (`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of
@@ -279,7 +287,7 @@ Three records say what happened in a turn:
 
 | Record | Written by | Holds | Built |
 |---|---|---|---|
-| Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage | yes |
+| Gateway rows | the gateway (`route: gateway` or `openai`); the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage; on the OpenAI route the credential, tier, tool calls, and request id | yes |
 | Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
