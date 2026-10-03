@@ -116,7 +116,8 @@ turn's own (`credential: turn`) when the kernel holds none, only to
 cache-write, long-context, and per-search rates; an unpriced model, tier,
 tool, or stored prompt is a 400 with no row. Content referenced by id or URL,
 or a hosted tool with no `max_tool_calls`, can leave a cut call short of the
-bill (`referenced`, `bounded: false`). Anthropic code execution is unmetered.
+bill (`referenced`, `bounded: false`). Anthropic web searches are charged per
+search; its code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
 (`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of

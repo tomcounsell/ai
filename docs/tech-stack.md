@@ -52,10 +52,10 @@ enforcing outside the model is AI Control [4].
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
 | Redis | none | in use (absent by decision) |
 | Memory | popoto over Postgres | chosen, not built |
-| Model gateway | in-house aiohttp proxy, Anthropic wire format | in use |
+| Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`: frontier, reviewer, light; the judgement legs pinned beside it | in use |
-| Frontier provider | Anthropic, one provider | in use |
+| Frontier provider | Anthropic; OpenAI through the gateway's second route | in use |
 | Judgement tier | Jev (`jev-1.13.0`), with the open-weight fallback Qwen3-235B-A22B Instruct 2507 on Parasail fp8 through OpenRouter behind the same port; OpenAI's Decisions API for judgements that need images | in use; the images leg chosen, not built |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
@@ -68,7 +68,7 @@ enforcing outside the model is AI Control [4].
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules | chosen, not built; libraries open |
 | Scheduling | launchd | chosen, not built |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -123,8 +123,9 @@ and correction".
 
 **Credential boundaries.** The kernel holds the database connection as
 `valor_kernel` and performs effects through the broker. The gateway sets the
-Claude credential on every call: `claude-token` in the kernel key directory
-when present, else Claude Code's own login read from the Keychain. A turn's
+Claude credential on every Anthropic call (`claude-token` in the kernel key
+directory when present, else Claude Code's own login read from the Keychain)
+and the kernel's OpenAI key on the OpenAI route. A turn's
 environment is an allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`,
 locale, terminal) with no tokens, no agent sockets, and only a placeholder
 Claude credential. Status: **in use**.
@@ -218,10 +219,11 @@ class and grants nothing [7].
 ## 4. The model gateway
 
 Every model call a turn makes goes through the kernel's gateway: an aiohttp
-server on `127.0.0.1` at an OS-assigned port, speaking the Anthropic
-Messages wire format (`core/gateway.py`, about 270 lines). A turn is pointed
-at it through `ANTHROPIC_BASE_URL` with a per-turn token in the path, so
-Claude Code's own side calls and subagents are metered too. Status:
+server on `127.0.0.1` at an OS-assigned port, with an Anthropic Messages
+route and an OpenAI Responses route under `openai/` (`core/gateway.py`). A
+turn is pointed at it through `ANTHROPIC_BASE_URL` with a per-turn token in
+the path, so Claude Code's own side calls and subagents are metered too.
+Status:
 **in use**.
 
 What it does per call (price, open, forward, charge) is
@@ -231,7 +233,8 @@ opening runs under the task's advisory lock, and the response streams
 back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path is refused once
-the gateway holds the credential. `revoke` retires the task's tokens and
+the gateway holds the credential, and on the OpenAI route only `v1/responses`
+and `v1/models` are forwarded. `revoke` retires the task's tokens and
 cancels its in-flight calls at once; the stop path calls it before killing
 the turn's process group.
 
@@ -252,10 +255,9 @@ Each price carries the day it was checked against that page, and every
 `gateway.charged` row records it as `price_checked`, so a price change
 upstream is visible in the ledger. Status: **in use**.
 
-**One provider.** Anthropic, through one wire format. Status: **in use**.
-A second provider arrives when the reviewer seat runs another vendor's
-Opus-class model, or when Tom asks for one; the gateway meters a provider
-before any turn uses it.
+**Providers.** Anthropic for frontier turns, and OpenAI's Responses API
+through its own gateway route. Status: **in use**. Another provider arrives
+when Tom asks for one; the gateway meters a provider before any turn uses it.
 
 ### Model seats
 
@@ -532,8 +534,8 @@ is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which
 both turn sandbox profiles deny: the kernel databases' passwords in a libpq
-password file, and the judgement keys in `judgement-keys` beside it, copied
-from the vault `.env` by `python -m core judgement-keys` ([machine.md](machine.md),
+password file, the judgement keys in `judgement-keys` and the OpenAI key in `openai-key` beside it, copied
+from the vault `.env` by `python -m core judgement-keys` and `python -m core openai-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. The bridges'
 secrets go in the macOS Keychain: **chosen, not built**. Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
