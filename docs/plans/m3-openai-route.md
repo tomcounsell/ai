@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-openai-route
 type: build
-status: passed; merge held for Tom's tap
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -591,3 +591,14 @@ optional action in Rollout.
 Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped. Rollout step 3 (a kernel-only OpenAI key) and step 4 (an admin key for the Usage API) are optional and Valor's call; the vault's `OPENAI_API_KEY` stands.
+
+## Merged
+
+Merged 2026-10-03 at `e7419ed34`: the docs head `d446c2d74` (candidate `a62dc423c`) rebased onto `valor-cori-rebuild`, code tree identical to the checked one (only plan files and the build skill differ). Backup first: `valor_rebuild-20261003T131858Z.dump`, 315 events.
+
+Rollout:
+
+1. `python -m core openai-key`: `written`.
+2. One live call through the merged gateway (`test_live_one_streamed_reply_through_the_kernel_key`, `VALOR_LIVE=1`): `gpt-6.1-sol`, tier `default`, 13 input tokens (none cached), 5 output; charged 76 micro-dollars, request `req_1b3e9a113487445ebb15fdf6dba1d6c0`. By hand: 13 x $2.00/M = 26, 5 x $10.00/M = 50, total 76. Equal.
+3. Kernel-only key: not minted, decided by the lead; the vault's `OPENAI_API_KEY` stands, and switching later is one `openai-key --name`.
+4. Usage API bucket: not done, no admin key in the vault; nothing waits on it.
