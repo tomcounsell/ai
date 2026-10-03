@@ -234,7 +234,9 @@ def test_a_utf_16_junit_report_is_read(tmp_path):
 def test_a_junit_report_in_an_encoding_expat_cannot_read_is_not_xml(tmp_path, encoding):
     name = _report(tmp_path, "x")
     text = f'<?xml version="1.0" encoding="{encoding}"?>' + GOOD.decode()
-    (tmp_path / name / checks.JUNIT).write_bytes(text.encode("utf-8" if encoding == "no-such-codec" else encoding))
+    (tmp_path / name / checks.JUNIT).write_bytes(
+        text.encode("utf-8" if encoding == "no-such-codec" else encoding)
+    )
     tests, why = checks.read_junit(tmp_path, name)
     assert tests is None and "not XML" in why
 
@@ -345,22 +347,22 @@ R_BASE = (
     "    return str(x)\n"
     "\n"
     "\n"
-    "@pytest.mark.parametrize(\"x\", CASES, ids=ids)\n"
+    '@pytest.mark.parametrize("x", CASES, ids=ids)\n'
     "def test_r(x):\n"
     "    pass\n"
     "\n"
     "\n"
-    "@pytest.mark.parametrize(\"x\", IMPORTED)\n"
+    '@pytest.mark.parametrize("x", IMPORTED)\n'
     "def test_i(x):\n"
     "    pass\n"
     "\n"
     "\n"
-    "@pytest.mark.parametrize(\"x\", json.loads(Path(__file__).with_name(\"cases_f.json\").read_text()))\n"
+    '@pytest.mark.parametrize("x", json.loads(Path(__file__).with_name("cases_f.json").read_text()))\n'
     "def test_f(x):\n"
     "    pass\n"
     "\n"
     "\n"
-    "@pytest.mark.parametrize(\"x\", [1, 2])\n"
+    '@pytest.mark.parametrize("x", [1, 2])\n'
     "def test_u(x):\n"
     "    pass\n"
 )
@@ -387,7 +389,9 @@ R_BASE = (
         )}, None, "test_u[2]"),
     ],
 )  # fmt: skip
-def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorator(tmp_path, edit, dropped, kept):
+def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorator(
+    tmp_path, edit, dropped, kept
+):
     repo = scripted.toy_repo(tmp_path)
     for path, text in {
         "tests/test_r.py": R_BASE,
@@ -402,7 +406,6 @@ def test_a_dropped_case_is_deleted_when_the_diff_touches_what_feeds_its_decorato
     if dropped:
         assert gone(f"tests.test_r::{dropped}")
     assert not gone(f"tests.test_r::{kept}")
-
 
 
 # -- the environment digest ---------------------------------------------------------------------
@@ -660,7 +663,9 @@ def test_a_candidate_whose_tree_holds_valor_is_red_and_not_rerun(dsn, tmp_path, 
     # The builder's clone hides the entry from the kernel's look there (a
     # replace ref would), so the mirror holds a candidate with `.valor`.
     seen = kws.tree_has_valor
-    monkeypatch.setattr(kws, "tree_has_valor", lambda *a, trusted, **k: trusted and seen(*a, trusted=trusted, **k))
+    monkeypatch.setattr(
+        kws, "tree_has_valor", lambda *a, trusted, **k: trusted and seen(*a, trusted=trusted, **k)
+    )
     _task, _b, out, got = through_test(dsn, tmp_path, writes={".VALOR/x": "x"})
     head = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "head")
     assert head["cause"] == "commit" and "holds a .valor entry" in head["why"]

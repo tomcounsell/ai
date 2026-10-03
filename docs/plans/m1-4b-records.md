@@ -266,3 +266,41 @@ four findings. 1.4c part one is built on 3e1b97989 and is checked there.
 Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
 
 Scope: the four findings under Delivery (parametrize ids kept outside the decorator, `rmtree` on a directory with no read bit, BOM-less UTF-16 JUnit, a `.valor` entry rerunning as cause `kernel`).
+
+## Patch round (Tom's feedback, 2026-10-03)
+
+Rebased onto `eb8314deb`. Plan-file conflicts kept that branch's text; in
+`docs/harnesses.md` the Codex and Pi section stays a pointer and its
+paragraph on the gateway's two metered formats moved into
+`harnesses-codex-pi.md`.
+
+1. Parametrize ids fed from outside the decorator. A missing parametrized
+   id is deleted when the diff touches what feeds that test's
+   `parametrize` decorators at base (`_feeds_parametrize`): the
+   decorators' lines (on the function or an enclosing class), the module
+   or class level binding of every name they use, followed through the
+   names those bindings use (a `CASES` built from `BASE`, an `ids=`
+   function), any base file a used name is imported from, and any base
+   file a string there names (a case file). A line removed inside one of
+   those spans, or inserted between two of its lines, touches it; a line
+   inserted just after a span's last line (directly under the decorator)
+   does not. Tests: a case dropped from a list the decorator names through
+   another name, an edited `ids=` function, an insertion inside a
+   multi-line binding, an imported module, a case file, and an insertion
+   under the decorator that deletes nothing.
+2. `rmtree` on a directory with no read bit. When the directory could not
+   be opened or listed, the handler makes it `0700` and removes it as a
+   tree of its own, never following a link. Test: modes 0000, 0100 and
+   0300, at the top of the check directory and inside it.
+3. A JUnit report declaring an encoding expat cannot read (`utf-16-le` or
+   `utf-16-be` with no BOM, a multi-byte or unknown name) is "not XML",
+   no per-test result, as any other unparseable report. Test: four
+   declarations.
+4. A `.valor` entry. `blind_checkout` raises `ValorInTree` for the tree it
+   checks out (only that one: the base's tree never lands in the
+   checkout), and the test runner records that run as `cause:
+   "commit"`: red at head, never rerun. An earlier stage does refuse such a
+   tree (`session._keep` refuses a plan or candidate whose tree, read in
+   the builder's clone, holds `.valor`), so this is reached only when the
+   clone hides the entry from that read. Test: a candidate with `.VALOR/x`
+   whose clone-side read is hidden is red with the finding and not rerun.
