@@ -5,7 +5,7 @@ sits in the agents tier of the three (README, "Three tiers"): the kernel decides
 and pays for it, and the harness does the work inside those bounds. This doc covers the port every
 harness conforms to, the Claude Code wrapper, how a task's turns share one session, how a turn talks
 back to the kernel, the sandbox a turn runs under, what happens to the processes it leaves behind,
-and the workspace it works in.
+and the workspace it works in (workspace.md).
 
 `harnesses/` holds the wrappers. `core/runs.py` holds the port and runs one
 turn; `core/session.py` runs a task's turns; `core/signals.py` holds the
@@ -306,7 +306,7 @@ holds no login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`), and the
 kernel's credential, only on `v1/messages`, its `count_tokens`, `v1/models`, and `v1/models/<id>`
 (letters, digits, `.`, `_`, `-`), refusing any other path with a 403: a long-lived token in the
 kernel key directory when one is there, else the machine's Claude Code login read from the Keychain
-at most once a minute (the first 401 after a read allows one more). A login is used until its stated
+at most once a minute (the first 401 after a read allows one more, even when the client has already left). A login is used until its stated
 expiry. The kernel never refreshes the login, and an expired one fails the call naming the remedy.
 The harness never holds a credit or a limit, and a call refused because the task is stopped reaches
 it as an API error.
@@ -494,62 +494,8 @@ not live and of row-less task directories whose provisioning (`provision:<id>`) 
 
 ## The workspace
 
-Serves Mission item 1 (delivering within authority) and the constraint
-**bounded authority**: a turn works on a real clone and every push is an
-`act` effect Tom releases.
-
-`core/workspace.py` provisions a task's workspace from a project spec
-(`projects/`) under `work_dir/<task id>/` before the task starts, cloning from
-a bare cache per repository URL (keyed by the URL's digest); a replay writes
-its spec (`scripts/replay_workspace.py`).
-
-| Part | What it is |
-|---|---|
-| `repo/` | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
-| `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. No turn writes it; only the broker's `push_branch` and `merge`, from the kernel's process, after Tom releases the push |
-| `kernel.git/` | the kernel mirror: seeded with the base, and fed each plan commit, candidate, and hand-recorded docs head; the merge predicate and the merge read it. No turn reads or writes it |
-| `home/` | git config (Valor's identity, no credential helper), an empty gh config, `pgpass`, and the profiles: `turn.sb`, each fresh session's, and `service.sb` |
-| `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's `TMPDIR` and Claude Code config; each fresh session's checkout, `tmp/`, and `claude/` |
-| `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
-
-The setup commands run once in `repo/` under `turn.sb`, with no time limit, their output going to a
-file and not a pipe so a child they leave behind cannot hold a step open; a failure is recorded on
-the Brief (`project.setup_result`) and the task still starts. Provisioning's git calls have no time
-limit either. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
-process groups get TERM, then KILL after `reap_grace_s`, the clone's temporary ref is removed, and
-provisioning is refused as interrupted. Nothing reaches GitHub, and the clone has no PR, issue, or
-later commit to read.
-
-**The mirror's fetch** treats the builder's clone as hostile: its config
-checked first; a gitfile, `commondir`, alternates, and shallow clones refused;
-the sending side inside the turn's sandbox; the receiving git with fsck, one
-pack under a size limit, a footprint watchdog, and replace refs and grafts
-off. A tree holding a top-level `.valor` (any case) is refused, since the
-kernel makes `.valor` itself for a fresh session's inputs, written through
-descriptors that follow no link and overwrite no file. A refused plan,
-candidate, or docs head does not count.
-
-### Per-task services
-
-A project declares the services its tests need (`postgres`, `redis`, or none).
-The binaries are Homebrew's, in a prefix a turn can write, so each runs under
-`service.sb`: its own directory and port only, no outbound connection, marked
-`valor.service.<task id>`. A port is the lowest free one that no unremoved
-task and no task directory's `ports.json` names, chosen under the
-`workspace:ports` lock. `python -m core workspace remove TASK` (stopped or
-merged only) stops the services, deletes the directory, and frees the ports.
-
-- **Postgres.** A cluster of the task's own on `127.0.0.1` only (no unix
-  socket), port 5440 to 5599, scram-sha-256 on every login; the superuser
-  password is random and removed once the roles exist. `app` owns database
-  `app` and may create databases (and manage only the spec's extra roles); the
-  passwords are in `home/pgpass`, and `PG*`, `DATABASE_URL`, and `TEST_DB_*`
-  point the app at it. Separate clusters answer the demonstration's first
-  incident, a machine cluster that trusted loopback (`docs/data.md`).
-- **Redis.** One redis-server when the project asks, port 6400 to 6499, on
-  127.0.0.1, no persistence, no unix socket, and the protected configs (`dir`,
-  `dbfilename`), `DEBUG`, and `MODULE` closed; `REDIS_URL` points the app at
-  it. A dependency of the repository under test, not the kernel.
+A task's workspace, its provisioning, the kernel mirror, and its per-task services are in
+[workspace.md](workspace.md).
 
 ## Testing actual use: a browser
 

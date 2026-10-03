@@ -154,10 +154,10 @@ the host refuses, so it is skipped as `input_too_large`. The body sends no
 never cut short by a figure of Valor's.
 
 **A 429** is the failure reason `rate_limited`, never `http_status`. When
-the answer carries `Retry-After` (seconds or an HTTP date), that endpoint
+the answer carries `Retry-After` (seconds in ASCII digits, or an HTTP date), that endpoint
 is not asked again before that time: a later call to it inside the hold is
 not sent, waits for nothing, costs nothing, and goes to the other leg as
-any failed leg does. A 429 without `Retry-After` holds nothing.
+any failed leg does. A 429 without a readable `Retry-After` holds nothing.
 
 ## The `JudgementPort`
 
@@ -285,7 +285,7 @@ And per record: `n`, how many labels are Tom's own, how many were written by a s
 (`role_played`), and how many came from a judge; the pinned model of each leg; the floors; the
 task's `task_sha256`; the run's number for its site; and the date.
 
-**How a record is made.** `python -m core calibrate CASES.json` (at most 50
+**How a record is made.** `python -m core calibrate CASES.json` (any number of
 cases; provider endpoints only, see Keys) starts
 a calibration task, which runs no turn and takes no verdict, answer,
 feedback, grant, or stop; asks each leg alone on every case; and

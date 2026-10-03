@@ -335,7 +335,7 @@ ports, under a service sandbox; and the project's setup, run once under the
 turn's sandbox. Services run only while a run of the task lasts; every run
 first stops those a killed kernel left up whose run or provisioning is not
 live. The disk is kept until `python -m core workspace remove`. The mirror's
-fetch treats the builder's clone as hostile (harnesses.md, The workspace).
+fetch treats the builder's clone as hostile (workspace.md).
 Serves Mission item 1 and bounded authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which
