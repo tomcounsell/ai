@@ -174,10 +174,12 @@ listed.
 `task_sha256`, and its runner registered. The floors keep their values;
 the comment "provisional: set by 1.4's calibration record" becomes "set
 from human labels once real tasks have produced thirty or more rows",
-which is the Done item. A site whose entry check fails after its runs does
-not land its runner: the build stops and asks Tom, as 1.3 did for the
-judge. Nothing in the kernel reads the record at run time; whether a
-runner is registered is the build's decision, made once.
+which is the Done item. A site whose entry check fails still lands its
+runner code, but the runner is not registered and its stage stays on the
+manual `verdict` path until the entry check passes. The failure is
+recorded in the build record; the build does not stop or ask Tom. Nothing
+in the kernel reads the record at run time; whether a runner is
+registered follows the latest record's entry check.
 
 ### The check environment (`core/workspace.py`)
 
@@ -532,8 +534,9 @@ refuses or pauses on money.
    `governance.adds.json`. Each record's `task_sha256` is compared by hand
    with the landed `calibrated` digest, and its `entry_check` must be true.
 3. If a real-ledger record fails its entry check, the site's runner is
-   taken out in a commit that restores its stage to `MANUAL_STAGES`, and
-   the build asks Tom.
+   unregistered in a commit that restores its stage to `MANUAL_STAGES`, so
+   the stage stays manual until its entry check passes, and the failure is
+   recorded in this plan file.
 4. Restart the kernel so `RUNNERS` holds the new runners.
 
 ## Decided by default
