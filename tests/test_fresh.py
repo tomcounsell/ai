@@ -234,9 +234,9 @@ def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_o
         await scripted.check(dsn, task, "review", "pass")
         f = machine.fold(await rows(dsn, task))
         docs = scripted.commit(ws, "docs/notes.md", "notes\n", "docs")
-        # The docs commit sits on the builder's branch only until the kernel
-        # takes it into the mirror; move the branch back, as a send-back
-        # would, and the mirror still has it.
+        scripted.keep_docs(b, ws, docs)
+        # Move the builder's branch back, as a send-back would; the mirror
+        # still has the kept head.
         scripted.git(ws, "reset", "-q", "--hard", f.candidate.sha)
         scripted.git(ws, "reflog", "expire", "--expire=now", "--all")
         await scripted.check(dsn, task, "docs", "updated", head=docs)
@@ -383,15 +383,11 @@ def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
                 await verdicts.record_check(
                     conn, task, machine.Check.TEST, "pass", leg="test runner", breadth="b"
                 )
-            with pytest.raises(verdicts.VerdictRefused, match="not a full commit"):
-                await verdicts.record_check(
-                    conn, task, machine.Check.DOCS, "updated", head="abc123", **scripted.MANUAL
-                )
-            unknown = "1" * 40
-            with pytest.raises(verdicts.VerdictRefused):
-                await verdicts.record_check(
-                    conn, task, machine.Check.DOCS, "updated", head=unknown, **scripted.MANUAL
-                )
+            for head in ("abc123", "1" * 40):
+                with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
+                    await verdicts.record_check(
+                        conn, task, machine.Check.DOCS, "updated", head=head, **scripted.MANUAL
+                    )
 
     run(checks_refuse())
 
@@ -456,19 +452,18 @@ def test_a_lower_raise_from_a_critique_turn_changes_nothing(dsn, tmp_path):
     assert machine.fold(written).loops.review_rounds == 1
 
 
-def test_a_docs_head_that_commits_valor_is_refused(dsn, tmp_path):
+def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
+    """A docs head counts only once the docs runner kept it in the mirror;
+    the kernel never fetches one from the builder's clone."""
     from core import verdicts
 
     task, _b, ws = planned(dsn, tmp_path)
 
     async def go():
         await drive(dsn, task, scripted.fresh_runners(ws))
-        (ws / ".valor").mkdir(exist_ok=True)
-        (ws / ".valor" / "verdict.json").write_text("{}")
-        scripted.git(ws, "add", "-f", ".valor/verdict.json")
         head = scripted.commit(ws, "docs/x.md", "x\n", "docs")
         async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="commits a .valor"):
+            with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
                 await verdicts.record_check(
                     conn, task, machine.Check.DOCS, "updated", head=head, **scripted.MANUAL
                 )

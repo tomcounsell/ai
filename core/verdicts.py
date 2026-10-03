@@ -22,13 +22,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks, workspace
+from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks
 from core.machine import Check, State
 
-MANUAL_STAGES: dict[str, State | Check] = {
-    "review": Check.REVIEW,
-    "docs": Check.DOCS,
-}
+MANUAL_STAGES: dict[str, State | Check] = {"review": Check.REVIEW}
 
 
 class VerdictRefused(LookupError):
@@ -297,14 +294,12 @@ async def record_check(
             if check is Check.DOCS:
                 head = head or c.sha
                 if head != c.sha:
-                    if leg != "manual":
-                        # The docs runner fetched and cut the head; it must sit under a docs ref.
-                        if not re_sha(head) or not git.trusted(
-                            repo, "for-each-ref", "--points-at", head, "refs/valor/docs/"
-                        ):
-                            raise VerdictRefused(f"{head} is not a docs head the kernel kept in the mirror")
-                    elif b.mirror:
-                        _docs_into_mirror(b, head, task_id)
+                    # The docs runner fetched and cut the head; it must sit under a docs ref.
+                    if b.mirror and (
+                        not re_sha(head)
+                        or not git.trusted(repo, "for-each-ref", "--points-at", head, "refs/valor/docs/")
+                    ):
+                        raise VerdictRefused(f"{head} is not a docs head the kernel kept in the mirror")
                     if not git.is_ancestor(repo, c.sha, head):
                         raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
                     if git.merges_between(repo, c.sha, head):
@@ -364,23 +359,6 @@ async def record_check(
         if f.state is State.CHECKS and after.state is State.MERGE and after.join is not None:
             await ledger.append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
     return after
-
-
-def _docs_into_mirror(b: tasks.Brief, head: str, task_id: str) -> None:
-    """A docs head recorded by hand sits in the builder's clone; it counts
-    only once fetched into the kernel mirror, never into the builder's
-    branch, so it cannot ride into the next candidate."""
-    if not re_sha(head):
-        raise VerdictRefused(f"{head!r} is not a full commit id")
-    try:
-        if workspace.tree_has_valor(b.workspace, head, trusted=False):
-            raise VerdictRefused(f"{head[:12]} commits a .valor entry")
-        workspace.fetch_into_mirror(
-            b.mirror, b.workspace, head, f"refs/valor/docs/{head}", b.harness["sandbox_profile"],
-            f"mirror-docs-{task_id}",
-        )  # fmt: skip
-    except (workspace.FetchRefused, git.GitError) as exc:
-        raise VerdictRefused(str(exc)) from None
 
 
 def re_sha(value: str) -> bool:

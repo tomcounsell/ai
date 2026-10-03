@@ -645,3 +645,9 @@ def test_each_legs_estimate_covers_what_it_billed_for_a_hunk_of_hashes():
     billed = recorded["billed_input_tokens"]
     assert jev.estimate(GOVERNANCE, recorded["inputs"]) >= billed["jev"]
     assert ow.estimate(GOVERNANCE, recorded["inputs"]) >= billed["open_weight"]
+
+
+@pytest.mark.parametrize("task", [t for t in TASKS if t.calibrated], ids=lambda t: t.site)
+def test_a_landed_calibrated_digest_is_the_task_as_the_providers_legs_render_it(task):
+    legs = {"jev": jev_leg.Jev("u", "k"), "open_weight": ow_leg.OpenWeight("u", "k")}
+    assert judgement.task_sha256(task, JudgementPort(legs).signature()) == task.calibrated

@@ -819,3 +819,60 @@ The rounds are spent; each finding is built in.
     default, and its status line says `verdict` keeps `review` until 1.4c.
 
 The five-runs-per-site limit stays: it was judged not governance.
+
+## Build record
+
+Calibration ran against the build database (`valor_rebuild_test_14bbuild`),
+never the real ledger. The case files live under
+`~/src/valor-demo/items/judgement/`.
+
+| case file | SHA-256 | cases |
+|---|---|---|
+| `governance.adds.json` | `d3686c87a7ca4b58a298d258b45fe5f228fba089d7f9f2705e20d103906c476e` | 50: 10 `true` and 22 `false` from `tom`, 18 `false` drafted |
+| `checks.test.breadth.json` | `5b8c92c7a913abef5d6df8d9f77e0286ac66f794e6b33e11c9ad0e2b0ef521d3` | 2: popoto #191 cases, every label drafted |
+
+The four validator positives (`920b6f392`, `8bb12c001`, `e2a623a44`,
+`1b8c9a27e`) each add their own validator file
+(`validate_no_module_scope_env.py`, `validate_no_redis_flush.py`,
+`validate_no_broad_process_kill.py`,
+`validate_no_destructive_git_in_shared_checkout.py`); the positive is that
+file's hunk in each.
+
+**Breadth, run 1** (task digest `6d40ad2d94bb`): entry check false, as it
+must be with no human label. On the drafted labels Jev was wrong twice on
+`gap_bound` and the open-weight leg twice each on `gap_state` and
+`gap_enum`. No call billed over its estimate (largest ratio 0.63 and
+0.80). Spend $0.0066. `BREADTH.calibrated` stays `None`; breadth is
+information.
+
+**Governance, run 1** (task digest `2270554f20be`): entry check false.
+Jev was wrong on 8 of the 22 `tom` negatives, all test code (scripted
+stand-ins, fixtures, a recording script), and the open-weight leg on 1. Six
+calls on each leg billed over the estimate, all on `uv.lock` and
+`pyproject.toml` hunks of hashes (largest ratio 1.25 for Jev, 1.36 for the
+open-weight leg). Spend $0.0199.
+
+Changes before run 2: the estimate counts two bytes per token
+(`settings.bytes_per_token`, was three), with
+`tests/fixtures/judgement_hash_dense.json` holding the hunk that billed
+furthest over; the question adds "Tests and the code that serves them
+(fixtures, helpers, scripted stand-ins, recording scripts) are none of
+these" (the governance paragraph's own "Tests are not governance").
+
+**Governance, run 2** (task digest `aa30f9c0d5d4`): entry check false.
+Jev wrong on 2 negatives (`tests/fixtures/record_judgement.py`, which exits
+without `VALOR_LIVE=1`, and an abstain on `tests/scripted.py`); the
+open-weight leg right on every case it answered, with two calls refused
+by the provider (HTTP 429). No call over its estimate. Spend $0.0193.
+
+Change before run 3: the question's test clause adds "even where they exit
+early or refuse to run", and the `false` label reads "it adds none of
+these, or adds only tests and the code that serves them".
+
+**Governance, run 3** (task digest
+`e47a2161d4dd2cc39bedb7a4d0883d95f62e5048030040479040829540f11e6f`,
+calibration task `981e9498eec7`): entry check true. Both legs right on
+all 32 `tom` cases and all 18 drafted ones, no error, no abstain; largest
+estimate ratio 0.86 (Jev) and 0.89 (open-weight). Spend $0.0205.
+`GOVERNANCE.calibrated` is that digest, the docs runner is registered, and
+`MANUAL_STAGES` holds `review` alone.

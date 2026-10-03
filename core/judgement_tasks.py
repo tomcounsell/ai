@@ -157,7 +157,7 @@ GOVERNANCE = JudgementTask(
     consumer={"proceed": "no instance", "caution": "a governance instance at the hunk, awaiting Tom's tap"},
     serves="the governance constraint",
     guard="the CLAUDE.md governance paragraph (correction 1)",
-    calibrated=None,
+    calibrated="e47a2161d4dd2cc39bedb7a4d0883d95f62e5048030040479040829540f11e6f",
 )
 
 TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, GOVERNANCE)
