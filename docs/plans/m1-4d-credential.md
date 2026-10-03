@@ -469,10 +469,14 @@ rebases onto it.
    No migration.
 2. The build session runs `python -m core github-key` from the kernel
    checkout; it prints `written`.
-3. **Tom**, from the kernel checkout:
+3. The build session, from the kernel checkout, under Tom's feedback of
+   2026-10-03 (merges are Valor's call):
    `python -m core merge-target add https://github.com/tomcounsell/ai.git
-   <rebuild branch> --note "the rebuild's merges"` and the same for
-   `valor/push-check` with `--note "1.4d live push"`.
+   <rebuild branch> --note "the rebuild's merges; Tom's feedback of
+   2026-10-03" --via "the build session, under Tom's feedback of
+   2026-10-03"` and the same for `valor/push-check` with `--note "1.4d
+   live push; Tom's feedback of 2026-10-03"` and the same `--via`. The row
+   keeps `by: "tom"`, as every grant does; `--via` names who ran it.
 4. The build session runs the live push test, then `python -m core
    merge-target remove https://github.com/tomcounsell/ai.git
    valor/push-check --by valor --note "live push done"`. The branch stays
@@ -525,6 +529,25 @@ Each is reversible and was decided by the build session:
   `git.deadline`, `git.remaining`, `reconcile_after_s`, and `bounded`'s
   `timeout` are gone, and the effect lock `core.performing` is what
   reconcile waits on.
+- A kernel subprocess writes its output to files the kernel holds, never
+  pipes: `git._git`'s stdout and stderr, `bounded`'s stderr, and
+  `_service_run`'s output go to unlinked files (`git.output_file`), and the
+  kernel waits on the process itself, then reads them. With pipes, a
+  program git started that left git's process group (`setsid`) and kept
+  the pipes open held the call, and a stopped caller, until it exited,
+  and no time limit ends that wait. The setup logs already work this way.
+  Turn output is not changed here.
+- `git.threaded` waits on its thread with `asyncio.wait`, not
+  `asyncio.shield`: on Python 3.14 a shielded future that raises after its
+  caller was cancelled logs an ERROR with a traceback, and an interrupted
+  thread always raises `git.Interrupted`.
+- `kernel_paths()` lists `settings.performing_dir`, so a task profile
+  denies the effect lock files wherever `VALOR_PERFORMING_DIR` puts them.
+- One case the effect lock and `reconcile` both miss: a remote that
+  received the pack before the client died can still apply the ref after
+  every client process has exited. `reconcile` then settles the merge
+  `failed` while the commit lands. The remedy is to request the merge
+  again: the new request pushes the same commit and settles `done`.
 
 ## Record
 
@@ -535,4 +558,4 @@ The critique rounds, the patch round, the checks, and the delivery are in
 
 Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
-Merge: tapped, after 1.4b and 1.4s land, per Rollout. Rollout steps 3 and 5 named Tom; step 5 is done (ruleset 24370170). Under the 2026-10-03 feedback the build session runs step 3's `merge-target add` commands itself, with `--note` citing this feedback.
+Merge: tapped, after 1.4b and 1.4s land, per Rollout. Rollout steps 3 and 5 named Tom; step 5 is done (ruleset 24370170). Under the 2026-10-03 feedback the build session runs step 3's `merge-target add` commands itself, with `--note` and `--via` citing this feedback.

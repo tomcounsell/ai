@@ -339,8 +339,15 @@ def layout(task_id: str, base: Path | None = None) -> Layout:
 
 def kernel_paths() -> list[Path]:
     """What no workspace sandbox may read or write: the kernel key
-    directory, the machine cluster's data directory, the backup disk."""
-    return [Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)]
+    directory, the effect lock files (`settings.performing_dir`, in the key
+    directory unless moved), the machine cluster's data directory, the
+    backup disk."""
+    return [
+        Path(settings.pg_passfile).parent,
+        Path(settings.performing_dir),
+        Path(settings.pg_data_dir),
+        Path(settings.backup_dir),
+    ]
 
 
 # -- sandbox profiles -----------------------------------------------------------------
@@ -966,24 +973,27 @@ def _pg(name: str) -> str:
 def _service_run(lay: Layout, task_id: str, *argv: str) -> subprocess.CompletedProcess:
     """A service program under the service profile, to its end. There is no
     time limit: under `git.interruptible()` (provisioning, a run starting
-    the services) an interrupt ends it, and `git.Interrupted` is raised."""
+    the services) an interrupt ends it, and `git.Interrupted` is raised.
+    Its output goes to files the kernel holds (`git.output_file`), so the
+    call ends when the program exits, whatever a daemon it started holds."""
     full = [binaries.require(binaries.SANDBOX_EXEC), "-f", str(lay.profiles / "service.sb"), *argv]
     held = git.watch()
-    proc = git.start(
-        full,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
-    )
-    try:
-        stdout, stderr = proc.communicate()
-    finally:
-        if held:
-            held.finished(proc)
-    if held and held.interrupted:
-        raise git.Interrupted()
+    with git.output_file() as out, git.output_file() as err:
+        proc = git.start(
+            full,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
+        )
+        try:
+            proc.wait()
+        finally:
+            if held:
+                held.finished(proc)
+        if held and held.interrupted:
+            raise git.Interrupted()
+        stdout, stderr = git.read_output(out, True), git.read_output(err, True)
     return subprocess.CompletedProcess(full, proc.returncode, stdout, stderr)
 
 
@@ -1188,8 +1198,10 @@ def bounded(
     limit until it exits, killing the whole group when its summed footprint
     passes `max_footprint`. There is no time limit: an interrupt of the
     watch it runs under (`git.threaded`, a stopped caller) ends it, and
-    `git.Interrupted` is raised. Returns the exit code (or `footprint`)
-    and its whole stderr."""
+    `git.Interrupted` is raised. Its stderr goes to a file the kernel holds
+    (`git.output_file`), so it ends when the command exits, whatever a
+    program it started holds. Returns the exit code (or `footprint`) and
+    its whole stderr."""
 
     # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.
@@ -1197,28 +1209,30 @@ def bounded(
     blocks = max(1, max_bytes // 1024)
     wrapped = ["/bin/bash", "-c", f'ulimit -f {blocks} && exec "$@"', "bash", *argv]
     held = git.watch()
-    proc = git.start(wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     why: int | str | None = None
-    try:
-        while proc.poll() is None:
-            if sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
-                why = "footprint"
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                break
-            time.sleep(0.5)
-        _, err = proc.communicate()
-    except BaseException:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        raise
-    finally:
-        if held:
-            held.finished(proc)
-    if held and held.interrupted:
-        raise git.Interrupted()
-    return (why or proc.returncode), err.decode(errors="replace")
+    with git.output_file() as err:
+        proc = git.start(wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=err)
+        try:
+            while proc.poll() is None:
+                if sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
+                    why = "footprint"
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    break
+                time.sleep(0.5)
+            proc.wait()
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise
+        finally:
+            if held:
+                held.finished(proc)
+        if held and held.interrupted:
+            raise git.Interrupted()
+        stderr = git.read_output(err).decode(errors="replace")
+    return (why or proc.returncode), stderr
 
 
 def fetch_into_mirror(

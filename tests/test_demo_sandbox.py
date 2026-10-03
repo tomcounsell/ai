@@ -333,10 +333,12 @@ def test_a_task_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path)
 
 def test_by_default_a_task_profile_denies_the_kernel_paths_its_settings_name(tmp_path):
     """The real paths, from settings: the password file's directory, the
-    machine cluster's data directory, and the backup disk (whose name is a
-    private-use character). Probed read-only where they exist."""
+    effect lock directory, the machine cluster's data directory, and the
+    backup disk (whose name is a private-use character). Probed read-only
+    where they exist."""
     text = kws.turn_profile(_task(tmp_path), [], home=tmp_path / "home")
-    for path in (Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)):
+    named = [Path(settings.pg_passfile).parent, Path(settings.performing_dir)]
+    for path in [*named, Path(settings.pg_data_dir), Path(settings.backup_dir)]:
         assert f'(subpath "{path}")' in text
     profile = tmp_path / "replay.sb"
     profile.write_text(text)

@@ -899,6 +899,80 @@ def test_a_stopped_caller_kills_the_command_and_its_group(tmp_path):
         raise AssertionError("the command's child outlived its stopped caller")
 
 
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def _detached_holder(tmp_path: Path) -> str:
+    """Shell that starts a program which leaves git's process group with
+    setsid, keeps git's stdout and stderr open, and writes its pid to
+    `held.pid` once it has left; the program sleeps until the test kills it."""
+    held = tmp_path / "held.pid"
+    return (
+        '/usr/bin/perl -MPOSIX -e \'POSIX::setsid() or die; open F, ">", $ARGV[0]; print F $$; close F; '
+        f"sleep 600' {held} &\n"
+        f"while [ ! -s {held} ]; do /bin/sleep 0.05; done\n"
+    )
+
+
+def _fake_git(tmp_path: Path, monkeypatch, tail: str) -> Path:
+    script = tmp_path / "fake-git"
+    script.write_text(f"#!/bin/bash\n{_detached_holder(tmp_path)}echo $$ > {tmp_path / 'git.pid'}\n{tail}")
+    script.chmod(0o755)
+    monkeypatch.setattr(kgit, "binary", lambda: str(script))
+    return tmp_path / "held.pid"
+
+
+def test_a_git_call_ends_when_git_exits_though_a_program_it_started_holds_its_output(tmp_path, monkeypatch):
+    held = _fake_git(tmp_path, monkeypatch, "echo out; echo err >&2; exit 0\n")
+    try:
+        done = kgit._git(tmp_path, "version")
+        assert (done.returncode, done.stdout, done.stderr) == (0, "out\n", "err\n")
+        assert not _gone(int(held.read_text()))
+    finally:
+        os.kill(int(held.read_text()), 9)
+
+
+def test_a_stopped_git_call_returns_though_a_program_git_started_in_its_own_session_holds_its_output(
+    tmp_path, monkeypatch, caplog
+):
+    """Git's group is killed and the cancel is raised while the program
+    that left the group still runs; nothing is logged as an error."""
+    held = _fake_git(tmp_path, monkeypatch, "exec /bin/sleep 600\n")
+
+    async def go():
+        t = asyncio.create_task(kgit.threaded(kgit._git, tmp_path, "version"))
+        while not (tmp_path / "git.pid").exists() or not (tmp_path / "git.pid").read_text().strip():
+            await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    try:
+        with caplog.at_level("ERROR"):
+            run(go())
+        assert _gone(int((tmp_path / "git.pid").read_text()))
+        assert not _gone(int(held.read_text()))
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+    finally:
+        os.kill(int(held.read_text()), 9)
+
+
+def test_a_bounded_command_ends_when_it_exits_though_a_program_it_started_holds_its_stderr(tmp_path):
+    argv = ["/bin/bash", "-c", _detached_holder(tmp_path) + "echo err >&2; exit 3\n"]
+    try:
+        code, err = kws.bounded(argv, cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024**2,
+                                max_footprint=1024**3)  # fmt: skip
+        assert (code, err) == (3, "err\n")
+        assert not _gone(int((tmp_path / "held.pid").read_text()))
+    finally:
+        os.kill(int((tmp_path / "held.pid").read_text()), 9)
+
+
 def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
     _, made = provision(tmp_path)
     sha = candidate(made)
@@ -1518,14 +1592,14 @@ def test_no_provisioning_git_call_carries_a_time_limit(tmp_path, monkeypatch):
 
     scripted.toy_repo(tmp_path)
     limits = []
-    real = subprocess.Popen.communicate
+    real = subprocess.Popen.wait
 
-    def spy(self, input=None, timeout=None):
+    def spy(self, timeout=None):
         if self.args[0] == git.binary():
             limits.append((self.args[self.args.index("-C") + 2 + len(git.PINNED)], timeout))
-        return real(self, input, timeout)
+        return real(self, timeout)
 
-    monkeypatch.setattr(subprocess.Popen, "communicate", spy)
+    monkeypatch.setattr(subprocess.Popen, "wait", spy)
     _task, made = provision(tmp_path)
     with git.interruptible():
         _task, made = provision(tmp_path / "again")

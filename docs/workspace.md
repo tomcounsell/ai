@@ -29,7 +29,8 @@ file at a path the profile denies; a step ends when its own process ends, and a 
 behind is reaped by the command's mark before the copy waits for EOF. A failure is recorded on
 the Brief (`project.setup_result`) and the task still starts. A command's whole output, stdout
 and stderr, goes to `setup/<n>.log`, and its result is `{command, exit, output}`, `output` naming
-that file. Provisioning's git calls have no time limit either. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
+that file. Provisioning's git calls have no time limit either, and git's output, like a service
+program's, goes to a file the kernel holds, not a pipe, so a call ends when git exits. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
 process groups get TERM, then KILL after `reap_grace_s`, the clone's temporary ref is removed, and
 provisioning is refused as interrupted. Nothing reaches GitHub, and the clone has no PR, issue, or
 later commit to read. A second signal during that cleanup does not end it: provisioning waits until the

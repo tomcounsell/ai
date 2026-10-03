@@ -141,3 +141,30 @@ dispatch's retire on failure, and adds `offered`; the command list has
 whole, per 1.4u. The caller of a cancelled `git.threaded` now waits for
 the thread, so the setsid case in the delivery notes delays the stop
 until that program exits.
+
+## Patch round 3: output in files, the stop's log, the lock directory
+
+The test and review rounds of patch round 2 found that a program git
+started which left git's process group with `setsid` and kept git's pipes
+open held the call, and a stopped caller, until it exited. The lead's
+calls:
+
+1. **Files, not pipes.** `git._git`'s stdout and stderr, `bounded`'s
+   stderr, and `_service_run`'s output go to unlinked files the kernel
+   holds (`git.output_file`), read by position after the process is
+   waited on (`git.read_output`). Turn output is unchanged. Tests: a fake
+   git that starts a `setsid` program holding its stdout and stderr; the
+   call returns git's output when git exits, and a cancelled
+   `git.threaded` caller returns with git's group killed and the program
+   still running. A `bounded` command does the same. On the round 2 code
+   the cancel test waited until the program was killed.
+2. **No ERROR on a stop.** `git.threaded` waits with `asyncio.wait`, not
+   `asyncio.shield`; the cancel test asserts no ERROR record. With
+   `shield` it logs "Interrupted exception in shielded future".
+3. `kernel_paths()` lists `settings.performing_dir`.
+4. The plan's decided-by-default names the case the effect lock and
+   `reconcile` both miss and its remedy, and Rollout step 3 is the build
+   session's, with `--note` and `--via` citing Tom's feedback of
+   2026-10-03.
+
+Suite: 1093 passed, 21 skipped. `ruff check` and `ruff format --check` clean.

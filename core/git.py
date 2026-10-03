@@ -24,7 +24,9 @@ name drivers; a driver's program comes from config. So every call:
   starting its services, and every `threaded` caller, such as a perform),
   an interrupt of the watch kills the group, git and everything it
   started; a cancelled `threaded` caller (a stop, or an interrupt of the
-  kernel's loop) interrupts its watch. Inside a perform git holds the
+  kernel's loop) interrupts its watch. Git writes its output to files
+  the kernel holds, not pipes, so the kernel waits on git itself and
+  never on a program git started. Inside a perform git holds the
   effect's lock (`core.performing`), which every process git starts
   inherits, so `broker.reconcile` waits until the last of them has exited;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
@@ -63,6 +65,7 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import io
 import json
 import os
 import re
@@ -270,33 +273,60 @@ def _git(
     until it exits, started through `start` so an interrupt of the current
     watch (`interruptible()`, `threaded`) kills the group. Inside a perform,
     git gets the effect's lock descriptor (`core.performing`), which every
-    process it starts inherits. `prefix` runs it under a sandbox
-    (`sandbox-exec ... -f <profile>`)."""
+    process it starts inherits. Its output goes to files the kernel holds
+    (`output_file`), not pipes, so the call ends when git exits, even while
+    a program git started still holds them. `prefix` runs it under a
+    sandbox (`sandbox-exec ... -f <profile>`)."""
     git_bin = binary()
     held = _WATCH.get()
     lock = performing.held()
     argv = [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args]
-    proc = start(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=text,
-        env={**env(), **(extra_env or {})},
-        pass_fds=() if lock is None else (lock,),
-    )
-    try:
-        stdout, stderr = proc.communicate()
-    except BaseException:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
-        proc.communicate()
-        raise
-    finally:
-        if held is not None:
-            held.finished(proc)
-    if held is not None and held.interrupted:
-        raise Interrupted()
+    with output_file() as out, output_file() as err:
+        proc = start(
+            argv,
+            stdout=out,
+            stderr=err,
+            env={**env(), **(extra_env or {})},
+            pass_fds=() if lock is None else (lock,),
+        )
+        try:
+            proc.wait()
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
+            proc.wait()
+            raise
+        finally:
+            if held is not None:
+                held.finished(proc)
+        if held is not None and held.interrupted:
+            raise Interrupted()
+        stdout, stderr = read_output(out, text), read_output(err, text)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def output_file():
+    """An unlinked file the kernel holds for a child's output, in place of a
+    pipe: waiting on the child returns when it exits, whatever its
+    descendants (one that left its process group with `setsid`, say) still
+    hold, and the kernel then reads the file (`read_output`)."""
+    return tempfile.TemporaryFile(prefix="valor-output-")
+
+
+def read_output(f, text: bool = False) -> str | bytes:
+    """What `f` (from `output_file`) holds now, read by position so a
+    descendant still writing to it keeps its own offset; decoded as
+    `subprocess` decodes text output when `text`."""
+    size = os.fstat(f.fileno()).st_size
+    parts, at = [], 0
+    while at < size:
+        part = os.pread(f.fileno(), size - at, at)
+        if not part:
+            break
+        parts.append(part)
+        at += len(part)
+    data = b"".join(parts)
+    return io.TextIOWrapper(io.BytesIO(data)).read() if text else data
 
 
 async def threaded(fn, *args, **kwargs):
@@ -309,10 +339,11 @@ async def threaded(fn, *args, **kwargs):
     with interruptible() as held:
         job = asyncio.ensure_future(performing.in_thread(functools.partial(fn, *args, **kwargs)))
         try:
-            return await asyncio.shield(job)
+            await asyncio.wait({job})  # waits without cancelling the job
         except asyncio.CancelledError:
             await interrupt(held, job)
             raise
+        return job.result()
 
 
 async def interrupt(held: Interruptible, job: asyncio.Future) -> None:
