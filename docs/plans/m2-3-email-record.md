@@ -116,3 +116,61 @@ From the review, test, and docs checks:
 | Filing delay | Not found is `Unknown`; the intent stays in flight until a later wake finds it |
 | Mislabelled kill test | Renamed to a send killed before the server took the message; EPIPE before the end of data line tested |
 | Guard firing | `guard.fired` on the `guards` stream, in the record's transaction in `intake.receive`; `guards.fired` reads it |
+
+## Checks, round 2 (of 2), at ca86e796e and aec2bff7f
+
+ca86e796e is the bridge and patch round 1 with no DMARC check; aec2bff7f is
+the one DMARC commit on top, which is not built into the system until Tom
+grants open question 17.
+
+- Docs: updated, 2817e0cda (`m2-1-port.md`: email searches `UNSEEN SINCE`
+  after each IDLE wake). The status-quo docs are true without the DMARC
+  commit.
+- Test: gaps. Base 566, ca86e796e 627, aec2bff7f 650 passed, 7 skipped;
+  ruff clean. A definite failure is `failed` with no lookup; an in-doubt
+  reply settles `done` from Sent Mail on the next wake; a miss stays in
+  flight until the message is filed; new mail arrives by IDLE in under a
+  second; `guard.fired` is written only for unverified mail from Tom's
+  address. Gaps: no test of a hung EHLO, STARTTLS or AUTH, or of the
+  mid-IDLE reconnect.
+- Review: changes on ca86e796e; `governance_refused` on aec2bff7f (it adds
+  a check and a guard; the grant named is a standing default, not Tom's
+  tap, and no spoofed mail has arrived). `broker.Failed` fits the port
+  contract. No invented caps.
+
+Findings:
+
+1. Mail that arrives during a search is announced (`EXISTS`) inside that
+   search's responses, so the next IDLE does not see it and the mail waits
+   up to 29 minutes. Fix: before idling, read the untagged responses
+   already received and search again.
+2. No timer on EHLO, STARTTLS, AUTH or any IMAP command, no socket timeout
+   and no keepalive. Sends and Sent Mail lookups run inside the outbox
+   loop, so one server that stays connected and never answers stalls every
+   send, the tick and the watch's reconnect, until the process is killed.
+   RFC 5321 4.5.3.2 requires per-command timeouts and gives no value for
+   these commands.
+3. An in-doubt send that is never found stays in flight, one lookup per
+   wake, and nothing tells Tom. A send killed before its greeting does the
+   same.
+4. `test_settle_after_function` settles sends other tests leave in flight;
+   it should filter on its own effect id.
+5. Docs: an in-doubt send settles on the next wake, not at once.
+
+## Delivery: delivered, not passed
+
+Review rounds are spent. Recommendation to Tom: one more patch.
+
+- Findings 1, 4 and 5 as above.
+- Finding 2 without a number: run each send and each Sent Mail lookup as
+  its own task off the outbox loop, so a hung server stalls only its own
+  effect and a stop still ends it. The per-command timer values RFC 5321
+  asks for are Tom's to give, or he accepts the hang ending only on stop.
+- Finding 3: a notice to Tom the moment a send is first in doubt, with no
+  wait (2.1's notice path).
+- The DMARC commit merges only with Tom's tap under open question 17.
+
+Merging with 1.4d needs `in_thread` read as `performing.in_thread`,
+`Outbox.reconcile`'s `settle` argument, and the crash tests'
+`reconcile_after_s=0` dropped. `broker.Failed` is new in 2.1's
+`core/broker.py` and is carried at merge.

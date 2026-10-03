@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-3-email
 type: build
-status: planned; critique round 1 built in; built
+status: delivered-not-passed (record in m2-3-email-record.md)
 critique_rounds: 1
 review_rounds: 2
 governance_grant: open question 17 (Tom, 2026-10-01), the DMARC verified check in core/intake.py
