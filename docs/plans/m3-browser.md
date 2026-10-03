@@ -319,3 +319,12 @@ built in.
   screens reader has no size or count cap. The `--wait` default of 3000 ms
   is the plan's own and sets how long scripts get to settle.
 - **No 5xx refusal.** `look` first refused a 5xx without rendering; that had no source, so it renders, prints the status, and exits non-zero.
+- **Live turn run.** `VALOR_LIVE=1 pytest tests/test_look.py -k live`
+  passed in 87 seconds: a real build turn served a page on a dev port, ran
+  `look`, and `turn.collected` held the screenshot's name, size, and digest,
+  named in `done.md`.
+- **Full suite at the final head.** 524 passed, 9 skipped, 1 failed:
+  `test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_live`
+  raised `Refused` in a provisioning step while other builds ran on the
+  machine, and passed alone on the rerun at the same head; it does not touch
+  code this task changed.
