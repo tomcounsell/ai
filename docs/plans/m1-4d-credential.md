@@ -106,6 +106,8 @@ What the kernel must never do:
   opened with `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 600, holding exactly:
 
   ```
+  [http]
+      followRedirects = false
   [http "<the granted URL>"]
       extraHeader = Authorization: Basic <base64 of x-access-token:TOKEN>
   ```
@@ -113,7 +115,8 @@ What the kernel must never do:
   It is passed as `GIT_CONFIG_GLOBAL` for that call through `_git`'s
   `extra_env` and deleted in a `finally` in the same worker thread when
   git exits. Git matches `http.<url>.*` against the URL, so the header
-  goes to that repository URL only. It is a pinned header (helpers stay
+  goes to that repository URL only, and with redirects off git never
+  carries it to a redirect's target. It is a pinned header (helpers stay
   refused, the PATH stays system-only), delivered as a file because
   arguments are readable by a running turn (m1-4-checks.md Questions, 4).
 - **The URL's shape.** `targets.url_ok(url, loopback=False)` parses the
@@ -349,9 +352,10 @@ same task sends no header and lands on the local origin; a `--workspace`
 task whose origin is a granted loopback URL merges with no header (401),
 and its `push_branch` sends none; a mirror holding an `http.` or `url.` key
 is refused before any request; on a redirect the second server never
-receives the header (git 2.39.5 sends it to the first redirect's target,
-`http.followRedirects=initial`, so the test is marked expected to fail;
-pinning `followRedirects=false` is a guard and waits on a grant); no leak: while the server holds
+receives the header (left to itself, git 2.39.5 follows the first redirect,
+`http.followRedirects=initial`, and sends the header there; the header file
+pins `followRedirects=false`, so the push fails at the redirect); no leak:
+while the server holds
 a push open, `ps -E -ww` from the kernel and `pgrep -lf` and `ps -E -ww`
 from a probe under `turn.sb` show no process whose arguments or environment
 contain the token, its base64 form, or the file's contents, and the probe
@@ -474,14 +478,22 @@ Each is reversible and was decided by the build session:
 - No transcript from a turn without its own config directory.
 - Base64 of raw bytes, one document per file per 64 MiB chunk.
 - The live push branch `valor/push-check`, kept afterwards.
+- `http.followRedirects=false` in the header file, so on every git call
+  that carries the credential the header reaches only the granted URL.
+  The threat model says the token goes nowhere but the recorded remote;
+  git's default follows the first redirect and sends the header there, as
+  the redirect test shows. The pin makes the code do what the threat model
+  states: it configures the transport, as dropping `Authorization` on a
+  cross-host redirect does on the gateway, inspects nothing about the
+  work, and refuses nothing a turn asked for. It is a fix, not a guard.
 
 ## Critique round 1 (of 2): revise
 
 Every finding accepted: the credential goes only with a mirror and only
 `--project` honours `merge_url` (1); raw bytes as base64, and a failed copy
-still records `turn.ended` (2); no size cap (3); `followRedirects`, the
-GitHub prefix, and the start-time key check dropped as guards with no
-incident (4); the URL's shape checked before it is written (5); the
+still records `turn.ended` (2); no size cap (3); the GitHub prefix and the
+start-time key check dropped as guards with no incident (4;
+`followRedirects` is a transport fix, under Decided by default); the URL's shape checked before it is written (5); the
 `start` read given a repository and `remote_head` an exit code (6); the
 outline updated and private repositories left out (7); cancellation,
 leftovers, a default-branch change, and the cwd encoding handled (8); the

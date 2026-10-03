@@ -256,7 +256,8 @@ HEADER_SUFFIX = ".gitconfig"
 @contextlib.contextmanager
 def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
     """A config file, mode 600, in the key file's directory, carrying the
-    token as `http.<url>.extraHeader` and nothing else; yields its path and
+    token as `http.<url>.extraHeader`, with `http.followRedirects=false` so
+    git never carries the header to a redirect's target; yields its path and
     removes it on exit. Refuses a URL `targets.url_ok` refuses, so nothing
     the URL holds can add a line. Leftovers a crashed call left, older than
     twice `git_timeout_s`, are removed first: every kernel git call is
@@ -273,7 +274,9 @@ def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(f'[http "{url}"]\n\textraHeader = Authorization: Basic {basic}\n')
+            f.write(
+                f'[http]\n\tfollowRedirects = false\n[http "{url}"]\n\textraHeader = Authorization: Basic {basic}\n'
+            )
         yield path
     finally:
         with contextlib.suppress(FileNotFoundError):

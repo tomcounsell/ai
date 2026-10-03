@@ -208,14 +208,9 @@ def test_a_mirror_whose_config_names_http_is_refused_before_any_request(tmp_path
     assert leftovers(keyfile) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="git follows the first redirect (http.followRedirects=initial) and sends extraHeader to the "
-    "redirected server; raised with the lead, not pinned off here",
-)
 def test_a_redirect_never_carries_the_header_to_the_second_server(tmp_path, keyfile, token):
-    """The plan expected git's own behaviour to keep the header on the
-    granted URL. It does not: the header follows the redirect."""
+    """Left to itself git follows the first redirect and sends the header
+    there; the header file pins `http.followRedirects=false`."""
     with Server(tmp_path / "second", token=token) as second:
         remote(second, toy(tmp_path))
         with Server(tmp_path / "first", token=token, redirect_to=f"http://127.0.0.1:{second.port}") as first:
@@ -301,7 +296,9 @@ def test_leftover_header_files_older_than_twice_the_git_timeout_are_removed(tmp_
     os.utime(old, (stale, stale))
     with credentials.header_file(keyfile, "https://github.com/tomcounsell/ai.git") as path:
         assert path.exists() and oct(path.stat().st_mode & 0o777) == "0o600"
-        assert path.read_text().startswith('[http "https://github.com/tomcounsell/ai.git"]\n\textraHeader = ')
+        assert path.read_text().startswith(
+            '[http]\n\tfollowRedirects = false\n[http "https://github.com/tomcounsell/ai.git"]\n\textraHeader = '
+        )
     assert not old.exists() and young.exists() and not path.exists()
 
 
