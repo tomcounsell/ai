@@ -319,9 +319,6 @@ class Settings:
     bytes_per_token: int = 3
     # Seconds between SIGTERM and SIGKILL when reaping a turn's processes.
     reap_grace_s: float = 2.0
-    # Turns in a row ending with neither a question nor a delivery before a
-    # run returns so Tom can look.
-    idle_turns: int = 2
 
     def __post_init__(self):
         if self.reconcile_after_s < 2 * self.git_timeout_s:

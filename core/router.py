@@ -51,7 +51,7 @@ async def run(
     """Run the task until it needs Tom or a runner that does not exist.
     Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
     runner`, `legacy`, `calibration task`, `already running`, `lock lost`, or what a runner
-    returned: `failed`, `idle`) and the task's state."""
+    returned: `failed`) and the task's state."""
     dsn = dsn or gateway.dsn
     holder = await db.connect(dsn)
     try:

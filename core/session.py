@@ -4,7 +4,8 @@ plan, build, and patch run, each turn resuming the one before.
 Serves Mission item 1 (one working context from inspection to delivery) and
 Mission item 6 (Tom's answer lands in the context that asked). `run` runs
 one state's turns until the task leaves that state, or until there is
-something for Tom: two idle turns, a failed turn, a stop.
+something for Tom: a failed turn, a stop. A turn that finishes without its
+stage's signal is followed by the next, prompted `Continue.`
 The router (`core/router.py`) decides what runs next.
 
 A turn's prompt is data from the row that moved the task into its state
@@ -38,7 +39,6 @@ from typing import Any
 from core import broker, db, git, ledger, machine, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
-from core.settings import settings
 
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
@@ -53,11 +53,10 @@ async def run(
     gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None = None, alive: Alive = _always
 ) -> dict[str, Any]:
     """Run turns in the task's current working state until it leaves it.
-    Returns `status`: `moved` (the fold left the state), `failed`, `idle`,
+    Returns `status`: `moved` (the fold left the state), `failed`,
     `stopped`, or `lock lost` (the router's run lock died), with the task's
     `state` from `tasks.status`."""
     dsn = dsn or gateway.dsn
-    idle = 0
     async with await db.connect(dsn) as conn:
         state = machine.fold(await ledger.read(conn, task_id)).state
     if state not in machine.WORKING:
@@ -97,9 +96,6 @@ async def run(
             return {"status": "moved", "state": now, "turn": ended}
         if not ok:
             return {"status": "failed", "state": now, "turn": ended}
-        idle += 1
-        if idle >= settings.idle_turns:
-            return {"status": "idle", "state": now, "turn": ended}
 
 
 def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:

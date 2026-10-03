@@ -378,7 +378,7 @@ so in its report.
   triage).
 - A parent waiting on its children as a state, and the supervisor waking a
   parent when a child delivers.
-- A per-task deadline; the idle bound stands in.
+- A per-task deadline.
 - Spending over a period; 4.3 sums `tree_spending`'s `charges` by `at`.
 - Moving a task to another parent, or any change to a Brief after start.
 - A count or depth limit on the tree: the leaf criterion (one session) is

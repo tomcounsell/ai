@@ -224,7 +224,6 @@ def _status_line(task_id: str, out: dict) -> str:
         "already running": "another run of this task is in progress",
         "lock lost": "the run's lock connection died; run again",
         "failed": f"the turn failed: {turn.get('stderr_tail') or turn.get('result')}",
-        "idle": f"{settings.idle_turns} turns ended without their stage's signal",
     }[status]
     return f"{status.upper()} (task {task_id}; {spent}): {detail}"
 

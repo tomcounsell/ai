@@ -667,15 +667,13 @@ def test_a_dirty_tree_is_no_candidate_and_the_next_prompt_says_what_is_uncommitt
         task = await scripted.start(dsn, ws)
         await drive(dsn, task)
         await scripted.critique(dsn, task)
-        scripted.steer(ws, build="dirty")
+        scripted.steer(ws, build="dirty", turns=1)
         return await drive(dsn, task)
 
     out = run(go())
-    assert out["status"] == "idle" and out["state"]["candidate"] is None
-    assert (
-        "uncommitted" in scripted.turns(ws)[-1]["prompt"]
-        and "greeting.txt" in scripted.turns(ws)[-1]["prompt"]
-    )
+    t = scripted.turns(ws)
+    assert out["state"]["candidate"]["turn_id"] and t[-1]["stage"] == "build"
+    assert "uncommitted" in t[-1]["prompt"] and "greeting.txt" in t[-1]["prompt"]
 
 
 @pytest.mark.parametrize(
@@ -684,28 +682,33 @@ def test_a_dirty_tree_is_no_candidate_and_the_next_prompt_says_what_is_uncommitt
 )
 def test_a_plan_turn_without_a_committed_plan_is_no_plan(dsn, tmp_path, plan, why):
     ws, _ = scripted.workspace(tmp_path)
-    scripted.steer(ws, plan=plan)
+    scripted.steer(ws, plan=plan, turns=1)
 
     async def go():
         task = await scripted.start(dsn, ws)
-        return await drive(dsn, task), await rows(dsn, task)
+        await drive(dsn, task)
+        return await rows(dsn, task)
 
-    out, written = run(go())
-    assert out["status"] == "idle" and out["state"]["state"] == "plan"
-    assert not [r for r in written if r["type"] == "plan.written"]
-    assert why in scripted.turns(ws)[-1]["prompt"]
+    written = run(go())
+    plans = [r for r in written if r["type"] == "plan.written"]
+    t = [x for x in scripted.turns(ws) if x["stage"] == "plan"]
+    assert len(t) == 2 and why in t[1]["prompt"]  # the next plan turn is told, and plans
+    assert len(plans) == 1 and plans[0]["payload"]["path"] == "docs/plan.md"
 
 
 def test_plan_counts_outside_zero_to_two_are_no_plan(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
-    scripted.steer(ws, counts={"critique_rounds": 3, "review_rounds": 0})
+    scripted.steer(ws, counts={"critique_rounds": 3, "review_rounds": 0}, turns=1)
 
     async def go():
         task = await scripted.start(dsn, ws)
-        return await drive(dsn, task)
+        await drive(dsn, task)
+        return await rows(dsn, task)
 
-    assert run(go())["status"] == "idle"
-    assert "each count is 0, 1, or 2" in scripted.turns(ws)[-1]["prompt"]
+    plans = [r for r in run(go()) if r["type"] == "plan.written"]
+    t = [x for x in scripted.turns(ws) if x["stage"] == "plan"]
+    assert len(t) == 2 and "each count is 0, 1, or 2" in t[1]["prompt"]
+    assert [p["payload"]["critique_rounds"] for p in plans] == [0]
 
 
 def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):

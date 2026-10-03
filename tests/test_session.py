@@ -142,20 +142,21 @@ def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
 
 
-def test_two_turns_with_no_signal_return_idle_and_the_next_prompt_says_continue(dsn, tmp_path):
+def test_turns_with_no_signal_do_not_end_the_run_and_the_next_prompt_says_continue(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task = await scripted.start(dsn, ws)
         await drive(dsn, task)
         await scripted.critique(dsn, task)
-        scripted.steer(ws, build="nothing")
+        scripted.steer(ws, build="nothing", turns=3)
         return await drive(dsn, task)
 
     out = run(go())
-    assert out["status"] == "idle" and out["state"]["state"] == "build"
-    t = scripted.turns(ws)
-    assert t[-2]["prompt"].startswith("# Critique: sound") and t[-1]["prompt"] == "Continue."
+    assert out["status"] == "no runner" and out["state"]["state"] == "checks"
+    t = [x for x in scripted.turns(ws) if x["stage"] == "build"]
+    assert len(t) == 4 and t[0]["prompt"].startswith("# Critique: sound")
+    assert [x["prompt"] for x in t[1:]] == ["Continue."] * 3
 
 
 def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, tmp_path):

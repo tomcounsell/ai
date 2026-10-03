@@ -83,8 +83,8 @@ lookup.
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
 Stop is final. A run (`core/router.py`) ends when the task needs Tom
 (`waiting`, `merge`, `merged`, `stopped`), reaches a stage with no runner,
-has a turn fail, or has two turns in a row end without their stage's signal
-(the idle bound).
+or has a turn fail. A turn that ends without its stage's signal is
+followed by the next turn in the same state.
 
 **Design.** The Brief gains, once tasks nest, a `parent_id` and a deadline.
 
@@ -140,8 +140,7 @@ route (judgement-layer.md).
 **Design.** A child's spending rolls up into its parent's reported
 spending (see The objective tree). A task that ends reports what it spent,
 what it produced, and what it asks for. A hung tool spends no money, so a
-per-task wall-clock deadline catches what metering cannot; the idle bound
-plays that part.
+per-task wall-clock deadline catches what metering cannot.
 
 ## Effect classes and the broker
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, router, tasks
+from core import broker, db, ledger, machine, router, session, tasks
 from core.gateway import Gateway
 from core.machine import State
 from tests import scripted
@@ -284,16 +284,18 @@ def test_a_plan_that_commits_a_valor_entry_is_no_plan_and_nothing_is_written_thr
 
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
-        scripted.steer(Path(b.workspace), plan=act, target=str(target))
+        scripted.steer(Path(b.workspace), plan=act, target=str(target), turns=1)
         out = await drive(dsn, task, scripted.fresh_runners(Path(b.workspace)))
         return out, await rows(dsn, task)
 
     _out, written = run(go())
-    assert not [r for r in written if r["type"] == "plan.written"]
-    errors = [e for r in written if r["type"] == "turn.collected" for e in r["payload"]["errors"]]
-    assert any("commits a .valor entry" in e for e in errors), errors
-    assert target.read_text() == "# untouched\n"
-    assert machine.fold(written).state is State.PLAN
+    collected = [
+        r["payload"] for r in written if r["type"] == "turn.collected" and r["payload"]["state"] == "plan"
+    ]
+    assert any("commits a .valor entry" in e for e in collected[0]["errors"]), collected[0]
+    assert collected[0]["verdict"] == "idle" and target.read_text() == "# untouched\n"
+    plans = [r["payload"] for r in written if r["type"] == "plan.written"]
+    assert [p["turn_id"] for p in plans] == [collected[1]["turn_id"]]  # the next plan turn's, not this one's
 
 
 def test_a_blind_checkout_refuses_a_tree_with_valor_and_inputs_never_overwrite(dsn, tmp_path):
@@ -330,14 +332,29 @@ def _fresh_checkout(lay, b):
 def test_a_refused_mirror_fetch_is_no_plan(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
-        (Path(b.workspace) / ".git" / "objects" / "info" / "alternates").write_text(str(tmp_path) + "\n")
-        await drive(dsn, task, scripted.RUNNERS)
+        alternates = Path(b.workspace) / ".git" / "objects" / "info" / "alternates"
+        alternates.write_text(str(tmp_path) + "\n")
+        seen = []
+
+        def turn_for(prompt, resume, brief):  # the second turn finds the alternates gone
+            if seen:
+                alternates.unlink(missing_ok=True)
+            seen.append(prompt)
+            return scripted.turn_for(prompt, resume, brief)
+
+        async def working(ctx: router.Context) -> dict:
+            return await session.run(ctx.gateway, ctx.task_id, turn_for, dsn=ctx.dsn, alive=ctx.alive)
+
+        await drive(dsn, task, {**scripted.RUNNERS, State.PLAN: working})
         return await rows(dsn, task)
 
     written = run(go())
-    assert not [r for r in written if r["type"] == "plan.written"]
-    errors = [e for r in written if r["type"] == "turn.collected" for e in r["payload"]["errors"]]
-    assert any("alternates" in e for e in errors), errors
+    collected = [
+        r["payload"] for r in written if r["type"] == "turn.collected" and r["payload"]["state"] == "plan"
+    ]
+    assert collected[0]["verdict"] == "idle" and any("alternates" in e for e in collected[0]["errors"])
+    plans = [r["payload"] for r in written if r["type"] == "plan.written"]
+    assert [p["turn_id"] for p in plans] == [collected[1]["turn_id"]]
 
 
 def test_critique_gets_no_database_credential_and_no_service_port(dsn, tmp_path):

@@ -48,6 +48,9 @@ with log.open("a") as f:
 if cfg.pop("fail_next", False):
     cfg_path.write_text(json.dumps(cfg))
     sys.exit(1)
+if "turns" in cfg:  # the steering lasts this many turns, then the defaults play
+    cfg["turns"] -= 1
+    cfg_path.write_text(json.dumps(cfg if cfg["turns"] else {}))
 v = pathlib.Path(".valor")
 (v / "effects").mkdir(parents=True, exist_ok=True)
 git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]

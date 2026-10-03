@@ -178,7 +178,7 @@ ceiling, and unrelated debt is a new task for Tom. Mission items 1 and 5.
 
 `python -m core run TASK` is the router. Each call folds the ledger to the
 current state, runs the work that state calls for, records its verdict, and
-continues until the task needs Tom (`waiting`, `merge`, two idle turns, a failed turn, or `stopped`) or reaches a stage with no
+continues until the task needs Tom (`waiting`, `merge`, a failed turn, or `stopped`) or reaches a stage with no
 runner, then prints one status line and returns. The router reads verdicts
 and follows the table; it never writes a verdict and never decides
 authority. One run per task at a time: a run holds a session advisory lock
@@ -321,9 +321,10 @@ Effects beyond the workspace are requests to the broker.
   how it verified it, and which decisions Tom might want to change,
   recorded on `turn.collected` with the head commit. Goes to `checks`.
 - `asked`: the turn wrote `.valor/question.md`. Goes to `waiting`.
-- `idle`: two consecutive turns ended with neither. The run returns so Tom
-  can look. **Exists in the kernel** (the `idle_turns` setting, 2), because pso-a's
-  bare run ended 2 of 3 turns idle (rebuild-baseline.md, Caveats).
+- `idle`: the turn finished with neither. The task stays in `build`, and
+  the run goes on to the next turn, resumed with the prompt `Continue.`
+  and what made any signal not count. The run ends only when a turn leaves
+  the state, fails, or the task is stopped.
 - `failed`: the harness reported an error or the turn did not finish. The
   run returns; the next run retries from the ledger.
 
