@@ -33,8 +33,8 @@ the bridge's code does.
 | Inbound text treated as data, never as authority | Retrieved content can act as instructions [7]; the kernel decides what a thing may do |
 
 The demonstration showed the need for the second door. Its second kernel
-finding was "No feedback path": Tom could not send a delivery back, and
-`core feedback` was added mid-demo (rebuild-demonstration.md, Kernel findings,
+finding was "No feedback path": Tom could not send a delivery back, which
+`core feedback` answers (rebuild-demonstration.md, Kernel findings,
 item 2). Every PM intervention in that record went through a command line run
 by the orchestrator, not through Tom's own hands (rebuild-demonstration.md,
 Where Tom acted as project manager).
@@ -85,9 +85,10 @@ work" below), in a separate step that reads `message.received` rows.
 ### Performers
 
 Every outbound operation is a broker performer, with the same shape as the
-`push_branch` performer that exists today: an `action_type`, a declared
-`effect_class`, `perform(action, key)`, and `lookup(action, key, since)`,
-`since` being the time of the effect's intent. The broker
+`push_branch` performer: an `action_type`, a declared
+`effect_class`, `perform(action, key)`, and `lookup(action, key, since)`.
+The Telegram `lookup` does not read `since`; it works from the message id
+kept in `telegram-sends.json`. The broker
 holds every `act` request until Tom approves it, writes `effect.intent`
 before `perform` runs, and writes `effect.outcome` after. A kill between the
 two leaves a dangling intent, which `lookup` reconciles by asking the platform
@@ -346,7 +347,9 @@ one message is `broker.Unknown`: nothing is concluded. When some of a
 split send's messages are on screen and the rest are not, `lookup` sends
 the rest, each under its own `random_id`, and the send settles as done:
 Tom approved the whole, and a message Telegram already holds is refused
-as a duplicate rather than shown twice. The outcome records `chat_id` and
+as a duplicate rather than shown twice. If a file of the send is gone or
+Telegram refuses to finish it, the send settles as done with the messages
+on screen. The outcome records `chat_id` and
 `message_id`, which is how a later reply to the sent message binds back to
 its task.
 
