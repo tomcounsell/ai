@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-2-persona
 type: build
-status: built
+status: passed; merge held for Tom's tap
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -538,3 +538,22 @@ already in force at the top of `CLAUDE.md`.
 - A turn may request a `push_branch` of a SHA that names no commit; the
   push fails only at release, after Tom's tap. Seen once in twelve live
   runs.
+
+## Checks after patch round 1, at 9b65a74fe (review round 1 of 1)
+
+- Test: `pass`. 526 passed, 8 skipped. Both `CLAUDE.md` paragraphs render
+  once each, byte for byte, under the governance heading;
+  `PersonaUnreadable` names a missing file or line; the workspace's own
+  `CLAUDE.md` and `persona/` are never read. No live spend.
+- Review: `pass`; governance boolean no; no invented caps. Every round 1
+  finding is fixed.
+- Docs: `updated`, e958ec8be on `m4-2-docs2` (`docs/persona.md` names both
+  paragraphs).
+
+## Delivery: merge held for Tom's tap
+
+The candidate is `m4-2-docs2`. Two notes from the review, not blocking:
+the comment in `persona/identity.toml` says every key must be one the
+renderer knows, while unknown keys are ignored; `persona/turn.md` assumes
+a stage section ends the text, which a turn with no workspace lacks.
+
