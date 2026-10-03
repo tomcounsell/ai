@@ -324,7 +324,7 @@ Effects beyond the workspace are requests to the broker.
 - `idle`: the turn finished with neither. The task stays in `build`, and
   the run goes on to the next turn, resumed with the prompt `Continue.`
   and what made any signal not count. The run ends only when a turn leaves
-  the state, fails, or the task is stopped.
+  the state, fails, the task is stopped, or the run loses its lock.
 - `failed`: the harness reported an error or the turn did not finish. The
   run returns; the next run retries from the ledger.
 
