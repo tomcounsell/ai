@@ -524,3 +524,11 @@ bridge performers.
 
 The critique rounds and patch rounds, each finding and how it is built
 in, are in [m2-1-resident-kernel-record.md](m2-1-resident-kernel-record.md).
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the Delivery's recommendation in m2-1-resident-kernel-record.md (settle a stopped task, mark seen only rows the step read, bigint id match, `services:<task>` in docs/data.md). Second in the order; 2.2, 2.3 and 4.1 merge after it.
+
+Question 1, who is the operator: decided by Valor under the 2026-10-03 feedback, as assumed: Telegram user id and email from `main`'s `projects.json` (`dms.whitelist` Tom, and `tom@yuda.me`). The rebuild's host from milestone 2 is this Mac, Valor the Cowboy, which `projects.json` gives the `valor` and `popoto` projects. Valor creates the operator group "Valor rebuild" from its own account with Tom in it, and schedules the test windows itself.

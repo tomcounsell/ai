@@ -210,6 +210,11 @@ requests from the last 12 months; $25 cap per full emulator run.
 
 **Default stands from 2026-10-01: A**, unless Tom says otherwise.
 
+**Answered 2026-10-03:** Tom: "yuda.me email is managed by google workspace.
+you decide". Decided: not granted for now, since no spoofed mail has
+arrived and the governance paragraph needs an incident. The DMARC commit
+(aec2bff7f) stays parked; email does not start work (m2-3-email.md).
+
 ### 18. How do you approve from your phone?
 *Example:* Valor asks to push the #894 branch while you are out.
 - **A.** A tap in Telegram. **(Recommended)** No new surface to build. **B.** A small web page, with a passkey signature for pushes and sends.

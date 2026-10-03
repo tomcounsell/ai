@@ -342,3 +342,9 @@ Findings both checks reproduced:
 Review rounds are spent. Recommendation to Tom: one more patch for the
 three findings. Finding 1 leaks ledger contents, so the patch is needed
 before 1.4v merges.
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the three findings under Checks (a mount with no mount point can catch the backup dump, with the `diskarbitrationd` deny verified; `~/.local/share/uv` write-denied and fresh sessions given their own `UV_PYTHON_INSTALL_DIR`; the PATH opening in the docs). First in the order.

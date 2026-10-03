@@ -589,3 +589,11 @@ The checks of review round 2 and the delivery are in
 
 None. The one thing that needs Tom is signing the session in, rollout
 step 5.
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the six findings in m2-2-telegram-record.md. Merges after 2.1.
+
+Rollout step 5, signing the session in: Valor does it; the code arrives in Valor's other sessions and the account's password is in the vault (`TELEGRAM_PASSWORD`). The test window is Valor's to schedule, by the 2026-10-03 feedback.

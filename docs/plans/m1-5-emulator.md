@@ -573,3 +573,11 @@ the two `mktemp` forms with tests, cites 2.1.286, states one source for
 `JUDGE_MODEL` (the catalog, with rollout step 2 saying so), drops the
 error-text cuts so the whole output is kept, and fixes the emulator doc's
 judge line; rerun the three checks; merge if they pass.
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the Delivery's recommendation (both `mktemp` forms with tests, cite 2.1.286, one source for `JUDGE_MODEL`, the error-text cuts dropped, the emulator doc's judge line).
+
+Question 1, the answer keys: Tom ruled the same day that technical calls are Valor's, never raised to him by default. The keys stand as written, with the inferred lines in the sidecar.

@@ -592,3 +592,13 @@ question; the password's place is machine.md's; the DMARC record and the
 
 What is decided by default, the critique round, and the build are
 recorded in [m2-3-email-record.md](m2-3-email-record.md).
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the Delivery in m2-3-email-record.md, findings 1, 3, 4 and 5, and finding 2 as sends and Sent Mail lookups each run as their own task off the outbox loop.
+
+Timers, Tom: "No timer; stop ends it". No value is set for EHLO, STARTTLS, AUTH, or any IMAP command; a hung connection holds only its own effect until a stop.
+
+Open question 17, DMARC, Tom: "yuda.me email is managed by google workspace. you decide". Decided: refused for now. The governance paragraph needs an incident and none has happened (no spoofed mail). Commit aec2bff7f stays parked, unmerged; email starts, answers, and steers nothing, and Valor still sends by email. Tom's pre-window DMARC and DKIM steps drop out, and the window tests sends only. If spoofed mail from Tom's address ever arrives, that is the incident, and the commit comes back for a grant.

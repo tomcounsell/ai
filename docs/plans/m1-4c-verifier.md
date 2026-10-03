@@ -571,3 +571,7 @@ output is read through a pipe waits for end of file, so a setup command
 that leaves a child holding stdout hangs. Every command in the VM and
 every CLI call on the host writes its output to a file, is waited on by
 its exit, and has its group killed after (The run; Tests, Results).
+
+## Tom's feedback (2026-10-03)
+
+Installing Apple's `container` from its signed package needs the Mac's admin password, which only Tom holds; the build asks him for it when 1.4c part two's rerun reaches this step, and otherwise the plan stands.

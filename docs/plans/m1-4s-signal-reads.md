@@ -451,3 +451,9 @@ Review rounds are spent. Recommendation: accept one more patch that runs
 treats any output as changes not committed, with tests for a space, a
 character outside ASCII, and a staged rename; rerun the three checks; merge
 if they pass. Everything else in the task passed both checks.
+
+## Tom's feedback (2026-10-03)
+
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+
+Scope: the Delivery's recommendation (literal-pathspec porcelain check; tests for a space, a character outside ASCII, and a staged rename).
