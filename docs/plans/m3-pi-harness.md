@@ -584,4 +584,17 @@ Merged 2026-10-04 by the merge train, fast-forward to abcd8da75.
 - **Suite.** 1007 passed, 19 skipped; `ruff check` clean; `ruff format
   --check` flags only docs/bridges/telegram.md and docs/plans/m2-1-port.md.
 - **Backup.** valor_rebuild-20261003T202331Z.dump.
-- **Follow-ups.** Rollout steps 3 and 4 wait for 1.4c and 1.5.
+- **Rollout 1.** `openai-key` reports the key kept; Pi is 0.73.1.
+- **Rollout 2** (backup first; spend metered by the gateway). Working
+  turn: passed, Pi reported $0.0157, the gateway charged $0.0180.
+  Compaction survived: passed. Pi compaction: 8 calls, input 914,278 then
+  591,229 and 323,666, charged $8.84, Pi reported $2.62. Claude Code
+  compaction: 37 calls, 971,417 down to 78,312, charged $17.41. Critique
+  at `reviewer_openai`: failed. node aborts at start (signal 6) because
+  the turn's stdout and stderr files (`<work>/<task>/turns/`) sit where
+  the fresh profile denies reads, and node needs `file-read-metadata` on
+  its standard streams. The same case passed at 7b426b15a ($0.0160).
+- **Follow-ups.** The turn output files under a denied path: in a
+  provisioned task `<work>` is denied to every profile, so a working Pi
+  turn there likely aborts too (not run). Rollout steps 3 and 4 wait for
+  1.4c and 1.5.
