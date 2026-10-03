@@ -338,7 +338,13 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
     move the denied path's contents to a name no rule covers, or let a turn
     put its own directory in its place; so would a mount."""
     home = tmp_path / "home"
-    for d in (".local/share/claude/versions", ".config/other", "Library/Caches", ".cache/uv"):
+    for d in (
+        ".local/share/claude/versions",
+        ".local/share/uv/python",
+        ".config/other",
+        "Library/Caches",
+        ".cache/uv",
+    ):
         (home / d).mkdir(parents=True)
     (home / ".local/bin").mkdir()
     claude = home / ".local/bin/claude"
@@ -365,13 +371,14 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
         f"rename:{home}>{tmp_path / 'home-old'}",
         f"mkdir:{home / 'absent'}",
         f"create:{home / '.cache/uv/x'}",
+        f"create:{home / '.local/share/uv/python/x'}",
         f"create:{home / '.local/x'}",
         f"create:{home / '.config/x'}",
         f"create:{home / 'Library/Caches/x'}",
         f"mkdir:{home / '.config/newapp'}",
         f"rename:{home / '.config/other'}>{home / '.config/other2'}",
     )
-    assert got == ["denied"] * 11 + ["open"] * 5
+    assert got == ["denied"] * 12 + ["open"] * 5
     assert claude.read_text() == "the real one" and (keys / "pgpass").read_text() == "secret"
 
     image = tmp_path / "planted.dmg"
@@ -387,11 +394,61 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
              "/usr/bin/hdiutil", "attach", "-nobrowse", "-mountpoint", str(mountpoint), str(image)],
             capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"},
         )  # fmt: skip
-        assert done.returncode != 0 and not os.path.ismount(mountpoint)
+        info = subprocess.run(["/usr/bin/hdiutil", "info"], capture_output=True, text=True, check=True).stdout
+        assert not os.path.ismount(mountpoint) and str(image) not in info, done.stdout
         assert claude.read_text() == "the real one"
     finally:
         if os.path.ismount(mountpoint):
             subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mountpoint)], check=False)
+
+
+def test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox(tmp_path):
+    """A disk image mounted at its own `/Volumes/<label>` can stand in for the
+    backup disk, and `open` hands an image, or an app the turn wrote, to a
+    process outside the sandbox."""
+    label = f"vprobe{uuid.uuid4().hex[:8]}"
+    volume = Path("/Volumes") / label
+    image = tmp_path / "planted.dmg"
+    subprocess.run(
+        ["/usr/bin/hdiutil", "create", "-quiet", "-size", "2m", "-fs", "HFS+", "-volname", label, str(image)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    marker = tmp_path / "denied" / "ran"
+    marker.parent.mkdir()
+    app = tmp_path / "Planted.app"
+    (app / "Contents/MacOS").mkdir(parents=True)
+    exe = app / "Contents/MacOS/planted"
+    exe.write_text(f"#!/bin/sh\n/usr/bin/touch {marker}\n")
+    exe.chmod(0o755)
+    (app / "Contents/Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+        "<key>CFBundleExecutable</key><string>planted</string>"
+        f"<key>CFBundleIdentifier</key><string>valor.probe.{label}</string>"
+        "<key>LSBackgroundOnly</key><true/></dict></plist>"
+    )
+    profile = tmp_path / "turn.sb"
+    lay = kws.Layout(tmp_path / "work" / "abc123")
+    profile.write_text(kws.turn_profile(lay, [], kernel=[marker.parent]))
+    attempts = [
+        ["/usr/bin/hdiutil", "attach", "-nobrowse", str(image)],
+        ["/usr/sbin/diskutil", "mount", label],
+        ["/usr/bin/open", "-W", str(image)],
+        ["/usr/bin/open", "-W", "-a", "/System/Library/CoreServices/DiskImageMounter.app", str(image)],
+        ["/usr/bin/open", "-W", "-g", str(app)],
+    ]
+    try:
+        for argv in attempts:
+            subprocess.run(
+                ["/usr/bin/sandbox-exec", "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile), *argv],
+                capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"},
+            )  # fmt: skip
+            info = subprocess.run(
+                ["/usr/bin/hdiutil", "info"], capture_output=True, text=True, check=True
+            ).stdout
+            assert str(image) not in info and not volume.exists() and not marker.exists(), argv
+    finally:
+        if volume.exists():
+            subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(volume)], check=False)
 
 
 def test_a_turn_can_neither_read_nor_write_a_scratch_cluster(tmp_path):

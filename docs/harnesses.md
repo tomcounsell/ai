@@ -363,7 +363,8 @@ a turn must not reach. It runs as Tom's user.
   clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config); for
   a fresh session, only its own check directory, with `/private/tmp`,
   `/private/var/tmp`, `/private/var/folders`, and `~/.claude*` denied. Its `UV_CACHE_DIR` is
-  `tmp/uv` in that directory, since `~/.cache/uv` is write-denied.
+  `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python` in that directory,
+  since `~/.cache/uv` and `~/.local/share/uv` are write-denied.
 - **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
   working session, its task's `home/` and bare origin. **Stat only:** the
   allowed directories' ancestors (not listable), so real paths resolve.
@@ -372,7 +373,7 @@ a turn must not reach. It runs as Tom's user.
   (`pg_data_dir`), and the backup disk (`backup_dir`).
 - **Above every denied path:** each directory above a path any rule denies,
   up to but not including `/`, is denied as itself (not its entries), as
-  written and with symlinks resolved, and no mount is allowed. Otherwise
+  written and with symlinks resolved. Otherwise
   renaming `~/.config` would move the kernel key directory to a name no rule
   covers, where a turn could read it, and renaming `~/.local` would let a turn
   put its own `bin/claude` in its place; a disk image mounted over a denied
@@ -382,6 +383,15 @@ a turn must not reach. It runs as Tom's user.
   On this Mac each one exists except the backup disk's mount point while the
   disk is out, which only macOS makes, in root's `/Volumes`; nothing a turn
   needs lives under any of them.
+- **No mount, no `open`:** a turn can make no mount call and cannot reach
+  `diskarbitrationd`, so `hdiutil attach` and `diskutil mount` mount nothing,
+  with or without a mount point. Otherwise a turn that unmounted the backup
+  disk could mount its own image at `/Volumes/<label>` under the disk's label
+  and catch the next dump. `open` would hand a disk image, or an app the turn
+  wrote, to a process outside the sandbox; the profile denies the Launch
+  Services database (`com.apple.lsd.*`), the quarantine resolver, and Apple
+  events, without which `open` and AppleScript launch nothing.
+  `launchservicesd` itself stays reachable, since Claude Code hangs without it.
 
 ### Loopback connects, and rule order
 

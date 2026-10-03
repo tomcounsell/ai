@@ -101,6 +101,7 @@ HOME_WRITE_DENIED = (
     ".config/git",
     "Library/Caches/ms-playwright",
     ".cache/uv",
+    ".local/share/uv",
 )
 HOME_WRITE_DENIED_FILES = (
     ".zshrc",
@@ -348,11 +349,22 @@ def profile(
         # Every directory above a denied path, itself and not its entries:
         # renaming one would move the denied path's contents to a name no
         # rule covers, and a turn could put its own directory in its place.
-        # A mount over a denied path does the same, so none is allowed.
         "(deny file-write*",
         *_paths("literal", _ancestors([*hidden, *write_denied, *kernel])),
         ")",
+        # A mount over a denied path does the same, and one at its own
+        # `/Volumes/<label>` can stand in for the backup disk, so none is
+        # allowed: no mount call and no diskarbitrationd (`hdiutil attach`,
+        # `diskutil mount`). `open` hands a disk image, or an app the turn
+        # wrote, to a process outside the sandbox; it fails without the
+        # Launch Services database, the quarantine resolver, and Apple
+        # events. `launchservicesd` itself stays: Claude Code hangs without it.
         "(deny file-mount)",
+        "(deny mach-lookup",
+        '    (global-name "com.apple.DiskArbitration.diskarbitrationd")',
+        '    (global-name "com.apple.coreservices.quarantine-resolver")',
+        '    (global-name "com.apple.coreservices.appleevents")',
+        r'    (global-name-regex #"^com\.apple\.lsd\."))',
         '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
     ]
     if service:
@@ -1306,9 +1318,11 @@ def check_harness(
     else:
         fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
     fresh_env["PATH"] = f"{git_dir}:{fresh_env.get('PATH', '/usr/bin:/bin')}"
-    # uv's own cache (`~/.cache/uv`) is write-denied, since the user's later
-    # `uv sync` installs from it; a fresh session's uv caches under its tmp.
+    # uv's own cache and managed Pythons (`~/.cache/uv`, `~/.local/share/uv`)
+    # are write-denied, since the user's later `uv sync` installs from the
+    # one and runs the other; a fresh session's uv keeps both under its tmp.
     fresh_env["UV_CACHE_DIR"] = str(check_dir / "tmp" / "uv")
+    fresh_env["UV_PYTHON_INSTALL_DIR"] = str(check_dir / "tmp" / "python")
     return {
         "sandbox_profile": str(path),
         "tmpdir": str(check_dir / "tmp"),

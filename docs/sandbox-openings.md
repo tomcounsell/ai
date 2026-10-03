@@ -28,16 +28,22 @@ Stated so the boundary is drawn where it is [4]:
   (`~/.zshrc` and the like), Claude Code's install (`~/.local/share/claude`)
   and state (`~/.claude`, `~/.claude.json`), git's global config, uv's cache
   (`~/.cache/uv`, from which the user's `uv sync` fills the kernel's own
-  environment without rehashing what is there; a fresh session gets its own
-  uv cache), and Homebrew's prefix, and every turn runs with
+  environment without rehashing what is there) and managed Pythons and tools
+  (`~/.local/share/uv`, whose interpreters that `uv sync` runs; a fresh
+  session gets its own uv cache and Python directory), and Homebrew's prefix, and every turn runs with
   `DISABLE_AUTOUPDATER=1`. The demonstration's profile denies none of these,
   and other places remain where a turn could leave a program a later
   unsandboxed process of the user runs, such as the caches under
   `/var/folders` that Apple's `/usr/bin` shims read (`/usr/bin/git` is the
   `xcrun` shim, which finds the real git through one), and the directories
   on the user's PATH ahead of Homebrew (`~/.bun/bin`, `~/.opencode/bin`,
-  `~/Library/Python/3.12/bin`), which Tom's own shell searches.
-  The kernel runs nothing from that reach outside the sandbox and never
+  `~/Library/Python/3.12/bin`), which Tom's own shell searches. The
+  kernel's own interpreter comes from that search too: `uv sync`, run from
+  Tom's shell, takes the first Python on PATH that fits the project when no
+  managed one does (none does on this Mac), so a `python3.14` a turn left in
+  one of those directories becomes the kernel's `.venv` interpreter, which
+  runs outside the sandbox. Apart from that, the kernel runs nothing from
+  that reach outside the sandbox and never
   looks a program up on PATH: its git is the Command Line Tools' install,
   its `ps` is `/bin/ps`, and the sandbox's own launcher is
   `/usr/bin/sandbox-exec`, each checked before it runs to be root's alone,
@@ -55,9 +61,14 @@ Stated so the boundary is drawn where it is [4]:
   `pg_scratch` setting), which no turn can read or write; a task's Postgres
   and Redis run only under `service.sb`.
 - A turn can unmount a disk the user mounted, the backup disk included,
-  since macOS allows a user's own unmount whatever the profile says. That
-  costs the next backup its disk (the dump refuses a missing directory),
-  not its contents.
+  since macOS allows a user's own unmount whatever the profile says. It
+  cannot mount anything in the disk's place (The turn sandbox, Files, in
+  [harnesses.md](harnesses.md)), so that costs the next backup its disk (the
+  dump refuses a missing directory), not its contents.
+- `launchservicesd` stays reachable from a turn, since Claude Code hangs
+  without it; what keeps `open` from launching anything is the denied Launch
+  Services database, quarantine resolver, and Apple events, not a deny of the
+  service that launches.
 - The demonstration's databases share one `test` role and password on
   5439, so a turn there could connect to another run's database. A task
   the kernel provisions has its own cluster, roles, and passwords, and its
