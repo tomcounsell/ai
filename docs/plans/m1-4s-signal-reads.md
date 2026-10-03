@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4s-signal-reads
 type: bug
-status: critique round 2 of 2 said revise; its findings built in; in build
+status: built; in review
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -335,3 +335,16 @@ The rounds are spent; each finding is built in.
 6. `m1-4-checks.md:1089` named; `m1-4c-verifier.md:215` edited; the 1.4b
    branch says what this task deletes if 1.4b lands first; `read_verdict`
    holds the `.valor` descriptor itself.
+
+## Build
+
+Built as planned, with one ordering change: `fetch_into_mirror` checks the
+clone's `.git` and the four names before it asks git about the clone's
+config, so a linked workspace is refused before git reads anything there.
+The suite at the plan commit: 507 passed, 7 skipped. With the build: 527
+passed, 7 skipped, 20 tests added (13 in `tests/test_signals.py`, 3 in
+`tests/test_session.py`, 5 in `tests/test_workspace.py`, the `big` case
+deleted from `tests/test_fresh.py`). Two `tests/test_fresh.py` tests that
+start a task's own Postgres or Redis failed once in the full run while
+other suites ran on the machine and passed when run again on their own.
+Ruff check and format are clean.
