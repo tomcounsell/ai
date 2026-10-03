@@ -72,7 +72,7 @@ def prefix():
 
 
 def _mine(prefix: str) -> list[Path]:
-    return list(Path("/tmp").glob(f"{prefix}*"))
+    return list(Path(settings.pg_scratch).glob(f"{prefix}*"))
 
 
 def _dump(backup_dir, **kw):

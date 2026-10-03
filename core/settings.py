@@ -13,7 +13,6 @@ as a shell assignment (`SETTING_PGHOST=/tmp`), which is how `scripts/demo_worksp
 import getpass
 import os
 import shlex
-import shutil
 from dataclasses import dataclass, field, fields
 from datetime import date
 from pathlib import Path
@@ -23,9 +22,8 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def _pg_bin() -> str:
-    found = shutil.which("pg_dump")
-    return str(Path(found).parent) if found else "/opt/homebrew/opt/postgresql@18/bin"
+def _passfile() -> str:
+    return _env("VALOR_PG_PASSFILE", str(Path.home() / ".config" / "valor-kernel" / "pgpass"))
 
 
 def _git() -> str:
@@ -34,10 +32,6 @@ def _git() -> str:
     from core import binaries
 
     return binaries.git() or ""
-
-
-def _claude() -> str:
-    return shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 
 
 @dataclass(frozen=True)
@@ -132,17 +126,24 @@ class Settings:
     test_database: str = field(default_factory=lambda: _env("VALOR_TEST_DB", "valor_rebuild_test"))
     kernel_role: str = "valor_kernel"
     owner_role: str = field(default_factory=lambda: _env("VALOR_PG_OWNER", getpass.getuser()))
-    pg_bin: str = field(default_factory=lambda: _env("VALOR_PG_BIN", _pg_bin()))
+    # Programs the kernel runs are named by fixed path, never looked up on
+    # PATH: a turn can write to directories on the user's PATH, so a lookup
+    # would run what a turn left there. Each default sits under a directory
+    # every sandbox profile write-denies (`core/workspace.py`), and an
+    # override must name a program inside such a directory too.
+    pg_bin: str = field(default_factory=lambda: _env("VALOR_PG_BIN", "/opt/homebrew/opt/postgresql@18/bin"))
     pg_data_dir: str = field(default_factory=lambda: _env("VALOR_PG_DATA", "/opt/homebrew/var/postgresql@18"))
-    pg_passfile: str = field(
-        default_factory=lambda: _env(
-            "VALOR_PG_PASSFILE", str(Path.home() / ".config" / "valor-kernel" / "pgpass")
-        )
+    pg_passfile: str = field(default_factory=_passfile)
+    # Where `core/backup.py` makes its scratch clusters, which run outside
+    # any sandbox: inside the kernel key directory, which every profile
+    # read- and write-denies, so no turn can edit a cluster before it starts.
+    pg_scratch: str = field(
+        default_factory=lambda: _env("VALOR_PG_SCRATCH", str(Path(_passfile()).parent / "run"))
     )
 
     # -- the model provider ---------------------------------------------------
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
-    claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", _claude()))
+    claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", str(Path.home() / ".local/bin/claude")))
 
     # -- git, as the kernel runs it: a root-owned install, never looked up on
     # a PATH or through a cache a turn can write (core/binaries.py) -----------

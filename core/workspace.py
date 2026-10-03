@@ -95,6 +95,7 @@ HOME_WRITE_DENIED = (
     ".local/share/claude",
     ".claude",
     ".config/git",
+    ".cache/uv",
 )
 HOME_WRITE_DENIED_FILES = (
     ".zshrc",
@@ -265,6 +266,16 @@ def _paths(kind: str, paths) -> list[str]:
     return [f'    ({kind} "{p}")' for p in paths]
 
 
+def _ancestors(paths) -> list[str]:
+    """Every directory above each path but `/`, for the path as written and
+    with symlinks resolved."""
+    found = set()
+    for p in paths:
+        for form in {str(p), os.path.realpath(p)}:
+            found.update(str(a) for a in Path(form).parents if str(a) != "/")
+    return sorted(found)
+
+
 def profile(
     *,
     rw: list[Path],
@@ -288,6 +299,7 @@ def profile(
     denied = [home / d for d in HOME_DENIED]
     if work is not None:
         denied.append(work)
+    hidden = [*denied, home / ".claude" / "projects", home / ".claude" / "history.jsonl"]
     lines = [
         "(version 1)",
         "(allow default)",
@@ -297,6 +309,8 @@ def profile(
         f'    (literal "{home / ".claude" / "history.jsonl"}"))',
     ]
     if fresh:
+        hidden += [Path("/private/tmp"), Path("/private/var/tmp"), Path("/private/var/folders")]
+        hidden += [home / ".claude", home / ".claude.json"]
         lines += [
             "(deny file-read* file-write*",
             '    (subpath "/private/tmp")',
@@ -305,6 +319,9 @@ def profile(
             f'    (subpath "{home / ".claude"}")',
             f'    (literal "{home / ".claude.json"}"))',
         ]
+    kernel = kernel if kernel is not None else kernel_paths()
+    write_denied = [home / d for d in HOME_WRITE_DENIED] + [home / f for f in HOME_WRITE_DENIED_FILES]
+    write_denied += [Path(p) for p in SYSTEM_WRITE_DENIED]
     lines += [
         "(deny file-write*",
         *_paths("subpath", [home / d for d in HOME_WRITE_DENIED]),
@@ -321,8 +338,16 @@ def profile(
     lines += ["(allow file-read-metadata", *_paths("literal", ancestors), ")"]
     lines += [
         "(deny file-read* file-write*",
-        *_paths("subpath", kernel if kernel is not None else kernel_paths()),
+        *_paths("subpath", kernel),
         ")",
+        # Every directory above a denied path, itself and not its entries:
+        # renaming one would move the denied path's contents to a name no
+        # rule covers, and a turn could put its own directory in its place.
+        # A mount over a denied path does the same, so none is allowed.
+        "(deny file-write*",
+        *_paths("literal", _ancestors([*hidden, *write_denied, *kernel])),
+        ")",
+        "(deny file-mount)",
         '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
     ]
     if service:
@@ -1150,7 +1175,8 @@ def check_harness(
     lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str], *, services: bool = False
 ) -> dict[str, Any]:
     """The harness settings of one fresh session: its own profile, TMPDIR,
-    Claude Code config directory, and the trusted git first on PATH. A
+    Claude Code config directory, uv cache, and the trusted git first on
+    PATH. A
     session that runs nothing against the task's services (critique) gets
     none of their ports and only the PATH of the task's environment, so no
     database credential; review and test get their own password-file copy
@@ -1168,6 +1194,9 @@ def check_harness(
     else:
         fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
     fresh_env["PATH"] = f"{git_dir}:{fresh_env.get('PATH', '/usr/bin:/bin')}"
+    # uv's own cache (`~/.cache/uv`) is write-denied, since the user's later
+    # `uv sync` installs from it; a fresh session's uv caches under its tmp.
+    fresh_env["UV_CACHE_DIR"] = str(check_dir / "tmp" / "uv")
     return {
         "sandbox_profile": str(path),
         "tmpdir": str(check_dir / "tmp"),

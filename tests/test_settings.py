@@ -31,6 +31,27 @@ def test_an_override_reaches_its_value_and_defaults_hold_otherwise(monkeypatch, 
     assert Settings().backup_dir == "/Volumes//valor_temp"
 
 
+def test_programs_are_named_by_fixed_path_whatever_is_first_on_path(monkeypatch, tmp_path):
+    """A turn can write to directories on the user's PATH, so a `claude` or
+    `pg_dump` left there must not become what the kernel runs."""
+    for name in ("claude", "pg_dump"):
+        (tmp_path / name).write_text("#!/bin/sh\n")
+        (tmp_path / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    for name in ("VALOR_CLAUDE", "VALOR_PG_BIN", "VALOR_PG_PASSFILE", "VALOR_PG_SCRATCH"):
+        monkeypatch.delenv(name, raising=False)
+    s = Settings()
+    assert s.claude == str(Path.home() / ".local/bin/claude")
+    assert s.pg_bin == "/opt/homebrew/opt/postgresql@18/bin"
+    assert s.pg_scratch == str(Path.home() / ".config/valor-kernel/run")
+    monkeypatch.setenv("VALOR_CLAUDE", "/opt/homebrew/bin/claude")
+    monkeypatch.setenv("VALOR_PG_BIN", "/opt/homebrew/opt/postgresql@17/bin")
+    monkeypatch.setenv("VALOR_PG_PASSFILE", str(tmp_path / "keys" / "pgpass"))
+    s = Settings()
+    assert (s.claude, s.pg_bin) == ("/opt/homebrew/bin/claude", "/opt/homebrew/opt/postgresql@17/bin")
+    assert s.pg_scratch == str(tmp_path / "keys" / "run")
+
+
 def test_a_connection_string_names_the_password_file_and_holds_no_password():
     dsn = settings.dsn()
     assert f"passfile={settings.pg_passfile}" in dsn and "password=" not in dsn

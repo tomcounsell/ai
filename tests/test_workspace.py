@@ -44,6 +44,23 @@ for target in sys.argv[1:]:
             open(arg, "a").close()
         elif mode == "list":
             os.listdir(arg)
+        elif mode == "mkdir":
+            os.mkdir(arg)
+            os.rmdir(arg)
+        elif mode == "rename":
+            src, _, dst = arg.partition(">")
+            os.rename(src, dst)
+        elif mode == "plant":  # move a directory aside, link a planted one in its place
+            src, _, planted = arg.partition(">")
+            os.rename(src, src + ".old")
+            os.symlink(planted, src)
+        elif mode == "swap":  # renamex_np(RENAME_SWAP)
+            import ctypes
+            src, _, dst = arg.partition(">")
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.renamex_np(src.encode(), dst.encode(), 2) != 0:
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err))
         elif mode == "connect":
             s = socket.socket()
             s.settimeout(1)
@@ -312,6 +329,83 @@ def test_the_working_session_cannot_write_where_a_later_process_of_the_user_runs
     finally:
         homebrew.unlink(missing_ok=True)
     assert got == ["denied"] * 10 + ["open", "denied", "denied", "open"]
+
+
+def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_path):
+    """Renaming a directory above a denied path, by any name or call, would
+    move the denied path's contents to a name no rule covers, or let a turn
+    put its own directory in its place; so would a mount."""
+    home = tmp_path / "home"
+    for d in (".local/share/claude/versions", ".config/other", "Library/Caches", ".cache/uv"):
+        (home / d).mkdir(parents=True)
+    (home / ".local/bin").mkdir()
+    claude = home / ".local/bin/claude"
+    claude.write_text("the real one")
+    keys = home / ".config/valor-kernel"
+    keys.mkdir()
+    (keys / "pgpass").write_text("secret")
+    planted = tmp_path / "planted"
+    (planted / "bin").mkdir(parents=True)
+    (planted / "bin/claude").write_text("planted")
+    lay = kws.Layout(tmp_path / "work" / "abc123")
+    profile = tmp_path / "turn.sb"
+    profile.write_text(kws.turn_profile(lay, [], home=home, kernel=[keys, home / "absent" / "keys"]))
+    got = probe(
+        profile,
+        f"rename:{home / '.local'}>{home / '.local-old'}",
+        f"rename:{home / '.local/share'}>{home / '.local/share-old'}",
+        f"plant:{home / '.local'}>{planted}",
+        f"swap:{home / '.local'}>{planted}",
+        f"rename:{home / '.LOCAL'}>{home / '.local-alias'}",
+        f"rename:{home / '.config'}>{home / '.config-old'}",
+        f"read:{keys / 'pgpass'}",
+        f"rename:{home / 'Library'}>{home / 'Library-old'}",
+        f"rename:{home}>{tmp_path / 'home-old'}",
+        f"mkdir:{home / 'absent'}",
+        f"create:{home / '.cache/uv/x'}",
+        f"create:{home / '.local/x'}",
+        f"create:{home / '.config/x'}",
+        f"create:{home / 'Library/Caches/x'}",
+        f"mkdir:{home / '.config/newapp'}",
+        f"rename:{home / '.config/other'}>{home / '.config/other2'}",
+    )
+    assert got == ["denied"] * 11 + ["open"] * 5
+    assert claude.read_text() == "the real one" and (keys / "pgpass").read_text() == "secret"
+
+    image = tmp_path / "planted.dmg"
+    subprocess.run(
+        ["/usr/bin/hdiutil", "create", "-quiet", "-size", "2m", "-fs", "HFS+", "-volname", "vprobe",
+         "-srcfolder", str(planted / "bin"), str(image)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    mountpoint = home / ".local/bin"
+    try:
+        done = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile),
+             "/usr/bin/hdiutil", "attach", "-nobrowse", "-mountpoint", str(mountpoint), str(image)],
+            capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"},
+        )  # fmt: skip
+        assert done.returncode != 0 and not os.path.ismount(mountpoint)
+        assert claude.read_text() == "the real one"
+    finally:
+        if os.path.ismount(mountpoint):
+            subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mountpoint)], check=False)
+
+
+def test_a_turn_can_neither_read_nor_write_a_scratch_cluster(tmp_path):
+    """`initdb`, `pg_ctl` and the server run on a scratch cluster outside any
+    sandbox, so its directory is inside the kernel key directory, which every
+    profile denies."""
+    from core import backup
+    from core.settings import settings
+
+    assert Path(settings.pg_scratch).parent == Path(settings.pg_passfile).parent
+    profile = tmp_path / "turn.sb"
+    profile.write_text(kws.turn_profile(kws.Layout(tmp_path / "work" / "abc123"), [], home=tmp_path / "home"))
+    with backup.scratch_cluster(prefix=f"vk-{uuid.uuid4().hex[:6]}-") as cluster:
+        assert cluster.root.parent == Path(settings.pg_scratch)
+        conf = cluster.data / "postgresql.conf"
+        assert probe(profile, f"list:{cluster.root}", f"read:{conf}", f"append:{conf}") == ["denied"] * 3
 
 
 # -- the kernel mirror ------------------------------------------------------------------------

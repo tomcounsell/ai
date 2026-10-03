@@ -338,8 +338,9 @@ directory, under an exclusive lock on `.valor_rebuild.lock` there: the disk
 is exFAT, which has neither hard links nor an exclusive rename, so the lock
 is what keeps two dumps from taking one name. The directory is synced to
 disk after each dump's renames. `python -m core restore DUMP`
-restores a dump into a scratch cluster under `/tmp`, compares it with its
-manifest, and removes the cluster.
+restores a dump into a scratch cluster under the kernel key directory (the
+`pg_scratch` setting, `~/.config/valor-kernel/run`, which no sandbox profile
+can read or write), compares it with its manifest, and removes the cluster.
 
 **Rehearsed on 2026-10-01** from the command line: `backup` wrote
 `valor_rebuild-20261001T151206Z.dump` (1,416 events, max id 1,416, 22
