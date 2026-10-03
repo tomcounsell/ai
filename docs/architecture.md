@@ -263,8 +263,9 @@ Critique, review, and docs run in fresh sessions. Prompts per state are in
 `no_question.md` (clarify found nothing to ask), `plan.json` (the committed
 plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
-layout. `turn.collected` records what the turn left, its state, and its
-verdict; `task.delivered` waits for the checks
+layout. `turn.collected` records what the turn left, its state, its
+verdict, and the screens `look` kept (name, size, and SHA-256 each, or the
+reason one was refused); `task.delivered` waits for the checks
 ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
 **An answer or feedback is spent only by a turn that finishes.** After a
@@ -471,7 +472,7 @@ Tom's decision.
 
 **Verify by use.** No run in either experiment looked at a UI result in a
 browser (rebuild-baseline.md, Browser use). A headless browser in the
-workspace is a capability for Mission item 1 ("testing actual use"),
+workspace (`look`) is a capability for Mission item 1 ("testing actual use"),
 specified in [harnesses.md](harnesses.md).
 
 ## The objective tree

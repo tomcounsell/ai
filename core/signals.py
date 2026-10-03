@@ -8,6 +8,8 @@ task's workspace, read when the turn ends.
   stakes, loop counts, and scope additions.
 - `.valor/done.md`: from a build or patch turn, a candidate: what was
   delivered and how it was verified.
+- `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
+  as evidence (name, size, SHA-256) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
   workspace, `{"action_type", "target", "payload"}`. The kernel passes each
   to the broker, which decides what it may do.
@@ -22,7 +24,10 @@ killed mid-way leaves whatever it wrote readable. Each file is moved to
 `.valor/handled/<turn_id>/` once read, so no signal is read twice.
 """
 
+import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +44,7 @@ class Signals:
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)
+    screens: list[dict[str, Any]] = field(default_factory=list)
 
 
 def collect(workspace: str | Path, turn_id: str) -> Signals:
@@ -79,7 +85,89 @@ def collect(workspace: str | Path, turn_id: str) -> Signals:
             entry["error"] = f"unreadable request: {exc!r}"
         signals.effects.append(entry)
         _move(path, handled / "effects" / path.name)
+    signals.screens = read_screens(workspace, turn_id)
     return signals
+
+
+def read_screens(workspace: str | Path, turn_id: str) -> list[dict[str, Any]]:
+    """The files in `.valor/screens/` as `{name, bytes, sha256}`, each opened
+    relative to a directory descriptor without following links or blocking,
+    and recorded only when a regular file with one link; anything else is
+    `{name, refused: reason}` and is never read. Each entry is then moved to
+    `.valor/handled/<turn_id>/screens/`. Written to be replaced by the shared
+    safe-read helper."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    out: list[dict[str, Any]] = []
+    fds: list[int] = []
+    try:
+        parent = os.open(workspace, flags | os.O_DIRECTORY)
+        fds.append(parent)
+        for part in (DIR, "screens"):
+            parent = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)
+            fds.append(parent)
+    except OSError:
+        return out  # no screens directory, or one that is not a plain directory
+    try:
+        screens = parent
+        valor = fds[-2]
+        dest = None
+        for name in sorted(os.listdir(screens)):
+            entry: dict[str, Any] = {"name": name}
+            try:
+                st = os.stat(name, dir_fd=screens, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode):
+                    entry["refused"] = "not a regular file"
+                elif st.st_nlink != 1:
+                    entry["refused"] = "more than one link"
+                else:
+                    fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=screens)
+                    try:
+                        after = os.fstat(fd)
+                        if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
+                            raise OSError("changed while read")
+                        digest, size = hashlib.sha256(), 0
+                        while chunk := os.read(fd, 1 << 20):
+                            digest.update(chunk)
+                            size += len(chunk)
+                    finally:
+                        os.close(fd)
+                    entry.update({"bytes": size, "sha256": digest.hexdigest()})
+            except OSError as exc:
+                entry["refused"] = exc.strerror or str(exc)
+            out.append(entry)
+            if dest is None:
+                dest = _screens_dest(valor, turn_id, fds)
+            if dest is not None:
+                try:
+                    os.rename(name, name, src_dir_fd=screens, dst_dir_fd=dest)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return out
+
+
+def _screens_dest(valor: int, turn_id: str, fds: list[int]) -> int | None:
+    """`.valor/handled/<turn_id>/screens/` as a descriptor, made step by step
+    relative to `.valor` and never through a link."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
+    parent = valor
+    for part in ("handled", turn_id, "screens"):
+        try:
+            os.mkdir(part, 0o755, dir_fd=parent)
+        except FileExistsError:
+            pass
+        except OSError:
+            return None
+        try:
+            parent = os.open(part, flags, dir_fd=parent)
+        except OSError:
+            return None
+        fds.append(parent)
+    return parent
 
 
 def _move(path: Path, to: Path) -> None:

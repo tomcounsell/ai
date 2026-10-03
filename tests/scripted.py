@@ -110,6 +110,8 @@ elif stage in ("build", "patch"):
     elif act != "reasons":
         answer = re.search(r"# Tom's answer\n\n(.*)", prompt)
         commit("greeting.txt", (answer.group(1) if answer else f"greeting {n}") + "\n", stage)
+    for command in cfg.get("run", []):
+        subprocess.run(command, shell=True, check=False)
     if cfg.get("push") and act != "nothing":
         (v / "effects" / "push.json").write_text(json.dumps({"action_type": "push_branch",
             "target": cfg["push"], "payload": {"head_sha": head()}}))

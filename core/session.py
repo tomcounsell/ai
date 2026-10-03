@@ -263,6 +263,7 @@ async def record(
                 "candidate": extra.get("candidate"),
                 "errors": errors,
                 "effects": effects,
+                "screens": found.screens,
             },
         )
         if current is state and verdict == "asked":

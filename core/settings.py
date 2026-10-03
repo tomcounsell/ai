@@ -144,6 +144,19 @@ class Settings:
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", _claude()))
 
+    # -- the headless browser `look` runs: one fixed Playwright build, never
+    # the newest in the cache (a turn cannot write that cache) ---------------
+    browser: str = field(
+        default_factory=lambda: _env(
+            "VALOR_BROWSER",
+            str(
+                Path.home()
+                / "Library/Caches/ms-playwright/chromium_headless_shell-1208"
+                / "chrome-headless-shell-mac-arm64/chrome-headless-shell"
+            ),
+        )
+    )
+
     # -- git, as the kernel runs it: a root-owned install, never looked up on
     # a PATH or through a cache a turn can write (core/binaries.py) -----------
     git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", _git()))

@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-browser
 type: build
-status: planned
+status: built
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -285,3 +285,31 @@ built in.
    `bin/` is shared and written atomically; the fresh-profile test asserts
    no `/private/var/folders` path.
 7. **Done evidence.** The report names where the screenshot is saved.
+
+## Build record
+
+- **Built to the plan, every named test.** `tests/test_look.py` has 18
+  offline tests that run, and two that need an opt-in: `test_memory`
+  (`VALOR_MEASURE=1`) and the live build turn (`VALOR_LIVE=1`, about one
+  dollar). The live turn is written and has not been run.
+- **Offline tests use ports 6451 to 6459.** The local server binds one of
+  them and the profile is told it as a service port, because the dev ports
+  may be in use on a shared machine; the profile's loopback rule is the
+  same for either.
+- **Sandbox finding.** Chromium's own sandbox cannot start inside the turn
+  profile: the GPU process exits with "sandbox initialization failed:
+  Operation not permitted" and the browser aborts. `look` passes
+  `--no-sandbox`; the reason is in the threat model and `docs/harnesses.md`.
+  Under the turn profile and the fresh session's profile both runs
+  succeed, and the fresh run prints no `/private/var/folders` path.
+- **Memory.** Five renders of a Django admin login page (Django served on
+  a loopback port, one `look` per render, process tree sampled by
+  `/bin/ps` every 50 ms): peaks of 372, 343, 344, 330, and 343 MB. Each
+  render covers both browser runs. `docs/machine.md` now holds 372 MB and a
+  peak total of 10,202 MB.
+- **`read_screens` is replaceable.** It is one function in
+  `core/signals.py` with no other reader of `signals.py` touched; the
+  shared safe-read helper from `m1-4s-signal-reads` replaces its body at
+  merge.
+- **Rebase note.** 3b also edits `core/workspace.py`, `core/settings.py`,
+  and `docs/harnesses.md`; whichever merges later rebases.
