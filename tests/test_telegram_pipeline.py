@@ -11,11 +11,11 @@ import pytest
 pytest.importorskip("core.intake")
 pytest.importorskip("core.bridge")
 
-from bridges.telegram.bridge import TelegramBridge  # noqa: E402
-from bridges.telegram.kernel import from_core  # noqa: E402
-from core import db  # noqa: E402
-from tests.telegram_emulator import Emulator, EmulatorWire  # noqa: E402
-from tests.telegram_kernel import Action  # noqa: E402
+from bridges.telegram.bridge import TelegramBridge
+from bridges.telegram.kernel import from_core
+from core import db
+from tests.telegram_emulator import Emulator, EmulatorWire
+from tests.telegram_kernel import Action
 
 CHAT = "-1010"
 

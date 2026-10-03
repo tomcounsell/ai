@@ -39,7 +39,7 @@ item:
 |---|---|
 | 1, 28 | `bridges/telegram/__main__.py run` calls `core.bridge.serve(TelegramBridge())`; the class implements `Bridge` (`channel = "telegram"`, `performers()`, `async run(outbox)`, `async tick()`) |
 | 2 | Every message ends at `intake.receive(conn, inbound)`; `Received.duplicate` means already recorded, and nothing more happens |
-| 3, 32 | Gap fill pages with `intake.highest` as a hint and receives only ids `intake.recorded` does not list, checked before any download |
+| 3, 32 | Gap fill pages back to the newest id the last pass saw, or to `intake.highest` for a chat it has no id for, and receives only ids `intake.recorded` does not list, checked before any download |
 | 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
 | 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
 | 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
@@ -235,17 +235,19 @@ sees it. A failing notice is yielded again on later wakes; its reason is
 logged once per notice.
 
 **Gap fill.** Runs on each connect and in `tick()`, per owned
-chat. Each pass pages back from the newest message, receives every id
-`intake.recorded` does not list, and stops at a message dated before the
-pass's floor. After a chat's first pass the floor is the previous pass's
-start less the clock margin, across reconnects too, so a message whose
-receive failed and dropped the connection is taken on the reconnect; it
-never goes below the first pass's floor. The first pass keeps every id
-above `intake.highest` and stops below that message's date less
-`serve_tick_s` and the margin. A chat with no rows starts at the first
-connect. Media is downloaded only for ids not recorded. A flood wait from
-a pass is held like any other, and `tick()` skips its pass while one is
-held.
+chat. Each pass pages back from the newest message to a stop id, receives
+every id above it that `intake.recorded` does not list, and remembers the
+newest id it saw. Message ids within a Telegram chat only grow, so a
+message the last pass did not see has a higher id than any it did see.
+The stop id is the newest id the chat's last completed pass saw, written
+to `telegram-seen.json` in the key directory after each pass, so it holds
+across reconnects and restarts: a message whose receive failed, or whose
+update was dropped before the process died, is taken by the next pass. A
+pass that fails writes nothing. A chat missing from the file stops at
+`intake.highest`; one with no rows takes its newest id as the stop and
+receives nothing. Media is downloaded only for ids not recorded. A flood
+wait from a pass is held like any other, and `tick()` skips its pass
+while one is held.
 
 **Flood waits.** A flood wait on a request is held in memory; later
 requests wait it out. A restart forgets it, and Telegram answers the next

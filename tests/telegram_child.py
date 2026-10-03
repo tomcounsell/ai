@@ -78,7 +78,7 @@ async def receive(url: str, chat: str, store: str, mark: str, where: str) -> Non
 
     if where != "none":
         s.receive = pausing
-    bridge = TelegramBridge(EmulatorWire(url), s.kernel())
+    bridge = TelegramBridge(EmulatorWire(url), s.kernel(), seen=Path(store + ".seen"))
     await bridge.connect()
     Path(mark).write_text("connected")
     await asyncio.sleep(3600)

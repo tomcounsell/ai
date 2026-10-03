@@ -381,7 +381,7 @@ class EmulatorWire:
                     f"{self.url}/updates", params={"after": self._seq, "epoch": self._epoch}
                 ) as r:
                     out = await r.json()
-            except (aiohttp.ClientError, TimeoutError):
+            except aiohttp.ClientError, TimeoutError:
                 await self.disconnect()
                 return
             if out["epoch"] != self._epoch:

@@ -1,18 +1,16 @@
 """Gap fill: receive what the live handler missed.
 
 Telethon drops updates on pts gaps while connected, and nothing arrives
-while the bridge is down, so a high-water mark alone loses messages. Each
-pass pages back from the newest message in a chat, keeps every id
-`intake.recorded` does not list, and stops at a message older than the
-pass's floor (and, on the first pass after connecting, at or below the
-chat's highest recorded id). The kept messages go through the handler's
-own path, oldest first.
+while the bridge is down. Each pass pages back from the newest message in
+a chat to a stop id, keeps every id above it that `intake.recorded` does
+not list, and hands them to the handler's own path, oldest first. Message
+ids within a Telegram chat only grow, so a message the last pass did not
+see has an id above the newest one it did see.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 
 from bridges.telegram.wire import Msg, Wire
 
@@ -23,20 +21,22 @@ async def missing(
     wire: Wire,
     chat_id: int,
     *,
-    floor: datetime,
-    stop_id: int | None,
+    stop_id: int,
     recorded: Callable[[list[str]], Awaitable[set[str]]],
-) -> list[Msg]:
-    """Messages above the floor that are not recorded, oldest first."""
+) -> tuple[list[Msg], int]:
+    """Messages with ids above `stop_id` that are not recorded, oldest
+    first, and the newest id the pass saw."""
     keep: list[Msg] = []
+    top = stop_id
     offset = 0
     while True:
         page = await wire.history(chat_id, offset_id=offset, limit=PAGE)
         if not page:
             break
+        top = max(top, page[0].id)
         batch, done = [], False
         for m in page:
-            if m.date < floor and (stop_id is None or m.id <= stop_id):
+            if m.id <= stop_id:
                 done = True
                 break
             batch.append(m)
@@ -50,4 +50,4 @@ async def missing(
             break
         offset = oldest
     keep.reverse()
-    return keep
+    return keep, top

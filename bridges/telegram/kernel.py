@@ -74,5 +74,10 @@ def session_path() -> Path:
     return key_dir() / "telegram.session"
 
 
+def seen_path() -> Path:
+    """The newest message id each chat's last gap-fill pass saw."""
+    return key_dir() / "telegram-seen.json"
+
+
 def keyfile() -> Path:
     return key_dir() / "telegram-keys"
