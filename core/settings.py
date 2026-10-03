@@ -318,6 +318,10 @@ class Settings:
     )
     # The largest verdict file a fresh session may leave.
     verdict_max_bytes: int = 256 * 1024
+    # How long one suite run of the test check may take (its setup aside).
+    suite_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_SUITE_TIMEOUT_S", "1800")))
+    # The largest JUnit file a suite run may leave.
+    junit_max_bytes: int = 50 * 1024 * 1024
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

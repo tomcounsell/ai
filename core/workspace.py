@@ -45,6 +45,7 @@ the sending side run inside the turn's own sandbox, the receiving side with
 fsck, one pack file under a file-size limit, and a footprint watchdog.
 """
 
+import contextlib
 import ctypes
 import functools
 import hashlib
@@ -60,6 +61,7 @@ import stat
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -393,11 +395,20 @@ def check_profile(
 
 
 def service_profile(
-    lay: Layout, task_id: str, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
+    lay: Layout,
+    task_id: str,
+    ports: list[int],
+    *,
+    work: Path,
+    home: Path = HOME,
+    kernel: list[Path] | None = None,
 ) -> str:
+    """The services' profile: their data directories, the whole work
+    directory `work` denied first. `work` is passed, never derived from
+    `lay`: a check's service layout sits under the task's `checks/`."""
     return profile(
         rw=[lay.pg, lay.redis],
-        work=lay.root.parent,
+        work=work,
         home=home,
         kernel=kernel,
         service=task_id,
@@ -559,10 +570,20 @@ class Provisioned:
         return asdict(self)
 
 
-def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[str, str]) -> dict[str, str]:
-    """The turn's environment for this project: tools first on PATH, the
-    caches under the task, the database and Redis it was given."""
-    bin_dir = lay.root.parent / "bin"
+def harness_env(
+    lay: Layout,
+    spec: Spec,
+    ports: dict[str, int],
+    passwords: dict[str, str],
+    *,
+    bin_dir: Path,
+    passfile: Path,
+) -> dict[str, str]:
+    """The turn's environment for this project: tools (`bin_dir`, the work
+    directory's `bin/`) first on PATH, the caches under `lay`, the database
+    and Redis it was given, and `passfile` as the Postgres password file.
+    The directories are passed, never derived from `lay`, so a check's own
+    service layout gets the task's `bin/`."""
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
         "VALOR_BROWSER": settings.browser,
@@ -578,7 +599,7 @@ def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[
                 "PGPORT": str(port),
                 "PGUSER": "app",
                 "PGDATABASE": "app",
-                "PGPASSFILE": str(lay.home / "pgpass"),
+                "PGPASSFILE": str(passfile),
                 "DATABASE_URL": f"postgresql://app:{passwords['app']}@127.0.0.1:{port}/app",
                 "TEST_DB_HOST": "127.0.0.1",
                 "TEST_DB_PORT": str(port),
@@ -593,9 +614,7 @@ def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[
                     "REDIS_PORT": str(port)})  # fmt: skip
     env.update(
         {
-            k: v.replace("{port}", str(ports.get("postgres", ""))).replace(
-                "{passfile}", str(lay.home / "pgpass")
-            )
+            k: v.replace("{port}", str(ports.get("postgres", ""))).replace("{passfile}", str(passfile))
             for k, v in spec.env.items()
         }
     )
@@ -679,12 +698,16 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     (lay.profiles / "turn.sb").write_text(turn_profile(lay, service_ports))
     passwords: dict[str, str] = {}
     if spec.services:
-        (lay.profiles / "service.sb").write_text(service_profile(lay, task_id, service_ports))
+        (lay.profiles / "service.sb").write_text(
+            service_profile(lay, task_id, service_ports, work=lay.root.parent)
+        )
     if "postgres" in spec.services:
         passwords = _init_postgres(lay, task_id, spec, ports["postgres"])
     if "redis" in spec.services:
         lay.redis.mkdir(parents=True, exist_ok=True)
-    env = harness_env(lay, spec, ports, passwords)
+    env = harness_env(
+        lay, spec, ports, passwords, bin_dir=lay.root.parent / "bin", passfile=lay.home / "pgpass"
+    )
     harness = {
         "sandbox_profile": str(lay.profiles / "turn.sb"),
         "gitconfig": str(lay.home / "gitconfig"),
@@ -734,22 +757,36 @@ def _remote_head(cache: Path) -> str:
 
 
 def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
-    """Each setup command once, in the clone, under the turn's profile, with
-    the turn's environment; a failure is recorded, never fatal."""
+    """The spec's setup in the builder's clone; a failure is recorded, never
+    fatal."""
+    return run_setup(lay.repo, harness, spec.setup, f"setup-{task_id}")
+
+
+def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[list[str], dict[str, str]]:
+    """One setup command's argv and environment: under the harness's
+    profile, marked `mark`, with the turn's environment."""
+    argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+    return argv, {**turn_environment(harness), runs.TURN_ENV: mark}
+
+
+def run_setup(checkout: Path, harness: dict[str, Any], commands, mark: str) -> dict[str, Any]:
+    """Each setup command once, in `checkout`, under the harness's profile,
+    with the turn's environment, marked `<mark>-<n>` and reaped; it stops at
+    the first failure. Returns `ok` and each command's exit and output
+    tail."""
     out: list[dict[str, Any]] = []
-    env = turn_environment(harness)
-    for command in spec.setup:
-        mark = f"setup-{task_id}-{len(out)}"
-        argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+    for command in commands:
+        step = f"{mark}-{len(out)}"
+        argv, env = setup_command(harness, step, command)
         try:
             ran = subprocess.run(
-                argv, cwd=lay.repo, env={**env, runs.TURN_ENV: mark}, capture_output=True, text=True,
+                argv, cwd=checkout, env=env, capture_output=True, text=True,
                 timeout=settings.setup_timeout_s, check=False,
             )  # fmt: skip
             code, text = ran.returncode, ran.stdout + ran.stderr
         except subprocess.TimeoutExpired as exc:
             code, text = "timeout", str(exc)
-        runs.reap(mark)
+        runs.reap(step)
         out.append({"command": command, "exit": code, "tail": text[-1500:]})
         if code != 0:
             return {"ok": False, "commands": out}
@@ -1041,7 +1078,7 @@ def fetch_into_mirror(
     if not ref.startswith("refs/valor/"):
         raise FetchRefused(f"{ref} is not a mirror ref")
     try:
-        found = git.hostile(source)
+        found = git.hostile(source, turn_profile_path, mark)
     except git.GitError as exc:
         raise FetchRefused(str(exc)) from None
     if found:
@@ -1170,17 +1207,21 @@ def check_harness(
     Claude Code config directory, and the trusted git first on PATH. A
     session that runs nothing against the task's services (critique) gets
     none of their ports and only the PATH of the task's environment, so no
-    database credential; review and test get their own password-file copy
-    with `services` (1.4b, 1.4c)."""
+    database credential. With `services` (test, review) the session gets
+    the environment `check_services` made for its fresh instances, those
+    ports, and its caches under `<check_dir>/cache/`."""
     name = check_dir.name
     path = lay.profiles / f"{name}.sb"
     path.write_text(check_profile(lay, check_dir, ports if services else []))
     git_dir = str(Path(git.binary()).parent)
     if services:
+        # The check's own copy of the caches, never the builder's.
+        cache = check_dir / "cache"
         fresh_env = {
-            k: v
-            for k, v in env.items()
-            if k not in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "npm_config_cache")
+            **env,
+            "UV_CACHE_DIR": str(cache / "uv"),
+            "UV_PYTHON_INSTALL_DIR": str(cache / "python"),
+            "npm_config_cache": str(cache / "npm"),
         }
     else:
         fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
@@ -1238,45 +1279,75 @@ def write_files(dir_fd: int, files: dict[str, str]) -> None:
             f.write(text)
 
 
-def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    """The verdict a fresh session left at `.valor/verdict.json`, opened
-    component by component without following links and without blocking;
-    then moved to `.valor/handled/<turn_id>/`. Returns (verdict, why not)."""
+def read_turn_file(
+    dir_fd: int, relpath: str, max_bytes: int, *, then: Callable[[int, str], str | None] | None = None
+) -> tuple[bytes | None, str | None]:
+    """A file a turn may have written, at `relpath` under the directory
+    `dir_fd`: each directory opened relative to its parent with
+    `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`, `fstat` required
+    to say a regular file, at most `max_bytes`. So a link, a FIFO, a socket,
+    or a device at the path is refused without blocking. `then(parent_fd,
+    name)`, when given, runs after the read with the file's directory open
+    and may refuse it. Returns (bytes, why not)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    *dirs, name = relpath.split("/")
+    fds: list[int] = []
+    parent = dir_fd
     try:
-        root = os.open(checkout, flags | os.O_DIRECTORY)
+        for part in dirs:
+            try:
+                parent = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent)
+            except FileNotFoundError:
+                return None, f"no {relpath}"
+            except OSError as exc:
+                return None, f"{part} is not a plain directory ({exc.strerror})"
+            fds.append(parent)
+        try:
+            fd = os.open(name, flags | os.O_NONBLOCK, dir_fd=parent)
+        except FileNotFoundError:
+            return None, f"no {relpath}"
+        except OSError as exc:
+            return None, f"{name} is not a plain file ({exc.strerror})"
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None, f"{name} is not a regular file"
+            if st.st_size > max_bytes:
+                return None, f"{name} is over {max_bytes} bytes"
+            body = os.read(fd, max_bytes + 1)
+            if len(body) > max_bytes:
+                return None, f"{name} is over {max_bytes} bytes"
+        finally:
+            os.close(fd)
+        if then is not None:
+            why = then(parent, name)
+            if why:
+                return None, why
+        return body, None
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """The verdict a fresh session left at `.valor/verdict.json`, read with
+    `read_turn_file`, then moved to `.valor/handled/<turn_id>/`. Returns
+    (verdict, why not)."""
+    try:
+        root = os.open(checkout, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY)
     except OSError as exc:
         return None, f"the checkout cannot be opened: {exc.strerror}"
     try:
-        try:
-            valor = os.open(".valor", flags | os.O_DIRECTORY, dir_fd=root)
-        except FileNotFoundError:
-            return None, "no .valor/verdict.json"
-        except OSError as exc:
-            return None, f".valor is not a plain directory ({exc.strerror})"
-        try:
-            try:
-                fd = os.open("verdict.json", flags | os.O_NONBLOCK, dir_fd=valor)
-            except FileNotFoundError:
-                return None, "no .valor/verdict.json"
-            except OSError as exc:
-                return None, f"verdict.json is not a plain file ({exc.strerror})"
-            try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode):
-                    return None, "verdict.json is not a regular file"
-                if st.st_size > settings.verdict_max_bytes:
-                    return None, f"verdict.json is over {settings.verdict_max_bytes} bytes"
-                body = os.read(fd, settings.verdict_max_bytes + 1)
-            finally:
-                os.close(fd)
-            why = _file_away(valor, "verdict.json", turn_id)
-            if why:
-                return None, why
-        finally:
-            os.close(valor)
+        body, why = read_turn_file(
+            root,
+            ".valor/verdict.json",
+            settings.verdict_max_bytes,
+            then=lambda valor, name: _file_away(valor, name, turn_id),
+        )
     finally:
         os.close(root)
+    if body is None:
+        return None, why
     try:
         data = json.loads(body)
     except ValueError:
@@ -1308,6 +1379,145 @@ def _file_away(valor: int, name: str, turn_id: str) -> str | None:
     finally:
         for fd in fds:
             os.close(fd)
+
+
+# -- a check's own services and caches -------------------------------------------------------
+
+SVC_SUFFIX = "-svc"
+
+
+def remove_check_services(lay: Layout) -> list[str]:
+    """Remove every `checks/*-svc/` directory, a check's service data left
+    by a run that ended or a kernel that was killed. Call only after
+    `stop_services` has reaped the task's mark."""
+    gone = []
+    if lay.checks.is_dir():
+        for d in lay.checks.iterdir():
+            if d.name.endswith(SVC_SUFFIX):
+                rmtree(d)
+                gone.append(d.name)
+    return gone
+
+
+def spec_of(project: dict[str, Any]) -> Spec:
+    """The project spec a Brief's `project` copy names (services, roles,
+    env), enough to build a check's services and environment."""
+    return Spec(
+        name=project.get("name") or "project",
+        repo=project.get("repo") or "",
+        kind=project.get("kind") or "plain",
+        suite=project.get("suite") or "true",
+        services=tuple(project.get("services") or ()),
+        roles=tuple(project.get("roles") or ()),
+        setup=tuple(project.get("setup") or ()),
+        env=dict(project.get("env") or {}),
+    )
+
+
+@contextlib.contextmanager
+def check_services(
+    lay: Layout, check_dir: Path, project: dict[str, Any], task_id: str
+) -> Iterator[dict[str, str]]:
+    """Fresh service instances for one check, on the task's own ports.
+
+    The task's own instances are stopped first (every process under
+    `valor.service.<task>`, whichever layout started it) and every stale
+    `checks/*-svc/` removed; a layout at `checks/<name>-svc/` gets a new
+    Postgres cluster with the project's roles and new passwords, and an
+    empty Redis. The password file is copied to `<check_dir>/tmp/pgpass`
+    (`O_NOFOLLOW | O_EXCL`). Yields the check's environment
+    (`harness_env` over the fresh instances). On exit the check's instances
+    are stopped, their directory removed, and the task's own started again;
+    the task's Postgres keeps its data, its Redis starts empty."""
+    spec = spec_of(project)
+    names = list(spec.services)
+    ports = {k: int(v) for k, v in (project.get("ports") or {}).items()}
+    work = lay.root.parent
+    svc = Layout(lay.checks / f"{check_dir.name}{SVC_SUFFIX}")
+    stop_services(task_id, lay)
+    remove_check_services(lay)
+    try:
+        passwords: dict[str, str] = {}
+        passfile = check_dir / "tmp" / "pgpass"
+        if names:
+            svc.profiles.mkdir(parents=True)
+            (svc.profiles / "service.sb").write_text(
+                service_profile(svc, task_id, [ports[n] for n in names], work=work)
+            )
+        if "postgres" in names:
+            passwords = _init_postgres(svc, task_id, spec, ports["postgres"])
+            copy_new(svc.home / "pgpass", passfile)
+        if "redis" in names:
+            svc.redis.mkdir(parents=True, exist_ok=True)
+        start_services(task_id, svc, names, ports)
+        yield harness_env(svc, spec, ports, passwords, bin_dir=work / "bin", passfile=passfile)
+    finally:
+        stop_services(task_id, svc)
+        rmtree(svc.root)
+        if names:
+            start_services(task_id, lay, names, ports)
+
+
+def copy_new(src: Path, dest: Path) -> None:
+    """Copy `src` to `dest`, refusing a `dest` that exists or is a link
+    (`O_EXCL | O_NOFOLLOW`): a check's directory is the suite's to write."""
+    data = src.read_bytes()
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def clone_tree(src: Path, dest: Path) -> None:
+    """`src` copied to `dest` as an APFS clone (`cp -c`), near free on disk;
+    a file written in one never shows in the other."""
+    rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["/bin/cp", "-c", "-R", str(src), str(dest)], check=True, capture_output=True)
+
+
+def rmtree(path: Path) -> None:
+    """Remove a tree a sandboxed program wrote, read-only entries included,
+    never following a link."""
+    if path.is_symlink():
+        path.unlink()
+        return
+    if not path.exists():
+        return
+
+    def writable(func, p, _exc):
+        parent = os.path.dirname(p)
+        os.chmod(parent, 0o700)
+        if not os.path.islink(p) and os.path.isdir(p):
+            os.chmod(p, 0o700)
+        func(p)
+
+    shutil.rmtree(path, onexc=writable)
+
+
+# -- the docs clone ----------------------------------------------------------------------------
+
+
+def docs_clone(mirror: str | Path, candidate: str, dest: Path, turn_id: str) -> None:
+    """A real clone of the candidate from the mirror, for the docs session.
+    Made over `file://` through a temporary `refs/heads/valor-docs/<turn>`,
+    so objects are copied through the pack protocol and never hardlinked;
+    the ref is deleted after. Refuses a candidate whose tree holds `.valor`."""
+    mirror = Path(mirror)
+    if tree_has_valor(mirror, candidate, trusted=True):
+        raise git.GitError(f"{candidate[:12]}'s tree holds a .valor entry")
+    ref = f"refs/heads/valor-docs/{turn_id}"
+    git.trusted(mirror, "update-ref", ref, candidate)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        git.trusted(dest.parent, "clone", "-q", "--no-tags", "--single-branch", "--branch",
+                    f"valor-docs/{turn_id}", f"file://{mirror}", str(dest))  # fmt: skip
+    finally:
+        git.trusted(mirror, "update-ref", "-d", ref)
+    git.trusted(dest, "checkout", "-q", "-b", "docs")
+    git.trusted(dest, "branch", "-q", "-D", f"valor-docs/{turn_id}")
+    git.trusted(dest, "remote", "remove", "origin")
+    with (dest / ".git" / "info" / "exclude").open("a") as f:
+        f.write(".valor/\n")
 
 
 def remove(task_id: str, lay: Layout | None = None) -> None:

@@ -113,11 +113,20 @@ class _Services:
         if self.started or not self.names:
             return None
         try:
-            await asyncio.to_thread(workspace.start_services, self.task_id, self.lay, self.names, self.ports)
+            await asyncio.to_thread(self._start)
         except workspace.Refused as exc:
             return str(exc)
         self.started = True
         return None
+
+    def _start(self) -> None:
+        """Reap whatever is under the task's service mark and remove stale
+        `checks/*-svc/` directories first: a check's Redis that a killed
+        kernel left on the task's port would otherwise pass for the task's
+        own."""
+        workspace.stop_services(self.task_id, self.lay)
+        workspace.remove_check_services(self.lay)
+        workspace.start_services(self.task_id, self.lay, self.names, self.ports)
 
     def down(self) -> None:
         if self.started:
