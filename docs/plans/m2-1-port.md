@@ -178,8 +178,12 @@ returns the result of a send that happened, None when the platform holds
 none. `since` is the `at` of the effect's intent (D34); `bridge.serve`
 wraps the bridge's lookup so the broker's two-argument call passes it,
 finding the intent by the effect id, the key's last segment.
-The scan covers own messages dated at or after `since`, less a clock
-margin, skipping `claimed` ids; there is no stop-at-newest-claimed rule.
+A bridge reads `since` where its platform has nothing better. The
+Telegram lookup reads no date: it reads the chat's history above the
+newest message id the bridge recorded before the send's first message,
+keeps the account's own messages, and skips `claimed` ids; there is no
+stop-at-newest-claimed rule. When part of a split send is on screen, it
+sends the rest under their own `random_id`s and returns the whole.
 Both results carry `{"sent": [{"channel", "chat_id", "message_id"}]}`,
 one entry per platform message.
 

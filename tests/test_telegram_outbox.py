@@ -27,7 +27,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 @pytest.fixture
 def emu():
-    e = Emulator(6534).start()
+    e = Emulator().start()
     yield e
     e.stop()
 
@@ -106,6 +106,28 @@ def test_a_duplicate_random_id_with_nothing_on_screen_sends_it_under_a_new_id(em
         shown = [m for m in emu.own(int(project)) if m["text"] == item.text]
         assert len(shown) == 1
         assert (await marked(dsn, nid))[0]["sent"][0]["message_id"] == str(shown[0]["id"])
+
+    run(go())
+
+
+def test_a_notice_cut_off_after_its_first_part_is_finished_on_the_next_try(emu, dsn, tmp_path, c):
+    _, project = c
+
+    async def go():
+        _, nid = await notice(dsn, project, text="i" * 3000 + " " + "j" * 3000)
+        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
+            item = await due(box, nid)
+            parts = [p.strip() for p in bridge.kernel.split_text(item.text)]
+            emu.control(lose_send_next=True, send_after=1)
+            await bridge.sender.notice(item, box)
+            assert await marked(dsn, nid) == []
+            assert [m["text"] for m in emu.own(int(project))] == parts[:1]
+            await bridge.sender.notice(item, box)
+            own = emu.own(int(project))
+            assert [m["text"] for m in own] == parts
+            [row] = await marked(dsn, nid)
+            assert [e["message_id"] for e in row["sent"]] == [str(m["id"]) for m in own]
+            assert bridge.sender.starts.names() == []
 
     run(go())
 

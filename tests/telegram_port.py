@@ -89,6 +89,9 @@ async def connected(url: str, dsn: str, tmp_path: Path, **kw):
     try:
         yield bridge
     finally:
+        for t in list(bridge._inflight.values()):
+            t.cancel()
+        await bridge.settled()
         await wire.close()
 
 

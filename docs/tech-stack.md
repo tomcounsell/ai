@@ -68,7 +68,7 @@ enforcing outside the model is AI Control [4].
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email chosen, not built |
 | Scheduling | launchd: the kernel's LaunchAgent and the backup job; routines | the kernel in use; routines chosen, not built |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the Telegram bridge's keys and session) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -534,8 +534,8 @@ is metered like any other task.
 both turn sandbox profiles deny: the kernel databases' passwords in a libpq
 password file, and the judgement keys in `judgement-keys` beside it, copied
 from the vault `.env` by `python -m core judgement-keys` ([machine.md](machine.md),
-Keychain, for why not the Keychain). Status: **in use**. The bridges'
-secrets go in the macOS Keychain: **chosen, not built**. Nothing secret is
+Keychain, for why not the Keychain). Status: **in use**. Telegram's keys and
+session sit there too (**in use**); email's: [email.md](bridges/email.md). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.
 

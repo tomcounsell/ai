@@ -171,16 +171,23 @@ password file), which every turn's sandbox denies.
 record. Edits, reactions, and deletions are not part of the port.
 
 **Reply chains.** When a message replies to another, the bridge fetches the
-ancestors through the API, up to a fixed number of hops, and puts them in
-`thread`. Fetching is I/O and belongs here. Choosing which ancestor roots the
+ancestors through the API, back to the root of the chain, and puts them in
+`thread`. The walk stops early at a deleted message or at a message it has
+already passed. Fetching is I/O and belongs here. Choosing which ancestor roots the
 conversation, and which task that root belongs to, is `core/`'s.
 
 **Attachments.** Photos, documents, and voice notes are downloaded to
 `inbound_dir/telegram/`, each named by its sha256, and listed with path,
-type, and size. A download
-that fails or times out is listed with its reason, so a turn can say exactly
-what it could not read. Transcribing or describing media is not the bridge's
-work.
+type, and size. A message with a file is received off the update stream:
+its download runs as its own task, so a slow download never holds up the
+messages behind it. A download has no timer of its own. It ends when the
+file is in, when the connection fails, or when the bridge stops. Telethon
+pings the server every 60 seconds and drops a connection whose last ping
+went unanswered, which fails every request still waiting on it, a stalled
+download included. A download Telegram refuses is listed with its reason,
+so a turn can say exactly what it could not read; a download cut off by a
+lost connection or a stop is taken again by the next gap-fill pass.
+Transcribing or describing media is not the bridge's work.
 
 **After downtime.** The bridge fills the gap itself, on every connect and
 every tick: it pages back through each owned chat to the newest message
@@ -188,7 +195,27 @@ id its last pass saw, kept in `telegram-seen.json` in the key directory
 (for a chat with no entry there, to the lowest id recorded for it),
 and receives every message `intake.recorded` does not list. Message ids
 in a Telegram chat only grow, so nothing newer is skipped. The receipt index makes each
-replay land once.
+replay land once. A pass never records a chat as seen past a message whose
+download is still running.
+
+**Reconnecting.** A dropped connection is reconnected at once and the gap
+filled. When a connect fails, or a receive or a gap-fill pass fails, the
+next connect waits one `serve_tick_s` first, the same wake the outbox runs
+on, until a gap-fill pass completes. A flood wait on connect is waited out
+for exactly the seconds Telegram gives.
+
+**Local state.** Besides the session and `telegram-keys`, the bridge keeps
+two files in the key directory:
+
+| File | Holds | When it is unreadable |
+|---|---|---|
+| `telegram-seen.json` | For each owned chat, the newest message id its last completed gap-fill pass saw | Set aside as `telegram-seen.json.unreadable`; each chat's next pass starts at its lowest id in the ledger (`intake.lowest`), so nothing is missed and the receipt index drops what is already recorded |
+| `telegram-sends.json` | For each send in flight (an effect with an intent and no outcome, or a notice not yet marked sent), the chat's newest message id before its first message | Set aside as `telegram-sends.json.unreadable`; a send with no entry is looked up over the whole chat, so Telegram's own record settles it |
+
+Each is written whole to a temporary file, flushed to disk, renamed into
+place, and the directory flushed. An entry in `telegram-sends.json` is
+dropped once the ledger settles its send: an `effect.outcome` for an
+effect, `notice.sent` for a notice.
 
 ## How a message becomes work
 
@@ -292,20 +319,30 @@ is refused when it is requested.
 uses to detect a repeated send. The performer derives it from the broker's
 idempotency key and the message's place in the send, so a resend of the
 same effect is refused by Telegram as a duplicate rather than delivered
-twice. Before a key's first send, the bridge records the chat's newest
-message id under the key in `telegram-sends.json` in the key directory.
-`lookup` reconciles a dangling intent by scanning the account's own
-messages in the target chat with ids above that one, since message ids in
-a chat only grow, skipping ids already recorded as sent, for that send's
-text, files, reply target, and topic. Clock skew between the Mac and
-Telegram cannot hide a message, since no date is read. A key with no
-record was never sent, so its lookup finds nothing. Two matches, or part of a split send
-found, is `broker.Unknown`: nothing is concluded. The outcome records `chat_id` and `message_id`,
-which is how a later reply to the sent message binds back to its task.
+twice. Before a send's first message, the bridge records the chat's
+newest message id under the effect id in `telegram-sends.json`.
+`lookup` reconciles a dangling intent by reading the chat's history above
+that id (message ids in a chat only grow) and keeping the account's own
+messages, skipping ids already recorded as sent, and matching each
+message of the send on its full text (trimmed, as Telegram trims), or its
+file name and size, with its reply target and topic. History, not search,
+since search reads an index that can lag a send. Clock skew between the
+Mac and Telegram cannot hide a message, since no date is read. A key with
+no record was never sent, so its lookup finds nothing. Two matches for
+one message is `broker.Unknown`: nothing is concluded. When some of a
+split send's messages are on screen and the rest are not, `lookup` sends
+the rest, each under its own `random_id`, and the send settles as done:
+Tom approved the whole, and a message Telegram already holds is refused
+as a duplicate rather than shown twice. The outcome records `chat_id` and
+`message_id`, which is how a later reply to the sent message binds back to
+its task.
 
 **One attempt.** `perform` makes one delivery attempt. A flood wait, a
-refusal, or no connection returns a failed outcome with the reason and,
-for a flood wait, the wait time, which later requests wait out. A
+refusal, or no connection on the first message returns a failed outcome
+with the reason and, for a flood wait, the wait time, which later requests
+wait out. A flood wait on a later message, once earlier ones are on
+screen, is waited out for exactly the seconds Telegram gives, and the
+send goes on. A
 connection lost after a request was written is `broker.Unknown`: no
 outcome, and the outbox's reconcile settles it through `lookup`. Sending again is a new request and a new
 approval. The bridge keeps no retry loop, dead-letter queue, or resend
@@ -339,7 +376,8 @@ Its resident memory counts against the RAM plan in
   notice from `core/`.
 - **State of its own.** It keeps no queue, deduplication store, session map,
   or message history outside the ledger. Its only local state is the
-  MTProto session, the downloaded files, and a flood wait held in memory.
+  MTProto session, the two files under Receiving, the downloaded files,
+  and a flood wait held in memory.
 
 ## Conforming an implementation
 
@@ -378,7 +416,9 @@ An implementation conforms to the port when:
   is what `tests/test_live_telegram_dc.py` checks on the test servers. The
   broker never performs one effect twice, so for effects it is defence in
   depth; for notices, which the outbox yields until marked sent, the scan
-  for the notice's short id backs it.
+  backs it: it matches each message of the notice on its full text, which
+  carries the notice's short id. A notice cut off part way is finished the
+  same way a split send is: the messages not on screen are sent.
 - **Approving sends one at a time.** Every reply Valor sends to anyone other
   than Tom waits for his tap. In a busy group that is many taps. A standing
   grant (say, "replies in this chat") would cut them, but the broker has no
@@ -393,10 +433,10 @@ job `com.valor.kernel.telegram` that `--plist` prints.
 | Module | Does |
 |---|---|
 | `wire.py` | The only module importing Telethon: one client with sequential updates, no automatic flood sleep, reconnect, or request retry; raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, no parse mode, no link preview |
-| `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain (20 hops), files by sha256 with a download timeout of ten seconds or five plus one per MB, tried once more at twice that |
-| `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message; the outbox loop; SIGTERM lets an in-flight send and its outcome finish |
+| `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain to its root, files by sha256 with no timer of their own |
+| `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message, and runs a message with a file as its own task; one `serve_tick_s` between connects after a failure; the outbox loop; dropping settled send records; SIGTERM lets an in-flight send and its outcome finish |
 | `send.py` | `telegram.send_message` perform and lookup, and the notice send to the row's `chat_id`, marked through `outbox.sent` |
-| `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send key's chat and the newest id before its first send), each written whole and renamed into place |
+| `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send in flight and the newest id in its chat before its first message), each written whole, flushed, and renamed into place; an unreadable one set aside |
 | `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
 | `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them; `--test-dc` signs in on Telegram's test servers), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |
 
