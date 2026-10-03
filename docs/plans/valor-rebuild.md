@@ -255,7 +255,7 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
 - The blind verifier: Opus in a fresh session, rerunning the tests in a
   fresh sandboxed checkout like the test branch's; `review.decided`
   carries the governance boolean. The Apple container verifier (task
-  1.4c) comes after takeover: the kernel's own suite is macOS-bound and
+  1.4c, part two) comes after takeover: the kernel's own suite is macOS-bound and
   cannot run in it, and it is the heaviest piece between here and Valor
   building itself.
 - `tools/push_branch.py` gains a GitHub credential held by the kernel and

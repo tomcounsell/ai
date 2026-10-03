@@ -9,6 +9,7 @@ Live spend: none.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import subprocess
@@ -19,7 +20,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, db, guards, ledger, machine, router, session, tasks, verdicts
+from core import broker, db, guards, judgement_tasks, ledger, machine, router, session, tasks, verdicts
 from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -310,17 +311,14 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
         spec = verdicts.InstanceSpec("hooks/gate.py", 1, "a gate on the push path", "incident X", "1")
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="governance_refused"):
-                await verdicts.record_check(
-                    conn, task, Check.REVIEW, "pass", governance=[spec], **scripted.MANUAL
-                )
-            with pytest.raises(verdicts.VerdictRefused, match="no added lines"):
-                await verdicts.record_check(
-                    conn, task, Check.REVIEW, "governance_refused",
-                    governance=[verdicts.InstanceSpec("README.md", 1)], **scripted.MANUAL,
-                )  # fmt: skip
-        await scripted.check(dsn, task, "review", "governance_refused", governance=[spec])
+        with pytest.raises(verdicts.VerdictRefused, match="reviewer's verdict is one of"):
+            await scripted.check(dsn, task, "review", "governance_refused", governance=[spec])
+        with pytest.raises(verdicts.VerdictRefused, match="no added lines"):
+            await scripted.check(
+                dsn, task, "review", "pass", governance=[verdicts.InstanceSpec("README.md", 1)]
+            )
+        # The reviewer's pass with an ungranted instance records governance_refused.
+        await scripted.check(dsn, task, "review", "pass", governance=[spec])
         held = await fold(dsn, task)
         # The Brief's grant does not stand in for the tap, and runs pile up no refusals.
         await drive(dsn, task)
@@ -333,11 +331,6 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
         no_by = cli("grant", task, instance, "--note", "yes", "--by", "stand-in")
         granted = cli("grant", task, instance, "--note", "yes, this gate")
         after_grant = await drive(dsn, task)
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="is pass"):
-                await verdicts.record_check(
-                    conn, task, Check.REVIEW, "governance_refused", governance=[spec], **scripted.MANUAL
-                )
         await scripted.check(dsn, task, "review", "pass", governance=[spec])
         return task, held, direct, no_by, granted, after_grant, await fold(dsn, task), await rows(dsn, task)
 
@@ -369,7 +362,7 @@ def test_a_grant_without_an_incident_is_refused(dsn, tmp_path):
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
         bare = verdicts.InstanceSpec("hooks/gate.py", 2)  # names no incident, no mission item
-        await scripted.check(dsn, task, "review", "governance_refused", governance=[bare])
+        await scripted.check(dsn, task, "review", "pass", governance=[bare])
         instance = (await fold(dsn, task)).instances()[0].id
         async with await db.connect(dsn) as conn:
             with pytest.raises(guards.GrantRefused, match="missing either"):
@@ -527,8 +520,9 @@ def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="merge commit"):
                 await verdicts.record_check(
-                    conn, task, Check.DOCS, "updated", head=git(ws, "rev-parse", "HEAD"), **scripted.MANUAL
-                )
+                    conn, task, Check.DOCS, "updated", head=git(ws, "rev-parse", "HEAD"), governance_from=[],
+                    **scripted.SESSION,
+                )  # fmt: skip
         return cand
 
     run(go())
@@ -601,7 +595,8 @@ def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_
         async with await db.connect(dsn) as conn:  # the writer, stopped before ensure_merge
             for check in (Check.TEST, Check.REVIEW, Check.DOCS):
                 verdict = "no_change" if check is Check.DOCS else "pass"
-                await verdicts.record_check(conn, task, check, verdict, **scripted.MANUAL)
+                kw = await scripted.judgements(dsn, task, check)
+                await verdicts.record_check(conn, task, check, verdict, **kw, **scripted.SESSION)
         before = await fold(dsn, task)
         await drive(dsn, task)
         await drive(dsn, task)
@@ -723,41 +718,9 @@ def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):
     assert f.candidate.sha == git(ws, "rev-parse", "HEAD") and f.candidate.turn_id
 
 
-def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-    task = run(scripted.start(dsn, ws))
-    run(drive(dsn, task))
-    who = ["--by", "test", "--role-played"]
-    critique = cli("verdict", task, "critique", "sound", *who)
-    assert critique.returncode == 1 and "critique has a runner" in critique.stderr
-    run(scripted.critique(dsn, task))
-    run(drive(dsn, task))
-    refused = cli("verdict", task, "test", "pass", *who)
-    assert refused.returncode == 1 and "test has a runner" in refused.stderr
-    run(scripted.check(dsn, task, "test", "pass"))
-    out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
-    assert out.returncode == 0, out.stderr
-    refused = cli("verdict", task, "docs", "no_change", *who)
-    assert refused.returncode == 1 and "docs has a runner" in refused.stderr
-    assert "unrecognized arguments: --head" in cli("verdict", task, "review", "pass", "--head", "x").stderr
-    run(scripted.check(dsn, task, "docs", "no_change"))
-    assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
-    run(drive(dsn, task))
-    run(scripted.check(dsn, task, "test", "pass"))
-    assert cli("verdict", task, "review", "pass", *who).returncode == 0
-    run(scripted.check(dsn, task, "docs", "no_change"))
-    f = run(fold(dsn, task))
-    assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
-    refused = cli("verdict", task, "review", "pass", *who)
-    assert refused.returncode == 1 and "not checks" in refused.stderr
-    assert "build has a runner" in cli("verdict", task, "build", "candidate").stderr
-    assert "no manual verdict" in cli("verdict", task, "merge", "released").stderr
-
-
-def test_a_stage_with_a_runner_takes_no_manual_verdict():
-    verdicts.manual_allowed(State.CRITIQUE, {State.PLAN: object()})
-    with pytest.raises(verdicts.VerdictRefused, match="has a runner"):
-        verdicts.manual_allowed(State.CRITIQUE, {State.CRITIQUE: object()})
+def test_there_is_no_verdict_command():
+    out = cli("verdict", "t", "review", "pass")
+    assert out.returncode == 2 and "invalid choice: 'verdict'" in out.stderr
 
 
 @pytest.mark.parametrize("where", ["judge", "plan", "critique", "checks", "merge"])
@@ -785,7 +748,7 @@ def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
             with pytest.raises(LookupError):
                 await verdicts.record_judge(conn, task, "no-such-judgement")
             with pytest.raises(LookupError):
-                await verdicts.record_check(conn, task, Check.TEST, "pass")
+                await verdicts.record_check(conn, task, Check.TEST, "pass", breadth="j", **scripted.SESSION)
             with pytest.raises(LookupError):
                 await guards.grant(conn, task, "i", note="x", incident="i", mission_item="1")
             after = len(await ledger.read(conn, task))
@@ -851,7 +814,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
             with pytest.raises(LookupError, match="predates"):
                 await session.answer(conn, b.id, "x")
             with pytest.raises(LookupError, match="predates"):
-                await verdicts.record_check(conn, b.id, Check.TEST, "pass")
+                await verdicts.record_check(conn, b.id, Check.TEST, "pass", breadth="j", **scripted.SESSION)
             with pytest.raises(LookupError, match="predates"):
                 await guards.grant(conn, b.id, "i", note="x", incident="i", mission_item="1")
             await broker.approve(conn, held.effect_id, note="push it")
@@ -859,8 +822,6 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
         return st, pushed, await drive(dsn, b.id)
 
     st, pushed, out = run(go())
-    by_hand = cli("verdict", st["task_id"], "review", "pass")
-    assert by_hand.returncode == 1 and "predates" in by_hand.stderr
     assert st["legacy"] is True and st["state"] == "merge"
     assert pushed.kind == "done" and git(origin, "rev-parse", "valor/old") == head
     assert out["status"] == "legacy"
@@ -1018,14 +979,17 @@ def scripted_signals(ws):
 # -- the review's test gaps ---------------------------------------------------------------
 
 
-def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(dsn, tmp_path):
+def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(dsn, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
+    )
     ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
         await scripted.checks(dsn, task, test="red")  # join row 5: the repair round
         await drive(dsn, task)
-        await scripted.check(dsn, task, "test", "gaps", behaviors=["archived teams"])
+        await scripted.check(dsn, task, "test", "gaps", answer="true")  # every breadth question a gap
         await scripted.check(dsn, task, "review", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
         f = await fold(dsn, task)
@@ -1035,7 +999,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(d
         return f, done
 
     f, done = run(go())
-    assert f.join.row == 7 and f.delivery["outcome"] == "gaps" and f.delivery["gaps"] == ["archived teams"]
+    assert f.join.row == 7 and f.delivery["outcome"] == "gaps" and len(f.delivery["gaps"]) == 3
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
 
 
@@ -1079,11 +1043,13 @@ def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tm
         git(ws, "checkout", "-q", "valor/work")
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="does not descend"):
-                await verdicts.record_check(conn, task, Check.DOCS, "updated", head=side, **scripted.MANUAL)
+                await verdicts.record_check(
+                    conn, task, Check.DOCS, "updated", head=side, governance_from=[], **scripted.SESSION
+                )
             with pytest.raises(verdicts.VerdictRefused, match="only review and docs"):
                 await verdicts.record_check(
                     conn, task, Check.TEST, "pass", governance=[verdicts.InstanceSpec("README.md", 1)],
-                    **scripted.MANUAL,
+                    **await scripted.judgements(dsn, task, Check.TEST), **scripted.SESSION,
                 )  # fmt: skip
             with pytest.raises(guards.GrantRefused, match="in checks"):
                 await guards.grant(conn, task, "any", note="yes", incident="i", mission_item="1")
@@ -1149,8 +1115,6 @@ def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters
     assert cli("start", "x", "--mode", "bare").returncode == 2  # the flag is gone
     with pytest.raises(TypeError):
         tasks.Brief(instruction="x", mode="bare")
-    by_hand = cli("verdict", task, "judge", "precise")
-    assert by_hand.returncode == 1 and "judge has a runner" in by_hand.stderr
 
 
 def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
@@ -1160,7 +1124,8 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
     async def test_runner(ctx: router.Context) -> dict:
         ran.append(ctx.check)
         async with await db.connect(ctx.dsn) as conn:
-            await verdicts.record_check(conn, ctx.task_id, Check.TEST, "pass", **scripted.MANUAL)
+            kw = await scripted.judgements(ctx.dsn, ctx.task_id, Check.TEST)
+            await verdicts.record_check(conn, ctx.task_id, Check.TEST, "pass", **kw, **scripted.SESSION)
         return {"status": "moved"}
 
     async def go():

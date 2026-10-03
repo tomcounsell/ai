@@ -179,7 +179,7 @@ async def breadth(port: JudgementPort, dsn: str, task_id: str) -> str:
 
 
 def _diff(workspace: str, older: str, newer: str, paths: list[str]) -> str:
-    return git.out(workspace, *DIFF, older, newer, "--", *paths) if paths else ""
+    return git.out(workspace, "--literal-pathspecs", *DIFF, older, newer, "--", *paths) if paths else ""
 
 
 def breadth_outcome(rows: list[dict], judgement_id: str, candidate: machine.Candidate) -> dict[str, Any]:
@@ -255,8 +255,8 @@ def diff_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
         hunks = git.hunks(workspace, older, newer, path)
         if not any(h.added for h in hunks):
             continue
-        plain = _hunk_texts(git.out(workspace, *DIFF, older, newer, "--", path))
-        wide = _hunk_texts(git.out(workspace, *DIFF, "-W", older, newer, "--", path))
+        plain = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, older, newer, "--", path))
+        wide = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, "-W", older, newer, "--", path))
         for h, (_, _, own) in zip(hunks, plain, strict=False):
             if not h.added or h.id() in seen:
                 continue
@@ -315,7 +315,7 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
 def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) -> dict[str, Any]:
     """What a set of governance rows means for a review or docs verdict:
     the hunks that are instances (caution, abstain, or too large for both
-    legs), how many came from an abstain, and the hunks left unjudged after
+    legs), how many came from an abstain and which, and the hunks left unjudged after
     their reruns. Refuses a set that skips a hunk, names one twice, or
     names a hunk the diff does not hold; raises `Unanswered` while any
     failed hunk has reruns left."""
@@ -335,14 +335,16 @@ def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) 
     missing = set(wanted) - set(by_hunk)
     if missing:
         raise Unusable(f"no governance judgement for hunks {sorted(missing)}")
-    instances, unjudged, abstained = [], [], 0
+    instances, unjudged, abstained, abstained_ids = [], [], 0, []
     for h in hunks:
         row = by_hunk[h.id]
         p = row["payload"]
         if row["type"] == "judgement.answered":
             if p["action"].get("adds") == "caution":
                 instances.append(h)
-                abstained += "adds" in (p.get("abstained") or [])
+                if "adds" in (p.get("abstained") or []):
+                    abstained += 1
+                    abstained_ids.append(h.id)
         elif p.get("too_large"):
             instances.append(h)
         else:
@@ -354,7 +356,12 @@ def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) 
                     f"governance unanswered for {h.path} ({_reasons(p)}); the next run asks again"
                 )
             unjudged.append((h, _reasons(p)))
-    return {"instances": instances, "abstain_instances": abstained, "unjudged": unjudged}
+    return {
+        "instances": instances,
+        "abstain_instances": abstained,
+        "abstained": abstained_ids,
+        "unjudged": unjudged,
+    }
 
 
 def unjudged_instance(unjudged: list[tuple[DiffHunk, str]]) -> dict[str, Any]:

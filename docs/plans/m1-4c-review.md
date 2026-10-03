@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-review
 type: build
-status: planned; revised after critique round 2 (both rounds spent)
+status: built (Build record); critique rounds spent
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -518,3 +518,57 @@ this part's; 12 is part two's.
 11. The manual-leg refusals: the verdict is computed for the session leg
     only, and both refusals stay for `leg="manual"` until deletion (The
     recorded verdict).
+
+## Build record
+
+Built on `m1-4c-review`, rebased onto `3e1b97989` (1.4b with its patch
+round 1), against the test database `valor_rebuild_test_14c1build`, never
+the real ledger. The suite: 619 passed, 11 skipped, 1 failed. The failure
+is `test_checks.py::test_the_check_layout_profile_and_a_planted_pgpass_link`,
+whose task Postgres did not start in the full run; this part does not
+touch it, and alone it passes. `uvx ruff check .` and `uvx ruff format --check .`: clean, apart from
+the two known complaints in `docs/bridges/telegram.md` and
+`docs/plans/m2-1-port.md`.
+The live tests are written and were not run (they spend; `VALOR_LIVE=1`):
+`tests/test_live_fresh.py` holds the two blind reviews, and
+`tests/test_live_session.py` reaches the merge through the review runner.
+
+Decided in the build, where the plan left it open:
+
+1. Tests that write a check verdict without its runner do it through
+   `record_check` on the `session` leg, with the judgements the local
+   upstream gives (`scripted.judgements`, `scripted.check`).
+2. A `.valor` the reviewer checkout's setup leaves is removed before the
+   kernel writes the inputs.
+3. The lint runs inside the head run, after the suite, with its own
+   output file. The test runner and the review runner share
+   `base_and_head` and `stop_heard`.
+4. `verify.json` carries ids, counts, codes, and lint locations, no tail.
+   `governance_outcome` also returns the abstained hunk ids, which
+   `governance.json` lists.
+5. `git.hunks` returns nothing unless the diff names exactly the one file
+   asked for, under `--literal-pathspecs`: `"."`, a directory, or a magic
+   pathspec has no hunk, so a reviewer instance there is a finding.
+6. A governance finding names the line only when the instance has one
+   (kernel instances may not).
+7. `record_critique` refuses a leg other than `session` or `kernel`
+   before it reads anything, as `record_check` does.
+8. A review at another seat returns `compared`. `effects.md` lists the
+   effects with a held or refused row.
+9. The offline set-up test uses the plain-kind toy: the probe runs the
+   suite's own command in the set-up checkout under the reviewer's
+   profile, since a `python-uv` project needs the network to seed. The
+   `python-uv` lint locations are tested on `lint_locations` and
+   `lint_command`.
+10. The router test probes a file in the builder clone and the listing of
+    the check directory: the builder's `done.md` is filed away once the
+    kernel reads it, and the test branch removes its checkouts after its
+    run. The fresh database is shown by the builder's table being absent;
+    `data_directory` needs a role the kernel's role does not have.
+11. In the router test the candidate's suite fails, so the rerun after
+    the grant records `pass` and the join sends the work to `patch`; the
+    test asserts the rerun up to its `review.decided`.
+12. `docs/sdlc-state-machine.md` stays under 600 lines with its
+    spending and attention pointing at `docs/spending-and-attention.md`;
+    the attention text there and in architecture.md names a verdict by
+    hand (`leg: manual`) only as a row the fold still reads.

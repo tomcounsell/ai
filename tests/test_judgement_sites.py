@@ -204,7 +204,7 @@ async def record_test(dsn, task, judgement_id, verdict, failures=()):
             breadth=judgement_id,
             failures=failures,
             command="pytest",
-            **scripted.MANUAL,
+            **scripted.SESSION,
         )
 
 
@@ -298,7 +298,9 @@ def test_a_breadth_row_for_another_candidate_or_site_is_refused(dsn, tmp_path):
             await record_test(dsn, task, gov.judgement_id, "pass")
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="only the test branch"):
-                await verdicts.record_check(conn, task, Check.REVIEW, "pass", breadth=jid, **scripted.MANUAL)
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "pass", breadth=jid, governance_from=[], **scripted.SESSION
+                )
 
     run(go())
 
@@ -337,7 +339,7 @@ async def candidate_range(dsn, task) -> tuple[str, str]:
 async def review(dsn, task, verdict, ids, **kw):
     async with await db.connect(dsn) as conn:
         return await verdicts.record_check(
-            conn, task, Check.REVIEW, verdict, governance_from=ids, **scripted.MANUAL, **kw
+            conn, task, Check.REVIEW, verdict, governance_from=ids, **scripted.SESSION, **kw
         )
 
 
@@ -352,9 +354,9 @@ def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tm
         ids = await judgement_sites.governance(p, dsn, task, older, newer)
         again = await judgement_sites.governance(p, dsn, task, older, newer)
         with pytest.raises(verdicts.VerdictRefused, match="no governance judgement for hunks"):
-            await review(dsn, task, "governance_refused", ids[1:])
+            await review(dsn, task, "pass", ids[1:])
         with pytest.raises(verdicts.VerdictRefused, match="answered twice"):
-            await review(dsn, task, "governance_refused", [*ids, ids[0]])
+            await review(dsn, task, "pass", [*ids, ids[0]])
         stray = await p.judge(
             GOVERNANCE,
             {"path": "x", "hunk": "y", "paths": "x"},
@@ -363,16 +365,14 @@ def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tm
             dsn=dsn,
         )
         with pytest.raises(verdicts.VerdictRefused, match="does not hold"):
-            await review(dsn, task, "governance_refused", [*ids, stray.judgement_id])
-        with pytest.raises(verdicts.VerdictRefused, match="governance_refused"):
-            await review(dsn, task, "pass", ids)
+            await review(dsn, task, "pass", [*ids, stray.judgement_id])
         with pytest.raises(verdicts.VerdictRefused, match="not governance instances"):
-            await review(dsn, task, "governance_refused", ids, notes={"nope": {"incident": "x"}})
+            await review(dsn, task, "pass", ids, notes={"nope": {"incident": "x"}})
         gate = next(h for h in judgement_sites.diff_hunks(ws, older, newer) if h.path == "hooks/gate.py")
         await review(
             dsn,
             task,
-            "governance_refused",
+            "pass",
             ids,
             notes={gate.id: {"summary": "a push gate", "incident": "incident X", "mission_item": "1"}},
         )
@@ -382,6 +382,7 @@ def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tm
     hunks = judgement_sites.diff_hunks(ws, older, newer)
     assert again == ids and len(ids) == len(hunks) == 4  # docs/plan.md and three files; reused on rerun
     assert len([r for r in UP.seen(sid) if r["leg"] == "jev"]) == 4 + 1  # four hunks, one stray
+    assert decided["verdict"] == "governance_refused" and decided["reviewer_verdict"] == "pass"
     gov = decided["governance"]
     assert gov["adds"] is True and [i["id"] for i in gov["instances"]] == [gate.id]
     assert gov["instances"][0]["incident"] == "incident X" and gov["judgements"] == ids
@@ -426,7 +427,7 @@ def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_pa
         older, newer = await candidate_range(dsn, task)
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
         util = verdicts.InstanceSpec("lib/util.py", 1, "the reviewer's own reading", "incident Y", "1")
-        await review(dsn, task, "governance_refused", ids, governance=[util])
+        await review(dsn, task, "pass", ids, governance=[util])
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
         return task, (await rows(dsn, task, "review.decided"))[0]["payload"]
@@ -452,7 +453,7 @@ def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(ds
             await review(dsn, task, "pass", first)
         second = await judgement_sites.governance(p, dsn, task, older, newer)
         third = await judgement_sites.governance(p, dsn, task, older, newer)
-        await review(dsn, task, "governance_refused", second)
+        await review(dsn, task, "pass", second)
         return first, second, third, (await rows(dsn, task, "review.decided"))[0]["payload"]
 
     first, second, third, decided = run(go())
@@ -473,7 +474,7 @@ def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
         task = await governance_candidate(dsn, ws, extra={"data/big.py": big})
         older, newer = await candidate_range(dsn, task)
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
-        await review(dsn, task, "governance_refused", ids)
+        await review(dsn, task, "pass", ids)
         return (await rows(dsn, task, "review.decided"))[0]["payload"]
 
     decided = run(go())
@@ -520,7 +521,7 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
         async with await db.connect(dsn) as conn:
             for refused in (
                 verdicts.record_judge(conn, task, "x"),
-                verdicts.record_check(conn, task, Check.TEST, "pass"),
+                verdicts.record_check(conn, task, Check.TEST, "pass", breadth="j", **scripted.SESSION),
                 session.answer(conn, task, "x"),
                 session.feedback(conn, task, "x"),
                 guards.grant(conn, task, "i", note="x", incident="i", mission_item="1"),
@@ -703,7 +704,7 @@ def test_a_test_verdict_with_a_breadth_judgement_takes_no_behaviors_from_the_cal
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="behaviors come from it"):
                 await verdicts.record_check(conn, task, Check.TEST, "gaps", breadth=jid,
-                                            behaviors=["made up"], **scripted.MANUAL)  # fmt: skip
+                                            behaviors=["made up"], **scripted.SESSION)  # fmt: skip
 
     run(go())
 
@@ -770,7 +771,7 @@ def test_a_reviewer_naming_a_line_in_a_kernel_instance_adds_its_notes_to_it(dsn,
         older, newer = await candidate_range(dsn, task)
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
         spec = verdicts.InstanceSpec("hooks/gate.py", 2, "the reviewer's reading", "incident Z", "1")
-        await review(dsn, task, "governance_refused", ids, governance=[spec])
+        await review(dsn, task, "pass", ids, governance=[spec])
         return (await rows(dsn, task, "review.decided"))[0]["payload"]["governance"]["instances"]
 
     (instance,) = run(go())
@@ -789,7 +790,7 @@ def test_docs_governance_reads_the_candidate_to_docs_head_range(dsn, tmp_path):
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, candidate, head)
         async with await db.connect(dsn) as conn:
             await verdicts.record_check(conn, task, Check.DOCS, "updated", head=head, governance_from=ids,
-                                        **scripted.MANUAL)  # fmt: skip
+                                        **scripted.SESSION)  # fmt: skip
         return ids, (await rows(dsn, task, "docs.decided"))[0]["payload"]
 
     ids, decided = run(go())
@@ -815,7 +816,9 @@ def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn
         async with await db.connect(dsn) as conn:
             for check in (Check.REVIEW, Check.DOCS):
                 with pytest.raises(verdicts.VerdictRefused, match="calibration task"):
-                    await verdicts.record_check(conn, task, check, "pass", governance_from=[])
+                    await verdicts.record_check(
+                        conn, task, check, "pass", governance_from=[], **scripted.SESSION
+                    )
         return task
 
     task = run(go())
@@ -848,7 +851,7 @@ def test_a_test_verdict_reads_failures_given_as_a_generator_once(dsn, tmp_path):
         jid = await judgement_sites.breadth(UP.port(fixed="false"), dsn, task)
         async with await db.connect(dsn) as conn:
             await verdicts.record_check(conn, task, Check.TEST, "red", breadth=jid,
-                                        failures=(f for f in ["test_x failed"]), **scripted.MANUAL)  # fmt: skip
+                                        failures=(f for f in ["test_x failed"]), **scripted.SESSION)  # fmt: skip
         return (await rows(dsn, task, "test.decided"))[0]["payload"]
 
     decided = run(go())

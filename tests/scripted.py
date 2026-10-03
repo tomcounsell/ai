@@ -9,7 +9,9 @@ Also: a workspace laid out the way `scripts/replay_workspace.py` lays one
 out (a work branch at the base, a bare origin whose HEAD names `main`), a
 task started on it and judged by the real judge runner against the local
 judgement upstream (`tests/judgement_upstream.py`), the router with the
-working-session runner, and manual verdicts.
+working-session runner, and scripted verdicts: session-leg rows with a
+scripted turn id and model, their breadth and governance judgements asked
+of the local upstream.
 """
 
 import json
@@ -18,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core import broker, db, fresh, judgement_sites, ledger, router, session, tasks, verdicts
+from core import broker, db, fresh, judgement_sites, ledger, machine, router, session, tasks, verdicts
 from core import workspace as kws
 from core.machine import Check, State
 from harnesses import claude_code
@@ -137,7 +139,7 @@ def commit(cwd, path: str, text: str, message: str = "change") -> str:
 
 def keep_docs(b, cwd, head: str) -> str:
     """A docs head kept in the mirror under `refs/valor/docs/`, as the docs
-    runner keeps one, for tests that record a docs verdict by hand."""
+    runner keeps one, for tests that write a docs verdict through `record_check`."""
     git(b.mirror, "fetch", "-q", str(cwd), f"{head}:refs/valor/docs/{head}")
     return head
 
@@ -195,7 +197,8 @@ RUNNERS = {
     State.BUILD: working,
     State.PATCH: working,
 }
-MANUAL = {"by": "test", "via": "the test suite", "role_played": True}
+SESSION = {"leg": "session", "turn_id": "scripted-turn", "model": "scripted"}
+SCRIPTED_FAILURE = "a scripted test failure"
 
 
 def performers(b: tasks.Brief) -> None:
@@ -238,12 +241,42 @@ async def status(dsn: str, task: str) -> dict:
 
 async def critique(dsn: str, task: str, verdict: str = "sound", **kw) -> None:
     async with await db.connect(dsn) as conn:
-        await verdicts.record_critique(conn, task, verdict, **MANUAL, **kw)
+        await verdicts.record_critique(conn, task, verdict, **{**SESSION, **kw})
 
 
-async def check(dsn: str, task: str, which: str, verdict: str, **kw):
+async def judgements(dsn: str, task: str, which: Check, answer: str = "false", **kw) -> dict:
+    """The judgements a scripted check verdict names, asked of the local
+    upstream with every question answered `answer`: breadth for test
+    (`true` lists every gap), governance for every hunk of review's or
+    docs' diff (`true` makes each an instance)."""
+    up = judgement_upstream.shared()
+    if which is Check.TEST and "breadth" not in kw:
+        kw["breadth"] = await judgement_sites.breadth(up.port(fixed=answer), dsn, task)
+    if which in (Check.REVIEW, Check.DOCS) and "governance_from" not in kw:
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, task)
+            f = machine.fold(await ledger.read(conn, task))
+        older, newer = (
+            (b.base_sha, f.candidate.sha) if which is Check.REVIEW else (f.candidate.sha, kw.get("head"))
+        )
+        kw["governance_from"] = (
+            await judgement_sites.governance(up.port(fixed=answer), dsn, task, older, newer)
+            if newer and newer != older
+            else []
+        )
+    return kw
+
+
+async def check(dsn: str, task: str, which: str, verdict: str, answer: str = "false", **kw):
+    """One scripted check verdict on the session leg, its judgements asked
+    as `judgements` says (a `red` test with no failures gets one scripted
+    failure). Review takes the reviewer's `pass` or `changes`."""
+    stage = Check(which)
+    kw = await judgements(dsn, task, stage, answer, **kw)
+    if stage is Check.TEST and verdict == "red" and not kw.get("failures"):
+        kw["failures"] = [SCRIPTED_FAILURE]
     async with await db.connect(dsn) as conn:
-        f = await verdicts.record_check(conn, task, Check(which), verdict, **MANUAL, **kw)
+        f = await verdicts.record_check(conn, task, stage, verdict, **{**SESSION, **kw})
         await verdicts.ensure_merge(conn, task)
         return f
 
@@ -273,7 +306,7 @@ with log.open("a") as f:
                         ("TMPDIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER")},
                         "harness": json.loads(os.environ.get("VALOR_HARNESS", "{}"))}) + "\n")
 acts = cfg.get("fresh_acts") or []
-act = acts.pop(0) if acts else cfg.get(stage, "sound")
+act = acts.pop(0) if acts else cfg.get(stage, "review" if stage == "review" else "sound")
 cfg["fresh_acts"] = acts
 cfg_path.write_text(json.dumps(cfg))
 v = pathlib.Path(".valor")
@@ -348,6 +381,19 @@ elif act == "docs":
     if "docs_head" in cfg:
         out["head"] = cfg["docs_head"]
     (v / "verdict.json").write_text(json.dumps(out))
+elif act == "review":
+    # The reviewer: what it was given, each `review_probe` command run under
+    # its own profile and environment, then `review_verdict` as its file.
+    harness = json.loads(os.environ.get("VALOR_HARNESS", "{}"))
+    seen = {"inputs": sorted(p.name for p in (v / "inputs").iterdir()), "probes": {}}
+    for name, cmd in (cfg.get("review_probe") or {}).items():
+        env = {**harness.get("env", {}), "TMPDIR": harness["tmpdir"], "HOME": os.environ["HOME"]}
+        r = subprocess.run(["/usr/bin/sandbox-exec", "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f",
+                            harness["sandbox_profile"], "/bin/sh", "-c", cmd],
+                           capture_output=True, text=True, env=env)
+        seen["probes"][name] = {"exit": r.returncode, "out": r.stdout.strip(), "err": r.stderr.strip()}
+    (cfg_path.parent / "valor-review-seen.jsonl").open("a").write(json.dumps(seen) + "\n")
+    (v / "verdict.json").write_text(json.dumps(cfg.get("review_verdict") or {"verdict": "pass", "findings": []}))
 print(json.dumps({"result": "ok", "session_id": "fresh-session", "is_error": False}))
 """
 
@@ -356,7 +402,7 @@ def fresh_for(script_dir: Path):
     """A fresh session played by a Python subprocess in its checkout, steered
     by the builder workspace's script file."""
 
-    def make(prompt, checkout, model, harness):
+    def make(prompt, checkout, model, harness, seat):
         def build(url, brief, turn_id):
             env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"],
                    "VALOR_SCRIPT": str(script_dir / "valor-script.json")}  # fmt: skip

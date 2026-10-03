@@ -30,6 +30,7 @@ the verdict.
 
 import ast
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -414,10 +415,60 @@ async def _setup(checkout: Path, harness: dict[str, Any], commands: list[str], m
     return {"ok": True, "commands": ran}
 
 
+# A ruff concise line: `path:line:col: RULE message`. The message is dropped.
+RUFF_LINE = re.compile(r"^(?P<path>[^\n]+?):(?P<line>\d+):(?P<col>\d+): (?P<rule>[A-Za-z][A-Za-z0-9-]*)")
+
+
+def lint_command(project: dict[str, Any]) -> str | None:
+    """The spec's lint command as the kernel runs it: for kind `python-uv`
+    a `ruff check` command gets `--output-format concise`, so its lines can
+    be read as locations."""
+    command = project.get("lint")
+    if command and project.get("kind") == "python-uv" and "ruff check" in command:
+        return f"{command} --output-format concise"
+    return command
+
+
+def lint_locations(text: str) -> list[dict[str, Any]]:
+    """Path, line, and rule of each ruff concise line in `text`; every other
+    line, and every message, dropped."""
+    out = []
+    for raw in text.splitlines():
+        m = RUFF_LINE.match(raw)
+        if m:
+            out.append({"path": m["path"], "line": int(m["line"]), "rule": m["rule"]})
+    return out
+
+
+async def _lint(project: dict[str, Any], checkout: Path, harness: dict[str, Any], mark: str,
+                stop: asyncio.Task, out: Path) -> dict[str, Any] | None:  # fmt: skip
+    """The spec's lint in `checkout` under the check's profile and mark:
+    None with no lint command; else the command, exit code, and duration,
+    and for kind `python-uv` the ruff locations read from the whole output
+    file."""
+    command = lint_command(project)
+    if not command:
+        return None
+    started = time.monotonic()
+    argv = workspace.sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+    env = {**workspace.turn_environment(harness), runs.TURN_ENV: mark}
+    code, _tail, _peak = await _race(argv, cwd=checkout, env=env, mark=mark, stop=stop, out=out)
+    record: dict[str, Any] = {
+        "command": command,
+        "exit": code,
+        "duration_s": round(time.monotonic() - started, 1),
+    }
+    if project.get("kind") == "python-uv":
+        record["locations"] = lint_locations(out.read_bytes().decode(errors="replace"))
+    return record
+
+
 async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str, stop: asyncio.Task,
-                *, digest: str, run_suite: bool = True) -> dict[str, Any]:  # fmt: skip
+                *, digest: str, run_suite: bool = True, lint: bool = False) -> dict[str, Any]:  # fmt: skip
     """One run at `sha`: checkout, the cache clone, fresh services, setup,
-    the suite. Returns the `suite.ran` payload. With
+    the suite, and with `lint` the spec's lint after it in the same
+    checkout (`lint` in the payload: None when the spec has none, or when
+    setup failed and nothing ran). Returns the `suite.ran` payload. With
     `run_suite` false only setup runs, to make the seed cache. Raises
     `_Stopped` on a stop."""
     project = b.project or {}
@@ -445,6 +496,8 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         "cause": None,
         "why": None,
     }
+    if lint:
+        payload["lint"] = None
 
     def done(**kw) -> dict[str, Any]:
         payload.update(kw, duration_s=round(time.monotonic() - started, 1))
@@ -491,6 +544,9 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         code, tail, peak = await _race(
             argv, cwd=checkout, env=run_env, mark=mark, stop=stop, out=out("suite")
         )
+        if lint:
+            lint_out = lay.checks / f"{check_dir.name}.lint.out"
+            payload["lint"] = await _lint(project, checkout, harness, f"{mark}-lint", stop, lint_out)
     finally:
         await asyncio.to_thread(services.__exit__, None, None, None)
     tests, why = read_junit(lay.checks, check_dir.name)
@@ -499,6 +555,64 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     if tests is None and code not in (0, 1):
         cause, reason = "commit", f"no JUnit report ({why}) and the suite exited {code} at {role}"
     return done(exit=code, tests=tests, junit=why, tail=tail, peak_footprint=peak, cause=cause, why=reason)
+
+
+# -- base and head runs -------------------------------------------------------------------
+
+
+async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asyncio.Task, head: str,
+                        head_role: str, *, lint: bool = False) -> dict[str, Any]:  # fmt: skip
+    """The base run and the head run at `head` under `head_role`, each a
+    usable `suite.ran` reused or run and appended. The seed cache is made
+    from the base's setup when it is missing. Returns {"ran": {"base":
+    row, "head": row}} or a runner result (`stopped`, `lock lost`, or
+    `failed` on a `kernel` cause). Raises `_Stopped` on a stop."""
+    bin_dir = lay.root.parent / "bin"
+    command = (b.project or {}).get("suite") or "true"
+    ran: dict[str, dict[str, Any]] = {}
+    for key, role, sha in (("base", "base", b.base_sha), ("head", head_role, head)):
+        digest = await asyncio.to_thread(environment_digest, b.mirror, sha, b.project or {}, bin_dir)
+        async with await db.connect(ctx.dsn) as conn:
+            rows = await ledger.read(conn, ctx.task_id)
+            if await tasks.is_stopped(conn, ctx.task_id):
+                return {"status": "stopped"}
+        kept = reusable(rows, sha, command, digest, role)
+        if kept is not None:
+            ran[key] = kept
+            continue
+        if key == "head" and not (lay.checks / SEED).is_dir() and (b.project or {}).get("setup"):
+            base_digest = ran["base"]["payload"]["digest"]
+            await suite(ctx, lay, b, b.base_sha, "base", stop, digest=base_digest, run_suite=False)
+        if not await ctx.alive():
+            return {"status": "lock lost"}
+        payload = await suite(ctx, lay, b, sha, role, stop, digest=digest, lint=lint and key == "head")
+        if payload["cause"] == "kernel":
+            return {"status": "failed", "turn": {"result": payload["why"]}}
+        if not await ctx.alive():
+            return {"status": "lock lost"}
+        async with await db.connect(ctx.dsn) as conn, conn.transaction():
+            await ledger.lock(conn, f"task:{ctx.task_id}")
+            if await tasks.is_stopped(conn, ctx.task_id):
+                return {"status": "stopped"}
+            event_id = await ledger.append(conn, ctx.task_id, SUITE, payload)
+        ran[key] = {"id": event_id, "payload": payload}
+    return {"ran": ran}
+
+
+@contextlib.asynccontextmanager
+async def stop_heard(ctx):
+    """A task that finishes when a stop for this task is heard, with its
+    listening connection, for one run's lifetime."""
+    listener = await db.connect(ctx.dsn)
+    stop = None
+    try:
+        await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
+        stop = asyncio.create_task(runs._stop_heard(listener, ctx.task_id))
+        yield stop
+    finally:
+        if stop is not None:
+            stop.cancel()
+        await listener.close()
 
 
 # -- the runner ---------------------------------------------------------------------------
@@ -540,46 +654,15 @@ def test_runner(port):
             return failed(f"breadth: {exc}")
 
         lay = workspace.Layout(Path(b.mirror).parent)
-        bin_dir = lay.root.parent / "bin"
         command = (b.project or {}).get("suite") or "true"
-        listener = await db.connect(ctx.dsn)
-        stop = None
         try:
-            await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
-            stop = asyncio.create_task(runs._stop_heard(listener, ctx.task_id))
-            ran: dict[str, dict[str, Any]] = {}
-            for role, sha in (("base", b.base_sha), ("head", candidate.sha)):
-                digest = await asyncio.to_thread(environment_digest, b.mirror, sha, b.project or {}, bin_dir)
-                async with await db.connect(ctx.dsn) as conn:
-                    rows = await ledger.read(conn, ctx.task_id)
-                    if await tasks.is_stopped(conn, ctx.task_id):
-                        return {"status": "stopped"}
-                kept = reusable(rows, sha, command, digest, role)
-                if kept is not None:
-                    ran[role] = kept
-                    continue
-                if role == "head" and not (lay.checks / SEED).is_dir() and (b.project or {}).get("setup"):
-                    base_digest = ran["base"]["payload"]["digest"]
-                    await suite(ctx, lay, b, b.base_sha, "base", stop, digest=base_digest, run_suite=False)
-                if not await ctx.alive():
-                    return {"status": "lock lost"}
-                payload = await suite(ctx, lay, b, sha, role, stop, digest=digest)
-                if payload["cause"] == "kernel":
-                    return failed(payload["why"])
-                if not await ctx.alive():
-                    return {"status": "lock lost"}
-                async with await db.connect(ctx.dsn) as conn, conn.transaction():
-                    await ledger.lock(conn, f"task:{ctx.task_id}")
-                    if await tasks.is_stopped(conn, ctx.task_id):
-                        return {"status": "stopped"}
-                    event_id = await ledger.append(conn, ctx.task_id, SUITE, payload)
-                ran[role] = {"id": event_id, "payload": payload}
+            async with stop_heard(ctx) as stop:
+                got = await base_and_head(ctx, lay, b, stop, candidate.sha, "head")
         except _Stopped:
             return {"status": "stopped"}
-        finally:
-            if stop is not None:
-                stop.cancel()
-            await listener.close()
+        if "ran" not in got:
+            return {**got, "state": state} if got["status"] == "failed" else got
+        ran = got["ran"]
 
         base, head = ran["base"], ran["head"]
         try:

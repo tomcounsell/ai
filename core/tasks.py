@@ -307,8 +307,8 @@ def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # Every kind of attention entry, in the order `attention_counts` lists them.
-# A manual verdict is a person playing a stage no runner plays yet; a grant
-# is Tom's tap on one governance instance.
+# A verdict is one a person recorded by hand (`leg: manual`), which only
+# older ledgers hold; a grant is Tom's tap on one governance instance.
 ATTENTION_KINDS = ("question", "feedback", "approval", "verdict", "grant")
 
 
@@ -320,8 +320,8 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     `governance`, `merge_effect`), its metered spending, every turn and effect, and
     the attention log. `attention` lists every point where Tom acted on the
     task, in ledger order, each labelled by `kind`: a question with his
-    answer, feedback on a delivery, an approval of a held effect, a manual
-    verdict, and a governance grant, each with the
+    answer, feedback on a delivery, an approval of a held effect, a verdict
+    recorded by hand (older ledgers only), and a governance grant, each with the
     provenance it was recorded with (see `provenance`). `attention_counts`
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet

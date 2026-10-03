@@ -80,19 +80,15 @@ stop, recovery, and correction":
 
 The machine is kernel code: `core/machine.py` holds the types, the total
 fold, the join, and the merge predicate; `core/router.py` is the control
-loop; `core/session.py` runs the working session; `core/verdicts.py`
-writes verdict rows; `core/guards.py` holds the guards; the broker enforces
-the predicate. Postgres refuses a verdict outside its enum (a `CHECK`
+loop; `core/session.py` runs the working session; `core/verdicts.py` writes
+verdict rows; `core/guards.py` holds the guards; the broker enforces the
+predicate. Postgres refuses a verdict outside its enum (a `CHECK`
 constraint generated from `VERDICTS`). A turn's Brief carries the stage
-file for its state from `skills/sdlc/`.
-
-Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
-`build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
-workspace the kernel provisioned), `checks.test` (`core/checks.py`), and
-`checks.docs` (`fresh.docs_runner`). `checks.review` has none. Where a
-stage has no runner the router stops there and says so, and a person records the verdict with `python -m core verdict TASK
-STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
-has a runner.
+file for its state from `skills/sdlc/`. Runners exist for `judge` (it asks
+the judgement port), `clarify`, `plan`, `build`, `patch`, `critique` (a
+fresh session, `core/fresh.py`, on a workspace the kernel provisioned),
+`checks.test` (`core/checks.py`), `checks.review` (`fresh.review_runner`),
+and `checks.docs` (`fresh.docs_runner`). Every verdict comes from a runner.
 
 **Tasks from before the machine.** A `task.started` without `sdlc: 1` is
 legacy and folds read-only by the old kernel's precedence (stopped; a
@@ -393,24 +389,30 @@ exclusion, and the demonstration wrote 10 tests against the reference's 35
 **Goal.** An independent verdict on whether the candidate does what was
 asked, correctly, and adds no ungranted governance.
 
-**What runs.** The blind verifier ([architecture.md](architecture.md)):
-the builder's Opus model in a fresh session, or an Opus-class model from
-another vendor through another harness, never a cheaper class. It reads the
-request, Tom's answers and feedback, the plan, the diff, and the docs at the
-candidate as the contract, never the executor's narration. It reruns the
-checks itself, so it needs nothing from the test branch. The kernel asks
-the governance boolean per hunk (use shape 6); the verifier adds instances,
-never removes one, and a line it names in a flagged hunk merges into it.
-Both legs failing leaves no verdict; after two such runs the unjudged hunks
-become one instance.
+**What runs.** `fresh.review_runner`, the blind verifier
+([architecture.md](architecture.md)). The kernel first asks the governance
+boolean per hunk (use shape 6), then runs the suite and the lint itself at
+base and candidate (`verify.ran`), then sets up a checkout of the candidate
+with fresh services and runs one fresh session there: the builder's Opus
+model, or an Opus-class model from another vendor through another harness,
+never a cheaper class. It reads the request, Tom's answers and feedback,
+the plan, the diff, the kernel's run, and the instances, never the
+executor's narration, reruns any test itself, and answers `pass` or
+`changes`; it adds instances, never removes one, and a line it names in a
+flagged hunk merges into it. Both legs failing leaves no verdict; after two
+such runs the unjudged hunks become one instance. The kernel computes the
+recorded verdict: a `pass` with an ungranted instance is
+`governance_refused`; a `changes` lists each such instance as a finding.
 
-**Exit evidence.** `review.decided`: the candidate, the verdict, the
-findings (each with a kind, `debt` among them), the governance boolean and
-its answer, the verifier's model and cost. `governance_refused` means the
-diff adds a check, gate, hook, round, or review step without a grant: the
-join sends it to Tom in `merge` with the hunk named. His grant, one tap per
-instance, starts the review branch again on the same candidate; his
-feedback sends the work to `patch` to take it out.
+**Exit evidence.** `review.decided`: the candidate, the verdict and the
+reviewer's own, the findings (each with a kind, `debt` among them), the
+governance answer, the kernel's run, the predicted failure, each
+requirement met or not, the verifier's model and cost. `governance_refused`
+means the diff adds a check, gate, hook, round, or review step without a
+grant: the join sends it to Tom in `merge` with the hunk named. His grant,
+one tap per instance, starts the review branch again on the same candidate,
+which reuses the governance answers and the kernel's run; his feedback
+sends the work to `patch` to take it out.
 
 **Why.** Mission item 1 and the Evidence item "Independent checks". One
 review is a constraint of the setup plan with no expiry. Sending work back
