@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -349,3 +350,56 @@ def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path
         proc.kill()
         out, _ = proc.communicate()
     assert "unknown option" not in out
+
+
+def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhile(tmp_path, monkeypatch):
+    """The fetch into the kernel mirror runs in a worker thread: the loop
+    keeps running while it does, and stopping `record` kills the fetch's
+    whole process group (here a fetch that never ends, run as the real
+    fetch runs, through `workspace.bounded`)."""
+    import types
+
+    from core import workspace as kws
+
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, "docs/plan.md", "a plan\n", "Plan")
+    (ws / ".valor").mkdir(exist_ok=True)
+    (ws / ".valor" / "plan.json").write_text(
+        json.dumps(
+            {"path": "docs/plan.md", "stakes": "s", "critique_rounds": 1, "review_rounds": 1, "scope": []}
+        )
+    )
+    pidfile = tmp_path / "pid"
+
+    def never_ends(mirror, source, sha, ref, profile, mark, **kw):
+        argv = ["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; wait"]
+        kws.bounded(argv, cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024, max_footprint=1024**3)
+
+    monkeypatch.setattr(session.workspace, "fetch_into_mirror", never_ends)
+    brief = types.SimpleNamespace(
+        mirror=str(tmp_path / "mirror"), workspace=str(ws), harness={"sandbox_profile": ""}
+    )
+
+    async def go():
+        found = signals.collect(ws, "turn-1")
+        recording = asyncio.create_task(
+            session.record(
+                None, "t", "turn-1", found, state=tasks.machine.State.PLAN, workspace=str(ws), brief=brief
+            )
+        )
+        while not pidfile.exists() or not pidfile.read_text().strip():  # the loop runs while the fetch does
+            await asyncio.sleep(0.05)
+        recording.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await recording
+        return int(pidfile.read_text())
+
+    child = run(go())
+    for _ in range(200):  # the group was sent SIGKILL; wait for the kernel to retire the child
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the fetch outlived its stopped caller")

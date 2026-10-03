@@ -262,7 +262,7 @@ async def record_check(
                 head = head or c.sha
                 if head != c.sha:
                     if b.mirror:
-                        _docs_into_mirror(b, head, task_id)
+                        await git.threaded(_docs_into_mirror, b, head, task_id)  # a stop kills the fetch
                     if not git.is_ancestor(repo, c.sha, head):
                         raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
                     if git.merges_between(repo, c.sha, head):

@@ -247,8 +247,11 @@ async def record(
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
     the broker. Returns the verdict. For a task with a kernel mirror, a plan
-    commit or a candidate counts only once it is fetched into the mirror."""
-    verdict, extra, errors = _verdict(state, found, workspace, turn_id, finished, brief)
+    commit or a candidate counts only once it is fetched into the mirror.
+    The verdict, with its git calls and that fetch, is read in a worker
+    thread (`git.threaded`), so the kernel's loop runs meanwhile and a stop
+    kills the fetch."""
+    verdict, extra, errors = await git.threaded(_verdict, state, found, workspace, turn_id, finished, brief)
     effects = []
     for entry in found.effects:
         if "request" in entry and entry["request"]["action_type"] == "merge":

@@ -593,4 +593,7 @@ From the test check and the lead:
    `performing`); `tests/conftest.py` sets it to a temporary directory of
    the session's own before the settings are built, so every test and
    every process a test starts uses it.
+8. **A stop reaches the mirror fetch.** `session.record` reads its verdict
+   (and fetches into the mirror) in `git.threaded`, and so does a docs head
+   in `verdicts`; the loop runs meanwhile and a stop kills the fetch.
 
