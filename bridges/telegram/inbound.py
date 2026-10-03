@@ -34,13 +34,13 @@ def skipped(msg: Msg, reason: str) -> dict[str, Any]:
     return {"name": m.name or m.kind, "mime": m.mime, "bytes": m.size, "skipped": reason}
 
 
-async def attachment(wire: Wire, msg: Msg, inbound_dir: Path) -> dict[str, Any]:
+async def attachment(wire: Wire, msg: Msg, inbound_dir: Path, progress=None) -> dict[str, Any]:
     """Download the message's file into `inbound_dir/telegram/`, named by its
     sha256. A lost connection or a flood wait is raised, so the message is
     taken again; Telegram refusing the file lists it as skipped with the
     reason."""
     try:
-        data = await wire.download(msg)
+        data = await wire.download(msg, progress)
     except NotConnected, FloodWait:
         raise
     except Exception as e:  # noqa: BLE001 - the message is recorded either way
@@ -102,7 +102,7 @@ def fields(msg: Msg, chain: list[dict[str, Any]], attachments: list[dict[str, An
     }
 
 
-async def build(wire: Wire, msg: Msg, inbound_dir: Path) -> dict[str, Any]:
+async def build(wire: Wire, msg: Msg, inbound_dir: Path, progress=None) -> dict[str, Any]:
     chain = await thread(wire, msg)
-    files = [await attachment(wire, msg, inbound_dir)] if msg.media else []
+    files = [await attachment(wire, msg, inbound_dir, progress)] if msg.media else []
     return fields(msg, chain, files)

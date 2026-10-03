@@ -232,9 +232,9 @@ once: the result. None: None. Any part with two matches: `broker.Unknown`.
 Some parts found and others not: the missing parts are sent under their
 own `random_id`s, Telegram refusing any it already holds, and the whole
 is the result; a flood wait or a send in doubt there is `broker.Unknown`,
-retried on a later wake, and a refusal or a changed file is None. A record
-is dropped once the ledger settles its send; an unreadable file is set
-aside and a send with no record is looked up over the whole chat.
+retried on a later wake, and a refusal or a changed file settles with the
+messages on screen. A record is dropped once the ledger settles its send;
+an unreadable file is set aside and a send with no record stays in doubt.
 
 **Notices.** For each `NoticeDue`, first scan as above, under the key
 `notice:<notice id>`, for the notice's parts by full text. Each part not
@@ -380,8 +380,8 @@ an approved send in the ledger for the outbox to yield.
   is `done`; a send cut off after its first part is `unknown`, and the
   reconcile sends the rest and writes `done`.
 - A send's record stays while it is in flight and is dropped once settled;
-  an unreadable sends file is set aside and the reconcile reads the whole
-  chat.
+  an unreadable sends file is set aside and a send with no record stays
+  in doubt (a notice is looked up over the whole chat).
 
 `tests/test_telegram_outbox.py`
 - A notice goes to the row's `chat_id` and `notice.sent` is recorded

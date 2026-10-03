@@ -330,24 +330,50 @@ def test_a_send_record_is_dropped_once_the_ledger_settles_it(emu, dsn, tmp_path,
     run(go())
 
 
-def test_an_unreadable_sends_file_is_set_aside_and_reconcile_reads_the_whole_chat(emu, dsn, tmp_path, c):
+def test_with_the_sends_file_lost_a_send_in_doubt_stays_in_doubt_and_adopts_nothing(emu, dsn, tmp_path, c):
     group, _ = c
 
     async def go():
+        # An earlier identical message of the account's own, in no record.
+        old = emu.inject(int(group), "same words", out=True, sender_id=1)
         async with connected(emu.url, dsn, tmp_path) as bridge:
-            effect = await release(dsn, send(group, "before the file broke"))
-            emu.control(drop_reply_next=True)
+            effect = await release(dsn, send(group, "same words"))
+            emu.control(lose_send_next=True)  # the request never reaches Telegram
             assert (await perform(dsn, bridge, effect)).kind == "unknown"
         (tmp_path / "telegram-sends.json").write_text("")
         async with connected(emu.url, dsn, tmp_path) as bridge:
             assert bridge.sender.starts.lost
             assert (tmp_path / "telegram-sends.json.unreadable").exists()
-            assert (await reconcile(dsn, bridge, effect)).kind == "done"
-            [m] = emu.own(int(group))
-            assert (await outcome(dsn, effect))["result"]["sent"][0]["message_id"] == str(m["id"])
+            assert await reconcile(dsn, bridge, effect) is None
             bridge._outbox = Box()
             await bridge.tidy()
-            # Settled: dropped. (Sends other tests left in doubt are still in flight.)
-            assert not bridge.sender.starts.lost and effect not in bridge.sender.starts.names()
+            assert not bridge.sender.starts.lost
+        # The mark survives the next restart; the old message is still not taken for the send.
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            assert await reconcile(dsn, bridge, effect) is None
+            assert await outcome(dsn, effect) is None
+            assert [m["id"] for m in emu.own(int(group))] == [old]
+
+    run(go())
+
+
+def test_a_send_cut_off_whose_file_is_gone_settles_done_with_the_parts_on_screen(emu, dsn, tmp_path, c):
+    group, _ = c
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"approved bytes")
+    digest = hashlib.sha256(b"approved bytes").hexdigest()
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            effect = await release(
+                dsn, send(group, "the text goes out", files=[{"path": str(f), "sha256": digest}])
+            )
+            emu.control(lose_send_next=True, send_after=1)
+            assert (await perform(dsn, bridge, effect)).kind == "unknown"
+            f.unlink()
+            assert (await reconcile(dsn, bridge, effect)).kind == "done"
+            [m] = emu.own(int(group))
+            sent = (await outcome(dsn, effect))["result"]["sent"]
+            assert [e["message_id"] for e in sent] == [str(m["id"])]
 
     run(go())

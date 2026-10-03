@@ -25,7 +25,12 @@ whatever the Mac's clock and Telegram's dates say. When some of a send's
 messages are on screen and the rest are not, `lookup` sends the rest,
 each under its own `random_id`, so a message Telegram already holds is
 refused as a duplicate rather than shown twice; the send then settles as
-done. A notice is finished the same way.
+done. A send whose start record was lost with the file is
+`Unknown`, never `done`: the chat's history cannot tell it from an earlier
+identical message. A notice's text carries its own id, so a notice whose
+record was lost is looked up over the whole chat. When finishing is refused, or a file of the send is gone, the send
+settles as done with the messages that are on screen. A notice is finished
+the same way.
 """
 
 from __future__ import annotations
@@ -149,6 +154,10 @@ class Sender:
             after = self._after(effect_of(key))
             if after is None:
                 return None  # the record is written before the first message
+            if after == LOST:
+                # Only Telegram could say, and its history cannot tell this
+                # send from an earlier identical message of the account's own.
+                raise self.kernel.Unknown(f"the start of send {key} was lost with the file")
             found = await self._scan(chat, expected, after)
             if all(f is None for f in found):
                 return None
@@ -158,11 +167,8 @@ class Sender:
                 parts = self._parts(p.get("text") or "", p.get("files") or [])
             except (OSError, ValueError) as e:
                 log.warning("send %s cannot be finished: %s", key, e)
-                return None
+                return {"sent": [f for f in found if f is not None]}
             return {"sent": await self._finish(chat, parts, found, key, reply, topic)}
-        except Refused as e:
-            log.warning("send %s cannot be finished: %s", key, e)
-            return None
         except WireError as e:
             if isinstance(e, FloodWait):
                 self.flood.hit(e.seconds)
@@ -185,7 +191,10 @@ class Sender:
                 )
             except (InDoubt, DuplicateRandomId) as e:
                 raise self.kernel.Unknown(f"finishing the send is in doubt: {e}") from None
-        return out
+            except Refused as e:
+                log.warning("send %s cannot be finished: %s", key, e)
+                break
+        return [o for o in out if o is not None]
 
     async def _put(self, chat, part: Part, rid: int, reply, topic, *, wait_out: bool) -> dict[str, str]:
         """One message. With `wait_out` (a later message of a send whose
@@ -230,7 +239,7 @@ class Sender:
                 await self._start(key, chat)
                 found = [None] * len(expected)
             else:
-                found = await self._scan(chat, expected, after)
+                found = await self._scan(chat, expected, max(after, 0))
             sent = await self._finish_notice(item, chat, key, expected, found)
         except self.kernel.Unknown as e:
             self._log_once(item.notice_id, f"notice {item.notice_id}: {e}")
@@ -260,7 +269,7 @@ class Sender:
                     )
                     out[n] = self._entry(chat, mid)
                 except DuplicateRandomId:
-                    again = await self._scan(chat, expected, self._after(key) or 0)
+                    again = await self._scan(chat, expected, max(self._after(key) or 0, 0))
                     if again[n] is None:
                         self._attempts[(item.notice_id, n)] = attempt + 1
                     out[n] = again[n]
@@ -279,21 +288,21 @@ class Sender:
             self.starts.set(key, page[0].id if page else 0)
 
     def _after(self, key: str) -> int | None:
-        """The id a scan for `key` starts above. With the file lost, a key
-        with no record scans the whole chat: only Telegram can say."""
+        """The id a scan for `key` starts above; None when the send never
+        began; `LOST` when its record went with the file."""
         after = self.starts.get(key)
         if after is None and self.starts.lost:
-            return 0
+            return LOST
         return after
 
     def keep_only(self, in_flight: set[str]) -> None:
         """Drop the record of every send the ledger has settled. The
-        records of sends still in flight, when the file was lost, start
-        at the beginning of the chat."""
+        records of sends still in flight, when the file was lost, are marked
+        `LOST`."""
         if self.starts.lost:
             for key in in_flight:
                 if self.starts.get(key) is None:
-                    self.starts.set(key, 0)
+                    self.starts.set(key, LOST)
             self.starts.lost = False
         self.starts.drop([k for k in self.starts.names() if k not in in_flight])
 
@@ -345,6 +354,9 @@ class Sender:
         if notice_id not in self._logged:
             self._logged.add(notice_id)
             log.warning(text)
+
+
+LOST = -1  # a send's start record that was lost with the file
 
 
 def effect_of(key: str) -> str:

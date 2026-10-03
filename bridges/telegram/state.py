@@ -7,7 +7,8 @@ written whole to a temporary file, flushed to disk, moved into place, and
 the directory flushed, so a file is never half written and a write that
 returned survives a power loss. With no path the state lives in memory.
 
-A file that cannot be read (empty, cut short, not JSON) is set aside as
+A file that cannot be read (empty, cut short, not JSON, or holding anything
+but a whole number for a key) is set aside as
 `<name>.unreadable` and the state starts empty with `lost` true; the
 caller rebuilds what it needs from the ledger or from Telegram.
 """
@@ -33,7 +34,7 @@ class State:
                 data = json.loads(path.read_text())
             except ValueError:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
                 data = None
-            if isinstance(data, dict):
+            if isinstance(data, dict) and all(type(v) is int for v in data.values()):
                 self.data = data
             else:
                 self.lost = True

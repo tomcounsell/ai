@@ -15,12 +15,13 @@ exactly the seconds Telegram gives.
 
 A message with a file is received off the update stream: its download
 runs as its own task, so a slow download never holds up the messages
-behind it. A download has no timer of its own. It ends when the file is
-in, when the connection fails (Telethon pings every 60 s and drops a
-connection whose ping went unanswered, failing every request on it), or
-when the bridge stops. A download that fails is retaken by the next
-gap-fill pass: a pass never records a chat as seen past a message whose
-receive is still running.
+behind it. A download ends when the file is in, when the connection fails
+(Telethon pings every 60 s and drops a connection whose ping went
+unanswered), or when the bridge stops. A download from another data
+centre has no ping of its own, so on each `tick` a download that received
+no bytes since the previous `tick` is cancelled. A download that ends
+without the file is retaken by the next gap-fill pass: a pass never
+records a chat as seen past a message whose receive is still running.
 
 On SIGTERM an in-flight perform and its outcome finish before `run`
 returns; downloads still running are stopped and retaken on the next
@@ -64,6 +65,8 @@ class TelegramBridge:
         self._filling = asyncio.Lock()
         self._failing = False  # a connect, receive or pass failed since the last completed pass
         self._inflight: dict[tuple[int, int], asyncio.Task] = {}
+        # message -> [bytes received so far, bytes received at the last tick or None]
+        self._received: dict[tuple[int, int], list] = {}
         self._outbox = None
         wire.on_message(self.handle)
 
@@ -112,8 +115,25 @@ class TelegramBridge:
         """On every wake: drop settled send records, and fill the gap; a
         pass under a flood wait waits for the next wake."""
         await self.tidy()
+        self._cancel_stalled()
         if self.wire.connected() and not self.sender.flood.active():
             await self.fill()
+
+    def _cancel_stalled(self) -> None:
+        """Cancel each download that received no bytes since the last tick;
+        the gap fill retakes it."""
+        for where, task in list(self._inflight.items()):
+            got = self._received.get(where)
+            if got is None:
+                continue
+            if got[1] is not None and got[0] == got[1]:
+                log.warning(
+                    "download of message %s in chat %s received nothing since the last tick",
+                    where[1],
+                    where[0],
+                )
+                task.cancel()
+            got[1] = got[0]
 
     async def tidy(self) -> None:
         """Keep the record of each send still in flight: an effect with an
@@ -183,9 +203,14 @@ class TelegramBridge:
         if where in self._inflight:
             return
 
+        got = self._received[where] = [0, None]
+
+        def progress(received: int, total: int) -> None:
+            got[0] = received
+
         async def receive():
             try:
-                await self._receive(msg)
+                await self._receive(msg, progress)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -194,11 +219,12 @@ class TelegramBridge:
                 )
             finally:
                 self._inflight.pop(where, None)
+                self._received.pop(where, None)
 
         self._inflight[where] = asyncio.create_task(receive())
 
-    async def _receive(self, msg: Msg) -> None:
-        fields = await inbound.build(self.wire, msg, Path(self.kernel.inbound_dir))
+    async def _receive(self, msg: Msg, progress=None) -> None:
+        fields = await inbound.build(self.wire, msg, Path(self.kernel.inbound_dir), progress)
         async with self.kernel.conn() as conn:
             await self.kernel.receive(conn, self.kernel.Inbound(**fields))
         try:
@@ -239,7 +265,11 @@ class TelegramBridge:
         if stop_id is None:
             # No rows: nothing before this connect is wanted.
             page = await self.wire.history(chat, limit=1)
-            self._seen.set(str(chat), page[0].id if page else 0)
+            top = page[0].id if page else 0
+            held = [i for c, i in self._inflight if c == chat]
+            if held:
+                top = min(top, min(held) - 1)
+            self._seen.set(str(chat), top)
             return
 
         async def recorded(ids: list[str]) -> set[str]:

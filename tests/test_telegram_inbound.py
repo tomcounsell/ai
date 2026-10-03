@@ -142,9 +142,9 @@ def test_a_refused_download_is_listed_skipped_and_not_tried_again(emu, dsn, tmp_
             calls = []
             real = bridge.wire.download
 
-            async def counting(msg):
+            async def counting(msg, progress=None):
                 calls.append(msg.id)
-                return await real(msg)
+                return await real(msg, progress)
 
             bridge.wire.download = counting
             emu.inject(
@@ -227,5 +227,53 @@ def test_album_is_one_record_per_photo_sharing_grouped_id(emu, dsn, tmp_path, c)
             rows = await received(dsn, c.group)
             assert {r["headers"]["grouped_id"] for r in rows} == {"777"}
             assert len({r["attachments"][0]["path"] for r in rows}) == 3
+
+    run(go())
+
+
+def test_a_download_with_no_bytes_since_the_last_tick_is_cancelled_and_retaken(emu, dsn, tmp_path, c):
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            stuck = emu.inject(
+                int(c.group),
+                "stuck",
+                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
+                data_b64=base64.b64encode(b"x").decode(),
+            )
+            moving = emu.inject(
+                int(c.forum),
+                "moving",
+                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
+                data_b64=base64.b64encode(b"y").decode(),
+            )
+            await until(lambda: len(bridge._inflight) == 2)
+            first = dict(bridge._inflight)
+            await bridge.tick()  # opens the window of each
+            assert len(bridge._inflight) == 2
+            bridge._received[(int(c.forum), moving)][0] += 1  # bytes arrived on this one
+            await bridge.tick()
+            await asyncio.sleep(0.1)
+            assert first[(int(c.group), stuck)].cancelled()
+            assert not first[(int(c.forum), moving)].done()
+            # The same tick's gap fill took the stuck message again, and held it.
+            assert bridge._inflight[(int(c.group), stuck)] is not first[(int(c.group), stuck)]
+            assert bridge._seen.get(c.group) < stuck
+
+    run(go())
+
+
+def test_a_download_in_a_chat_with_no_rows_is_held_by_the_first_pass(emu, dsn, tmp_path, c):
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            slow = emu.inject(
+                int(c.dm),
+                "",
+                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
+                data_b64=base64.b64encode(b"x").decode(),
+            )
+            await until(lambda: (int(c.dm), slow) in bridge._inflight)
+            assert bridge._seen.get(c.dm) is None or bridge._seen.get(c.dm) < slow
+            await bridge.fill()
+            assert bridge._seen.get(c.dm) == slow - 1
 
     run(go())

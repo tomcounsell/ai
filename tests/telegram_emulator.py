@@ -441,9 +441,12 @@ class EmulatorWire:
         }
         return (await self._post("send", body, send=True))["id"]
 
-    async def download(self, msg: Msg) -> bytes:
+    async def download(self, msg: Msg, progress=None) -> bytes:
         out = await self._post("download", {"chat": msg.chat_id, "id": msg.id})
-        return base64.b64decode(out["data_b64"])
+        data = base64.b64decode(out["data_b64"])
+        if progress is not None:
+            progress(len(data), len(data))
+        return data
 
     async def mark_read(self, chat_id: int, max_id: int) -> None:
         await self._post("read", {"chat": chat_id, "max_id": max_id})

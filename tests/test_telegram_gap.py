@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import dataclasses
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -130,9 +131,9 @@ def test_a_dropped_live_update_is_recorded_on_the_next_tick_without_downloading_
             downloads = []
             real = bridge.wire.download
 
-            async def counting(msg):
+            async def counting(msg, progress=None):
                 downloads.append(msg.id)
-                return await real(msg)
+                return await real(msg, progress)
 
             bridge.wire.download = counting
             dropped = emu.inject(int(group), "the update for this one is lost", live=False)
@@ -260,6 +261,26 @@ def test_an_unreadable_seen_file_is_set_aside_and_the_pass_starts_at_the_ledger(
         async with connected(emu.url, dsn, tmp_path):
             assert (tmp_path / "telegram-seen.json.unreadable").exists()
             assert await ids(dsn, dm) == [str(first), str(missed)]
+
+    with machine(tmp_path, [dm]):
+        run(go())
+
+
+def test_a_seen_file_holding_a_wrong_typed_value_is_set_aside_and_the_pass_completes(emu, dsn, tmp_path):
+    dm = chat("dm")
+    emu.control(chats=[emu_chat(dm)])
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path):
+            first = emu.inject(int(dm), "recorded")
+            await until(lambda: ids(dsn, dm))
+        missed = emu.inject(int(dm), "while down", live=False)
+        (tmp_path / "telegram-seen.json").write_text(json.dumps({dm: "not a number"}))
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            assert (tmp_path / "telegram-seen.json.unreadable").exists()
+            assert not bridge._failing
+            assert await ids(dsn, dm) == [str(first), str(missed)]
+            assert await bridge.fill()
 
     with machine(tmp_path, [dm]):
         run(go())

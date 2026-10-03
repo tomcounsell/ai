@@ -191,13 +191,15 @@ conversation, and which task that root belongs to, is `core/`'s.
 `inbound_dir/telegram/`, each named by its sha256, and listed with path,
 type, and size. A message with a file is received off the update stream:
 its download runs as its own task, so a slow download never holds up the
-messages behind it. A download has no timer of its own. It ends when the
-file is in, when the connection fails, or when the bridge stops. Telethon
-pings the server every 60 seconds and drops a connection whose last ping
-went unanswered, which fails every request still waiting on it, a stalled
-download included. A download Telegram refuses is listed with its reason,
+messages behind it. A download ends when the file is in, when the
+connection fails, or when the bridge stops. Telethon pings the server every
+60 seconds and drops a connection whose last ping went unanswered, which
+fails every request still waiting on it; a download from another data
+centre has no ping of its own. So on each tick the bridge cancels a
+download that received no bytes since the previous tick, and the gap fill
+retakes it. A download Telegram refuses is listed with its reason,
 so a turn can say exactly what it could not read; a download cut off by a
-lost connection or a stop is taken again by the next gap-fill pass.
+lost connection, a stop, or a stall is taken again by the next gap-fill pass.
 Transcribing or describing media is not the bridge's work.
 
 **After downtime.** The bridge fills the gap itself, on every connect and
@@ -220,8 +222,8 @@ two files in the key directory:
 
 | File | Holds | When it is unreadable |
 |---|---|---|
-| `telegram-seen.json` | For each owned chat, the newest message id its last completed gap-fill pass saw | Set aside as `telegram-seen.json.unreadable`; each chat's next pass starts at its lowest id in the ledger (`intake.lowest`), so nothing is missed and the receipt index drops what is already recorded |
-| `telegram-sends.json` | For each send in flight (an effect with an intent and no outcome, or a notice not yet marked sent), the chat's newest message id before its first message | Set aside as `telegram-sends.json.unreadable`; a send with no entry is looked up over the whole chat, so Telegram's own record settles it |
+| `telegram-seen.json` | For each owned chat, the newest message id its last completed gap-fill pass saw | Set aside (also when a value is not a whole number) as `telegram-seen.json.unreadable`; each chat's next pass starts at its lowest id in the ledger (`intake.lowest`), so nothing is missed and the receipt index drops what is already recorded |
+| `telegram-sends.json` | For each send in flight (an effect with an intent and no outcome, or a notice not yet marked sent), the chat's newest message id before its first message | Set aside as `telegram-sends.json.unreadable`; a send in flight with no entry stays in doubt, because Telegram's history cannot tell it from an earlier identical message of the account's own; a notice with no entry is looked up over the whole chat, since its text carries its own id |
 
 Each is written whole to a temporary file, flushed to disk, renamed into
 place, and the directory flushed. An entry in `telegram-sends.json` is
@@ -348,10 +350,12 @@ as a duplicate rather than shown twice. The outcome records `chat_id` and
 `message_id`, which is how a later reply to the sent message binds back to
 its task.
 
-**One attempt.** `perform` makes one delivery attempt. A flood wait, a
-refusal, or no connection on the first message returns a failed outcome
-with the reason and, for a flood wait, the wait time, which later requests
-wait out. A flood wait on a later message, once earlier ones are on
+**One attempt.** `perform` makes one delivery attempt. A flood wait or a
+refusal on the first message returns a failed outcome with the reason and,
+for a flood wait, the wait time, which later requests wait out. With no
+connection on the first message the send stays in flight: `lookup` needs
+the connection, so the outbox's reconcile settles it as failed once one is
+up. A flood wait on a later message, once earlier ones are on
 screen, is waited out for exactly the seconds Telegram gives, and the
 send goes on. A
 connection lost after a request was written is `broker.Unknown`: no

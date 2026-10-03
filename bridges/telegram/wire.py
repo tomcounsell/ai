@@ -120,7 +120,11 @@ class Wire(Protocol):
         reply_to: int | None,
         topic_id: int | None,
     ) -> int: ...
-    async def download(self, msg: Msg) -> bytes: ...
+    async def download(self, msg: Msg, progress: Callable[[int, int], None] | None = None) -> bytes:
+        """The file's bytes. `progress(received, total)` is called as bytes
+        arrive."""
+        ...
+
     async def mark_read(self, chat_id: int, max_id: int) -> None: ...
 
 
@@ -205,9 +209,11 @@ class TelethonWire:
         found = await self._call(self.client.get_messages(chat_id, ids=ids))
         return [await self._msg(m) if m is not None else None for m in found]
 
-    async def download(self, msg: Msg) -> bytes:
+    async def download(self, msg: Msg, progress: Callable[[int, int], None] | None = None) -> bytes:
         try:
-            return await self._call(self.client.download_media(msg.raw, file=bytes))
+            return await self._call(
+                self.client.download_media(msg.raw, file=bytes, progress_callback=progress)
+            )
         except asyncio.CancelledError:
             # Telethon cancels a dropped connection's pending requests; only
             # a cancel of this task is a stop.
