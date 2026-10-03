@@ -61,6 +61,7 @@ import socket
 import stat
 import struct
 import subprocess
+import threading
 import time
 import tomllib
 from collections.abc import Iterator
@@ -877,11 +878,12 @@ def _remote_head(cache: Path) -> str:
 def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
     """Each setup command once, in the clone, under the turn's profile, with
     the turn's environment; a failure is recorded, never fatal. A command
-    ends when its own process ends: its whole output goes to
-    `<task root>/setup/<n>.log`, a file the kernel holds open (not a pipe,
-    so a child it leaves running cannot hold the step open) at a path no
-    turn can write, and the child is reaped by the command's mark. Each
-    result names that file. There is no time limit; provisioning under
+    ends when its own process ends, and the child it leaves running is
+    reaped by the command's mark. Its stdout and stderr are one pipe, which
+    the kernel copies whole into `<task root>/setup/<n>.log`, at a path no
+    turn can read or write, until EOF, which comes once the reap has ended
+    every process of the command: node aborts at startup when its stdout is
+    a file at a path it cannot read. Each result names that file. There is no time limit; provisioning under
     `git.interruptible()` ends it when interrupted."""
     out: list[dict[str, Any]] = []
     lay.setup.mkdir(parents=True, exist_ok=True)
@@ -891,15 +893,20 @@ def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> di
         held = git.watch()
         path = lay.setup / f"{len(out)}.log"
         with path.open("wb") as log:
-            kwargs = {"cwd": lay.repo, "env": env, "stdin": subprocess.DEVNULL,
-                      "stdout": log, "stderr": subprocess.STDOUT}  # fmt: skip
+            kwargs = {"cwd": lay.repo, "env": env, "stdin": subprocess.DEVNULL, "bufsize": 0,
+                      "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}  # fmt: skip
             proc = git.start(argv, **kwargs)
+            pump = threading.Thread(target=shutil.copyfileobj, args=(proc.stdout, log))
+            pump.start()
             try:
                 code = proc.wait()
             finally:
                 if held:
                     held.finished(proc)
                 runs.reap(mark)
+                # Every process the command left has ended, so the pipe is at EOF.
+                pump.join()
+                proc.stdout.close()
             if held and held.interrupted:
                 raise git.Interrupted()
         out.append({"command": command, "exit": code, "output": str(path)})

@@ -28,6 +28,15 @@ copies after the reap, so a child the turn left holding a pipe is ended by
 the reap, not waited on. A stop still kills the group at once. No sandbox
 opening is added; `<work>` stays denied to every profile.
 
+Setup commands (`workspace._setup`) get the same treatment: their stdout
+and stderr are one pipe, copied whole into `setup/<n>.log` in a thread. The
+step ends when the command's process ends; the command's mark is reaped,
+and then the copy is joined at EOF.
+
+**Decided by default (the lead):** neither copy has a timeout on its EOF
+wait after the reap. None has a source, and a process that escapes every
+reap mark can only be an unsandboxed one, which no provisioned task runs.
+
 **The second item.** m1-4b-runners.md (Landing) lands a site with
 `calibrated` set only when its record passes its entry check. Governance's
 record on the real ledger (task `405d06d5bb53`, `task_sha256`
@@ -59,13 +68,16 @@ shed its sandbox mark.
 | Large output on both streams and a large stdin do not deadlock | `test_a_large_output_on_both_streams_and_a_large_stdin_do_not_deadlock`: 4 MiB on stderr before any stdout, 4 MiB on stdout before stdin is read |
 | node starts in a turn under a profile that denies the work dir | `test_node_starts_when_its_turn_runs_under_a_profile_that_denies_the_work_dir` (fails on the old code) |
 | The whole output still lands in the files, and a stop still ends the turn | `test_a_turns_whole_output_is_in_files_no_turn_can_write_and_its_row_names_them`, `test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_ledger`, unchanged |
+| A node setup command under the turn profile starts, and its log holds its whole output | `test_a_node_setup_command_starts_under_the_turn_profile_and_its_log_holds_its_output` (exit -6 on the old code) |
+| A setup command whose child holds its output still ends | `test_a_setup_command_whose_child_holds_its_output_still_ends`, `test_interrupting_start_kills_a_setup_command`, unchanged |
 | Neither breadth nor governance is landed calibrated; docs has no runner | `test_breadth_and_governance_have_no_landed_record_so_docs_has_no_runner` |
 | The critique at `reviewer_openai` passes on a provisioned task | `tests/test_pi_live.py::test_a_live_critique_at_the_openai_seat_leaves_a_verdict`, run once (Build record) |
 
 ## Docs
 
-`docs/harnesses.md` (Running one turn) and the `core/runs.py` docstring say
-the streams are pipes copied into the files, and why.
+`docs/harnesses.md` (Running one turn), `docs/workspace.md` (setup), and
+the `core/runs.py` and `_setup` docstrings say the streams are pipes copied
+into the files, and why.
 
 ## Build record
 
@@ -91,6 +103,9 @@ Built on `460943b8a`, branch `m1-4w-turn-pipes`.
 - Live: `test_pi_live.py::test_a_live_critique_at_the_openai_seat_leaves_a_verdict`
   passed on a provisioned task (verdict `revise`), charged $0.0156 by the
   gateway.
-- Follow-up for the lead: setup commands (`workspace._setup`) still hold
-  `<task root>/setup/<n>.log` as their stdout and stderr, under the turn's
-  profile; a node-based setup command there would abort the same way.
+
+**Round 2** (the lead: setup commands too). `_setup` starts each command
+with `stdout=PIPE`, `stderr=STDOUT`, unbuffered; a thread copies the pipe
+into `setup/<n>.log`; after `wait()` the `finally` reaps the mark, then
+joins the copy. The new node setup test failed on the old code (exit -6,
+SIGABRT) and passes. Suite 1011 passed, 19 skipped; `ruff check` clean; `ruff format --check` flags only the two known docs files. No live spend this round.

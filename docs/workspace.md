@@ -23,8 +23,10 @@ its spec (`scripts/replay_workspace.py`).
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
 | `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr; no turn can write them |
 
-The setup commands run once in `repo/` under `turn.sb`, with no time limit, their output going to a
-file and not a pipe so a child they leave behind cannot hold a step open; a failure is recorded on
+The setup commands run once in `repo/` under `turn.sb`, with no time limit. A command's stdout and
+stderr are one pipe the kernel copies into its log, since node aborts at startup when its stdout is a
+file at a path the profile denies; a step ends when its own process ends, and a child it leaves
+behind is reaped by the command's mark before the copy waits for EOF. A failure is recorded on
 the Brief (`project.setup_result`) and the task still starts. A command's whole output, stdout
 and stderr, goes to `setup/<n>.log`, and its result is `{command, exit, output}`, `output` naming
 that file. Provisioning's git calls have no time limit either. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the

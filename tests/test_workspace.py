@@ -1605,6 +1605,19 @@ def test_a_setup_commands_whole_output_is_in_its_log_which_no_turn_can_write(tmp
     assert not hasattr(kws, "SETUP_TAIL")
 
 
+def test_a_node_setup_command_starts_under_the_turn_profile_and_its_log_holds_its_output(tmp_path):
+    from core.settings import settings
+
+    if not Path(settings.node).exists():
+        pytest.skip("no node at the node setting")
+    script = "process.stdout.write('o'.repeat(200000)); console.error('end')"
+    _task, made = provision(tmp_path, setup=[f'{settings.node} -e "{script}"'])
+    (only,) = made.project["setup_result"]["commands"]
+    assert only["exit"] == 0
+    text = Path(only["output"]).read_text()  # one pipe for both: node may interleave them
+    assert text.count("o") == 200000 and text.replace("o", "") == "end\n"
+
+
 def _service_layout(tmp_path) -> kws.Layout:
     lay = kws.Layout(tmp_path / "task")
     lay.profiles.mkdir(parents=True)
