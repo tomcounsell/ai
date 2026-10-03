@@ -77,8 +77,10 @@ def body(**extra) -> dict:
 
 
 def estimate(sent: dict) -> int:
-    """The body's input estimate: its compact JSON bytes over 3."""
-    return ceil(len(json.dumps(sent, separators=(",", ":")).encode()) / 3)
+    """The body's input estimate: its compact JSON bytes over `bytes_per_token`."""
+    from core.settings import settings
+
+    return ceil(len(json.dumps(sent, separators=(",", ":")).encode()) / settings.bytes_per_token)
 
 
 class Upstream:

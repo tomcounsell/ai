@@ -227,7 +227,7 @@ Status: **in use**.
 
 What it does per call (price, open, forward, charge) is
 [architecture.md](architecture.md)'s (Metered spending). The stack-specific parts:
-input is estimated at three bytes per token for the worst-case estimate, the opening runs under the task's advisory lock, and the response streams back unchanged while the gateway reads the provider's usage.
+input is estimated at two bytes per token (`settings.bytes_per_token`) for the worst-case estimate, the opening runs under the task's advisory lock, and the response streams back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path, and on the
 OpenAI route any method a listed path does not take, is a 403. `revoke` retires the task's tokens and

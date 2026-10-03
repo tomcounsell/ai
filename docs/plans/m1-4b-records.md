@@ -269,10 +269,15 @@ Scope: the four findings under Delivery (parametrize ids kept outside the decora
 
 ## Patch round (Tom's feedback, 2026-10-03)
 
-Rebased onto `eb8314deb`. Plan-file conflicts kept that branch's text; in
-`docs/harnesses.md` the Codex and Pi section stays a pointer and its
-paragraph on the gateway's two metered formats moved into
-`harnesses-codex-pi.md`.
+Rebased onto `ca620a91f` (3a, 3c and 4.2 merged). Plan-file conflicts
+kept that branch's text. In `docs/harnesses.md` the Codex and Pi section
+stays a pointer and its paragraph on the gateway's two metered formats
+went into `harnesses-codex-pi.md`; `docs/README.md` lists `browser.md`
+beside the two split docs; the live session test keeps the docs runner's
+run and takes 4.2's "every tapped effect has its outcome". 3a's OpenAI
+route estimates input with the same `settings.bytes_per_token`, which is
+2 here: its tests compute the estimate from that setting, and
+`tech-stack.md` says two bytes per token.
 
 1. Parametrize ids fed from outside the decorator. A missing parametrized
    id is deleted when the diff touches what feeds that test's
