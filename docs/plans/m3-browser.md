@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-browser
 type: build
-status: built
+status: passed; merge held for Tom's tap
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -344,3 +344,17 @@ built in.
   `.valor/done.md`. Earlier tries failed on how the test worded the task
   (the model did the work in the plan stage, or wrote `done.md` in the
   repo), not on `look` or the recording.
+
+## Checks
+
+- At c41f3fd05 (after the patch round): review `pass`; docs `updated`
+  9f09dc26c on `m3c-docs2`; test `gaps`: `look --size 0x0` passed the
+  shape check and left headless Chrome running, and three behaviours had no
+  committed test.
+- Repair patch at da33cd37e: a zero width or height is refused before a
+  browser starts (a zero viewport never exits), and tests cover a run from a
+  subdirectory, a run outside a git clone, and strict `--size`.
+- At da33cd37e: test `pass` (559 passed, 9 skipped); review `pass`,
+  governance boolean no, no invented caps; docs `updated` f102de7a4 on
+  `m3c-docs3`.
+- Join: merge, held for Tom's tap.
