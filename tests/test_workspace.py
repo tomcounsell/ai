@@ -446,7 +446,7 @@ def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
     checks.mkdir()
     (checks / "critique-abc").symlink_to(outside)
     verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict is None and why == "critique-abc is a link, not a plain directory"
+    assert verdict is None and why == "critique-abc is not a plain directory"
     assert sorted(str(p) for p in outside.rglob("*")) == before
 
 

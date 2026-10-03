@@ -46,6 +46,7 @@ fsck, one pack file under a file-size limit, and a footprint watchdog.
 """
 
 import ctypes
+import errno
 import functools
 import hashlib
 import json
@@ -1288,16 +1289,10 @@ def _open_dir(dir_fd: int, name: str, shown: str) -> tuple[int | None, str | Non
     except FileNotFoundError:
         return None, None
     except OSError as exc:
-        if _is_link(dir_fd, name):
-            return None, f"{shown} is a link, not a plain directory"
+        # With O_DIRECTORY, macOS answers a link with ENOTDIR, as for a file.
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            return None, f"{shown} is not a plain directory"
         return None, f"{shown} is not a plain directory ({exc.strerror})"
-
-
-def _is_link(dir_fd: int, name: str) -> bool:
-    try:
-        return stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
-    except OSError:
-        return False
 
 
 def open_turn_dir(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
@@ -1321,49 +1316,58 @@ def open_turn_file(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
     """The regular file with one link and no holes at `relpath` under
     `dir_fd`, opened for reading as a descriptor the caller closes, or (None,
     why), or (None, None) when it does not exist. Nothing is read."""
+    fd, _size, why = _open_checked(dir_fd, relpath)
+    return fd, why
+
+
+def _open_checked(dir_fd: int, relpath: str) -> tuple[int | None, int, str | None]:
+    """`open_turn_file`, with the size `fstat` saw when it checked the file."""
     parts = _parts(relpath)
     if parts is None:
-        return None, f"{relpath!r} is not a plain relative path"
+        return None, 0, f"{relpath!r} is not a plain relative path"
     parent = dir_fd
     if len(parts) > 1:
         parent, why = open_turn_dir(dir_fd, "/".join(parts[:-1]))
         if parent is None:
-            return None, why
+            return None, 0, why
     try:
         try:
             fd = os.open(parts[-1], FILE_FLAGS, dir_fd=parent)
         except FileNotFoundError:
-            return None, None
+            return None, 0, None
         except OSError as exc:
-            if _is_link(parent, parts[-1]):
-                return None, f"{relpath} is a link, not a plain file"
-            return None, f"{relpath} is not a plain file ({exc.strerror})"
+            if exc.errno == errno.ELOOP:
+                return None, 0, f"{relpath} is a link, not a plain file"
+            return None, 0, f"{relpath} is not a plain file ({exc.strerror})"
     finally:
         if parent != dir_fd:
             os.close(parent)
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         os.close(fd)
-        return None, f"{relpath} is not a regular file"
+        return None, 0, f"{relpath} is not a regular file"
     if st.st_nlink != 1:
         os.close(fd)
-        return None, f"{relpath} has {st.st_nlink} links"
+        return None, 0, f"{relpath} has {st.st_nlink} links"
     if st.st_blocks * 512 < st.st_size:
         os.close(fd)
-        return None, f"{relpath} is sparse ({st.st_size} bytes claimed, {st.st_blocks * 512} on disk)"
-    return fd, None
+        return None, 0, f"{relpath} is sparse ({st.st_size} bytes claimed, {st.st_blocks * 512} on disk)"
+    return fd, st.st_size, None
 
 
 def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
-    """The whole of the file `open_turn_file` opens, or why not, or (None,
-    None) when it does not exist."""
-    fd, why = open_turn_file(dir_fd, relpath)
+    """The file `open_turn_file` opens, read to the size `fstat` saw when it
+    checked the file and no further, so a file grown after the check is not
+    read past what was checked; or why not, or (None, None) when it does not
+    exist."""
+    fd, size, why = _open_checked(dir_fd, relpath)
     if fd is None:
         return None, why
     chunks = []
     try:
-        while chunk := os.read(fd, 1 << 20):
+        while size > 0 and (chunk := os.read(fd, min(size, 1 << 20))):
             chunks.append(chunk)
+            size -= len(chunk)
     finally:
         os.close(fd)
     return b"".join(chunks), None

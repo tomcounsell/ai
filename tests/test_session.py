@@ -10,6 +10,7 @@ by hand, as `python -m core verdict` records them.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -241,7 +242,9 @@ def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):
 
 
 @pytest.mark.parametrize("path", ["docs/plans/p.md", "../outside/fifo"])
-def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_returns_a_reason(tmp_path, path):
+def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_is_never_opened(tmp_path, path):
+    """The payload comes from the committed blob; the turn's copy is never
+    read, so a link to a FIFO there cannot block the kernel."""
     ws, _ = scripted.workspace(tmp_path)
     (tmp_path / "outside").mkdir()
     os.mkfifo(tmp_path / "outside" / "fifo")
@@ -259,9 +262,21 @@ def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_returns_a_reason(tmp
     t.join(5)
     assert not t.is_alive(), "_plan blocked"
     plan, why = got["value"]
-    assert plan is None and why
     if path == "docs/plans/p.md":
-        assert why == "docs/plans/p.md cannot be read: docs/plans/p.md is a link, not a plain file"
+        target = str(tmp_path / "outside" / "fifo").encode()
+        assert why is None and plan["sha256"] == hashlib.sha256(target).hexdigest()
+    else:
+        assert plan is None and why == "../outside/fifo is not committed at HEAD"
+
+
+def test_a_plan_changed_after_its_commit_is_no_plan(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.commit(ws, "docs/plans/p.md", "the plan\n", "plan")
+    raw = {"path": "docs/plans/p.md", "critique_rounds": 1, "review_rounds": 1}
+    plan, why = session._plan(str(ws), raw)
+    assert why is None and plan["sha256"] == hashlib.sha256(b"the plan\n").hexdigest()
+    (ws / "docs" / "plans" / "p.md").write_text("changed\n")
+    assert session._plan(str(ws), raw) == (None, "docs/plans/p.md has changes not committed")
 
 
 def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():

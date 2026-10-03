@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from core import signals
+from core import signals, workspace
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -115,7 +115,7 @@ def test_a_linked_valor_is_not_read_and_nothing_is_made_there(ws, outside):
     (ws / ".valor").symlink_to(outside)
     found = collect(ws)
     assert not leaked(found) and found.question is None and found.effects == []
-    assert found.unreadable == [".valor is a link, not a plain directory"]
+    assert found.unreadable == [".valor is not a plain directory"]
     assert listing(outside) == before and not (outside / "handled").exists()
 
 
@@ -125,7 +125,7 @@ def test_a_linked_effects_directory_is_not_listed(ws, outside):
     (ws / ".valor" / "effects").symlink_to(outside)
     found = collect(ws)
     assert found.effects == [] and not leaked(found)
-    assert found.unreadable == ["effects is a link, not a plain directory"]
+    assert found.unreadable == ["effects is not a plain directory"]
     assert listing(outside) == before
 
 
@@ -211,3 +211,66 @@ def test_a_sparse_file_is_refused_and_written_or_cloned_files_are_read(ws):
     assert found.unreadable == [f"question.md is sparse ({1 << 50} bytes claimed, 0 on disk)"]
     assert found.done == body
     assert [e["request"]["payload"]["t"] == body for e in found.effects] == [True, True]
+
+
+def test_a_file_grown_after_its_check_is_read_only_to_the_size_checked(ws, monkeypatch):
+    (ws / ".valor" / "done.md").write_text("checked")
+    real = workspace._open_checked
+
+    def grow(dir_fd, relpath):
+        got = real(dir_fd, relpath)
+        with open(ws / ".valor" / "handled" / "turn-1" / relpath, "a") as f:
+            f.write(" and grown after the check" * 1000)
+        return got
+
+    monkeypatch.setattr(workspace, "_open_checked", grow)
+    assert collect(ws).done == "checked"
+
+
+def test_an_entry_gone_after_its_move_is_recorded_unreadable(ws, monkeypatch):
+    (ws / ".valor" / "question.md").write_text("q")
+    (ws / ".valor" / "effects").mkdir()
+    (ws / ".valor" / "effects" / "a.json").write_text("{}")
+    real = workspace._file_away
+
+    def then_gone(src, name, valor, turn_id, sub=()):
+        dest, why = real(src, name, valor, turn_id, sub)
+        if dest is not None:
+            os.unlink(name, dir_fd=dest)
+        return dest, why
+
+    monkeypatch.setattr(workspace, "_file_away", then_gone)
+    found = collect(ws)
+    assert found.question is None
+    assert found.unreadable == ["question.md was gone from handled/turn-1 when it was read"]
+    assert found.effects == [
+        {
+            "file": "a.json",
+            "error": "unreadable request: a.json was gone from handled/turn-1 when it was read",
+        }
+    ]
+
+
+def test_an_entry_swapped_for_a_link_after_its_move_is_not_followed(ws, outside, monkeypatch):
+    (ws / ".valor" / "question.md").write_text("q")
+    real = workspace._file_away
+
+    def then_swapped(src, name, valor, turn_id, sub=()):
+        dest, why = real(src, name, valor, turn_id, sub)
+        if dest is not None:
+            os.unlink(name, dir_fd=dest)
+            os.symlink(outside / "fifo", name, dir_fd=dest)
+        return dest, why
+
+    monkeypatch.setattr(workspace, "_file_away", then_swapped)
+    found = collect(ws)
+    assert found.question is None and not leaked(found)
+    assert found.unreadable == ["question.md is a link, not a plain file"]
+
+
+def test_text_that_is_not_utf8_is_read_with_replacement(ws):
+    (ws / ".valor" / "question.md").write_bytes(b"caf\xe9 or tea?\n")
+    (ws / ".valor" / "plan.json").write_bytes(b'{"path": "\xff"}')
+    found = collect(ws)
+    assert found.question == "caf� or tea?"
+    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable")

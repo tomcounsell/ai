@@ -148,10 +148,10 @@ Callers:
    `plan_error`; a refused text signal is an `unreadable` entry and counts
    as absent. `session.record` adds `found.unreadable` to the `errors` of
    `turn.collected`, so no schema change.
-2. `session._plan` opens the workspace and reads `path` with
-   `read_turn_file`, then compares. A missing file is "`path` has changes
-   not committed", as for a differing one; a refusal is "`path` cannot be
-   read: why".
+2. `session._plan` reads nothing from the workspace: the payload comes
+   from the committed blob (`git.show` at HEAD), and "`path` has changes
+   not committed" comes from `git.dirty` naming `path`, as `_candidate`
+   uses it.
 3. `read_verdict(checks, name, turn_id)` takes the kernel-owned checks
    directory (`lay.checks`) and the check directory's name, opens `checks`
    with `O_NOFOLLOW | O_DIRECTORY`, and holds the `.valor` descriptor
@@ -311,7 +311,12 @@ not by a turn.
 - An unreadable `question.md` or `done.md` counts as absent: the task does
   not wait on a question it cannot show Tom.
 - No size cap, setting, or stop is added: the reads are made safe and
-  nothing else (Tom's standing rule on invented caps).
+  nothing else (Tom's standing rule on invented caps). A file is read to
+  the size `fstat` saw when it was checked, its own size, so a file grown
+  after the check is not read past it.
+- Text that is not UTF-8 is decoded with replacement characters. At the
+  base, `read_text` raised on it out of `collect`; the decode fixes that
+  crash.
 
 ## Questions for Tom
 
@@ -388,3 +393,36 @@ files moved off the event loop (Off the event loop). Tests: 11a, and a
 sparse verdict under 11. The full suite with this: 527 passed, 2 failed, 7 skipped, the
 two being tests that start a task's own Postgres, which failed in the full
 run and passed on their own; ruff clean.
+
+Compressed files are refused like sparse ones: a file APFS stores
+compressed reports fewer blocks than its size, and `UF_COMPRESSED` cannot
+tell an honest one apart, since a turn owns its files and can write a
+decmpfs header that claims any size and set the flag itself. A turn
+writing plainly never makes a compressed file.
+
+## Patch round 1 (review: changes; test: gaps)
+
+1. `session._plan` read the turn's copy of the plan: removed. The payload
+   is the committed blob's; "has changes not committed" comes from
+   `git.dirty`. Test: a committed link to a FIFO is never opened, a `..`
+   path is "not committed at HEAD", and a plan changed after its commit is
+   refused.
+2. `_is_link` stat'ed an entry after a failed open: removed. The errno
+   answers it: `ELOOP` on a file is "is a link, not a plain file"; with
+   `O_DIRECTORY`, macOS answers a link with `ENOTDIR` as for a file, so
+   both are "is not a plain directory".
+3. `read_turn_file` read to EOF after checking the size: it reads to the
+   size `fstat` saw at the check and no further. Test: a file grown after
+   the check is read only to its checked size.
+4. An entry gone between its move and its open was dropped silently: it
+   is recorded as unreadable ("was gone from handled/<turn> when it was
+   read"), as is an effect listed and gone before its move. Test.
+5. The reads off the event loop are tested: `tests/test_fresh.py` drives a
+   critique and a build and fails if `read_verdict`, `collect`, or
+   `_verdict` runs on the loop (checked by reverting each call).
+6. Tests for an entry swapped for a link after its move and for text that
+   is not UTF-8.
+7. `m1-4-checks.md`'s verdict lines say "and no holes"; Decided by default
+   records the UTF-8 decode; the build record records compressed files.
+
+The full suite after patch round 1: 535 passed, 7 skipped; ruff check and format clean.

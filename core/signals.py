@@ -107,7 +107,9 @@ def _effects(signals: Signals, valor: int, turn_id: str) -> None:
             entry: dict[str, Any] = {"file": name}
             body, why = _take(effects, name, valor, turn_id, ("effects",))
             if body is None:
-                entry["error"] = f"unreadable request: {why or 'vanished'}"
+                entry["error"] = (
+                    f"unreadable request: {why or name + ' was listed and gone when it was moved'}"
+                )
                 signals.effects.append(entry)
                 continue
             try:
@@ -135,6 +137,9 @@ def _take(
     if dest is None:
         return None, why
     try:
-        return workspace.read_turn_file(dest, name)
+        body, why = workspace.read_turn_file(dest, name)
     finally:
         os.close(dest)
+    if body is None and why is None:
+        why = f"{name} was gone from handled/{turn_id} when it was read"
+    return body, why

@@ -32,7 +32,6 @@ ledger (`tasks.status`).
 
 import asyncio
 import hashlib
-import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -122,14 +121,13 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
             return None, "the workspace is not a git repository, so the plan cannot be committed"
         head = git.head(workspace)
         body = git.show(workspace, "HEAD", path) if head else None
+        left = git.dirty(workspace) if body is not None else []
     except git.GitError as exc:
         return None, str(exc)
     if body is None:
         return None, f"{path} is not committed at HEAD"
-    local, why = _read_local(workspace, path)
-    if why:
-        return None, f"{path} cannot be read: {why}"
-    if local != body:
+    named = [line.split(maxsplit=1)[-1] for line in left]
+    if any(n == path or n.endswith(f" -> {path}") for n in named):
         return None, f"{path} has changes not committed"
     return {
         "path": path,
@@ -139,18 +137,6 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
         **counts,
         "scope": list(raw.get("scope") or []),
     }, None
-
-
-def _read_local(ws: str, path: str) -> tuple[bytes | None, str | None]:
-    """The turn's copy of `path`, read without following a link or blocking."""
-    try:
-        root = os.open(ws, workspace.DIR_FLAGS)
-    except OSError as exc:
-        return None, f"the workspace cannot be opened ({exc.strerror})"
-    try:
-        return workspace.read_turn_file(root, path)
-    finally:
-        os.close(root)
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
