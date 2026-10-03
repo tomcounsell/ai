@@ -595,3 +595,25 @@ Each finding of critique-2-1-r2.md and how it is built in.
   the intent's `at`. Low 7: `step` takes a Performers factory. Low 8:
   the cc is decided by default. Low 9: an email near-approve notice says
   approvals come by Telegram.
+
+## Patch round 1
+
+Review round 1 said `changes`, the test check `gaps`. Retries ride the
+`serve_tick_s` wake or a row on the task's stream.
+
+1, 3. A failed `services:<task>` claim, a release that raises other than
+   a refusal, or services that cannot open park the task and free the
+   harness slot until its next row or the next tick. Tests.
+2. `slot.held` unlocks before closing its session.
+4. `message.bound` is each binding's first row; a second binder writes
+   nothing. Test with two binders.
+5. `core/README.md` brought to the code.
+6. A notice with no chat writes `notice.undeliverable`. Test.
+7. Files alone from Tom start a task listing them. Test.
+8. The outbox relistens after a drop; an `is_error` turn leaves the
+   steering; one task's error is logged and the rest go on. Tests.
+   Telegram `verified` is true for every record (Telegram attests the
+   sender id); bind checks `sender_id == operator_telegram_id`. The
+   port said so; m2-2-telegram.md's row 11 is corrected.
+9. Tests: `recorded`, `claimed`, one bridge per channel and machine,
+   `core run` refusing while `services:<task>` is held.

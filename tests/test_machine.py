@@ -633,3 +633,17 @@ def test_a_malformed_turn_ended_changes_nothing():
     led.add("turn.ended", {"turn_id": "t", "outcome": "done", "result": "text"})
     after = led.fold()
     assert after.session == before.session and len(after.ignored) == len(before.ignored) + 2
+
+
+def test_a_turn_that_ended_in_an_error_does_not_spend_the_steering():
+    led = Ledger()
+    state = led.state.value
+    led.add("message.steered", {"text": "use the other branch"})
+    led.add("turn.started", {"turn_id": "e", "state": state})
+    led.add(
+        "turn.ended", {"turn_id": "e", "outcome": "done", "result": {"session_id": "s", "is_error": True}}
+    )
+    kept = led.fold().steering
+    led.add("turn.started", {"turn_id": "ok", "state": state})
+    led.add("turn.ended", {"turn_id": "ok", "outcome": "done", "result": {"session_id": "s"}})
+    assert [p["text"] for p in kept] == ["use the other branch"] and led.fold().steering == []

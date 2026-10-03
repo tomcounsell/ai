@@ -229,7 +229,8 @@ class Fold:
     @property
     def steering(self) -> list[dict[str, Any]]:
         """What Tom wrote after the start of the last working turn that
-        finished, oldest first: the next working turn reads it."""
+        finished without an error, oldest first: the next working turn
+        reads it."""
         return [p for i, p in self.steered if i > self.steer_since]
 
     @property
@@ -398,7 +399,14 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         # (critique, review, docs) never does.
         if result.get("session_id") and f.turn_states.get(turn_id) != FRESH:
             f.session = result["session_id"]
-        if p.get("outcome") == "done" and turn_id in f.turn_states and f.turn_states[turn_id] != FRESH:
+        # A turn that ended in an error has not acted on the steering, so it
+        # stays for the next turn.
+        if (
+            p.get("outcome") == "done"
+            and not result.get("is_error")
+            and turn_id in f.turn_states
+            and f.turn_states[turn_id] != FRESH
+        ):
             f.steer_since = max(f.steer_since, f.turn_rows.get(turn_id, 0))
         if (
             p.get("outcome") == "done"

@@ -43,7 +43,7 @@ item:
 | 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
 | 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
 | 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
-| 11 | Passes Telegram's raw facts; `verified` as item 11 states, from the account's own peer id the bridge reports |
+| 11 | Passes Telegram's raw facts; `receive` sets `verified` true for every Telegram record, since Telegram's servers attest the sender id, and bind decides whether the sender is the operator (`sender_id == operator_telegram_id`) |
 | 15b, 25 | `ChannelLimits(max_text=4096, max_file_bytes=2_097_152_000)`, Telegram's message length and upload limit; the performer splits text over the limit |
 | 17, 18 | `Inbound.topic_id`, `thread: list[dict]`, `headers["grouped_id"]`, attachments `{name, mime, bytes, path}` or `{name, mime, bytes, skipped: reason}`, files under `settings.inbound_dir/telegram/` named by sha256 |
 | 19 | Payload `files: [{path, sha256}]`: read once, hashed, raise before sending on a mismatch, send the bytes hashed |

@@ -10,7 +10,9 @@ and has not requested, to `settings.operator_channel` and
   approve it.
 - `delivered` (`delivered:<sha>`): the candidate and each check's outcome.
 
-`request` writes one notice; binding (`core/intake.py`) and a refused
+A notice with no channel or chat (the operator's unset) is written with a
+`notice.undeliverable` row beside it, so the ledger shows it was never
+sent. `request` writes one notice; binding (`core/intake.py`) and a refused
 release (`core/broker.py`) use it for theirs. A notice is requested once
 per task and `about_key` (`events_one_notice`): a second request, from
 another kernel or a retry, is skipped in a savepoint. Each text carries the
@@ -56,6 +58,8 @@ async def request(
     if found is not None:
         return None
     notice_id = ledger.new_id()
+    channel = channel or settings.operator_channel
+    chat_id = chat_id if chat_id is not None else settings.operator_chat
     try:
         async with conn.transaction():
             await ledger.append(
@@ -64,14 +68,26 @@ async def request(
                 "notice.requested",
                 {
                     "notice_id": notice_id,
-                    "channel": channel or settings.operator_channel,
-                    "chat_id": chat_id if chat_id is not None else settings.operator_chat,
+                    "channel": channel,
+                    "chat_id": chat_id,
                     "kind": kind,
                     "about_key": about_key,
                     "text": f"{text}\n\n{tag(notice_id)}",
                     "reply_to": reply_to,
                 },
             )
+            if not channel or not chat_id:
+                # No bridge sends a notice with no chat: the ledger says so.
+                await ledger.append(
+                    conn,
+                    task_id,
+                    "notice.undeliverable",
+                    {
+                        "notice_id": notice_id,
+                        "reason": "no operator channel or chat is set "
+                        "(VALOR_OPERATOR_CHANNEL, VALOR_OPERATOR_CHAT)",
+                    },
+                )
     except psycopg.errors.UniqueViolation:
         return None
     return notice_id

@@ -27,13 +27,15 @@ The binding table, first match wins:
 | A Telegram reply to an effect notice, exactly `approve` | `approve` |
 | The same, the effect already released or done | `none`, with a notice |
 | Any other reply to a task's notice or send | `steer` |
-| Not a reply | `start` |
+| Not a reply, with text or files | `start` |
+| Not a reply, empty | `none` |
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
 and owes a notice; by email, `approve` and `stop` always steer, and the
 notice says they come by Telegram. A binding that raises is rolled back
 and bound `none` with the error, owing a notice; later messages never wait
-behind it.
+behind it. `message.bound` is the first row a binding writes, so a
+second binder of the same message stops there and writes nothing.
 """
 
 import re
@@ -209,6 +211,8 @@ async def bind(conn) -> list[tuple[str, str]]:
         try:
             async with conn.transaction():
                 bound = await _bind(conn, p)
+        except AlreadyBound:
+            continue
         except Exception as exc:  # noqa: BLE001  one message's error never blocks the next
             bound = await _bind_failed(conn, p, exc)
         if bound is not None:
@@ -216,8 +220,14 @@ async def bind(conn) -> list[tuple[str, str]]:
     return done
 
 
-async def _bound(conn, p: dict[str, Any], task_id: str | None, as_: str, **extra) -> str | None:
-    """`message.bound`; None when another kernel bound it first."""
+class AlreadyBound(Exception):
+    """Another binder wrote this message's `message.bound` first."""
+
+
+async def _bound(conn, p: dict[str, Any], task_id: str | None, as_: str, **extra) -> str:
+    """`message.bound`, written before any row the binding writes, in the
+    same transaction: a second binder of the same message waits on the
+    unique index, then raises `AlreadyBound` and writes nothing."""
     try:
         async with conn.transaction():
             await ledger.append(
@@ -227,7 +237,7 @@ async def _bound(conn, p: dict[str, Any], task_id: str | None, as_: str, **extra
                 {"received_id": p["received_id"], "task_id": task_id, "as": as_, **extra},
             )
     except psycopg.errors.UniqueViolation:
-        return None
+        raise AlreadyBound(p["received_id"]) from None
     return as_
 
 
@@ -237,12 +247,14 @@ async def _bind_failed(conn, p: dict[str, Any], exc: Exception) -> str | None:
         task_id, _ = await _replied(conn, p)
     except Exception:  # noqa: BLE001, S110  the notice goes to the channel's stream instead
         pass
-    async with conn.transaction():
-        as_ = await _bound(conn, p, task_id, "none", error=repr(exc))
-        if as_ is not None:
+    try:
+        async with conn.transaction():
+            as_ = await _bound(conn, p, task_id, "none", error=repr(exc))
             await _notice(
                 conn, task_id or p["channel"], p, f"Your message ({p['message_id']}) was not acted on: {exc}"
             )
+    except AlreadyBound:
+        return None
     return as_
 
 
@@ -299,8 +311,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     f = machine.fold(rows)
     if f.state in (State.MERGED, State.STOPPED):
         as_ = await _bound(conn, p, task_id, "none")
-        if as_ is not None:
-            await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
+        await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
         return as_
     text = (p.get("text") or "").strip()
     exact = text.casefold()
@@ -310,17 +321,21 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     kind, about = notice.get("kind"), notice.get("about_key") or ""
 
     if telegram and exact == "stop":
+        as_ = await _bound(conn, p, task_id, "stop")
         await tasks.stop(conn, task_id, reason=f"Tom replied stop ({p['message_id']})", by="tom", via=via)
-        return await _bound(conn, p, task_id, "stop")
+        return as_
     if kind == "question" and f.state is State.WAITING and about == f"question:{f.open_question}":
+        as_ = await _bound(conn, p, task_id, "answer")
         await session.answer(conn, task_id, text, by="tom", via=via)
-        return await _bound(conn, p, task_id, "answer")
+        return as_
     if kind == "delivered" and f.state is State.MERGE:
+        as_ = await _bound(conn, p, task_id, "feedback")
         await session.feedback(conn, task_id, text, by="tom", via=via)
-        return await _bound(conn, p, task_id, "feedback")
+        return as_
     if telegram and exact == "approve" and kind == "effect":
         return await _approve(conn, p, task_id, about.removeprefix("effect:"))
 
+    as_ = await _bound(conn, p, task_id, "steer")
     await ledger.append(
         conn,
         task_id,
@@ -335,9 +350,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             "provenance": ledger.provenance("tom", via, False),
         },
     )
-    as_ = await _bound(conn, p, task_id, "steer")
-    if as_ is None:
-        return None
     for word in ("approve", "stop"):
         if _near(text, word):
             said = (
@@ -379,10 +391,10 @@ async def _approve(conn, p: dict[str, Any], task_id: str, effect_id: str) -> str
     }
     if standing:
         as_ = await _bound(conn, p, task_id, "none")
-        if as_ is not None:
-            said = "already done" if standing & {"effect.outcome", "effect.refused"} else "already released"
-            await _notice(conn, task_id, p, f"Effect {effect_id} is {said}; nothing was done.")
+        said = "already done" if standing & {"effect.outcome", "effect.refused"} else "already released"
+        await _notice(conn, task_id, p, f"Effect {effect_id} is {said}; nothing was done.")
         return as_
+    as_ = await _bound(conn, p, task_id, "approve")
     held = await broker._held(conn, effect_id)
     approval_id = await broker.approve(conn, effect_id, note=p.get("text") or "", by="tom", via=p["channel"])
     declared = DECLARED.get(held["payload"]["action_type"])
@@ -396,7 +408,7 @@ async def _approve(conn, p: dict[str, Any], task_id: str, effect_id: str) -> str
             "owner": declared.owner if declared else "kernel",
         },
     )
-    return await _bound(conn, p, task_id, "approve")
+    return as_
 
 
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
@@ -413,8 +425,12 @@ def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
 async def _start(conn, p: dict[str, Any]) -> str | None:
     """A new task from Tom's message, under the project listing the chat
     (by email: the sender), else `valor`. Its workspace is provisioned by a
-    kernel job after it starts."""
+    kernel job after it starts. A message of files alone starts a task
+    whose instruction lists them."""
     text = (p.get("text") or "").strip()
+    files = _files(p.get("attachments") or [])
+    if files:
+        text = f"{text}\n\n{files}" if text else f"Tom sent files with no text:\n{files}"
     if not text:
         return await _bound(conn, p, None, "none")
     spec = _project_for(p)
@@ -423,5 +439,18 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
         model=resolve_model("light"),
         project={"name": spec.name} if spec else None,
     )
-    task_id = await tasks.start(conn, brief, by="tom", via=p["channel"])
-    return await _bound(conn, p, task_id, "start")
+    as_ = await _bound(conn, p, brief.id, "start")
+    await tasks.start(conn, brief, by="tom", via=p["channel"])
+    return as_
+
+
+def _files(attachments: list[dict[str, Any]]) -> str:
+    """One line per attachment: its name, type, and path, or why it was
+    not downloaded."""
+    lines = []
+    for a in attachments:
+        where = a.get("path") or f"not downloaded: {a.get('skipped')}"
+        lines.append(
+            f"- {a.get('name') or 'file'} ({a.get('mime') or 'unknown type'}, {a.get('bytes')} bytes): {where}"
+        )
+    return "\n".join(lines)

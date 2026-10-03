@@ -108,10 +108,11 @@ async def outbox(dsn: str, bridge: FakeBridge):
     perform_conn = await db.connect(dsn)
     listener = await db.connect(dsn)
     await listener.execute("LISTEN valor_events")
+    box = Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener, dsn)
     try:
-        yield Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener)
+        yield box
     finally:
-        for c in (listener, perform_conn, conn):
+        for c in (box.listener, perform_conn, conn):
             await c.close()
 
 

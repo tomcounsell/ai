@@ -648,6 +648,185 @@ def test_one_step_per_event(fresh, op):
     assert run(go()) == (2, 2, 3)
 
 
+def test_held_services_park_the_task(fresh, op, monkeypatch):
+    """Another process holds the task's services: one claim, no spin, and
+    the task is picked up on its next row or the next tick once free."""
+    claims, steps = [], []
+    claim = router._Services.claim
+
+    async def counted(self):
+        claims.append(self.task_id)
+        return await claim(self)
+
+    monkeypatch.setattr(router._Services, "claim", counted)
+
+    async def judging(ctx):
+        steps.append(ctx.task_id)
+        return {"status": "idle"}
+
+    async def go():
+        task = await new_task(fresh)
+        kernel = only(serve.Kernel(None, {State.JUDGE: judging}, None, fresh), task)
+        holder = await db.connect(fresh)
+        try:
+            await holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"services:{task}",))
+            with bridges.configure(serve_tick_s=3600):
+                for _ in range(20):
+                    await tick(kernel, fresh)
+                    await settled(kernel)
+                held = (len(claims), len(steps))
+                await holder.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (f"services:{task}",)
+                )
+                await tick(kernel, fresh)
+                await settled(kernel)
+                quiet = (len(claims), len(steps))
+                # The other run exits writing nothing: the next tick picks it up.
+                kernel.parked_at -= 3600
+                await tick(kernel, fresh)
+                await settled(kernel)
+                by_tick = (len(claims), len(steps))
+                # Held again, then a row on its stream picks it up.
+                await kernel.settle(task)
+                await holder.execute(
+                    "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"services:{task}",)
+                )
+                async with await db.connect(fresh) as conn:
+                    await ledger.append(conn, task, "test.poke", {})
+                await tick(kernel, fresh)
+                await settled(kernel)
+                await holder.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (f"services:{task}",)
+                )
+                async with await db.connect(fresh) as conn:
+                    await ledger.append(conn, task, "test.poke", {})
+                await tick(kernel, fresh)
+                await settled(kernel)
+                by_row = (len(claims), len(steps))
+        finally:
+            await kernel.close()
+            await holder.close()
+        return held, quiet, by_tick, by_row
+
+    held, quiet, by_tick, by_row = run(go())
+    assert held == (1, 0)
+    assert quiet == (1, 0)
+    assert by_tick == (2, 1)
+    assert by_row == (4, 2)
+
+
+def test_core_run_refuses_while_services_are_held(fresh, op):
+    """`core run` on a task whose services another process holds returns
+    `already running` and runs nothing."""
+    ran = []
+
+    async def judging(ctx):
+        ran.append(ctx.task_id)
+        return {"status": "idle"}
+
+    async def go():
+        task = await new_task(fresh)
+        before = len(await rows(fresh, task))
+        holder = await db.connect(fresh)
+        try:
+            await holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"services:{task}",))
+            out = await router.run(None, task, {State.JUDGE: judging}, dsn=fresh)
+        finally:
+            await holder.close()
+        return out, before, len(await rows(fresh, task))
+
+    out, before, after = run(go())
+    assert out["status"] == "already running"
+    assert ran == [] and after == before
+
+
+def test_a_failed_job_parks_the_task(fresh, op, monkeypatch):
+    """A release that fails for a reason other than a refusal, and services
+    that cannot be opened: each tried once, then again on the next tick."""
+    built, opened = [], []
+
+    def broken(brief):
+        built.append(brief.id)
+        raise RuntimeError("no performers")
+
+    async def no_services(dsn, task_id):
+        opened.append(task_id)
+        raise RuntimeError("no services")
+
+    async def judging(ctx):
+        raise AssertionError("never stepped")
+
+    async def go():
+        task = await new_task(fresh)
+        await _asked(fresh, task, broker.Performers(RefusedAtRelease()))
+        other = await new_task(fresh)
+        releasing = only(serve.Kernel(None, {}, broken, fresh), task)
+        stepping = only(serve.Kernel(None, {State.JUDGE: judging}, None, fresh), other)
+        monkeypatch.setattr(router._Services, "open", no_services)
+        try:
+            with bridges.configure(serve_tick_s=3600):
+                for _ in range(10):
+                    for kernel in (releasing, stepping):
+                        await tick(kernel, fresh)
+                        await settled(kernel)
+                parked = (len(built), len(opened), task in releasing.parked, other in stepping.parked)
+                for kernel in (releasing, stepping):
+                    kernel.parked_at -= 3600
+                    await tick(kernel, fresh)
+                    await settled(kernel)
+        finally:
+            await releasing.close()
+            await stepping.close()
+        return parked, (len(built), len(opened))
+
+    parked, retried = run(go())
+    assert parked == (1, 1, True, True)
+    assert retried == (2, 2)
+
+
+def test_a_failure_in_one_task_leaves_the_others(fresh, op, monkeypatch, capsys):
+    """An error in one task's notices or scheduling is logged; the other
+    task is still stepped."""
+    from core import notices
+
+    steps = []
+    owe = notices.owe
+
+    async def judging(ctx):
+        steps.append(ctx.task_id)
+        return {"status": "idle"}
+
+    async def go():
+        bad, good = await new_task(fresh), await new_task(fresh)
+
+        async def failing_owe(conn, task_id):
+            if task_id == bad:
+                raise RuntimeError("owe broke")
+            return await owe(conn, task_id)
+
+        monkeypatch.setattr(notices, "owe", failing_owe)
+        kernel = only(serve.Kernel(None, {State.JUDGE: judging}, None, fresh), bad, good)
+        ready = kernel._ready
+
+        async def failing_ready(conn, task_id):
+            if task_id == bad:
+                raise RuntimeError("schedule broke")
+            return await ready(conn, task_id)
+
+        kernel._ready = failing_ready
+        try:
+            await tick(kernel, fresh)
+            await settled(kernel)
+        finally:
+            await kernel.close()
+        return bad, good
+
+    bad, good = run(go())
+    assert steps == [good]
+    err = capsys.readouterr().err
+    assert f"task {bad}: notices failed" in err and f"task {bad}: scheduling failed" in err
+
+
 def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, sleep_once=30)

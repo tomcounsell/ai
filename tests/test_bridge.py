@@ -352,3 +352,70 @@ def test_settle_after_function(dsn, tmp_path):
         soon, later = run(go())
     assert soon == []
     assert [o.kind for o in later] == ["failed"]
+
+
+def test_outbox_listener_reconnects(dsn, op):
+    """The listening connection drops: the next wake listens on a new one,
+    and a notice wakes the outbox again."""
+
+    async def go():
+        task = await new_task(dsn)
+        async with bridges.outbox(dsn, FakeBridge()) as box:
+            dropped = box.listener
+            await dropped.close()
+            await asyncio.wait_for(box.wait(), 10)
+            with bridges.configure(serve_tick_s=60):  # only the notice ends this wait
+                waiting = asyncio.create_task(box.wait())
+                await asyncio.sleep(0.05)
+                async with await db.connect(dsn) as conn:
+                    await notices.request(conn, task, kind="test", about_key="test:wake", text="wake")
+                await asyncio.wait_for(waiting, 10)
+            return dropped, box.listener
+
+    dropped, listener = run(go())
+    assert listener is not dropped and dropped.closed
+
+
+def test_one_bridge_per_channel_and_machine(dsn, op):
+    """A second bridge of the same channel on the same machine waits for
+    the first to exit; another channel's runs beside it."""
+    from core import bridge as port
+
+    class Held(FakeBridge):
+        def __init__(self, channel, name, entered):
+            super().__init__(channel)
+            self.name, self.entered = name, entered
+            self.leave = asyncio.Event()
+
+        async def run(self, outbox):
+            self.entered.append(self.name)
+            await self.leave.wait()
+
+    async def serving(b):
+        with pytest.raises(SystemExit):
+            await port.serve(b, dsn)
+
+    async def go():
+        entered: list[str] = []
+        first = Held("telegram", "first", entered)
+        second = Held("telegram", "second", entered)
+        email = Held("email", "email", entered)
+        jobs = [asyncio.create_task(serving(first))]
+        while "first" not in entered:
+            await asyncio.sleep(0.05)
+        jobs += [asyncio.create_task(serving(second)), asyncio.create_task(serving(email))]
+        while "email" not in entered:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
+        while_held = list(entered)
+        first.leave.set()
+        while "second" not in entered:
+            await asyncio.sleep(0.05)
+        second.leave.set()
+        email.leave.set()
+        await asyncio.wait_for(asyncio.gather(*jobs), 30)
+        return while_held, entered
+
+    while_held, entered = run(go())
+    assert sorted(while_held) == ["email", "first"]
+    assert entered[-1] == "second"

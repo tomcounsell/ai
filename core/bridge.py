@@ -257,7 +257,16 @@ class Outbox:
     that wake reconciles this channel's dangling sends, calls the bridge's
     `tick`, and yields again."""
 
-    def __init__(self, bridge: Bridge, performers: broker.Performers, conn, perform_conn, listener):
+    def __init__(
+        self,
+        bridge: Bridge,
+        performers: broker.Performers,
+        conn,
+        perform_conn,
+        listener,
+        dsn: str | None = None,
+    ):
+        self.dsn = dsn
         self.bridge = bridge
         self.channel = bridge.channel
         self.performers = performers
@@ -330,7 +339,16 @@ class Outbox:
                 if json.loads(note.payload).get("type") in ("release.requested", "notice.requested"):
                     return
         except psycopg.OperationalError:
+            # The listening connection died: wait the tick, then listen on a
+            # new one; `due` catches up what was missed.
             await asyncio.sleep(settings.serve_tick_s)
+            try:
+                listener = await db.connect(self.dsn, application_name=f"valor-{self.channel}-listen")
+                await listener.execute("LISTEN valor_events")
+            except psycopg.OperationalError:
+                return
+            await self.listener.close()
+            self.listener = listener
 
     async def perform(self, item: Release) -> broker.Outcome:
         """Release the effect through the broker: the checks, the intent,
@@ -371,15 +389,16 @@ async def serve(bridge: Bridge, dsn: str | None = None) -> None:
     conn = await db.connect(dsn, application_name=f"valor-{channel}")
     perform_conn = await db.connect(dsn, application_name=f"valor-{channel}-perform")
     listener = await db.connect(dsn, application_name=f"valor-{channel}-listen")
+    outbox = None
     try:
         await conn.execute(
             "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"bridge:{channel}:{settings.machine}",)
         )
         await listener.execute("LISTEN valor_events")
-        outbox = Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener)
+        outbox = Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener, dsn)
         await outbox.reconcile()
         await bridge.run(outbox)
     finally:
-        for c in (listener, perform_conn, conn):
+        for c in (outbox.listener if outbox else listener, perform_conn, conn):
             await c.close()
     raise SystemExit(1)

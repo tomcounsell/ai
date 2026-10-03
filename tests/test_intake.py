@@ -2,6 +2,7 @@
 the binding table, steering, and a task started by message."""
 
 import asyncio
+import dataclasses
 import uuid
 
 import pytest
@@ -520,3 +521,122 @@ def test_owns(op, tmp_path):
     assert intake.owns("email", OPERATOR_EMAIL)
     with bridges.configure(machine="other"):
         assert intake.owns("telegram", "-1002") and not intake.owns("telegram", "-1001")
+
+
+def test_two_binders_bind_once(dsn, op, monkeypatch):
+    """Two binders take the same message at once: one binding, one set of
+    effects; the other writes nothing."""
+    real = intake._bind
+    arrived: dict[str, int] = {}
+    both: dict[str, asyncio.Event] = {}
+
+    async def racing(conn, p):
+        rid = p["received_id"]
+        arrived[rid] = arrived.get(rid, 0) + 1
+        gate = both.setdefault(rid, asyncio.Event())
+        if arrived[rid] == 2:
+            gate.set()
+        await asyncio.wait_for(gate.wait(), 30)
+        return await real(conn, p)
+
+    monkeypatch.setattr(intake, "_bind", racing)
+
+    async def binder():
+        async with await db.connect(dsn) as conn:
+            return await intake.bind(conn)
+
+    async def go():
+        task = await new_task(dsn)
+        target = await a_notice(dsn, task)
+        out = {}
+        for name, inbound in (
+            ("steer", msg("use the other branch", reply_to=target)),
+            ("start", msg("new work")),
+        ):
+            async with await db.connect(dsn) as conn:
+                got = await intake.receive(conn, inbound)
+            await asyncio.gather(binder(), binder())
+            out[name] = got.received_id
+        return out
+
+    out = run(go())
+    for rid in out.values():
+        assert len(run(of_type(dsn, "message.bound", received_id=rid))) == 1
+    assert len(run(of_type(dsn, "message.steered", received_id=out["steer"]))) == 1
+    (bound,) = run(of_type(dsn, "message.bound", received_id=out["start"]))
+    assert len([r for r in run(rows(dsn, bound["task_id"])) if r["type"] == "task.started"]) == 1
+
+
+def test_a_notice_with_no_chat_is_undeliverable(dsn, op):
+    async def go():
+        task = await new_task(dsn)
+        with bridges.configure(operator_chat=None):
+            async with await db.connect(dsn) as conn:
+                notice = await notices.request(conn, task, kind="test", about_key="test:nowhere", text="hi")
+        return task, notice
+
+    task, notice = run(go())
+    (row,) = [r["payload"] for r in run(rows(dsn, task)) if r["type"] == "notice.undeliverable"]
+    assert row["notice_id"] == notice and "VALOR_OPERATOR_CHAT" in row["reason"]
+
+
+def test_files_alone_start_a_task(dsn, op, tmp_path):
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+    inbound = dataclasses.replace(
+        msg(""),
+        attachments=[
+            {"name": "shot.png", "mime": "image/png", "bytes": 3, "path": str(shot)},
+            {"name": "big.mov", "mime": "video/quicktime", "bytes": 9, "skipped": "too large"},
+        ],
+    )
+
+    async def go():
+        bound = await say(dsn, inbound)
+        async with await db.connect(dsn) as conn:
+            return bound, await tasks.brief(conn, bound["task_id"])
+
+    bound, brief = run(go())
+    assert bound["as"] == "start"
+    assert str(shot) in brief.instruction and "not downloaded: too large" in brief.instruction
+
+
+def test_recorded_is_scoped_by_channel_and_chat(dsn, op):
+    async def go():
+        ids = [uuid.uuid4().hex for _ in range(4)]
+        async with await db.connect(dsn) as conn:
+            await intake.receive(conn, msg("a", mid=ids[0]))
+            await intake.receive(conn, msg("b", mid=ids[1], chat="2000"))
+            await intake.receive(
+                conn, msg("c", mid=ids[2], channel="email", sender=OPERATOR_EMAIL, chat=OPERATOR_CHAT)
+            )
+            return ids, (
+                await intake.recorded(conn, "telegram", OPERATOR_CHAT, ids),
+                await intake.recorded(conn, "telegram", "2000", ids),
+                await intake.recorded(conn, "email", OPERATOR_CHAT, ids),
+            )
+
+    ids, (here, other_chat, other_channel) = run(go())
+    assert here == {ids[0]}
+    assert other_chat == {ids[1]}
+    assert other_channel == {ids[2]}
+
+
+def test_claimed_reads_notices_and_sends_in_the_chat(dsn, op):
+    async def go():
+        task = await new_task(dsn)
+        noticed = await a_notice(dsn, task)
+        sent = await a_send(dsn, task)
+        elsewhere = await a_send(dsn, task, chat="2000")
+        by_email = await a_send(dsn, task, channel="email")
+        async with await db.connect(dsn) as conn:
+            return (noticed, sent, elsewhere, by_email), (
+                await intake.claimed(conn, "telegram", OPERATOR_CHAT),
+                await intake.claimed(conn, "telegram", "2000"),
+                await intake.claimed(conn, "email", OPERATOR_CHAT),
+            )
+
+    (noticed, sent, elsewhere, by_email), (here, other_chat, other_channel) = run(go())
+    assert {noticed, sent} <= here and not {elsewhere, by_email} & here
+    assert elsewhere in other_chat and not {noticed, sent, by_email} & other_chat
+    assert by_email in other_channel and not {noticed, sent, elsewhere} & other_channel

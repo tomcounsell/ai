@@ -41,8 +41,10 @@ async def held(holder: str, dsn: str | None = None) -> AsyncIterator[None]:
         return
     conn = await db.connect(dsn, application_name="valor-slot")
     awake = None
+    locked = False
     try:
         await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key(),))
+        locked = True
         token = _HELD.set(holder)
         awake = _caffeinate()
         try:
@@ -53,8 +55,13 @@ async def held(holder: str, dsn: str | None = None) -> AsyncIterator[None]:
         if awake is not None:
             awake.terminate()
             await asyncio.to_thread(awake.wait)
-        # Closing the session frees the lock.
-        await conn.close()
+        # Unlocked here, not left to the closing session, so the next
+        # waiter is granted the slot before this returns.
+        try:
+            if locked and not conn.closed:
+                await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key(),))
+        finally:
+            await conn.close()
 
 
 def holder() -> str | None:

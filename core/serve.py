@@ -29,6 +29,13 @@ A task is stepped again when it moved, or when a row it did not write
 lands on its stream (an answer, a steer, a stop, a release's outcome); a
 step that ends anywhere else waits for such a row, so a failing turn is
 not retried in a loop.
+
+A job that cannot start its work (another process holds the task's
+services, or the job raises before the task's own rows record why) parks
+the task: it is tried again on the next row on its stream or the next
+`serve_tick_s` wake, whichever comes first, and never in a loop. A wake's
+failure in binding, notices, or scheduling is logged per task, and the
+kernel goes on.
 """
 
 import asyncio
@@ -36,6 +43,7 @@ import json
 import os
 import plistlib
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -62,7 +70,7 @@ from core.settings import settings
 HARNESS = {State.CLARIFY, State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 AT_ONCE = {State.JUDGE, State.MERGE}
 # Rows the kernel writes beside a task without anything having happened to it.
-QUIET = ("notice.requested", "notice.sent")
+QUIET = ("notice.requested", "notice.sent", "notice.undeliverable")
 LABEL = "com.valor.kernel"
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -253,13 +261,25 @@ class Kernel:
         self.services: dict[str, router._Services] = {}
         self.swept: set[str] = set()
         self.seen: dict[str, int] = {}  # the latest row a step of the task has answered
+        # Tasks whose job could not start its work, with the latest row then:
+        # tried again on a newer row or the next `serve_tick_s` wake.
+        self.parked: dict[str, int] = {}
+        self.parked_at = time.monotonic()
         self.wake = asyncio.Event()
 
     async def tick(self, conn) -> None:
-        """One wake: bind, owe, schedule."""
+        """One wake: bind, owe, schedule. A failure for one task is logged,
+        and the others go on."""
+        now = time.monotonic()
+        if now - self.parked_at >= settings.serve_tick_s:
+            self.parked.clear()
+            self.parked_at = now
         await intake.bind(conn)
         for task_id in await self.active(conn):
-            await notices.owe(conn, task_id)
+            try:
+                await notices.owe(conn, task_id)
+            except Exception as exc:  # noqa: BLE001  one task's notice fails alone
+                _log(f"task {task_id}: notices failed: {exc!r}")
         await self.schedule(conn)
 
     async def active(self, conn) -> list[str]:
@@ -277,31 +297,47 @@ class Kernel:
         for task_id in await self.active(conn):
             if task_id in self.jobs:
                 continue
-            rows = await ledger.read(conn, task_id)
-            f = machine.fold(rows)
-            if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
-                await self.settle(task_id)
+            try:
+                found = await self._ready(conn, task_id)
+            except Exception as exc:  # noqa: BLE001  one task's scheduling fails alone
+                _log(f"task {task_id}: scheduling failed: {exc!r}")
                 continue
-            released = await self._kernel_release(conn, task_id)
-            if released is not None:
-                self._start(task_id, self._release(task_id, released))
-                continue
-            b = await tasks.brief(conn, task_id)
-            if b.project and not b.workspace:
-                if _provision_due(rows):
-                    self._start(task_id, self._provision(task_id, b.project.get("name")))
-                continue
-            latest = max((r["id"] for r in rows if r["type"] not in QUIET), default=0)
-            if latest <= self.seen.get(task_id, 0) or f.state is State.WAITING:
-                continue
-            if f.state in AT_ONCE:
-                self._start(task_id, self._step(task_id, latest))
-            elif f.state in HARNESS:
-                ready.append((latest, task_id))
+            if found is not None:
+                ready.append(found)
         if self.harness is None and ready:
             latest, task_id = min(ready)
             self.harness = task_id
-            self._start(task_id, self._step(task_id, latest))
+            self._start(task_id, self._step(task_id, latest), latest)
+
+    async def _ready(self, conn, task_id: str) -> tuple[int, str] | None:
+        """Start the task's job if it has one now; a harness step is
+        returned instead, for `schedule` to choose the oldest."""
+        rows = await ledger.read(conn, task_id)
+        f = machine.fold(rows)
+        if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
+            await self.settle(task_id)
+            return None
+        latest = max((r["id"] for r in rows if r["type"] not in QUIET), default=0)
+        if task_id in self.parked:
+            if latest <= self.parked[task_id]:
+                return None
+            del self.parked[task_id]
+        released = await self._kernel_release(conn, task_id)
+        if released is not None:
+            self._start(task_id, self._release(task_id, released), latest)
+            return None
+        b = await tasks.brief(conn, task_id)
+        if b.project and not b.workspace:
+            if _provision_due(rows):
+                self._start(task_id, self._provision(task_id, b.project.get("name")), latest)
+            return None
+        if latest <= self.seen.get(task_id, 0) or f.state is State.WAITING:
+            return None
+        if f.state in AT_ONCE:
+            self._start(task_id, self._step(task_id, latest), latest)
+        elif f.state in HARNESS:
+            return (latest, task_id)
+        return None
 
     async def _kernel_release(self, conn, task_id: str) -> str | None:
         row = await (
@@ -315,7 +351,7 @@ class Kernel:
         ).fetchone()
         return None if row is None else row[0]
 
-    def _start(self, task_id: str, coro) -> None:
+    def _start(self, task_id: str, coro, latest: int) -> None:
         job = asyncio.create_task(coro)
         self.jobs[task_id] = job
 
@@ -323,6 +359,9 @@ class Kernel:
             self.jobs.pop(task_id, None)
             if self.harness == task_id:
                 self.harness = None
+            if not job.cancelled() and job.exception() is not None:
+                _log(f"task {task_id}: job failed: {job.exception()!r}")
+                self.parked[task_id] = latest
             self.wake.set()
 
         job.add_done_callback(finished)
@@ -333,7 +372,8 @@ class Kernel:
             try:
                 await broker.release(conn, effect_id, performers=built)
             except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
-                print(f"release {effect_id} of task {task_id} refused: {exc}", file=sys.stderr, flush=True)
+                # The broker wrote `effect.refused`; any other failure parks the task.
+                _log(f"release {effect_id} of task {task_id} refused: {exc}")
 
     async def _provision(self, task_id: str, name: str | None) -> None:
         """Provision a task started by message, off the loop. A failure is a
@@ -381,7 +421,10 @@ class Kernel:
         if services is None:
             services = await router._Services.open(self.dsn, task_id)
             if not await services.claim():
+                # Another process runs the task: tried again on its next row
+                # or the next `serve_tick_s` wake.
                 await services.close()
+                self.parked[task_id] = latest
                 return
             self.services[task_id] = services
         first = task_id not in self.swept
@@ -391,7 +434,7 @@ class Kernel:
                 self.gateway, task_id, self.runners, self.dsn, self.performers, services, sweep=first
             )
         except Exception as exc:  # noqa: BLE001  a step's failure is the task's; the kernel goes on
-            print(f"task {task_id}: step failed: {exc!r}", file=sys.stderr, flush=True)
+            _log(f"task {task_id}: step failed: {exc!r}")
             out = {"status": "failed"}
         status = out.get("status")
         async with await db.connect(self.dsn) as conn:
@@ -418,6 +461,10 @@ class Kernel:
         await asyncio.gather(*self.jobs.values(), return_exceptions=True)
         for task_id in list(self.services):
             await self.settle(task_id)
+
+
+def _log(text: str) -> None:
+    print(text, file=sys.stderr, flush=True)
 
 
 def _provision_due(rows: list[dict[str, Any]]) -> bool:
@@ -461,7 +508,15 @@ async def serve(
         try:
             while True:
                 kernel.wake.clear()
-                await kernel.tick(conn)
+                try:
+                    await kernel.tick(conn)
+                except Exception as exc:  # noqa: BLE001  the next wake tries again
+                    _log(f"kernel wake failed: {exc!r}")
+                    if conn.closed:
+                        conn = await db.connect(dsn, application_name="valor-kernel")
+                        await conn.execute(
+                            "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),)
+                        )
                 try:
                     await asyncio.wait_for(kernel.wake.wait(), settings.serve_tick_s)
                 except TimeoutError:

@@ -129,6 +129,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/intake.py` | `message.bound` | `received_id`, `task_id`, `as` (`start`, `steer`, `answer`, `feedback`, `approve`, `stop`, `none`), `error` when binding raised | A message acts once |
 | `core/intake.py` | `message.steered` | `received_id`, channel, chat and message ids, text, attachments, provenance; the next working turn opens with it | Corrections reach every session |
 | `core/notices.py` | `notice.requested` | `notice_id`, `channel`, `chat_id`, `kind`, `about_key`, `text` (ending in the notice's id), `reply_to` | Mission item 6; what Tom is owed |
+| `core/notices.py` | `notice.undeliverable` | `notice_id`, `reason`: no operator channel or chat is set, so no bridge sends it | A notice never sent is seen |
 | `core/bridge.py` | `notice.sent` | `notice_id` and `sent`, the platform's message ids, written by the bridge | A notice is sent once |
 | `core/intake.py`, `core/broker.py` | `release.requested` | `effect_id`, `approval_id`, `owner` (the channel whose bridge performs it, or `kernel`) | An approved effect is performed by its owner |
 | `core/serve.py` | `workspace.provisioned` | `fields`, the Brief fields the provisioning made, laid over the stored Brief | A message-started task gets its workspace |
