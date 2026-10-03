@@ -108,3 +108,36 @@ The candidate is `m1-4d-docs2`. Notes from the checks, not blocking:
   key directory. Listing it fixes the sandbox profile.
 - Whichever of 1.4d and 2.1 lands second follows the lock-based reconcile
   in `core/bridge.py` and the three tests that read `reconcile_after_s`.
+
+## Patch round 2: onto 460943b8a
+
+1.4s, 1.4v, 1.4u, and 3b landed after the checks; the build is squashed
+onto the rebuild branch at 460943b8a as one commit. The lead's calls:
+
+1. **One interrupt mechanism.** `git.threaded` runs the thread under
+   1.4u's `git.interruptible`; a cancelled caller calls `git.interrupt`,
+   which interrupts the watch (TERM, then KILL to every group) and waits
+   for the thread. `git.popen` and the started-process set are gone.
+   `core/__main__.py`'s `_provision` turns SIGTERM and SIGHUP into a cancel
+   of `git.threaded(workspace.provision, ...)`, `start --project` uses it,
+   removal and the docs runner's mirror fetch run in `git.threaded`, the
+   router's service start interrupts through `git.interrupt`, and
+   `workspace.bounded` starts through `git.start`.
+2. **No git time limit.** `git_timeout_s`, `git.deadline`,
+   `git.remaining`, `reconcile_after_s`, and `bounded`'s `timeout` are
+   gone, as decided by default in the plan; this drops 1.4u's rule that a
+   git call outside a watch keeps a time limit.
+   `test_provisioning_runs_past_the_git_timeout` became
+   `test_no_provisioning_git_call_carries_a_time_limit`, and the mirror
+   fetch deadline test went.
+
+Folds: one copy of the turn file helpers (the merged `open_turn_dir`,
+`open_turn_file`, `DIR_FLAGS`), with `core/transcripts.py` reading a
+missing entry as `(None, None)` and its tests taking the merged wording;
+no idle value in `session.py`; `runs.py` keeps `spending.turn_spent`, the
+dispatch's retire on failure, and adds `offered`; the command list has
+`openai-key`, `github-key`, and `merge-target`; `copy_keys` keeps
+`sources`; `remote_head`'s stderr and the transcript failure text are
+whole, per 1.4u. The caller of a cancelled `git.threaded` now waits for
+the thread, so the setsid case in the delivery notes delays the stop
+until that program exits.
