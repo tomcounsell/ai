@@ -227,9 +227,7 @@ Status: **in use**.
 
 What it does per call (price, open, forward, charge) is
 [architecture.md](architecture.md)'s (Metered spending). The stack-specific parts:
-input is estimated at three bytes per token for the worst-case estimate, the
-opening runs under the task's advisory lock, and the response streams
-back unchanged while the gateway reads the provider's usage.
+input is estimated at three bytes per token for the worst-case estimate, the opening runs under the task's advisory lock, and the response streams back unchanged while the gateway reads the provider's usage.
 
 Token counting and model lists pass unmetered; any other path, and on the
 OpenAI route any method a listed path does not take, is a 403. `revoke` retires the task's tokens and
@@ -248,14 +246,7 @@ rerun through the same path for $18.37 (rebuild-baseline.md, Caveats).
 
 **Prices.** A table of US dollars per million tokens per model, input,
 output, cache write, and cache read, from the provider's public pricing
-page. On the Anthropic route a dated model id matches its undated entry,
-longest match first. On the OpenAI route only the exact id, or the id plus
-a `-YYYY-MM-DD` snapshot date, matches, because OpenAI sells pricier
-variants under the base name (`-pro`); any other id is unpriced. Every
-per-million charge is tokens times the rate, rounded up to a whole
-micro-dollar in integer arithmetic, so a very large worst case is exact. A
-turn's metered spend is the numeric sum of the charges on its calls.
-Each price carries the day it was checked against that page, and every
+page. An Anthropic dated id matches its undated entry, longest match first; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix, since `-pro` variants cost more; any other id is unpriced. Each per-million charge is rounded up to a whole micro-dollar in integers, and a turn's spend is the numeric sum of its charges. Each price carries the day it was checked against that page, and every
 `gateway.charged` row records it as `price_checked`, so a price change
 upstream is visible in the ledger. Status: **in use**.
 

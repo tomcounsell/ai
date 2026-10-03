@@ -95,12 +95,8 @@ routes: Anthropic's Messages API (`route: gateway`) and OpenAI's Responses
 API under `openai/` (`route: openai`). For every call it:
 
 1. prices the model from the table in `core/settings.py`, each price
-   carrying the day it was checked (`price_checked` on the charge row); an unpriced model is refused. Anthropic ids match with a date suffix
-   against the undated entry; OpenAI ids match only exactly or with a
-   `-YYYY-MM-DD` suffix. Every per-million charge is rounded up to a whole
-   micro-dollar in integers;
-2. opens the call with a `gateway.opened` row (call id, turn id, model,
-   route, estimate), refusing with a `gateway.refused` row of reason
+   carrying the day it was checked (`price_checked` on the charge row); an unpriced model is refused. An Anthropic dated id matches its undated entry; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix. Per-million charges round up to whole micro-dollars in integers;
+2. opens the call with a `gateway.opened` row (call id, turn id, model, route, estimate), refusing with a `gateway.refused` row of reason
    `stopped` if the task is stopped; nothing else refuses a call;
 3. forwards the call with the kernel's own credential (harnesses.md, Metering
    through the gateway), streaming the response back unchanged and reading the
