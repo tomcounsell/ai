@@ -312,6 +312,7 @@ built in.
   `core/signals.py` with no other reader of `signals.py` touched; the
   shared safe-read helper from `m1-4s-signal-reads` replaces its body at
   merge.
+- **A refused move is unreadable.** A screen that cannot be moved aside is recorded as refused and removed, never left or swallowed.
 - **Rebase note.** 3b also edits `core/workspace.py`, `core/settings.py`,
   and `docs/harnesses.md`; whichever merges later rebases.
 - **No invented limits.** `look` first had a 10 second timeout on the

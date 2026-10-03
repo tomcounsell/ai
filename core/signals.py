@@ -134,20 +134,33 @@ def read_screens(workspace: str | Path, turn_id: str) -> list[dict[str, Any]]:
                     entry.update({"bytes": size, "sha256": digest.hexdigest()})
             except OSError as exc:
                 entry["refused"] = exc.strerror or str(exc)
-            out.append(entry)
             if dest is None:
                 dest = _screens_dest(valor, turn_id, fds)
-            if dest is not None:
-                try:
-                    os.rename(name, name, src_dir_fd=screens, dst_dir_fd=dest)
-                except OSError:
-                    pass
+            try:
+                if dest is None:
+                    raise OSError("no place to file it")
+                os.rename(name, name, src_dir_fd=screens, dst_dir_fd=dest)
+            except OSError:
+                # A screen that cannot be filed away counts as unreadable and
+                # is removed, so no later turn records it again.
+                entry = {"name": name, "refused": "could not be moved aside"}
+                _remove(screens, name)
+            out.append(entry)
     except OSError:
         pass
     finally:
         for fd in fds:
             os.close(fd)
     return out
+
+
+def _remove(dir_fd: int, name: str) -> None:
+    for unlink in (os.unlink, os.rmdir):
+        try:
+            unlink(name, dir_fd=dir_fd)
+            return
+        except OSError:
+            continue
 
 
 def _screens_dest(valor: int, turn_id: str, fds: list[int]) -> int | None:
