@@ -23,6 +23,13 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _span(name: str, default: str) -> tuple[int, int]:
+    """A port span from `LOW-HIGH`, so a machine running several kernels
+    or test runs side by side gives each its own ports."""
+    low, high = _env(name, default).split("-")
+    return int(low), int(high)
+
+
 def _pg_bin() -> str:
     found = shutil.which("pg_dump")
     return str(Path(found).parent) if found else "/opt/homebrew/opt/postgresql@18/bin"
@@ -199,8 +206,8 @@ class Settings:
             "VALOR_PROJECTS", str(Path(__file__).resolve().parent.parent / "projects")
         )
     )
-    pg_ports: tuple[int, int] = (5440, 5599)
-    redis_ports: tuple[int, int] = (6400, 6499)
+    pg_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_PG_PORTS", "5440-5599"))
+    redis_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_REDIS_PORTS", "6400-6499"))
     # How long one `setup` command may run at provisioning.
     setup_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_SETUP_TIMEOUT_S", "1200")))
     # The kernel mirror's fetch from a builder's clone: the largest file the

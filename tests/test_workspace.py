@@ -25,6 +25,7 @@ from core import db, ledger, router, runs, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from tests import scripted
+from tests.ports import span as ports_span
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -83,9 +84,9 @@ def provision(tmp_path: Path, services=(), task_id=None, base=None, **kw) -> tup
     task_id = task_id or ledger.new_id()
     ports = {}
     if "postgres" in services:
-        ports["postgres"] = kws.choose_port((5540, 5579), set())
+        ports["postgres"] = kws.choose_port(ports_span((5540, 5579)), set())
     if "redis" in services:
-        ports["redis"] = kws.choose_port((6440, 6459), set())
+        ports["redis"] = kws.choose_port(ports_span((6440, 6459)), set(ports.values()))
     made = kws.provision(
         task_id, spec(src, services=list(services), **kw), ports, base=base, work=tmp_path / "work"
     )
@@ -201,7 +202,7 @@ def test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other(tmp_pa
     _a, made_a = provision(tmp_path, services=["postgres"])
     taken = {made_a.project["ports"]["postgres"]}
     src = tmp_path / "src" / "toy"
-    port_b = kws.choose_port((5540, 5579), taken)
+    port_b = kws.choose_port(ports_span((5540, 5579)), taken)
     b = ledger.new_id()
     made_b = kws.provision(b, spec(src, services=["postgres"]), {"postgres": port_b}, work=tmp_path / "work")
     assert port_b != made_a.project["ports"]["postgres"]
@@ -706,7 +707,7 @@ def test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_l
     other = ledger.new_id()
     work = tmp_path / "work"
     src = scripted.toy_repo(tmp_path)
-    port = kws.choose_port((5540, 5579), set())
+    port = kws.choose_port(ports_span((5540, 5579)), set())
     kws.provision(other, spec(src, services=["postgres"]), {"postgres": port}, work=work)
     lay = kws.Layout(work / other)
     kws.start_services(other, lay, ["postgres"], {"postgres": port})  # as a kernel killed mid-setup left it
@@ -925,7 +926,7 @@ def _orphan_with_services(tmp_path):
     work = tmp_path / "work"
     orphan = ledger.new_id()
     src = scripted.toy_repo(tmp_path)
-    port = kws.choose_port((5540, 5579), set())
+    port = kws.choose_port(ports_span((5540, 5579)), set())
     kws.provision(orphan, spec(src, services=["postgres"]), {"postgres": port}, work=work)
     lay = kws.Layout(work / orphan)
     kws.start_services(orphan, lay, ["postgres"], {"postgres": port})
