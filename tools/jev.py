@@ -21,7 +21,7 @@ from core import judgement
 from core.judgement import DATA_ONLY, JudgementTask, Kind, LegAnswer, LegError
 from core.settings import JEV_MODEL, settings
 
-# Jev's billed input over the request body's bytes / 3 (see `Jev.estimate`).
+# Jev's billed input over the request body's estimated tokens (see `Jev.estimate`).
 OVERHEAD_RATIO = 1.25
 OVERHEAD_FIXED = 300
 OVERHEAD_PER_QUESTION = 50
@@ -61,11 +61,11 @@ class Jev:
         """Input tokens, estimated high enough for a worst case: Jev bills a prompt
         of its own around the request. Over its 35 calibration calls of
         2026-10-02 it billed 0.95 to 1.59 times the body's bytes / 3, and at
-        most 189 tokens more (`docs/plans/m1-3-judgement.md`, Patch round 1),
-        so the estimate is a quarter over bytes / 3 plus 300 tokens and 50
-        per question. All 35 were single-question judge calls of at most 1,016
-        estimated tokens (bytes / 3); breadth and governance re-check this from their own
-        rows when 1.4 calibrates them."""
+        most 189 tokens more (`docs/plans/m1-3-judgement.md`, Patch round 1).
+        Over the 50 governance calls of 2026-10-03 it billed up to 1.25 times
+        that estimate on hunks of lock-file hashes, so the body is counted at
+        `bytes_per_token` (2), a quarter over it, plus 300 tokens and 50 per
+        question (`tests/fixtures/judgement_hash_dense.json`)."""
         body = judgement.estimate_tokens(json.dumps(self.body(task, inputs)))
         return math.ceil(body * OVERHEAD_RATIO) + OVERHEAD_FIXED + OVERHEAD_PER_QUESTION * len(task.questions)
 

@@ -229,8 +229,9 @@ class Settings:
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a
     # call with no reported usage is charged. An underestimate charges less
-    # than the invoice, so it leans high: English and JSON run above 3.
-    bytes_per_token: int = 3
+    # than the invoice, so it leans high: English and JSON run above 3, and
+    # a lock file's hashes run near 1.5 on both judgement legs.
+    bytes_per_token: int = 2
     # Seconds between SIGTERM and SIGKILL when reaping a turn's processes.
     reap_grace_s: float = 2.0
     # Turns in a row ending with neither a question nor a delivery before a

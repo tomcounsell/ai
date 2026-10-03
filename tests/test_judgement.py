@@ -598,11 +598,11 @@ def test_calibrate_from_the_command_line_refuses_before_asking(dsn, tmp_path):
     good = tmp_path / "cases.json"
     good.write_text(json.dumps({"site": "intake.underspecified", "cases": []}))
     unknown = tmp_path / "unknown.json"
-    unknown.write_text(json.dumps({"site": "governance.adds", "cases": []}))
+    unknown.write_text(json.dumps({"site": "no.such.site", "cases": []}))
     jev, ow = UP.urls(fixed="precise")
     for args, env, said in (
         ([str(tmp_path / "missing.json")], {}, "no cases file"),
-        ([str(unknown)], {}, "no calibration case shape for governance.adds"),
+        ([str(unknown)], {}, "no calibration case shape for no.such.site"),
         (
             [str(good)],
             {"VALOR_JEV_URL": jev, "VALOR_OPEN_WEIGHT_URL": ow},
@@ -637,3 +637,11 @@ def test_a_clean_decimal_answer_a_hair_under_the_floor_after_normalizing_still_m
     assert not why and checked[q.id]["false"] < 0.75
     got = judgement.decide(q, checked[q.id], BREADTH.floor["fallback"])
     assert got["decision"] == "proceed" and got["p_proceed"] == 0.75
+
+
+def test_each_legs_estimate_covers_what_it_billed_for_a_hunk_of_hashes():
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "judgement_hash_dense.json").read_text())
+    jev, ow = jev_leg.Jev("u", "k"), ow_leg.OpenWeight("u", "k")
+    billed = recorded["billed_input_tokens"]
+    assert jev.estimate(GOVERNANCE, recorded["inputs"]) >= billed["jev"]
+    assert ow.estimate(GOVERNANCE, recorded["inputs"]) >= billed["open_weight"]
