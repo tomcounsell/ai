@@ -89,9 +89,18 @@ classifies the rest as a new request, a steer, feedback, an answer, a
 correction, an exemplar, or conversation. Three things differ for email.
 
 **Who counts as Tom.** A `From` header is a claim anyone can write.
-`intake.receive` sets every email record's `verified` false, so a record
-from Tom's address is recorded and starts nothing. The bridge never sets
-`verified`.
+`intake.receive` sets an email record's `verified` with
+`intake.dmarc_verified(headers, email_authserv_id)`: true only when the
+record has one `From` header holding one address, and the topmost
+`Authentication-Results` value (the one Gmail writes, `mx.google.com`)
+reports `dmarc=pass` with `header.from` that address's domain. Lines below
+the topmost are the sender's own and count for nothing. An unverified
+record from Tom's address is recorded and starts nothing. The test is the
+`email.dmarc` guard in `core/guards.py`, granted under open question 17
+and seeded by `migrate`; it fires when a record from `operator_email` is
+not verified, and each firing is a `guard.fired` row on the `guards`
+stream written with the record (`guards.fired` reads them). The bridge
+never sets `verified`.
 
 **No approvals or stops by email.** An email reply carries quoted history,
 signatures, and client furniture around what the person typed, so a fixed
@@ -240,6 +249,7 @@ it exits.
 | `bridges/email/smtp.py` | `perform` and `lookup` |
 | `core/mail.py` | `reply_all`, the message builder, and its encoded size |
 | `core/session.py` | A `reply_to` request filled in as reply-all |
+| `core/intake.py` | `dmarc_verified` |
 
 The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
 `core.settings`, `core.db`, and `core.credentials`, and nothing from the
@@ -257,7 +267,11 @@ Telegram bridge. Its tests run against Dovecot and a local SMTP server
   outside IDLE wait as long as the server takes. A server that accepts a
   connection and then never answers holds that send or lookup, and the
   outbox behind it, until the connection drops.
-- **Email starts nothing.** No email record is verified, so mail from Tom
-  is recorded and binds as nothing.
+- **DMARC as the test of Tom's identity.** It holds only while Tom's
+  domain publishes a DMARC policy and Gmail writes `Authentication-Results`.
+  A record fails the test when either is missing, and then starts nothing.
+  The `email.dmarc` guard row expires in ninety days; deleting it at expiry
+  does not change the test, which stays in `core/intake.py` until a diff
+  removes it.
 - **Approving every send.** As on Telegram, each send to anyone but Tom
   waits for his tap, and the broker has no standing grants.

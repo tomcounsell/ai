@@ -7,8 +7,12 @@ approval, a stop, a steer of a running task, or a new task. A bridge holds
 no binding logic.
 
 `verified` is set here, not by the bridge: every Telegram record is
-verified (MTProto authenticates the sender); an email record is not.
-Whether the sender is the operator is decided at bind.
+verified (MTProto authenticates the sender); an email record is verified
+when `dmarc_verified` passes on its headers, the check granted under open
+question 17 (Tom, 2026-10-01) and ledgered as the `email.dmarc` guard in
+`core/guards.py`. Each email record from one of Tom's addresses that fails
+it writes `guard.fired` on the `guards` stream, in the record's
+transaction. Whether the sender is the operator is decided at bind.
 
 Ownership: this machine's bridges receive the operator's own chat and
 addresses, and the chats a project spec lists (`chats`) whose `machine`
@@ -38,6 +42,7 @@ behind it. `message.bound` is the first row a binding writes, so a
 second binder of the same message stops there and writes nothing.
 """
 
+import email.utils
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -45,7 +50,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import ledger, machine, notices, session, tasks, workspace
+from core import guards, ledger, machine, notices, session, tasks, workspace
 from core.machine import State
 from core.settings import resolve_model, settings
 
@@ -79,10 +84,18 @@ def _verified_telegram(inbound: Inbound) -> bool:
 
 
 def _verified_email(inbound: Inbound) -> bool:
-    return False
+    return dmarc_verified(inbound.headers, settings.email_authserv_id)
 
 
 VERIFY = {"telegram": _verified_telegram, "email": _verified_email}
+
+
+def _dmarc_fired(inbound: Inbound, verified: bool) -> bool:
+    """The `email.dmarc` guard fires on an email record from one of Tom's
+    addresses that fails the test: the record is kept and starts nothing."""
+    return (
+        inbound.channel == "email" and not verified and inbound.sender_id.lower() in settings.operator_email
+    )
 
 
 async def receive(conn, inbound: Inbound) -> Received:
@@ -93,6 +106,18 @@ async def receive(conn, inbound: Inbound) -> Received:
     try:
         async with conn.transaction():
             await ledger.append(conn, inbound.channel, "message.received", payload)
+            if _dmarc_fired(inbound, payload["verified"]):
+                await ledger.append(
+                    conn,
+                    guards.STREAM,
+                    "guard.fired",
+                    {
+                        "guard_id": guards.GUARD_DMARC,
+                        "received_id": received_id,
+                        "message_id": inbound.message_id,
+                        "sender_id": inbound.sender_id,
+                    },
+                )
     except psycopg.errors.UniqueViolation:
         row = await (
             await conn.execute(
@@ -467,3 +492,69 @@ def _files(attachments: list[dict[str, Any]]) -> str:
             f"- {a.get('name') or 'file'} ({a.get('mime') or 'unknown type'}, {a.get('bytes')} bytes): {where}"
         )
     return "\n".join(lines)
+
+
+# -- the DMARC test (open question 17; guard email.dmarc) --------------------
+
+
+def _strip_comments(text: str) -> str:
+    """RFC 5322 comments removed, nesting and quoted pairs honored."""
+    out, depth, i = [], 0, 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and depth:
+            i += 2
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _results(value: str) -> tuple[str, list[dict[str, str]]]:
+    """An `Authentication-Results` value as its authserv-id and one dict per
+    result (`method` -> result, `ptype.property` -> value), lowercased."""
+    text = _strip_comments(re.sub(r"\r?\n[ \t]+", " ", value))
+    head, *rest = text.split(";")
+    tokens = head.split()
+    authserv = tokens[0].lower() if tokens else ""
+    found = []
+    for segment in rest:
+        pairs = {}
+        for token in segment.split():
+            name, sep, val = token.partition("=")
+            if sep:
+                pairs.setdefault(name.lower(), val.strip('"').lower())
+        if pairs:
+            found.append(pairs)
+    return authserv, found
+
+
+def _values(headers: dict, name: str) -> list[str]:
+    value = headers.get(name)
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def dmarc_verified(headers: dict, authserv_id: str) -> bool:
+    """True only when the record has one `From` header holding one address,
+    and the topmost `Authentication-Results` (the first entry, as received)
+    is from `authserv_id` and reports `dmarc=pass` with `header.from` that
+    address's domain. Lines below the topmost one are the sender's own."""
+    froms = _values(headers, "from")
+    results = _values(headers, "authentication_results")
+    if len(froms) != 1 or not results:
+        return False
+    addresses = [addr for _, addr in email.utils.getaddresses([froms[0]]) if addr]
+    if len(addresses) != 1 or addresses[0].count("@") != 1:
+        return False
+    domain = addresses[0].rsplit("@", 1)[1].strip().lower()
+    authserv, found = _results(results[0])
+    if not domain or authserv != authserv_id.lower():
+        return False
+    return any(r.get("dmarc") == "pass" and r.get("header.from") == domain for r in found)

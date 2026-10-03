@@ -1,7 +1,7 @@
-"""The email bridge on the kernel: the IMAP watch through intake, the bridge
-under `bridge.serve`, the reply-all a turn asks for, the request-time size
-refusal, and a kill at every point of a send, on real Postgres and the
-local mail servers."""
+"""The email bridge on the kernel: the IMAP watch through intake, the DMARC
+test at receive, the bridge under `bridge.serve`, the reply-all a turn
+asks for, the request-time size refusal, and a kill at every point of a
+send, on real Postgres and the local mail servers."""
 
 import asyncio
 import dataclasses
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from bridges.email import EmailBridge, imap
-from core import bridge, broker, db, intake, ledger, mail, session, signals, tasks
+from core import bridge, broker, db, guards, intake, ledger, mail, session, signals, tasks
 from tests import scripted
 from tests.fake_bridges import OPERATOR_EMAIL, configure, declared, new_task, of_type, operator, outbox
 from tests.test_email_parse import message
@@ -37,7 +37,7 @@ def run(coro):
 
 @pytest.fixture
 def op(tmp_path):
-    with operator(tmp_path, inbound_dir=str(tmp_path / "inbound")) as s:
+    with operator(tmp_path, inbound_dir=str(tmp_path / "inbound"), email_authserv_id="mx.google.com") as s:
         yield s
 
 
@@ -78,7 +78,7 @@ def seen(mailbox) -> dict[str, bool]:
     return out
 
 
-def test_the_poll_receives_owned_unseen_mail_once_and_starts_nothing_unverified(dsn, op, mailbox):
+def test_the_poll_receives_owned_unseen_mail_once_and_binds_only_verified_mail(dsn, op, mailbox):
     good, forged, plain, stranger = mid(), mid(), mid(), mid()
     mailbox.dovecot.deliver(from_tom(message_id=good, body="please start"))
     mailbox.dovecot.deliver(from_tom(FORGED, message_id=forged, body="me too"))
@@ -105,10 +105,12 @@ def test_the_poll_receives_owned_unseen_mail_once_and_starts_nothing_unverified(
     assert first == 3 and again == 0
     assert rows[stranger] == []
     assert [len(rows[m]) for m in (good, forged, plain)] == [1, 1, 1]
-    assert [rows[m][0]["verified"] for m in (good, forged, plain)] == [False, False, False]
+    assert rows[good][0]["verified"] is True
+    assert rows[forged][0]["verified"] is False and rows[plain][0]["verified"] is False
     assert rows[good][0]["sender_id"] == OPERATOR_EMAIL and rows[good][0]["chat_id"] == good
     assert rows[good][0]["headers"]["uidvalidity"] and rows[good][0]["headers"]["uid"]
-    assert [bound[m]["as"] for m in (good, forged, plain)] == ["none", "none", "none"]
+    assert bound[good]["as"] == "start" and bound[good]["task_id"]
+    assert bound[forged]["as"] == "none" and bound[plain]["as"] == "none"
     flags = seen(mailbox)
     assert flags[good] and flags[forged] and flags[plain] and not flags[stranger]
 
@@ -148,6 +150,49 @@ def test_attachments_are_written_under_the_inbound_directory_by_sha256(dsn, op, 
     path = tmp_path / "inbound" / "email"
     assert any(p.read_bytes() == data for p in path.rglob("*") if p.is_file())
     assert hashlib.sha256(data).hexdigest() in att["path"]
+
+
+def _inbound(results, sender=OPERATOR_EMAIL):
+    return intake.Inbound(
+        channel="email", chat_id=mid(), chat_kind="email", message_id=mid(), sender_id=sender,
+        sender_name="Tom", sent_at="2026-10-03T00:00:00Z", text="x",
+        headers={"from": [f"Tom <{sender}>"], "authentication_results": results},
+    )  # fmt: skip
+
+
+def test_receive_sets_verified_from_the_topmost_authentication_results(dsn, op):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            ok = await intake.receive(conn, _inbound([PASS]))
+            below = await intake.receive(conn, _inbound([FORGED, PASS]))
+        return [
+            (await of_type(dsn, "message.received", received_id=r.received_id))[0]["verified"]
+            for r in (ok, below)
+        ]
+
+    assert run(go()) == [True, False]
+
+
+def test_the_dmarc_guard_records_each_firing_once(dsn, op):
+    """An unverified record from Tom's address writes one `guard.fired`;
+    a verified one, another sender's, and a duplicate write none."""
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            before = len(await guards.fired(conn, guards.GUARD_DMARC))
+            forged = _inbound([FORGED, PASS])
+            first = await intake.receive(conn, forged)
+            again = await intake.receive(conn, forged)
+            await intake.receive(conn, _inbound([PASS]))
+            await intake.receive(conn, _inbound([FORGED], sender="someone@elsewhere.example"))
+            rows = (await guards.fired(conn, guards.GUARD_DMARC))[before:]
+        return first, again, forged, rows
+
+    first, again, forged, rows = run(go())
+    assert again.duplicate and again.received_id == first.received_id
+    assert [(r["received_id"], r["message_id"], r["sender_id"]) for r in rows] == [
+        (first.received_id, forged.message_id, OPERATOR_EMAIL)
+    ]
 
 
 def test_the_bridge_under_serve_sends_a_release_once_and_receives_mail(dsn, op, mailbox):
@@ -516,3 +561,28 @@ def test_a_file_swapped_after_approval_is_refused_at_release_and_never_sent(dsn,
     (refused,) = run(go())
     assert refused["at"] == "release" and "sha256 differs" in refused["reason"]
     assert mailbox.smtp.connections == 0 and mailbox.smtp.accepted == []
+
+
+def test_toms_reply_to_a_sent_mail_steers_its_task(dsn, op, mailbox):
+    payload = {"to": [OPERATOR_EMAIL], "cc": [], "subject": "Re: plans", "body": "Done.",
+               "in_reply_to": None, "references": [], "files": []}  # fmt: skip
+    cfg = mailbox.config()
+
+    async def go():
+        task = await new_task(dsn)
+        effect_id = await released(dsn, task, payload)
+        (outcome,) = await served_until(dsn, cfg, effect_id)
+        sent = outcome["result"]["message_id"]
+        reply = mid()
+        mailbox.dovecot.deliver(
+            from_tom(message_id=reply, body="also add tests", In_Reply_To=sent, References=sent)
+        )
+
+        await served_until(dsn, cfg, effect_id, lambda: received(dsn, reply))
+        async with await db.connect(dsn) as conn:
+            await intake.bind(conn)
+        (got,) = await received(dsn, reply)
+        return task, await of_type(dsn, "message.bound", received_id=got["received_id"])
+
+    task, (row,) = run(go())
+    assert row["as"] == "steer" and row["task_id"] == task

@@ -874,16 +874,25 @@ def test_migrate_seeds_the_granted_guards_once(dsn):
         "checks.test.breadth",
         "critique.loop",
         "review.loop",
+        "email.dmarc",
     ]
     for (p,) in seeded:
         assert p["incident"] and p["mission_items"] and p["granted_at"] == "2026-10-01"
         assert p["expires"] == "2026-12-30" and p["provenance"]["by"] == "tom"
+        assert "via" not in p and p["provenance"]["role_played"] is False
+    *pipeline, (dmarc,) = seeded
+    for (p,) in pipeline:
+        assert p["note"] == guards.NOTE
+        assert p["provenance"]["via"] == "the 2026-10-01 pipeline decision, seeded by migrate"
+    assert dmarc["mission_items"] == [6] and "open question 17" in dmarc["provenance"]["via"]
+    assert dmarc["source"].startswith("docs/plans/rebuild-open-questions.md, 17")
+    assert "forged From starts nothing" in dmarc["note"]
     db.migrate(TEST_DB)
     with psycopg.connect(dsn, autocommit=True) as conn:
         again = conn.execute(
             "SELECT count(*) FROM events WHERE task_id = 'guards' AND type = 'guard.granted'"
         ).fetchone()[0]
-    assert again == 4
+    assert again == 5
     assert json.dumps(seeded[0][0])  # plain JSON
 
 

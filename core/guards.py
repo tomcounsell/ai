@@ -1,13 +1,16 @@
 """Guards: every checkpoint that holds or redirects work, ledgered with the
 incident it prevents, the mission item it serves, and a ninety-day expiry.
 
-The four granted with the pipeline on 2026-10-01 are seeded by `db.migrate`
-on the `guards` stream, once each. A governance instance Tom grants on a
+The four granted with the pipeline on 2026-10-01, and the DMARC test
+granted under open question 17 the same day, are seeded by `db.migrate` on
+the `guards` stream, once each. A governance instance Tom grants on a
 task (one hunk that adds a check, gate, hook, round, or review step) is a
 `guard.granted` row on that task, bound to the instance's id: an unchanged
 hunk stays granted across patches, a changed or moved hunk is a new
-instance. This module records; deleting an expired guard is a routine for
-milestone 4.
+instance. A seeded guard that acts on a record writes `guard.fired` on the
+same stream each time it does (`fired` reads them), so its expiry can be
+judged on whether it fired. This module records; deleting an expired
+guard is a routine for milestone 4.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -16,6 +19,9 @@ from typing import Any
 from core import ledger, machine
 
 STREAM = "guards"
+# The DMARC test in `core/intake.py`, which records its firing; nothing in
+# `core/machine.py` fires it.
+GUARD_DMARC = "email.dmarc"
 GRANTED = date(2026, 10, 1)
 EXPIRES = GRANTED + timedelta(days=90)  # 2026-12-30
 NOTE = (
@@ -72,18 +78,39 @@ SEEDED: tuple[dict[str, Any], ...] = (
         "mission_items": [1],
         "source": "docs/sdlc-state-machine.md, checks.review, Why; rebuild-baseline.md, Review rounds",
     },
+    {
+        "guard_id": GUARD_DMARC,
+        "name": (
+            "the DMARC test: an email record is verified only when the receiving server's topmost "
+            "Authentication-Results shows DMARC pass for its single From address's domain"
+        ),
+        "incident": (
+            "the risk, stated as it stands: a spoofed From reaching the kernel as Tom and carrying his "
+            "authority. main's email bridge routes on an unauthenticated From, with no SPF, DKIM, or "
+            "DMARC test (docs/features/context-recall-advisory.md on main, line 82), and #2694's review "
+            "found that address reaching a shell interpolation, mitigated by quoting. There is no record "
+            "of a spoofed mail having arrived yet"
+        ),
+        "mission_items": [6],
+        "source": "docs/plans/rebuild-open-questions.md, 17; docs/bridges/email.md, Who counts as Tom",
+        "note": 'serves the constraint "Bounded authority, metered spending": a forged From starts nothing',
+        "via": "open question 17, default A standing, seeded by migrate",
+    },
 )
 
 
 def seeded_payload(guard: dict[str, Any]) -> dict[str, Any]:
+    """A seeded guard's row: its own `note` and `via` when it carries them,
+    the pipeline decision's otherwise."""
+    own = {k: v for k, v in guard.items() if k not in ("note", "via")}
     return {
-        **guard,
+        **own,
         "granted_at": GRANTED.isoformat(),
         "expires": EXPIRES.isoformat(),
-        "note": NOTE,
+        "note": guard.get("note", NOTE),
         "provenance": {
             "by": "tom",
-            "via": "the 2026-10-01 pipeline decision, seeded by migrate",
+            "via": guard.get("via", "the 2026-10-01 pipeline decision, seeded by migrate"),
             "role_played": False,
             "at": GRANTED.isoformat(),
         },
@@ -110,6 +137,19 @@ def seed(conn) -> int:
                 )
                 written += 1
     return written
+
+
+async def fired(conn, guard_id: str) -> list[dict[str, Any]]:
+    """Every `guard.fired` row of `guard_id`, oldest first, each payload
+    with its `at`."""
+    rows = await (
+        await conn.execute(
+            "SELECT payload, at FROM events WHERE task_id = %s AND type = 'guard.fired' "
+            "AND payload->>'guard_id' = %s ORDER BY id",
+            (STREAM, guard_id),
+        )
+    ).fetchall()
+    return [{**p, "at": at.isoformat()} for p, at in rows]
 
 
 class GrantRefused(LookupError):

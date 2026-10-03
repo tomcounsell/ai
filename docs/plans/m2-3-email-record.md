@@ -115,3 +115,4 @@ From the review, test, and docs checks:
 | C3, SMTP timeouts | EHLO, STARTTLS, and AUTH wait with no timer; `QUIT` after a 250 is not awaited |
 | Filing delay | Not found is `Unknown`; the intent stays in flight until a later wake finds it |
 | Mislabelled kill test | Renamed to a send killed before the server took the message; EPIPE before the end of data line tested |
+| Guard firing | `guard.fired` on the `guards` stream, in the record's transaction in `intake.receive`; `guards.fired` reads it |

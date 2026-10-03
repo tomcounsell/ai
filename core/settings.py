@@ -257,6 +257,8 @@ class Settings:
     email_address: str = field(default_factory=lambda: _env("VALOR_EMAIL_ADDRESS", ""))
     # Unseen mail dated before this day (YYYY-MM-DD) is never received.
     email_since: str = field(default_factory=lambda: _env("VALOR_EMAIL_SINCE", ""))
+    # The receiving server whose topmost Authentication-Results is trusted.
+    email_authserv_id: str = field(default_factory=lambda: _env("VALOR_EMAIL_AUTHSERV_ID", "mx.google.com"))
     imap_host: str = field(default_factory=lambda: _env("VALOR_IMAP_HOST", "imap.gmail.com"))
     imap_port: int = field(default_factory=lambda: int(_env("VALOR_IMAP_PORT", "993")))
     smtp_host: str = field(default_factory=lambda: _env("VALOR_SMTP_HOST", "smtp.gmail.com"))

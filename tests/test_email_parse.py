@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from bridges.email import parse
+from core import intake
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -121,10 +122,11 @@ def test_no_message_id_is_given_the_digest_of_the_bytes():
     assert first["chat_id"] == first["message_id"]
 
 
-def test_no_from_is_kept_with_an_empty_sender():
+def test_no_from_is_kept_with_an_empty_sender_never_verified():
     raw = message(body="x").replace(b"From: Tom <tom@yuda.me>\n", b"")
     f = parse.parse_email_message(raw).fields
     assert f["sender_id"] == "" and f["headers"]["from"] == []
+    assert not intake.dmarc_verified(f["headers"], "mx.google.com")
 
 
 def test_references_give_the_thread_and_its_root():
