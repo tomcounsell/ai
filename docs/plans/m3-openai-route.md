@@ -161,7 +161,7 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
 
 - `OPENAI_PRICES` in `core/settings.py`, beside `PRICES` and kept apart
   from it as `JUDGEMENT_PRICES` is, so the Anthropic route never prices an
-  OpenAI model. An `OpenAIPrice` per model id prefix, with the pricing
+  OpenAI model. An `OpenAIPrice` per model id, with the pricing
   page's URL in a comment and a `checked` date. Per service tier, keyed by
   OpenAI's names (`default`, `flex`, `fast`, with `priority` an alias of
   `fast`): input, cached input, cache write, and output per million
@@ -177,8 +177,10 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
   the image model's own rates. Token-only tools (`function`, `custom`,
   `mcp`, `computer_use_preview`, and `shell` with a local environment)
   need no line.
-- `openai_prices(model)` matches the longest prefix, as `prices()` does,
-  and returns None for an unknown model, which the gateway answers with
+- `openai_prices(model)` matches the exact id, or the id plus a
+  `-YYYY-MM-DD` snapshot date, and nothing else, since OpenAI ships
+  pricier variants under the base name (`-pro`). It returns None for any
+  other id, which the gateway answers with
   the same 400 as an unpriced Anthropic model, before any row is written
   or anything goes upstream.
 - `openai_cost(usage, tier, tool_calls, prices)`: at the rates of the tier
@@ -358,11 +360,15 @@ and the table:
   with `max_tool_calls: -5` it estimates one window and no fee cap;
 - a completed reply with one `web_search_call` streamed and in `output`
   charges one fee, not two;
-- the request id is in `gateway.charged`, not `gateway.opened`.
+- the request id is in `gateway.charged`, not `gateway.opened`;
+- a `web_search` body with `max_tool_calls: 2^70`, cut, opens and charges
+  its worst case (past 2^63 micro-dollars) exactly, in integers, and the
+  turn's sum (`spending.turn_spent`, numeric) returns it exactly.
 
 Refusals, each showing nothing reached the upstream:
 
-- an unpriced model (400);
+- an unpriced model (400), among them `gpt-6.1-sol-pro`; the exact id
+  and a dated id are priced;
 - an unpriced `service_tier` is forwarded and charged at the highest
   tier, `tier_unpriced: true`;
 - a `code_interpreter` tool, a `shell` tool with a `container_auto`
@@ -560,3 +566,11 @@ optional action in Rollout.
   `DELETE v1/models/<id>` is a 403; a negative `max_tool_calls` counts as
   0; a 401 names the kernel's or the turn's key; `proxy-authorization`
   dropped on both routes.
+- Patch round 2: OpenAI ids match exactly or with a snapshot date, so
+  `gpt-6.1-sol-pro` is a 400; the stale tier comment on `OPENAI_PRICES`
+  corrected. The column: the ledger holds amounts as JSON numbers in
+  `jsonb` (exact at any size); the one bigint cast, the turn's charge sum
+  in `core/runs.py`, now sums as numeric (`spending.turn_spent`). The test
+  for it found the per-million rounding done in floats, which rounded a
+  2^70-call worst case down by 10.5 million micro-dollars; every
+  per-million charge now rounds up in integers.

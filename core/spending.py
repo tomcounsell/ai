@@ -11,6 +11,7 @@ open checks only that the task is not stopped.
 """
 
 import json
+import re
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from math import ceil
 
@@ -69,9 +70,7 @@ def judgement_worst_case(input_tokens: int, max_tokens: int, price: dict) -> int
     """A judgement call's worst case: its estimated input and every output
     token it may produce, rounded up, never under one micro-dollar. It is
     the charge when the provider may have billed and reported nothing."""
-    return max(
-        1, ceil(input_tokens * price["input"] / 1_000_000) + ceil(max_tokens * price["output"] / 1_000_000)
-    )
+    return max(1, _per_mtok(input_tokens * price["input"]) + _per_mtok(max_tokens * price["output"]))
 
 
 def usd_micros(reported) -> int | None:
@@ -93,8 +92,8 @@ def judgement_cost(usage: dict, price: dict) -> int:
     """What a judgement call costs from its usage: tokens at the pinned
     price, rounded up, or the provider's reported cost when that is more,
     so the ledger never records less than the invoice."""
-    tokens = ceil(int(usage["input_tokens"]) * price["input"] / 1_000_000) + ceil(
-        int(usage.get("output_tokens") or 0) * price["output"] / 1_000_000
+    tokens = _per_mtok(int(usage["input_tokens"]) * price["input"]) + _per_mtok(
+        int(usage.get("output_tokens") or 0) * price["output"]
     )
     reported = usd_micros(usage.get("reported_usd")) if usage.get("reported_usd") is not None else None
     return max(tokens, reported or 0)
@@ -116,9 +115,7 @@ def cost(usage: dict, price: dict) -> int:
         "cache_write_1h": writes - short,
     }
     searches = int((usage.get("server_tool_use") or {}).get("web_search_requests") or 0)
-    return sum(ceil(n * price[p] / 1_000_000) for p, n in tokens.items()) + searches * price.get(
-        "web_search", 0
-    )
+    return sum(_per_mtok(n * price[p]) for p, n in tokens.items()) + searches * price.get("web_search", 0)
 
 
 def estimate_input(body: dict) -> int:
@@ -128,27 +125,38 @@ def estimate_input(body: dict) -> int:
 def worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
     """Input at the most expensive input rate plus every output token the
     caller allowed: the charge for a call whose provider reports no usage."""
-    return ceil(input_tokens * price["cache_write_1h"] / 1_000_000) + ceil(
-        max_tokens * price["output"] / 1_000_000
-    )
+    return _per_mtok(input_tokens * price["cache_write_1h"]) + _per_mtok(max_tokens * price["output"])
 
 
 # -- the OpenAI route ------------------------------------------------------------
+
+
+def _per_mtok(units: int) -> int:
+    """Micro-dollars for tokens times a per-million rate, rounded up, in
+    integers: exact at any size, where a float would round a large worst
+    case down."""
+    return -(-int(units) // 1_000_000)
 
 
 def _micros(rates) -> dict:
     return {k: round(getattr(rates, k) * 1_000_000) for k in ("input", "cached", "cache_write", "output")}
 
 
+# An OpenAI snapshot date at the end of a model id.
+OPENAI_DATED = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
 def openai_prices(model: str) -> dict | None:
     """Micro-dollars per million tokens for an OpenAI model id, per tier
     (`base` up to the long-context threshold, `long` above it), with the
-    threshold, context window, maximum output, and checked date. The
-    longest matching entry wins, as in `prices`; None when unpriced."""
-    names = [n for n in OPENAI_PRICES if model == n or model.startswith(n + "-")]
-    if not names:
+    threshold, context window, maximum output, and checked date. Only the
+    exact id or the id plus a `-YYYY-MM-DD` snapshot date matches, since
+    OpenAI ships pricier variants under the base name (`-pro`); None when
+    unpriced."""
+    name = OPENAI_DATED.sub("", model)
+    if name not in OPENAI_PRICES:
         return None
-    p = OPENAI_PRICES[max(names, key=len)]
+    p = OPENAI_PRICES[name]
     return {
         "tiers": {t: {"base": _micros(b), "long": _micros(lg)} for t, (b, lg) in p.tiers.items()},
         "long_above": p.long_context_above,
@@ -262,8 +270,8 @@ def openai_estimate(body: dict, price: dict) -> dict:
     max_output = body.get("max_output_tokens")
     max_output = int(max_output) if isinstance(max_output, int) and max_output > 0 else price["max_output"]
     every = [r for t in price["tiers"].values() for r in (t["base"], t["long"])]
-    tokens = ceil(estimated * max(max(r["input"], r["cache_write"]) for r in every) / 1_000_000) + ceil(
-        max_output * max(r["output"] for r in every) / 1_000_000
+    tokens = _per_mtok(estimated * max(max(r["input"], r["cache_write"]) for r in every)) + _per_mtok(
+        max_output * max(r["output"] for r in every)
     )
     fees = [tool_fee(f) for f in (tool_fee_line(k) for k in kinds) if f]
     fee_cap = (max_calls or 0) * max(fees, default=0)
@@ -301,7 +309,7 @@ def openai_cost(usage: dict, tier: str | None, tool_calls: dict, price: dict) ->
         "cache_write": written,
         "output": int(usage.get("output_tokens") or 0),
     }
-    charged = sum(ceil(n * rates[k] / 1_000_000) for k, n in tokens.items())
+    charged = sum(_per_mtok(n * rates[k]) for k, n in tokens.items())
     charged += sum(n * tool_fee(f) for f, n in tool_calls.items())
     return charged, unpriced
 
@@ -323,6 +331,21 @@ async def open_call(conn, task_id: str, call: dict) -> str:
             return call["call_id"]
         await ledger.append(conn, task_id, "gateway.refused", {**call, "reason": "stopped"})
     raise tasks.TaskStopped(task_id)
+
+
+async def turn_spent(conn, task_id: str, turn_id: str) -> int:
+    """Every charge on one turn's calls, summed. Summed as numeric, as the
+    ledger's JSON holds it: a worst case past 2^63 micro-dollars (a turn
+    can ask for any `max_tool_calls`) sums exactly."""
+    row = await (
+        await conn.execute(
+            "SELECT COALESCE(sum((payload->>'usd_micros')::numeric), 0) FROM events "
+            "WHERE task_id = %s AND type = 'gateway.charged' "
+            "AND payload->>'turn_id' = %s",
+            (task_id, turn_id),
+        )
+    ).fetchone()
+    return int(row[0])
 
 
 async def charge(conn, task_id: str, call_id: str, usd_micros: int, detail: dict) -> None:

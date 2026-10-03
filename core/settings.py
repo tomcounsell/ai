@@ -97,8 +97,8 @@ class OpenAIPrice:
 # Checked against https://developers.openai.com/api/docs/pricing and
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol. Kept apart from
 # `PRICES`, so the Anthropic route never prices an OpenAI model. A model
-# absent here, or a tier absent from its entry, has no price, and the
-# gateway answers its request with a 400.
+# absent here has no price, and the gateway answers its request with a 400;
+# a tier absent from its entry is forwarded and charged at the highest tier.
 OPENAI_PRICES: dict[str, OpenAIPrice] = {
     "gpt-6.1-sol": OpenAIPrice(
         tiers={
