@@ -77,16 +77,17 @@ Building waits only on what the task's code needs:
 | 1.5 emulator and takeover gate | now | now (the scripts' move); the gate runs once 1.4b, 1.4s, 1.4c part one, and 1.4d merge | 1.4d |
 | 1.4s kernel reads of turn-owned files (bug fix) | now | now | 1.4b |
 | 1.4c part one: review runner, host rerun | now | 1.4b merges | 1.4s, before the 1.5 gate runs |
+| 1.4u invented caps out of the merged code (cap-audit-code) | now | now | 1.4b and 1.4s; later of 1.4u, 3a, 3b rebases |
 | 1.4c part two: the rerun in a container | now | Tom installs `container` | 1.5 |
-| 2.1 resident kernel, bridge port | now | 1.4b merges | 1.5 |
-| 2.2 Telegram | now | 2.1's plan is `sound` (it builds to the port the plan names) | 2.1 |
-| 2.3 email | now | 2.1's plan is `sound` | 2.1 |
+| 2.1 resident kernel, bridge port | now | now, on current code; rebases onto 1.4b, 1.4d, 1.4s | 1.5 |
+| 2.2 Telegram | now | 2.1's critique rounds are done (it builds to the port the plan names) | 2.1 |
+| 2.3 email | now | 2.1's critique rounds are done | 2.1 |
 | 3a the gateway's OpenAI route | now | now | 1.5 |
 | 3b Pi and the harness contract suite | now | now | 3a |
 | 3c headless browser in the workspace | now | now | 1.5 |
 | 4.1 objective tree | now | 2.1 merges | 2.1 |
 | 4.2 persona | now | now | 1.5 |
-| 4.3 routines and status page | now | 4.1's plan is `sound` | 4.1 |
+| 4.3 routines and status page | now | 4.1's build lands | 4.1 |
 | 5 tools on demand | none: built when a task needs a tool twice | | |
 | 6 memory | when popoto #631 ships | | |
 
