@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: planned; revised after critique round 1, awaiting round 2
+status: planned; revised after critique round 2 (both rounds spent)
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -100,18 +100,31 @@ between verifications. The start's latency is measured with the RAM
 (below) and recorded on `verify.ran`.
 
 **One verification at a time on the machine.** machine.md allows at most
-one Apple container at a time on the 16 GB machine. A session-level
-advisory lock `container:machine` (as the broker holds one per effect) is
-taken before `system start` and held through every build, the runs, the
-`verify.ran` append, the prune, and `system stop`. A second task's review
-waits on it.
+one Apple container at a time on the 16 GB machine. The runtime is
+machine-wide and a Postgres advisory lock is not (it holds per database,
+and the kernel and every build's test database are separate), so the lock
+is an `fcntl.flock` on a fixed file,
+`~/Library/Application Support/valor/container.lock`, a constant in
+`core/container.py` that no setting overrides, so every kernel and every
+test database on the machine share it. No profile allows it, so no turn
+can take it. It is taken before `system start` and held through every
+build, the runs, the `verify.ran` append, the prune, and `system stop`;
+the kernel's death releases it. A second verification waits on it in
+one-second non-blocking tries raced against `runs._stop_heard`, so a
+stopped task stops waiting and returns `stopped`.
+
+**Owners.** Every container and builder carries `valor.db=<first 12 hex
+of the sha256 of the owning database's name>` beside `valor.task=<task>`
+(containers) or `valor.build` (builders); dependency images carry
+`valor.db` too.
 
 **Reaping what a killed kernel left.** At the start of every run of any
-task, the router's sweep tries `container:machine` without waiting. When
-it is free, no verification is live: every container labelled
-`valor.task=*` and every builder labelled `valor.build` is killed and
-deleted, and the container system is stopped if it is running. When it
-is held, the holder's own end does this.
+task, the router's sweep tries the lock without waiting. When it is free,
+no verification is live on the machine: every container and builder
+labelled with the sweep's own `valor.db` is killed and deleted, and the
+container system is stopped only when no container or builder labelled
+`valor.db` of any owner remains. Another owner's leftovers are its own
+sweep's. When the lock is held, the sweep touches nothing.
 
 ### Profile denies (`core/workspace.py`)
 
@@ -168,10 +181,11 @@ tagged `valor/<project>:<digest hex>` and `container image inspect` must
 give the recorded digest immediately before the run; a mismatch is a
 `kernel` cause.
 
-**Pruning.** Under `container:machine`, after the runs: every dependency
-image not named by the latest `verify.ran` of an open task or by an open
-task's base manifests is deleted. Nothing else holds the lock, so no
-build or run can lose its image.
+**Pruning.** Under the machine lock, after the runs: every dependency
+image labelled with this database's `valor.db` and not named by the
+latest `verify.ran` of an open task or by an open task's base manifests
+is deleted; another database's images are its own to prune. Nothing else
+holds the lock, so no build or run can lose its image.
 
 ### The run
 
@@ -204,17 +218,31 @@ null and a memory kill is read from an exit of 137 with the kernel's OOM
 line in `dmesg`.
 
 The CLI call is an async subprocess in its own session, raced against
-`runs._stop_heard` and `settings.setup_timeout_s` plus
-`settings.suite_timeout_s` (1.4b's; no new limit). On a stop or a timeout:
+`runs._stop_heard` and `settings.setup_timeout_s` plus twice
+`settings.suite_timeout_s`, one for the suite and one for the lint
+(1.4b's settings, as part one times them; no new limit). On a stop or a timeout:
 `container kill`, then `container delete --force`, never a graceful stop
 (machine.md: a graceful stop left the workload running). Every run ends
 in `container delete --force`.
 
 ### Reading the result and `verify.ran`
 
-`read_turn_file` reads `out/result.json` and `out/junit.xml` (1.4b's walk
-and bounds); `read_junit` parses the JUnit file; `compare` gives the three
-lists against the base run in the base's image. `verify.ran` gains, with
+`read_turn_file` reads `out/result.json` and `out/junit.xml` (1.4b's
+walk); `read_junit` parses the JUnit file; `compare` gives the three
+lists against the base run in the base's image. The lint record is part
+one's (its parser, its `null`, no message).
+
+**Reuse.** A VM `verify.ran` is reused when its key matches and its
+`cause` is not `kernel`:
+
+- head: candidate, image digest, `memory_mb`, and `where: "vm"`;
+- base: base sha, base image digest, `memory_mb`, and `where: "vm"`, run
+  once per task and image and shared by every candidate of the task.
+
+`memory_mb` in the key means raising the default reruns a memory kill.
+Part one's host key carries `where: "host"`, so a task in flight when
+this part merges runs its next review in a VM and reuses no host
+result. `verify.ran` gains, with
 `where: "vm"`: image digest, base image digest, `manifests_differ`,
 `memory_mb`, `cpus`, `peak_mb`, the runtime's release, system start
 seconds, `result_owner`, the count of ids skipped under the `macos`
@@ -286,12 +314,12 @@ them.
 | Failure | What happens |
 |---|---|
 | `container` missing or the system will not start | `kernel` cause naming it; `failed`, no verdict, retried |
-| Another task's verification holds `container:machine` | this one waits for it |
+| Another verification holds the machine lock | this one waits for it, and stops waiting on a stop |
 | A dependency build fails on the network | `kernel`; retried |
 | The candidate's manifests will not install | `commit`; the reviewer sees it |
 | The VM runs out of memory | `memory`; the reviewer and the attention log see it |
 | A stop during a build or a run | builder or VM killed and deleted, system stopped, `stopped` |
-| A kernel killed mid-verification | the next run of any task, finding the lock free, kills and deletes every labelled VM and builder and stops the system |
+| A kernel killed mid-verification | the next run of any task under the same database, finding the lock free, kills and deletes that database's labelled VMs and builders, and stops the system when no owner's remain |
 | A forged JUnit file, or a `/out` the suite's user can write | recorded as the candidate's claim, `result_owner` says which |
 
 ## Tests
@@ -306,8 +334,14 @@ Tests that need the runtime carry a `container` marker and skip when
 - A stop during a build leaves no builder.
 - A kernel killed with SIGKILL mid-run: the next run of a different task
   kills and deletes the labelled VM and stops the system.
-- With `container:machine` held by a live verification, another task's
-  sweep touches nothing.
+- Two test databases: with a verification live under one, the other's
+  sweep touches nothing; with the first's kernel killed (the lock free),
+  the second's sweep leaves the first's labelled VM and does not stop the
+  system; the first's next sweep deletes it and stops the system.
+- A task stopped while waiting on the lock returns `stopped` without
+  taking it.
+- Raising `verify_memory_mb` reruns a `cause: memory` run; the base run
+  is reused across two candidates of a task.
 - After a verification the system is stopped (`container system status`).
 
 **Images.**
@@ -373,7 +407,7 @@ Other tasks change `core/` too; these are the files this part touches.
 | `core/fresh.py` | the review rerun calls `container.verify` |
 | `core/binaries.py` | `CONTAINER`, `CONTAINER_HELPERS` |
 | `core/workspace.py` | the runtime denies in `profile()` |
-| `core/router.py` | the sweep reaps containers and builders when `container:machine` is free |
+| `core/router.py` | the sweep reaps its own database's containers and builders when the machine lock is free |
 | `core/settings.py` | `verify_memory_mb`, `verify_cpus` |
 | `core/README.md` | the module |
 | `pyproject.toml`, `tests/conftest.py` | the `macos` and `container` markers |
@@ -439,7 +473,8 @@ Reversible calls made by the build session, not questions for Tom.
    verification**, rather than left resident with tech-stack.md amended.
    It keeps the runtime's memory off the 16 GB machine between reviews;
    the start latency is measured and on `verify.ran`.
-3. **One verification at a time, by machine.md's one-container rule.**
+3. **One verification at a time, by machine.md's one-container rule**,
+   held by a file lock because the runtime is machine-wide.
 4. **The host never unpacks the candidate.**
 5. **Every image build gets a fresh builder with no cache.** Slower, and
    no candidate's install scripts reach another image.
@@ -469,7 +504,7 @@ item 7 in part one).
    a fresh builder with no cache, `manifests_differ` goes to the
    reviewer, and the builder's reach to host services is tested (Images;
    Tests).
-7. Pruning raced running verifications: `container:machine` is held from
+7. Pruning raced running verifications: the machine lock is held from
    system start to system stop, and pruning runs under it (Runtime;
    Images).
 8. Orphan cleanup was too narrow: any task's run start reaps every
@@ -493,3 +528,21 @@ item 7 in part one).
     tech-stack.md's statement true (Runtime; Docs fixed; Rollout).
 17. The `../../escape` test could not arise from `git archive` and is
     dropped; m1-4-checks.md's Rosetta and "64 GB" lines are in Docs fixed.
+
+## Critique round 2 (of 2): revise
+
+Both rounds are spent; every finding is folded in. Findings 1 and 3 to 11
+are part one's (m1-4c-review.md); 2 and 12 are handled here.
+
+2. A per-database advisory lock guarded a machine-wide runtime: the lock
+   is an `fcntl.flock` on a fixed file, every container and builder is
+   labelled with its owning database, a sweep reaps only its own label
+   and stops the system only when no owner's container remains, tested
+   with two test databases (Runtime; Tests).
+12. Smaller gaps: the wait on the lock races a stop; the base run in the
+    VM is reused by base sha, base image digest, `memory_mb`, and
+    `where`; part one's key carries `where`, so no host result is reused
+    for a VM run; `memory_mb` in every VM key, so a raised default reruns
+    a memory kill; the run's time limit adds lint's `suite_timeout_s`;
+    `read_turn_file` is cited for its walk only (Runtime; The run;
+    Reading the result).
