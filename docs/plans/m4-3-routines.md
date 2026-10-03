@@ -538,11 +538,10 @@ tail ~/Library/Logs/valor/routine-expiry.log
 .venv/bin/python -m core routines
 ```
 
-The emulator sweep's first run comes on its schedule. To remove a job, run
-`launchctl bootout gui/$(id -u)/com.valor.routine.NAME`. To stop a routine,
-run `python -m core stop` on the routine's objective; `python -m core
-routine NAME --restart` starts it again. To open the page, run
-`.venv/bin/python -m ui` and go to `http://127.0.0.1:8790/`.
+The emulator sweep first runs on its schedule. `launchctl bootout
+gui/$(id -u)/com.valor.routine.NAME` removes a job. `python -m core stop`
+on the objective stops a routine; `--restart` starts it again. The page
+is `.venv/bin/python -m ui`, at `http://127.0.0.1:8790/`.
 
 ## Decided by default
 
