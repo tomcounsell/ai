@@ -133,20 +133,22 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
             ),
             "supervisor",
         ),
-        (
-            lambda d: (d / "identity.toml").write_text(
-                (d / "identity.toml").read_text() + 'nickname = "V"\n'
-            ),
-            "nickname",
-        ),
     ],
-    ids=["missing-conduct", "missing-supervisor", "unknown-key"],
+    ids=["missing-conduct", "missing-supervisor"],
 )
 def test_an_unreadable_persona_raises_naming_what_is_wrong(tmp_path, edit, message):
     target = copy_persona(tmp_path)
     edit(target)
     with pytest.raises(persona.PersonaUnreadable, match=message):
         persona.render(target)
+
+
+def test_an_identity_key_the_renderer_does_not_know_is_ignored(tmp_path):
+    target = copy_persona(tmp_path)
+    (target / "identity.toml").write_text((target / "identity.toml").read_text() + 'nickname = "V"\n')
+    text = persona.render(target)
+    assert text == persona.render(PERSONA)
+    assert "nickname" not in text
 
 
 # -- dispatch and the turn record ---------------------------------------------------------------
