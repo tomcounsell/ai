@@ -104,7 +104,6 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     # push is held for Tom, and the merge is held for Tom.
     pending = {e for e, s in state["effects"].items() if s == "pending"}
     held = [r for r in rows("effect.held") if r["effect_id"] in pending]
-    assert len(held) == len(pending)
     assert [r["action_type"] for r in held].count("merge") == 1
     pushes = [r for r in held if r["action_type"] == "push_branch"]
     assert pushes, "expected at least one push_branch held for Tom"
@@ -113,7 +112,8 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
         core("approve", effect, "--note", "yes")
         core("release", effect)
     granted = {r["effect_id"] for r in rows("approval.granted")}
-    assert {r["effect_id"] for r in rows("effect.outcome")} <= granted
+    # Every outcome follows a tap, and every tapped effect has its outcome.
+    assert {r["effect_id"] for r in rows("effect.outcome")} == granted
     assert sh("git", "rev-parse", "main", cwd=origin) == candidate
     pushed = sh("git", "rev-parse", "valor/greeting", cwd=origin)
     assert pushed == pushes[-1]["payload"]["head_sha"]

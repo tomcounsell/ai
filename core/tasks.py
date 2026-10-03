@@ -220,8 +220,10 @@ async def dispatch(
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file. Returns the text, the
     correction numbers it carries, the text's digest, and the persona's
-    digest and size. A persona that cannot be read raises
-    `persona.PersonaUnreadable`; there is no fallback text."""
+    digest and size. A persona that cannot be read (a missing persona file
+    or identity field, or a `CLAUDE.md` that is missing or lacks the
+    governance or tests paragraph) raises `persona.PersonaUnreadable`;
+    there is no fallback text."""
     from core import broker
 
     b = await brief(conn, task_id)

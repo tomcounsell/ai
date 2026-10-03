@@ -127,8 +127,10 @@ neither, so there the verdict channel and stage file govern.
    from `identity.toml` in a fixed field order (the renderer's own list,
    not the file's key order), one line per field, then `turn.md`.
 2. `voice.md`, `conduct.md`, each stripped.
-3. `governance.md`, stripped, then the paragraph from
-   `corrections.governance_paragraph()`, unchanged, under its heading.
+3. `governance.md`, stripped, then under its heading the governance
+   paragraph and the "Tests are not governance." paragraph, each the
+   first line of `CLAUDE.md` (`corrections.GOVERNANCE_SOURCE`) starting
+   with its prefix, unchanged.
 4. `delivery.md`, stripped.
 
 Sections are joined by one blank line. The same files give the same
@@ -279,6 +281,11 @@ New in `tests/test_persona.py`, on real Postgres where a turn runs:
 - The rendered persona holds `CLAUDE.md`'s governance line byte for
   byte; with `GOVERNANCE_SOURCE` pointed at a copy whose paragraph is
   edited, the next render carries the edit.
+- The rendered persona holds `CLAUDE.md`'s "Tests are not governance."
+  line byte for byte, once, under the governance heading after the
+  governance paragraph; an edited copy shows in the next render. A
+  missing `CLAUDE.md`, or one without either line, raises
+  `PersonaUnreadable`.
 - None of the six files the renderer reads holds the governance
   paragraph (one source); `persona/README.md` is outside the claim and
   keeps its copy.
@@ -496,6 +503,31 @@ The twelfth failed after release: the plan turn requested a push of a SHA
 no commit has (a near copy of the real one), the push failed at release,
 and the origin had no `valor/greeting`. That is the model's error in the
 request, listed under Follow-ups.
+
+## Patch round 1
+
+Review round 1 answered `changes`; docs were fast-forwarded in first.
+
+1. `persona/turn.md` said "leave the files it names", which reads as
+   "do not touch"; it now says "write the files it names".
+2. `CLAUDE.md`'s "Tests are not governance." paragraph renders under the
+   governance heading, after the governance paragraph, read from
+   `CLAUDE.md` at render time byte for byte like the governance
+   paragraph, so a turn does not read a new test as a check needing a
+   grant. `governance.md`'s lead line now introduces both. Tests show it
+   once in the persona, under the heading, following an edited copy, and
+   that no rendered file holds a copy.
+3. `persona/README.md` says every fresh session (critique, review,
+   docs) gets the persona.
+4. `core/persona.py` reads both paragraphs itself and raises
+   `PersonaUnreadable` for a missing `CLAUDE.md` or a missing line,
+   naming which, so `dispatch`'s docstring is true; tests cover all three.
+
+From the test check: `tests/test_live_session.py` drops the circular
+count of held against pending effects and asserts that the effects with
+an outcome are exactly the effects Tom approved, both directions. No
+live run: the change to the persona text is one verb and one paragraph
+already in force at the top of `CLAUDE.md`.
 
 ## Follow-ups
 

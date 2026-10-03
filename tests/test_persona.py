@@ -25,6 +25,11 @@ pytestmark = pytest.mark.spend(usd=0)
 
 ROOT = Path(__file__).resolve().parent.parent
 PERSONA = ROOT / "persona"
+TESTS_LINE = next(
+    line
+    for line in (ROOT / "CLAUDE.md").read_text().splitlines()
+    if line.startswith("**Tests are not governance.")
+)
 RENDERED = ("identity.toml", "turn.md", "voice.md", "conduct.md", "governance.md", "delivery.md")
 GOVERNANCE = next(
     line for line in (ROOT / "CLAUDE.md").read_text().splitlines() if line.startswith("**Governance")
@@ -102,16 +107,44 @@ def test_the_governance_paragraph_is_claude_mds_and_follows_it(tmp_path, monkeyp
     assert text.index("## Conduct") < text.index("## Governance")
     edited = tmp_path / "CLAUDE.md"
     changed = GOVERNANCE.replace("structure, not sentiment", "structure, never sentiment")
-    edited.write_text("# CLAUDE.md\n\n" + changed + "\n")
+    edited.write_text("# CLAUDE.md\n\n" + changed + "\n\n" + TESTS_LINE + "\n")
     monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", edited)
     text = persona.render(PERSONA)
     assert changed in text and GOVERNANCE not in text
+
+
+def test_the_tests_paragraph_is_claude_mds_under_the_governance_heading(tmp_path, monkeypatch):
+    text = persona.render(PERSONA)
+    section = text[text.index("\n## Governance\n") : text.index("\n## Delivery format")]
+    assert TESTS_LINE in section and text.count(TESTS_LINE) == 1
+    assert section.index(GOVERNANCE) < section.index(TESTS_LINE)
+    edited = tmp_path / "CLAUDE.md"
+    changed = TESTS_LINE.replace("part of the code", "part of the program")
+    edited.write_text("# CLAUDE.md\n\n" + GOVERNANCE + "\n\n" + changed + "\n")
+    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", edited)
+    text = persona.render(PERSONA)
+    assert changed in text and TESTS_LINE not in text
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [(None, "CLAUDE.md"), (GOVERNANCE, "Tests are not governance"), (TESTS_LINE, "Governance")],
+    ids=["missing-file", "missing-tests-line", "missing-governance-line"],
+)
+def test_a_claude_md_without_the_rules_is_an_unreadable_persona(tmp_path, monkeypatch, body, message):
+    source = tmp_path / "CLAUDE.md"
+    if body is not None:
+        source.write_text("# CLAUDE.md\n\n" + body + "\n")
+    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", source)
+    with pytest.raises(persona.PersonaUnreadable, match=message):
+        persona.render(PERSONA)
 
 
 def test_no_rendered_file_holds_a_copy_of_the_paragraph_and_the_readme_keeps_its_own():
     for name in RENDERED:
         body = (PERSONA / name).read_text()
         assert "Governance is restrained" not in body and GOVERNANCE[200:260] not in body, name
+        assert "Tests are not governance" not in body, name
     assert GOVERNANCE in (PERSONA / "README.md").read_text()
 
 
