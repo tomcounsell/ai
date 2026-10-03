@@ -319,8 +319,8 @@ def test_tick_called(dsn, op):
 
 def test_settle_after_function(dsn, tmp_path):
     action = broker.Action("email.send", "a@b.c", {"to": ["a@b.c"], "subject": "s", "body": "b" * 1_000_000})
-    with bridges.operator(tmp_path):
-        assert DECLARED["email.send"].settle(action) is None
+    with bridges.operator(tmp_path) as s:
+        assert DECLARED["email.send"].settle(action) == s.reconcile_after_s
         sized = Declared("x", "act", "", "email", settle_after_s=lambda a: len(a.payload["body"]) / 1000)
         assert sized.settle(action) == 1000.0
         assert DECLARED["telegram.send_message"].settle(action) is None

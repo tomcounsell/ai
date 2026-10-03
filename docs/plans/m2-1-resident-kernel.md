@@ -229,7 +229,7 @@ notification is delivered at commit. The trigger refuses nothing;
   too. 1.4d builds to this shape.
 - **Settle time.** `Declared.settle_after_s` is a number or a function of
   the action; `bridge.serve` resolves it against the intent's action and
-  passes the number to `reconcile`. 2.1 sets no email settle time and no
+  passes the number to `reconcile`. 2.1 sets email's settle time to `reconcile_after_s` and no
   email size function; 2.3 sets both.
 - **`broker.Unknown` after a failed perform** (raised by `perform`, or by
   the `lookup` the broker asks next) leaves the intent in flight with no

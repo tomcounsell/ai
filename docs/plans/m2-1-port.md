@@ -214,7 +214,7 @@ def declared_performers() -> list[Declared]: ...
 `refuse` has 1.4d's shape, `async (conn, action)`. `settle_after_s`
 (D22, D37) is a number or a function of the action, resolved against the intent's action before
 `broker.reconcile`; unset, reconcile waits `reconcile_after_s`. 2.1
-sets none for email; 2.3 sets email's with its own cited basis. Every
+sets email's to `reconcile_after_s`; 2.3 sets email's with its own cited basis. Every
 task's
 Performers holds `declared_performers()`, so `request` holds a send for
 Tom and `dispatch(offered=...)` tells the turn the send exists.

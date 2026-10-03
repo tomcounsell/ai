@@ -173,6 +173,8 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="email",
         refuse=_refuse_email,
+        # 2.3 owns email's settle function and cites its basis.
+        settle_after_s=lambda action: settings.reconcile_after_s,
     ),
 }
 
