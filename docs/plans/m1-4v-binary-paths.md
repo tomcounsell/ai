@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4v-binary-paths
 type: bug
-status: delivered-not-passed
+status: merged
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -400,3 +400,34 @@ session's `UV_PYTHON_INSTALL_DIR`; `sandbox-openings.md` gains
 
 Suite: 704 passed, 11 skipped (own DB and ports 6430-6439). Ruff check clean; format check clean but for the
 known `docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`.
+
+## Merged
+
+Merged 2026-10-04 by the lead's decision, at `c2cea1de0` on
+`valor-cori-rebuild`.
+
+- **Checks that passed** after patch round 1, at `67e750d9b`: review pass
+  (review-1-4v-p2), test pass (test-1-4v-p2), docs updated at `a1ad76695`
+  (docs-1-4v-p2).
+- **The lead's decision on `open`.** The open block is probe-based: the
+  profile denies the Launch Services database (`com.apple.lsd.*`), the
+  quarantine resolver, and Apple events, and the checks showed every public
+  launch route failing under it (`open` by path, bundle id, app and URL,
+  `osascript`, `NSWorkspace`, `LSOpenCFURLRef`, `launchctl`). It stands as
+  a named opening, not a closed one: `launchservicesd` stays reachable,
+  since Claude Code hangs without it, so a message sent to it by hand
+  through private API is not ruled out (`docs/sandbox-openings.md`).
+- **The open escape it answers.** Before the patch, a turn could write an
+  app and hand it to `open`, which ran it outside the sandbox with the
+  user's full reach; the builder reproduced it, and the patch's denies
+  stopped it.
+- **Rebase.** Onto 1.4s merged. One conflict, `core/settings.py`: 1.4b's
+  `_span` port ranges kept beside this task's `_passfile`; `_pg_bin` and
+  its `shutil` lookup are gone, as this task's fixed paths require.
+  `docs/README.md` lists `sandbox-openings.md` with the other top-level
+  docs.
+- **Suite** on the rebased head: 881 passed, 13 skipped. `ruff check` clean;
+  `ruff format --check` flags only `docs/bridges/telegram.md` and
+  `docs/plans/m2-1-port.md`.
+- **Backup** before the merge: `valor_rebuild-20261003T195152Z.dump`.
+- **Follow-ups.** None.
