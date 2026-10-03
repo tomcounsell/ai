@@ -108,3 +108,36 @@ Review round 1 said `changes`, the test check `gaps`. Retries ride the
     effect's performing lock, then reading the remote; no age.
 12. The rounds live in this file, linked from the plan, so each file
     stays under 600 lines.
+
+## Checks after patch round 1, at e4dc6cfb0 (review round 2 of 2)
+
+- Test: `gaps`. 564 passed, 7 skipped; two failures from other suites
+  running at once, each passing alone. Ruff clean. Probes show parked
+  tasks neither block others nor loop, `slot.held` releases on a raised
+  error and a killed backend, and notices dedupe. Finding: `intake.lowest`
+  and `intake.highest` raise `NumericValueOutOfRange` on an all-digit id
+  longer than 19 digits; Telegram ids fit.
+- Review: `changes`; governance boolean no; no invented caps; the six
+  threat model items hold. Findings, both reproduced by probes:
+  1. A task stopped between steps keeps its services. `Kernel.active()`
+     skips stopped tasks, so `settle` never runs for them; Postgres and
+     Redis stay up and `services:<task>` stays held until the kernel
+     exits, so `workspace.sweep` cannot stop them either.
+  2. A row written during a step can be lost. A step that ends without
+     moving marks every row up to then as seen, including rows another
+     writer added while it ran, so Tom steering mid-turn before the turn
+     fails leaves nothing to step the task again. The tick clears only
+     parked tasks.
+  3. Docs: `docs/data.md`'s session locks omit `services:<task>`.
+  Item 11 of patch round 1 holds in the plan and port only: the code still
+  settles on `reconcile_after_s`, which 1.4d deletes.
+- Docs: `updated`, 83bfcc026 on `m2-1-docs2`.
+
+## Delivery: delivered-not-passed
+
+Review rounds are spent. Recommendation: accept one more patch that
+settles a stopped task (services down, lock released) when the stop is
+read, marks as seen only the rows the step read, makes the id match in
+`lowest` and `highest` fit a bigint, and adds `services:<task>` to
+`docs/data.md`, each with a test; rerun the three checks; merge if they
+pass. 2.2, 2.3 and 4.1 build on this task.

@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: planned; critique rounds 1 and 2 built in; building
+status: delivered-not-passed
 critique_rounds: 2
 review_rounds: 2
 ---
