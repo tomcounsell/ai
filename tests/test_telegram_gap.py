@@ -66,6 +66,29 @@ def test_messages_sent_while_down_are_received_once_oldest_first(emu, dsn, tmp_p
         run(go())
 
 
+def test_a_chat_with_rows_and_no_seen_entry_takes_an_update_dropped_below_the_newest_row(emu, dsn, tmp_path):
+    """No seen entry: the pass stops at the lowest recorded id, so a
+    message below the newest recorded one, whose update was dropped
+    before the chat's first pass, is still received."""
+    dm = chat("dm")
+    emu.control(chats=[emu_chat(dm)])
+    before = emu.inject(int(dm), "history before the bridge", live=False)
+    first = emu.inject(int(dm), "recorded", live=False)
+    dropped = emu.inject(int(dm), "the update for this one is lost", live=False)
+    newest = emu.inject(int(dm), "recorded too", live=False)
+
+    async def go():
+        await record(dsn, dm, first)
+        await record(dsn, dm, newest)
+        async with connected(emu.url, dsn, tmp_path):
+            got = await ids(dsn, dm)
+            assert sorted(got, key=int) == [str(first), str(dropped), str(newest)]
+            assert str(before) not in got
+
+    with machine(tmp_path, [dm]):
+        run(go())
+
+
 def test_a_chat_with_no_rows_backfills_nothing(emu, dsn, tmp_path):
     dm = chat("dm")
     emu.control(chats=[emu_chat(dm)])
