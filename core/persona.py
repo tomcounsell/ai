@@ -3,7 +3,8 @@
 The text lives in `persona/` (`settings.persona_dir`) in the kernel's own
 checkout and changes only by a reviewed diff: the identity as data in
 `identity.toml`, then `turn.md` (what one turn is), `voice.md`,
-`conduct.md`, and `delivery.md`. The
+`conduct.md`, `governance.md` (the heading and the line that introduces
+the paragraph), and `delivery.md`. The
 governance paragraph is not copied into any of them; it is read from the
 first `**Governance` line of `CLAUDE.md` (`corrections.governance_paragraph`)
 each time the persona is rendered, so it is the same words by construction.
@@ -21,7 +22,7 @@ from pathlib import Path
 from core import corrections, ledger
 
 # The identity fields, in the order they render, with their labels. The
-# file's own key order does not matter; a key not listed here is refused.
+# file's own key order does not matter; a key not listed here is ignored.
 IDENTITY = (
     ("name", "Name"),
     ("email", "Email and Google Workspace account"),
@@ -63,8 +64,8 @@ def identity(directory: str | Path) -> dict[str, str]:
 
 def render(directory: str | Path) -> str:
     """The persona as a turn reads it: the identity and what one turn is,
-    the voice, the conduct,
-    the governance paragraph from `CLAUDE.md`, the delivery format. The
+    the voice, the conduct, the governance section with the paragraph
+    from `CLAUDE.md` under it, the delivery format. The
     same files give the same bytes."""
     directory = Path(directory)
     who = identity(directory)
@@ -76,6 +77,7 @@ def render(directory: str | Path) -> str:
         + _text(directory, "turn.md")
     )
     sections = [head, *(_text(directory, name) for name in TEXTS)]
+    sections.append(_text(directory, "governance.md"))
     sections.append(corrections.governance_paragraph())
     sections.append(_text(directory, CLOSING))
     return "\n\n".join(sections)
