@@ -23,6 +23,7 @@ from core import workspace as kws
 from core.machine import Check, State
 from harnesses import claude_code
 from tests import judgement_upstream
+from tests.ports import span as ports_span
 from tools.push_branch import Merge, PushBranch
 
 SCRIPT = r"""
@@ -369,9 +370,9 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
     async with await db.connect(dsn) as conn:
         taken = await kws.taken_ports(conn)
     if "postgres" in services:
-        ports["postgres"] = kws.choose_port((5560, 5599), taken)
+        ports["postgres"] = kws.choose_port(ports_span((5560, 5599)), taken)
     if "redis" in services:
-        ports["redis"] = kws.choose_port((6460, 6499), taken)
+        ports["redis"] = kws.choose_port(ports_span((6460, 6499)), taken | set(ports.values()))
     made = kws.provision(task_id, spec, ports, work=tmp_path / "work")
     b = tasks.Brief(
         id=task_id, instruction="Write Tom a greeting.", max_effect_class="act",
