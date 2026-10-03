@@ -108,8 +108,9 @@ def owned(channel: str) -> list[str]: ...
 class ChannelLimits:
     max_text: int | None  # per message, in text_units
     text_units: str  # "utf16" or "chars"
-    max_file_bytes: int | None  # per file, when message_bytes is None
-    message_bytes: Callable[[broker.Action], int] | None = None  # whole message
+    max_file_bytes: int | None  # per file
+    max_message_bytes: int | None = None  # the whole message, measured by message_bytes
+    message_bytes: Callable[[broker.Action], int] | None = None
 
 
 LIMITS: dict[str, ChannelLimits]  # "telegram", "email"
@@ -156,13 +157,13 @@ importing a bridge, and bridges read them from there:
   parts of 512 KiB).
 - Email: `max_text` None. The limit is on the whole message: Gmail
   refuses a message over 25 MB, counted as 25,000,000 bytes of the whole
-  encoded message (D15c). `message_bytes` is `email_encoded_bytes` in
-  `core/bridge.py`, the encoded MIME message's length; 2.3 makes it the
-  exact message its performer sends.
+  encoded message (D15c): `max_message_bytes` 25,000,000. Its size
+  function, `message_bytes`, is 2.3's `email_encoded_bytes`; in 2.1 it is
+  unset, so 2.1 refuses no email for size at request time.
 `split_text` splits a text over `max_text`, counting in the channel's
 units, into several messages, so `sent` is a list. A send over the
 limit (a Telegram file over `max_file_bytes`, an email whose
-`message_bytes` exceeds 25,000,000) is refused at request time, with
+`message_bytes`, once set, exceeds `max_message_bytes`) is refused at request time, with
 the protocol limit as the reason, so Tom never approves an impossible
 send.
 
@@ -211,9 +212,10 @@ def declared_performers() -> list[Declared]: ...
 ```
 
 `refuse` has 1.4d's shape, `async (conn, action)`. `settle_after_s`
-(D22, D37) is a number or a function of the action (email's settle time
-scales with its size), resolved against the intent's action before
-`broker.reconcile`. Every task's
+(D22, D37) is a number or a function of the action, resolved against the intent's action before
+`broker.reconcile`; unset, reconcile waits `reconcile_after_s`. 2.1
+sets none for email; 2.3 sets email's with its own cited basis. Every
+task's
 Performers holds `declared_performers()`, so `request` holds a send for
 Tom and `dispatch(offered=...)` tells the turn the send exists.
 

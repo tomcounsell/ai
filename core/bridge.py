@@ -24,18 +24,17 @@ impossible send at request time without importing a bridge:
   4000 parts of 512 KiB).
 - Email: no per-message text limit. Gmail refuses a message over 25 MB
   (its maximum email size), counted as 25,000,000 bytes of the whole
-  encoded message, measured by `email_encoded_bytes`.
+  encoded message. The size function that measures it (`message_bytes`)
+  is the email bridge's; until it is set, an email is not refused for
+  size at request time.
 """
 
 import asyncio
-import email.policy
 import hashlib
 import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from email.message import EmailMessage
-from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
@@ -48,38 +47,15 @@ from core.settings import settings
 class ChannelLimits:
     max_text: int | None  # per message, in text_units
     text_units: str  # "utf16" or "chars"
-    max_file_bytes: int | None  # per file, when message_bytes is None
-    message_bytes: Callable[[broker.Action], int] | None = None  # the whole message
-
-
-EMAIL_MESSAGE_BYTES = 25_000_000
-
-
-def email_encoded_bytes(action: broker.Action) -> int:
-    """The encoded size of an email: the MIME message holding the
-    recipients, subject, body, and every file, as SMTP would carry it."""
-    p = action.payload
-    msg = EmailMessage(policy=email.policy.SMTP)
-    msg["To"] = ", ".join(str(t) for t in p.get("to") or [])
-    if p.get("cc"):
-        msg["Cc"] = ", ".join(str(t) for t in p["cc"])
-    msg["Subject"] = str(p.get("subject") or "")
-    msg.set_content(str(p.get("body") or ""))
-    for f in p.get("files") or []:
-        try:
-            data = Path(f["path"]).read_bytes()
-        except OSError, KeyError, TypeError:
-            continue
-        msg.add_attachment(
-            data, maintype="application", subtype="octet-stream", filename=Path(f["path"]).name
-        )
-    return len(msg.as_bytes())
+    max_file_bytes: int | None  # per file
+    max_message_bytes: int | None = None  # the whole message, measured by message_bytes
+    message_bytes: Callable[[broker.Action], int] | None = None
 
 
 LIMITS: dict[str, ChannelLimits] = {
     "telegram": ChannelLimits(max_text=4096, text_units="utf16", max_file_bytes=2000 * 1024 * 1024),
     "email": ChannelLimits(
-        max_text=None, text_units="chars", max_file_bytes=None, message_bytes=email_encoded_bytes
+        max_text=None, text_units="chars", max_file_bytes=None, max_message_bytes=25_000_000
     ),
 }
 
@@ -153,16 +129,12 @@ async def _refuse_email(conn, action: broker.Action) -> str | None:
     said = _file_refusal("email", action.payload.get("files") or [])
     if said:
         return said
-    size = LIMITS["email"].message_bytes(action)
-    if size > EMAIL_MESSAGE_BYTES:
-        return f"the message is {size} bytes, over email's limit of {EMAIL_MESSAGE_BYTES} bytes"
+    limits = LIMITS["email"]
+    if limits.message_bytes is not None and limits.max_message_bytes is not None:
+        size = limits.message_bytes(action)
+        if size > limits.max_message_bytes:
+            return f"the message is {size} bytes, over email's limit of {limits.max_message_bytes} bytes"
     return None
-
-
-def _email_settle(action: broker.Action) -> float:
-    """Reconcile's wait for an email: the git-derived wait plus the upload
-    time of the whole message at 1 Mbit/s."""
-    return settings.reconcile_after_s + email_encoded_bytes(action) * 8 / 1_000_000
 
 
 @dataclass(frozen=True)
@@ -201,7 +173,6 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="email",
         refuse=_refuse_email,
-        settle_after_s=_email_settle,
     ),
 }
 

@@ -9,10 +9,10 @@ email.
 **Status.** The kernel side of the port is built (`core/bridge.py`,
 `core/intake.py`, `core/notices.py`); the email bridge process is not.
 Every email record is `verified=false`, so it binds as nothing until DMARC
-verification is built. A send is refused when the whole message, body and
-files, is over 25,000,000 bytes encoded (Gmail's 25 MB limit), and its
-reconcile waits `reconcile_after_s` plus the time to send the encoded
-message at 1 Mbit/s. Until the bridge is built, answers and feedback reach a task
+verification is built. `core/bridge.py` states Gmail's limit as 25,000,000
+bytes of the whole encoded message; its size function is the email
+bridge's, and until the bridge sets it, an email is not refused for size
+at request time. Until the bridge is built, answers and feedback reach a task
 through `python -m core` and record `via: "the command line"`. The email
 code that exists today can be adapted to the port; the last sections say
 what a conforming implementation keeps and what it hands to `core/`.

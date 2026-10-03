@@ -229,7 +229,8 @@ notification is delivered at commit. The trigger refuses nothing;
   too. 1.4d builds to this shape.
 - **Settle time.** `Declared.settle_after_s` is a number or a function of
   the action; `bridge.serve` resolves it against the intent's action and
-  passes the number to `reconcile`.
+  passes the number to `reconcile`. 2.1 sets no email settle time and no
+  email size function; 2.3 sets both.
 - **`broker.Unknown` after a failed perform** (raised by `perform`, or by
   the `lookup` the broker asks next) leaves the intent in flight with no
   outcome, for reconcile. 2.2 relies on this (port item 24).
@@ -490,6 +491,26 @@ bridge performers.
 - The email cc: Tom's primary address (`operator_email`'s first entry),
   reversible in settings.
 - A chat spec with no `machine` belongs to `settings.default_machine`.
+- A release refused before `release.requested` exists writes no row;
+  `core release` raises with nothing written.
+- Performers reach the kernel's code through the `broker.CURRENT`
+  contextvar, beside the `performers=` keyword.
+- A task started by message has `workspace=None`; its provision job
+  writes `workspace.provisioned`, which `tasks.brief` lays over the
+  Brief; a failure writes `workspace.failed` and a notice, retried only
+  on a later `message.steered`. It runs at ceiling `propose` on
+  `resolve_model("light")`.
+- The gateway's call holder is `run:<task>`; `spending.HOLDER` holds the
+  same for judgement calls.
+- A declared performer is one with an `owner` and no `perform`.
+- Binding notices go by Telegram; other notices to `operator_chat`.
+- One router step per task per wake with new rows; `notice.requested`
+  and `notice.sent` rows wake no step; stopped tasks are skipped;
+  services go down in a settled state or `merge`.
+- Recollect covers the last non-fresh turn with a state.
+- `core run` refuses a task whose `services:<task>` another process
+  holds: one holder is a scheduling fact.
+- The test helpers are `tests/bridges.py`.
 
 ## Questions for Tom
 
