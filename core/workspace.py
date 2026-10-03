@@ -339,9 +339,9 @@ def layout(task_id: str, base: Path | None = None) -> Layout:
 
 def kernel_paths() -> list[Path]:
     """What no workspace sandbox may read or write: the kernel key
-    directory, the effect lock files (`settings.performing_dir`, in the key
-    directory unless moved), the machine cluster's data directory, the
-    backup disk."""
+    directory, the effect lock files and the kernel's output files
+    (`settings.performing_dir`, in the key directory unless moved), the
+    machine cluster's data directory, the backup disk."""
     return [
         Path(settings.pg_passfile).parent,
         Path(settings.performing_dir),
@@ -429,8 +429,11 @@ def profile(
     ancestors = sorted({str(a) for p in [*rw, *ro] for a in Path(p).parents})
     lines += ["(allow file-read-metadata", *_paths("literal", ancestors), ")"]
     lines += [
+        # Each kernel path as written and with symlinks resolved: the
+        # sandbox matches the resolved path, so `/var/...` alone denies
+        # nothing under `/private/var/...`.
         "(deny file-read* file-write*",
-        *_paths("subpath", kernel),
+        *_paths("subpath", sorted({f for p in kernel for f in (str(p), os.path.realpath(p))})),
         ")",
         # Every directory above a denied path, itself and not its entries:
         # renaming one would move the denied path's contents to a name no
@@ -1200,8 +1203,9 @@ def bounded(
     watch it runs under (`git.threaded`, a stopped caller) ends it, and
     `git.Interrupted` is raised. Its stderr goes to a file the kernel holds
     (`git.output_file`), so it ends when the command exits, whatever a
-    program it started holds. Returns the exit code (or `footprint`) and
-    its whole stderr."""
+    program it started holds. The file-size limit covers that file too, so
+    a command whose stderr passes `max_bytes` is killed (SIGXFSZ). Returns
+    the exit code (or `footprint`) and its stderr, up to `max_bytes`."""
 
     # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.

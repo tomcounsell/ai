@@ -169,3 +169,29 @@ calls:
    2026-10-03.
 
 Suite: 1093 passed, 21 skipped. `ruff check` and `ruff format --check` clean.
+
+## Patch round 4: output files in a kernel path
+
+Review round 3 found that a turn could open and truncate the output
+files: `TemporaryFile` on macOS makes a named file in `$TMPDIR` and then
+unlinks it, and builder, setup, and service profiles do not deny the temp
+directory. A probe under the builder profile blanked 708 of 8,872 kernel
+`config --list` reads. The lead's calls:
+
+1. **Output files in a kernel path.** `git.output_file` makes its files in
+   `git.output_dir`, `output/` under `settings.performing_dir`, made by
+   the kernel with mode 0700. A task profile now denies each kernel path
+   both as written and with symlinks resolved: the suite's lock directory
+   is under `/var/folders`, which the sandbox matches as `/private/var`,
+   so the deny as written covered nothing there. Test: under the builder
+   turn profile a file in that directory cannot be read or appended and
+   the directory cannot be listed, and 5 MiB from the kernel's git comes
+   back whole from files made there.
+2. `bounded`'s docstring and the `mirror_fetch_max_bytes` comment say the
+   file-size limit covers its stderr file too. No cap added.
+3. `performing.in_thread`'s branch for a call cancelled before its thread
+   starts stays: `git.threaded` never cancels it on a stop, but the event
+   loop's shutdown does, and without the branch the descriptor, and the
+   effect's lock, would stay open. Its docstring says so.
+
+Suite: 1098 passed, 21 skipped. `ruff check` and `ruff format --check` clean.

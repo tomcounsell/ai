@@ -12,8 +12,10 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import struct
 import subprocess
+import tempfile
 import time
 import uuid
 import zlib
@@ -26,6 +28,7 @@ from core import db, ledger, router, runs, tasks
 from core import git as kgit
 from core import workspace as kws
 from core.gateway import Gateway
+from core.settings import settings
 from tests import scripted
 from tests.ports import span as ports_span
 
@@ -971,6 +974,38 @@ def test_a_bounded_command_ends_when_it_exits_though_a_program_it_started_holds_
         assert not _gone(int((tmp_path / "held.pid").read_text()))
     finally:
         os.kill(int((tmp_path / "held.pid").read_text()), 9)
+
+
+def test_no_turn_can_open_or_list_the_kernels_output_files_and_git_output_is_read_whole(
+    tmp_path, monkeypatch
+):
+    """The output files have a path, in `git.output_dir`, between creation
+    and unlink. A builder turn's profile (the kernel paths from settings)
+    cannot list that directory or open a file in it, and a large output of
+    the kernel's own git comes back whole from files made there."""
+    out = kgit.output_dir()
+    assert out.is_relative_to(Path(settings.performing_dir))
+    assert stat.S_IMODE(out.stat().st_mode) == 0o700
+    profile = tmp_path / "turn.sb"
+    profile.write_text(kws.turn_profile(kws.Layout(tmp_path / "work" / "abc123"), [], home=tmp_path / "home"))
+    with tempfile.NamedTemporaryFile(prefix="valor-output-", dir=out) as f:
+        assert probe(profile, f"list:{out}", f"read:{f.name}", f"append:{f.name}") == ["denied"] * 3
+
+    made = []
+    real = tempfile.TemporaryFile
+
+    def spy(*a, **kw):
+        made.append(Path(kw["dir"]))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kgit.tempfile, "TemporaryFile", spy)
+    repo = tmp_path / "repo"
+    kgit._git(tmp_path, "init", "-q", str(repo))
+    blob = tmp_path / "blob"
+    blob.write_bytes(os.urandom(5 * 1024**2))
+    sha = kgit._git(repo, "hash-object", "-w", str(blob)).stdout.strip()
+    assert kgit._git(repo, "cat-file", "blob", sha, text=False).stdout == blob.read_bytes()
+    assert made and set(made) == {out}
 
 
 def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):

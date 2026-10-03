@@ -329,8 +329,9 @@ class Settings:
     pg_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_PG_PORTS", "5440-5599"))
     redis_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_REDIS_PORTS", "6400-6499"))
     # The kernel mirror's fetch from a builder's clone: the largest file the
-    # receiving git may write, and the footprint past which it is killed
-    # (macOS enforces no memory limit on a process).
+    # receiving git may write (its stderr file among them), and the
+    # footprint past which it is killed (macOS enforces no memory limit on
+    # a process).
     mirror_fetch_max_bytes: int = field(
         default_factory=lambda: int(_env("VALOR_MIRROR_FETCH_MAX_BYTES", str(2 * 1024**3)))
     )

@@ -119,7 +119,10 @@ async def in_thread(fn, *args):
     """`fn(*args)` in a worker thread that holds the effect's lock for as
     long as it runs. The thread owns its duplicate descriptor and closes it
     in its own `finally`; when the caller is cancelled before the thread
-    starts, the caller closes it and the thread never runs `fn`."""
+    starts, the caller closes it and the thread never runs `fn`.
+    `git.threaded` never cancels this call on a stop; the event loop's
+    shutdown cancels it, and a thread not yet started then would otherwise
+    leave the descriptor, and the lock, open."""
     outer = _HELD.get()
     if outer is None:
         return await asyncio.to_thread(fn, *args)

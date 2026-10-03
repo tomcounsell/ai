@@ -305,12 +305,28 @@ def _git(
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
+def output_dir() -> Path:
+    """Where `output_file` makes its files: `output/` in the effect lock
+    directory (`settings.performing_dir`), made by the kernel with mode
+    0700. A file has a path there between its creation and its unlink, and
+    every task profile denies this directory (`workspace.kernel_paths`),
+    so no turn, setup command, or service can open, list, or truncate one;
+    the temp directory is open to all of them. It moves with
+    `VALOR_PERFORMING_DIR`, so the test suite writes nothing under the
+    kernel key directory."""
+    d = Path(settings.performing_dir)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (d / "output").mkdir(mode=0o700, exist_ok=True)
+    return d / "output"
+
+
 def output_file():
     """An unlinked file the kernel holds for a child's output, in place of a
     pipe: waiting on the child returns when it exits, whatever its
     descendants (one that left its process group with `setsid`, say) still
-    hold, and the kernel then reads the file (`read_output`)."""
-    return tempfile.TemporaryFile(prefix="valor-output-")
+    hold, and the kernel then reads the file (`read_output`). It is made in
+    `output_dir`, which no task profile can reach."""
+    return tempfile.TemporaryFile(prefix="valor-output-", dir=output_dir())
 
 
 def read_output(f, text: bool = False) -> str | bytes:

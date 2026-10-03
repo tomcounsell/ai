@@ -545,6 +545,13 @@ Each is reversible and was decided by the build session:
   thread always raises `git.Interrupted`.
 - `kernel_paths()` lists `settings.performing_dir`, so a task profile
   denies the effect lock files wherever `VALOR_PERFORMING_DIR` puts them.
+  A profile denies each kernel path as written and with symlinks resolved.
+- The output files are made in `output/` under `settings.performing_dir`
+  (`git.output_dir`, mode 0700), not the temp directory, which builder,
+  setup, and service profiles leave open: a file has a path there between
+  creation and unlink, long enough for a turn to open and truncate it.
+  That directory is already a kernel path and already moves with the test
+  suite, so no new setting is needed.
 - One case the effect lock and `reconcile` both miss: a remote that
   received the pack before the client died can still apply the ref after
   every client process has exited. `reconcile` then settles the merge
