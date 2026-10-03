@@ -186,8 +186,7 @@ critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
 verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
-`.valor/verdict.json`, moved to `.valor/handled/<turn_id>/` and read there by the same walk as the signals. Review and
-docs follow in milestone 1.4.
+`.valor/verdict.json`, read by the same walk as the signals. Review and docs follow in milestone 1.4.
 
 Each prompt is followed by what did not count from the previous turn
 (`errors` on its `turn.collected`) and what became of the effects it
@@ -228,8 +227,8 @@ first long task records both in `turn.ended`.
 ## The signal channel: `.valor/`
 
 Serves Mission item 6 (every question and delivery is a ledger row, so the
-attention a task costs is a fold over its ledger) and the constraint
-**bounded authority** (an effect is a request the broker decides).
+attention a task costs is a fold over its ledger) and the constraint **bounded
+authority** (an effect is a request the broker decides).
 
 A turn reaches Tom and the world through files under `.valor/` in its
 workspace, which the kernel reads when the turn ends:
@@ -243,32 +242,25 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
-it there, so no signal is read twice. The turn controls these files, so the
-kernel reaches each one relative to directory descriptors (`core/workspace.py`:
-`open_turn_dir`, `open_turn_file`, `read_turn_file`), follows no link, never
-blocks on a FIFO, and reads only a regular file with one link and no holes. A
-sparse file claims a size the turn never wrote, so it is refused. Anything
-else, a directory under a signal's name included, goes to `Signals.unreadable`
-with its reason and never its contents, and an entry that cannot be moved is
-removed unread. The read runs in a worker thread, off the router's event
-loop. An effect file that
-is not a JSON object with `action_type` and `target` is recorded with an
-error and no request. Everything a turn left is one `turn.collected` row
+it there, in a worker thread, so no signal is read twice. The turn controls
+these files: the kernel follows no link, never blocks on a FIFO, and reads
+only a regular file with one link and no holes (a sparse file claims a size
+the turn never wrote). Anything else goes to `Signals.unreadable` with its
+reason, never its contents, and an entry that cannot be moved is removed
+unread (`docs/architecture.md`). An effect file that is not a JSON object
+with `action_type` and `target` is recorded with an error and no request. Everything a turn left is one `turn.collected` row
 with the state it ran in and its verdict; a question takes precedence over
 the other signals in the same turn, and a signal that means nothing in the
-state (a `done.md` during plan) is an error, not acted on. `.valor/` is in
-the clone's `.git/info/exclude`, so signals never enter a commit.
+state (a `done.md` during plan) is an error, not acted on. `.valor/` is in the
+clone's `.git/info/exclude`, so signals never enter a commit.
 
 Files, because writing one is a deliberate tool call that survives whatever
-prose follows it, and a turn killed midway leaves what it wrote readable.
-The text of the channel is `skills/sdlc/channel.md`, carried in every
+prose follows it, and a turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
 workspace turn's Brief; it lists the effects the registered performers
 offer (each performer's `usage` line; the merge offers none) and says
 pushing any other way is unavailable, which the sandbox makes true.
 
-The text inside a signal file grants nothing. A question is shown to Tom; an
-effect request is classified and bounded by the broker against the task's
-ceiling. The turn's own words never decide what it may do [7].
+The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is
