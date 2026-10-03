@@ -39,7 +39,7 @@ browser="${VALOR_BROWSER:-}"
 [ -n "$browser" ] || die "VALOR_BROWSER is not set; no browser is configured"
 [ -x "$browser" ] || die "the browser is missing or not executable: $browser"
 
-status=$(/usr/bin/curl -s -o /dev/null -m 10 -w '%{http_code}' "$url")
+status=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' "$url")
 case "$status" in
   000) die "nothing answered at $url" 3 ;;
   5??) die "$url answered $status" 3 ;;

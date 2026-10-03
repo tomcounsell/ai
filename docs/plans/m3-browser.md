@@ -313,3 +313,7 @@ built in.
   merge.
 - **Rebase note.** 3b also edits `core/workspace.py`, `core/settings.py`,
   and `docs/harnesses.md`; whichever merges later rebases.
+- **No invented limits.** `look` first had a 10 second timeout on the
+  status request; it had no source and no function, so it was dropped. The
+  screens reader has no size or count cap. The `--wait` default of 3000 ms
+  is the plan's own and sets how long scripts get to settle.
