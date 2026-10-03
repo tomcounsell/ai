@@ -583,17 +583,15 @@ From the test check and the lead:
    and its settings check are gone. The header sweep removes a file whose
    writer's PID (in the name) names no process.
 6. **No git time limit.** `git_timeout_s`, `git.deadline`, and the mirror
-   fetch's time limit are gone, with their tests: no protocol fact bounds a
-   git call. Git runs until it exits; an interrupt of the calling thread,
-   or a cancelled `git.threaded` caller (push_branch, merge, provisioning
-   and removal in `core/__main__.py`), kills its process group, as 1.4c
-   does for image builds and setup.
+   fetch's limit are gone with their tests: no protocol fact bounds a git
+   call. Git runs until it exits; an interrupt, or a cancelled
+   `git.threaded` caller (push_branch, merge, `core/__main__.py`'s
+   provisioning and removal), kills its process group, as 1.4c does.
 7. **Tests write no lock file under the key directory.** `performing_dir`
    is a setting (`VALOR_PERFORMING_DIR`, default the key directory's
-   `performing`); `tests/conftest.py` sets it to a temporary directory of
-   the session's own before the settings are built, so every test and
-   every process a test starts uses it.
+   `performing`); `tests/conftest.py` sets it to a temporary directory
+   before the settings are built, for every test and process it starts.
 8. **A stop reaches the mirror fetch.** `session.record` reads its verdict
    (and fetches into the mirror) in `git.threaded`, and so does a docs head
    in `verdicts`; the loop runs meanwhile and a stop kills the fetch.
-
+9. **Base.** On `e4b30b78c` (plans only), with no conflict and no timeout.
