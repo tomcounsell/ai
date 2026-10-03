@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-openai-route
 type: build
-status: planned; revised after critique round 1, awaiting round 2
+status: building; critique rounds spent, round 2's findings built in
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -76,12 +76,27 @@ the gateway". 3a closes the route half; 3b closes the Pi half.
   fee-bearing tool) gets a 400.
 - **Accepted: stored responses on a shared key.** A `previous_response_id`
   continues any response stored under the key, so a turn that learns
-  another conversation's id can read its context. On a key shared with
-  Tom's own work or other tools, that reach covers them too. The plan
-  recommends a project key used only by the kernel (Questions for Tom),
-  which narrows the reach to the kernel's own turns; on a shared key the
-  reach is accepted as stated. 3b records whether Pi's client sends
-  `store: false`.
+  another conversation's id can read its context. The kernel spends on the
+  vault's `OPENAI_API_KEY`, which Tom's other work shares, so that reach
+  covers them too. It is low in practice (a response id reaches only the
+  turn that made it, and the ledger records request ids, not response ids)
+  and accepted as stated. A project key used only by the kernel narrows it
+  to the kernel's own turns; making one is an optional action for Tom
+  (Rollout). 3b records whether Pi's client sends `store: false`.
+- **Accepted: content referenced by id or URL.** A body's `input_file`
+  with `file_url` or `file_id`, an `input_image` with an `image_url` that
+  is not a `data:` URL or with a `file_id`, and an `item_reference` input
+  item bring content the body bytes do not show. The estimate takes the
+  model's context window as input for them, and the row is marked
+  `referenced: true`. A completed call's reported usage is right; the
+  undercount, if any, is in the cut case past one context window.
+- **Accepted: hosted-tool loops.** With a hosted tool (`web_search`,
+  `file_search`, `mcp`), one call samples the model several times, each
+  re-billing its context as input, so a cut call's input can exceed one
+  context window. When the body sets `max_tool_calls`, the worst case's
+  input is `max_tool_calls + 1` context windows; without it a cut
+  hosted-tool call may be charged less than billed, and `gateway.charged`
+  carries `bounded: false`.
 - **Accepted: fees after a cut.** A background response, or a streamed one
   whose connection is cut, can go on generating at OpenAI. Its tokens are
   bounded by `max_output_tokens` and covered by the worst case; its tool
@@ -119,11 +134,16 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
   `authorization: Bearer <key>`, the key read from the kernel key
   directory by an `OpenAIKey` credential (`core/gateway.py`, beside
   `ClaudeLogin`).
-- **No OpenAI credential.** A gateway built without one answers every
-  OpenAI path with a 403 and sends nothing. The Anthropic route without a
-  credential forwards the turn's own; the OpenAI route does not, because
-  an OpenAI call that bills a key of the turn's own is a call the kernel
-  cannot see on any invoice of its own.
+- **No OpenAI credential.** A gateway built without one forwards the
+  turn's own `authorization` on the listed paths, as the Anthropic route
+  forwards the turn's own without a credential, and meters the call the
+  same way; `gateway.opened` carries `credential: "turn"`, and
+  `credential: "kernel"` when the kernel's key was set. Unlisted paths are
+  a 403 either way.
+- **A 401's body is the gateway's own.** On the OpenAI route an upstream
+  401 is answered with the gateway's own 401 body ("the kernel's OpenAI
+  key was refused") and the upstream's body is dropped, since it can echo
+  part of the key.
 - **A 401 invalidates only its route's credential.** The handler's
   `invalidate()` on a 401 is called on the credential of the route that
   answered, so an OpenAI 401 never forces a Keychain read of the Claude
@@ -137,48 +157,63 @@ Anthropic route, unchanged, still recorded as `route: "gateway"`.
 - `OPENAI_PRICES` in `core/settings.py`, beside `PRICES` and kept apart
   from it as `JUDGEMENT_PRICES` is, so the Anthropic route never prices an
   OpenAI model. An `OpenAIPrice` per model id prefix, with the pricing
-  page's URL in a comment and a `checked` date: input, cached input, and
-  output per million tokens; a rate per service tier the page lists; the
-  long-context threshold and its input and output rates; and the model's
-  context window and maximum output.
+  page's URL in a comment and a `checked` date. Per service tier, keyed by
+  OpenAI's names (`default`, `flex`, `fast`, with `priority` an alias of
+  `fast`): input, cached input, cache write, and output per million
+  tokens, and the same four above the long-context threshold. Plus the
+  threshold, the model's context window, and its maximum output.
 - `OPENAI_TOOL_FEES` beside it: one line per fee-bearing tool type the
   page prices per call (the build reads `web_search` and `file_search`
-  from the page), each with its unit and `checked` date. A tool whose fee
-  unit the response does not let the gateway count (a code interpreter
-  container billed per session) gets no line, so a request using it is
-  unpriced. Token-only tools (function, custom, MCP, computer use, shell,
-  image generation, whose cost is in the usage) need no line.
+  from the page), each with its unit and `checked` date. A tool whose cost
+  the gateway cannot count from the response gets no line, so a request
+  using it is unpriced: a code interpreter or a hosted `shell` (a
+  `container_auto` environment, or any environment that is not plainly
+  local), billed per container session; and `image_generation`, billed at
+  the image model's own rates. Token-only tools (`function`, `custom`,
+  `mcp`, `computer_use_preview`, and `shell` with a local environment)
+  need no line.
 - `openai_prices(model)` matches the longest prefix, as `prices()` does,
   and returns None for an unknown model, which the gateway answers with
   the same 400 as an unpriced Anthropic model, before any row is written
   or anything goes upstream.
 - `openai_cost(usage, tier, tool_calls, prices)`: at the rates of the tier
-  the response reports, input minus cached input at the input rate, cached
-  input at the cached rate, output at the output rate; above the
-  long-context threshold, the long-context rates for input and output
-  both; plus each fee-bearing tool's count times its fee. In OpenAI's
-  usage, `input_tokens` includes `input_tokens_details.cached_tokens` and
+  the response reports, `input_tokens_details.cache_write_tokens` at the
+  cache write rate, `input_tokens_details.cached_tokens` at the cached
+  rate, the rest of `input_tokens` at the input rate, and `output_tokens`
+  at the output rate; above the long-context threshold, the long-context
+  rates for all four; plus each fee-bearing tool's count times its fee.
+  `input_tokens` includes the cached and written tokens and
   `output_tokens` includes `output_tokens_details.reasoning_tokens`, so
-  neither is added twice. Rounded up per field, as `cost` is.
-- `openai_worst_case(body, prices)`: the estimated input (the existing
-  `estimate_input`, 3 bytes per token, or the model's context window when
-  the body carries `previous_response_id` or `conversation`) at the
-  highest input rate any tier or the long-context rate lists, plus
-  `max_output_tokens` (or the model's maximum output when absent) at the
-  highest output rate, plus `max_tool_calls` times the highest fee among
-  the request's fee-bearing tools when it sets both.
+  none is added twice. A reported tier missing from the table is charged
+  at the highest tier's rates, and the row records `tier_unpriced: true`
+  beside the reported tier. Rounded up per field, as `cost` is.
+- `openai_worst_case(body, prices)`: the estimated input at the highest
+  of the input and cache write rates any tier or the long-context rate
+  lists, plus `max_output_tokens` (or the model's maximum output when
+  absent) at the highest output rate, plus `max_tool_calls` times the
+  highest fee among the request's fee-bearing tools when it sets both. The
+  estimated input is `estimate_input` (3 bytes per token); the context
+  window when the body carries `previous_response_id`, `conversation`, or
+  referenced content; and `max_tool_calls + 1` context windows when it
+  carries a hosted tool and sets `max_tool_calls`.
 
 ### What the meter cannot price
 
 A request gets a 400 naming what has no price, before any row is written
 and with nothing sent, when the table cannot give its cost. This is the
-rule that refuses an unpriced model, applied to the two other parts of a
+rule that refuses an unpriced model, applied to the other parts of a
 Responses body that carry their own prices:
 
 - `service_tier` naming a tier the entry does not price (`auto` and an
   absent tier are priced: they open at the highest tier and charge at the
   tier the response reports);
-- a tool whose type is neither token-only nor in `OPENAI_TOOL_FEES`.
+- a tool whose type is neither token-only nor in `OPENAI_TOOL_FEES`;
+- a `prompt` reference, since the stored prompt can carry tools and a
+  model the gateway cannot see.
+
+A non-streamed background call's result cannot be fetched through the
+gateway (`GET v1/responses/<id>` and its cancel are unlisted paths), so
+nothing should rely on one; it is charged the worst case.
 
 `background: true` is metered like any call: a streamed background
 response feeds the meter as it streams; a non-streamed one returns queued
@@ -193,7 +228,8 @@ with `usage: null` and is charged the worst case.
   `response.service_tier`, and `response.output`; the first of them seen
   with a usage object closes the call. `response.output_item.added` items
   of a fee-bearing `*_call` type are counted as they stream, so a cut call
-  is charged the calls seen.
+  is charged the calls seen; a completed response's `output` replaces that
+  count, so no call is charged twice.
 - **Not streamed.** A JSON body with `usage` at the top level.
 - **`usage: null` is no usage.** A queued or in-progress response carries
   it; the meter treats it as absent, and the call takes the worst-case
@@ -209,22 +245,25 @@ with `usage: null` and is charged the worst case.
 - `gateway.opened` carries `route: "openai"`, the model, and the estimate.
   It is written before the request goes upstream, so the request id
   (`x-request-id`) goes in `gateway.charged`'s detail, with the reported
-  tier and the tool call counts.
+  tier, the tool call counts, and the marks `tier_unpriced`, `referenced`,
+  and `bounded`.
 
 ### The key (`core/credentials.py`, `core/settings.py`, `core/__main__.py`)
 
 - `settings.openai_keyfile`, in the kernel key directory beside
   `judgement_keyfile` (`~/.config/valor-kernel/`), mode 600, denied to
   every turn and check profile by `kernel_paths()`.
-- `python -m core openai-key [--name NAME]` copies `NAME` (default
-  `OPENAI_API_KEY`) from the vault `.env` with `copy_keys`, and prints
-  `written`, `kept`, or `missing`, never a value. It is the
-  `judgement-keys` command with one name.
+- `python -m core openai-key [--name NAME]` copies vault `NAME` (default
+  `OPENAI_API_KEY`) into `openai_keyfile` under the one name `OpenAIKey`
+  reads (`OPENAI_API_KEY`), replacing any value there, so a swap leaves
+  the old key nowhere in the file. It prints `written`, `kept`, or
+  `missing`, never a value. `read_key`'s missing-key message names the
+  command for the file it read.
 - `_run_task` builds `Gateway(credential=ClaudeLogin(),
-  openai_credential=OpenAIKey())`. A missing key file is not a refusal to
-  run: the OpenAI route answers 403 and every Claude Code turn runs as
-  before. A turn that needs the route fails at its first call with the
-  gateway's reason in its stderr tail.
+  openai_credential=OpenAIKey())`. A missing key file leaves `OpenAIKey`
+  empty, and the route forwards the turn's own key, recorded
+  `credential: "turn"`; a turn that carries only the placeholder gets
+  OpenAI's own 401.
 
 ## Tech debt absorbed
 
@@ -233,6 +272,9 @@ with `usage: null` and is charged the worst case.
   search. `Price` gains the page's per-search fee and `cost` charges it,
   so both routes price per-call tools the same way. A replayed Anthropic
   response with two searches is charged them, worked out by hand.
+- The Anthropic route's code execution container fee stays unmetered, a
+  known gap named in `docs/architecture.md`; workspace turns do not
+  enable it.
 - `docs/harnesses.md` says the gateway speaks only the Anthropic format.
   The build rewrites that passage to describe both routes.
 - The gateway's module docstring names one upstream. It names both.
@@ -241,7 +283,12 @@ with `usage: null` and is charged the worst case.
 
 - Chat Completions, the Assistants API, Realtime, batches, files, and fine
   tuning. Each is a 403 until a task prices it.
-- Code interpreter containers, until the gateway can count their unit.
+- Code interpreter, hosted shell containers, and image generation, until
+  a task tables their rates and the gateway can count their units.
+- `v1/responses/compact` and `v1/responses/input_tokens`: unlisted, so a
+  403. 3b notes whether Pi's client calls either.
+- Regional processing endpoints, which carry an uplift the table does not
+  hold. The default upstream is not one.
 - OpenAI models other than the GPT-6.1 id in the table. Adding one is a
   table row and its replayed cases.
 - Codex and every harness other than Pi (milestone 3 leaves them out).
@@ -271,11 +318,16 @@ and the table:
 - a reply with 1,024 cached tokens charges those at the cached rate and
   the rest of the input at the full rate, and the total is less than the
   same usage priced uncached;
+- the first call of the cached pair, with nonzero `cache_write_tokens`,
+  charges those at the cache write rate;
 - reasoning tokens are counted once, inside `output_tokens`;
 - input above the long-context threshold charges the long-context rates
   on input and on output;
-- a request with no tier whose response reports `priority` charges the
-  priority rates; one that reports `default` charges the default rates;
+- a request with no tier whose response reports `fast` charges the fast
+  rates; one that reports `default` charges the default rates; a request
+  sending `priority` is forwarded and priced as `fast`; a response
+  reporting a tier the table lacks charges the highest tier's rates and
+  the row says `tier_unpriced: true`;
 - a reply with one `web_search_call` charges its tokens plus one search
   fee;
 - `response.incomplete` and `response.failed` charge their usage;
@@ -291,22 +343,30 @@ and the table:
   `tests/test_gateway_meter.py`) charges the worst case and the row closes;
 - a body with no `max_output_tokens` takes the table's maximum output in
   its estimate;
-- a `previous_response_id` takes the model's context window as input in
-  its estimate;
+- a `previous_response_id` and a `file_url` input each take the model's
+  context window as input in the estimate, and the `file_url` row says
+  `referenced: true`;
+- a `web_search` body with `max_tool_calls: 3` estimates four context
+  windows of input; without it, a cut call's row says `bounded: false`;
+- a completed reply with one `web_search_call` streamed and in `output`
+  charges one fee, not two;
 - the request id is in `gateway.charged`, not `gateway.opened`.
 
 Refusals, each showing nothing reached the upstream:
 
 - an unpriced model (400);
 - an unpriced `service_tier` (400);
-- a `code_interpreter` tool and an unknown tool type (400); a `function`,
-  an `mcp`, and a `web_search` tool are forwarded;
+- a `code_interpreter` tool, a `shell` tool with a `container_auto`
+  environment, an `image_generation` tool, an unknown tool type, and a
+  `prompt` reference (400); a `function`, an `mcp`, a `web_search`, and a
+  local `shell` tool are forwarded;
 - `v1/chat/completions`, `v1/files`, `v1/batches`, `v1/responses/<id>`
   (retrieval), `v1/embeddings`, `v1/realtime` (403);
 - `openai/v1/responses%2f..`, `openai//v1/responses`, and
   `openai/v1/./responses` (400 from `safe_tail`);
-- a gateway with no OpenAI credential (403 on every OpenAI path; the
-  Anthropic route still answers).
+- a gateway with no OpenAI credential forwards the turn's own key on
+  `v1/responses`, meters it, and records `credential: "turn"`; unlisted
+  paths are still a 403.
 
 Headers and the key:
 
@@ -321,10 +381,11 @@ Headers and the key:
   every response body and header the turn received, and the gateway's
   captured stderr, in every case above, including an upstream 401 whose
   body echoes the key's last four characters (the replaying upstream
-  sends one);
+  sends one), whose body the turn receives as the gateway's own;
 - `python -m core openai-key` against a scratch vault and key file writes
   mode 600, reports `written`, then `kept`, and with the name absent,
-  `missing`; `--name` copies another name; its output holds no value.
+  `missing`; `--name OTHER` then a read returns OTHER's value and the
+  first value is gone from the file; its output holds no value.
 
 Live (`VALOR_LIVE=1`, `pytest.mark.spend(usd=0.05)`): one streamed
 GPT-6.1 reply through the gateway; the test prints the returned usage,
@@ -365,29 +426,29 @@ dollar. The suite's replayed tests spend nothing.
 
 ## Rollout
 
-1. Tom: the key the kernel spends on is in the vault `.env` (see
-   Questions for Tom). This is a credential step.
-2. The build session, after merge: `python -m core openai-key` (with
-   `--name` if Tom names a kernel-only key), and report `written` or
-   `kept`. It prints no value.
-3. One live call through the merged gateway, its returned usage priced by
+1. The build session, after merge: `python -m core openai-key`, and
+   report `written` or `kept`. It prints no value.
+2. One live call through the merged gateway, its returned usage priced by
    hand beside the charge, with the request id.
-4. If no OpenAI admin key was in the vault at build time: Tom, or the
-   build session once he puts one there, reads the Usage API's one-minute
-   bucket for that key and model at the live call's minute and compares it
-   with the charge.
+3. Optional, Tom's: mint a project key used only by the kernel, put it in
+   the vault, and have the build session run `openai-key --name <it>`.
+4. Optional information: with an admin key in the vault, the Usage API's
+   one-minute bucket for the key and model at the live call's minute,
+   beside the charge. Without one it is recorded as not done; nothing
+   waits on it.
 
 ## Questions for Tom
 
-- **Which key.** Recommended: a project key in OpenAI used only by the
-  kernel, put in the vault under a name of Tom's choosing, so stored
-  responses a turn can reach are the kernel's own and the Usage API shows
-  the kernel's spend alone. Assumed if Tom does not make one: the
-  `OPENAI_API_KEY` already in the vault, with the shared-key reach stated
-  in the threat model accepted.
+None. The key is decided by default below; a kernel-only key is an
+optional action in Rollout.
 
 ## Decided by default
 
+- **The key is the vault's `OPENAI_API_KEY`.** It is there; the meter
+  prices from the response whichever key paid, and switching later is one
+  `openai-key --name`.
+- **No kernel key is not a refusal.** Without one the route forwards the
+  turn's key and meters the call, recorded `credential: "turn"`.
 - **The model id comes from OpenAI.** The build takes GPT-6.1's id from
   the pricing page and confirms it in `v1/models` through the gateway (the
   page lists `gpt-6.1-sol`), and pins that id in `OPENAI_PRICES` and in
@@ -407,8 +468,6 @@ dollar. The suite's replayed tests spend nothing.
   at the end, so no smaller figure is known to be at least the bill.
 - **The tier charged is the one OpenAI reports.** With no tier or `auto`,
   the project's default decides the bill, and the response says which.
-- **A missing key does not stop a run.** Only turns that use the route
-  fail, and they fail with the gateway's reason.
 - **Prices are copied by hand with a checked date**, as the Anthropic table
   is, since the page has no machine-readable form the kernel trusts.
 
@@ -442,3 +501,28 @@ dollar. The suite's replayed tests spend nothing.
   12. The searched places named (ledger rows, response bodies and headers,
       captured stderr); the Anthropic route keeps `route: "gateway"`; the
       no-credential 403 explained in one line.
+- Critique round 2: revise, the last round. Every finding accepted into
+  the build.
+  1. Cache writes priced at the page's write rate (1.25x input) in the
+     cost and the worst case; a replayed write case.
+  2. Hosted `shell` and `image_generation` are unpriced (400); a local
+     `shell` passes.
+  3. Tiers keyed `default`, `flex`, `fast`, with `priority` an alias; a
+     reported tier the table lacks is charged at the highest tier and
+     marked `tier_unpriced`.
+  4. Content referenced by id or URL takes the context window in the
+     estimate, the undercount stated and the row marked `referenced`; a
+     `prompt` reference is unpriced.
+  5. Hosted-tool loops: `max_tool_calls + 1` windows when set, otherwise
+     the undercount stated and the row marked `bounded: false`.
+  6. An upstream 401 body is replaced by the gateway's own.
+  7. `openai-key --name` writes the one name `OpenAIKey` reads, replacing
+     the old value; the missing-key message names the command.
+  8. The key is the vault's `OPENAI_API_KEY` by default; a kernel-only
+     key is an optional action for Tom; the Usage API comparison is
+     optional information, recorded as not done without an admin key.
+  9. The smaller points: one count per tool call; background results not
+     fetchable; compact and input_tokens unlisted; regional endpoints left
+     out; the Anthropic code execution gap named.
+  Cap audit: a 403 when the kernel holds no OpenAI key was a refusal; the
+  route forwards the turn's key instead, recorded `credential: "turn"`.
