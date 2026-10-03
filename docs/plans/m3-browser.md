@@ -11,7 +11,7 @@ review_rounds: 1
 
 Task 3c of milestone 3 of [valor-rebuild.md](valor-rebuild.md). It gives a
 workspace turn a way to open the app it built in a headless browser and
-keep what it saw: a screenshot and the page's rendered text, written under
+keep what it saw: a screenshot and the page's rendered HTML, written under
 `.valor/screens/` and named in `done.md`, with the kernel recording each
 file's digest when it collects the turn. It serves Mission item 1
 ("testing actual use") and is a capability for the turn, never a gate: no
@@ -25,7 +25,8 @@ browser is a command the turn runs, not a harness feature. It merges after
 
 `critique_rounds: 1`, `review_rounds: 1`. The task adds a read-only
 command to the workspace's tool directory, one field to `turn.collected`,
-and a sentence to the build and patch stage text. It adds no effect, no
+a sentence to the build and patch stage text, and a write denial on the
+Playwright cache. It adds no effect, no
 spend, and no credential. The browser runs inside the turn's own sandbox,
 with the turn's reach and no more.
 
@@ -38,7 +39,7 @@ app it built and records what it saw".
   build turn (`VALOR_LIVE=1`) on a provisioned Django workspace that
   starts the dev server on a dev port, runs `look`, and names the
   screenshot in `done.md`; `turn.collected` holds the screenshot's name,
-  size, and SHA-256; the build report includes the image.
+  size, and SHA-256; the build report includes the image, saved at `<scratchpad>/screens/<name>.png` and named in the report.
 - **It runs under the turn's sandbox.** Evidence: the offline test below,
   under the real turn profile, and the build report stating whether
   Chromium's own sandbox runs nested inside `sandbox-exec` or needed
@@ -56,10 +57,22 @@ app it built and records what it saw".
 - A page the turn loads is the turn's own app or anything on the web the
   profile allows. A hostile page can exploit the browser and reach the
   turn's sandbox, which is the reach the turn already has.
-- The browser's binary sits in the machine user's cache, which the user
-  can write and the turn profile does not deny writing. A turn that
-  replaces it affects only later turns that run it, inside their own
-  sandboxes; the kernel never runs it outside one.
+- The browser's binary sits in `~/Library/Caches/ms-playwright/`, which
+  every Playwright the user runs outside a sandbox also reads. The turn
+  profile denies writes there (`HOME_WRITE_DENIED`), and `settings.browser`
+  names one fixed build, so a turn can neither replace the binary nor plant
+  a newer build for the kernel to pick. The kernel never runs the browser
+  itself.
+- A turn controls everything under its `.valor/screens/`: names, links,
+  hard links, FIFOs. The kernel never follows or blocks on any of it: it
+  opens each entry relative to a directory descriptor, refuses anything
+  that is not a plain single-link regular file, and records the refusal.
+- The browser's own sandbox is off (`--no-sandbox`). A hostile page that
+  exploits its renderer then has the browser process's reach, which is the
+  turn's reach and no more: the profile is `(allow default)` for the
+  internet and mach services, and loopback is limited to the dev ports, the
+  gateway, and service ports. The turn already loads any page it likes with
+  its own tools. No profile line changes for the browser.
 - A screenshot is the turn's own account of what it saw, as editable as
   `done.md`. The digest on `turn.collected` makes a later edit visible; it
   does not make the image true. A verifier who needs to see the page
@@ -71,50 +84,75 @@ app it built and records what it saw".
 
 Playwright's `chrome-headless-shell` build, already in the machine user's
 cache (`~/Library/Caches/ms-playwright/chromium_headless_shell-<build>/`).
-`settings.browser` holds the binary's path, default the newest build in
-that cache, overridden by `VALOR_BROWSER`. A missing browser leaves `look`
+`settings.browser` holds the binary's path, default the fixed build
+`~/Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell`
+(never "the newest"), overridden by `VALOR_BROWSER`. The cache directory is
+added to `HOME_WRITE_DENIED`, so turns read it and cannot write it. A turn
+that installs Playwright into its own project points
+`PLAYWRIGHT_BROWSERS_PATH` at its `lay.cache`. A missing browser leaves `look`
 answering with that reason and a non-zero exit; nothing else in the turn
 changes.
 
-### `look` (`tools/look`, copied into the workspace's `bin/`)
+### `look` (`tools/look`, written into the workspace's `bin/`)
 
 A POSIX shell script, so it needs no Python or Node of the project's.
-Provisioning copies it into the work root's `bin/`, which every turn and
-fresh profile reads and none writes, and which is first on the turn's
-`PATH`.
+`bin/` is the one directory shared by every task under the work root, first
+on the turn's `PATH`, read and never written by a turn. Provisioning writes
+`look` there once per provisioning, to a temporary name and then renamed
+over, so a running turn never runs a half-written script.
 
 ```
 look URL [NAME] [--size WxH] [--wait MS]
 ```
 
 - Writes `.valor/screens/NAME.png` (a screenshot at `--size`, default
-  1280x800) and `.valor/screens/NAME.txt` (the rendered DOM's text) in the
-  current clone, NAME defaulting to a timestamp. `.valor/` is already in
+  1280x800) and `.valor/screens/NAME.html` (the page's serialized DOM after
+  scripts ran) in the current clone, NAME defaulting to a timestamp. A NAME
+  with a slash, a leading dot, or `..` is refused. `.valor/` is already in
   the clone's `.git/info/exclude`, so screens never enter a commit.
-- Runs the browser with `--headless`, `--screenshot`, `--dump-dom`,
-  `--window-size`, `--virtual-time-budget` (from `--wait`, default 3000),
-  a user data directory under the turn's own `TMPDIR`, and
-  `--no-first-run --no-default-browser-check --disable-extensions`. If the
-  build finds Chromium's sandbox cannot start nested, `--no-sandbox` is
-  added, with the reason in a comment and in `docs/harnesses.md`.
-- Prints the two paths and the page's HTTP status, and exits non-zero if
-  the page did not load, so the turn sees a dead dev server as a failure.
+- First asks for the page's status with `/usr/bin/curl -s -o /dev/null -w
+  '%{http_code}'`. A `000` (nothing answered) or a `5xx` prints that and
+  exits non-zero without starting the browser; the browser's flags report
+  no status and exit 0 on its own error page.
+- Then runs the browser twice, once with `--screenshot` and once with
+  `--dump-dom`, since the two flags are not honoured together in one run.
+  Both get `--headless`, `--window-size`, `--virtual-time-budget` (from
+  `--wait`, default 3000), a user data directory under the turn's own
+  `TMPDIR`, and `--no-first-run --no-default-browser-check
+  --disable-extensions --no-sandbox`. `--no-sandbox` is on for the reason
+  in the threat model, and the build report states whether Chromium's own
+  sandbox runs nested inside `sandbox-exec`.
+- Prints the two paths and the HTTP status.
 
 Interaction (clicks, forms, a login) is left out; see below.
 
-### What the kernel records (`core/signals.py`)
+### What the kernel records (`core/signals.py`, `core/session.py`)
 
-When it collects a build or patch turn, the kernel lists
-`.valor/screens/` and adds `screens: [{name, bytes, sha256}]` to
-`turn.collected`. Files are opened without following links, as other
-signal files are. A screens directory that is absent or empty records
-nothing. Screens are evidence, not signals: they change no state.
+When it collects a build or patch turn, the kernel lists `.valor/screens/`
+and adds `screens: [{name, bytes, sha256} | {name, refused}]` to the
+`turn.collected` payload that `core/session.py` builds. `core/signals.py`
+reads it into `Signals.screens`.
+
+Other signal files in `signals.py` are today read with `is_file()` and
+`read_text()`, which follow links; the separate task `m1-4s-signal-reads`
+fixes those and builds a shared safe-read helper. The screens reader here
+is a small self-contained function (`read_screens`) written the same way
+`workspace.read_verdict` reads: `.valor`, then `screens`, then each entry
+opened relative to the directory descriptor with `O_NOFOLLOW | O_NONBLOCK`,
+required to be a regular file with `st_nlink == 1`, hashed from the open
+descriptor. Anything else (a link, a FIFO, a directory, a hard-linked file)
+is recorded as `{name, refused: reason}` and never read. At merge the shared
+helper replaces the function's body. Each recorded or refused screen is
+moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
+record it again; `done.md` names it by its original name. A screens
+directory that is absent or empty records nothing. Screens are evidence,
+not signals: they change no state.
 
 ### The stage text (`skills/sdlc/build.md`, `skills/sdlc/patch.md`)
 
 One sentence in each: when the work changes what a page shows, start the
 dev server on a port from 8000 to 8009, run `look` on the page, look at
-the screenshot, and name it in `done.md` with what you saw. The text says
+the screenshot, and name it in `done.md` with what you saw (the kernel files recorded screens away after the turn, so a later turn finds none). The text says
 what the tool is for; no check reads whether it was used.
 
 ## Tech debt absorbed
@@ -142,21 +180,28 @@ what the tool is for; no check reads whether it was used.
 
 - `look` under a real turn profile against a tiny local HTTP server bound
   to a dev port writes a PNG (its header and the requested size read from
-  the file) and a text file holding the page's text, and exits 0.
+  the file) and an `.html` file holding the page's text, and exits 0.
 - The same against a dev port with nothing listening exits non-zero and
   says so.
 - A page that sets its text after a 1 second timer: with `--wait 2000`
-  the text file holds it.
+  the html file holds it.
+- A dev port that answers 500 exits non-zero.
+- A turn profile write to a file under `~/Library/Caches/ms-playwright` is
+  denied; `settings.browser` is the fixed build path.
 - A NAME with a slash or `..` is refused; screens land only under
   `.valor/screens/`.
 - `look` under the fresh session's profile (no `/private/tmp`) still runs,
-  its user data directory under the session's own tmp.
+  its user data directory under the session's own tmp, and the browser
+  touches no path under `/private/var/folders` (checked with `fs_usage` or
+  the profile's denial log).
 - With `VALOR_BROWSER` pointing at a missing path, `look` exits non-zero
   with the reason.
 - Collection: a scripted turn (`tests/scripted.py`) that runs `look` and
   writes `done.md` produces `turn.collected` with one screens entry whose
-  digest matches the file; a screen that is a link to a file outside the
-  clone is not followed and is recorded as refused.
+  digest matches the file; a screen that is a symlink to a file outside the
+  clone, a hard link, and a FIFO are each recorded as refused, never read
+  and never blocking; recorded screens are moved to
+  `handled/<turn_id>/screens/` and the next turn records none.
 - Memory: `tests/test_look.py::test_memory` (marked to run only with
   `VALOR_MEASURE=1`) samples the browser's process tree with `/bin/ps`
   every 50 ms over five renders of a provisioned Django app's admin login
@@ -170,11 +215,13 @@ names it.
 ## Files it changes
 
 - `tools/look` (new script).
-- `core/workspace.py` (copy `look` into the work root's `bin/` at
-  provisioning; `settings.browser` passed into the turn's environment as
-  `VALOR_BROWSER`).
+- `core/workspace.py` (write `look` into the work root's `bin/` at
+  provisioning, atomically; `settings.browser` passed into the turn's
+  environment as `VALOR_BROWSER`; `Library/Caches/ms-playwright` in
+  `HOME_WRITE_DENIED`).
 - `core/settings.py` (`browser`).
-- `core/signals.py` (the screens list on `turn.collected`).
+- `core/signals.py` (`read_screens`, `Signals.screens`).
+- `core/session.py` (the `screens` field of the `turn.collected` payload).
 - `skills/sdlc/build.md`, `skills/sdlc/patch.md`.
 - `tests/test_look.py`, `tests/scripted.py` (a step that runs a command).
 - `docs/harnesses.md`, `docs/machine.md`, `docs/architecture.md` (the
@@ -212,3 +259,29 @@ None. The task touches no identity or credential.
   screen changed; copying waits for the document store's session copy.
 - **The stage text mentions `look` without requiring it.** A screenshot is
   evidence the turn chooses to give.
+
+## Critique round 1 (of 1): revise
+
+The critique's verdict was revise; the round is spent, and every finding is
+built in.
+
+1. **Screens were said to be read without following links, as other signal
+   files are; they are followed.** Fixed: `read_screens` opens everything
+   by directory descriptor with `O_NOFOLLOW | O_NONBLOCK`, requires a
+   regular file with one link, and records `{name, refused}` otherwise. The
+   sentence about other signal files is corrected; their fix and a shared
+   helper belong to `m1-4s-signal-reads`, and `read_screens` is written to
+   be replaced by that helper at merge.
+2. **The Playwright cache is shared with the user's unsandboxed runs.**
+   Fixed: `Library/Caches/ms-playwright` joins `HOME_WRITE_DENIED`, and
+   `settings.browser` names build 1208 rather than the newest.
+3. **Browser flags give no status and exit 0 on errors.** Fixed: `curl`
+   first for the status, two browser runs, output named `NAME.html`.
+4. **`--no-sandbox` was undecided.** Decided: on, for the reason in the
+   threat model; no profile line changes.
+5. **Screens recorded again by every later turn.** Fixed: each recorded
+   screen moves to `handled/<turn_id>/screens/`.
+6. **Smaller errors.** `core/session.py` added to the files changed;
+   `bin/` is shared and written atomically; the fresh-profile test asserts
+   no `/private/var/folders` path.
+7. **Done evidence.** The report names where the screenshot is saved.
