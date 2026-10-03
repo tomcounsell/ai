@@ -409,9 +409,8 @@ one blind verification per candidate, beside test and docs, with as many
 send-backs to patch as the plan allows (0, 1, or 2, set by the stakes).
 
 **Design.** Nothing in the kernel verifies yet (review verdicts are recorded
-by hand); the emulator's judge (`tests/emulator/judge.py`) runs outside it, metered
-through the gateway.
-The verifier:
+by hand); the emulator's judge (`tests/emulator/judge.py`) runs outside
+it, metered through the gateway. The verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
   deterministic check results, and the effect ledger. It never reads the
