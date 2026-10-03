@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4v-binary-paths
 type: bug
-status: built
+status: delivered-not-passed
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -309,3 +309,36 @@ The two notes, judged:
   cluster have the `pg_hba.conf` the kernel wrote. Homebrew's Postgres
   tools reach every cluster on a socket, where libpq skips GSS. Nothing
   changed.
+
+## Checks, round 1 of 1, at 171b32d87
+
+- Docs: updated, e9863c804. Known openings move to `docs/sandbox-openings.md`.
+- Test: gaps. Base 507 passed, head 510 passed, 7 skipped each; ruff
+  clean. The ancestor rule, mounts onto a denied path, the fixed program
+  paths, the scratch cluster and the uv cache held. `VALOR_PG_SCRATCH=/tmp`
+  reaches only turn and fresh-session environments, never the kernel's.
+- Review: changes. Governance boolean: no. No invented caps.
+
+Findings both checks reproduced:
+
+1. `(deny file-mount)` refuses a mount with a named mount point only.
+   `hdiutil attach` with no `-mountpoint`, and `diskutil mount`, still
+   mount at `/Volumes/<label>`. A turn that unmounts the backup disk (an
+   accepted opening) can mount its own image under the disk's label;
+   `backup.dump` checks only that the directory exists on another device,
+   so the next ledger dump lands in the turn's image, which the turn then
+   reads from its own `.dmg`. "Costs availability, not contents" and "no
+   mount is allowed" are therefore untrue. One probe denying mach-lookup of
+   `diskarbitrationd` mounted nothing; it needs verifying.
+2. `~/.local/share/uv` (`python`, `tools`) is turn-writable, and the
+   user's `uv sync` runs a planted managed interpreter from it outside any
+   sandbox. Same class as `~/.cache/uv`: write-deny it and give fresh
+   sessions their own `UV_PYTHON_INSTALL_DIR`.
+3. Docs: the PATH opening also lets a program early on Tom's PATH choose
+   the interpreter `uv sync` gives the kernel.
+
+## Delivery: delivered, not passed
+
+Review rounds are spent. Recommendation to Tom: one more patch for the
+three findings. Finding 1 leaks ledger contents, so the patch is needed
+before 1.4v merges.
