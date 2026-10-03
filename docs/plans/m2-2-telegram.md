@@ -31,7 +31,7 @@ file.
 
 ## Port used
 
-The lead's port decisions, items 1 to 36 and 34a, as 2.1 writes them in
+The lead's port decisions, items 1 to 40 with 11a, 15c, and 34a, as 2.1 writes them in
 [m2-1-port.md](m2-1-port.md) (2.1's commit 4ce1cede3). What 2.2 uses, by
 item:
 
@@ -43,8 +43,10 @@ item:
 | 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
 | 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
 | 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
-| 11 | Passes Telegram's raw facts; `receive` sets `verified` true for every Telegram record, since Telegram's servers attest the sender id, and bind decides whether the sender is the operator (`sender_id == operator_telegram_id`) |
-| 15b, 25 | `ChannelLimits(max_text=4096, max_file_bytes=2_097_152_000)`, Telegram's message length and upload limit; the performer splits text over the limit |
+| 11 | Passes Telegram's raw facts; `verified` as item 11 states, from the account's own peer id the bridge reports |
+| 15b, 15c, 25 | `limits` is Telegram's entry in `core/bridge.py` (`max_text` 4096 UTF-16 code units, `max_file_bytes` the upload limit); the bridge reads it and declares none of its own. The performer splits text over the limit |
+| 38 | `tick()`, which `serve` calls on every `serve_tick_s` wake, runs the gap fill |
+| 39, 40 | Kernel behaviour the pipeline tests exercise through the bridge: a binding that raises binds `none` and owes a notice; a refused release appends `effect.refused` once and owes a notice |
 | 17, 18 | `Inbound.topic_id`, `thread: list[dict]`, `headers["grouped_id"]`, attachments `{name, mime, bytes, path}` or `{name, mime, bytes, skipped: reason}`, files under `settings.inbound_dir/telegram/` named by sha256 |
 | 19 | Payload `files: [{path, sha256}]`: read once, hashed, raise before sending on a mismatch, send the bytes hashed |
 | 22, 24 | `Declared` for `telegram.send_message` is 2.1's; a send in doubt raises `broker.Unknown` |
@@ -177,7 +179,7 @@ Read with `git show origin/main:<path>`; nothing is imported from it.
 
 | New file | Source on `main` | Kept | What changes |
 |---|---|---|---|
-| `bridges/telegram/wire.py` | `bridge/telegram_bridge.py` (client construction, connect loop), `bridge/telegram_relay.py` (`_send_queued_message`) | Telethon client setup; connect with exponential backoff to 256 s and jitter; a connect flood wait honored | The only module that imports Telethon. `sequential_updates=True`, `flood_sleep_threshold=0`, `catch_up=False`, `auto_reconnect=False`: the bridge owns reconnect and runs the gap fill on each connect. No attempt count. Sends are raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, `no_webpage=True`, no parse mode, `reply_to` with `top_msg_id` for a topic. The session path, API id, and hash come from the kernel key directory. Sentry, liveness, hibernation, the lsof session cleanup and its signals, and the `data/flood-backoff` and `data/last_connected` files go. Never deletes the session's `-journal` file |
+| `bridges/telegram/wire.py` | `bridge/telegram_bridge.py` (client construction, connect loop), `bridge/telegram_relay.py` (`_send_queued_message`) | Telethon client setup; connect with exponential backoff to 256 s and jitter; a connect flood wait honored | The only module that imports Telethon. `sequential_updates=True`, `flood_sleep_threshold=0`, `request_retries=1`, `connection_retries=1`, `catch_up=False`, `auto_reconnect=False`, so Telethon repeats no request on its own: the bridge owns reconnect and runs the gap fill on each connect. No attempt count. Sends are raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, `no_webpage=True`, no parse mode, `reply_to` with `top_msg_id` for a topic. The session path, API id, and hash come from the kernel key directory. Sentry, liveness, hibernation, the lsof session cleanup and its signals, and the `data/flood-backoff` and `data/last_connected` files go. Never deletes the session's `-journal` file |
 | `bridges/telegram/inbound.py` | the head of `handler` in `bridge/telegram_bridge.py`; `bridge/media.py` (`get_media_type`, `compute_media_timeout`, `download_media`); `_download_media_with_retry`; `bridge/context.py` (`fetch_reply_chain`, `media_descriptor`) | Media typing; a size-scaled timeout with one retry at twice the leash; the reply-chain walk (20 hops, cycle stop) | The handler builds one `Inbound` and ends at `intake.receive`, then marks the message read. Redis dedup, the replay cursor, `/update`, project routing, screening, and storage go. Text is `message.message`, never Telethon's rendered `.text`. Outgoing and service messages, and messages from the account itself, are skipped. The timeout is `max(10, 5 + MB)` seconds with no ceiling. Files are named by sha256. A message in a forum topic has `topic_id` set and `reply_to` None unless it replies to a message other than the topic's root. `thread` entries are `{id, text, attachments}`, attachments listed as `skipped: "earlier message"`. Transcription and image description go |
 | `bridges/telegram/gap.py` | `bridge/history_fetch.py` | Backward paging that accepts only strictly older ids and stops on a short page | Pages to a floor (below), receives ids `intake.recorded` does not list, oldest first, through the same path as the handler; no per-chat ceiling |
 | `bridges/telegram/send.py` | `_send_queued_message` in `bridge/telegram_relay.py`; `_find_already_sent_poll` | The scan of the account's own messages in a chat, newest first; two matches adopt nothing | The `telegram.send_message` perform and lookup, and the notice send. One attempt per message. Text is split, then files are sent as documents. `random_id` per part. Voice notes, albums, custom emoji, markdown, the oversized-as-file path, and dead letters go |
@@ -194,8 +196,8 @@ so the sandbox deny on that directory covers them.
 
 **Sending.** Text is split so each part is at most 4,096 UTF-16 code
 units, Telegram's count, breaking at the last newline before the limit,
-else the last space, else at the limit; core's check by characters is the
-same or stricter. The first part carries the reply target; every part
+else the last space, else at the limit, never inside a surrogate pair;
+the kernel counts the same way (item 15c). The first part carries the reply target; every part
 carries the topic. Then each file is sent as a document named by its
 `path`'s base name, from the bytes hashed. Part `n` has `random_id` from
 the first 8 bytes of SHA-256 of `key:n`, a signed int64, never zero. The
@@ -235,7 +237,7 @@ again with `random_id` from the notice id and the attempt count, so Tom
 sees it. A failing notice is yielded again on later wakes; its reason is
 logged once per notice.
 
-**Gap fill.** Runs on each connect and on every outbox wake, per owned
+**Gap fill.** Runs on each connect and in `tick()`, per owned
 chat. Each pass pages back from the newest message, receives every id
 `intake.recorded` does not list, and stops at a message dated before the
 pass's floor. During a connection the floor is the previous pass's start
@@ -376,6 +378,8 @@ process the test starts and kills by its pid. No mocks inside the bridge.
   notice; `approve` records `approval.granted` and the push reaches the
   local bare origin, with no `release.requested`.
 - `approve` in reply to the delivered notice binds as feedback.
+- A second `approve` to the same notice binds `none` and owes a notice;
+  the next message from Tom still binds.
 - `stop` in reply to a notice records `task.stopped`, and a released send
   of that task is then refused.
 
