@@ -138,10 +138,9 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
         ("fail", None),
         ("none", "no .valor/verdict.json"),
         ("malformed", "not JSON"),
-        ("symlink", "not a plain file"),
+        ("symlink", "verdict.json is a link, not a plain file"),
         ("fifo", "not a regular file"),
-        ("dir_symlink", ".valor is not a plain directory"),
-        ("big", "over 262144 bytes"),
+        ("dir_symlink", ".valor is a link, not a plain directory"),
     ],
 )
 def test_a_critique_that_leaves_no_valid_verdict_writes_none_and_only_critique_reruns(

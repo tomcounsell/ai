@@ -197,7 +197,7 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None):
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
             return {"status": "failed", "state": now, "turn": ended}
-        data, why = workspace.read_verdict(checkout, ended["turn_id"])
+        data, why = workspace.read_verdict(lay.checks, check_dir.name, ended["turn_id"])
         if data is None:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         if not await ctx.alive():

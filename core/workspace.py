@@ -1023,19 +1023,13 @@ def fetch_into_mirror(
         raise FetchRefused(f"{sha!r} is not a full commit id")
     if not ref.startswith("refs/valor/"):
         raise FetchRefused(f"{ref} is not a mirror ref")
+    _no_borrowed_objects(source)
     try:
         found = git.hostile(source)
     except git.GitError as exc:
         raise FetchRefused(str(exc)) from None
     if found:
         raise FetchRefused("the clone's git config names what the kernel will not run: " + "; ".join(found))
-    dotgit = source / ".git"
-    if dotgit.is_symlink() or (dotgit.exists() and not dotgit.is_dir()):
-        raise FetchRefused("the clone's .git is not a directory (a gitfile moves the real one elsewhere)")
-    gitdir = dotgit if dotgit.is_dir() else source
-    for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow", "commondir"):
-        if (gitdir / name).exists() or (gitdir / name).is_symlink():
-            raise FetchRefused(f"the clone has {name}, which the kernel will not fetch from")
     git_bin = git.binary()
     upload = " ".join(
         shlex.quote(a)
@@ -1071,6 +1065,50 @@ def fetch_into_mirror(
         if code == "timeout":
             raise FetchRefused("the fetch into the kernel mirror did not finish in time")
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
+
+
+def _no_borrowed_objects(source: Path) -> None:
+    """Refuse a clone whose `.git` is not a plain directory, or that has
+    alternates, a shallow file, or a common directory, every lookup relative
+    to a descriptor and never through a link. With no `.git`, the clone is
+    bare and the names are looked up in it."""
+    try:
+        root = os.open(source, DIR_FLAGS)
+    except OSError as exc:
+        raise FetchRefused(f"the clone is not a plain directory ({exc.strerror})") from None
+    try:
+        dotgit, why = open_turn_dir(root, ".git")
+        if why:
+            raise FetchRefused("the clone's .git is not a directory (a gitfile moves the real one elsewhere)")
+        gitdir = root if dotgit is None else dotgit
+        try:
+            for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow", "commondir"):
+                if _present(gitdir, name):
+                    raise FetchRefused(f"the clone has {name}, which the kernel will not fetch from")
+        finally:
+            if dotgit is not None:
+                os.close(dotgit)
+    finally:
+        os.close(root)
+
+
+def _present(dir_fd: int, relpath: str) -> bool:
+    """Whether `relpath` names an entry: a link or a non-directory at a
+    directory component counts, as does any entry at the last one."""
+    head, _, last = relpath.rpartition("/")
+    parent = dir_fd
+    if head:
+        parent, why = open_turn_dir(dir_fd, head)
+        if parent is None:
+            return why is not None
+    try:
+        os.stat(last, dir_fd=parent, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    finally:
+        if parent != dir_fd:
+            os.close(parent)
 
 
 def clean_partial(repo: Path) -> None:
@@ -1221,45 +1259,198 @@ def write_files(dir_fd: int, files: dict[str, str]) -> None:
             f.write(text)
 
 
-def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    """The verdict a fresh session left at `.valor/verdict.json`, opened
-    component by component without following links and without blocking;
-    then moved to `.valor/handled/<turn_id>/`. Returns (verdict, why not)."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+# -- files a turn controls ------------------------------------------------------------
+#
+# Every read of a path a turn (or a fresh session) can write goes through
+# these: each component opened relative to its parent's descriptor with
+# `O_NOFOLLOW | O_NONBLOCK`, so no link is followed and no FIFO blocks, and a
+# file is read only when `fstat` says a regular file with one link. A missing
+# entry is `(None, None)`; an entry that exists and is refused is
+# `(None, why)`, and its contents are never read.
+
+DIR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _parts(relpath: str) -> list[str] | None:
+    parts = relpath.split("/")
+    if relpath.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        return None
+    return parts
+
+
+def _open_dir(dir_fd: int, name: str, shown: str) -> tuple[int | None, str | None]:
     try:
-        root = os.open(checkout, flags | os.O_DIRECTORY)
+        return os.open(name, DIR_FLAGS, dir_fd=dir_fd), None
+    except FileNotFoundError:
+        return None, None
     except OSError as exc:
-        return None, f"the checkout cannot be opened: {exc.strerror}"
+        if _is_link(dir_fd, name):
+            return None, f"{shown} is a link, not a plain directory"
+        return None, f"{shown} is not a plain directory ({exc.strerror})"
+
+
+def _is_link(dir_fd: int, name: str) -> bool:
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def open_turn_dir(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
+    """The directory at `relpath` under `dir_fd` as a new descriptor the
+    caller closes, or (None, why), or (None, None) when it does not exist."""
+    parts = _parts(relpath)
+    if parts is None:
+        return None, f"{relpath!r} is not a plain relative path"
+    fd = dir_fd
+    for i, part in enumerate(parts):
+        nxt, why = _open_dir(fd, part, "/".join(parts[: i + 1]))
+        if fd != dir_fd:
+            os.close(fd)
+        if nxt is None:
+            return None, why
+        fd = nxt
+    return fd, None
+
+
+def open_turn_file(dir_fd: int, relpath: str) -> tuple[int | None, str | None]:
+    """The regular file with one link at `relpath` under `dir_fd`, opened for
+    reading as a descriptor the caller closes, or (None, why), or (None,
+    None) when it does not exist. Nothing is read."""
+    parts = _parts(relpath)
+    if parts is None:
+        return None, f"{relpath!r} is not a plain relative path"
+    parent = dir_fd
+    if len(parts) > 1:
+        parent, why = open_turn_dir(dir_fd, "/".join(parts[:-1]))
+        if parent is None:
+            return None, why
     try:
         try:
-            valor = os.open(".valor", flags | os.O_DIRECTORY, dir_fd=root)
+            fd = os.open(parts[-1], FILE_FLAGS, dir_fd=parent)
         except FileNotFoundError:
-            return None, "no .valor/verdict.json"
+            return None, None
         except OSError as exc:
-            return None, f".valor is not a plain directory ({exc.strerror})"
+            if _is_link(parent, parts[-1]):
+                return None, f"{relpath} is a link, not a plain file"
+            return None, f"{relpath} is not a plain file ({exc.strerror})"
+    finally:
+        if parent != dir_fd:
+            os.close(parent)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return None, f"{relpath} is not a regular file"
+    if st.st_nlink != 1:
+        os.close(fd)
+        return None, f"{relpath} has {st.st_nlink} links"
+    return fd, None
+
+
+def read_turn_file(dir_fd: int, relpath: str) -> tuple[bytes | None, str | None]:
+    """The whole of the file `open_turn_file` opens, or why not, or (None,
+    None) when it does not exist."""
+    fd, why = open_turn_file(dir_fd, relpath)
+    if fd is None:
+        return None, why
+    chunks = []
+    try:
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks), None
+
+
+def _file_away(
+    src_fd: int, name: str, valor_fd: int, turn_id: str, sub: tuple[str, ...] = ()
+) -> tuple[int | None, str | None]:
+    """Move the entry `name` in `src_fd` to `.valor/handled/<turn_id>/<sub...>/`
+    under `valor_fd`, every step relative to a descriptor and never through a
+    link, and return that directory's descriptor (the caller closes it), so
+    the entry is read only once it is filed. `os.rename` moves the entry
+    itself, never what a link names. A missing entry is (None, None). When
+    the move is refused, the entry is removed unread (a link is unlinked,
+    not its target) and the reason returned, so nothing is left for a later
+    turn to read."""
+    try:
+        os.stat(name, dir_fd=src_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"{name} cannot be looked up ({exc.strerror})"
+    parent, why = valor_fd, None
+    for part in ("handled", turn_id, *sub):
         try:
+            os.mkdir(part, 0o755, dir_fd=parent)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            why = f"handled/{part} cannot be made ({exc.strerror})"
+            break
+        nxt, refused = _open_dir(parent, part, f"handled/{part}")
+        if parent != valor_fd:
+            os.close(parent)
+        parent = nxt
+        if nxt is None:
+            why = refused or f"handled/{part} vanished"
+            break
+    if why is None:
+        try:
+            os.rename(name, name, src_dir_fd=src_fd, dst_dir_fd=parent)
+            return parent, None
+        except OSError as exc:
+            why = f"{name} cannot be filed away ({exc.strerror})"
+    if parent is not None and parent != valor_fd:
+        os.close(parent)
+    return None, _remove_unread(src_fd, name, why)
+
+
+def _remove_unread(dir_fd: int, name: str, why: str) -> str:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except IsADirectoryError, PermissionError:
+        try:
+            os.rmdir(name, dir_fd=dir_fd)
+        except OSError:
+            return f"{why}; left in place unread"
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return f"{why}; left in place unread"
+    return f"{why}; removed unread"
+
+
+def read_verdict(checks: Path, name: str, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """The verdict a fresh session left at `<checks>/<name>/repo/.valor/verdict.json`,
+    walked from the kernel's checks directory without following a link at
+    any component (the check directory included, which the session can
+    replace) and without blocking; moved to `.valor/handled/<turn_id>/`
+    first and read there. Returns (verdict, why not)."""
+    try:
+        root = os.open(checks, DIR_FLAGS)
+    except OSError as exc:
+        return None, f"the checks directory cannot be opened: {exc.strerror}"
+    try:
+        valor, why = open_turn_dir(root, f"{name}/repo/.valor")
+        if valor is None:
+            return None, why or "no .valor/verdict.json"
+        try:
+            dest, why = _file_away(valor, "verdict.json", valor, turn_id)
+            if dest is None:
+                return None, why or "no .valor/verdict.json"
             try:
-                fd = os.open("verdict.json", flags | os.O_NONBLOCK, dir_fd=valor)
-            except FileNotFoundError:
-                return None, "no .valor/verdict.json"
-            except OSError as exc:
-                return None, f"verdict.json is not a plain file ({exc.strerror})"
-            try:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode):
-                    return None, "verdict.json is not a regular file"
-                if st.st_size > settings.verdict_max_bytes:
-                    return None, f"verdict.json is over {settings.verdict_max_bytes} bytes"
-                body = os.read(fd, settings.verdict_max_bytes + 1)
+                body, why = read_turn_file(dest, "verdict.json")
             finally:
-                os.close(fd)
-            why = _file_away(valor, "verdict.json", turn_id)
-            if why:
-                return None, why
+                if dest != valor:
+                    os.close(dest)
         finally:
             os.close(valor)
     finally:
         os.close(root)
+    if body is None:
+        return None, why or "no .valor/verdict.json"
     try:
         data = json.loads(body)
     except ValueError:
@@ -1267,30 +1458,6 @@ def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, s
     if not isinstance(data, dict):
         return None, "verdict.json is not a JSON object"
     return data, None
-
-
-def _file_away(valor: int, name: str, turn_id: str) -> str | None:
-    """Move `.valor/<name>` to `.valor/handled/<turn_id>/<name>`, every step
-    relative to a descriptor and never through a link."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
-    fds = []
-    try:
-        parent = valor
-        for part in ("handled", turn_id):
-            try:
-                os.mkdir(part, 0o755, dir_fd=parent)
-            except FileExistsError:
-                pass
-            try:
-                parent = os.open(part, flags, dir_fd=parent)
-            except OSError as exc:
-                return f".valor/{part} is not a plain directory ({exc.strerror})"
-            fds.append(parent)
-        os.rename(name, name, src_dir_fd=valor, dst_dir_fd=parent)
-        return None
-    finally:
-        for fd in fds:
-            os.close(fd)
 
 
 def remove(task_id: str, lay: Layout | None = None) -> None:

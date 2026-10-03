@@ -212,8 +212,6 @@ class Settings:
     mirror_fetch_max_footprint_mb: int = field(
         default_factory=lambda: int(_env("VALOR_MIRROR_FETCH_MAX_FOOTPRINT_MB", "1024"))
     )
-    # The largest verdict file a fresh session may leave.
-    verdict_max_bytes: int = 256 * 1024
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

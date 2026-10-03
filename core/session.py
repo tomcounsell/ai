@@ -31,8 +31,8 @@ ledger (`tasks.status`).
 """
 
 import hashlib
+import os
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from core import broker, db, git, ledger, machine, runs, signals, tasks, workspace
@@ -121,8 +121,10 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
         return None, str(exc)
     if body is None:
         return None, f"{path} is not committed at HEAD"
-    local = Path(workspace) / path
-    if not local.is_file() or local.read_bytes() != body:
+    local, why = _read_local(workspace, path)
+    if why:
+        return None, f"{path} cannot be read: {why}"
+    if local != body:
         return None, f"{path} has changes not committed"
     return {
         "path": path,
@@ -132,6 +134,18 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
         **counts,
         "scope": list(raw.get("scope") or []),
     }, None
+
+
+def _read_local(ws: str, path: str) -> tuple[bytes | None, str | None]:
+    """The turn's copy of `path`, read without following a link or blocking."""
+    try:
+        root = os.open(ws, workspace.DIR_FLAGS)
+    except OSError as exc:
+        return None, f"the workspace cannot be opened ({exc.strerror})"
+    try:
+        return workspace.read_turn_file(root, path)
+    finally:
+        os.close(root)
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
@@ -179,7 +193,7 @@ def _verdict(
 ) -> tuple[str, dict[str, Any], list[str]]:
     """The turn's verdict in its state, what goes with it, and the signals
     that did not count."""
-    errors: list[str] = []
+    errors: list[str] = list(found.unreadable)
     extra: dict[str, Any] = {}
     meant = {
         State.CLARIFY: ("question", "no_question"),

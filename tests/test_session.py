@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -212,6 +213,55 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert "merge.json: the merge is the kernel's to request" in prompt
     assert state["state"] == "plan" and list(state["effects"].values()) == ["refused"]
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
+
+
+def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-marker")
+    (ws / ".valor").mkdir()
+    (ws / ".valor" / "question.md").symlink_to(outside)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        found = signals.collect(ws, "turn-unreadable")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": "turn-unreadable", "state": "plan"})
+            await ledger.append(conn, task, "turn.ended",
+                                {"turn_id": "turn-unreadable", "outcome": "done", "result": {"session_id": "s"}})  # fmt: skip
+            await session.record(
+                conn, task, "turn-unreadable", found, state=tasks.machine.State.PLAN, workspace=str(ws)
+            )
+            return await ledger.read(conn, task)
+
+    rows = run(go())
+    collected = [r["payload"] for r in rows if r["type"] == "turn.collected"][-1]
+    assert "question.md is a link, not a plain file" in collected["errors"]
+    assert "outside-marker" not in json.dumps([r["payload"] for r in rows])
+
+
+@pytest.mark.parametrize("path", ["docs/plans/p.md", "../outside/fifo"])
+def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_returns_a_reason(tmp_path, path):
+    ws, _ = scripted.workspace(tmp_path)
+    (tmp_path / "outside").mkdir()
+    os.mkfifo(tmp_path / "outside" / "fifo")
+    (ws / "docs" / "plans").mkdir(parents=True)
+    (ws / "docs" / "plans" / "p.md").symlink_to(tmp_path / "outside" / "fifo")
+    git(ws, "add", "docs/plans/p.md")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "plan")
+    got: dict = {}
+
+    def go():
+        got["value"] = session._plan(str(ws), {"path": path, "critique_rounds": 1, "review_rounds": 1})
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "_plan blocked"
+    plan, why = got["value"]
+    assert plan is None and why
+    if path == "docs/plans/p.md":
+        assert why == "docs/plans/p.md cannot be read: docs/plans/p.md is a link, not a plain file"
 
 
 def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():

@@ -19,13 +19,22 @@ Brief by `core/tasks.py`.
 Files rather than a line of final output, because writing a file is a
 deliberate tool call that survives whatever prose follows it, and a turn
 killed mid-way leaves whatever it wrote readable. Each file is moved to
-`.valor/handled/<turn_id>/` once read, so no signal is read twice.
+`.valor/handled/<turn_id>/` and read there, so no signal is read twice.
+
+The turn controls everything under its workspace, so every lookup goes
+through `core.workspace`'s descriptor walk: no link is followed, no FIFO
+blocks, and a file is read only when it is a regular file with one link.
+Anything else is recorded in `unreadable` with a reason, never its
+contents. An entry that cannot be moved is removed unread.
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from core import workspace
 
 DIR = ".valor"
 TEXT_SIGNALS = ("question", "no_question", "done")
@@ -39,49 +48,93 @@ class Signals:
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
 
 
-def collect(workspace: str | Path, turn_id: str) -> Signals:
-    """Read and move aside everything the turn left. An effect file that is
-    not a JSON object comes back with an `error` and no request; so does a
-    `plan.json` that is not one."""
-    root = Path(workspace) / DIR
-    handled = root / "handled" / turn_id
+def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
+    """Move aside, then read, everything the turn left. An effect file that
+    is not a JSON object comes back with an `error` and no request; so does
+    a `plan.json` that is not one. A text signal that cannot be read counts
+    as absent, with its reason in `unreadable`."""
     signals = Signals()
-    for name in TEXT_SIGNALS:
-        path = root / f"{name}.md"
-        if path.is_file():
-            setattr(signals, name, path.read_text().strip() or f"(empty {name}.md)")
-            _move(path, handled / path.name)
-    plan = root / "plan.json"
-    if plan.is_file():
-        try:
-            value = json.loads(plan.read_text())
-            if not isinstance(value, dict):
-                raise TypeError("not a JSON object")
-            signals.plan = value
-        except (ValueError, TypeError) as exc:
-            signals.plan_error = f"plan.json is unreadable: {exc!r}"
-        _move(plan, handled / plan.name)
-    effects = root / "effects"
-    for path in sorted(effects.glob("*.json")) if effects.is_dir() else []:
-        entry: dict[str, Any] = {"file": path.name}
-        try:
-            request = json.loads(path.read_text())
-            if not isinstance(request, dict):
-                raise TypeError("not a JSON object")
-            entry["request"] = {
-                "action_type": str(request["action_type"]),
-                "target": str(request["target"]),
-                "payload": dict(request.get("payload") or {}),
-            }
-        except (ValueError, KeyError, TypeError) as exc:
-            entry["error"] = f"unreadable request: {exc!r}"
-        signals.effects.append(entry)
-        _move(path, handled / "effects" / path.name)
+    try:
+        root = os.open(workspace_dir, workspace.DIR_FLAGS)
+    except FileNotFoundError:
+        return signals
+    except OSError as exc:
+        signals.unreadable.append(f"the workspace is not a plain directory ({exc.strerror})")
+        return signals
+    try:
+        valor, why = workspace.open_turn_dir(root, DIR)
+    finally:
+        os.close(root)
+    if valor is None:
+        if why:
+            signals.unreadable.append(why)
+        return signals
+    try:
+        for name in TEXT_SIGNALS:
+            body, why = _take(valor, f"{name}.md", valor, turn_id)
+            if body is not None:
+                setattr(signals, name, body.decode(errors="replace").strip() or f"(empty {name}.md)")
+            elif why:
+                signals.unreadable.append(why)
+        body, why = _take(valor, "plan.json", valor, turn_id)
+        if body is not None:
+            try:
+                value = json.loads(body)
+                if not isinstance(value, dict):
+                    raise TypeError("not a JSON object")
+                signals.plan = value
+            except (ValueError, TypeError) as exc:
+                signals.plan_error = f"plan.json is unreadable: {exc!r}"
+        elif why:
+            signals.plan_error = f"plan.json is unreadable: {why}"
+        _effects(signals, valor, turn_id)
+    finally:
+        os.close(valor)
     return signals
 
 
-def _move(path: Path, to: Path) -> None:
-    to.parent.mkdir(parents=True, exist_ok=True)
-    path.replace(to)
+def _effects(signals: Signals, valor: int, turn_id: str) -> None:
+    effects, why = workspace.open_turn_dir(valor, "effects")
+    if effects is None:
+        if why:
+            signals.unreadable.append(why)
+        return
+    try:
+        for name in sorted(n for n in os.listdir(effects) if n.endswith(".json")):
+            entry: dict[str, Any] = {"file": name}
+            body, why = _take(effects, name, valor, turn_id, ("effects",))
+            if body is None:
+                entry["error"] = f"unreadable request: {why or 'vanished'}"
+                signals.effects.append(entry)
+                continue
+            try:
+                request = json.loads(body)
+                if not isinstance(request, dict):
+                    raise TypeError("not a JSON object")
+                entry["request"] = {
+                    "action_type": str(request["action_type"]),
+                    "target": str(request["target"]),
+                    "payload": dict(request.get("payload") or {}),
+                }
+            except (ValueError, KeyError, TypeError) as exc:
+                entry["error"] = f"unreadable request: {exc!r}"
+            signals.effects.append(entry)
+    finally:
+        os.close(effects)
+
+
+def _take(
+    src: int, name: str, valor: int, turn_id: str, sub: tuple[str, ...] = ()
+) -> tuple[bytes | None, str | None]:
+    """File `name` away into `handled/<turn_id>/<sub...>/`, then read it
+    there. (None, None) when there is no such entry."""
+    dest, why = workspace._file_away(src, name, valor, turn_id, sub)
+    if dest is None:
+        return None, why
+    try:
+        return workspace.read_turn_file(dest, name)
+    finally:
+        os.close(dest)

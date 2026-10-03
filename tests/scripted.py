@@ -305,8 +305,6 @@ elif act == "dir_symlink":
         p.rmdir()
     v.rmdir()
     v.symlink_to(real.resolve())
-elif act == "big":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
 print(json.dumps({"result": "ok", "session_id": "fresh-session", "is_error": False}))
 """
 

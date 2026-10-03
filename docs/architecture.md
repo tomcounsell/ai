@@ -258,13 +258,20 @@ Critique, review, and docs run in fresh sessions. Prompts per state are in
 [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
-`.valor/` in its workspace, read when the turn ends and then moved to
-`.valor/handled/<turn_id>/`: `question.md` (the task waits for Tom),
+`.valor/` in its workspace, moved when the turn ends to
+`.valor/handled/<turn_id>/` and read there: `question.md` (the task waits for Tom),
 `no_question.md` (clarify found nothing to ask), `plan.json` (the committed
 plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
-layout. `turn.collected` records what the turn left, its state, and its
-verdict; `task.delivered` waits for the checks
+layout. The turn controls these files, so the kernel walks to each one
+relative to directory descriptors, follows no link, never blocks on a
+FIFO, and reads only a regular file with one link; anything else is
+recorded as unreadable with its reason, never its contents, and an entry
+that cannot be moved is removed unread (`core/workspace.py`'s
+`open_turn_dir`, `open_turn_file`, `read_turn_file`). The same walk reads a
+fresh session's verdict from the kernel's checks directory. `turn.collected`
+records what the turn left, its state, its verdict, and what was
+unreadable; `task.delivered` waits for the checks
 ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
 **An answer or feedback is spent only by a turn that finishes.** After a

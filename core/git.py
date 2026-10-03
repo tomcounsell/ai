@@ -56,6 +56,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import time
 from dataclasses import dataclass
@@ -255,12 +256,20 @@ def out(workspace: str | Path, *args: str) -> str:
     return done.stdout.strip()
 
 
+def _plain_dir(path: str | Path) -> bool:
+    """A directory, not a link to one."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def is_repo(workspace: str | Path | None) -> bool:  # raises GitError when no trusted git exists
     """Whether the directory is a git repository; reads nothing the turn
     controls beyond what `git rev-parse` needs to find it."""
     return (
         bool(workspace)
-        and Path(workspace).is_dir()
+        and _plain_dir(workspace)
         and _git(workspace, "rev-parse", "--git-dir").returncode == 0
     )
 
