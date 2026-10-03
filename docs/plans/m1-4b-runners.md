@@ -365,9 +365,9 @@ base's setup runs again to make it, without the suite.
    not rerun it.
 4. `read_junit(check_dir)` reads the file through the same walk as
    `read_verdict` (critique finding 8), lifted into a shared
-   `read_turn_file(dir_fd, relpath, max_bytes)`: each component opened with
+   `read_turn_file(dir_fd, relpath)`: each component opened with
    `O_NOFOLLOW`, the file with `O_NOFOLLOW | O_NONBLOCK`, `fstat` must
-   say `S_ISREG`, at most `settings.junit_max_bytes` (default 50 MB). So a
+   say `S_ISREG` with one link and no holes. So a
    FIFO, a socket, a link, or a device at the path is refused without
    blocking. A file holding a `DOCTYPE` is refused; the rest is parsed
    with `xml.etree.ElementTree`. Any refusal is "no per-test result",

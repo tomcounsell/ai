@@ -274,8 +274,7 @@ What the kernel must never do:
   reads Tom's own `~/.claude`.
 - **When.** In `runs.run_turn`, after `reap` (no process of the turn is
   left to write) and before `turn.ended`, in a worker thread.
-- **How it reads.** 1.4b leaves `read_turn_file(dir_fd, relpath,
-  max_bytes)` in `core/workspace.py`, the no-follow component walk of
+- **How it reads.** 1.4b leaves `read_turn_file(dir_fd, relpath)` in `core/workspace.py`, the no-follow component walk of
   `read_verdict`; transcripts reuse its walk. Each component is opened
   with `O_NOFOLLOW`, the final file must be regular, and the subagent
   directory is listed through its own descriptor, taking only regular

@@ -186,7 +186,7 @@ critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
 verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
-`.valor/verdict.json`, read without following links or blocking. Review and
+`.valor/verdict.json`, moved to `.valor/handled/<turn_id>/` and read there by the same walk as the signals. Review and
 docs follow in milestone 1.4.
 
 Each prompt is followed by what did not count from the previous turn
@@ -242,8 +242,16 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
-`core.signals.collect` reads them, then moves each to
-`.valor/handled/<turn_id>/`, so no signal is read twice. An effect file that
+`core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
+it there, so no signal is read twice. The turn controls these files, so the
+kernel reaches each one relative to directory descriptors (`core/workspace.py`:
+`open_turn_dir`, `open_turn_file`, `read_turn_file`), follows no link, never
+blocks on a FIFO, and reads only a regular file with one link and no holes. A
+sparse file claims a size the turn never wrote, so it is refused. Anything
+else, a directory under a signal's name included, goes to `Signals.unreadable`
+with its reason and never its contents, and an entry that cannot be moved is
+removed unread. The read runs in a worker thread, off the router's event
+loop. An effect file that
 is not a JSON object with `action_type` and `target` is recorded with an
 error and no request. Everything a turn left is one `turn.collected` row
 with the state it ran in and its verdict; a question takes precedence over
