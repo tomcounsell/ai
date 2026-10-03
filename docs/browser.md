@@ -5,8 +5,8 @@ never a gate.
 
 **`look`.** The workspace's `bin/` holds `look`, a shell script written there
 at each provisioning (to a temporary name, then renamed). `look URL [NAME]
-[--size WxH] [--wait MS]` takes `--size` only as two integers joined by `x`
-(anything else is refused) and asks `/usr/bin/curl` for the page's status first and
+[--size WxH] [--wait MS]` takes `--size` only as two positive integers joined by
+`x` (anything else, a zero included, is refused) and asks `/usr/bin/curl` for the page's status first and
 exits non-zero when nothing answers; on a 5xx it still renders and keeps the
 page, prints the status, and exits non-zero. The browser itself exits 0 on
 its own error page. It then runs Playwright's
