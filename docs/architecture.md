@@ -473,7 +473,7 @@ Tom's decision.
 **Verify by use.** No run in either experiment looked at a UI result in a
 browser (rebuild-baseline.md, Browser use). A headless browser in the
 workspace (`look`) is a capability for Mission item 1 ("testing actual use"),
-specified in [harnesses.md](harnesses.md).
+specified in [browser.md](browser.md).
 
 ## The objective tree
 
