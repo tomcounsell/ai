@@ -104,7 +104,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/spending.py` | `gateway.opened` | `call_id`, `turn_id`, model, `route`, estimate (`usd_micros` worst case, estimated input, `max_tokens`). A judgement call's (written through `core/judgement.py`) has `turn_id` null and `route: judgement`, and adds `judgement_id`, site, leg. Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the folds read as this row | Metered spending: every call is on the ledger |
 | `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
 | `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |
-| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
+| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched text whole, `brief_sha256`, `persona_sha256`, `persona_bytes`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend (the numeric sum of the turn's charges) | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
 | `core/runs.py` | `turn.started` (fresh) | as any `turn.started`, plus `fresh: true` and the stage; the fold never resumes its session | Independent checks |
@@ -298,14 +298,15 @@ mutable status column.
 
 ## Rendering at turn time
 
-The Brief a turn receives is rendered from the store as the turn starts,
-never carried over from an earlier turn. `core/tasks.py`, `dispatch`,
-reads the task document and every correction in force from the
-`corrections` stream and renders one text: the task's commitments, the
+The text a turn receives is rendered as the turn starts, never carried
+over from an earlier turn. `core/tasks.py`, `dispatch`, renders the
+persona from `persona/`, reads the task document and every correction in
+force from the `corrections` stream, and renders one text: the persona,
+the task's commitments, the
 corrections in the order Tom gave them with their provenance, and the
 `.valor/` protocol a turn uses to reach Tom. `core/runs.py` records that
-text whole in `turn.started`, with its SHA-256 and the correction numbers
-it carried, under the task's lock, before the harness starts.
+text whole in `turn.started`, with its SHA-256, the persona's SHA-256 and
+size, and the correction numbers it carried, under the task's lock, before the harness starts.
 
 Serves the constraint that corrections reach every session and agent. A
 correction recorded now reaches the next turn of every task, including

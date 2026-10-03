@@ -69,14 +69,15 @@ the task starts:
 | `harness` | the harness's settings for the task, its isolation included |
 | `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
-The Brief a turn receives is **dispatched**: rendered from the ledger as the
-turn starts, carrying the task's commitments, every correction in force, the
+The text a turn receives is **dispatched**: rendered as the turn starts,
+the persona first (`persona/`, read from the kernel's own checkout), then
+the Brief, carrying the task's commitments, every correction in force, the
 signal channel (how the turn reaches Tom, listing the effects the registered
 performers offer), and the stage file for the state the turn runs in
 (`skills/sdlc/<state>.md`); a fresh session gets the verdict channel
 (`skills/sdlc/verdict.md`) instead. `turn.started` records the dispatched
-text whole, its SHA-256, and the correction numbers it carried, so what a
-turn was told is a lookup.
+text whole, its SHA-256, the persona's SHA-256 and size, and the correction
+numbers it carried, so what a turn was told is a lookup.
 
 **State.** A task's state is the SDLC state machine's, folded from its
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
@@ -288,7 +289,7 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway (`route: gateway` or `openai`); the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage; on the OpenAI route the credential, tier, tool calls, and request id | yes |
-| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record, but

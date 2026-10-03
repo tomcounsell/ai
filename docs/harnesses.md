@@ -30,10 +30,10 @@ The port is one value, `TurnCommand`, built fresh for each turn:
 | `parse` | reads the harness's stdout into the fields the ledger keeps |
 
 A wrapper supplies a builder. The kernel calls it with three values only it
-knows at that moment: the gateway base URL issued for this turn, the Brief
-rendered from the ledger as the turn starts (corrections included), and the
+knows at that moment: the gateway base URL issued for this turn, the dispatched
+text rendered as the turn starts (persona, Brief, corrections), and the
 turn's id. The builder returns the `TurnCommand`. The kernel records the argv
-and the Brief whole in `turn.started`, so the ledger shows exactly what the
+and the text whole in `turn.started`, so the ledger shows exactly what the
 turn was given, then runs the command.
 
 `parse` returns at least `text`, `is_error`, and `session_id`, and may
@@ -77,11 +77,10 @@ turn takes is `docs/machine.md`'s to state.
 `harnesses/claude_code.py` builds two kinds of turn.
 
 **`turn`** is one self-contained call: no tools by default, no session
-persistence, a system prompt of the persona followed by the Brief. The live
-tests use it. It copies the kernel's environment minus Claude Code's own
-variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no
-sandbox profile, so it can read whatever Tom's user can, the kernel's
-password file included; it must not be given tools without one.
+persistence, a system prompt of the dispatched text (persona, then Brief).
+The live tests use it. It copies the kernel's environment minus Claude Code's
+own variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no sandbox profile, so it can read whatever Tom's user can, the
+kernel's password file included; it must not be given tools without one.
 
 **`workspace_turn`** is one turn of a task that works in a directory, and is
 what a real task runs. Its arguments:
@@ -93,7 +92,7 @@ what a real task runs. Its arguments:
 | `--strict-mcp-config` | no MCP servers | bounded authority; least privilege [11] |
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--disallowedTools WebFetch WebSearch` | no web tools | independent checks: a replay cannot fetch its own answer (rebuild-baseline.md, Caveats); retrieved pages carry no instructions into the turn [7] |
-| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the persona and the Brief, re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
+| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
 | `--resume SESSION` | continues the task's session | Mission item 1 (see below) |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
 
@@ -137,9 +136,9 @@ GATEWAY_PORT=<port> -D VALOR_TURN=<turn id> -f <profile>`.
 `is_error`, `num_turns`, `total_cost_usd` (as `harness_reported_usd`), and
 `session_id` are kept. Unparseable output is kept as its last 400 bytes.
 
-The persona passed in is the one identity of `docs/persona.md`; the current
-composition root passes only "You are Valor." ahead of the Brief, and
-rendering the full persona into every turn is part of the design.
+The persona is not a harness parameter. `core/tasks.py`, `dispatch`, renders
+the one identity of `docs/persona.md` at the head of the dispatched text;
+the harness passes that text through byte for byte as `turn.started` records it.
 
 ## A task's turns and session resume
 

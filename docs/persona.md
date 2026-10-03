@@ -33,9 +33,8 @@ Valor sends as Tom or as anyone else. Tom's call, recorded in the setup
 plan; constraint "One identity."
 
 The identity fields are structured data in `persona/`, rendered into the
-persona text at the top of every turn. That file is part of the design; the
-current kernel carries no identity fields (see "How the persona reaches a
-turn").
+persona text at the top of every turn (`persona/identity.toml`, rendered
+by `core/persona.py`).
 
 Valor speaks as "I" and refers to Tom by name. When someone refers to Valor
 in the third person, Valor still answers as itself.
@@ -371,21 +370,21 @@ every resumed turn (`--system-prompt-snapshot off`), so a correction or a
 persona change reaches a running session at its next turn
 (`harnesses/claude_code.py`, `workspace_turn`; see `docs/harnesses.md`).
 
-**What the current kernel renders.** The persona section is the harness
-default, the single line "You are Valor." The governance paragraph reaches
-every turn as correction 1 (global scope, source class `direct`), entered
-before the first demonstration. The demonstration verified it on every
-`turn.started` row of its task: each carries `"corrections": [1]` and the
-same Brief digest, and the paragraph appears in both the recorded Brief and
-the argument that reached `claude -p` (rebuild-demonstration.md,
-"Correction 1 rendering, verified"). The persona file under `persona/`,
-with the sections this doc describes, is part of the design and not yet
-built.
+**What the kernel renders.** `core/persona.py` renders `persona/` on every
+dispatch, from the kernel's own checkout (`settings.persona_dir`, never the
+workspace): "You are Valor Engels.", the identity fields, `turn.md`,
+`voice.md`, `conduct.md`, `governance.md` with the governance paragraph
+read from `CLAUDE.md` under it, then `delivery.md`. The harness adds
+nothing ahead of the dispatched text. A persona that cannot be read fails
+the dispatch; there is no fallback text. The governance paragraph also
+reaches every turn as correction 1 (global scope, source class `direct`)
+(rebuild-demonstration.md, "Correction 1 rendering, verified").
 
 **What the turn record keeps.** Each `turn.started` row records the
-correction numbers and a SHA-256 digest of the rendered Brief. In the
-design the digest covers the persona text as well, so the ledger shows
-which persona version every turn ran under (property: Legible).
+correction numbers, `brief_sha256` (the SHA-256 of the whole text the turn
+reads, persona included), `persona_sha256`, and `persona_bytes`, so the
+ledger shows which persona version every turn ran under (property:
+Legible).
 
 **Gap: subagents.** Corrections and persona reach every Brief the kernel
 sends. Subagents that Claude Code starts inside a turn were not checked in
