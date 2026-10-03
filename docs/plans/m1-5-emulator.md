@@ -610,7 +610,14 @@ fixed in code, no guard added.
    (the record names the diff's size and truncation, no exclusion);
    checked against `judge.py`'s result fields.
 
-Suite on the rebased head: 669 passed, 8 skipped, one port-race failure
-(`test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other`)
-that passes alone. Ruff check clean; format check flags only
+Rebase onto 3c and 4.2: `core/workspace.py` keeps both sides (the
+trusted git's directory on `PATH` beside `VALOR_BROWSER`; provisioning
+writes `mktemp` and installs `look`). 3c's cache test made its fake home
+under pytest's temp directory, which a turn's profile now denies whole;
+it reads the real home's Playwright cache and tries to write a probe into
+its fixed build instead (`test_the_browser_is_the_fixed_build_and_a_turn_cannot_write_its_cache`).
+
+Suite on the rebased head: 739 passed, 11 skipped; the cache test above
+failed before its fix, and the 16 GB sweep test failed once under load
+and passes alone. Ruff check clean; format check flags only
 `docs/bridges/telegram.md` and the 2.1 plan.

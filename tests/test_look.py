@@ -248,21 +248,27 @@ def test_provisioning_writes_look_into_the_shared_bin_and_hands_it_the_browser(t
     assert harness["env"]["PATH"].startswith(str(lay.root.parent / "bin") + ":")
 
 
+@needs_browser
 def test_the_browser_is_the_fixed_build_and_a_turn_cannot_write_its_cache(tmp_path):
+    """Under the real home's cache: a test home would sit in the shared temp
+    directories, which a turn's profile denies whole."""
     assert "chromium_headless_shell-1208" in settings.browser
     assert "newest" not in settings.browser
     lay, _ = provision(tmp_path)
-    home = tmp_path / "home"
-    cache = home / "Library" / "Caches" / "ms-playwright" / "chromium_headless_shell-9999"
-    cache.mkdir(parents=True)
+    cache = kws.HOME / "Library" / "Caches" / "ms-playwright"
+    build = next(p for p in Path(settings.browser).parents if p.parent == cache)
+    probe = build / f"valor-probe-{lay.root.name}"
     profile = lay.profiles / "probe.sb"
-    profile.write_text(kws.turn_profile(lay, [], home=home))
-    done = subprocess.run(
-        kws.sandboxed(profile, "probe", "/bin/sh", "-c",
-                      f"ls {cache.parent} >/dev/null && echo read; "
-                      f"touch {cache}/chrome 2>/dev/null && echo wrote || echo denied"),
-        capture_output=True, text=True, check=False,
-    )  # fmt: skip
+    profile.write_text(kws.turn_profile(lay, []))
+    try:
+        done = subprocess.run(
+            kws.sandboxed(profile, "probe", "/bin/sh", "-c",
+                          f"ls {cache} >/dev/null && echo read; "
+                          f"touch {probe} 2>/dev/null && echo wrote || echo denied"),
+            capture_output=True, text=True, check=False,
+        )  # fmt: skip
+    finally:
+        probe.unlink(missing_ok=True)
     assert done.stdout.split() == ["read", "denied"], done.stderr
 
 
