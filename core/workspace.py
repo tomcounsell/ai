@@ -95,6 +95,7 @@ HOME_WRITE_DENIED = (
     ".local/share/claude",
     ".claude",
     ".config/git",
+    "Library/Caches/ms-playwright",
 )
 HOME_WRITE_DENIED_FILES = (
     ".zshrc",
@@ -564,6 +565,7 @@ def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[
     bin_dir = lay.root.parent / "bin"
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "VALOR_BROWSER": settings.browser,
         "UV_CACHE_DIR": str(lay.cache / "uv"),
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
         "npm_config_cache": str(lay.cache / "npm"),
@@ -600,6 +602,20 @@ def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[
     return env
 
 
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+WORKSPACE_TOOLS = ("look",)
+
+
+def _install_tools(bin_dir: Path) -> None:
+    """Write each workspace tool into the shared `bin/`, to a temporary name
+    and renamed over, so a running turn never runs a half-written script."""
+    for name in WORKSPACE_TOOLS:
+        tmp = bin_dir / f".{name}.{os.getpid()}.tmp"
+        shutil.copyfile(TOOLS_DIR / name, tmp)
+        tmp.chmod(0o755)
+        tmp.replace(bin_dir / name)
+
+
 def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | None = None,
               source: str | None = None, work: Path | None = None) -> Provisioned:  # fmt: skip
     """Build the task's workspace. Anything that fails removes what was
@@ -629,6 +645,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
               lay.work_state / "claude", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
     (lay.root.parent / "bin").mkdir(exist_ok=True)
+    _install_tools(lay.root.parent / "bin")
     # The clone: history up to the base only, no tags, one work branch.
     ref = f"refs/heads/valor-base/{task_id}"
     git.trusted(cache, "update-ref", ref, base_sha)

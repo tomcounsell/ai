@@ -558,19 +558,49 @@ merged only) stops the services, deletes the directory, and frees the ports.
 Serves Mission item 1 ("testing actual use"). A capability for the turn,
 never a gate.
 
-**Gap.** No run used a browser. Valor never looked at the demonstration's
-banner in a browser in any round and said so each time
-(rebuild-demonstration.md, What was delivered), and no baseline run looked at
-a page, including the two UI items (rebuild-baseline.md, Browser use). The
-workspace has what the app needs to run (its own database, dev ports 8000 to
-8009 open for binding), and nothing to look at it with.
+**`look`.** The workspace's `bin/` holds `look`, a shell script written there
+at each provisioning (to a temporary name, then renamed). `look URL [NAME]
+[--size WxH] [--wait MS]` asks `/usr/bin/curl` for the page's status first and
+exits non-zero when nothing answers or the status is 5xx, since the browser
+itself exits 0 on its own error page. It then runs Playwright's
+`chrome-headless-shell` twice, once for the screenshot and once for the
+serialized DOM, and writes `.valor/screens/NAME.png` and
+`.valor/screens/NAME.html` in the clone. `.valor/` is excluded from commits, so
+screens never enter one. Interaction (clicks, forms, logins) is not part of it.
 
-The design adds a headless browser the turn drives against the dev server on
-a dev port, with screenshots written into the run directory and named in
-`done.md`. Unmeasured: whether a headless Chromium runs under the turn's
-sandbox-exec profile (it brings a sandbox of its own), and its RAM on the
-16 GB machine, which `docs/machine.md` has to plan for. The emulator can score
-it on the UI items (#894, #872, #893) once it exists.
+**The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
+`chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
+newest in the cache. Every turn profile denies writes to that cache, since
+the user's own Playwright runs outside any sandbox read it. A turn that
+installs Playwright into its own project sets `PLAYWRIGHT_BROWSERS_PATH` to
+its task cache.
+
+**Sandbox.** Chromium's own sandbox cannot start inside a turn's sandbox-exec
+profile: the GPU process exits with "sandbox initialization failed: Operation
+not permitted" and the browser aborts. `look` runs it with `--no-sandbox`.
+That is acceptable because the turn's profile already bounds the process:
+outbound internet and mach services are open to the turn anyway, loopback is
+limited to the dev ports, the gateway, and service ports, and the turn can
+load any page with its other tools. No profile line changes for the browser.
+Under a fresh session's profile, which denies `/private/tmp` and
+`/private/var/folders`, `look` runs with its user data directory under the
+session's own tmp.
+
+**What the kernel records.** When it collects a turn, the kernel opens
+`.valor/screens/` and each file in it by directory descriptor, never following
+a link or blocking, and adds `screens` to `turn.collected`: `{name, bytes,
+sha256}` for a regular file with one link, `{name, refused}` for anything else
+(a link, a hard link, a FIFO, a directory), which it never reads. Each entry
+is then moved to `.valor/handled/<turn_id>/screens/`, so a later turn does not
+record it again; `done.md` names a screen by its original name. The digest
+shows whether a screen was edited afterward; it does not make the image true.
+Screens are evidence, never a gate: nothing requires one and no check reads
+one.
+
+**Memory.** Peak resident memory of the browser's process tree over five
+renders of a Django admin login page: 330 to 372 MB (`docs/machine.md`).
+
+The emulator can score the UI items (#894, #872, #893) once it exists.
 
 ## Further harnesses: Codex and Pi
 

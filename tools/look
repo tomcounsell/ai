@@ -1,0 +1,67 @@
+#!/bin/sh
+# look URL [NAME] [--size WxH] [--wait MS]
+#
+# Opens URL in a headless browser and keeps what it saw in the current
+# clone: .valor/screens/NAME.png (a screenshot) and .valor/screens/NAME.html
+# (the page's DOM after its scripts ran). Prints the two paths and the HTTP
+# status; exits non-zero when nothing answered or the page is a 5xx.
+#
+# The browser is $VALOR_BROWSER. It runs with --no-sandbox: Chromium's own
+# sandbox adds nothing inside the turn's sandbox-exec profile, which already
+# bounds the process, and the turn can load any page with its other tools.
+set -u
+
+die() { echo "look: $*" >&2; exit "${2:-2}"; }
+
+url=""; name=""; size="1280x800"; wait_ms=3000
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --size) [ $# -ge 2 ] || die "--size needs WxH"; size="$2"; shift 2 ;;
+    --wait) [ $# -ge 2 ] || die "--wait needs milliseconds"; wait_ms="$2"; shift 2 ;;
+    -*) die "unknown option $1" ;;
+    *) if [ -z "$url" ]; then url="$1"; elif [ -z "$name" ]; then name="$1"; else die "too many arguments"; fi; shift ;;
+  esac
+done
+[ -n "$url" ] || die "usage: look URL [NAME] [--size WxH] [--wait MS]"
+[ -n "$name" ] || name=$(date +%Y%m%d-%H%M%S)
+case "$name" in
+  ""|.*|*/*|*..*) die "NAME must be a plain file name: $name" ;;
+esac
+case "$size" in
+  [0-9]*x[0-9]*) ;;
+  *) die "--size must be WxH" ;;
+esac
+case "$wait_ms" in
+  ""|*[!0-9]*) die "--wait must be a number of milliseconds" ;;
+esac
+
+browser="${VALOR_BROWSER:-}"
+[ -n "$browser" ] || die "VALOR_BROWSER is not set; no browser is configured"
+[ -x "$browser" ] || die "the browser is missing or not executable: $browser"
+
+status=$(/usr/bin/curl -s -o /dev/null -m 10 -w '%{http_code}' "$url")
+case "$status" in
+  000) die "nothing answered at $url" 3 ;;
+  5??) die "$url answered $status" 3 ;;
+esac
+
+dir=".valor/screens"
+mkdir -p "$dir" || die "cannot make $dir"
+data="${TMPDIR:-/tmp}/look-profile.$$"
+trap 'rm -rf "$data"' EXIT
+flags="--headless --no-sandbox --no-first-run --no-default-browser-check --disable-extensions
+  --disable-gpu --hide-scrollbars --window-size=${size%x*},${size#*x} --virtual-time-budget=$wait_ms
+  --user-data-dir=$data"
+
+# The two outputs come from two runs: the flags are not honoured together.
+# shellcheck disable=SC2086
+"$browser" $flags --screenshot="$dir/$name.png" "$url" >/dev/null 2>"$data.err" \
+  || { cat "$data.err" >&2; rm -f "$data.err"; die "the browser failed taking the screenshot" 4; }
+# shellcheck disable=SC2086
+"$browser" $flags --dump-dom "$url" >"$dir/$name.html" 2>"$data.err" \
+  || { cat "$data.err" >&2; rm -f "$data.err"; die "the browser failed dumping the page" 4; }
+rm -f "$data.err"
+
+echo "$dir/$name.png"
+echo "$dir/$name.html"
+echo "status $status"

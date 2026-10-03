@@ -71,7 +71,7 @@ The kernel starts and stops these; launchd never does.
 | The workspace cluster | A Postgres cluster of the workspace's own, separate from the machine cluster, for the app's tests | Constraint "a ledger the system cannot edit": a turn's tests never share a cluster with the kernel's ledger (rebuild-demonstration.md, Kernel findings 1) | Fresh: 36 MB, as above. The replay series' workspace cluster after every run's test suites: 352 MB summed (383 MB RSS), of which the checkpointer and background writer each count the touched shared buffers | 400 MB |
 | A Redis per run | Only when the project under work needs Redis for its tests | Mission item 1 | An idle `redis-server`: 2 MB RSS | 50 MB |
 | One Apple container | Work that needs a VM boundary rather than a process sandbox (see Sandboxes) | Constraint "bounded authority, metered spending" | Not measured for memory. Boot about 1 s, an exec 65 to 110 ms, a write 45 ms, a read 30 ms, destroy 1.5 s with a one-second grace, export of a 285 MB root filesystem 2.4 to 14.6 s, on apple/container 1.4.1 | 1,024 MB (estimate: the VM's default allocation) |
-| A headless browser | When a turn opens the app it built to look at it | Mission item 1 ("testing actual use"); rebuild-demonstration.md, Recommendations; rebuild-baseline.md, Browser use | Not measured | 600 MB (estimate) |
+| A headless browser | When a turn opens the app it built to look at it | Mission item 1 ("testing actual use"); rebuild-demonstration.md, Recommendations; rebuild-baseline.md, Browser use | One page of a Django app's admin login, rendered by `look` (a screenshot run and a page-dump run), five times: peak resident memory of the browser's process tree 372, 343, 344, 330, and 343 MB, summed per process by `ps` so shared pages count more than once | 372 MB |
 | The dashboard (`ui/`) | When Tom opens it | Mission item 6 (the attention log is readable without asking) | Not measured | 100 MB (estimate) |
 | A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's line: a routine's turn takes the turn slot like any other |
 | Judgement calls | Every classification, routing, and cheap check | The three-tier constraint: judgement is hosted | HTTP from the kernel process; no local model | Included in the kernel process |
@@ -107,9 +107,9 @@ that, which is why it is stopped rather than left up.
 | Workspace cluster | 400 |
 | Redis per run | 50 |
 | One Apple container | 1,024 |
-| Headless browser | 600 |
+| Headless browser | 372 |
 | Dashboard | 100 |
-| **Peak with everything on demand running at once** | **10,430** |
+| **Peak with everything on demand running at once** | **10,202** |
 | **Left of 16,384** | **about 6,000** |
 
 The 6 GB left is file cache and memory compression. The machine is
@@ -379,4 +379,3 @@ Each estimate above is a gap until measured on the Air:
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
 - An Apple container's real memory cost at its default allocation.
-- A headless browser rendering one page of a workspace app.
