@@ -581,3 +581,36 @@ Tom, on one more patch round for nine deliveries with the scopes and order put t
 Scope: the Delivery's recommendation (both `mktemp` forms with tests, cite 2.1.286, one source for `JUDGE_MODEL`, the error-text cuts dropped, the emulator doc's judge line).
 
 Question 1, the answer keys: Tom ruled the same day that technical calls are Valor's, never raised to him by default. The keys stand as written, with the inferred lines in the sidecar.
+
+## Patch round 2
+
+The Delivery's recommendation, as Tom's feedback scoped it; each finding
+fixed in code, no guard added.
+
+1. **`mktemp` forms.** The `mktemp` in `bin/` reads its arguments as
+   `/usr/bin/mktemp`'s getopt_long does: `-t` and `-p` take the rest of
+   their word or the next one (`-tapp`, `-dtout`, `-t -p`), `--` ends the
+   options so what follows is a template, options may follow a template,
+   and `--tmpdir` may be cut (`--tmp`). Only a call with no directory and
+   no template gets `-p "$TMPDIR"`. Test:
+   `test_mktemp_in_a_turn_reads_its_arguments_as_mktemp_does`, under the
+   real turn profile; it fails on the round 1 shim.
+2. **2.1.286, one source.** `JUDGE_MODEL` is the id Claude Code 2.1.286's
+   baked catalog gives `sonnet` for the first party, `claude-sonnet-5-5`
+   (read from the 2.1.286 binary on this Mac). `judge.py`,
+   `docs/emulator.md`, the Design line, rollout step 2 and the decided doc
+   name that catalog alone; the live probe is gone from the plan.
+3. **Error-text cuts.** A failed `core run` keeps its whole error in the
+   log and in `paused`; before, `paused` held only the first line, the
+   command, not why it failed. Test:
+   `test_a_core_run_that_fails_keeps_its_whole_error`; it fails on the
+   round 1 code. The `said` line's 2,000 is the baseline's
+   (5d90b4776:scripts/replay.py:304) and stays.
+4. **The emulator doc's judge line.** Already fixed on the docs branch
+   (the record names the diff's size and truncation, no exclusion);
+   checked against `judge.py`'s result fields.
+
+Suite on the rebased head: 669 passed, 8 skipped, one port-race failure
+(`test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other`)
+that passes alone. Ruff check clean; format check flags only
+`docs/bridges/telegram.md` and the 2.1 plan.
