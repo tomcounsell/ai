@@ -1,25 +1,22 @@
 # The judgement layer
 
-The judgement layer is the middle of Valor's three tiers. The kernel holds
-authority, frontier agents do the hard work, and judgement answers the cheap,
-closed questions in between: what kind of message is this, is this request
-thin, does this diff add a gate. A judgement call returns, per question, a
-probability for each label of a closed set. It never returns prose, never
-grants or refuses anything, and never grades frontier work for acceptance.
+The judgement layer is the middle of Valor's three tiers. The kernel holds authority, frontier
+agents do the hard work, and judgement answers the cheap, closed questions in between: what kind of
+message is this, is this request thin, does this diff add a gate. A judgement call returns, per
+question, a probability for each label of a closed set. It never returns prose, never grants or
+refuses anything, and never grades frontier work for acceptance.
 
-The tier exists for two reasons. Money (Mission item 6): a closed question
-answered by a frontier model costs dollars where a judgement call costs a
-fraction of a cent. Authority (constraint "Bounded authority, metered spending"): a
-classifier decides what a thing is; the kernel decides what it may do. The
-layer is built so that the second sentence holds by structure.
+The tier exists for two reasons. Money (Mission item 6): a closed question answered by a frontier
+model costs dollars where a judgement call costs a fraction of a cent. Authority (constraint
+"Bounded authority, metered spending"): a classifier decides what a thing is; the kernel decides
+what it may do. The layer is built so that the second sentence holds by structure.
 
-Status. Built: the port, router, and gate (`core/judgement.py`); the legs
-(`tools/jev.py`, `tools/open_weight.py`); the three tasks
-(`core/judgement_tasks.py`); the judge runner and the breadth and
-governance calls (`core/judgement_sites.py`); metering; and `python -m core
-calibrate`. No runner calls breadth or governance; the test, review, and
-docs runners that do are 1.4's. The images leg, live scoring, and use shapes 2 to 5, 7, 9, and 10
-are design, and each section says which.
+Status. Built: the port, router, and gate (`core/judgement.py`); the legs (`tools/jev.py`,
+`tools/open_weight.py`); the three tasks (`core/judgement_tasks.py`); the judge runner and the
+breadth and governance calls (`core/judgement_sites.py`); metering; and `python -m core calibrate`.
+No runner calls breadth or governance; the test, review, and docs runners that do are 1.4's. The
+images leg, live scoring, and use shapes 2 to 5, 7, 9, and 10 are design, and each section says
+which.
 
 ## Terms
 
@@ -35,17 +32,17 @@ are design, and each section says which.
 | use shape | One of the ten kinds of question the tier answers, listed below |
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
-"Judgement" is the vendor-neutral name for the tier, the port, and the calls.
-TypeSafe's Jev is the primary leg, and OpenAI's Decisions API is the design
-for judgements that need images, which Jev does not take (Tom, 2026-10-01;
-[Decisions API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)).
-Any of them can sit behind the port without a change to any caller.
+"Judgement" is the vendor-neutral name for the tier, the port, and the calls. TypeSafe's Jev is the
+primary leg, and OpenAI's Decisions API is the design for judgements that need images, which Jev
+does not take (Tom, 2026-10-01; [Decisions
+API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)). Any of
+them can sit behind the port without a change to any caller.
 
 ## The boundary with the kernel
 
-The kernel turns a judgement into an action through a fixed table in kernel
-code. The judgement supplies a label; the table supplies the consequence.
-Serves: constraint "Bounded authority, metered spending".
+The kernel turns a judgement into an action through a fixed table in kernel code. The judgement
+supplies a label; the table supplies the consequence. Serves: constraint "Bounded authority, metered
+spending".
 
 - No judgement changes an effect ceiling, a `governance_grant`, or
   an approval. Those are kernel facts, and Tom is the only source of the last
@@ -78,11 +75,10 @@ hand.
 
 ## Task taxonomy
 
-Every judgement call site declares one judgement task. The declaration is
-the only per-site choice; nothing about a site is configured elsewhere.
-Serves: Mission item 6 (a site's cost and its error cost are visible in one
-place) and constraint "Bounded authority, metered spending" (the consumer table is
-next to the question, so a reader sees what a label can and cannot cause).
+Every judgement call site declares one judgement task. The declaration is the only per-site choice;
+nothing about a site is configured elsewhere. Serves: Mission item 6 (a site's cost and its error
+cost are visible in one place) and constraint "Bounded authority, metered spending" (the consumer
+table is next to the question, so a reader sees what a label can and cannot cause).
 
 | Field | Meaning |
 |---|---|
@@ -102,10 +98,9 @@ The three tasks (judge, breadth, governance) are declared in
 `core/judgement_tasks.py`, as `TASKS`. One module, literal declarations, no
 discovery, so a reader and a test see the same list.
 
-Two populations are kept apart by tier, not by a field. A call that returns
-one of a closed set of labels is a judgement. A call that returns prose,
-extracts structure, or summarizes is agent work, runs on a frontier model
-inside a task, and is out of this layer.
+Two populations are kept apart by tier, not by a field. A call that returns one of a closed set of
+labels is a judgement. A call that returns prose, extracts structure, or summarizes is agent work,
+runs on a frontier model inside a task, and is out of this layer.
 
 Error-cost tiers set the landing bar (see "Calibration discipline"):
 
@@ -117,9 +112,9 @@ Error-cost tiers set the landing bar (see "Calibration discipline"):
 
 ## The router
 
-The router (`judgement.route`) is a pure function naming a task's primary
-and fallback legs. Serves: constraint "16 GB of RAM" (no resident model)
-and Mission item 6 (a failed vendor call does not become a frontier call).
+The router (`judgement.route`) is a pure function naming a task's primary and fallback legs. Serves:
+constraint "16 GB of RAM" (no resident model) and Mission item 6 (a failed vendor call does not
+become a frontier call).
 
 1. Every judgement task routes to the primary leg, Jev, with the
    open-weight leg as its fallback. A task that takes images raises
@@ -133,25 +128,36 @@ and Mission item 6 (a failed vendor call does not become a frontier call).
    because a fallback that costs a hundred times the primary would turn a
    vendor outage into a spending event.
 
-No leg runs resident on the Mac: 16 GB beside Postgres, one container
-runtime, one `claude -p`, and the bridges leaves no room for a classifier
-worth running (`docs/machine.md`). Tom asked for the primary's own
-open-weight model on a second provider (2026-10-01), but Jev's underlying
-model is not published, so the fallback is a model chosen for the job:
-Qwen3-235B-A22B Instruct 2507 (open weights, no reasoning tokens), hosted
-by Parasail at fp8 through OpenRouter with provider fallback off. It is
-an assumed answer that Tom can reverse (`docs/plans/m1-3-judgement.md`).
+No leg runs resident on the Mac: 16 GB beside Postgres, one container runtime, one `claude -p`, and
+the bridges leaves no room for a classifier worth running (`docs/machine.md`). Tom asked for the
+primary's own open-weight model on a second provider (2026-10-01), but Jev's underlying model is not
+published, so the fallback is a model chosen for the job: Qwen3-235B-A22B Instruct 2507 (open
+weights, no reasoning tokens), hosted by Parasail at fp8 through OpenRouter with provider fallback
+off. It is an assumed answer that Tom can reverse (`docs/plans/m1-3-judgement.md`).
 
 Models are pinned by exact version on both legs (`core/settings.py`):
 
-| Leg | Pinned model on the row | Endpoint setting | Timeout | Input cap |
+| Leg | Pinned model on the row | Endpoint setting | Timeout | Input limit |
 |---|---|---|---|---|
 | primary | `jev-1.13.0` | `VALOR_JEV_URL`, default TypeSafe's `/v1/systemone` | 10 s | 30,000 estimated tokens |
-| fallback | `qwen/qwen3-235b-a22b-2507@parasail/fp8` | `VALOR_OPEN_WEIGHT_URL`, default OpenRouter's chat completions | 30 s | 100,000 estimated tokens, 400 output |
+| fallback | `qwen/qwen3-235b-a22b-2507@parasail/fp8` | `VALOR_OPEN_WEIGHT_URL`, default OpenRouter's chat completions | 30 s | 131,072 estimated tokens, the endpoint's context; no output limit is sent |
 
-An answer naming another model or provider is `malformed`. A version
-change is a new calibration record. One call is one attempt; the fallback
-is the retry.
+An answer naming another model or provider is `malformed`. A version change is a new calibration
+record. One call is one attempt; the fallback is the retry.
+
+The fallback's input limit and its largest answer are the pinned
+endpoint's own, as OpenRouter lists them for it (`OPEN_WEIGHT_CONTEXT`
+131,072 and `OPEN_WEIGHT_MAX_COMPLETION` 117,964 in `core/settings.py`,
+with the day they were checked). An input the endpoint cannot hold is one
+the host refuses, so it is skipped as `input_too_large`. The body sends no
+`max_tokens`, so the host's own completion limit applies and an answer is
+never cut short by a figure of Valor's.
+
+**A 429** is the failure reason `rate_limited`, never `http_status`. When
+the answer carries `Retry-After` (seconds or an HTTP date), that endpoint
+is not asked again before that time: a later call to it inside the hold is
+not sent, waits for nothing, costs nothing, and goes to the other leg as
+any failed leg does. A 429 without `Retry-After` holds nothing.
 
 ## The `JudgementPort`
 
@@ -173,7 +179,7 @@ The adapters live in `tools/`, one per vendor, because they are
 vendor-dependent and the core runs without any one of them
 (`tools/README.md`); `core/` imports neither. Each decodes an answer into
 probabilities per label or a failure (`transport`, `http_status`,
-`timeout`, `malformed`, `input_too_large`) with a fixed sentence; no
+`timeout`, `rate_limited`, `malformed`, `input_too_large`) with a fixed sentence; no
 provider text reaches a row or an exception. Serves: constraint "Three
 tiers".
 
@@ -199,7 +205,8 @@ kernel process, through `core/spending.py`'s open and `charge`: the
 gateway's rows with `route: judgement`, and no HTTP route, since no turn
 makes these calls. Each leg's call opens with a `gateway.opened` row whose
 estimate is the worst case: estimated input at the input price plus every
-output token allowed. The estimate gates nothing; it is the charge only
+output token allowed (for the fallback, `OPEN_WEIGHT_MAX_COMPLETION`, the
+most its endpoint produces). The estimate gates nothing; it is the charge only
 when billing is unknown. Input is estimated as bytes / 3 of the request body; for Jev, which bills a
 prompt of its own around it, 1.25 times that plus 300 tokens and 50 per
 question, sized from Jev's 35 calibration calls, all single-question judge
@@ -223,19 +230,16 @@ chose what it chose.
 
 ## Confidence gating
 
-Each judgement task declares a floor per leg and an abstain route. The gate
-is on the kernel action, never on a single label: per question, the port
-normalizes the leg's probabilities and sums those of the `proceed` labels
-(`p_proceed`, rounded to nine places so a float sum never lands a hair
-under a floor it meets). With the leg's floor `f`, the leg proceeds when `p_proceed`
-is at least `f`, is cautious when it is at most `1 - f`, and abstains in
-between. The band is two-sided: a confident cautious answer is not
-second-guessed, since the fallback could only move it toward less caution.
-Only an abstain goes to the fallback; a question both legs abstain on takes
-the abstain route. The argmax decides nothing: `precise` at .45 against
-thin labels at .20, .20, and .15 is an abstain, never a bare build.
-Serves: constraint "Three tiers" ("confidence-gated to a human") and
-Mission item 6.
+Each judgement task declares a floor per leg and an abstain route. The gate is on the kernel action,
+never on a single label: per question, the port normalizes the leg's probabilities and sums those of
+the `proceed` labels (`p_proceed`, rounded to nine places so a float sum never lands a hair under a
+floor it meets). With the leg's floor `f`, the leg proceeds when `p_proceed` is at least `f`, is
+cautious when it is at most `1 - f`, and abstains in between. The band is two-sided: a confident
+cautious answer is not second-guessed, since the fallback could only move it toward less caution.
+Only an abstain goes to the fallback; a question both legs abstain on takes the abstain route. The
+argmax decides nothing: `precise` at .45 against thin labels at .20, .20, and .15 is an abstain,
+never a bare build. Serves: constraint "Three tiers" ("confidence-gated to a human") and Mission
+item 6.
 
 Gating to a human spends Tom's attention, which Mission item 6 counts like
 money, so every abstain route names what it costs Tom:
@@ -259,11 +263,10 @@ ledger by site (`docs/mission.md`) is design; a governance verdict's
 
 ## Calibration discipline
 
-A judgement task routes real work only after it has a calibration record,
-and keeps routing only while its live record holds. Serves: Evidence
-"Independent checks", and constraint "Reliable stop, recovery, and
-correction" ("Autonomy shrinks automatically on evidence and grows only by
-Tom's decision").
+A judgement task routes real work only after it has a calibration record, and keeps routing only
+while its live record holds. Serves: Evidence "Independent checks", and constraint "Reliable stop,
+recovery, and correction" ("Autonomy shrinks automatically on evidence and grows only by Tom's
+decision").
 
 **What a record measures.** Labels come from humans, not from another model:
 calibration is scored against human-labelled cases, because model assistance
@@ -278,10 +281,9 @@ worsens human calibration and a model-to-model agreement number hides that
 - the error rate (transport, timeout, malformed);
 - the cost per call.
 
-And per record: `n`, how many labels are Tom's own, how many were written by
-a stand-in (`role_played`), and how many came from a judge; the pinned model
-of each leg; the floors; the task's `task_sha256`; the run's number for its
-site; and the date.
+And per record: `n`, how many labels are Tom's own, how many were written by a stand-in
+(`role_played`), and how many came from a judge; the pinned model of each leg; the floors; the
+task's `task_sha256`; the run's number for its site; and the date.
 
 **How a record is made.** `python -m core calibrate CASES.json` (at most 50
 cases; provider endpoints only, see Keys) starts
@@ -326,14 +328,12 @@ review. Growing back is Tom's decision.
 
 ## Which uses are gates
 
-A judgement that only labels (for the ledger, for measurement) adds no
-governance. A judgement that holds, redirects, or refuses work is a check or
-a gate, and the governance constraint applies to it in full: it names the
-mission item it serves and the incident that already happened without it, it
-needs Tom's tap through a `governance_grant`, and it is ledgered as a guard
-with that incident, that mission item, and a ninety-day expiry. A guard that
-has not fired by expiry is deleted by default. The guard ledger itself is
-described in `docs/architecture.md`.
+A judgement that only labels (for the ledger, for measurement) adds no governance. A judgement that
+holds, redirects, or refuses work is a check or a gate, and the governance constraint applies to it
+in full: it names the mission item it serves and the incident that already happened without it, it
+needs Tom's tap through a `governance_grant`, and it is ledgered as a guard with that incident, that
+mission item, and a ninety-day expiry. A guard that has not fired by expiry is deleted by default.
+The guard ledger itself is described in `docs/architecture.md`.
 
 ## The ten use shapes
 
@@ -376,8 +376,10 @@ Notes per shape:
 5. Labels for the attention ledger after the fact, which the demonstration
    record filled by hand (rebuild-demonstration.md, "Attention log"). Its
    labels are also the live labels for shape 1. Measurement, no gate.
-6. The blind verifier's one boolean, asked once per hunk (eight in
-   flight), with the hunk's enclosing function as input. Each hunk at
+6. The blind verifier's one boolean, asked once per hunk (every hunk at
+   once, on one database connection the steps take turns on, so the
+   provider calls overlap and the task's advisory lock already orders the
+   rows), with the hunk's enclosing function as input. Each hunk at
    caution is an instance; a reviewer can add instances and cannot remove
    one. A `true` with no grant is a refused merge: the broker refuses a flagged
    action without a grant, and this judgement sets the flag from the diff.
@@ -398,17 +400,15 @@ Notes per shape:
     signal names. This shape stays a candidate until a failure arrives that
     the deterministic signals could not classify.
 
-Shapes 2 to 5 and 9 to 10 label and route; they add no governance. Shapes 6
-to 8 are checks the plan or Tom's decisions already require. Shape 1 is the
-one guard granted on its own incident.
+Shapes 2 to 5 and 9 to 10 label and route; they add no governance. Shapes 6 to 8 are checks the plan
+or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier
 
-A cheap judgement reads each incoming request before the first turn and
-routes thin requests to a clarify turn; precise requests go straight to
-build. Granted by Tom on 2026-10-01. Serves Mission item 3 ("Ask only when
-the answer materially changes the outcome") and Mission item 6 (two PM
-rounds cost more attention than one message of questions).
+A cheap judgement reads each incoming request before the first turn and routes thin requests to a
+clarify turn; precise requests go straight to build. Granted by Tom on 2026-10-01. Serves Mission
+item 3 ("Ask only when the answer materially changes the outcome") and Mission item 6 (two PM rounds
+cost more attention than one message of questions).
 
 ### The incident
 
@@ -449,10 +449,9 @@ frontier model noticing on its own, which in the demonstration it did not.
 | `thread` | Earlier messages in the same thread, if any, oldest first |
 | `project` | The project name the task works in |
 
-The demonstration record's estimate assumed the classifier also reads a
-short summary of the code the request names. That input is a gap: producing
-it needs an inspection step, and whether it improves the label is measured
-on the emulator before it is added.
+The demonstration record's estimate assumed the classifier also reads a short summary of the code
+the request names. That input is a gap: producing it needs an inspection step, and whether it
+improves the label is measured on the emulator before it is added.
 
 ### Labels
 
@@ -466,41 +465,34 @@ on the emulator before it is added.
 The rubrics as sent are in `core/judgement_tasks.py`; the table summarizes
 them.
 
-The three thin labels route the same way. They are kept apart because the
-calibration record reports each, and because the clarify turn's questions
-differ: an `example_as_spec` request most needs "is the example the whole
-requirement?", the demonstration's question 1.
+The three thin labels route the same way. They are kept apart because the calibration record reports
+each, and because the clarify turn's questions differ: an `example_as_spec` request most needs "is
+the example the whole requirement?", the demonstration's question 1.
 
-A clarify route moves the task to the `clarify` state the kernel already
-has (`skills/sdlc/clarify.md`): Valor inspects without editing and sends one
-message holding its material questions, each with the answer it will
-assume, and its intended approach, or says that none would change the
-result and goes on to the plan. That keeps Mission item 3's
-order: the message is a proposed first version of the decisions, not a
-questionnaire.
+A clarify route moves the task to the `clarify` state the kernel already has
+(`skills/sdlc/clarify.md`): Valor inspects without editing and sends one message holding its
+material questions, each with the answer it will assume, and its intended approach, or says that
+none would change the result and goes on to the plan. That keeps Mission item 3's order: the message
+is a proposed first version of the decisions, not a questionnaire.
 
 ### Confidence gating
 
-The decision is on P(precise), the only `proceed` label. At or above the
-leg's floor (0.70 for Jev, 0.75 for the fallback) the request builds; an
-abstain, a cautious answer, and a failure of both legs go to clarify. The
-clarify message is the human gate, and a one-word "go" costs Tom one
-message.
+The decision is on P(precise), the only `proceed` label. At or above the leg's floor (0.70 for Jev,
+0.75 for the fallback) the request builds; an abstain, a cautious answer, and a failure of both legs
+go to clarify. The clarify message is the human gate, and a one-word "go" costs Tom one message.
 
-The asymmetry behind that choice, from the records: a thin request built
-bare cost the demonstration two PM rounds, #188 one PM round and twice the
-spend, and #191 a delivery at fidelity 1 that a lenient reviewer accepted. A
-precise request sent to clarify cost one question message and, on the
-baseline's means, no money ($1.42 per run on either arm, rebuild-baseline.md,
-"Aggregate"), with #633 as the one case where it hurt. The floors lean
-toward clarify by that asymmetry. They were set before the first
-calibration run and held through every run, not fitted to seven cases.
+The asymmetry behind that choice, from the records: a thin request built bare cost the demonstration
+two PM rounds, #188 one PM round and twice the spend, and #191 a delivery at fidelity 1 that a
+lenient reviewer accepted. A precise request sent to clarify cost one question message and, on the
+baseline's means, no money ($1.42 per run on either arm, rebuild-baseline.md, "Aggregate"), with
+#633 as the one case where it hurt. The floors lean toward clarify by that asymmetry. They were set
+before the first calibration run and held through every run, not fitted to seven cases.
 
 ### Calibration against the replay baseline
 
-The seed set is the seven labelled cases in the two records. A case is
-labelled by outcome, not by how the request looks: thin when asking first
-changed what was built, precise when it did not or made it worse.
+The seed set is the seven labelled cases in the two records. A case is labelled by outcome, not by
+how the request looks: thin when asking first changed what was built, precise when it did not or
+made it worse.
 
 | Case | Request shape | Label | Evidence |
 |---|---|---|---|
@@ -574,10 +566,9 @@ on, so it is a gate, and it is ledgered as a guard:
 | Fires when | A request is routed to clarify |
 | Expiry | 2026-12-30, ninety days from the grant. Not fired by then: deleted by default |
 
-Each firing is one `judgement.answered` row with a thin label, an abstain,
-or a failure, followed by the clarify turn. Each firing's answers are
-labelled by shape 5, so at expiry the record shows how many firings changed
-what was built, beside how many fired.
+Each firing is one `judgement.answered` row with a thin label, an abstain, or a failure, followed by
+the clarify turn. Each firing's answers are labelled by shape 5, so at expiry the record shows how
+many firings changed what was built, beside how many fired.
 
 ## Not here
 

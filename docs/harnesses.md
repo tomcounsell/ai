@@ -1,12 +1,11 @@
 # Harnesses
 
-A harness is the agent program that does a turn's work: Claude Code today,
-Codex and Pi later. It sits in the agents tier of the three (README, "Three
-tiers"): the kernel decides what a turn may do and pays for it, and the
-harness does the work inside those bounds. This doc covers the port every
-harness conforms to, the Claude Code wrapper, how a task's turns share one
-session, how a turn talks back to the kernel, the sandbox a turn runs under,
-what happens to the processes it leaves behind, and the workspace it works in.
+A harness is the agent program that does a turn's work: Claude Code today, Codex and Pi later. It
+sits in the agents tier of the three (README, "Three tiers"): the kernel decides what a turn may do
+and pays for it, and the harness does the work inside those bounds. This doc covers the port every
+harness conforms to, the Claude Code wrapper, how a task's turns share one session, how a turn talks
+back to the kernel, the sandbox a turn runs under, what happens to the processes it leaves behind,
+and the workspace it works in.
 
 `harnesses/` holds the wrappers. `core/runs.py` holds the port and runs one
 turn; `core/session.py` runs a task's turns; `core/signals.py` holds the
@@ -29,12 +28,11 @@ The port is one value, `TurnCommand`, built fresh for each turn:
 | `harness` | the harness's name, recorded in `turn.started` |
 | `parse` | reads the harness's stdout into the fields the ledger keeps |
 
-A wrapper supplies a builder. The kernel calls it with three values only it
-knows at that moment: the gateway base URL issued for this turn, the Brief
-rendered from the ledger as the turn starts (corrections included), and the
-turn's id. The builder returns the `TurnCommand`. The kernel records the argv
-and the Brief whole in `turn.started`, so the ledger shows exactly what the
-turn was given, then runs the command.
+A wrapper supplies a builder. The kernel calls it with three values only it knows at that moment:
+the gateway base URL issued for this turn, the Brief rendered from the ledger as the turn starts
+(corrections included), and the turn's id. The builder returns the `TurnCommand`. The kernel records
+the argv and the Brief whole in `turn.started`, so the ledger shows exactly what the turn was given,
+then runs the command.
 
 `parse` returns at least `text`, `is_error`, and `session_id`, and may
 return what the harness says it spent (`harness_reported_usd`). The kernel
@@ -43,9 +41,8 @@ a harness's account of itself is narration, and the ledger records what
 passed the gateway [6]. In the demonstration the two agreed to $0.000024 over
 $2.97 (rebuild-demonstration.md, Money).
 
-A wrapper holds no effect class. Anything a turn does beyond its workspace
-reaches the world as a request the broker decides (see the signal channel
-below).
+A wrapper holds no effect class. Anything a turn does beyond its workspace reaches the world as a
+request the broker decides (see the signal channel below).
 
 ## Running one turn
 
@@ -66,11 +63,10 @@ through the gateway and a real stop mid-stream.
 code, the parsed result, the last 400 bytes of stderr, and the metered total
 for the turn.
 
-One harness turn runs at a time on the machine. The baseline series ran
-three replays at once under slot locks on a 64 GB machine
-(rebuild-baseline.md, Infrastructure); the target is a 16 GB MacBook Air,
-where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a
-turn takes is `docs/machine.md`'s to state.
+One harness turn runs at a time on the machine. The baseline series ran three replays at once under
+slot locks on a 64 GB machine (rebuild-baseline.md, Infrastructure); the target is a 16 GB MacBook
+Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a turn takes is
+`docs/machine.md`'s to state.
 
 ## The Claude Code wrapper
 
@@ -97,10 +93,9 @@ what a real task runs. Its arguments:
 | `--resume SESSION` | continues the task's session | Mission item 1 (see below) |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
 
-The demonstration checked the system-prompt row: every `turn.started` row
-carried correction 1 in the Brief and in the `--append-system-prompt`
-argument that reached `claude -p` (rebuild-demonstration.md, Correction 1
-rendering).
+The demonstration checked the system-prompt row: every `turn.started` row carried correction 1 in
+the Brief and in the `--append-system-prompt` argument that reached `claude -p`
+(rebuild-demonstration.md, Correction 1 rendering).
 
 **The environment** is an allowlist [11]: `HOME`, `USER`, `LOGNAME`, `PATH`,
 `SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`, plus the workspace's own
@@ -109,8 +104,11 @@ sockets, and Claude Code's own session variables stay behind. The wrapper
 then sets:
 
 - `ANTHROPIC_BASE_URL`: the gateway URL issued for this turn.
-- `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: the per-call output cap (32,000 by
-  default), which sets the gateway's worst-case estimate per call, the charge only if the provider reports no usage.
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: set only when the task's harness
+  settings name `max_output_tokens`; otherwise Claude Code's own per-model
+  default applies. The gateway's worst-case estimate per call comes from
+  the `max_tokens` of each request body, and is the charge only if the
+  provider reports no usage.
 - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: a `-p` turn that ends kills
   what it left running in the background, so commands run in the foreground.
   Two of three turns of a baseline run ended idle waiting on killed
@@ -137,23 +135,21 @@ GATEWAY_PORT=<port> -D VALOR_TURN=<turn id> -f <profile>`.
 `is_error`, `num_turns`, `total_cost_usd` (as `harness_reported_usd`), and
 `session_id` are kept. Unparseable output is kept as its last 400 bytes.
 
-The persona passed in is the one identity of `docs/persona.md`; the current
-composition root passes only "You are Valor." ahead of the Brief, and
-rendering the full persona into every turn is part of the design.
+The persona passed in is the one identity of `docs/persona.md`; the current composition root passes
+only "You are Valor." ahead of the Brief, and rendering the full persona into every turn is part of
+the design.
 
 ## A task's turns and session resume
 
-Serves Mission item 1 (own outcomes across the whole job: one working
-context from inspection to delivery) and Mission item 6 (Tom's answer lands
-in the context that asked, so he never restates the task).
+Serves Mission item 1 (own outcomes across the whole job: one working context from inspection to
+delivery) and Mission item 6 (Tom's answer lands in the context that asked, so he never restates the
+task).
 
-A task's first frontier turn opens a Claude Code session, the working
-session; every later clarify, plan, build, and patch turn resumes it
-with `--resume`. `core.session.next_prompt` reads the session id from the
-last `turn.ended` that carried one, and builds the prompt as data from the
-row that moved the task into its state, under a short label. What the turn
-should do with it is the stage file its Brief carries
-(`skills/sdlc/<state>.md`), never sentences in the kernel:
+A task's first frontier turn opens a Claude Code session, the working session; every later clarify,
+plan, build, and patch turn resumes it with `--resume`. `core.session.next_prompt` reads the session
+id from the last `turn.ended` that carried one, and builds the prompt as data from the row that
+moved the task into its state, under a short label. What the turn should do with it is the stage
+file its Brief carries (`skills/sdlc/<state>.md`), never sentences in the kernel:
 
 | After | The turn's prompt |
 |---|---|
@@ -189,17 +185,15 @@ verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
 `.valor/verdict.json`, read without following links or blocking. Review and
 docs follow in milestone 1.4.
 
-Each prompt is followed by what did not count from the previous turn
-(`errors` on its `turn.collected`) and what became of the effects it
-requested, read from the ledger now, so a push Tom has since released reads
-as done. An answer or feedback is spent only by a turn that finishes: after
-a failed or stopped turn the next one opens with it again. That rule exists
-because a failed turn once consumed feedback 1 and the retry was prompted
-"Continue." (rebuild-demonstration.md, Kernel findings 4).
+Each prompt is followed by what did not count from the previous turn (`errors` on its
+`turn.collected`) and what became of the effects it requested, read from the ledger now, so a push
+Tom has since released reads as done. An answer or feedback is spent only by a turn that finishes:
+after a failed or stopped turn the next one opens with it again. That rule exists because a failed
+turn once consumed feedback 1 and the retry was prompted "Continue." (rebuild-demonstration.md,
+Kernel findings 4).
 
-Every turn gets the Brief re-rendered from the ledger regardless of resume,
-so the session's memory of an older Brief never stands in for the current
-one.
+Every turn gets the Brief re-rendered from the ledger regardless of resume, so the session's memory
+of an older Brief never stands in for the current one.
 
 Claude Code keeps the session as a JSONL file under `<config
 dir>/projects/<workspace path with / and . as ->/`, where the config directory
@@ -210,12 +204,11 @@ workspace path and config directory.
 
 ### What resume costs
 
-Each resumed turn re-sends the whole session. In the demonstration the first
-call of the task carried about 30,000 input tokens and the last about
-109,000; cache reads totalled 4.5 million tokens against 35,113 output
-tokens. Delivery 2 resumed over an hour after delivery 1 and wrote 77,602
-cache tokens in 9 calls, against 25,613 in 20 calls for delivery 3, which
-followed promptly (rebuild-demonstration.md, Money).
+Each resumed turn re-sends the whole session. In the demonstration the first call of the task
+carried about 30,000 input tokens and the last about 109,000; cache reads totalled 4.5 million
+tokens against 35,113 output tokens. Delivery 2 resumed over an hour after delivery 1 and wrote
+77,602 cache tokens in 9 calls, against 25,613 in 20 calls for delivery 3, which followed promptly
+(rebuild-demonstration.md, Money).
 
 **Compaction, never replacement.** The working session is always resumed.
 When it nears the model's context limit it is compacted in place, by
@@ -251,16 +244,15 @@ the other signals in the same turn, and a signal that means nothing in the
 state (a `done.md` during plan) is an error, not acted on. `.valor/` is in
 the clone's `.git/info/exclude`, so signals never enter a commit.
 
-Files, because writing one is a deliberate tool call that survives whatever
-prose follows it, and a turn killed midway leaves what it wrote readable.
-The text of the channel is `skills/sdlc/channel.md`, carried in every
-workspace turn's Brief; it lists the effects the registered performers
-offer (each performer's `usage` line; the merge offers none) and says
-pushing any other way is unavailable, which the sandbox makes true.
+Files, because writing one is a deliberate tool call that survives whatever prose follows it, and a
+turn killed midway leaves what it wrote readable. The text of the channel is
+`skills/sdlc/channel.md`, carried in every workspace turn's Brief; it lists the effects the
+registered performers offer (each performer's `usage` line; the merge offers none) and says pushing
+any other way is unavailable, which the sandbox makes true.
 
-The text inside a signal file grants nothing. A question is shown to Tom; an
-effect request is classified and bounded by the broker against the task's
-ceiling. The turn's own words never decide what it may do [7].
+The text inside a signal file grants nothing. A question is shown to Tom; an effect request is
+classified and bounded by the broker against the task's ceiling. The turn's own words never decide
+what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is
@@ -304,27 +296,35 @@ kind, which needs no migration (`docs/data.md`, documents).
 Serves the constraint **bounded authority, metered spending**: every model call a
 turn makes is metered and its spending recorded on the task.
 
-The wrapper points the harness at the gateway with `ANTHROPIC_BASE_URL`,
-carrying a per-turn token in the path. Claude Code sends every call through
-that base URL: the main loop, its own side calls, and any subagent it starts
-inside the turn. The demonstration's 69 model calls all passed the gateway,
-and the gateway and the harness agreed on the total (rebuild-demonstration.md,
-Money). The gateway checks each path as it arrived, undecoded, and forwards it
-byte for byte; a percent escape, a backslash, or an empty, `.`, or `..`
-segment is a 400. A turn's own Claude Code config directory holds no login, so
-it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`), and the gateway sets the
-kernel's credential, only on `v1/messages`, its `count_tokens`, `v1/models`,
-and `v1/models/<id>` (letters, digits, `.`, `_`, `-`), refusing any other path
-with a 403: a long-lived token in the kernel key directory when one is there,
-else the machine's Claude Code login read from the Keychain at most once a
-minute (the first 401 after a read allows one more). The kernel never
-refreshes the login, and an expired one fails the call naming the remedy. The
-harness never holds a credit or a limit, and a call refused because the task is stopped reaches it as an API error.
+The wrapper points the harness at the gateway with `ANTHROPIC_BASE_URL`, carrying a per-turn token
+in the path. Claude Code sends every call through that base URL: the main loop, its own side calls,
+and any subagent it starts inside the turn. The demonstration's 69 model calls all passed the
+gateway, and the gateway and the harness agreed on the total (rebuild-demonstration.md, Money). The
+gateway checks each path as it arrived, undecoded, and forwards it byte for byte; a percent escape,
+a backslash, or an empty, `.`, or `..` segment is a 400. A turn's own Claude Code config directory
+holds no login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`), and the gateway sets the
+kernel's credential, only on `v1/messages`, its `count_tokens`, `v1/models`, and `v1/models/<id>`
+(letters, digits, `.`, `_`, `-`), refusing any other path with a 403: a long-lived token in the
+kernel key directory when one is there, else the machine's Claude Code login read from the Keychain
+at most once a minute (the first 401 after a read allows one more). A login is used until its stated
+expiry. The kernel never refreshes the login, and an expired one fails the call naming the remedy.
+The harness never holds a credit or a limit, and a call refused because the task is stopped reaches
+it as an API error.
 
-`CLAUDE_CODE_MAX_OUTPUT_TOKENS` bounds each call's output, and the gateway
-takes each call's worst-case estimate from that bound. The estimate is the
-charge only when the provider reports no usage, so a lower cap keeps that
-fallback close to what a call really costs.
+The gateway takes each call's worst-case estimate from the `max_tokens` the
+request body carries, whatever value Claude Code sends. The estimate is the
+charge only when the provider reports no usage. A task that names
+`max_output_tokens` in its harness settings sets Claude Code's output limit
+(`CLAUDE_CODE_MAX_OUTPUT_TOKENS`); Valor sets none of its own.
+
+**The gateway sets no connect or read timeout.** A call ends when the
+provider answers or fails, or when no client is waiting for it: the turn
+exited, was stopped, or dropped its connection. Such a call is cut and
+charged by the usual rules (every allowed output token if it had started,
+the worst case if not), and a call cut while it was still opening is not
+sent and is charged 0. A call that could not reach the provider, or whose
+connection ended before it answered, returns a 502 that says which and
+names only the exception's type.
 
 Two points the harness relies on and has to keep true:
 
@@ -340,11 +340,10 @@ Two points the harness relies on and has to keep true:
 
 ## The turn sandbox
 
-Serves the constraint **bounded authority, metered spending** (a turn cannot perform
-an effect except through the broker), the constraint **a ledger the system
-cannot edit**, and the Evidence item **independent checks** (a replay cannot
-read its answer). The stance is AI Control's: the protocol holds even if the
-model tries to get around it [4].
+Serves the constraint **bounded authority, metered spending** (a turn cannot perform an effect
+except through the broker), the constraint **a ledger the system cannot edit**, and the Evidence
+item **independent checks** (a replay cannot read its answer). The stance is AI Control's: the
+protocol holds even if the model tries to get around it [4].
 
 A workspace turn runs under a sandbox-exec profile written for its workspace
 by `core/workspace.py` (every task the kernel provisions, replays included) or
@@ -400,11 +399,10 @@ listens on them, which lasts only as long as the turn (see reaping). Every
 other port, on every address, is refused. The bind rules sit before the
 outbound denies, keeping the outbound allows last.
 
-The bind rules exist because of an incident: during the parallel baseline
-series, popoto's test setup daemonized redis-servers that outlived their
-turns, one on `*:6379` open to the LAN beside the production Redis, one on a
-socket in `/tmp`, and one on `*:6390` (commit 76b164458, "Keep a turn from
-listening beyond its dev ports and reap what it leaves running").
+The bind rules exist because of an incident: during the parallel baseline series, popoto's test
+setup daemonized redis-servers that outlived their turns, one on `*:6379` open to the LAN beside the
+production Redis, one on a socket in `/tmp`, and one on `*:6390` (commit 76b164458, "Keep a turn
+from listening beyond its dev ports and reap what it leaves running").
 
 ### Processes and credentials
 
@@ -482,21 +480,17 @@ of this user that matches any of three marks:
    second check keeps unrelated apps out). The check is libsandbox's
    `sandbox_check`, without logging.
 
-Each gets SIGTERM, then SIGKILL after two seconds, and a `turn.reaped` row
-lists pid, command, and signal. The sandbox mark is the one a daemon cannot
-shed: it survives `setsid`, re-parenting to launchd, and a process retitling
-itself over its environment, which redis-server does; platform binaries hide
-their environment from other processes altogether. With the sandbox mark
-disabled, the redis test's daemon survives. `tests/test_reap.py` reaps a
-double-forked `setsid` daemon and a redis-server daemonized inside a task
-turn's sandbox, and leaves a bystander alive.
+Each gets SIGTERM, then SIGKILL after two seconds, and a `turn.reaped` row lists pid, command, and
+signal. The sandbox mark is the one a daemon cannot shed: it survives `setsid`, re-parenting to
+launchd, and a process retitling itself over its environment, which redis-server does; platform
+binaries hide their environment from other processes altogether. With the sandbox mark disabled, the
+redis test's daemon survives. `tests/test_reap.py` reaps a double-forked `setsid` daemon and a
+redis-server daemonized inside a task turn's sandbox, and leaves a bystander alive.
 
-A task's services, marked `valor.service.<task id>`, stop when its run
-returns. After a killed kernel, the next run of any task, if `workspace:ports`
-is free, stops those of tasks whose run is not live and of row-less task
-directories whose provisioning (`provision:<id>`) is not live
-(`services.reaped`). The replay judge's commands run under `turn.sb` with
-their own mark.
+A task's services, marked `valor.service.<task id>`, stop when its run returns. After a killed
+kernel, the next run of any task, if `workspace:ports` is free, stops those of tasks whose run is
+not live and of row-less task directories whose provisioning (`provision:<id>`) is not live
+(`services.reaped`). The replay judge's commands run under `turn.sb` with their own mark.
 
 ## The workspace
 
@@ -518,9 +512,13 @@ its spec (`scripts/replay_workspace.py`).
 | `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's `TMPDIR` and Claude Code config; each fresh session's checkout, `tmp/`, and `claude/` |
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
 
-The setup commands run once in `repo/` under `turn.sb`; a failure is recorded
-on the Brief (`project.setup_result`) and the task still starts. Nothing
-reaches GitHub, and the clone has no PR, issue, or later commit to read.
+The setup commands run once in `repo/` under `turn.sb`, with no time limit, their output going to a
+file and not a pipe so a child they leave behind cannot hold a step open; a failure is recorded on
+the Brief (`project.setup_result`) and the task still starts. Provisioning's git calls have no time
+limit either. An interrupt of `start` (Ctrl-C, or SIGTERM or SIGHUP of the kernel) ends them: the
+process groups get TERM, then KILL after `reap_grace_s`, the clone's temporary ref is removed, and
+provisioning is refused as interrupted. Nothing reaches GitHub, and the clone has no PR, issue, or
+later commit to read.
 
 **The mirror's fetch** treats the builder's clone as hostile: its config
 checked first; a gitfile, `commondir`, alternates, and shallow clones refused;
