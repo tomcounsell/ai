@@ -147,12 +147,17 @@ def binary() -> str:
 
 
 def _git(
-    workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None
+    workspace: str | Path,
+    *args: str,
+    text: bool = True,
+    extra_env: dict[str, str] | None = None,
+    prefix: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """The trusted git (`settings.git_bin`, checked each call), never
     whichever `git` comes first on a PATH, in its own process group, killed
     whole when it outlives its limit (the smaller of `git_timeout_s` and
-    what is left of the caller's `deadline`)."""
+    what is left of the caller's `deadline`). `prefix` runs it under a
+    sandbox (`sandbox-exec ... -f <profile>`)."""
     git_bin = binary()
     limit = settings.git_timeout_s
     ends = _DEADLINE.get()
@@ -161,7 +166,7 @@ def _git(
         if limit <= 0:
             raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
     proc = subprocess.Popen(
-        [git_bin, "-C", str(workspace), *PINNED, *args],
+        [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
@@ -207,10 +212,20 @@ def deadline(seconds: float):
         _DEADLINE.reset(token)
 
 
-def hostile(workspace: str | Path) -> list[str]:
+def hostile(
+    workspace: str | Path, profile: str | Path | None = None, mark: str = "valor-git-config"
+) -> list[str]:
     """Every key in the workspace's local or worktree config (includes
-    followed) that the kernel will not run git under."""
-    listed = _git(workspace, "config", "--list", "--show-scope", "--includes")
+    followed) that the kernel will not run git under. With `profile`, the
+    read runs under that sandbox profile, marked `mark`, so an include
+    naming a file the profile denies fails the read."""
+    prefix = (
+        [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
+         "-f", str(profile)]
+        if profile is not None
+        else None
+    )  # fmt: skip
+    listed = _git(workspace, "config", "--list", "--show-scope", "--includes", prefix=prefix)
     if listed.returncode != 0:  # unreadable config is refused, never assumed clean
         return [f"the config could not be read: {listed.stderr.strip()[:200]}"]
     found = []
