@@ -13,15 +13,14 @@ returns.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import random
 import signal
 from pathlib import Path
 
 from bridges.telegram import gap, inbound
 from bridges.telegram.send import Sender
+from bridges.telegram.state import State
 from bridges.telegram.wire import FloodWait, Msg, Wire, WireError
 
 log = logging.getLogger("valor.telegram")
@@ -32,16 +31,20 @@ BACKOFF_CAP_S = 256  # carried from main's connect loop; it never stops trying
 class TelegramBridge:
     channel = "telegram"
 
-    def __init__(self, wire: Wire, kernel, *, timeout=inbound.media_timeout, seen: Path | None = None):
+    def __init__(
+        self,
+        wire: Wire,
+        kernel,
+        *,
+        timeout=inbound.media_timeout,
+        seen: Path | None = None,
+        sends: Path | None = None,
+    ):
         self.wire = wire
         self.kernel = kernel
-        self.sender = Sender(wire, kernel)
+        self.sender = Sender(wire, kernel, State(sends))
         self.timeout = timeout
-        # chat -> newest id its last completed pass saw, kept in `seen` across restarts
-        self._seen_path = seen
-        self._seen: dict[int, int] = {}
-        if seen is not None and seen.exists():
-            self._seen = {int(k): v for k, v in json.loads(seen.read_text()).items()}
+        self._seen = State(seen)  # chat -> newest id its last completed pass saw
         self._busy = False
         self._filling = asyncio.Lock()
         wire.on_message(self.handle)
@@ -155,14 +158,14 @@ class TelegramBridge:
                 await self.wire.disconnect()
 
     async def _fill_chat(self, chat: int) -> None:
-        stop_id = self._seen.get(chat)
+        stop_id = self._seen.get(str(chat))
         if stop_id is None:
             async with self.kernel.conn() as conn:
                 stop_id = await self.kernel.highest(conn, "telegram", str(chat))
         if stop_id is None:
             # No rows: nothing before this connect is wanted.
             page = await self.wire.history(chat, limit=1)
-            self._mark(chat, page[0].id if page else 0)
+            self._seen.set(str(chat), page[0].id if page else 0)
             return
 
         async def recorded(ids: list[str]) -> set[str]:
@@ -173,11 +176,4 @@ class TelegramBridge:
         for msg in found:
             if inbound.wanted(msg):
                 await self._receive(msg)
-        self._mark(chat, top)
-
-    def _mark(self, chat: int, top: int) -> None:
-        self._seen[chat] = top
-        if self._seen_path is not None:
-            tmp = self._seen_path.with_name(self._seen_path.name + ".tmp")
-            tmp.write_text(json.dumps(self._seen))
-            os.replace(tmp, self._seen_path)
+        self._seen.set(str(chat), top)

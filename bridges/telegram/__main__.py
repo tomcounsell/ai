@@ -93,14 +93,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.verb == "run":
         from bridges.telegram.bridge import TelegramBridge
-        from bridges.telegram.kernel import from_core, seen_path, session_path
+        from bridges.telegram.kernel import from_core, seen_path, sends_path, session_path
         from bridges.telegram.wire import TelethonWire
         from core import bridge
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         api_id, api_hash = credentials()
         wire = TelethonWire(session_path(), api_id, api_hash)
-        asyncio.run(bridge.serve(TelegramBridge(wire, from_core(), seen=seen_path())))
+        asyncio.run(bridge.serve(TelegramBridge(wire, from_core(), seen=seen_path(), sends=sends_path())))
         return 1  # serve returned: launchd restarts the job
     parser.print_help()
     return 2
