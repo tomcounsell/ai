@@ -1150,8 +1150,14 @@ def tree_has_valor(
     would sit where the kernel writes a fresh session's inputs and reads its
     verdict, so no such plan or candidate counts."""
     args = ("ls-tree", "--name-only", "-z", rev)
-    listing = git.trusted(repo, *args, extra_env=extra_env) if trusted else git.out(repo, *args)
-    return any(name.casefold() == VALOR_DIR for name in listing.split("\0") if name)
+    listing = (
+        git.trusted(repo, *args, extra_env=extra_env, text=False)
+        if trusted
+        else git.out(repo, *args, text=False)
+    )  # a tree entry's name is any bytes but NUL and `/`
+    return any(
+        name.decode(errors="surrogateescape").casefold() == VALOR_DIR for name in listing.split(b"\0") if name
+    )
 
 
 # -- fresh checkouts -----------------------------------------------------------------------------
@@ -1436,7 +1442,8 @@ def check_services(
     (`O_NOFOLLOW | O_EXCL`). Yields the check's environment
     (`harness_env` over the fresh instances). On exit the check's instances
     are stopped, their directory removed, and the task's own started again,
-    even when the stop or the removal raises; the task's Postgres keeps its
+    even when the stop or the removal raises (that exception is raised, the
+    restart's failure, if any, as its cause); the task's Postgres keeps its
     data, its Redis starts empty."""
     spec = spec_of(project)
     names = list(spec.services)
@@ -1464,9 +1471,15 @@ def check_services(
         try:
             stop_services(task_id, svc)
             rmtree(svc.root)
-        finally:
+        except BaseException as exc:
             if names:
-                start_services(task_id, lay, names, ports)
+                try:
+                    start_services(task_id, lay, names, ports)
+                except Exception as restart:
+                    raise exc from restart  # the first failure is the one raised
+            raise
+        if names:
+            start_services(task_id, lay, names, ports)
 
 
 def copy_new(src: Path, dest: Path) -> None:
@@ -1488,23 +1501,28 @@ def clone_tree(src: Path, dest: Path) -> None:
 
 def rmtree(path: Path) -> None:
     """Remove a tree a sandboxed program wrote, entries of any mode
-    included, never following a link. An entry's user flags `uchg` and
-    `uappnd` and its ACL are cleared before it is opened, moved or
-    unlinked, since a mode alone leaves either one in the way. Works
-    through directory descriptors with no recursion: each directory found
-    below `path` is moved up to sit directly in `path` before it is
-    emptied, so no path grows past one level and at most two directories
-    are open at once, however deep the tree."""
+    included, never following a link. Each entry's user flags and its ACL
+    are cleared, without reading either, before it is examined, opened,
+    moved or unlinked: a mode alone leaves a flag such as `uchg` or
+    `uappnd`, or an ACL entry, in the way, and an ACL denying `readattr` or
+    `readsecurity` makes even its `lstat` fail. Works through directory
+    descriptors with no recursion: each directory found below `path` is
+    moved up to sit directly in `path` before it is emptied, so no path
+    grows past one level and at most two directories are open at once,
+    however deep the tree."""
     try:
-        st = os.lstat(path)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except FileNotFoundError:
         return
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        if not stat.S_ISDIR(st.st_mode):
-            _unlink(path.name, parent, st)
+        try:
+            st = _cleared(path.name, parent)
+        except FileNotFoundError:
             return
-        root = _open_own_dir(path.name, parent, st)
+        if not stat.S_ISDIR(st.st_mode):
+            os.unlink(path.name, dir_fd=parent)
+            return
+        root = _open_own_dir(path.name, parent)
         try:
             _empty_dir(root)
         finally:
@@ -1515,11 +1533,12 @@ def rmtree(path: Path) -> None:
 
 
 # setattrlistat(2): `struct attrlist` naming ATTR_CMN_FLAGS (0x40000) and
-# ATTR_CMN_EXTENDED_SECURITY (0x400000); the value buffer is the flags,
+# ATTR_CMN_EXTENDED_SECURITY (0x400000); the value buffer is the flags (0),
 # then an attrreference to a `kauth_filesec` whose entry count is
 # KAUTH_FILESEC_NOACL, which removes the ACL. FSOPT_NOFOLLOW is 1.
 _ATTRS = struct.pack("=HHIIIII", 5, 0, 0x40000 | 0x400000, 0, 0, 0, 0)
 _NO_ACL = struct.pack("=I16s16sII", 0x012CC16D, b"", b"", 0xFFFFFFFF, 0)
+_CLEARED = struct.pack("=IiI", 0, 8, len(_NO_ACL)) + _NO_ACL
 
 
 @functools.cache
@@ -1537,52 +1556,40 @@ def _setattrlistat():
     return fn
 
 
-def _clear(name: str, dir_fd: int, st: os.stat_result) -> None:
-    """Clear `uchg` and `uappnd` and remove the ACL of the entry `name`
-    under `dir_fd`, never following a link: the owner may always do both."""
-    values = (
-        struct.pack("=IiI", st.st_flags & ~(stat.UF_IMMUTABLE | stat.UF_APPEND), 8, len(_NO_ACL)) + _NO_ACL
-    )
-    if _setattrlistat()(dir_fd, os.fsencode(name), _ATTRS, values, len(values), 1) != 0:
+def _cleared(name: str, dir_fd: int) -> os.stat_result:
+    """Clear every user flag and remove the ACL of the entry `name` under
+    `dir_fd` in one write that reads neither (the owner may always write
+    both, and an ACL may deny reading them), never following a link; then
+    its `lstat`."""
+    if _setattrlistat()(dir_fd, os.fsencode(name), _ATTRS, _CLEARED, len(_CLEARED), 1) != 0:
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err), name)
+    return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 
 
-def _unlink(name: str, dir_fd: int, st: os.stat_result) -> None:
-    _clear(name, dir_fd, st)
-    os.unlink(name, dir_fd=dir_fd)
-
-
-def _open_own_dir(name: str, dir_fd: int, st: os.stat_result) -> int:
-    """The directory `name` under `dir_fd`, cleared and made 0700 first so
-    it can be listed, searched and emptied; a link there is never
-    followed."""
-    _clear(name, dir_fd, st)
+def _open_own_dir(name: str, dir_fd: int) -> int:
+    """The cleared directory `name` under `dir_fd`, made 0700 first so it
+    can be listed, searched and emptied; a link there is never followed."""
     os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
-
-
-def _lstat(name: str, dir_fd: int) -> os.stat_result:
-    return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 
 
 def _empty_dir(root: int) -> None:
     moved = 0
     while names := os.listdir(root):
         for name in names:
-            st = _lstat(name, root)
+            st = _cleared(name, root)
             if not stat.S_ISDIR(st.st_mode):
-                _unlink(name, root, st)
+                os.unlink(name, dir_fd=root)
                 continue
-            fd = _open_own_dir(name, root, st)
+            fd = _open_own_dir(name, root)
             try:
                 for sub in os.listdir(fd):
-                    sub_st = _lstat(sub, fd)
+                    sub_st = _cleared(sub, fd)
                     if not stat.S_ISDIR(sub_st.st_mode):
-                        _unlink(sub, fd, sub_st)
+                        os.unlink(sub, dir_fd=fd)
                         continue
                     # Moving a directory to a new parent rewrites its `..`.
-                    _clear(sub, fd, sub_st)
                     os.chmod(sub, 0o700, dir_fd=fd, follow_symlinks=False)
                     while True:
                         moved += 1
@@ -1590,6 +1597,8 @@ def _empty_dir(root: int) -> None:
                             os.stat(f".rm{moved}", dir_fd=root, follow_symlinks=False)
                         except FileNotFoundError:
                             break
+                        except PermissionError:
+                            pass  # taken, by an entry whose ACL denies reading its attributes
                     os.rename(sub, f".rm{moved}", src_dir_fd=fd, dst_dir_fd=root)
             finally:
                 os.close(fd)

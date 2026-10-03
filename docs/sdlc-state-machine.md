@@ -455,7 +455,7 @@ governance answer, and the verdict it computes. `updated` or `no_change`
 passes. `changes` means a doc states something the code should still honor
 and the candidate breaks it, a doc cannot be made true without a code
 change, the kernel dropped a commit, or the candidate's tree holds `.valor`
-(no clone or session; leg `kernel`, its only verdict). Docs commits
+(no clone or session; the kernel records it, leg `kernel`). Docs commits
 belong to their candidate: after a send-back they are not merged, and the
 next docs session reads them as `previous-docs.patch`, keeping what holds.
 

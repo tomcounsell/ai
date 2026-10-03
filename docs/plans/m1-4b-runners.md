@@ -78,7 +78,7 @@ What the kernel must never do with any of it:
   FIFO, a link, or a JUnit file with a `DOCTYPE` is a suite with no
   per-test result.
 - Run candidate code outside the check profile, or past a stop. Setup and
-  suite both run under it, marked, time-limited, and killed as a process
+  suite both run under it, marked, with no time limit, and killed as a process
   group when the task is stopped; whatever is left under the mark is
   reaped.
 - Give a check the caller's environment, the builder's caches, or the

@@ -60,6 +60,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from core import binaries
 from core.settings import settings
@@ -252,23 +253,34 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
     return _git(workspace, *args, text=text)
 
 
-def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None, strip: bool = True) -> str:
+def trusted(
+    cwd: str | Path,
+    *args: str,
+    extra_env: dict[str, str] | None = None,
+    strip: bool = True,
+    text: bool = True,
+) -> Any:
     """One git call in a repository only the kernel writes (its cache, a
     task's mirror and bare origin, a checkout it is making), with no hostile
     check: no turn can have written its config. Raises `GitError` on a
     non-zero exit. `strip=False` keeps the output whole, as a file's text
-    whose line numbers count."""
-    done = _git(cwd, *args, extra_env=extra_env)
+    whose line numbers count; `text=False` returns bytes, for names git
+    does not require to be UTF-8."""
+    done = _git(cwd, *args, text=text, extra_env=extra_env)
     if done.returncode != 0:
-        raise GitError(f"git {' '.join(args[:3])}: {done.stderr.strip()[:300]}")
+        raise GitError(f"git {' '.join(args[:3])}: {_text(done.stderr).strip()[:300]}")
     return done.stdout.strip() if strip else done.stdout
 
 
-def out(workspace: str | Path, *args: str) -> str:
-    done = run(workspace, *args)
+def out(workspace: str | Path, *args: str, text: bool = True) -> Any:
+    done = run(workspace, *args, text=text)
     if done.returncode != 0:
-        raise GitError(f"git {' '.join(args)}: {done.stderr.strip()}")
+        raise GitError(f"git {' '.join(args)}: {_text(done.stderr).strip()}")
     return done.stdout.strip()
+
+
+def _text(output: str | bytes) -> str:
+    return output if isinstance(output, str) else output.decode(errors="replace")
 
 
 def is_repo(workspace: str | Path | None) -> bool:  # raises GitError when no trusted git exists

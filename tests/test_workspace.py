@@ -1153,3 +1153,72 @@ def test_rmtree_clears_the_flags_and_acls_a_turn_sets(tmp_path, script):
     assert not tree.exists()
     assert (tmp_path / "keep").read_text() == "outside"
     assert os.stat(tmp_path / "keep").st_flags == 0
+
+
+# chflags(2) is syscall 34; chflags(1) stats first, which such an ACL refuses.
+_CHFLAGS = """/usr/bin/perl -e 'for (@ARGV) { my ($p, $v) = split /=/; syscall(34, $p, $v + 0) == 0 or die "$p: $!" }' """
+
+
+@pytest.mark.parametrize(
+    ("script", "hidden"),
+    [
+        ('chmod +a "everyone deny readattr" a/f', "a/f"),
+        ('chmod +a "everyone deny readsecurity" a/f', "a/f"),
+        ('chmod +a "everyone deny readattr" a/b/f a/b', "a/b"),
+        ('chmod +a "everyone deny readsecurity" a/b', "a/b"),
+        ('chmod +a "everyone deny readattr" .', "."),
+        ('chmod +a "everyone deny readsecurity" .', "."),
+        ('chmod +a "everyone deny readattr,readsecurity" a/f a/b .; ' + _CHFLAGS + "a/f=2 a/b=6 .=2", "."),
+        ('mkdir .rm1 .rm2; chmod +a "everyone deny readattr" .rm1 .rm2 a/b', ".rm1"),
+    ],
+    ids=[
+        "readattr-file",
+        "readsecurity-file",
+        "readattr-dir",
+        "readsecurity-dir",
+        "readattr-root",
+        "readsecurity-root",
+        "acl-then-flags",
+        "readattr-moved-name",
+    ],
+)
+def test_rmtree_clears_an_acl_that_hides_the_entry(tmp_path, script, hidden):
+    """An ACL denying `readattr` or `readsecurity` makes an entry's `lstat`
+    fail even for its owner, and a turn may set one on anything in its
+    checkout, the checkout itself included, then flags it could no longer
+    read; the check directory is named by its sha, so every rerun met the
+    same tree."""
+    (tmp_path / "keep").write_text("outside")
+    tree = _locked_by_a_turn(tmp_path, f"ln -s {tmp_path / 'keep'} a/link; {script}")
+    with pytest.raises(PermissionError):
+        os.lstat(tree / hidden)
+    kws.rmtree(tree)
+    assert not tree.exists()
+    assert (tmp_path / "keep").read_text() == "outside"
+    assert os.stat(tmp_path / "keep").st_flags == 0
+
+
+def test_tree_has_valor_reads_a_tree_name_that_is_not_utf8(tmp_path):
+    """A tree entry's name is any bytes but NUL and `/`; `git mktree`
+    writes one that is no UTF-8, and the read neither crashes nor misses a
+    `.valor` beside it."""
+    repo = scripted.toy_repo(tmp_path)
+    blob = scripted.git(repo, "rev-parse", "HEAD:README.md")
+
+    def commit_of(*names: bytes) -> str:
+        listing = b"".join(b"100644 blob " + blob.encode() + b"\t" + n + b"\0" for n in names)
+        tree = (
+            subprocess.run(
+                ["git", "-C", str(repo), "mktree", "-z"], input=listing, capture_output=True, check=True
+            )
+            .stdout.decode()
+            .strip()
+        )
+        return scripted.git(
+            repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree", tree, "-m", "x"
+        )
+
+    plain, marked = commit_of(b"\xff\xfename"), commit_of(b"\xff\xfename", b".Valor")
+    for trusted in (True, False):
+        assert not kws.tree_has_valor(repo, plain, trusted=trusted)
+        assert kws.tree_has_valor(repo, marked, trusted=trusted)

@@ -936,6 +936,35 @@ def test_the_tasks_own_services_come_back_when_the_check_services_removal_raises
     kws.stop_services(task, lay)
 
 
+def test_a_failed_check_services_stop_is_the_error_raised_when_the_restart_then_fails(
+    dsn, tmp_path, monkeypatch
+):
+    """A stop that raises before stopping the check's instances leaves the
+    port taken, so the task's own cannot start; the stop's error is the one
+    raised, the restart's refusal its cause."""
+
+    async def go():
+        return await scripted.provisioned(dsn, tmp_path, services=["postgres"])
+
+    task, b = run(go())
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = kws.fresh_dir(lay.checks / "test-head-x")
+    stop = kws.stop_services
+
+    def refuse(task_id, layout=None):
+        if layout is not lay:
+            raise PermissionError(1, "Operation not permitted", "stop")
+        return stop(task_id, layout)
+
+    monkeypatch.setattr(kws, "stop_services", refuse)
+    try:
+        with pytest.raises(PermissionError) as raised, kws.check_services(lay, check_dir, b.project, task):
+            pass
+        assert isinstance(raised.value.__cause__, kws.Refused)
+    finally:
+        stop(task)  # every process under the task's mark, the check's included
+
+
 KERNEL = r"""
 import asyncio, sys
 from core import checks, router
