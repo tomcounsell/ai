@@ -270,8 +270,7 @@ file claims a size the turn never wrote), and only up to the size it
 checked, in a worker thread off the router's event loop; anything else, and
 an entry that vanishes before it is read, is recorded as unreadable with
 its reason, never its contents, and an entry that cannot be moved is
-removed unread (`core/workspace.py`'s `open_turn_dir`, `open_turn_file`,
-`read_turn_file`). The same walk reads a fresh session's verdict from the
+removed unread (`core/workspace.py`). The same walk reads a fresh session's verdict from the
 kernel's checks directory. `turn.collected` records what the turn left, its
 state, its verdict, and what was unreadable; `task.delivered` waits for the
 checks ([sdlc-state-machine.md](sdlc-state-machine.md)).
