@@ -30,10 +30,11 @@ system prompt the kernel adds, byte for byte what `turn.started` records.
 import functools
 import json
 import os
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import binaries
+from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import settings
@@ -157,6 +158,11 @@ def workspace_turn(
     `TMPDIR`; `claude_config_dir`, its own Claude Code config directory,
     with the gateway supplying the credential. The rest are optional. A
     fresh session (critique, review, docs) is this with no `resume`.
+
+    A new session gets `--session-id` with an id the kernel chose; a
+    resumed one `--resume`. With `claude_config_dir`, the command names
+    where the session's transcript lies, which the kernel copies when the
+    turn ends.
     """
     harness = harness or {}
     if not harness.get("sandbox_profile"):
@@ -213,8 +219,15 @@ def workspace_turn(
             "--append-system-prompt",
             brief,
         ]
+        # The session id is the kernel's: a new session gets one chosen here,
+        # a resumed one keeps the id the fold holds, so where its transcript
+        # lies is known before the turn starts and stdout decides nothing.
         if resume:
+            session_id = resume
             argv += ["--resume", resume]
+        else:
+            session_id = str(uuid.uuid4())
+            argv += ["--session-id", session_id]
         argv += ["--", prompt]
         # The sandbox's own launcher runs outside it, so it is the root-owned
         # /usr/bin/sandbox-exec by absolute path, checked here, never a
@@ -238,6 +251,7 @@ def workspace_turn(
             harness="claude_code",
             parse=parse,
             harness_version=version(settings.claude),
+            transcript=transcripts.anchored(harness.get("claude_config_dir"), session_id),
         )
 
     return build

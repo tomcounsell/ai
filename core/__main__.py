@@ -17,7 +17,9 @@ start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] ...
                                provision the task's workspace from a project
                                spec (clone at the base, bare origin, kernel
                                mirror, its own Postgres and Redis, setup), then
-                               start it; the merge lands on its own origin
+                               start it; the merge lands on the spec's
+                               merge_url when Tom granted the pair (never the
+                               remote's default branch), else on its own origin
 workspace show TASK_ID         where the kernel provisioned the task
 workspace remove TASK_ID       delete a stopped or merged task's workspace and
                                free its ports
@@ -35,6 +37,15 @@ openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
                                into the kernel's OpenAI key file (mode 600),
                                replacing the key there; prints written,
                                kept, or missing, never a value
+github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
+                               the kernel's github-keys file (mode 600), the
+                               same way
+merge-target add URL BRANCH --note TEXT
+                               Tom's grant of a (URL, branch) pair a merge
+                               may land on; https only; always his
+merge-target remove URL BRANCH --note TEXT --by B
+                               revoke a pair
+merge-target list              the granted pairs
 calibrate CASES.json
                                both judgement legs alone on every labelled
                                case (at most 50), one
@@ -104,6 +115,7 @@ from core import (
     machine,
     router,
     session,
+    targets,
     tasks,
     workspace,
 )
@@ -120,14 +132,24 @@ from core.settings import (
 )
 
 
-def _performers(b: tasks.Brief) -> None:
+def _performers(b: tasks.Brief) -> broker.Performers:
+    """The task's own performers, built from its Brief. push_branch goes to
+    the task's own bare origin; the merge pushes to the Brief's origin URL,
+    from the kernel mirror with the GitHub credential when the kernel
+    provisioned the task, and from the workspace with none otherwise."""
     from tools.push_branch import Merge, PushBranch
 
-    if b.workspace:
-        # push_branch goes to the task's own bare origin; the merge pushes
-        # from the kernel mirror when the kernel provisioned the task.
-        broker.register(PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch))
-        broker.register(Merge(b.mirror or b.workspace))
+    if not b.workspace:
+        return broker.Performers()
+    return broker.Performers(
+        PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch),
+        Merge(
+            b.mirror or b.workspace,
+            url=b.origin_url,
+            branch=b.target_branch,
+            credential=settings.github_keyfile if b.mirror else None,
+        ),
+    )
 
 
 def _harnesses() -> dict:
@@ -147,7 +169,9 @@ def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_na
 
 
 async def _working(ctx: router.Context) -> dict:
-    return await session.run(ctx.gateway, ctx.task_id, _turn_for, dsn=ctx.dsn, alive=ctx.alive)
+    return await session.run(
+        ctx.gateway, ctx.task_id, _turn_for, dsn=ctx.dsn, alive=ctx.alive, performers=ctx.performers
+    )
 
 
 def port(keyfile: str | None = None) -> judgement.JudgementPort:
@@ -250,7 +274,6 @@ async def _run_task(task_id: str) -> str:
         b = await tasks.brief(conn, task_id)
     from harnesses import claude_code
 
-    _performers(b)
     try:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
@@ -258,7 +281,7 @@ async def _run_task(task_id: str) -> str:
     gateway = Gateway(credential=ClaudeLogin(), openai_credential=OpenAIKey())
     await gateway.start()
     try:
-        out = await router.run(gateway, task_id, runners(judgement_port))
+        out = await router.run(gateway, task_id, runners(judgement_port), performers=_performers(b))
     except claude_code.Unsandboxed as exc:
         raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
@@ -267,34 +290,22 @@ async def _run_task(task_id: str) -> str:
 
 
 async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None):
-    """`workspace.provision` in a thread, with no time limit on its git
-    calls or setup commands. An interrupt of `start` (Ctrl-C, or SIGTERM or
-    SIGHUP of the kernel while it provisions) ends them, and the thread is
-    waited for, so `provision:<task>` is held until its cleanup is done; a
-    second signal or cancel during that cleanup waits for it too."""
+    """`workspace.provision` in `git.threaded`, with no time limit on its
+    git calls or setup commands. An interrupt of `start` (Ctrl-C, or
+    SIGTERM or SIGHUP of the kernel while it provisions) cancels it, which
+    interrupts them, and the thread is waited for, so `provision:<task>` is
+    held until its cleanup is done; a second signal or cancel during that
+    cleanup waits for it too. The handlers stay until then: without them a
+    second signal would end the kernel with the cleanup half done."""
     loop = asyncio.get_running_loop()
     me = asyncio.current_task()
-    with git.interruptible() as held:
-        job = asyncio.ensure_future(asyncio.to_thread(workspace.provision, task_id, spec, ports, base=base))
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(sig, me.cancel)
+    try:
+        return await git.threaded(workspace.provision, task_id, spec, ports, base=base)
+    finally:
         for sig in (signal.SIGTERM, signal.SIGHUP):
-            loop.add_signal_handler(sig, me.cancel)
-        try:
-            return await asyncio.shield(job)
-        except asyncio.CancelledError:
-            # The handlers stay: without them a second signal would end the
-            # kernel with the cleanup half done.
-            stop = asyncio.ensure_future(asyncio.to_thread(held.interrupt))
-            while not (stop.done() and job.done()):
-                try:
-                    await asyncio.wait({stop, job})
-                except asyncio.CancelledError:
-                    me.uncancel()  # a second cancel waits for the same cleanup
-            if not job.cancelled():
-                job.exception()  # the thread's own Refused; the interrupt is what is raised
-            raise
-        finally:
-            for sig in (signal.SIGTERM, signal.SIGHUP):
-                loop.remove_signal_handler(sig)
+            loop.remove_signal_handler(sig)
 
 
 async def _start_project(conn, args) -> str:
@@ -313,6 +324,10 @@ async def _start_project(conn, args) -> str:
             spec = dataclasses.replace(spec, branch=args.branch, target_branch=args.branch)
     except workspace.Refused as exc:
         raise SystemExit(f"start refused: {exc}") from None
+    if spec.merge_url and (spec.target_branch or spec.branch):
+        said = await targets.check(conn, spec.merge_url, spec.target_branch or spec.branch)
+        if said:
+            raise SystemExit(f"start refused: {said}")
     task_id = ledger.new_id()
     lock = f"provision:{task_id}"
     await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
@@ -335,6 +350,10 @@ async def _start_project(conn, args) -> str:
         except workspace.Refused as exc:
             raise SystemExit(f"start refused: {exc}") from None
         try:
+            # The target branch is known here when the spec named none.
+            said = await targets.check(conn, made.origin_url, made.target_branch)
+            if said:
+                raise ValueError(said)
             brief = tasks.Brief(
                 id=task_id,
                 instruction=args.instruction,
@@ -345,7 +364,7 @@ async def _start_project(conn, args) -> str:
             )
             return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
         except BaseException as exc:
-            await asyncio.to_thread(workspace.remove, task_id)
+            await git.threaded(workspace.remove, task_id)
             if isinstance(exc, ValueError):
                 raise SystemExit(f"start refused: {exc}") from None
             raise
@@ -382,7 +401,7 @@ async def _workspace(conn, args) -> str:
             raise SystemExit(
                 f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
             )
-        await asyncio.to_thread(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
+        await git.threaded(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
         await ledger.append(
             conn,
             args.task_id,
@@ -416,7 +435,7 @@ async def _orphan(conn, args, *, after_lock=None) -> str:
             await conn.execute("SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (args.task_id,))
         ).fetchone():
             raise SystemExit(f"{args.task_id} became a task; remove it as one once it is stopped or merged")
-        await asyncio.to_thread(workspace.remove, args.task_id, lay)
+        await git.threaded(workspace.remove, args.task_id, lay)
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
     return f"removed {lay.root}, which no task row names"
@@ -437,7 +456,7 @@ async def _verdict(conn, args) -> str:
         raise SystemExit(f"no manual verdict for {args.stage}; one of {', '.join(verdicts_.MANUAL_STAGES)}")
     verdicts_.manual_allowed(stage, RUNNERS)
     who = {"by": args.by, "via": args.via, "role_played": args.role_played}
-    _performers(await tasks.brief(conn, args.task_id))
+    performers = _performers(await tasks.brief(conn, args.task_id))
     await verdicts_.record_check(
         conn,
         args.task_id,
@@ -447,7 +466,7 @@ async def _verdict(conn, args) -> str:
         governance=[_instance(g, args) for g in args.governance],
         **who,
     )
-    await verdicts_.ensure_merge(conn, args.task_id)
+    await verdicts_.ensure_merge(conn, performers, args.task_id)
     state = await tasks.status(conn, args.task_id)
     return f"recorded {args.stage} {args.verdict}; task {args.task_id} is in {state['state']}"
 
@@ -575,20 +594,55 @@ async def _run(args) -> None:
             ).fetchone()
             if row is None:
                 raise SystemExit(f"no held effect {args.effect_id}")
-            _performers(await tasks.brief(conn, row[0]))
+            performers = _performers(await tasks.brief(conn, row[0]))
             try:
-                outcome = await broker.release(conn, args.effect_id)
+                outcome = await broker.release(conn, performers, args.effect_id)
             except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
                 raise SystemExit(f"release refused: {exc}") from None
             print(
                 f"{outcome.kind} {json.dumps(outcome.result, sort_keys=True)}"
                 + (f" {outcome.error}" if outcome.error else "")
             )
+        elif args.command == "merge-target":
+            print(await _merge_target(conn, args))
         elif args.command == "correct":
             c = await corrections.record(conn, args.text, by=args.by, via=args.via)
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
+
+
+async def _merge_target(conn, args) -> str:
+    """`add` (always Tom's), `remove` (anyone's), `list`."""
+    if args.target_command == "list":
+        rows = await targets.granted(conn)
+        return "\n".join(f"{r['url']}  {r['branch']}  {r['note']}" for r in rows) or "no merge targets"
+    if args.target_command == "add":
+        if not targets.url_ok(args.url):
+            raise SystemExit(
+                f"merge-target refused: {args.url} is not https://host/path (letters, digits, . _ / -; "
+                "no port, user, query, fragment, or dot segment)"
+            )
+        if not _branch_ok(args.branch):
+            raise SystemExit(f"merge-target refused: {args.branch!r} is not a branch name")
+        await targets.grant(conn, args.url, args.branch, args.note, via=args.via)
+        return f"granted {args.url} {args.branch}"
+    await targets.revoke(conn, args.url, args.branch, args.note, by=args.by, via=args.via)
+    return f"revoked {args.url} {args.branch}"
+
+
+def _branch_ok(branch: str) -> bool:
+    import subprocess
+
+    from core import git
+
+    done = subprocess.run(
+        [git.binary(), "check-ref-format", "--branch", branch],
+        env=git.env(),
+        capture_output=True,
+        check=False,
+    )
+    return done.returncode == 0 and not branch.startswith("-")
 
 
 def _secure_login() -> dict:
@@ -630,6 +684,15 @@ def _sync(args) -> bool:
         except FileNotFoundError:
             raise SystemExit(f"no vault .env at {settings.vault_env}") from None
         print(f"{OPENAI_KEY_NAME} (from {args.name}): {status[OPENAI_KEY_NAME]}")
+    elif args.command == "github-key":
+        try:
+            status = credentials.copy_keys(
+                settings.vault_env, settings.github_keyfile, [credentials.GITHUB_KEY]
+            )
+        except FileNotFoundError:
+            raise SystemExit(f"no vault .env at {settings.vault_env}") from None
+        for name, what in status.items():
+            print(f"{name}: {what}")
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -758,6 +821,20 @@ def main() -> None:
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
+    sub.add_parser("github-key")
+    target_cmd = sub.add_parser("merge-target").add_subparsers(dest="target_command", required=True)
+    add_target = target_cmd.add_parser("add")
+    add_target.add_argument("url")
+    add_target.add_argument("branch")
+    add_target.add_argument("--note", required=True)
+    add_target.add_argument("--via", default="the command line")
+    remove_target = target_cmd.add_parser("remove")
+    remove_target.add_argument("url")
+    remove_target.add_argument("branch")
+    remove_target.add_argument("--note", required=True)
+    remove_target.add_argument("--by", required=True)
+    remove_target.add_argument("--via", default="the command line")
+    target_cmd.add_parser("list")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     sub.add_parser("backup").add_argument("--plist", action="store_true")

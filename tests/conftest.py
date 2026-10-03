@@ -6,6 +6,11 @@ file, or `pg_hba.conf`, so a test run leaves the machine cluster's
 credentials as it found them. Every test marks its live spend with
 `@pytest.mark.spend(usd=...)`. A session's task directories (turn output
 among them) live in a temporary `VALOR_WORK`, never the machine's.
+
+The effect lock files (`settings.performing_dir`) go to a temporary
+directory of the session's own, set in the environment before the settings
+are built, so the suite and every process it starts write nothing under the
+kernel key directory.
 """
 
 import atexit
@@ -17,6 +22,8 @@ import pytest
 
 os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
+os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
+atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
 
 from core import db  # settings read VALOR_WORK on import
 from core.settings import settings

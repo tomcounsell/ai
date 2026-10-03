@@ -78,8 +78,7 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
 
 def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_the_cli(dsn, tmp_path):
     outbox = tmp_path / "outbox.jsonl"
-    broker.register(WorkspaceWrite(tmp_path))
-    broker.register(OutboxAppend(outbox))
+    perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(outbox))
 
     def cli(*args):
         return subprocess.run(
@@ -104,16 +103,16 @@ def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_t
             )
             text = (ended["result"].get("text") or "").strip()
             wrote = await broker.request(
-                conn, task, broker.Action("workspace_write", "reply.txt", {"text": text})
+                conn, perf, task, broker.Action("workspace_write", "reply.txt", {"text": text})
             )
-            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": text}))
+            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": text}))
             with pytest.raises(broker.NotApproved):
-                await broker.release(conn, held.effect_id)
+                await broker.release(conn, perf, held.effect_id)
             lines_before = outbox.exists()
             pending = cli("pending")
             cli("approve", held.effect_id, "--note", "yes, send it")
-            sent = await broker.release(conn, held.effect_id)
-            again = await broker.release(conn, held.effect_id)
+            sent = await broker.release(conn, perf, held.effect_id)
+            again = await broker.release(conn, perf, held.effect_id)
             state = await tasks.status(conn, task)
         await gateway.close()
         return ended, text, wrote, held, lines_before, pending, sent, again, state

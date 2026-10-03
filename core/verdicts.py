@@ -447,7 +447,7 @@ def merge_action(f: machine.Fold, b: tasks.Brief) -> broker.Action | None:
     )
 
 
-async def ensure_merge(conn, task_id: str) -> broker.Outcome | None:
+async def ensure_merge(conn, performers: broker.Performers, task_id: str) -> broker.Outcome | None:
     """Request the merge for a task in `merge` whose current candidate's
     delivery passed (or passed with gaps) and has no merge effect yet.
     Idempotent: the broker returns a held effect for the same payload. It
@@ -475,4 +475,4 @@ async def ensure_merge(conn, task_id: str) -> broker.Outcome | None:
         and effect["grants"] == len(f.granted)
     ):
         return None
-    return await broker.request(conn, task_id, action)
+    return await broker.request(conn, performers, task_id, action)

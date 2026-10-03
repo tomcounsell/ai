@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from core import db, fresh, ledger, router
+from core import db, fresh, ledger
 from core.gateway import ClaudeLogin, Gateway
 from core.machine import State
 from core.settings import resolve_model
@@ -47,10 +47,10 @@ def test_a_real_fresh_critique_session_leaves_a_verdict_through_the_gateway(dsn,
         gateway = Gateway(dsn, credential=ClaudeLogin())
         await gateway.start()
         try:
-            planned = await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+            planned = await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
             assert planned["missing"] == ["critique"], planned
             runners = {**scripted.RUNNERS, State.CRITIQUE: fresh.critique_runner(fresh_for, model=light)}
-            out = await router.run(gateway, task, runners, dsn=dsn)
+            out = await scripted.route(gateway, task, runners, dsn=dsn)
         finally:
             await gateway.close()
         async with await db.connect(dsn) as conn:

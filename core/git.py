@@ -10,7 +10,7 @@ name drivers; a driver's program comes from config. So every call:
   `core.binaries.require_git` before every call: the Command Line Tools'
   git by default, never Apple's `/usr/bin/git` shim, which finds the real
   git through a per-user cache a turn can poison) with a PATH of system
-  directories only and a time limit (`settings.git_timeout_s`);
+  directories only;
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
 - ignores replace refs and grafts (`GIT_NO_REPLACE_OBJECTS=1`,
@@ -19,18 +19,24 @@ name drivers; a driver's program comes from config. So every call:
   which a turn can write and none of which is config, so none can change
   what history the kernel reads;
 - drops every `DYLD_*` variable, so no library is injected into git;
-- runs git in its own process group, killed whole when the call outlives
-  its time: the smaller of `git_timeout_s` and what is left of the
-  `deadline` the caller set (a performer sets one for its whole perform,
-  so a push and the calls around it share one limit); a call made under
-  `interruptible()` (provisioning) has no time limit, and ends when its
-  holder interrupts it;
+- runs git in its own process group with no time limit: git runs until
+  it exits. Started under a watch (`interruptible()`: provisioning, a run
+  starting its services, and every `threaded` caller, such as a perform),
+  an interrupt of the watch kills the group, git and everything it
+  started; a cancelled `threaded` caller (a stop, or an interrupt of the
+  kernel's loop) interrupts its watch. Inside a perform git holds the
+  effect's lock (`core.performing`), which every process git starts
+  inherits, so `broker.reconcile` waits until the last of them has exited;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
   and signing off on its command line, which overrides the repository's
   config; a push also passes `--no-follow-tags --no-recurse-submodules
   --no-signed`, so it sends exactly the one commit Tom's approval binds;
+- on a call carrying the GitHub credential, also pins
+  `http.followRedirects=false` and an empty `http.proxy`, at the general
+  scope and the URL's own (`credential_pins`), so the header reaches the
+  granted URL and nothing else whatever the repository's config says;
 - passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
   submodules in `status`;
 - and first refuses the workspace outright (`GitError`) when its local or
@@ -48,11 +54,14 @@ Reading config (`git config --list`) runs nothing: it only reads files. A
 workspace whose config the kernel refuses gets no candidate, no instance,
 no git facts, and no push until the turn removes the key.
 
-Imports the standard library and `core.settings`.
+Imports the standard library, `core.binaries`, `core.performing`, and
+`core.settings`.
 """
 
+import asyncio
 import contextlib
 import contextvars
+import functools
 import hashlib
 import json
 import os
@@ -67,7 +76,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import binaries
+from core import binaries, performing
 from core.settings import settings
 
 # The PATH every kernel git call runs with: system directories only, none a
@@ -122,6 +131,20 @@ PINNED = [
     "-c", "submodule.recurse=false",
     "-c", "advice.graftFileDeprecated=false",
 ]  # fmt: skip
+
+
+def credential_pins(url: str) -> list[str]:
+    """Pinned on every call that carries the GitHub credential to `url`, on
+    the command line, which outranks the repository's config and the header
+    file, at both the general and the URL's own scope (a key scoped to the
+    URL beats a general one wherever it is set): no redirect is followed and
+    no proxy is used, so the header reaches the granted URL and nothing
+    else. `url` is one `targets.url_ok` accepted, so it holds no `=`."""
+    pins = []
+    for key, value in (("followRedirects", "false"), ("proxy", "")):
+        pins += ["-c", f"http.{key}={value}", "-c", f"http.{url}.{key}={value}"]
+    return pins
+
 
 # Local or worktree config keys (lowercased) the kernel will not run git
 # under: by prefix, or by a `remote.<name>.` / `diff.<name>.` /
@@ -206,8 +229,7 @@ def interruptible():
 @contextlib.contextmanager
 def uninterrupted():
     """A call that must run even after an interrupt (removing a ref the
-    interrupted work added, stopping the services it started), with the
-    usual time limit for a git call."""
+    interrupted work added, stopping the services it started)."""
     token = _WATCH.set(None)
     try:
         yield
@@ -244,30 +266,31 @@ def _git(
     prefix: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """The trusted git (`settings.git_bin`, checked each call), never
-    whichever `git` comes first on a PATH, in its own process group, killed
-    whole when it outlives its limit (the smaller of `git_timeout_s` and
-    what is left of the caller's `deadline`; under `interruptible()`, the
-    deadline alone). `prefix` runs it under a sandbox (`sandbox-exec ...
-    -f <profile>`)."""
+    whichever `git` comes first on a PATH, in its own process group, run
+    until it exits, started through `start` so an interrupt of the current
+    watch (`interruptible()`, `threaded`) kills the group. Inside a perform,
+    git gets the effect's lock descriptor (`core.performing`), which every
+    process it starts inherits. `prefix` runs it under a sandbox
+    (`sandbox-exec ... -f <profile>`)."""
     git_bin = binary()
     held = _WATCH.get()
-    limit = None if held is not None else settings.git_timeout_s
-    ends = _DEADLINE.get()
-    if ends is not None:
-        limit = ends - time.monotonic() if limit is None else min(limit, ends - time.monotonic())
-        if limit <= 0:
-            raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
+    lock = performing.held()
     argv = [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args]
     proc = start(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, env={**env(), **(extra_env or {})}
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=text,
+        env={**env(), **(extra_env or {})},
+        pass_fds=() if lock is None else (lock,),
     )
     try:
-        stdout, stderr = proc.communicate(timeout=limit)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
         proc.communicate()
-        raise GitError(f"git {' '.join(args[:2])} did not finish in {limit:.0f}s") from None
+        raise
     finally:
         if held is not None:
             held.finished(proc)
@@ -276,33 +299,35 @@ def _git(
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
-_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("git_deadline", default=None)
+async def threaded(fn, *args, **kwargs):
+    """`fn(*args, **kwargs)` in a worker thread under its own watch
+    (`interruptible()`) and, inside a perform, holding the effect's lock
+    (`performing.in_thread`). Cancelling the caller (a stop, or an
+    interrupt of the kernel's loop) interrupts the watch, which kills every
+    process the thread started and refuses any it would start next; the
+    cancel is raised once the thread has returned."""
+    with interruptible() as held:
+        job = asyncio.ensure_future(performing.in_thread(functools.partial(fn, *args, **kwargs)))
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            await interrupt(held, job)
+            raise
 
 
-def remaining(limit: float) -> float:
-    """`limit`, or less when the caller's `deadline` ends sooner; a passed
-    deadline raises `GitError`. For a git run outside `_git` (the kernel
-    mirror's bounded fetch)."""
-    ends = _DEADLINE.get()
-    if ends is None:
-        return limit
-    left = ends - time.monotonic()
-    if left <= 0:
-        raise GitError("the deadline for this perform has passed")
-    return min(limit, left)
-
-
-@contextlib.contextmanager
-def deadline(seconds: float):
-    """One limit for every git call inside the block, together. Nested
-    blocks keep the earlier deadline."""
-    ends = time.monotonic() + seconds
-    outer = _DEADLINE.get()
-    token = _DEADLINE.set(ends if outer is None else min(outer, ends))
-    try:
-        yield
-    finally:
-        _DEADLINE.reset(token)
+async def interrupt(held: Interruptible, job: asyncio.Future) -> None:
+    """Interrupt `held` and wait for both the interrupt and `job` (the
+    thread doing the work) to finish; a further cancel meanwhile waits for
+    the same. The job's own error is read and dropped: the interrupt is
+    what the caller raises."""
+    stop = asyncio.ensure_future(asyncio.to_thread(held.interrupt))
+    while not (stop.done() and job.done()):
+        try:
+            await asyncio.wait({stop, job})
+        except asyncio.CancelledError:
+            asyncio.current_task().uncancel()
+    if not job.cancelled():
+        job.exception()
 
 
 def hostile(
@@ -333,10 +358,18 @@ def hostile(
 
 
 def run(
-    workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None
+    workspace: str | Path,
+    *args: str,
+    text: bool = True,
+    extra_env: dict[str, str] | None = None,
+    credential: Path | None = None,
+    url: str | None = None,
 ) -> subprocess.CompletedProcess:
     """One git call in the workspace, refused before it runs when the
-    workspace's config is hostile."""
+    workspace's config is hostile. With `credential`, the per-call config
+    file `core.credentials.header_file` wrote, git reads it as its global
+    config, which carries the merge's pinned header for `url`, and the call
+    also passes `credential_pins(url)`."""
     found = hostile(workspace)
     if found:
         raise GitError(
@@ -344,7 +377,13 @@ def run(
             "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
             "key is refused): " + "; ".join(found)
         )
-    return _git(workspace, *args, text=text, extra_env=extra_env)
+    pins = []
+    if credential is not None:
+        if url is None:
+            raise ValueError("a call carrying the credential names its URL")
+        pins = credential_pins(url)
+        extra_env = {**(extra_env or {}), "GIT_CONFIG_GLOBAL": str(credential)}
+    return _git(workspace, *pins, *args, text=text, extra_env=extra_env)
 
 
 def trusted(
@@ -366,8 +405,15 @@ def trusted(
     return done.stdout.strip() if strip else done.stdout
 
 
-def out(workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None) -> Any:
-    done = run(workspace, *args, text=text, extra_env=extra_env)
+def out(
+    workspace: str | Path,
+    *args: str,
+    text: bool = True,
+    extra_env: dict[str, str] | None = None,
+    credential: Path | None = None,
+    url: str | None = None,
+) -> Any:
+    done = run(workspace, *args, text=text, extra_env=extra_env, credential=credential, url=url)
     if done.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {_text(done.stderr).strip()}")
     return done.stdout.strip()
@@ -481,17 +527,29 @@ def push_url(workspace: str | Path, remote: str = "origin") -> str:
     return url
 
 
-def remote_head(workspace: str | Path, url: str) -> str | None:
+def remote_head(workspace: str | Path, url: str, credential: Path | None = None) -> str | None:
     """The branch a remote's HEAD names, or None when it names none (an
-    unborn HEAD lists nothing)."""
-    listed = run(workspace, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
+    unborn HEAD lists nothing). A remote that does not answer raises
+    `GitError` carrying git's stderr."""
+    listed = run(
+        workspace,
+        "ls-remote",
+        "--symref",
+        "--upload-pack=git-upload-pack",
+        url,
+        "HEAD",
+        credential=credential,
+        url=url,
+    )
+    if listed.returncode != 0:
+        raise GitError(listed.stderr.strip())
     for line in listed.stdout.splitlines():
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             return line[len("ref: refs/heads/") : -len("\tHEAD")]
     return None
 
 
-def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
+def push(workspace: str | Path, url: str, sha: str, branch_name: str, credential: Path | None = None) -> None:
     """Push one commit to one branch at an explicit URL, never with force.
     `run` refuses a workspace whose config could rewrite where it lands."""
     if run(workspace, "check-ref-format", "--branch", branch_name).returncode != 0:
@@ -508,14 +566,26 @@ def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
         "--receive-pack=git-receive-pack",
         url,
         f"{sha}:refs/heads/{branch_name}",
+        credential=credential,
+        url=url,
     )
 
 
-def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
+def remote_sha(
+    workspace: str | Path, url: str, branch_name: str, credential: Path | None = None
+) -> str | None:
     """The branch's tip at the remote, or None when the remote answered and
     holds no such branch. A remote that does not answer raises `GitError`:
     unreachable is not the same as absent."""
-    listed = run(workspace, "ls-remote", "--upload-pack=git-upload-pack", url, f"refs/heads/{branch_name}")
+    listed = run(
+        workspace,
+        "ls-remote",
+        "--upload-pack=git-upload-pack",
+        url,
+        f"refs/heads/{branch_name}",
+        credential=credential,
+        url=url,
+    )
     if listed.returncode != 0:
         raise GitError(f"ls-remote {url}: {listed.stderr.strip()}")
     fields = listed.stdout.split()
@@ -525,13 +595,15 @@ def remote_sha(workspace: str | Path, url: str, branch_name: str) -> str | None:
 LOOKUP_REF = "refs/valor-kernel/lookup"
 
 
-def holds(workspace: str | Path, url: str, branch_name: str, sha: str) -> bool | None:
+def holds(
+    workspace: str | Path, url: str, branch_name: str, sha: str, credential: Path | None = None
+) -> bool | None:
     """Whether the remote branch holds `sha`: its tip, or a commit the tip
     descends from (the branch may have moved on since). None when the
     remote holds no such branch. The tip is fetched into the kernel's own
     ref (`LOOKUP_REF`), so ancestry is read from objects the remote sent
     now. Raises `GitError` when the remote cannot be read."""
-    tip = remote_sha(workspace, url, branch_name)
+    tip = remote_sha(workspace, url, branch_name, credential)
     if tip is None:
         return None
     if tip == sha:
@@ -540,6 +612,8 @@ def holds(workspace: str | Path, url: str, branch_name: str, sha: str) -> bool |
         workspace,
         "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
         "--upload-pack=git-upload-pack", url, f"+refs/heads/{branch_name}:{LOOKUP_REF}",
+        credential=credential,
+        url=url,
     )  # fmt: skip
     return is_ancestor(workspace, sha, LOOKUP_REF)
 

@@ -261,7 +261,25 @@ authority, and a turn holds none.
 | The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on the OpenAI route's listed calls (`POST v1/responses`, `GET` or `HEAD` on `v1/models` and one model by id; any other method is a 403) and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
 | Mail credentials | The email bridge | Not built |
-| Git hosting tokens | The broker's performer for a released push, never the turn | Not needed yet: pushes go to a local bare origin |
+| The GitHub push token, `GITHUB_PUSH_TOKEN` | The merge performer of a task the kernel provisioned, for a released merge to a granted remote, never the turn and never `push_branch` | `github-keys` in the kernel key directory (mode 600), written only by `python -m core github-key`, which copies it from the vault `.env` and prints `written`, `kept`, or `missing`. For each git call against the remote the kernel writes a config file of its own, mode 600, in the same directory, holding one header (`Authorization: Basic`, user `x-access-token`) scoped to that exact URL, with `http.followRedirects=false` so the header never follows a redirect, gives git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits; the call also pins no redirect and no proxy on its command line, which outranks the repository's config; the file is named by the PID of the process writing it, and a file a crash left is removed by the next merge once that process no longer exists. GitHub's refusal of the token fails the merge saying to rotate it |
+
+**Where a merge lands.** A merge to a remote lands only on a (URL,
+branch) pair on the merge-target list, which Tom grants with `python -m
+core merge-target add URL BRANCH --note TEXT` and anyone removes with
+`merge-target remove`; `merge-target list` shows it. The URL is plain
+`https://host/path`, with no user, port, query, or quoting. `start
+--project` refuses a spec whose `merge_url` and branch are not granted,
+and refuses the branch the remote's HEAD names (its default branch), read
+at start and again before each push. A merge to a local origin needs no
+grant and no token; a `--workspace` task merges with no token.
+
+**Reading what a turn wrote.** A file or directory under a turn's own
+state is the turn's to change, so the kernel opens it component by
+component from a directory it owns, following no link at any step
+(`workspace.open_turn_dir`). `open_turn_file` keeps a file only when it is
+regular, has one link (a hard link could name a file in the kernel key
+directory), and is not sparse, and otherwise returns why. The transcript copy
+([harnesses.md](harnesses.md)) is read this way.
 
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is

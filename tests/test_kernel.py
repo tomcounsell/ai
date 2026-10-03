@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -108,21 +109,24 @@ def test_prices_round_up_and_match_dated_ids():
 
 
 def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_path):
-    broker.register(WorkspaceWrite(tmp_path))
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
         task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            wrote = await broker.request(conn, task, broker.Action("workspace_write", "a.txt", {"text": "a"}))
-            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
-            again = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            wrote = await broker.request(
+                conn, perf, task, broker.Action("workspace_write", "a.txt", {"text": "a"})
+            )
+            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            again = await broker.request(
+                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"})
+            )
             with pytest.raises(broker.NotApproved):
-                await broker.release(conn, held.effect_id)
+                await broker.release(conn, perf, held.effect_id)
             lines_before = _lines(tmp_path / "outbox.jsonl")
             await broker.approve(conn, held.effect_id, note="send it")
-            sent = await broker.release(conn, held.effect_id)
-            repeat = await broker.release(conn, held.effect_id)
+            sent = await broker.release(conn, perf, held.effect_id)
+            repeat = await broker.release(conn, perf, held.effect_id)
             state = await tasks.status(conn, task)
         return wrote, held, again, lines_before, sent, repeat, state
 
@@ -136,16 +140,15 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
 
 
 def test_ceiling_and_stop_refuse_effects(dsn, tmp_path):
-    broker.register(WorkspaceWrite(tmp_path))
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
         low = await new_task(dsn, max_effect_class="propose")
         async with await db.connect(dsn) as conn:
-            above = await broker.request(conn, low, broker.Action("outbox_send", "tom", {"text": "x"}))
+            above = await broker.request(conn, perf, low, broker.Action("outbox_send", "tom", {"text": "x"}))
             await tasks.stop(conn, low, reason="test")
             after_stop = await broker.request(
-                conn, low, broker.Action("workspace_write", "b.txt", {"text": "b"})
+                conn, perf, low, broker.Action("workspace_write", "b.txt", {"text": "b"})
             )
         return above, after_stop
 
@@ -159,14 +162,14 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
     """The flag is the broker's to compute from the review and docs verdicts
     (tests/test_pipeline.py has the merge cases); no requester can set it,
     and what the broker computed is what the ledger records."""
-    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
     with pytest.raises(TypeError):
         broker.Action("outbox_send", "tom", {"text": "x"}, adds_governance=True)
 
     async def go():
         task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "x"}))
+            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "x"}))
             rows = await ledger.read(conn, task)
         return held, rows
 
@@ -548,3 +551,82 @@ def test_the_rendered_ledger_shows_each_payload_whole():
     long = "p" * 1000
     text = ledger.render([{"id": 1, "type": "turn.ended", "payload": {"result": long}}])
     assert text.endswith(f'{{"result": "{long}"}}')
+
+
+# -- reconcile from the intent row ----------------------------------------------------------
+
+
+class StuckWrite(WorkspaceWrite):
+    """Writes the file, then never returns: the process dies mid-perform."""
+
+    def __init__(self, root, wrote: asyncio.Event):
+        super().__init__(root)
+        self.wrote = wrote
+
+    async def perform(self, action, key):
+        out = await super().perform(action, key)
+        self.wrote.set()
+        await asyncio.Event().wait()
+        return out
+
+
+def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_alone(dsn, tmp_path):
+    """A propose-class effect has no `effect.held` row; a perform cut off
+    after its intent leaves only the intent, and reconcile settles it."""
+    action = broker.Action("workspace_write", "note.txt", {"text": "hello"})
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t"))
+        wrote = asyncio.Event()
+        stuck = broker.Performers(StuckWrite(tmp_path, wrote))
+        conn = await db.connect(dsn)
+        requesting = asyncio.create_task(broker.request(conn, stuck, task, action))
+        await wrote.wait()
+        requesting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await requesting
+        await conn.close()
+        async with await db.connect(dsn) as conn:
+            rows = await ledger.read(conn, task)
+            (intent,) = [r["payload"] for r in rows if r["type"] == "effect.intent"]
+            settled = await broker.reconcile(
+                conn, broker.Performers(WorkspaceWrite(tmp_path)), intent["effect_id"]
+            )
+            return rows, intent, settled, await broker.held_task(conn, intent["effect_id"]), task
+
+    rows, intent, settled, owner, task = run(go())
+    assert not [r for r in rows if r["type"] in ("effect.held", "effect.outcome")]
+    assert intent["action_type"] == "workspace_write" and intent["target"] == "note.txt"
+    assert intent["payload"] == {"text": "hello"} and intent["effect_class"] == "propose"
+    assert intent["payload_sha256"] == ledger.digest({"text": "hello"}) and intent["approval_id"] is None
+    assert settled.kind == "done" and owner == task
+
+
+def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one_concludes_nothing(
+    dsn, tmp_path
+):
+    outbox = tmp_path / "outbox.jsonl"
+    action = broker.Action("outbox_send", "tom", {"text": "hi"})
+    described = action.describe("act", False)
+    outbox.write_text(json.dumps({"key": described["idempotency_key"], "to": "tom", "text": "hi"}) + "\n")
+    perf = broker.Performers(OutboxAppend(outbox), WorkspaceWrite(tmp_path))
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
+            held, bare = ledger.new_id(), ledger.new_id()
+            await ledger.append(conn, task, "effect.held", {"effect_id": held, **described})
+            for effect_id in (held, bare):
+                await ledger.append(conn, task, "effect.intent", {
+                    "effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": None,
+                })  # fmt: skip
+            return (
+                await broker.reconcile(conn, perf, held),
+                await broker.reconcile(conn, perf, bare),
+                await broker.reconcile(conn, perf, ledger.new_id()),
+            )
+
+    from_held, without, unknown = run(go())
+    assert from_held.kind == "done" and from_held.result["key"] == described["idempotency_key"]
+    assert without is None and unknown is None

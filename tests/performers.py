@@ -24,13 +24,13 @@ class WorkspaceWrite:
             raise ValueError(f"{action.target} is outside the workspace")
         return path
 
-    def perform(self, action, key: str) -> dict:
+    async def perform(self, action, key: str) -> dict:
         path = self._path(action)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(action.payload["text"])
         return {"path": str(path), "bytes": len(action.payload["text"].encode())}
 
-    def lookup(self, action, key: str) -> dict | None:
+    async def lookup(self, action, key: str) -> dict | None:
         path = self._path(action)
         if path.exists() and path.read_text() == action.payload["text"]:
             return {"path": str(path), "bytes": path.stat().st_size}
@@ -44,13 +44,13 @@ class OutboxAppend:
     def __init__(self, outbox: Path):
         self.outbox = Path(outbox)
 
-    def perform(self, action, key: str) -> dict:
+    async def perform(self, action, key: str) -> dict:
         self.outbox.parent.mkdir(parents=True, exist_ok=True)
         with self.outbox.open("a") as f:
             f.write(json.dumps({"key": key, "to": action.target, **action.payload}) + "\n")
         return {"outbox": str(self.outbox), "key": key}
 
-    def lookup(self, action, key: str) -> dict | None:
+    async def lookup(self, action, key: str) -> dict | None:
         if not self.outbox.exists():
             return None
         for line in self.outbox.read_text().splitlines():

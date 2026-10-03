@@ -19,7 +19,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, db, guards, ledger, machine, router, session, tasks, verdicts
+from core import broker, db, guards, ledger, machine, performing, router, session, tasks, verdicts
 from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -53,7 +53,7 @@ async def drive(dsn, task, runners=None) -> dict:
     gateway = Gateway(dsn)
     await gateway.start()
     try:
-        return await router.run(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
+        return await scripted.route(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
     finally:
         await gateway.close()
 
@@ -250,7 +250,7 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge it")
             try:
-                out = await broker.release(conn, effect)
+                out = await scripted.release(conn, effect)
             except broker.Refused as exc:
                 out = exc
         return out, await rows(dsn, task)
@@ -326,7 +326,7 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
         await drive(dsn, task)
         await drive(dsn, task)
         async with await db.connect(dsn) as conn:
-            direct = await broker.request(
+            direct = await scripted.request(
                 conn, task, verdicts.merge_action(held, await tasks.brief(conn, task))
             )
         instance = held.instances()[0].id
@@ -397,9 +397,9 @@ def test_all_five_terms_hold_and_the_merge_lands_on_the_recorded_origin(dsn, tmp
         effect = await merge_effect(dsn, task)
         async with await db.connect(dsn) as conn:
             with pytest.raises(broker.MergeRefused) as no_approval:
-                await broker.release(conn, effect)
+                await scripted.release(conn, effect)
             await broker.approve(conn, effect, note="merge it")
-            done = await broker.release(conn, effect)
+            done = await scripted.release(conn, effect)
         return task, no_approval.value, done, await fold(dsn, task)
 
     _task, no_approval, done, f = run(go())
@@ -423,10 +423,10 @@ def test_a_red_test_refuses_the_merge_even_when_one_is_requested_and_approved(ds
         await scripted.check(dsn, task, "docs", "no_change")
         f = await fold(dsn, task)
         async with await db.connect(dsn) as conn:
-            held = await broker.request(conn, task, verdicts.merge_action(f, await tasks.brief(conn, task)))
+            held = await scripted.request(conn, task, verdicts.merge_action(f, await tasks.brief(conn, task)))
             await broker.approve(conn, held.effect_id, note="merge anyway")
             with pytest.raises(broker.MergeRefused) as refused:
-                await broker.release(conn, held.effect_id)
+                await scripted.release(conn, held.effect_id)
         return f, refused.value, await rows(dsn, task)
 
     f, refused, written = run(go())
@@ -477,7 +477,7 @@ def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_p
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge")
             try:
-                return await broker.release(conn, effect)
+                return await scripted.release(conn, effect)
             except broker.MergeRefused as exc:
                 return exc
 
@@ -505,7 +505,7 @@ def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge")
             with pytest.raises(broker.MergeRefused) as refused:
-                await broker.release(conn, effect)
+                await scripted.release(conn, effect)
         f = await fold(dsn, task)
         return refused.value, f.checks[Check.DOCS].payload["paths"]
 
@@ -549,9 +549,9 @@ def test_an_approval_for_another_digest_releases_nothing(dsn, tmp_path):
         second = await merge_effect(dsn, task)
         async with await db.connect(dsn) as conn:
             with pytest.raises(broker.MergeRefused) as on_first_approval:
-                await broker.release(conn, second)
+                await scripted.release(conn, second)
             with pytest.raises(broker.MergeRefused) as stale:
-                await broker.release(conn, first)
+                await scripted.release(conn, first)
         return first, second, on_first_approval.value, stale.value
 
     first, second, on_first_approval, stale = run(go())
@@ -804,8 +804,9 @@ def test_the_brief_renders_the_stage_and_the_offered_effects(dsn, tmp_path):
     async def go():
         task = await scripted.start(dsn, ws, judge="thin")
         async with await db.connect(dsn) as conn:
-            clarify = await tasks.dispatch(conn, task)
-            plan = await tasks.dispatch(conn, task, state=State.PLAN)
+            offered = scripted.performers(await tasks.brief(conn, task)).offered()
+            clarify = await tasks.dispatch(conn, task, offered=offered)
+            plan = await tasks.dispatch(conn, task, state=State.PLAN, offered=offered)
         return clarify["text"], plan["text"]
 
     clarify, plan = run(go())
@@ -840,10 +841,10 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
             await ledger.append(conn, b.id, "task.started", {"instruction": "old",
                                                              "max_effect_class": "act", "mode": "bare"})  # fmt: skip
             await ledger.append(conn, b.id, "task.delivered", {"turn_id": "t", "summary": "done"})
-        broker.register(PushBranch(ws))
+        perf = broker.Performers(PushBranch(ws))
         async with await db.connect(dsn) as conn:
             held = await broker.request(
-                conn, b.id, broker.Action("push_branch", "valor/old", {"head_sha": head})
+                conn, perf, b.id, broker.Action("push_branch", "valor/old", {"head_sha": head})
             )
             st = await tasks.status(conn, b.id)
             with pytest.raises(LookupError, match="predates"):
@@ -857,7 +858,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
             with pytest.raises(LookupError, match="predates"):
                 await guards.grant(conn, b.id, "i", note="x", incident="i", mission_item="1")
             await broker.approve(conn, held.effect_id, note="push it")
-            pushed = await broker.release(conn, held.effect_id)
+            pushed = await broker.release(conn, perf, held.effect_id)
         return st, pushed, await drive(dsn, b.id)
 
     st, pushed, out = run(go())
@@ -961,7 +962,7 @@ def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_p
         results = {}
         async with await db.connect(dsn) as conn:
             try:
-                await broker.release(conn, effect)
+                await scripted.release(conn, effect)
             except broker.Refused as exc:
                 results["release"] = str(exc)
             results["facts"] = broker._git_facts(str(ws), f, {"head_sha": f.candidate.sha})
@@ -1033,7 +1034,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(d
         f = await fold(dsn, task)
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, f.merge_effect["effect_id"], note="merge with the gap")
-            done = await broker.release(conn, f.merge_effect["effect_id"])
+            done = await scripted.release(conn, f.merge_effect["effect_id"])
         return f, done
 
     f, done = run(go())
@@ -1062,7 +1063,7 @@ def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp
         effect = delivered["state"]["merge_effect"]["effect_id"]
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge")
-            done = await broker.release(conn, effect)
+            done = await scripted.release(conn, effect)
         return held_back, done, head, await rows(dsn, task)
 
     held_back, done, head, written = run(go())
@@ -1129,7 +1130,7 @@ def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_p
         effect = await merge_effect(dsn, task)
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge")
-            await broker.release(conn, effect)
+            await scripted.release(conn, effect)
         return judge, await drive(dsn, task)
 
     judge, merged = run(go())
@@ -1197,7 +1198,7 @@ def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn
         async def release():
             async with await db.connect(dsn) as conn:
                 try:
-                    return await broker.release(conn, effect)
+                    return await scripted.release(conn, effect)
                 except broker.Refused as exc:
                     return exc
 
@@ -1250,7 +1251,7 @@ def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
         async def release():
             async with await db.connect(dsn) as conn:
                 try:
-                    return await broker.release(conn, effect)
+                    return await scripted.release(conn, effect)
                 except (broker.Refused, broker.NotApproved) as exc:
                     return exc
 
@@ -1384,9 +1385,9 @@ def test_a_tag_the_turn_made_is_not_pushed_and_push_settings_refuse(dsn, tmp_pat
             await broker.approve(conn, effect, note="merge")
             git(ws, "config", "push.followTags", "true")
             with pytest.raises(broker.Refused, match="push.followtags"):
-                await broker.release(conn, effect)
+                await scripted.release(conn, effect)
             git(ws, "config", "--unset", "push.followTags")
-            return await broker.release(conn, effect), sha
+            return await scripted.release(conn, effect), sha
 
     done, sha = run(go())
     assert done.kind == "done" and git(origin, "rev-parse", "main") == sha
@@ -1424,7 +1425,7 @@ def test_a_merge_that_landed_before_the_crash_is_reconciled_as_done(dsn, tmp_pat
         async with await db.connect(dsn) as conn:  # a live performer still holding the effect: left alone
             other = await db.connect(dsn)
             await other.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"effect:{effect}",))
-            assert await broker.reconcile(conn, effect) is None
+            assert await scripted.reconcile(conn, effect) is None
             await other.close()
         return effect, await drive(dsn, task), await rows(dsn, task)
 
@@ -1463,7 +1464,7 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
         origin.rename(tmp_path / "away.git")
         out = await drive(dsn, task)
         async with await db.connect(dsn) as conn:
-            assert await broker.reconcile(conn, effect, settle_after_s=0) is None
+            assert await scripted.reconcile(conn, effect) is None
         return effect, out, await rows(dsn, task)
 
     effect, out, written = run(go())
@@ -1471,27 +1472,33 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
     assert out["status"] == "delivered" and out["state"]["merge_effect"]["state"] == "in_flight"
 
 
-def test_a_missing_merge_is_failed_only_after_no_performer_could_still_be_pushing(dsn, tmp_path, monkeypatch):
-    """A performer whose database connection dropped frees its lock while its
-    push may still run, bounded by the git time limit; until the intent is
-    older than that, an absent effect concludes nothing."""
+def test_a_missing_merge_is_failed_only_once_no_process_holds_it(dsn, tmp_path):
+    """A performer whose database connection dropped frees its session
+    lock while its thread and its git may still run; they hold the
+    effect's lock file, and until it is free an absent effect concludes
+    nothing."""
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task, effect, _ = await _dangling(dsn, ws)
-        young = await drive(dsn, task)
-        assert _outcomes(await rows(dsn, task), effect) == []
-        monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "0")
-        monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "0")  # for the broker's copy only
-        monkeypatch.setattr(broker, "settings", type(broker.settings)())
-        old = await drive(dsn, task)
-        return effect, young, old, await rows(dsn, task)
+        p = performing.path(effect)
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = performing.hold(p)  # a push still running
+        try:
+            held = await drive(dsn, task)
+            assert _outcomes(await rows(dsn, task), effect) == []
+        finally:
+            os.close(fd)
+        freed = await drive(dsn, task)
+        return effect, held, freed, await rows(dsn, task)
 
-    effect, young, old, written = run(go())
-    assert young["state"]["merge_effect"]["state"] == "in_flight"
+    effect, held, freed, written = run(go())
+    assert held["state"]["merge_effect"]["state"] == "in_flight"
     (outcome,) = _outcomes(written, effect)
     assert outcome["kind"] == "failed" and outcome["reconciled"] is True
-    assert old["status"] == "delivered" and old["state"]["merge_effect"]["effect_id"] != effect  # a new merge
+    assert (
+        freed["status"] == "delivered" and freed["state"]["merge_effect"]["effect_id"] != effect
+    )  # a new merge
 
 
 def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_performer(dsn, tmp_path):
@@ -1502,13 +1509,13 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
         other = await scripted.start(dsn, ws)
         head = git(ws, "rev-parse", "HEAD")
         async with await db.connect(dsn) as conn:
-            held = await broker.request(
+            held = await scripted.request(
                 conn, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
             )
             await broker.approve(conn, held.effect_id, note="push")
             git(ws, "remote", "set-url", "origin", str(tmp_path / "nowhere.git"))
-            broker.register(PushBranch(ws, url=str(tmp_path / "nowhere.git")))
-            failed = await broker.release(conn, held.effect_id)
+            nowhere = broker.Performers(PushBranch(ws, url=str(tmp_path / "nowhere.git")))
+            failed = await broker.release(conn, nowhere, held.effect_id)
         probe = await db.connect(dsn)
         got = await (
             await probe.execute(
@@ -1518,17 +1525,13 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
         await probe.close()
         # A dangling intent whose performer is not registered is left alone.
         async with await db.connect(dsn) as conn:
-            parked = await broker.request(
+            parked = await scripted.request(
                 conn, other, broker.Action("push_branch", "valor/y", {"head_sha": head})
             )
             await ledger.append(
                 conn, other, "effect.intent", {"effect_id": parked.effect_id, "idempotency_key": "k"}
             )
-            saved = broker.PERFORMERS.pop("push_branch")
-            try:
-                none = await broker.reconcile(conn, parked.effect_id, settle_after_s=0)
-            finally:
-                broker.PERFORMERS["push_branch"] = saved
+            none = await broker.reconcile(conn, broker.Performers(), parked.effect_id)
         return failed, got[0], none
 
     failed, lock_free, none = run(go())
@@ -1611,27 +1614,6 @@ def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, 
     assert kernel_ran is False
 
 
-def test_settings_refuse_a_reconcile_wait_shorter_than_two_git_limits(monkeypatch):
-    from core.settings import Settings
-
-    monkeypatch.setenv("VALOR_GIT_TIMEOUT_S", "120")
-    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "239")
-    with pytest.raises(ValueError, match="at least twice"):
-        Settings()
-    monkeypatch.setenv("VALOR_RECONCILE_AFTER_S", "240")
-    assert Settings().reconcile_after_s == 240
-
-
-def test_a_perform_has_one_deadline_for_all_its_git_calls(tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-    with kgit.deadline(60):
-        assert kgit.head(ws)
-    with kgit.deadline(0), pytest.raises(kgit.GitError, match="deadline"):
-        kgit.head(ws)
-    with kgit.deadline(60), kgit.deadline(3600):  # a nested block keeps the earlier deadline
-        assert kgit._DEADLINE.get() - __import__("time").monotonic() < 61
-
-
 def test_ps_and_sandbox_exec_must_be_roots_alone(tmp_path, monkeypatch):
     from core import binaries, runs
     from harnesses import claude_code
@@ -1659,7 +1641,7 @@ class RacedPerformer:
     def __init__(self, owner_dsn: str):
         self.owner_dsn = owner_dsn
 
-    def perform(self, action, key):
+    async def perform(self, action, key):
         with psycopg.connect(self.owner_dsn, autocommit=True) as conn:
             effect_id, task_id = conn.execute(
                 "SELECT payload->>'effect_id', task_id FROM events WHERE type = 'effect.intent' "
@@ -1673,19 +1655,19 @@ class RacedPerformer:
             )  # fmt: skip
         return {"by": "performer"}
 
-    def lookup(self, action, key):
+    async def lookup(self, action, key):
         return None
 
 
 def test_an_outcome_reconcile_wrote_first_stands_over_the_performers(dsn, owner_dsn, tmp_path):
-    broker.register(RacedPerformer(owner_dsn))
+    perf = broker.Performers(RacedPerformer(owner_dsn))
 
     async def go():
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="x", max_effect_class="act"))
-            held = await broker.request(conn, task, broker.Action("raced", "t", {"n": 1}))
+            held = await broker.request(conn, perf, task, broker.Action("raced", "t", {"n": 1}))
             await broker.approve(conn, held.effect_id, note="go")
-            out = await broker.release(conn, held.effect_id)
+            out = await broker.release(conn, perf, held.effect_id)
             return out, await ledger.read(conn, task)
 
     out, written = run(go())

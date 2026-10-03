@@ -18,6 +18,7 @@ the rules leave alone, so a lost file never locks the owner out.
 """
 
 import base64
+import contextlib
 import fcntl
 import hashlib
 import hmac
@@ -237,6 +238,75 @@ def read_key(keyfile: str | Path, name: str, command: str = "judgement-keys") ->
     if not value:
         raise MissingKey(f"{name} is not in {path}; run `python -m core {command}`")
     return value
+
+
+# The merge's GitHub credential. The token sits in `settings.github_keyfile`;
+# for each git call the merge performer makes against a granted remote, the
+# kernel writes a config file holding one pinned header scoped to that URL,
+# hands git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits.
+
+GITHUB_KEY = "GITHUB_PUSH_TOKEN"
+HEADER_PREFIX = "github-push-"
+HEADER_SUFFIX = ".gitconfig"
+
+
+@contextlib.contextmanager
+def header_file(keyfile: str | Path, url: str, *, loopback: bool = False):
+    """A config file, mode 600, in the key file's directory, carrying the
+    token as `http.<url>.extraHeader`, with `http.followRedirects=false` so
+    git never carries the header to a redirect's target; yields its path and
+    removes it on exit. Refuses a URL `targets.url_ok` refuses, so nothing
+    the URL holds can add a line. The file is named by the PID of the
+    process writing it; leftovers whose process no longer exists are
+    removed first (`sweep_headers`)."""
+    from core import targets
+
+    if not targets.url_ok(url, loopback=loopback):
+        raise CredentialError(f"{url} is not an https://host/path URL the kernel writes into config")
+    token = read_key(keyfile, GITHUB_KEY, "github-key")
+    directory = Path(keyfile).parent
+    sweep_headers(directory)
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    path = directory / f"{HEADER_PREFIX}{os.getpid()}-{secrets.token_hex(16)}{HEADER_SUFFIX}"
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(
+                f'[http]\n\tfollowRedirects = false\n[http "{url}"]\n\textraHeader = Authorization: Basic {basic}\n'
+            )
+        yield path
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
+
+def sweep_headers(directory: str | Path) -> list[str]:
+    """Remove header files whose writing process (the PID in the name) no
+    longer exists, and any not named by a PID; returns the names removed.
+    A live writer removes its own file when its call ends."""
+    removed = []
+    for entry in os.scandir(directory):
+        name = entry.name
+        if not (name.startswith(HEADER_PREFIX) and name.endswith(HEADER_SUFFIX)):
+            continue
+        pid = name[len(HEADER_PREFIX) : -len(HEADER_SUFFIX)].split("-", 1)[0]
+        if pid.isdigit() and _alive(int(pid)):
+            continue
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(entry.path)
+            removed.append(name)
+    return removed
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this PID exists (signal 0 sends nothing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def copy_keys(

@@ -235,14 +235,17 @@ What the kernel must never do:
   `broker.reconcile`, and session and fresh pass `performers.offered()` to
   `run_turn`.
 - **`tools/push_branch.py`**: `perform`, `lookup`, and `refuse` run in
-  `git.threaded` (`performing.in_thread`, plus the set of gits the thread
-  runs). `Merge` writes and removes the config file around each git call,
-  all inside the thread. Git has no time limit: it runs until it exits.
+  `git.threaded`: `performing.in_thread` under a `git.interruptible`
+  watch, the one mechanism that also interrupts provisioning and a
+  service start. `Merge` writes and removes the config file around each
+  git call, all inside the thread. Git has no time limit: it runs until it
+  exits.
 - **Cancellation.** `to_thread` cannot stop a running thread, so a
-  cancelled caller of `git.threaded` (a stop, or an interrupt) kills the
-  process group of every git the thread runs and refuses any it would start
-  next; the thread then removes the config file and leaves an intent with
-  no outcome. The effect's
+  cancelled caller of `git.threaded` (a stop, or an interrupt) interrupts
+  its watch: the process group of every git the thread runs is killed and
+  any it would start next is refused. The caller then waits for the
+  thread, which removes the config file and leaves an intent with no
+  outcome. The effect's
   session lock frees, but its lock file (`core/performing.py`,
   `<effect_id>.lock` in the kernel key directory) stays held: the release
   holds it from before the intent, `performing.in_thread` hands the
@@ -516,6 +519,12 @@ Each is reversible and was decided by the build session:
   pinned, since pinning a CA path would replace the system's trust store,
   and are covered as every `http.*` key is: `git.run` refuses a
   repository whose config sets one, and the mirror is the kernel's.
+- No git call carries a time limit, under a watch or outside one; a stop
+  or an interrupt ends a hung one. This drops the rule that a git call
+  outside `git.interruptible` keeps a time limit: `git_timeout_s`,
+  `git.deadline`, `git.remaining`, `reconcile_after_s`, and `bounded`'s
+  `timeout` are gone, and the effect lock `core.performing` is what
+  reconcile waits on.
 
 ## Record
 

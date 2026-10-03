@@ -245,6 +245,17 @@ class Settings:
     pg_scratch: str = field(
         default_factory=lambda: _env("VALOR_PG_SCRATCH", str(Path(_passfile()).parent / "run"))
     )
+    # The per-effect lock files (`core.performing`). By default in the kernel
+    # key directory, beside `pg_passfile`, which every turn's sandbox profile
+    # denies, so no turn can hold, remove, or plant one; the test suite points
+    # it at its own temporary directory.
+    performing_dir: str = field(
+        default_factory=lambda: _env(
+            "VALOR_PERFORMING_DIR",
+            str(Path(_env("VALOR_PG_PASSFILE", str(Path.home() / ".config" / "valor-kernel" / "pgpass"))).parent
+                / "performing"),
+        )
+    )  # fmt: skip
 
     # -- the model provider ---------------------------------------------------
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
@@ -274,14 +285,6 @@ class Settings:
     # -- git, as the kernel runs it: a root-owned install, never looked up on
     # a PATH or through a cache a turn can write (core/binaries.py) -----------
     git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", _git()))
-    # The longest one kernel git call may run (a push included) before it is
-    # killed and counted as failed; reconcile waits this long, and more,
-    # before it reads a missing effect as never having happened.
-    git_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_GIT_TIMEOUT_S", "120")))
-    # How old a dangling intent must be before `broker.reconcile` reads an
-    # effect missing from its target as never having happened: twice the
-    # git limit, so no performer can still be pushing it.
-    reconcile_after_s: float = field(default_factory=lambda: float(_env("VALOR_RECONCILE_AFTER_S", "240")))
 
     # -- the judgement legs ----------------------------------------------------
     jev_url: str = field(default_factory=lambda: _env("VALOR_JEV_URL", JEV_URL))
@@ -344,14 +347,6 @@ class Settings:
     # Seconds between SIGTERM and SIGKILL when reaping a turn's processes.
     reap_grace_s: float = 2.0
 
-    def __post_init__(self):
-        if self.reconcile_after_s < 2 * self.git_timeout_s:
-            raise ValueError(
-                f"reconcile_after_s ({self.reconcile_after_s}) must be at least twice git_timeout_s "
-                f"({self.git_timeout_s}): reconcile must not read a merge as missing while a perform "
-                "could still be pushing it"
-            )
-
     @property
     def judgement_keyfile(self) -> str:
         """The judgement legs' keys, in the kernel key directory beside the
@@ -359,6 +354,14 @@ class Settings:
         setting, so the turn sandbox profiles' deny (derived from the same
         directory) cannot drift from it."""
         return str(Path(self.pg_passfile).parent / "judgement-keys")
+
+    @property
+    def github_keyfile(self) -> str:
+        """The GitHub push token (`GITHUB_PUSH_TOKEN`), in the kernel key
+        directory, written by `python -m core github-key` and read only by
+        the merge performer. Derived from `pg_passfile` as the judgement
+        keys are."""
+        return str(Path(self.pg_passfile).parent / "github-keys")
 
     @property
     def claude_token_file(self) -> str:

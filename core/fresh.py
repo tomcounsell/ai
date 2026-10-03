@@ -539,7 +539,8 @@ async def _docs_turn(
     if head is not None and head != c.sha:
         raw = f"refs/valor/docs-raw/{turn_id}"
         try:
-            await asyncio.to_thread(
+            # In `git.threaded`, so a stop kills the fetch.
+            await git.threaded(
                 workspace.fetch_into_mirror, b.mirror, checkout, head, raw, harness["sandbox_profile"],
                 f"docs-fetch-{ctx.task_id}",
             )  # fmt: skip

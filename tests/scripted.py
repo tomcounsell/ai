@@ -20,11 +20,11 @@ from pathlib import Path
 
 from core import broker, db, fresh, judgement_sites, ledger, router, session, tasks, verdicts
 from core import workspace as kws
+from core.__main__ import _performers
 from core.machine import Check, State
 from harnesses import claude_code
 from tests import judgement_upstream
 from tests.ports import span as ports_span
-from tools.push_branch import Merge, PushBranch
 
 SCRIPT = r"""
 import json, pathlib, re, subprocess, sys
@@ -97,7 +97,7 @@ elif stage == "plan":
                     p.unlink()
             (v / "plan.json").write_text(json.dumps({"path": "docs/plan.md", "stakes": "a toy change",
                 **counts, "scope": []}))
-            print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+            print(json.dumps({"result": "ok", "session_id": resume or "00000000-0000-4000-8000-000000000001", "is_error": False}))
             sys.exit(0)
         if act == "uncommitted":
             pathlib.Path("docs").mkdir(exist_ok=True)
@@ -121,7 +121,7 @@ elif stage in ("build", "patch"):
             "target": cfg["push"], "payload": {"head_sha": head()}}))
     if act != "nothing":
         (v / "done.md").write_text(f"{stage} turn {n}: greeting.txt, checked by reading it.")
-print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+print(json.dumps({"result": "ok", "session_id": resume or "00000000-0000-4000-8000-000000000001", "is_error": False}))
 """
 
 
@@ -184,7 +184,9 @@ def turn_for(prompt, resume, b):
 
 
 async def working(ctx: router.Context) -> dict:
-    return await session.run(ctx.gateway, ctx.task_id, turn_for, dsn=ctx.dsn, alive=ctx.alive)
+    return await session.run(
+        ctx.gateway, ctx.task_id, turn_for, dsn=ctx.dsn, alive=ctx.alive, performers=ctx.performers
+    )
 
 
 def judge(answer: str = "precise"):
@@ -203,9 +205,24 @@ RUNNERS = {
 MANUAL = {"by": "test", "via": "the test suite", "role_played": True}
 
 
-def performers(b: tasks.Brief) -> None:
-    broker.register(PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch))
-    broker.register(Merge(b.mirror or b.workspace))
+SESSION = "00000000-0000-4000-8000-000000000001"
+
+
+def performers(b: tasks.Brief) -> broker.Performers:
+    """The task's performers, as the composition root builds them."""
+    return _performers(b)
+
+
+async def performers_of(dsn: str, task: str) -> broker.Performers:
+    async with await db.connect(dsn) as conn:
+        return performers(await tasks.brief(conn, task))
+
+
+async def route(gateway, task: str, runners=None, dsn: str | None = None) -> dict:
+    """`router.run` with the task's own performers."""
+    return await router.run(
+        gateway, task, runners or RUNNERS, dsn=dsn, performers=await performers_of(dsn or gateway.dsn, task)
+    )
 
 
 async def _always() -> bool:
@@ -228,7 +245,6 @@ async def start(dsn: str, ws: Path, judge: str | None = "precise", **kw) -> str:
         **where,
         **kw,
     )
-    performers(b)
     async with await db.connect(dsn) as conn:
         task = await tasks.start(conn, b)
     if judge is not None:
@@ -249,7 +265,7 @@ async def critique(dsn: str, task: str, verdict: str = "sound", **kw) -> None:
 async def check(dsn: str, task: str, which: str, verdict: str, **kw):
     async with await db.connect(dsn) as conn:
         f = await verdicts.record_check(conn, task, Check(which), verdict, **MANUAL, **kw)
-        await verdicts.ensure_merge(conn, task)
+        await verdicts.ensure_merge(conn, performers(await tasks.brief(conn, task)), task)
         return f
 
 
@@ -353,7 +369,9 @@ elif act == "docs":
     if "docs_head" in cfg:
         out["head"] = cfg["docs_head"]
     (v / "verdict.json").write_text(json.dumps(out))
-print(json.dumps({"result": "ok", "session_id": "fresh-session", "is_error": False}))
+elif act == "big":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
+print(json.dumps({"result": "ok", "session_id": "00000000-0000-4000-8000-0000000000f1", "is_error": False}))
 """
 
 
@@ -421,7 +439,6 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
         id=task_id, instruction="Write Tom a greeting.", max_effect_class="act",
         **made.brief_fields(),
     )  # fmt: skip
-    performers(b)
     async with await db.connect(dsn) as conn:
         await tasks.start(conn, b)
     if judge is not None:
@@ -431,3 +448,27 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
 
 def fresh_runners(ws: Path) -> dict:
     return {**RUNNERS, State.CRITIQUE: fresh.critique_runner(fresh_for(ws / ".git"))}
+
+
+# -- the broker, with the task's own performers ---------------------------------
+
+
+async def _of(conn, task: str) -> broker.Performers:
+    return performers(await tasks.brief(conn, task))
+
+
+async def request(conn, task: str, action: broker.Action) -> broker.Outcome:
+    return await broker.request(conn, await _of(conn, task), task, action)
+
+
+async def release(conn, effect_id: str) -> broker.Outcome:
+    return await broker.release(conn, await _of(conn, await broker.held_task(conn, effect_id)), effect_id)
+
+
+async def reconcile(conn, effect_id: str, **kw) -> broker.Outcome | None:
+    task = await broker.held_task(conn, effect_id)
+    return await broker.reconcile(conn, await _of(conn, task), effect_id, **kw)
+
+
+async def ensure_merge(conn, task: str) -> broker.Outcome | None:
+    return await verdicts.ensure_merge(conn, await _of(conn, task), task)

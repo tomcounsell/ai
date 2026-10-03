@@ -14,6 +14,7 @@ import json
 import os
 import struct
 import subprocess
+import time
 import uuid
 import zlib
 from pathlib import Path
@@ -137,7 +138,7 @@ def test_a_provisioned_clone_holds_nothing_after_the_base_and_pushes_only_to_its
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert refused.returncode != 0  # non-fast-forward refused
-    assert made.origin_url == made.push_url  # until 1.4d the merge lands on the task's own origin
+    assert made.origin_url == made.push_url  # without merge_url the merge lands on the task's own origin
     for key in ("sandbox_profile", "gitconfig", "gh_config_dir", "tmpdir", "claude_config_dir"):
         assert Path(made.harness[key]).exists()
 
@@ -778,7 +779,7 @@ def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(d
             gateway = Gateway(dsn)
             await gateway.start()
             try:
-                return await router.run(gateway, b, scripted.RUNNERS, dsn=dsn)
+                return await scripted.route(gateway, b, scripted.RUNNERS, dsn=dsn)
             finally:
                 await gateway.close()
         finally:
@@ -866,17 +867,36 @@ def test_the_file_size_limit_is_the_limit_asked_for(tmp_path):
     out = tmp_path / "big"
     code, _ = kws.bounded(
         ["/bin/dd", "if=/dev/zero", f"of={out}", "bs=1024", "count=4096"],
-        cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024 * 1024, max_footprint=1024**3, timeout=30,
+        cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024 * 1024, max_footprint=1024**3,
     )  # fmt: skip
     assert code != 0 and out.stat().st_size == 1024 * 1024
 
 
-def test_a_command_past_its_time_is_killed(tmp_path):
-    code, _ = kws.bounded(
-        ["/bin/sleep", "30"], cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024, max_footprint=1024**3,
-        timeout=1,
-    )  # fmt: skip
-    assert code == "timeout"
+def test_a_stopped_caller_kills_the_command_and_its_group(tmp_path):
+    pidfile = tmp_path / "pid"
+
+    async def go():
+        argv = ["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; wait"]
+        t = asyncio.create_task(
+            kgit.threaded(lambda: kws.bounded(argv, cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024,
+                                              max_footprint=1024**3))
+        )  # fmt: skip
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        return int(pidfile.read_text())
+
+    child = run(go())
+    for _ in range(200):  # the group was sent SIGKILL; wait for the kernel to retire the child
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the command's child outlived its stopped caller")
 
 
 def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
@@ -995,7 +1015,7 @@ def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_s
         gateway = Gateway(dsn)
         await gateway.start()
         try:
-            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+            return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
             await gateway.close()
 
@@ -1013,7 +1033,7 @@ def test_the_tasks_postgres_is_up_while_a_runners_turn_runs_and_down_after(dsn, 
         gateway = Gateway(dsn)
         await gateway.start()
         try:
-            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+            return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
             await gateway.close()
 
@@ -1219,20 +1239,6 @@ def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, mo
         assert lay.root.exists()
     finally:
         kws.stop_services(orphan, lay)
-
-
-def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
-    import time
-
-    from core import git as kgit
-
-    _, made = provision(tmp_path)
-    sha = candidate(made)
-    with kgit.deadline(0.01):
-        time.sleep(0.05)
-        with pytest.raises((kgit.GitError, kws.FetchRefused), match="deadline"):
-            fetch(made, sha)
-    assert kgit.remaining(5.0) == 5.0  # outside a deadline, the limit stands
 
 
 def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_path):
@@ -1505,20 +1511,12 @@ def _wait_for(check, seconds: float = 20) -> None:
         time.sleep(0.05)
 
 
-def test_provisioning_runs_past_the_git_timeout(tmp_path, monkeypatch):
-    """Outside a watch a git call keeps `git_timeout_s`; under one,
-    provisioning's git calls run with no limit, except removing the clone's
-    temporary ref, which runs uninterrupted with the usual limit."""
-    import dataclasses
-
+def test_no_provisioning_git_call_carries_a_time_limit(tmp_path, monkeypatch):
+    """Inside a watch or outside one, every git call provisioning makes
+    waits for git with no time limit; a stop ends a hung one."""
     from core import git
-    from core.settings import settings
 
     scripted.toy_repo(tmp_path)
-    monkeypatch.setattr(git, "settings", dataclasses.replace(settings, git_timeout_s=0.001))
-    with pytest.raises(kws.Refused, match="did not finish"):
-        provision(tmp_path)
-    monkeypatch.setattr(git, "settings", settings)
     limits = []
     real = subprocess.Popen.communicate
 
@@ -1528,11 +1526,11 @@ def test_provisioning_runs_past_the_git_timeout(tmp_path, monkeypatch):
         return real(self, input, timeout)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", spy)
+    _task, made = provision(tmp_path)
     with git.interruptible():
-        _task, made = provision(tmp_path)
-    assert Path(made.workspace).is_dir() and len(limits) > 5
-    assert all(t is None for cmd, t in limits if cmd != "update-ref") and ("clone", None) in limits
-    assert [t for cmd, t in limits if cmd == "update-ref"][-1] == settings.git_timeout_s
+        _task, made = provision(tmp_path / "again")
+    assert Path(made.workspace).is_dir() and len(limits) > 10
+    assert all(t is None for _cmd, t in limits) and ("clone", None) in limits
 
 
 def test_interrupting_start_kills_provisioning_git(tmp_path):
@@ -1658,7 +1656,7 @@ def test_a_service_programs_whole_stderr_is_in_its_refusal(tmp_path, monkeypatch
 def test_a_failing_bounded_command_returns_its_whole_stderr(tmp_path):
     code, err = kws.bounded(
         ["/bin/bash", "-c", "head -c 5000 /dev/zero | tr '\\0' e >&2; exit 4"], cwd=tmp_path, env={},
-        max_bytes=10**6, max_footprint=10**9, timeout=60,
+        max_bytes=10**6, max_footprint=10**9,
     )  # fmt: skip
     assert code == 4 and err == "e" * 5000
 

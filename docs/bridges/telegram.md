@@ -138,8 +138,8 @@ Evidence section counts "decisions escalated to Tom per finished task", and
 
 ```python
 class Bridge(Protocol):
-    channel: str                       # "telegram" or "email"
-    limits: ChannelLimits              # max text length, file size, poll support
+    channel: str  # "telegram" or "email"
+    limits: ChannelLimits  # max text length, file size, poll support
 
     def performers(self) -> list[Performer]: ...
     async def run(self, intake: Intake, outbox: Outbox) -> None: ...

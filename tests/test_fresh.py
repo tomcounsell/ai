@@ -35,7 +35,7 @@ async def drive(dsn, task, runners) -> dict:
     gateway = Gateway(dsn)
     await gateway.start()
     try:
-        return await router.run(gateway, task, runners, dsn=dsn)
+        return await scripted.route(gateway, task, runners, dsn=dsn)
     finally:
         await gateway.close()
 
@@ -68,7 +68,7 @@ def test_a_sound_critique_goes_to_build_and_the_build_resumes_the_working_sessio
     out = run(drive(dsn, task, scripted.fresh_runners(ws)))
     assert out["status"] == "no runner" and out["missing"] == ["test", "review", "docs"]
     stages = [(t["stage"], t["resume"]) for t in scripted.turns(ws)]
-    assert stages == [("plan", ""), ("critique", None), ("build", "session-1")]
+    assert stages == [("plan", ""), ("critique", None), ("build", scripted.SESSION)]
     written = run(rows(dsn, task))
     decided = next(r["payload"] for r in written if r["type"] == "critique.decided")
     started = [r["payload"] for r in written if r["type"] == "turn.started"]
@@ -78,7 +78,7 @@ def test_a_sound_critique_goes_to_build_and_the_build_resumes_the_working_sessio
     assert "# How this session reaches the kernel" in started[1]["brief"]
     assert "Workspace:" not in started[1]["brief"] and ".valor/effects" not in started[1]["brief"]
     # The fresh turn's own session id was never resumed.
-    assert machine.fold(written).session == "session-1"
+    assert machine.fold(written).session == scripted.SESSION
     # A fresh session's effect requests reach no broker.
     assert not [r for r in written if r["type"].startswith("effect.")]
 
@@ -199,7 +199,7 @@ def test_a_critique_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
         gateway = Gateway(dsn)
         await gateway.start()
         try:
-            running = asyncio.create_task(router.run(gateway, task, scripted.fresh_runners(ws), dsn=dsn))
+            running = asyncio.create_task(scripted.route(gateway, task, scripted.fresh_runners(ws), dsn=dsn))
             for _ in range(200):
                 if any(
                     r["type"] == "turn.started" and r["payload"].get("fresh") for r in await rows(dsn, task)
@@ -240,17 +240,26 @@ def _row(i, kind, **payload):
     return {"id": i, "type": kind, "payload": payload}
 
 
+WORKING = "00000000-0000-4000-8000-0000000000a1"
+
+
 def test_a_fresh_turn_never_names_the_session_in_either_fold():
     turns = [
         _row(2, "turn.started", turn_id="w1", state="plan"),
-        _row(3, "turn.ended", turn_id="w1", outcome="done", result={"session_id": "working"}),
+        _row(3, "turn.ended", turn_id="w1", outcome="done", result={"session_id": WORKING}),
         _row(4, "turn.started", turn_id="f1", state="critique", fresh=True, stage="critique"),
-        _row(5, "turn.ended", turn_id="f1", outcome="done", result={"session_id": "critic"}),
+        _row(
+            5,
+            "turn.ended",
+            turn_id="f1",
+            outcome="done",
+            result={"session_id": "00000000-0000-4000-8000-0000000000c1"},
+        ),
     ]
     sdlc = [_row(1, "task.started", sdlc=1, instruction="x"), *turns]
     legacy = [_row(1, "task.started", instruction="x"), *turns]
-    assert machine.fold(sdlc).session == "working"
-    assert machine.fold(legacy).legacy and machine.fold(legacy).session == "working"
+    assert machine.fold(sdlc).session == WORKING
+    assert machine.fold(legacy).legacy and machine.fold(legacy).session == WORKING
 
 
 def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_origin(dsn, tmp_path):
@@ -272,7 +281,7 @@ def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_o
         scripted.git(ws, "gc", "-q", "--prune=now")  # the builder's clone no longer holds the docs commit
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge it")
-            done = await broker.release(conn, effect)
+            done = await scripted.release(conn, effect)
         return done, docs, machine.fold(await rows(dsn, task))
 
     done, docs, f = run(go())
@@ -489,7 +498,7 @@ def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line
         effect = machine.fold(await rows(dsn, task)).merge_effect["effect_id"]
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="merge it")
-            await broker.release(conn, effect)
+            await scripted.release(conn, effect)
         return task, b
 
     task, b = run(go())

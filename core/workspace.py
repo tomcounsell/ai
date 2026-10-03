@@ -6,8 +6,9 @@ starts, from a project spec the kernel reads (never the candidate).
       bin/                 shared tools (uv), read-only to every sandbox
       <task_id>/
         repo/              the builder's clone: the working session's cwd
-        origin.git/        local bare origin: push_branch's target (and, until
-                           1.4d, the merge's); no turn writes it
+        origin.git/        local bare origin: push_branch's target, and the
+                           merge's when the spec has no merge_url; no turn
+                           writes it
         kernel.git/        the kernel mirror: the base, plan commits,
                            candidates, docs heads; no turn writes it
         home/              gitconfig, empty gh config, pgpass, profiles/*.sb
@@ -69,7 +70,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, git, runs
+from core import binaries, git, runs, targets
 from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
@@ -619,8 +620,8 @@ def choose_port(span: tuple[int, int], taken: set[int]) -> int:
 
 def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     """The kernel's bare clone of the repository, fetched by its trusted git:
-    a local path, or a public HTTPS URL fetched anonymously. A private
-    repository needs the credential, which is 1.4d's."""
+    a local path, or a public HTTPS URL fetched anonymously. A repository
+    that needs a credential to fetch is refused."""
     origin = source or spec.repo
     local = Path(origin).expanduser()
     url = str(local.resolve()) if local.exists() else origin
@@ -647,7 +648,7 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     except git.GitError as exc:
         if needs_credential(str(exc)):
             raise Refused(
-                f"{origin} needs a credential to fetch; private repositories wait for 1.4d"
+                f"{origin} needs a credential to fetch; private repositories are not fetched"
             ) from None
         raise Refused(f"fetching {origin}: {exc}") from None
     listed = git.trusted(cache, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
@@ -658,8 +659,8 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
 
 
 def needs_credential(error: str) -> bool:
-    """Whether git's error says the remote wants a credential, which the
-    kernel has none of until 1.4d."""
+    """Whether git's error says the remote wants a credential: the kernel
+    fetches no private repository."""
     return "Authentication" in error or "could not read Username" in error
 
 
@@ -777,6 +778,8 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
+    if spec.merge_url and not targets.local(spec.merge_url):
+        _not_default(cache, spec.merge_url, target)
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
               lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
@@ -858,14 +861,28 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     return Provisioned(
         workspace=str(lay.repo),
         mirror=str(lay.mirror),
+        # push_branch lands on the task's own bare origin; the merge lands on
+        # the spec's merge_url when it has one (granted, checked at start).
         push_url=str(lay.origin),
-        # Until 1.4d every merge lands on the task's own bare origin.
-        origin_url=str(lay.origin),
+        origin_url=spec.merge_url or str(lay.origin),
         target_branch=target,
         base_sha=base_sha,
         harness=harness,
         project=project,
     )
+
+
+def _not_default(cache: Path, url: str, target: str) -> None:
+    """Refuse a merge target that is the remote's default branch, read
+    anonymously now, from the kernel's cache clone."""
+    try:
+        named = git.remote_head(cache, url)
+    except git.GitError as exc:
+        raise Refused(f"cannot read the remote's HEAD: {exc}") from None
+    if named is None:
+        raise Refused("the remote's HEAD names no branch")
+    if named == target:
+        raise Refused(f"{target} is the default branch of {url}; a merge never lands there")
 
 
 def _remote_head(cache: Path) -> str:
@@ -1164,36 +1181,43 @@ def _group(pgid: int) -> list[int]:
     ]
 
 
-def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int,
-            timeout: float) -> tuple[int | str, str]:  # fmt: skip
-    """Run `argv` in its own process group with a file-size limit, killing
-    the whole group when its summed footprint passes `max_footprint` or the
-    time limit passes. Returns the exit code (or `footprint`, `timeout`) and
-    its whole stderr."""
+def bounded(
+    argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int
+) -> tuple[int | str, str]:
+    """Run `argv` in its own process group (`git.start`) with a file-size
+    limit until it exits, killing the whole group when its summed footprint
+    passes `max_footprint`. There is no time limit: an interrupt of the
+    watch it runs under (`git.threaded`, a stopped caller) ends it, and
+    `git.Interrupted` is raised. Returns the exit code (or `footprint`)
+    and its whole stderr."""
 
     # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.
     # bash counts `ulimit -f` in 1024-byte blocks.
     blocks = max(1, max_bytes // 1024)
     wrapped = ["/bin/bash", "-c", f'ulimit -f {blocks} && exec "$@"', "bash", *argv]
-    proc = subprocess.Popen(
-        wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
-    )
-    deadline = time.monotonic() + timeout
+    held = git.watch()
+    proc = git.start(wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     why: int | str | None = None
-    while proc.poll() is None:
-        if time.monotonic() > deadline:
-            why = "timeout"
-        elif sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
-            why = "footprint"
-        if why:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            break
-        time.sleep(0.5)
-    _, err = proc.communicate()
+    try:
+        while proc.poll() is None:
+            if sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
+                why = "footprint"
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                break
+            time.sleep(0.5)
+        _, err = proc.communicate()
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    finally:
+        if held:
+            held.finished(proc)
+    if held and held.interrupted:
+        raise git.Interrupted()
     return (why or proc.returncode), err.decode(errors="replace")
 
 
@@ -1207,7 +1231,6 @@ def fetch_into_mirror(
     *,
     max_bytes: int | None = None,
     max_footprint: int | None = None,
-    timeout: float | None = None,
 ) -> None:
     """Fetch one commit from a clone a turn controls into the kernel mirror,
     under `ref`. Raises `FetchRefused` with the reason."""
@@ -1244,7 +1267,6 @@ def fetch_into_mirror(
         env=git.env(),
         max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
         max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
-        timeout=git.remaining(timeout or settings.git_timeout_s),
     )
     runs.reap(mark)
     if code != 0:
@@ -1255,8 +1277,6 @@ def fetch_into_mirror(
         clean_partial(mirror)
         if code == "footprint":
             raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
-        if code == "timeout":
-            raise FetchRefused("the fetch into the kernel mirror did not finish in time")
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
 
 

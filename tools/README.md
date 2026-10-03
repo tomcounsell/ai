@@ -8,11 +8,11 @@ Non-core components and vendor-dependent tooling.
 - Each tool declares its effect class and reaches the world through the broker. The judgement legs are the exception: `read`-class clients the judgement port calls directly from the kernel process, metered and recorded on the task.
 - A tool is extracted on a demonstrated second need, never on a first. A tool unused for ninety days is deleted by default.
 
-Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and the broker) and [docs/tech-stack.md](../docs/tech-stack.md) (the broker's performers).
+Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and the broker) and [docs/tech-stack.md](../docs/tech-stack.md) (the broker's performers, in [docs/performers.md](../docs/performers.md)).
 
 ## Performers
 
-- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, after Tom's tap; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, released only when the merge predicate holds; no turn is offered it. Both push to the origin URL the kernel recorded at start and refuse a workspace whose own config names a program, redirects a push, or includes other config (`core.git.hostile`). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
+- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, after Tom's tap; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, released only when the merge predicate holds; no turn is offered it. `push_branch` pushes to the task's `push_url` (else the origin URL recorded at start) and never carries a credential. `merge` is built from the task's Brief, pushes to its origin URL, and lands on a remote only on a (URL, branch) pair Tom granted and never on the remote's default branch, from the kernel mirror with the GitHub token ([docs/machine.md](../docs/machine.md), Keychain). Both refuse a workspace whose own config names a program, redirects a push, or includes other config (`core.git.hostile`). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
 
 ## Judgement legs
 

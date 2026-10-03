@@ -26,7 +26,6 @@ from core import (
     judgement_tasks,
     ledger,
     machine,
-    router,
     session,
     tasks,
     verdicts,
@@ -67,7 +66,7 @@ async def drive(dsn, task, judge_port=None) -> dict:
     gateway = Gateway(dsn)
     await gateway.start()
     try:
-        return await router.run(gateway, task, runners, dsn=dsn)
+        return await scripted.route(gateway, task, runners, dsn=dsn)
     finally:
         await gateway.close()
 
@@ -538,7 +537,7 @@ def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_pat
             ):
                 with pytest.raises(LookupError, match="calibration task"):
                     await refused
-            assert await verdicts.ensure_merge(conn, task) is None
+            assert await scripted.ensure_merge(conn, task) is None
             state = await tasks.status(conn, task)
         return first, second, started, out, state
 

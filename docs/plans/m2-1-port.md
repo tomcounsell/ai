@@ -26,25 +26,27 @@ and `core.credentials` (to read its key files). Nothing else from `core/`.
 ```python
 @dataclass(frozen=True)
 class Inbound:
-    channel: str                 # "telegram" or "email"
-    chat_id: str                 # Telegram: marked peer id as text (-100... for groups); email: the thread root
-    chat_kind: str               # "dm", "group", or "email"
-    message_id: str              # Telegram: message id as text; email: Message-ID
-    sender_id: str               # Telegram: user id as text; email: From address, lowercased
+    channel: str  # "telegram" or "email"
+    chat_id: str  # Telegram: marked peer id as text (-100... for groups); email: the thread root
+    chat_kind: str  # "dm", "group", or "email"
+    message_id: str  # Telegram: message id as text; email: Message-ID
+    sender_id: str  # Telegram: user id as text; email: From address, lowercased
     sender_name: str
-    sent_at: str                 # ISO 8601, UTC
+    sent_at: str  # ISO 8601, UTC
     kind: str = "message"
-    text: str = ""               # email: the subject, a blank line, then the body
+    text: str = ""  # email: the subject, a blank line, then the body
     reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To
-    thread: list[dict] = field(default_factory=list)       # {id, text, attachments}, oldest first
+    thread: list[dict] = field(default_factory=list)  # {id, text, attachments}, oldest first
     topic_id: str | None = None  # Telegram forum topic
     attachments: list[dict] = field(default_factory=list)  # see below
     headers: dict[str, str | list[str]] = field(default_factory=dict)
 
+
 @dataclass(frozen=True)
 class Received:
     received_id: str
-    duplicate: bool   # this (channel, chat_id, message_id) is already recorded
+    duplicate: bool  # this (channel, chat_id, message_id) is already recorded
+
 
 async def receive(conn, inbound: Inbound) -> Received: ...
 async def highest(conn, channel: str, chat_id: str) -> int | None: ...
@@ -104,21 +106,25 @@ def owned(channel: str) -> list[str]: ...
 ```python
 @dataclass(frozen=True)
 class ChannelLimits:
-    max_text: int | None          # per message, in text_units
-    text_units: str               # "utf16" or "chars"
-    max_file_bytes: int | None    # per file, when message_bytes is None
+    max_text: int | None  # per message, in text_units
+    text_units: str  # "utf16" or "chars"
+    max_file_bytes: int | None  # per file, when message_bytes is None
     message_bytes: Callable[[broker.Action], int] | None = None  # whole message
+
 
 LIMITS: dict[str, ChannelLimits]  # "telegram", "email"
 
 PerformFn = Callable[[broker.Action, str], Awaitable[dict[str, Any]]]
 LookupFn = Callable[[broker.Action, str, str], Awaitable[dict[str, Any] | None]]
 
+
 class Bridge(Protocol):
     channel: str
+
     def performers(self) -> dict[str, tuple[PerformFn, LookupFn]]: ...
     async def run(self, outbox: Outbox) -> None: ...
     async def tick(self) -> None: ...
+
 
 def split_text(channel: str, text: str) -> list[str]: ...
 async def serve(bridge: Bridge) -> None: ...
@@ -192,11 +198,14 @@ class Declared:
     action_type: str
     effect_class: str
     usage: str
-    owner: str                         # "telegram" or "email"
+    owner: str  # "telegram" or "email"
     refuse: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
     settle_after_s: float | Callable[[broker.Action], float] | None = None
 
-DECLARED: dict[str, Declared]          # telegram.send_message, email.send
+
+DECLARED: dict[str, Declared]  # telegram.send_message, email.send
+
+
 def declared_performers() -> list[Declared]: ...
 ```
 
@@ -229,16 +238,18 @@ Tom and `dispatch(offered=...)` tells the turn the send exists.
 @dataclass(frozen=True)
 class Release:
     effect_id: str
-    at: str            # the release.requested row's at, which precedes the intent (D34)
+    at: str  # the release.requested row's at, which precedes the intent (D34)
+
 
 @dataclass(frozen=True)
 class NoticeDue:
     notice_id: str
     task_id: str
     chat_id: str
-    text: str          # carries the notice's short id (D35)
+    text: str  # carries the notice's short id (D35)
     reply_to: str | None
-    at: str            # the notice.requested row's at (D34)
+    at: str  # the notice.requested row's at (D34)
+
 
 class Outbox:
     def __aiter__(self) -> AsyncIterator[Release | NoticeDue]: ...
