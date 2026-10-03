@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-2-telegram
 type: build
-status: planned
+status: delivered-not-passed
 critique_rounds: 1
 review_rounds: 2
 ---
@@ -579,6 +579,11 @@ The test window, on the build Mac:
     The 20-hop chain, the size-scaled timeout and retry, the 256 s backoff,
     and the 5 s connect margin are gone.
   - The emulator listens on a free port it reports.
+
+## Record
+
+The checks of review round 2 and the delivery are in
+`m2-2-telegram-record.md`.
 
 ## Questions for Tom
 
