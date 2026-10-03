@@ -326,7 +326,7 @@ built in.
   bytes}` from `fstat` and no longer reads a screen (a sparse file stalled
   the router). `look` writes to the clone's root, prints a `shasum -a 256`
   of each file for the turn to quote, and accepts `--size` only as two
-  integers. The gap cases from the test check are in `tests/test_look.py`.
+  positive integers. The gap cases from the test check are in `tests/test_look.py`.
 - **Live turn run (an earlier version used a static page; the Django run below replaces it).** `VALOR_LIVE=1 pytest tests/test_look.py -k live`
   passed in 87 seconds: a real build turn served a page on a dev port, ran
   `look`, and `turn.collected` held the screenshot's name and size,
