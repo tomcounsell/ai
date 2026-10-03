@@ -234,13 +234,15 @@ What the kernel must never do:
   it to `session` (turn effect requests), `verdicts.ensure_merge`, and
   `broker.reconcile`, and session and fresh pass `performers.offered()` to
   `run_turn`.
-- **`tools/push_branch.py`**: `perform` runs in `performing.in_thread`
-  and `lookup` in `asyncio.to_thread`, setting `git.deadline` inside the
-  thread function (a contextvar; `to_thread` copies the context). `Merge` writes and
-  removes the config file around each git call, all inside the thread.
-- **Cancellation.** `to_thread` cannot stop a running thread. A cancelled
-  release leaves the push running to its git deadline, the config file in
-  place until git exits, and an intent with no outcome. The effect's
+- **`tools/push_branch.py`**: `perform`, `lookup`, and `refuse` run in
+  `git.threaded` (`performing.in_thread`, plus the set of gits the thread
+  runs). `Merge` writes and removes the config file around each git call,
+  all inside the thread. Git has no time limit: it runs until it exits.
+- **Cancellation.** `to_thread` cannot stop a running thread, so a
+  cancelled caller of `git.threaded` (a stop, or an interrupt) kills the
+  process group of every git the thread runs and refuses any it would start
+  next; the thread then removes the config file and leaves an intent with
+  no outcome. The effect's
   session lock frees, but its lock file (`core/performing.py`,
   `<effect_id>.lock` in the kernel key directory) stays held: the release
   holds it from before the intent, `performing.in_thread` hands the
@@ -400,9 +402,9 @@ does not trigger the default-branch refusal.
 
 **Performers**: two tasks with different origins, released concurrently
 (`asyncio.gather`), each land only on their own origin; a timer task ticks
-while the server holds a push open; `git.deadline` applies inside the
-thread; a release cancelled mid-push leaves an intent that `reconcile`
-settles `done` once the push lands, and the config file is gone; `reconcile`
+while the server holds a push open; a release cancelled mid-push kills
+git, and `reconcile` settles the intent `failed` once git is reaped, the
+remote unmoved; a stopped caller kills a mirror fetch's whole group; `reconcile`
 uses the task's own performers; a propose-class perform cut off after its
 intent is settled `done` from the intent row alone, an older intent reads
 its action from `effect.held`, and an intent with neither concludes
@@ -579,6 +581,16 @@ From the test check and the lead:
    two. Reconcile now reads the remote only once the effect's lock file is
    free (the push process reaped), and settles at once; `reconcile_after_s`
    and its settings check are gone. The header sweep removes a file whose
-   writer's PID (in the name) names no process. `git_timeout_s` itself is
-   kept as it is, unsourced, for the lead.
+   writer's PID (in the name) names no process.
+6. **No git time limit.** `git_timeout_s`, `git.deadline`, and the mirror
+   fetch's time limit are gone, with their tests: no protocol fact bounds a
+   git call. Git runs until it exits; an interrupt of the calling thread,
+   or a cancelled `git.threaded` caller (push_branch, merge, provisioning
+   and removal in `core/__main__.py`), kills its process group, as 1.4c
+   does for image builds and setup.
+7. **Tests write no lock file under the key directory.** `performing_dir`
+   is a setting (`VALOR_PERFORMING_DIR`, default the key directory's
+   `performing`); `tests/conftest.py` sets it to a temporary directory of
+   the session's own before the settings are built, so every test and
+   every process a test starts uses it.
 

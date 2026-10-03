@@ -10,7 +10,7 @@ name drivers; a driver's program comes from config. So every call:
   `core.binaries.require_git` before every call: the Command Line Tools'
   git by default, never Apple's `/usr/bin/git` shim, which finds the real
   git through a per-user cache a turn can poison) with a PATH of system
-  directories only and a time limit (`settings.git_timeout_s`);
+  directories only;
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
 - ignores replace refs and grafts (`GIT_NO_REPLACE_OBJECTS=1`,
@@ -19,13 +19,12 @@ name drivers; a driver's program comes from config. So every call:
   which a turn can write and none of which is config, so none can change
   what history the kernel reads;
 - drops every `DYLD_*` variable, so no library is injected into git;
-- runs git in its own process group, killed whole when the call outlives
-  its time: the smaller of `git_timeout_s` and what is left of the
-  `deadline` the caller set (a performer sets one for its whole perform,
-  so a push and the calls around it share one limit), and, inside a
-  perform, holding the effect's lock (`core.performing`), which every
-  process git starts inherits, so `broker.reconcile` waits until the last
-  of them has exited;
+- runs git in its own process group with no time limit: git runs until
+  it exits. An interrupt of the calling thread, or a cancelled caller of
+  `threaded` (a stop, or an interrupt of the kernel's loop), kills the
+  group, git and everything it started. Inside a perform git holds the
+  effect's lock (`core.performing`), which every process git starts
+  inherits, so `broker.reconcile` waits until the last of them has exited;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
@@ -65,7 +64,7 @@ import os
 import re
 import signal
 import subprocess
-import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,65 +171,99 @@ def _git(
     workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
     """The trusted git (`settings.git_bin`, checked each call), never
-    whichever `git` comes first on a PATH, in its own process group, killed
-    whole when it outlives its limit (the smaller of `git_timeout_s` and
-    what is left of the caller's `deadline`). Inside a perform, git gets
-    the effect's lock descriptor (`core.performing`), which every process
-    it starts inherits."""
+    whichever `git` comes first on a PATH, in its own process group, run
+    until it exits; an interrupt, or a cancelled `threaded` caller, kills
+    the group. Inside a perform, git gets the effect's lock descriptor
+    (`core.performing`), which every process it starts inherits."""
     git_bin = binary()
-    limit = settings.git_timeout_s
-    ends = _DEADLINE.get()
-    if ends is not None:
-        limit = min(limit, ends - time.monotonic())
-        if limit <= 0:
-            raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
     held = performing.held()
-    proc = subprocess.Popen(
+    started = _STARTED.get()
+    proc = popen(
         [git_bin, "-C", str(workspace), *PINNED, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
         env={**env(), **(extra_env or {})},
-        start_new_session=True,
         pass_fds=() if held is None else (held,),
     )
     try:
-        stdout, stderr = proc.communicate(timeout=limit)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        kill(proc)
         proc.communicate()
-        raise GitError(f"git {' '.join(args[:2])} did not finish in {limit:.0f}s") from None
+        raise
+    finally:
+        if started is not None:
+            started.forget(proc)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
-_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("git_deadline", default=None)
+class _Started:
+    """The git processes a `threaded` worker started and still runs; once
+    its caller is cancelled, every one is killed and none starts."""
+
+    def __init__(self):
+        self.gate = threading.Lock()
+        self.procs: set[subprocess.Popen] = set()
+        self.cancelled = False
+
+    def add(self, proc: subprocess.Popen) -> None:
+        with self.gate:
+            self.procs.add(proc)
+            if self.cancelled:
+                kill(proc)
+
+    def forget(self, proc: subprocess.Popen) -> None:
+        with self.gate:
+            self.procs.discard(proc)
+
+    def cancel(self) -> None:
+        with self.gate:
+            self.cancelled = True
+            for proc in self.procs:
+                kill(proc)
 
 
-def remaining(limit: float) -> float:
-    """`limit`, or less when the caller's `deadline` ends sooner; a passed
-    deadline raises `GitError`. For a git run outside `_git` (the kernel
-    mirror's bounded fetch)."""
-    ends = _DEADLINE.get()
-    if ends is None:
-        return limit
-    left = ends - time.monotonic()
-    if left <= 0:
-        raise GitError("the deadline for this perform has passed")
-    return min(limit, left)
+_STARTED: contextvars.ContextVar[_Started | None] = contextvars.ContextVar("git_started", default=None)
 
 
-@contextlib.contextmanager
-def deadline(seconds: float):
-    """One limit for every git call inside the block, together. Nested
-    blocks keep the earlier deadline."""
-    ends = time.monotonic() + seconds
-    outer = _DEADLINE.get()
-    token = _DEADLINE.set(ends if outer is None else min(outer, ends))
+def popen(argv: list[str], **kw) -> subprocess.Popen:
+    """A kernel git process in its own process group, known to the
+    `threaded` caller it runs for, if any. Refused once that caller was
+    cancelled."""
+    started = _STARTED.get()
+    if started is not None and started.cancelled:
+        raise GitError("git was not started: its caller was stopped")
+    proc = subprocess.Popen(argv, start_new_session=True, **kw)
+    if started is not None:
+        started.add(proc)
+    return proc
+
+
+def kill(proc: subprocess.Popen) -> None:
+    """Kill the process group of a git still running (`poll` reads None
+    until it is reaped, so a reaped PID's group is never signalled)."""
+    if proc.poll() is None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)  # git and everything it started
+
+
+async def threaded(fn, *args, **kwargs):
+    """`fn(*args, **kwargs)` in a worker thread (`performing.in_thread`, so inside a
+    perform the thread holds the effect's lock); cancelling the caller (a
+    stop, or an interrupt of the kernel's loop) kills every git the thread
+    is running and refuses any it would start next."""
+    started = _Started()
+
+    def run():
+        _STARTED.set(started)
+        return fn(*args, **kwargs)
+
     try:
-        yield
-    finally:
-        _DEADLINE.reset(token)
+        return await performing.in_thread(run)
+    except BaseException:
+        started.cancel()
+        raise
 
 
 def hostile(workspace: str | Path) -> list[str]:

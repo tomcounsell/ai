@@ -139,6 +139,17 @@ class Settings:
             "VALOR_PG_PASSFILE", str(Path.home() / ".config" / "valor-kernel" / "pgpass")
         )
     )
+    # The per-effect lock files (`core.performing`). By default in the kernel
+    # key directory, beside `pg_passfile`, which every turn's sandbox profile
+    # denies, so no turn can hold, remove, or plant one; the test suite points
+    # it at its own temporary directory.
+    performing_dir: str = field(
+        default_factory=lambda: _env(
+            "VALOR_PERFORMING_DIR",
+            str(Path(_env("VALOR_PG_PASSFILE", str(Path.home() / ".config" / "valor-kernel" / "pgpass"))).parent
+                / "performing"),
+        )
+    )  # fmt: skip
 
     # -- the model provider ---------------------------------------------------
     upstream: str = field(default_factory=lambda: _env("VALOR_UPSTREAM", "https://api.anthropic.com"))
@@ -147,9 +158,6 @@ class Settings:
     # -- git, as the kernel runs it: a root-owned install, never looked up on
     # a PATH or through a cache a turn can write (core/binaries.py) -----------
     git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", _git()))
-    # The longest one kernel git call may run (a push included) before it is
-    # killed and counted as failed.
-    git_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_GIT_TIMEOUT_S", "120")))
 
     # -- the judgement legs ----------------------------------------------------
     jev_url: str = field(default_factory=lambda: _env("VALOR_JEV_URL", JEV_URL))
@@ -236,13 +244,6 @@ class Settings:
         the merge performer. Derived from `pg_passfile` as the judgement
         keys are."""
         return str(Path(self.pg_passfile).parent / "github-keys")
-
-    @property
-    def performing_dir(self) -> str:
-        """The per-effect lock files (`core.performing`), in the kernel key
-        directory, so no turn can hold, remove, or plant one. Derived from
-        `pg_passfile` as the judgement keys are."""
-        return str(Path(self.pg_passfile).parent / "performing")
 
     @property
     def claude_token_file(self) -> str:

@@ -25,17 +25,17 @@ remote's `HEAD` names, read just before the push. A task with a kernel
 mirror pushes from the mirror with the GitHub credential, a per-call config
 file (`core.credentials.header_file`); no other push carries it.
 
-Every method is a coroutine; git runs in a worker thread, with the
-perform's deadline set inside it. A perform's thread holds the effect's
-lock file and hands it to every git it runs (`core.performing.in_thread`),
-so `broker.reconcile` reads the remote only after the push was reaped.
+Every method is a coroutine; git runs in a worker thread
+(`core.git.threaded`) until it exits, and cancelling the coroutine (a stop,
+or an interrupt of the kernel) kills the git it runs. A perform's thread
+holds the effect's lock file and hands it to every git it runs
+(`core.performing.in_thread`), so `broker.reconcile` reads the remote only
+after the push was reaped.
 """
 
-import asyncio
 from pathlib import Path
 
-from core import broker, credentials, git, performing, targets
-from core.settings import settings
+from core import broker, credentials, git, targets
 
 
 class PushBranch:
@@ -55,7 +55,7 @@ class PushBranch:
         """Checked at request and again at release, before the intent."""
         if self.protected and action.target == self.protected:
             return f"{self.protected} is the task's target branch; only the merge lands there"
-        return await asyncio.to_thread(self._rewrites)
+        return await git.threaded(self._rewrites)
 
     def _rewrites(self) -> str | None:
         try:
@@ -72,20 +72,13 @@ class PushBranch:
         return self.url or git.push_url(self.workspace), action.target
 
     async def perform(self, action, key: str) -> dict:
-        return await performing.in_thread(self._bounded, self._perform, action)
+        return await git.threaded(self._perform, action)
 
     async def lookup(self, action, key: str) -> dict | None:
         """Present (the remote branch holds the commit, at its tip or below
         it): the result. Absent: None. Unknown (the workspace is refused or
         the remote cannot be read): `broker.Unknown`."""
-        return await asyncio.to_thread(self._bounded, self._lookup, action)
-
-    @staticmethod
-    def _bounded(fn, action):
-        """One deadline, `git_timeout_s`, for every git call of the perform
-        (or lookup), set inside the worker thread."""
-        with git.deadline(settings.git_timeout_s):
-            return fn(action)
+        return await git.threaded(self._lookup, action)
 
     def _perform(self, action) -> dict:
         if self.protected and action.target == self.protected:
@@ -158,7 +151,7 @@ class Merge(PushBranch):
         said = await targets.check(conn, p["url"], p["target_branch"])
         if said:
             return said
-        return await asyncio.to_thread(self._rewrites)
+        return await git.threaded(self._rewrites)
 
     def destination(self, action) -> tuple[str, str]:
         return action.payload["url"], action.payload["target_branch"]

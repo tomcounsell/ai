@@ -56,7 +56,6 @@ import re
 import secrets
 import shlex
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -989,35 +988,32 @@ def _group(pgid: int) -> list[int]:
     ]
 
 
-def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int,
-            timeout: float) -> tuple[int | str, str]:  # fmt: skip
-    """Run `argv` in its own process group with a file-size limit, killing
-    the whole group when its summed footprint passes `max_footprint` or the
-    time limit passes. Returns the exit code (or `footprint`, `timeout`) and
-    the stderr tail."""
+def bounded(
+    argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int
+) -> tuple[int | str, str]:
+    """Run `argv` in its own process group (`git.popen`) with a file-size
+    limit until it exits, killing the whole group when its summed footprint
+    passes `max_footprint`, or on an interrupt or a stopped `git.threaded`
+    caller. Returns the exit code (or `footprint`) and the stderr tail."""
 
     # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.
     # bash counts `ulimit -f` in 1024-byte blocks.
     blocks = max(1, max_bytes // 1024)
     wrapped = ["/bin/bash", "-c", f'ulimit -f {blocks} && exec "$@"', "bash", *argv]
-    proc = subprocess.Popen(
-        wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
-    )
-    deadline = time.monotonic() + timeout
+    proc = git.popen(wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     why: int | str | None = None
-    while proc.poll() is None:
-        if time.monotonic() > deadline:
-            why = "timeout"
-        elif sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
-            why = "footprint"
-        if why:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            break
-        time.sleep(0.5)
+    try:
+        while proc.poll() is None:
+            if sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
+                why = "footprint"
+                git.kill(proc)
+                break
+            time.sleep(0.5)
+    except BaseException:
+        git.kill(proc)
+        proc.communicate()
+        raise
     _, err = proc.communicate()
     return (why or proc.returncode), err.decode(errors="replace")[-400:]
 
@@ -1032,7 +1028,6 @@ def fetch_into_mirror(
     *,
     max_bytes: int | None = None,
     max_footprint: int | None = None,
-    timeout: float | None = None,
 ) -> None:
     """Fetch one commit from a clone a turn controls into the kernel mirror,
     under `ref`. Raises `FetchRefused` with the reason."""
@@ -1075,7 +1070,6 @@ def fetch_into_mirror(
         env=git.env(),
         max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
         max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
-        timeout=git.remaining(timeout or settings.git_timeout_s),
     )
     runs.reap(mark)
     if code != 0:
@@ -1086,8 +1080,6 @@ def fetch_into_mirror(
         clean_partial(mirror)
         if code == "footprint":
             raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
-        if code == "timeout":
-            raise FetchRefused("the fetch into the kernel mirror did not finish in time")
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
 
 

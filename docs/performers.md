@@ -17,8 +17,9 @@ Status: **in use**.
   tags, submodules, or a signature. Git is the Command Line Tools' install
   (`VALOR_GIT` overrides), checked before each call to be root's alone and
   a real install, never Apple's `/usr/bin/git` shim (`core/binaries.py`),
-  with a system-only PATH, no `DYLD_*` or global config, one deadline per
-  perform (git in its own process group, killed whole on timeout), replace
+  with a system-only PATH, no `DYLD_*` or global config, git in its own
+  process group, run until it exits and killed whole when its caller is
+  stopped or interrupted, replace
   refs, grafts, commit-graph, and multi-pack-index ignored, and hooks,
   helpers, pagers, and transports pinned off, and refuses a workspace whose
   own config names a program, redirects a push, sets any `push.*` or

@@ -14,6 +14,7 @@ import json
 import os
 import struct
 import subprocess
+import time
 import uuid
 import zlib
 from pathlib import Path
@@ -22,6 +23,7 @@ import psycopg
 import pytest
 
 from core import db, ledger, runs, tasks
+from core import git as kgit
 from core import workspace as kws
 from core.gateway import Gateway
 from tests import scripted
@@ -623,17 +625,36 @@ def test_the_file_size_limit_is_the_limit_asked_for(tmp_path):
     out = tmp_path / "big"
     code, _ = kws.bounded(
         ["/bin/dd", "if=/dev/zero", f"of={out}", "bs=1024", "count=4096"],
-        cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024 * 1024, max_footprint=1024**3, timeout=30,
+        cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024 * 1024, max_footprint=1024**3,
     )  # fmt: skip
     assert code != 0 and out.stat().st_size == 1024 * 1024
 
 
-def test_a_command_past_its_time_is_killed(tmp_path):
-    code, _ = kws.bounded(
-        ["/bin/sleep", "30"], cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024, max_footprint=1024**3,
-        timeout=1,
-    )  # fmt: skip
-    assert code == "timeout"
+def test_a_stopped_caller_kills_the_command_and_its_group(tmp_path):
+    pidfile = tmp_path / "pid"
+
+    async def go():
+        argv = ["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; wait"]
+        t = asyncio.create_task(
+            kgit.threaded(lambda: kws.bounded(argv, cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024,
+                                              max_footprint=1024**3))
+        )  # fmt: skip
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        return int(pidfile.read_text())
+
+    child = run(go())
+    for _ in range(200):  # the group was sent SIGKILL; wait for the kernel to retire the child
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the command's child outlived its stopped caller")
 
 
 def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
@@ -976,17 +997,3 @@ def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, mo
         assert lay.root.exists()
     finally:
         kws.stop_services(orphan, lay)
-
-
-def test_the_mirror_fetch_keeps_to_the_callers_git_deadline(tmp_path):
-    import time
-
-    from core import git as kgit
-
-    _, made = provision(tmp_path)
-    sha = candidate(made)
-    with kgit.deadline(0.01):
-        time.sleep(0.05)
-        with pytest.raises((kgit.GitError, kws.FetchRefused), match="deadline"):
-            fetch(made, sha)
-    assert kgit.remaining(5.0) == 5.0  # outside a deadline, the limit stands

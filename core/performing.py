@@ -21,8 +21,9 @@ before these files existed. A process that opens the file checks, once
 locked, that the path still names what it opened (a remover may have
 unlinked it in between), and opens again when it does not.
 
-The directory is in the kernel key directory, which every turn's sandbox
-profile denies, so no turn can hold, remove, or plant a lock.
+The directory (`settings.performing_dir`) is by default in the kernel key
+directory, which every turn's sandbox profile denies, so no turn can hold,
+remove, or plant a lock.
 
 Imports the standard library and `core.settings`.
 """

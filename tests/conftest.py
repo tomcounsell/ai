@@ -5,7 +5,19 @@ database as its owner. `db.migrate` touches no role password, password
 file, or `pg_hba.conf`, so a test run leaves the machine cluster's
 credentials as it found them. Every test marks its live spend with
 `@pytest.mark.spend(usd=...)`.
+
+The effect lock files (`settings.performing_dir`) go to a temporary
+directory of the session's own, set in the environment before the settings
+are built, so the suite and every process it starts write nothing under the
+kernel key directory.
 """
+
+import os
+import shutil
+import tempfile
+
+_PERFORMING = tempfile.mkdtemp(prefix="valor-test-performing-")
+os.environ["VALOR_PERFORMING_DIR"] = _PERFORMING
 
 import pytest
 
@@ -23,3 +35,7 @@ def dsn() -> str:
 @pytest.fixture(scope="session")
 def owner_dsn(dsn) -> str:
     return settings.dsn(owner=True, database=TEST_DB)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    shutil.rmtree(_PERFORMING, ignore_errors=True)

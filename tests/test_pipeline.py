@@ -1608,16 +1608,6 @@ def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, 
     assert kernel_ran is False
 
 
-def test_a_perform_has_one_deadline_for_all_its_git_calls(tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-    with kgit.deadline(60):
-        assert kgit.head(ws)
-    with kgit.deadline(0), pytest.raises(kgit.GitError, match="deadline"):
-        kgit.head(ws)
-    with kgit.deadline(60), kgit.deadline(3600):  # a nested block keeps the earlier deadline
-        assert kgit._DEADLINE.get() - __import__("time").monotonic() < 61
-
-
 def test_ps_and_sandbox_exec_must_be_roots_alone(tmp_path, monkeypatch):
     from core import binaries, runs
     from harnesses import claude_code

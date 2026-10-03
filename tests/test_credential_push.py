@@ -16,17 +16,15 @@ import os
 import secrets
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
-from core import broker, credentials, db, git, ledger, performing, targets, tasks
+from core import broker, credentials, db, git, ledger, targets, tasks
 from core import workspace as kws
 from core.settings import settings
 from tests import scripted
 from tests.smart_http import Server
-from tools import push_branch
 from tools.push_branch import ROTATE, Merge, PushBranch
 
 pytestmark = [pytest.mark.spend(usd=0)]
@@ -457,26 +455,10 @@ def test_two_merges_run_at_once_each_to_its_own_remote_while_the_loop_ticks(tmp_
     assert [sh(b, "rev-parse", "rebuild") for b in bares] == shas
 
 
-def test_the_deadline_applies_inside_the_worker_thread(tmp_path, keyfile, token, monkeypatch):
-    monkeypatch.setattr(push_branch, "settings", dataclasses.replace(settings, git_timeout_s=1.5))
-    with Server(tmp_path / "remote", token=token) as server:
-        remote(server, toy(tmp_path))
-        url = server.url("ai.git")
-        made = provision(tmp_path, url)
-        sha = candidate(made.mirror, made.base_sha)
-        merge = Merge(made.mirror, url=url, branch="rebuild", credential=keyfile, loopback=True)
-        server.hold_push = True
-        started = time.monotonic()
-        with pytest.raises(git.GitError, match="did not finish|deadline"):
-            run(merge.perform(merge_action(url, "rebuild", sha), "k"))
-        elapsed = time.monotonic() - started
-    assert elapsed < 10 and leftovers(keyfile) == []
-
-
-def test_a_release_cancelled_mid_push_is_settled_only_after_git_is_reaped(dsn, tmp_path):
-    """The release's coroutine, and with it its database session and its
-    own hold on the effect's lock file, is gone while git still pushes:
-    reconcile concludes nothing until git exits, then reads the remote."""
+def test_a_release_cancelled_mid_push_kills_git_and_reconciles_to_failed(dsn, tmp_path):
+    """Cancelling the release (a stop) kills the push's git, which has no
+    time limit of its own; once git is reaped the lock file is free, and
+    reconcile reads the remote, which the push never moved."""
     with Server(tmp_path / "remote") as server:
         ws, _origin = scripted.workspace(tmp_path)
         bare = server.bare("ws.git")
@@ -506,23 +488,24 @@ def test_a_release_cancelled_mid_push_is_settled_only_after_git_is_reaped(dsn, t
             with contextlib.suppress(asyncio.CancelledError):
                 await releasing
             async with await db.connect(dsn) as conn:
-                early = await broker.reconcile(conn, perf, held.effect_id)
-            still_held = not performing.settled(held.effect_id)
-            server.release.set()
-            async with await db.connect(dsn) as conn:
-                for _ in range(200):  # until git exits
+                for _ in range(200):  # until the killed git is reaped
                     settled = await broker.reconcile(conn, perf, held.effect_id)
                     if settled is not None:
                         break
                     await asyncio.sleep(0.05)
-                return early, still_held, settled, await ledger.read(conn, task)
+                written = await ledger.read(conn, task)
+            probe = ["git", "-C", str(bare), "rev-parse", "--verify", "-q", "refs/heads/valor/x"]
+            moved = (
+                await asyncio.to_thread(subprocess.run, probe, capture_output=True, check=False)
+            ).returncode == 0
+            server.release.set()  # lets the test server's handler end
+            return settled, written, moved
 
-        early, still_held, settled, written = run(go())
-    assert early is None and still_held
-    assert settled is not None and settled.kind == "done"
+        settled, written, moved = run(go())
+    assert settled is not None and settled.kind == "failed"
     assert [r["type"] for r in written].count("effect.intent") == 1
     (outcome,) = [r["payload"] for r in written if r["type"] == "effect.outcome"]
-    assert outcome["reconciled"] is True and sh(bare, "rev-parse", "valor/x") == head
+    assert outcome["reconciled"] is True and not moved
 
 
 # -- the merge-target list at release ----------------------------------------------------------

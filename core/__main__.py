@@ -101,6 +101,7 @@ from core import (
     credentials,
     db,
     fresh,
+    git,
     guards,
     judgement,
     judgement_sites,
@@ -309,7 +310,7 @@ async def _start_project(conn, args) -> str:
         finally:
             await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
         try:
-            made = await asyncio.to_thread(workspace.provision, task_id, spec, ports, base=args.base)
+            made = await git.threaded(workspace.provision, task_id, spec, ports, base=args.base)
         except workspace.Refused as exc:
             raise SystemExit(f"start refused: {exc}") from None
         try:
@@ -326,7 +327,7 @@ async def _start_project(conn, args) -> str:
             )
             return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
         except BaseException as exc:
-            await asyncio.to_thread(workspace.remove, task_id)
+            await git.threaded(workspace.remove, task_id)
             if isinstance(exc, ValueError):
                 raise SystemExit(f"start refused: {exc}") from None
             raise
@@ -363,7 +364,7 @@ async def _workspace(conn, args) -> str:
             raise SystemExit(
                 f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
             )
-        await asyncio.to_thread(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
+        await git.threaded(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
         await ledger.append(
             conn,
             args.task_id,
@@ -397,7 +398,7 @@ async def _orphan(conn, args, *, after_lock=None) -> str:
             await conn.execute("SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (args.task_id,))
         ).fetchone():
             raise SystemExit(f"{args.task_id} became a task; remove it as one once it is stopped or merged")
-        await asyncio.to_thread(workspace.remove, args.task_id, lay)
+        await git.threaded(workspace.remove, args.task_id, lay)
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
     return f"removed {lay.root}, which no task row names"
