@@ -11,252 +11,268 @@ review_rounds: 2
 
 Task 2.2 of [valor-rebuild.md](valor-rebuild.md), milestone 2. It builds
 `bridges/telegram/`: a Telethon client on Valor's own account that hands
-every message in the chats it reads to `intake.receive`, performs
-`telegram.send_message` effects the broker releases, and sends operator
-notices to Tom's chat. It conforms to the port that task 2.1 builds in
-`core/`; the names it assumes from that port are listed under "Port
-assumed" so the two plans can be reconciled before either is built.
+every message in the chats this machine owns to `intake.receive`, performs
+the `telegram.send_message` effects the outbox yields, and sends the
+notices the outbox yields. It is a bridge on the port in
+[m2-1-port.md](m2-1-port.md), which 2.1 builds in `core/`.
 
 It serves Mission items 1 and 6 (Tom gives work and taps approvals where
 he already is) and the constraint "Bounded authority, metered spending"
 (nothing leaves under Valor's name without passing the broker).
 
+Depends on 2.1's merge and on 1.4d's (`broker.Performers` passed
+explicitly, awaitable perform and lookup).
+
 ## Stakes
 
 `critique_rounds: 1`, `review_rounds: 2`. The bridge sends to real people
-under Valor's name and holds the account's session. It changes one kernel
-file (`core/settings.py`, new fields), so its merge waits its turn behind
-other tasks that change kernel files.
+under Valor's name and holds the account's session. It changes no kernel
+file.
 
-## Port assumed
+## Port used
 
-From 2.1 as [valor-rebuild.md](valor-rebuild.md) describes it and
-[bridges/telegram.md](../bridges/telegram.md) specifies it. Where 2.1's
-plan names a thing differently, this plan takes 2.1's name.
+The lead's port decisions, items 1 to 36, as 2.1 writes them in
+[m2-1-port.md](m2-1-port.md). What 2.2 uses, by item:
 
-| Name | What 2.2 relies on |
+| Item | What 2.2 does with it |
 |---|---|
-| `core.intake.Inbound` | The record in telegram.md's field table, with `headers` free for channel facts; no `vote` field and no `kind: vote` (polls are dropped) |
-| `core.intake.receive(conn, inbound)` | Appends `message.received` on the `telegram` channel stream and returns after commit; a replay of the same `(channel, chat_id, message_id)` is absorbed by the unique index and returns without error |
-| `core.intake.highest_message_id(conn, channel, chat_id)` | The largest `message_id` received in a chat, or None; the gap fill's floor |
-| `core.bridge.Bridge`, `ChannelLimits` | The protocol in telegram.md, "The port in code" |
-| `core.outbox` | `pending(conn, action_types)`: effects of those types that carry a `release.requested` row, an unused approval, and no intent; `unsent_notices(conn, channel)`: `notice.requested` rows with no `notice.sent`; the notification channel name (assumed `valor_outbox`) the kernel notifies on when it writes either row |
-| `release.requested` | The row the kernel writes when Tom's `approve` reply or `core release` asks for a held effect to be performed; the owning bridge performs it |
-| `notice.requested`, `notice.sent` | `notice.requested` carries `notice_id`, `text`, and the record it concerns, and names no recipient; `notice.sent` carries `notice_id`, `chat_id`, `message_id` |
-| `core.broker.Performer` with awaitable `perform` and `lookup` | 1.4 made the broker's perform awaitable; a performer is registered per process |
-| The broker's idempotency key carries the effect id | 2.1 absorbs this; `random_id` is derived from the key, so two identical sends in one task get two `random_id`s |
-| `core.broker.reconcile` for any action type, and the restart sweep | The bridge calls the sweep for its own action types on start |
-| Binding in `core/` | A reply from Tom's sender id to a notice binds to the record it carries (`question.answered`, `feedback.given`, `approval.granted` plus `release.requested` on exactly `approve`, `task.stopped` on exactly `stop`), each with `via: "telegram"` and `role_played: false`; any other message from Tom starts a task. If 2.1's plan does not carry binding, the lead moves it into one of the two plans before either builds |
-| `core.db.connect` as `valor_kernel` through the password file | The bridge is a kernel process with its own launchd job |
+| 1, 28 | `bridges/telegram/__main__.py run` calls `core.bridge.serve(TelegramBridge())`; the class implements `Bridge` (`channel = "telegram"`, `limits`, `performers()`, `async run(outbox)`) |
+| 2 | Every message ends at `intake.receive(conn, inbound)`; `Received.duplicate` means already recorded, and nothing more happens |
+| 3, 32 | Gap fill pages with `intake.highest` as a hint and receives only ids `intake.recorded` does not list, checked before any download |
+| 4, 15, 16 | Reads only `intake.owned("telegram")` (the operator chat, plus chats a project spec lists for this machine); drops events from any other chat and Valor's own messages |
+| 5, 23 | Iterates `Outbox`: a `Release` goes to `outbox.perform(item)`, a `NoticeDue` is sent by the bridge; the outbox reconciles `broker.dangling` on every wake. The bridge runs no loop, LISTEN, drain, or sweep of its own |
+| 8, 9 | A notice goes to `item.chat_id`; `outbox.sent(item, sent)` records it, `sent` being `[{channel, chat_id, message_id}]` |
+| 11 | Passes Telegram's raw facts; `verified` as item 11 states, from the account's own peer id the bridge reports |
+| 15b, 25 | `ChannelLimits(max_text=4096, max_file_bytes=2_097_152_000)`, Telegram's message length and upload limit; the performer splits text over the limit |
+| 17, 18 | `Inbound.topic_id`, `thread: list[dict]`, `headers["grouped_id"]`, attachments `{name, mime, bytes, path}` or `{name, mime, bytes, skipped: reason}`, files under `settings.inbound_dir/telegram/` named by sha256 |
+| 19 | Payload `files: [{path, sha256}]`: read once, hashed, raise before sending on a mismatch, send the bytes hashed |
+| 22, 24 | `Declared` for `telegram.send_message` is 2.1's; a send in doubt raises `broker.Unknown` |
+| 26 | Uses 2.1's settings: `operator_chat`, `inbound_dir`, `machine`, `serve_tick_s`, `pg_passfile` |
+| 27 | Single instance is `serve`'s session lock `bridge:telegram:<machine>`; no flock |
+| 29 | Connections named `valor-telegram` and `valor-telegram-perform`, by `serve` |
+| 30 | Imports `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, `core.credentials`, nothing else |
+| 31 | `--plist` prints the job for Tom to load |
+| 33, 34 | The lookup scans own messages dated at or after `since` less the clock margin, skipping `intake.claimed` ids |
+| 35 | A notice lookup matches the notice's short id in its text |
+| 36 | Flood waits are held in memory for the process |
 
 ## Done, as evidence
 
 ### Shown now, with the Telegram emulator and the local test server
 
-The emulator is `tests/telegram_emulator.py`: a local HTTP server, run as
-its own process, holding chats, per-chat message id sequences, the
-account's own messages, `random_id` duplicate detection, injected flood
-waits, disconnects, and a pause point after a send is accepted. The bridge
-reaches it through the same narrow wire interface it uses for Telethon
-(`bridges/telegram/wire.py`), passed in by the test's child process, so no
-production setting selects it. Postgres is the real test database.
+The emulator is `tests/telegram_emulator.py`, a local HTTP server run as
+its own process. It holds chats, own messages, a message id sequence per
+supergroup and one shared by private chats and basic groups (so a chat's
+ids have gaps), `random_id` duplicate detection, Telegram's trim of
+leading and trailing whitespace, injected flood waits, dropped live
+updates, a disconnect after accepting a send and before replying, and a
+pause point after a send is accepted. The bridge reaches it below
+`bridges/telegram/wire.py`, through a stand-in wire the test's child
+process passes in; no production setting selects it. Postgres is the
+real test database. `wire.py` itself (Telethon's update handling, error
+types, and reconnect) is shown only on the test servers below.
 
-- **Receipt is idempotent and lossless.** A message killed between commit
-  and acknowledgement lands once after restart; the live handler and the
-  gap fill receiving the same message at once write one row; a receive
-  that fails (Postgres down) drops the connection, and the gap fill on
-  reconnect records the message.
-- **Gap fill.** After the bridge was down, every message in each read
-  chat above `highest_message_id` is received once, oldest first, across
-  more than one page; a chat with no rows backfills nothing.
+- **Receipt is idempotent and lossless.** Killed between commit and the
+  read acknowledgement, a message lands once after restart. The live
+  handler and the gap fill receiving one message at once write one row.
+  A live update Telethon drops (104 dropped, 105 delivered) is recorded
+  within one tick.
+- **Gap fill.** After the bridge was down, every message in each owned
+  chat that `intake.recorded` does not list is received once, oldest
+  first, across more than one page; a chat with no rows backfills
+  nothing.
 - **An inbound message from Tom starts a task** through 2.1's kernel, and
-  `python -m core status` shows its metered spending (the judge call
-  answered by the local judgement upstream).
-- **A question reaches Tom and his reply binds.** A `notice.requested`
-  goes to the operator chat only, `notice.sent` records its message id,
-  and an emulated reply from Tom's sender id records `question.answered`
-  with `via: "telegram"`, `role_played: false`.
-- **A delivery card's tap releases a held push.** A reply of exactly
-  `approve` to the card records `approval.granted` and `release.requested`;
-  the kernel releases the push to the task's local bare origin. A reply of
-  `Approve.` or `ok approve` leaves it held.
-- **A forced crash between intent and outcome does not send twice.** The
-  child is killed by its own pid at the emulator's pause point, after the
-  send was accepted and before the outcome; on restart the sweep's
-  `lookup` finds the message and writes `done`, reconciled, and the
-  emulator holds one message. Killed before the send was accepted, the
-  effect settles `failed` after `reconcile_after_s` and nothing is sent.
-- **A `telegram.send_message` sends verbatim**: plain text with no parse
-  mode and no link preview, the reply target honored, the outcome carrying
-  `chat_id` and `message_id`; over the limit, a `.txt` file holding the
-  same bytes.
+  `python -m core status` shows its metered spending.
+- **A question reaches Tom and his reply binds.** A question notice goes to
+  the row's chat, `notice.sent` records its message id, and an emulated
+  reply from Tom's id records `question.answered` with `via: "telegram"`,
+  `role_played: false`.
+- **A held push is released by a tap.** A reply of exactly `approve` to
+  the held push's effect notice records `approval.granted`, and the kernel
+  performs the push to the task's local bare origin, with no
+  `release.requested`. `Approve.` binds as a steer and owes the notice
+  "not an approval; reply `approve`". `approve` in reply to the delivered
+  notice binds as feedback.
+- **A forced crash between intent and outcome does not send twice.**
+  Killed at the pause point after the emulator accepted a send: on
+  restart, the outbox's reconcile finds the message and writes `done`,
+  reconciled, and the emulator holds one message. Killed before the send
+  was accepted and restarted at once: the effect stays in flight until
+  its intent is older than the settle time, then a later tick writes
+  `failed`, and nothing is sent.
+- **A send in doubt is not a failure.** The emulator accepts a send and
+  drops the connection before replying: the effect ends `done` with one
+  message on screen.
+- **`telegram.send_message` sends verbatim**: plain text with no parse
+  mode and no link preview, the reply target and forum topic honored, text
+  over 4,096 split into several messages, files sent as documents from
+  the bytes hashed.
 - **The inbound record carries the forum topic id** (#2652).
 
 ### Shown on Telegram's test servers, with test accounts
 
-Telegram runs test data centres with their own test phone numbers
+Telegram runs test data centres with their own phone numbers
 (`99966XYYYY`, sign-in code fixed by the number). No Valor session is
-used. With `VALOR_LIVE=1` and `VALOR_TELEGRAM_TEST_DC=1`,
-`tests/test_live_telegram_dc.py` shows, through the real Telethon wire:
+used. `tests/test_live_telegram_dc.py` (`VALOR_LIVE=1`,
+`VALOR_TELEGRAM_TEST_DC=1`) reads Valor's API id and hash from the kernel
+key directory, which every turn's sandbox denies, so the lead session runs
+it outside a turn, before the merge. Through the real `wire.py` it shows:
 
-- a repeated `random_id` from a user account is refused by Telegram
-  rather than delivered twice, and the performer reads that as sent (the
-  gap telegram.md names); if Telegram delivers again instead, the test
-  says so and `lookup` alone reconciles, as telegram.md states;
-- send, `lookup`, gap fill, and media download work against MTProto.
-
-This needs Valor's API id and hash in the kernel key directory (question 4).
+- a repeated `random_id` from a user account is dropped rather than
+  delivered twice; if Telegram delivers again, the test says so and
+  notices rely on the short-id lookup alone;
+- send, split, topic send, file send, `lookup`, gap fill, and media
+  download against MTProto;
+- `sequential_updates=True` handling, and the mapping of Telethon's
+  `FloodWaitError`, `RandomIdDuplicateError`, and a connection lost
+  mid-request onto failed, sent, and `broker.Unknown`.
 
 ### Waiting for Tom's test window, on Valor's real account
 
-As valor-rebuild.md 2.2 states them, in the operator chat:
+In the operator group, as valor-rebuild.md 2.2 states them:
 
 - an inbound message starts a task with its spending metered and shown;
 - a question reaches Tom and his reply binds to it;
-- a delivery card's tap releases a held push;
+- `approve` in reply to a held push's effect notice releases the push,
+  which goes to a local bare origin; `approve` in reply to the delivered
+  notice is feedback;
 - a forced crash between intent and outcome does not send twice, run by
-  `tests/test_live_telegram_window.py`, which only Tom starts;
-- the bridge's RSS after a day connected is measured and recorded in
+  `tests/test_live_telegram_window.py` with the launchd job booted out;
+- the bridge's RSS after a day connected, recorded in
   [machine.md](../machine.md).
 
 ## Threat model
 
 What others control: everything inbound. Anyone who can message Valor's
-account controls the text, the sender's display name, file names, media
-bytes, reply targets, and the ancestors a reply chain fetches. Telegram
-(or the emulator) controls what `lookup` and the gap fill read back. A
-turn controls the text of the effects it requests and of the questions
-and deliveries the kernel renders into notices.
+account in an owned chat controls the text, the display name, file names,
+media bytes, reply targets, and the ancestors a reply chain fetches.
+Telegram (or the emulator) controls what `lookup` and the gap fill read
+back. A turn controls the text and files of the sends it requests and of
+the questions and deliveries the kernel renders into notices.
 
 What the bridge must never do with any of it:
 
 - Act on inbound text. It writes facts to `message.received` and decides
-  nothing; Tom's identity is his numeric sender id, never a name.
-- Build a path from a sender's file name. A download lands at
-  `<media dir>/<chat>-<message id><extension>`, the extension cut to
-  lowercase letters and digits.
-- Send to anyone the broker did not release, or send a notice anywhere
-  but the operator chat in settings. A notice row names no recipient, and
-  a field on it that does is ignored.
+  nothing; binding is the kernel's, by numeric sender id, never by name.
+- Build a path from a sender's file name. Files land under
+  `inbound_dir/telegram/` named by their sha256.
+- Send to a chat the outbox did not yield, or anything the broker did not
+  release; send other bytes than those hashed.
 - Change what Tom approved: no parse mode, no link preview, no trimming;
-  the oversized path keeps the bytes.
-- Conclude `done` from anything but one unclaimed own message matching
-  the payload exactly; two matches conclude nothing.
-- Let the session reach a turn, a log, or a ledger row. The session file
-  and the API id and hash live in the kernel key directory, which every
+  splitting keeps every character in order.
+- Conclude `done` from anything but own messages dated after the intent,
+  unclaimed, matching the payload; two matches conclude nothing.
+- Let the session reach a turn, a log, or a ledger row. The session and
+  the API id and hash live in the kernel key directory, which every
   sandbox profile denies; nothing prints any part of the hash.
+
+Inbound files under `inbound_dir` (default `~/valor-inbound`) are readable
+by every turn, as 2.1's sandbox stands; they are data a sender chose to
+send to Valor.
 
 ## Per file, from `main`
 
 Read with `git show origin/main:<path>`; nothing is imported from it.
-About 700 lines kept, 600 adapted, the rest of `bridge/` (about 23,500
-lines) not carried.
 
 | New file | Source on `main` | Kept | What changes |
 |---|---|---|---|
-| `bridges/telegram/wire.py` | `bridge/telegram_bridge.py` (`main`'s client construction and connect loop), `bridge/telegram_relay.py` (`_send_queued_message`) | Telethon client setup; connect with exponential backoff and jitter; flood wait on connect honored | The only module that imports Telethon. `flood_sleep_threshold=0`, `catch_up=False`, `auto_reconnect=False`: the bridge owns reconnect, so each connect runs the gap fill. No attempt count: the loop backs off up to 256 s and keeps trying. Sends are raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, `no_webpage=True`, no parse mode. The session path, API id, and hash come from the kernel key directory. Sentry, liveness, hibernation, and log formatting go |
-| `bridges/telegram/lock.py` | `_cleanup_session_locks` in `bridge/telegram_bridge.py` | The rule never to delete the session's `-journal`, `-wal`, or `-shm` files | Killing whatever `lsof` says holds the session goes. The bridge takes an exclusive `flock` on `<session>.lock` for its life; a second process exits with code 3, naming the holder's pid, and signals nothing |
-| `bridges/telegram/inbound.py` | the head of `handler` in `bridge/telegram_bridge.py`; `bridge/media.py` (`get_media_type`, `compute_media_timeout`, `download_media`); `_download_media_with_retry`; `bridge/context.py` (`fetch_reply_chain`, `media_descriptor`, `telegram_media_descriptor`) | Media typing, size-scaled timeout with one retry at twice the leash, the descriptor shape, the reply-chain walk (20 hops, cycle stop) | The handler builds one `Inbound` and ends at `intake.receive`, then marks the message read; the four layers of Redis dedup, the stale-replay cursor, `/update`, project lookup, shadow routing, injection screening, and storage go. Text is `message.message`, the raw string, never Telethon's rendered `.text`. Outgoing and service messages are skipped. `headers` carries `topic_id` and `grouped_id`. Ancestors in `thread` carry media descriptors without downloading; their files, if received, are in their own `message.received` rows. Transcription and image description go |
-| `bridges/telegram/gap.py` | `bridge/history_fetch.py` | Backward paging that accepts only strictly older ids and stops on a short page | Pages down to `highest_message_id` instead of a date cutoff, with no per-chat ceiling, and hands messages to the same intake path oldest first |
-| `bridges/telegram/send.py` | `_send_queued_message`, `_maybe_send_oversized_text_as_file` in `bridge/telegram_relay.py`; `_find_already_sent_poll` | The oversized-as-file path; the scan of the account's own messages in a chat with "two matches adopt nothing" | Becomes the `telegram.send_message` performer (`act`) and the notice sender. One attempt; flood waits, network errors, and refusals raise, and the broker writes the failed outcome. `random_id` is the first 8 bytes of SHA-256 of the key as a signed int64, never zero. `RandomIdDuplicate` is read as sent and answered by `lookup`. The `.txt` file is named from the key's digest, so `lookup` matches it exactly. Voice notes, albums, custom emoji, the `_file_sent` marker, markdown, and dead letters go |
-| `bridges/telegram/bridge.py` | the outbox loop in `bridge/telegram_relay.py` (`process_outbox`, `relay_loop`) and the body of `main()` in `bridge/telegram_bridge.py` | Graceful shutdown on SIGTERM | The Redis outbox loop becomes LISTEN on the outbox channel plus a drain on start and on every database reconnect: `broker.release` for each pending effect of its action type, and each unsent notice. Startup runs the sweep for its action types, then connects |
-| `bridges/telegram/peer.py` | `utils/peer.py` | `numeric_peer`, `deliverable_telegram_peer` as they are | The module docstring about import cost goes |
-| `bridges/telegram/login.py` | `scripts/telegram_login.py` | The interactive code and two-factor flow; the existing-session check | Reads the API id and hash from the kernel key file; asks for the phone number and the password at the prompt (the password through `getpass`) and stores neither; writes the session into the kernel key directory, mode 600. Prints the signed-in name and user id, and no part of the API hash (`main` prints its last four characters). `--test-dc` signs a test account into a session under the test's temporary directory |
-| `bridges/telegram/__main__.py` | none | | `run`, `login`, `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault `.env` into `telegram-keys` in the kernel key directory through `credentials.copy_keys`, printing each name with `written`, `kept`, or `missing`), and `plist` (prints the launchd job) |
+| `bridges/telegram/wire.py` | `bridge/telegram_bridge.py` (client construction, connect loop), `bridge/telegram_relay.py` (`_send_queued_message`) | Telethon client setup; connect with exponential backoff to 256 s and jitter; a connect flood wait honored | The only module that imports Telethon. `sequential_updates=True`, `flood_sleep_threshold=0`, `catch_up=False`, `auto_reconnect=False`: the bridge owns reconnect and runs the gap fill on each connect. No attempt count. Sends are raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, `no_webpage=True`, no parse mode, `reply_to` with `top_msg_id` for a topic. The session path, API id, and hash come from the kernel key directory. Sentry, liveness, hibernation, the lsof session cleanup and its signals, and the `data/flood-backoff` and `data/last_connected` files go. Never deletes the session's `-journal` file |
+| `bridges/telegram/inbound.py` | the head of `handler` in `bridge/telegram_bridge.py`; `bridge/media.py` (`get_media_type`, `compute_media_timeout`, `download_media`); `_download_media_with_retry`; `bridge/context.py` (`fetch_reply_chain`, `media_descriptor`) | Media typing; a size-scaled timeout with one retry at twice the leash; the reply-chain walk (20 hops, cycle stop) | The handler builds one `Inbound` and ends at `intake.receive`, then marks the message read. Redis dedup, the replay cursor, `/update`, project routing, screening, and storage go. Text is `message.message`, never Telethon's rendered `.text`. Outgoing and service messages, and messages from the account itself, are skipped. The timeout is `max(10, 5 + MB)` seconds with no ceiling. Files are named by sha256. A message in a forum topic has `topic_id` set and `reply_to` None unless it replies to a message other than the topic's root. `thread` entries are `{id, text, attachments}`, attachments listed as `skipped: "earlier message"`. Transcription and image description go |
+| `bridges/telegram/gap.py` | `bridge/history_fetch.py` | Backward paging that accepts only strictly older ids and stops on a short page | Pages to a floor (below), receives ids `intake.recorded` does not list, oldest first, through the same path as the handler; no per-chat ceiling |
+| `bridges/telegram/send.py` | `_send_queued_message` in `bridge/telegram_relay.py`; `_find_already_sent_poll` | The scan of the account's own messages in a chat, newest first; two matches adopt nothing | The `telegram.send_message` perform and lookup, and the notice send. One attempt per message. Text is split, then files are sent as documents. `random_id` per part. Voice notes, albums, custom emoji, markdown, the oversized-as-file path, and dead letters go |
+| `bridges/telegram/bridge.py` | the body of `main()` in `bridge/telegram_bridge.py` | Graceful shutdown on SIGTERM | `TelegramBridge`: `run(outbox)` connects, runs the gap fill, registers the handler, and iterates the outbox. On SIGTERM an in-flight perform and its outcome finish before exit |
+| `bridges/telegram/peer.py` | `utils/peer.py` | `numeric_peer`, `deliverable_telegram_peer` | The docstring about import cost goes |
+| `bridges/telegram/login.py` | `scripts/telegram_login.py` | The code and two-factor flow; the existing-session check | Reads the API id and hash from the key file; asks for the phone number and the password (through `getpass`) and stores neither; writes the session into the kernel key directory, mode 600. Prints the signed-in name and user id, and no part of the API hash (`main` prints its last four characters). `--test-dc` signs a test account into a session under the test's temporary directory |
+| `bridges/telegram/__main__.py` | none | | `run`, `login`, `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault `.env` into `telegram-keys` in the kernel key directory with `credentials.copy_keys`, printing each name with `written`, `kept`, or `missing`), and `--plist` |
+
+The session is `telegram.session` and the keys `telegram-keys`, both in the
+directory holding `settings.pg_passfile`, derived in `bridges/telegram/`,
+so the sandbox deny on that directory covers them.
 
 ## Behaviour in detail
 
-**Chats it reads.** The operator chat (`telegram_operator_chat`) and any
-chat ids in `telegram_chats`, default empty. An event from any other chat
-is dropped before anything is recorded, and the gap fill visits only these
-chats. This is how the bridge keeps to single-machine ownership: it reads
-no chat unless listed, and the operator chat is one no other Mac's bridge
-owns (question 1).
+**Sending.** Text is split so each part is at most 4,096 UTF-16 code
+units, Telegram's count, breaking at the last newline before the limit,
+else the last space, else at the limit; core's check by characters is the
+same or stricter. The first part carries the reply target; every part
+carries the topic. Then each file is sent as a document named by its
+`path`'s base name, from the bytes hashed. Part `n` has `random_id` from
+the first 8 bytes of SHA-256 of `key:n`, a signed int64, never zero. The
+result is `{"sent": [...]}`, one entry per message, in order.
 
-**Messages from others.** In a read chat, a message from anyone is
-recorded with its sender id; the kernel uses only Tom's to start or bind
-work, as telegram.md, "Other people", states.
+**What each failure means.**
 
-**Lookup.** For a dangling intent, scan the account's own messages in the
-target chat, newest first, and stop at the newest one whose message id is
-already recorded in an `effect.outcome` or `notice.sent` row for that chat;
-everything older was sent before. Among the unclaimed ones, a match is a
-text equal to the payload's text with the same reply target, or, for an
-oversized send, the document whose name is the key's digest. One match:
-`{chat_id, message_id}`. None: `None`. More than one: `broker.Unknown`, so
-nothing is concluded and the effect stays in flight for Tom to see.
-
-**Notices.** For each unsent notice, the bridge first runs the same scan
-for the notice's text (a crash between send and `notice.sent` leaves it
-already on screen) and records `notice.sent` if found; otherwise it sends
-with a `random_id` derived from the notice id. A notice that fails stays
-unsent and is sent at the next drain after any flood wait has passed:
-notices are the approval surface and need no approval, so this is not a
-resend of an approved effect.
-
-**Flood waits.** A flood wait anywhere is written as a `telegram.flood_wait`
-row (`until`) on the `telegram` channel stream. Before connecting and before
-each request the bridge waits out the latest one, so a restart by launchd
-mid-wait does not hit Telegram again early. No local file holds it.
-
-**Length.** `ChannelLimits.max_text` is 4,096, measured in UTF-16 code
-units, as Telegram counts. Over it, the performer sends a `.txt` file of
-the same bytes with the caption "The full message is in the attached
-file."
-
-**Where things live.** The session at `telegram.session` and the keys at
-`telegram-keys`, both in the kernel key directory (mode 600, directory
-700). Media under `telegram_media_dir` (default
-`~/Library/Application Support/valor-kernel/telegram-media`). Logs under
-`settings.log_dir`. Copying an attachment into a task's workspace, where a
-turn can read it, is `core/`'s.
-
-## Settings it adds (`core/settings.py`)
-
-| Field | Env | Default |
+| What happened | Perform raises | The broker writes |
 |---|---|---|
-| `telegram_operator_id` | `VALOR_TELEGRAM_OPERATOR_ID` | none; `run` refuses to start without it, naming the variable |
-| `telegram_operator_chat` | `VALOR_TELEGRAM_OPERATOR_CHAT` | none; same |
-| `telegram_chats` | `VALOR_TELEGRAM_CHATS` | empty |
-| `telegram_media_dir` | `VALOR_TELEGRAM_MEDIA` | as above |
-| `telegram_session`, `telegram_keyfile` | none | derived from `pg_passfile`'s directory, like `judgement_keyfile`, so the sandbox deny cannot drift from them |
-| `telegram_test_dc` | `VALOR_TELEGRAM_TEST_DC` | off |
+| Telegram answered with an error (flood wait, write forbidden, peer invalid) | that error, with the seconds for a flood | `failed`, after `lookup` finds nothing |
+| Not connected; nothing was written to the socket | a connection error | `failed`, after `lookup` |
+| The connection was lost after a request was written and before its answer | `broker.Unknown` | nothing; the outbox's reconcile settles it |
+| `RandomIdDuplicate` | nothing: perform calls `lookup` and returns its result, or raises `broker.Unknown` if the scan misses | `done`, or nothing |
+| Killed mid-perform | | nothing; reconcile settles it |
 
-`python -m core settings` prints the paths and ids; none is a secret.
+`random_id` is defence in depth for effects: the broker never performs one
+effect twice. It is the main mechanism for notices, which the outbox
+yields again until marked sent.
+
+**Lookup** (`lookup(action, key, since)`). Scan the account's own messages
+in the target chat, newest first, down to those dated before `since` less
+a clock margin of 60 seconds, for skew between this Mac's clock and
+Telegram's dates. Skip ids in `intake.claimed`. Compare texts after
+Telegram's trim of leading and trailing whitespace, with the same reply
+target and topic; a file by its document name and size. Every part found
+once: the result. None: None. Any part with two matches, or some parts
+found and others not: `broker.Unknown`, so nothing is concluded and the
+effect stays in flight for Tom to see.
+
+**Notices.** For each `NoticeDue`, first scan as above from `item.at` for
+a message carrying the notice's short id; if found, `outbox.sent`.
+Otherwise send to `item.chat_id` with the reply target, `random_id` from
+the notice id, and on success `outbox.sent`. On `RandomIdDuplicate` with
+no message found by the scan, the notice is not on screen; it is sent
+again with `random_id` from the notice id and the attempt count, so Tom
+sees it. A failing notice is yielded again on later wakes; its reason is
+logged once per notice.
+
+**Gap fill.** Runs on each connect and on every outbox wake, per owned
+chat. Each pass pages back from the newest message, receives every id
+`intake.recorded` does not list, and stops at a message dated before the
+pass's floor. During a connection the floor is the previous pass's start
+less the clock margin. The first pass after connecting stops at the lower
+of `intake.highest` and that message's date less `serve_tick_s` and the
+margin. A chat with no rows starts at the connect time. Media is
+downloaded only for ids not recorded.
+
+**Flood waits.** A flood wait on a request is held in memory; later
+requests wait it out. A restart forgets it, and Telegram answers the next
+request with the remaining wait.
 
 ## Tech debt absorbed
 
-- **#3550 and #3095**: polls dropped, per Tom's ruling. Telegram.md loses
-  "Questions as polls", the `telegram.send_poll` row, `kind: vote`, and the
-  `vote` field.
-- **#2652**: the inbound record carries the forum topic id: `reply_to_top_id`
-  when the message is in a topic, the reply target when it replies to the
-  topic's root, and none in a forum's General topic.
-- **#3269**: gap fill on every connect, from the ledger; no local cursor.
-- **#3589**: every send passes the broker, and notices go only to the
-  operator chat.
+- **#3550 and #3095**: polls dropped. Telegram.md loses "Questions as
+  polls", the `telegram.send_poll` row, `kind: vote`, and the `vote` field.
+- **#2652**: the inbound record carries the forum topic id: in a topic,
+  `reply_to_top_id`, or the reply target when it is the topic's root;
+  none in General.
+- **#3269**: gap fill from the ledger on connect and on every tick; no
+  local cursor.
+- **#3589**: every send passes the broker or is a notice the kernel wrote.
 - `flood_sleep_threshold` set to 0, so Telethon never retries on its own.
 - Plain text sends, so what Tom approves is what renders.
 - `main`'s login printing the last four characters of the API hash.
 - `main`'s session-lock cleanup signalling any process `lsof` names.
-- `main`'s local state files (`data/flood-backoff`, `data/last_connected`):
-  the flood wait is a ledger row and the gap fill needs no timestamp.
+- `main`'s 120 s ceiling on the media download timeout, which fails any
+  file over about 115 MB on a link slower than about 1 MB/s.
 - Telegram.md's "secrets live in Keychain" against machine.md's kernel key
-  directory: the docs are made to say the key directory (question 3).
+  directory: the docs say the key directory.
 
 ## Left out
 
 - Routing, the drafter, the promise gate, catch-up and reconciler state,
-  hibernation, `/update`, reactions, dead letters, polls (as valor-rebuild.md
-  lists).
-- Edits, deletions, and reactions inbound (not part of the port).
-- Files, voice notes, and albums in an outbound payload. The payload is
-  `text` and `reply_to`; a file is added when a task needs to send one
-  twice (Mission item 5). Only the oversized-text file is sent.
+  hibernation, `/update`, reactions, dead letters, polls.
+- Edits, deletions, and reactions inbound.
+- Voice notes, albums, and captions outbound.
 - Transcribing voice notes and describing images.
-- Reading chat ownership from `main`'s `projects.json`. Chats are listed
-  in settings.
-- Inline buttons: a user account cannot send them, so a tap is a reply of
+- Inline buttons: a user account cannot send them; a tap is a reply of
   `approve`.
 - Standing grants for any chat (milestone 2's Leaves out).
 - A bot account.
@@ -264,215 +280,219 @@ turn can read it, is `core/`'s.
 ## Tests
 
 Real Postgres (the test database, never `valor_rebuild`), the emulator as
-its own process, and the bridge in a child process the test starts and
-kills by pid. No mocks inside the bridge.
+its own process, and the bridge in `tests/telegram_child.py`, a child
+process the test starts and kills by its pid. No mocks inside the bridge.
 
 `tests/test_telegram_inbound.py`
 - `message.message` with Markdown-looking characters and entities arrives
   verbatim; `.text` is never read.
-- Outgoing messages, service messages (joins, pins), and messages from an
-  unread chat write nothing.
-- A message from someone other than Tom in a read chat is recorded with
+- Outgoing messages, service messages, Valor's own messages, and messages
+  from an unowned chat write nothing.
+- A message from someone other than Tom in an owned chat is recorded with
   that sender id.
-- Topic id: a message in a topic, a reply inside a topic, a message in
-  General.
-- A sender file name of `../../x.sh` lands inside the media dir as
-  `<chat>-<id>.sh`; a name with no extension and a photo with no name.
-- A download that times out twice is listed with its reason; a
-  non-timeout error is not retried.
+- Topic: a message in a topic has `topic_id` and `reply_to` None; a reply
+  inside a topic has both; a message in General has neither.
+- A sender file name of `../../x.sh` lands as `inbound_dir/telegram/<sha256>`.
+- A 500 MB declared size gets a timeout above 500 s; a download that times
+  out twice is listed with `skipped` and its reason; a non-timeout error is
+  not retried.
 - Reply chain: a cycle stops, a deleted ancestor stops the walk, the walk
-  stops at 20 hops, ancestors carry descriptors without downloads.
-- An album of three photos is three records sharing `grouped_id`.
+  stops at 20 hops, ancestors carry `{id, text, attachments}` with nothing
+  downloaded.
+- An album of three photos is three records sharing `headers["grouped_id"]`.
 
 `tests/test_telegram_gap.py`
 - Messages sent while the bridge was down are received once, oldest first,
-  across three pages.
-- A chat with no `message.received` rows backfills nothing.
+  across three pages, in a chat whose ids have gaps.
+- A chat with no rows backfills nothing.
 - The live handler and the gap fill delivering one message at once write
   one row.
+- The emulator drops the live update for 104 and delivers 105: 104 is
+  recorded within one tick, and 105's media is not downloaded again.
+- Killed after 105 was received and before a tick covered a dropped 104:
+  the first pass after restart records 104.
 - A receive that fails with Postgres stopped drops the connection; after
-  Postgres returns, the reconnect's gap fill records the message.
-- A flood wait during the gap fill is waited out and recorded.
+  Postgres returns, the reconnect's pass records the message.
 
 `tests/test_telegram_send.py`
-- `random_id` is the same for the same key and differs for two effects
-  with identical payloads in one task.
-- The emulator reporting a duplicate `random_id` yields `done` with the
-  first message's id, and one message on screen.
-- Sent text carries no parse mode and no link preview; the reply target is
-  honored; the outcome carries `chat_id` and `message_id`.
-- 4,096 UTF-16 units go as text; 4,097 go as a `.txt` whose SHA-256 equals
-  the text's; 2,048 astral-plane emoji (4,096 units) go as text and 2,049
-  as a file.
-- A flood wait on send writes a failed outcome carrying the seconds, sends
-  nothing more, and the next request waits it out.
-- `lookup`: a matching message older than the newest claimed one is not
-  adopted; two unclaimed matches raise `Unknown` and nothing is written;
-  an oversized send is found by its file name.
+- `random_id` is the same for the same key and part and differs for two
+  effects with identical payloads in one task.
+- Sent text carries no parse mode and no link preview; the reply target
+  and topic are honored; the result carries one `sent` entry per message.
+- 4,096 UTF-16 units go as one message; 4,097 as two whose joined text is
+  the payload; 2,049 astral-plane emoji as two; a split falls on a newline
+  when there is one.
+- A file whose bytes changed after approval raises before anything is
+  sent; a file is sent from the bytes hashed.
+- A flood wait on send writes `failed` carrying the seconds, and the next
+  request waits it out.
+- The emulator accepts a send and drops the connection before replying:
+  `broker.Unknown`, no outcome, and the next tick's reconcile writes `done`
+  with one message on screen.
+- `RandomIdDuplicate` on an effect: perform returns the scanned message.
+- Lookup: a match dated before `since` less the margin is not adopted; a
+  claimed id is skipped; a payload with a trailing newline matches the
+  trimmed message; a sent message older than a later claimed one is found;
+  two unclaimed matches, or a split send half found, give `broker.Unknown`
+  and nothing is written.
 
 `tests/test_telegram_outbox.py`
-- An approved effect with no `release.requested` is not performed; a
-  released one is performed once, whether the drain was woken by NOTIFY or
-  by startup.
-- A released effect on a stopped task is refused by the broker and nothing
-  is sent.
-- Effects of other action types (`push_branch`, `merge`, `email.send`) are
-  left alone.
-- A notice goes to the operator chat even when its row carries a
-  `chat_id`; killed between send and `notice.sent`, it is found by the
-  scan on restart and not sent again; a notice that hit a flood wait is
-  sent at the next drain after the wait.
-- A dropped database connection is reconnected and the outbox drained.
+- A notice goes to the row's `chat_id` and `notice.sent` is recorded
+  through `outbox.sent`; killed between send and `sent`, the short-id scan
+  finds it on restart and nothing is sent again.
+- `RandomIdDuplicate` on a notice with a scan miss: one notice on screen
+  afterwards, and `notice.sent` recorded.
+- A notice failing on every attempt logs its reason once.
+- A released effect on a stopped task is refused, recorded once, and
+  nothing is sent.
+- Effects of other owners (`push_branch`, `email.send`) are left alone.
 
 `tests/test_telegram_crash.py`
 - Killed at the pause point after the emulator accepted a send: restart,
-  the sweep writes `done` (reconciled), one message.
-- Killed after the intent and before the send: restart, `failed` once the
-  intent is older than the settle time (set short in the test), zero
-  messages, and no resend.
+  `done` (reconciled), one message.
+- Killed after the intent and before the send, restarted within a second,
+  with a settle time of 5 s: the effect is still in flight after the first
+  tick, `failed` on a tick after 5 s, zero messages.
 - Killed after `receive` committed and before the read acknowledgement:
   the replay lands once.
+- SIGTERM during a perform: the message and its outcome are both recorded
+  before exit.
 
 `tests/test_telegram_bridge.py`
-- A second bridge process exits with code 3 naming the first's pid; the
-  first keeps serving and receives no signal.
-- `run` without `telegram_operator_id` or `telegram_operator_chat` exits
-  naming the variable.
+- A second `run` waits on `serve`'s lock while the first keeps serving,
+  and no process receives a signal.
 - `login` and `keys` output contains no 4-character substring of a fake
   API hash; `keys` writes mode 600.
 - `peer.py`'s cases from `main`'s tests, kept.
 
 `tests/test_telegram_pipeline.py` (with 2.1's kernel)
-- An emulated message from Tom's id in the operator chat starts a task in
-  `judge`; `status` shows metered spending.
+- An emulated message from Tom in the operator group starts a task;
+  `status` shows metered spending.
 - A question notice, Tom's emulated reply, `question.answered` with
   `via: "telegram"` and `role_played: false`; the next run resumes.
-- An approval card for a held `push_branch`; `Approve.` leaves it held;
-  `approve` records `approval.granted` and `release.requested`, and the
-  push reaches the local bare origin.
+- A held `push_branch` effect notice: `Approve.` binds as a steer with its
+  notice; `approve` records `approval.granted` and the push reaches the
+  local bare origin, with no `release.requested`.
+- `approve` in reply to the delivered notice binds as feedback.
 - `stop` in reply to a notice records `task.stopped`, and a released send
   of that task is then refused.
 
-Live: `tests/test_live_telegram_dc.py` (test servers, test accounts) and
-`tests/test_live_telegram_window.py` (Valor's account; skipped unless
-`VALOR_TELEGRAM_WINDOW=1`, set only by Tom in a window).
+Live: `tests/test_live_telegram_dc.py` (test servers, run by the lead
+session before the merge) and `tests/test_live_telegram_window.py`
+(Valor's account; skipped unless `VALOR_TELEGRAM_WINDOW=1`, set only by
+Tom in a window). The window test runs `tests/telegram_child.py` around
+the real `wire.py`, pausing after `SendMessageRequest` returns, a pause
+only the test child has.
 
 ## Files it changes
 
-- New: `bridges/telegram/__init__.py`, `__main__.py`, `wire.py`, `lock.py`,
+- New: `bridges/telegram/__init__.py`, `__main__.py`, `wire.py`,
   `inbound.py`, `gap.py`, `send.py`, `bridge.py`, `peer.py`, `login.py`.
 - New: `tests/telegram_emulator.py`, `tests/telegram_child.py`, and the
   test files above.
-- `core/settings.py`: the fields above.
 - `pyproject.toml`, `uv.lock`: `telethon`, pinned.
-- `docs/bridges/telegram.md`: status (built), polls removed, secrets in the
-  kernel key directory, lookup and notice behaviour as built, the
+- `docs/bridges/telegram.md`: status, polls removed, secrets in the kernel
+  key directory, sends, lookup, notices, and gap fill as built, the
   conformance tests naming the emulator and the test servers.
-- `docs/machine.md`: the Keychain table's Telegram row, the measured RSS
-  after the window.
+- `docs/machine.md`: the secrets table's Telegram row, and the measured
+  RSS after the window.
 - `docs/tech-stack.md`: Telethon chosen for the Telegram bridge; the
   secrets row.
-- `bridges/README.md`, `tests/README.md`, `core/README.md`: entry points
-  and settings.
+- `bridges/README.md`, `tests/README.md`: entry points.
 
 ## Rollout
 
-1. Merge on Tom's tap, after any other task changing kernel files that is
-   ahead of it.
-2. On the build Mac, in the kernel's checkout: `uv sync`, then
-   `python -m bridges.telegram keys`.
-3. Tom creates the operator group (question 1) and gives its chat id and
-   his user id; they go into the launchd job's environment from
-   `python -m bridges.telegram plist`, label `com.valor.kernel.telegram`.
-4. The emulator suite and, with question 4 answered, the test-server
-   suite are green on the merged branch.
+1. On the build Mac, outside a turn: `uv sync`, then
+   `python -m bridges.telegram keys`. The lead session runs the emulator
+   suite and `tests/test_live_telegram_dc.py`; both are green before the
+   merge.
+2. Merge on Tom's tap, after 2.1 and 1.4d.
+3. The operator group "Valor rebuild" exists, holding Tom and Valor's
+   account. Its title contains no group name a `main` project lists (never
+   "Eng: Valor ..."), since `main` matches groups by substring. Nobody
+   sends `/update` in it, since `main`'s bridges on other Macs run it from
+   any group. It is listed in `projects/valor.toml` `chats` with this
+   machine as `machine`, and `operator_chat` is its id, as 2.1's rollout
+   sets.
 
 The test window, on the build Mac:
 
-5. Disable the running system, in its checkout, by label, never by
+4. Disable the running system, in its checkout, by label, never by
    process pattern: `./scripts/valor-service.sh worker-disable`,
-   `./scripts/valor-service.sh email-disable`, then for its Telegram
-   bridge `launchctl disable gui/$(id -u)/<prefix>.bridge-watchdog`,
+   `./scripts/valor-service.sh email-disable`, then
+   `launchctl disable gui/$(id -u)/<prefix>.bridge-watchdog`,
    `launchctl disable gui/$(id -u)/<prefix>.bridge`,
-   `launchctl disable gui/$(id -u)/<prefix>.update` (its update job
-   restarts services), and `./scripts/valor-service.sh stop`.
+   `launchctl disable gui/$(id -u)/<prefix>.update` (it restarts
+   services), and `./scripts/valor-service.sh stop`.
    `launchctl print gui/$(id -u)/<prefix>.bridge` shows it not running.
-6. Tom runs `python -m bridges.telegram login` and types the code and his
-   password (question 2).
-7. Install and start the job: `launchctl bootstrap gui/$(id -u)` with the
-   printed plist.
-8. The window's evidence, in order: a message from Tom in the operator
-   chat starts a task and `status` shows its spending; the task's question
-   reaches him and his reply binds; its delivery card's `approve` releases
-   the held push; Tom runs `VALOR_LIVE=1 VALOR_TELEGRAM_WINDOW=1 pytest
+5. Tom runs `python -m bridges.telegram login` and types the code and his
+   password. The code arrives as a message from 777000 in Valor's other
+   sessions, including `main`'s bridges on other Macs.
+6. Load the job `python -m bridges.telegram --plist` prints, label
+   `com.valor.kernel.telegram`, with `launchctl bootstrap gui/$(id -u)`.
+7. In the operator group: a message from Tom starts a task whose push goes
+   to a local bare origin, and `status` shows its spending; its question
+   reaches Tom and his reply binds; `approve` in reply to the push's
+   effect notice performs the push; `approve` in reply to the delivered
+   notice is feedback.
+8. `launchctl bootout gui/$(id -u)/com.valor.kernel.telegram`; Tom runs
+   `VALOR_LIVE=1 VALOR_TELEGRAM_WINDOW=1 pytest
    tests/test_live_telegram_window.py`, which kills its own child by pid
-   at the pause point and checks one message on screen and a reconciled
-   `done`.
-9. RSS after a day connected: `ps -o rss= -p <pid>`, the pid from
-   `launchctl print gui/$(id -u)/com.valor.kernel.telegram`, recorded in
-   machine.md. Under question 5's assumed answer the bridge stays
-   connected after step 10 for the day; otherwise the day is its own
-   window.
-10. Enable the running system: `launchctl enable` for the bridge,
-    watchdog, and update labels, `./scripts/valor-service.sh start`,
-    `worker-enable` then `worker-start`, `email-enable` then
-    `email-start`. Messages in the operator group belong to the new
-    system; the running system does not read that group, so it replays
-    none of them.
+   at the pause and checks one message on screen and a reconciled `done`;
+   then bootstrap the job again.
+9. Enable the running system: `launchctl enable` for the bridge,
+   watchdog, and update labels, `./scripts/valor-service.sh start`,
+   `worker-enable` then `worker-start`, `email-enable` then
+   `email-start`. `main` does not read the operator group, so it replays
+   none of the window's messages.
+10. RSS after a day connected: `ps -o rss= -p <pid>`, the pid from
+    `launchctl print gui/$(id -u)/com.valor.kernel.telegram`, recorded in
+    machine.md. Under question 3's assumed answer the bridge stays
+    connected for the day after step 9; otherwise the day is its own
+    window.
 11. The results go into this file's Done section and the task's ledger.
 
 ## Decided by default
 
-- **One launchd process per bridge**, separate from the resident kernel,
-  so a Telethon fault does not take the kernel down; it connects to
-  Postgres as `valor_kernel` like the kernel does.
-- **`flock` instead of killing lock holders.** Killing whatever holds the
-  session file can kill a process this bridge did not start.
+- **Secrets in the kernel key directory**, as machine.md decides for
+  kernel-held secrets: the API id, hash, and session. Telegram.md,
+  machine.md, and tech-stack.md are made to say so.
+- **The operator group** is "Valor rebuild", listed in
+  `projects/valor.toml` with `machine` (the lead's answer).
 - **The bridge owns reconnect** (`auto_reconnect=False`, `catch_up=False`),
-  so every connect runs the gap fill; one recovery path, from the ledger.
-- **No connect attempt count.** launchd restarts a process that exits, so a
-  count only adds a restart; the backoff stays.
-- **Flood waits as a ledger row**, so the bridge's only local state is the
-  session and the media directory, as telegram.md states.
-- **Outbound payload is text and a reply target.** No task sends files
-  yet, and reading a turn-named path is a risk with no need behind it.
+  so every connect runs the gap fill.
+- **`sequential_updates=True`**, so one message's failed receive cannot
+  commit a later one first.
+- **No connect attempt count.** launchd restarts a process that exits; the
+  backoff stays.
+- **The clock margin is 60 seconds**, for skew between the Mac's clock and
+  Telegram's message dates; it widens a scan and stops nothing.
+- **Split at a newline or space before the limit**, so a split message
+  reads whole.
+- **Files after text**, as documents with no caption.
 - **Link previews off**: what renders is the approved text.
-- **Notices are sent again after a failure**; they need no approval, and a
-  question Tom never sees costs more than a second attempt.
-- **Chats listed in settings**, not read from `projects.json`.
 - **No backfill for a chat with no rows**: a first connect does not turn a
   chat's history into tasks.
 - **Mark read after commit**, as telegram.md says.
-- **Two lookup matches conclude nothing** (`Unknown`), as `main`'s poll
-  adoption does.
-- **The length limit in UTF-16 code units**, as Telegram counts.
 - **The emulator is a local server process**, so a kill of the bridge
-  leaves the "server" holding what it accepted, which the crash tests need.
+  leaves the server holding what it accepted.
 
 ## Questions for Tom
 
-Identity, credential, and intent only. The build proceeds on each assumed
-answer.
+Credential and intent only. The build proceeds on each assumed answer.
 
-1. **Which chat is the operator chat?** Assumed: a new group, "Valor
-   rebuild", holding only Tom and Valor, listed in no project's config, so
-   no running bridge on any Mac reads it and messages there belong to the
-   new system alone. The alternative is Tom's DM with Valor, which the
-   running system on some Mac reads, so the gap fill would hand the new
-   system messages the running one already answered.
-2. **Which session does the bridge use?** Assumed: its own login, a new
+1. **Which session does the bridge use?** Assumed: its own login, a new
    authorized device on Valor's account, made by Tom in the window with
-   `python -m bridges.telegram login`. Not a copy of the running bridge's
-   session file, since two processes must never share one session.
-3. **Where do the Telegram API id, hash, and session live?** Assumed: the
-   kernel key directory, which every turn's sandbox denies, as machine.md
-   says of kernel-held secrets. Telegram.md's "Keychain" is readable by a
-   turn through `security`.
-4. **May the build use Valor's Telegram API id and hash against Telegram's
+   `python -m bridges.telegram login`, not a copy of the running bridge's
+   session, since two processes must never share one session. The login
+   code arrives in Valor's other sessions, `main`'s bridges included.
+2. **May the build use Valor's Telegram API id and hash against Telegram's
    test servers, with test accounts and no Valor session?** Assumed: yes;
    `keys` copies them from the vault into the key directory, printing no
-   value. If not, the `random_id` check moves into Tom's window.
-5. **May the bridge stay connected outside a window, reading only the
+   value, and the lead session runs the suite outside a turn. If not, the
+   `random_id` and error-mapping checks move into Tom's window.
+3. **May the bridge stay connected outside a window, reading only the
    operator group, for the day-long RSS measurement?** Assumed: yes. It
-   reads no chat the running system owns and sends nothing without a tap.
-   If not, the measurement is a day-long window of its own.
+   reads no chat the running system owns and sends nothing without a tap,
+   apart from notices to the operator group. If not, the measurement is a
+   day-long window of its own.

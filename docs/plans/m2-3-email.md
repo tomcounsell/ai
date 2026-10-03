@@ -5,6 +5,7 @@ type: build
 status: planned
 critique_rounds: 1
 review_rounds: 2
+governance_grant: open question 17 (Tom, 2026-10-01), the DMARC verified check in core/intake.py
 ---
 
 # 2.3 in full: the email bridge, adapted from `main`
@@ -49,7 +50,7 @@ Dovecot, as Gmail files it). Ports are free ones the OS gives each run.
 | A mail from Tom passing DMARC starts a task | A message delivered into the Dovecot inbox with the headers Gmail writes (topmost `Authentication-Results: mx.google.com; ... dmarc=pass ... header.from=<Tom's domain>`) and `From` Tom's address lands as one `message.received` row with `verified: true` and starts one task, its metered spending shown in `status`. The forgeries in "Tests" that reach the inbox from an owned address land as one row each with `verified: false` and start nothing |
 | A reply-all is held and released once | A task requests `email.send` with `reply_to` naming Tom's message (which had a `Cc`). The held effect's payload names the sender plus every `To` and `Cc` address minus Valor's own, a `Re:` subject, `In-Reply-To`, and the whole `References` chain. `core approve` then `core release` lead the bridge process to send it; the local server receives exactly one copy with the Message-ID derived from the broker key; a second `release` returns the recorded outcome and sends nothing |
 | A crash between SMTP and outcome does not double-send | The exactly-one case: the after-DATA hook kills the bridge process by its PID once the message is stored, before the 250 reply; the restarted bridge's sweep finds the message in `\Sent` by its Message-ID, writes `effect.outcome` `done` with `reconciled: true`, and the server holds one copy. The upload case: the test terminates the performing connection's backend (its pid from `pg_stat_activity` where `application_name = 'valor-email-perform'`) while a 9 MB upload is in flight; after restart and settle, the server holds at most one copy, and the outcome is `done` exactly when it holds one |
-| A 9 MB attachment sends | A 9 MB file sends through a server reading at 1 MB/s with `smtp_timeout_s` set to 2 s for the test: the deadline, scaled by the encoded length, lets it finish, and the received attachment's sha256 equals the approved one. The same send with the deadline unscaled fails, the underlying timeout named in the error |
+| A 9 MB attachment sends | A 9 MB file sends through a server reading at 1 MB/s with `smtp_timeout_s` set to 2 s for the test: the deadline, scaled by the encoded length, lets it finish, and the received attachment's sha256 equals the approved one. The same send with the deadline unscaled times out mid-body: the performer raises `broker.Unknown` naming the timeout, no outcome is written, and the next sweep after `settle_after_s` writes `failed`, since the server stored nothing |
 
 ### Waits for Tom's test window on Valor's real mailbox
 
@@ -60,36 +61,28 @@ Dovecot, as Gmail files it). Ports are free ones the OS gives each run.
 | A crash between SMTP and outcome does not double-send | During a 9 MB reply, the performing connection's backend is terminated by its pid; launchd restarts the bridge, a sweep settles the effect from Gmail's Sent Mail, and Tom's inbox holds at most one copy, with the outcome `done` exactly when it holds one |
 | A 9 MB attachment sends | The reply above carries a 9 MB file that arrives intact |
 
-The window also measures, with no decision attached: whether
-`UID SEARCH HEADER Message-ID` finds a sent message in Gmail's Sent Mail
-or the `X-GM-RAW` form is needed, how long Gmail takes to file it there,
-the upload rate of the 9 MB send, and the bridge's RSS (machine.md
-estimates 100 MB).
+The window also measures the Sent Mail search form that works, Gmail's
+filing delay, the 9 MB upload rate, and the bridge's RSS.
 
 ## Threat model
 
-What senders control: every byte of an inbound message except the
-headers the receiving server prepends, so `From`, `Message-ID`,
-`References`, `In-Reply-To`, any `Authentication-Results` lines inside
-the message, MIME structure, charsets, part counts and sizes, and
-attachment filenames. What a turn controls: the `email.send` it requests
-(body, files from its workspace, and for a new thread the recipients and
-subject), and every file in its workspace, at any time.
+Senders control every byte of an inbound message except the headers the
+receiving server prepends: `From`, the ids, any `Authentication-Results`
+inside, MIME structure, charsets, sizes, and filenames. A turn controls
+the `email.send` it requests and every file in its workspace, any time.
 
 What the kernel must never do with any of it:
 
-- Set `verified` on a mail's `From` alone. Only the topmost
-  `Authentication-Results` header, carrying the configured authserv-id,
-  with `dmarc=pass` and `header.from` equal to the domain of a single
-  `From` address, makes a record verified. Lines further down are the
-  sender's and are never read for identity.
+- Set `verified` on `From` alone. Only the topmost
+  `Authentication-Results`, with the configured authserv-id, `dmarc=pass`,
+  and `header.from` the domain of a single `From`, verifies; lines below
+  it are the sender's.
 - Take an approval or a stop from mail. Mail is data, and steering.
 - Send anything the broker did not release with Tom's unused approval
   bound to the payload digest. Tom's tap is on the full card, recipients
   included; reply-all computes those recipients in `core/` so a turn
   need not, but a turn can name its own, and Tom sees them.
-- Send file bytes other than the bytes whose sha256 Tom approved. The
-  performer reads each file once, hashes those bytes, and sends them.
+- Send file bytes other than those whose sha256 Tom approved.
 - Write an attachment outside `inbound_dir/email/`.
 - Put the app password in a record, a row, a log line, an exception, or
   `os.environ`.
@@ -102,10 +95,9 @@ random, so this needs the id before it exists.
 
 From the lead's port decisions, which 2.1 writes into its plan:
 
-- `core.intake`: `Inbound`, `Received`, `receive(conn, inbound) ->
-  Received(received_id, duplicate)`, `owns(channel, id)`, and
-  `owned(channel) -> list[str]`. Email ownership keys on `sender_id`; the
-  operator's addresses are owned by definition. Email has no cursor.
+- `core.intake`: `Inbound`, `receive(conn, inbound) -> Received`,
+  `recorded`, `owns(channel, id)`, `owned(channel)`; ownership on
+  `sender_id`, the operator's addresses owned by definition.
 - The email record: `chat_id` is the thread root (the first `References`
   id, else the message's own `Message-ID`); `sender_id` is the `From`
   address lowercased; `message_id` is the `Message-ID` header;
@@ -125,8 +117,9 @@ From the lead's port decisions, which 2.1 writes into its plan:
   ignores `NoticeDue`, since `operator_channel` is Telegram.
 - `email.send`: target the `to` list, lowercased, sorted, comma-joined;
   payload `to`, `cc`, `subject`, `body`, `in_reply_to`, `references`,
-  `files: [{path, sha256}]`. A file over `max_file_bytes` is refused at
-  request time with the protocol limit as the reason.
+  `files: [{path, sha256}]`. A send whose encoded message exceeds
+  `max_file_bytes` is refused at request time with the protocol limit as
+  the reason (port decision 15b).
 - Results carrying `sent: [{channel, chat_id, message_id}]`; binding on
   `(channel, chat_id, message_id)`. Email binds only `answer`, `steer`,
   and `start`; an `In-Reply-To` matching no sent message is not a reply;
@@ -134,8 +127,7 @@ From the lead's port decisions, which 2.1 writes into its plan:
   the chat, otherwise under `valor` (decision 15).
 - `broker.Unknown`: when `perform` raises it, the broker writes no
   outcome and leaves the intent for `reconcile`.
-- Imports: `core.bridge`, `core.intake`, `core.broker`, `core.settings`,
-  `core.db`, `core.credentials`; 2.1's settings names.
+- Imports and settings names per port decisions 26 and 30.
 
 ## What is built
 
@@ -177,11 +169,17 @@ server ends one poll and never stalls the loop.
    kept). `FROM` is a substring search, so each fetched message is kept
    only when `intake.owns("email", sender)` is true; others are left
    unseen.
-3. For each UID, oldest first: `UID FETCH (UID INTERNALDATE BODY.PEEK[])`,
-   parse, persist attachments, `intake.receive(conn, inbound)`, and only after it
-   returns, `UID STORE +FLAGS.SILENT (\Seen)`.
+3. Fetch the headers of every match (`BODY.PEEK[HEADER.FIELDS
+   (MESSAGE-ID FROM REFERENCES)]`), and ask `intake.recorded(conn,
+   "email", chat_id, ids)` per thread root which are already received.
+   Those are marked `\Seen` without a body fetch, so a crash between
+   receive and `\Seen` never downloads a 9 MB message twice.
+4. For each other UID, oldest first: `UID FETCH (UID INTERNALDATE
+   BODY.PEEK[])`, parse, persist attachments, `intake.receive(conn,
+   inbound)`, and only after it returns, `UID STORE +FLAGS.SILENT
+   (\Seen)`.
 
-A duplicate is marked seen. A message whose parse, persist, or receive
+A duplicate `receive` reports is marked seen too. A message whose parse, persist, or receive
 raises is logged with its UID and stays unseen, and the poll goes on to
 the next UID, so one bad message never blocks later mail. A failed login
 or connection is one failed poll in the log, and the next poll runs on
@@ -213,24 +211,30 @@ Adapted from `_build_reply_mime` and `_send_smtp`
   length of the serialized message, base64 included, the unit #3601
   measured in. One attempt.
 - **Refused or in doubt.** A refused login, every recipient refused, or a
-  refusal of the message at `MAIL`, `RCPT`, or the reply to `DATA`'s
-  start raise with the server's reply, and the effect is `failed`. Once
-  the message body has started to go, a timeout or a lost connection
-  raises `broker.Unknown`, and the effect stays open for `reconcile`.
-  smtplib reports a timeout as `SMTPServerDisconnected`; the raised error
-  includes the exception's `__context__`, so the timeout is named. Some
+  refusal of the message at `MAIL` (an over-`SIZE` message included),
+  `RCPT`, or the reply to `DATA`'s start raise with the server's reply,
+  and the effect is `failed`. Once the body has started to go, anything
+  that ends the send without a final reply raises `broker.Unknown` and
+  the effect stays open for `reconcile`: the deadline firing mid-body, a
+  lost connection, or a timeout waiting for the reply after the body.
+  The server may have stored the message, so none of these is `failed`.
+  smtplib reports a timeout as `SMTPServerDisconnected`; the raised
+  `Unknown` includes the exception's `__context__`, so the timeout is
+  named. Some
   recipients refused: `done`, with `refused` listing each address and its
   reply.
-- **Result.** `message_id`, `accepted`, `refused`, and `sent`: one entry,
-  `{"channel": "email", "chat_id": <thread root>, "message_id":
-  <Message-ID>}`, the thread root being the first `references` id, else
-  the sent message's own Message-ID. A reply from any recipient carries
-  the same root, so it binds.
+- **Result.** `message_id`, `accepted`, `refused`, and one `sent` entry
+  whose `chat_id` is the thread root (the first `references` id, else the
+  own Message-ID), so a reply from any recipient binds.
 - **lookup.** One IMAP connection; plain `LIST "" "*"`, and the folder
-  whose flags include `\Sent`; `UID SEARCH HEADER Message-ID <id>`, or,
-  when the server advertises `X-GM-EXT-1`, `UID SEARCH X-GM-RAW
-  "rfc822msgid:<id>"`. Found: the result rebuilt with `sent`. Not found:
-  `None`. A connection or login failure raises `broker.Unknown`.
+  whose flags include `\Sent`; `UID SEARCH SINCE <the date of the
+  intent's at, less one day> HEADER Message-ID <id>`, or, when the server
+  advertises `X-GM-EXT-1`, `UID SEARCH X-GM-RAW "rfc822msgid:<id>
+  after:<that date>"`, with the `at` `Release` carries (port decision
+  34). The exact key-derived Message-ID needs no scan, so
+  `intake.claimed` is not consulted. Found: the result rebuilt with
+  `sent`. Not found: `None`. A connection or login failure raises
+  `broker.Unknown`.
 - **settle_after_s**, on `email.send`'s `Declared` in `core/bridge.py`:
   twice the action's deadline plus `email_sent_settle_s`, the time Gmail
   takes to file a sent message. If `Declared` takes a number rather than
@@ -238,10 +242,15 @@ Adapted from `_build_reply_mime` and `_send_smtp`
   Gmail accepts, about 20 minutes. `email_sent_settle_s` is 120 until the
   window measures it. The wait only delays reading a missing message as
   never sent; it refuses nothing.
-- **limits.** `max_text` is `None`. `max_file_bytes` is 18,000,000:
-  Gmail refuses a message over 25 MB encoded, and base64 makes 18 MB of
-  files about 25 MB, so this is Gmail's encoded limit stated in raw
-  bytes, a protocol fact.
+- **limits.** `max_text` is `None`; `max_file_bytes` is 25,000,000,
+  Gmail's limit on the whole encoded message ("Gmail sending limits in
+  Google Workspace", Admin Help: maximum email size 25 MB), compared
+  with `email_encoded_bytes(payload)` in `core/bridge.py` (body, MIME
+  headers, files base64 at 76 characters a line plus CRLF), which the
+  request-time refusal and `settle_after_s` both use. The window records
+  the `SIZE` smtp.gmail.com advertises, which replaces 25,000,000 if it
+  differs. `MAIL FROM` carries `SIZE`, so an oversize message is refused
+  before the body, a definite `failed`.
 
 `smtp_floor_bytes_per_s` is 50,000, a provisional value below #3601's
 measured rate (9.0 MB in 45.6 s); the window's measured 9 MB rate
@@ -288,16 +297,20 @@ forms.
 
 ### The DMARC check, ledgered
 
-Tom's default answer to open question 17 (A, standing from 2026-10-01)
-grants the DMARC test as an approved check, and valor-rebuild.md says it
-is ledgered the way the four pipeline guards are. So `core/guards.py`
-seeds a fifth guard on the `guards` stream, once, through `migrate`:
+The `verified` test is governance-shaped: it decides whose mail carries
+Tom's authority. Tom's default answer to open question 17 (A, standing
+from 2026-10-01) grants it as an approved check, so the 2.3 Brief carries
+`governance_grant` citing that answer, and the merge tap is Tom's
+approval for this instance. The code is `intake.dmarc_verified` in
+`core/intake.py` (port decision 11). valor-rebuild.md says it is ledgered
+the way the four pipeline guards are, so `core/guards.py` seeds a fifth
+guard on the `guards` stream, once, through `migrate`:
 
 | Field | Value |
 |---|---|
 | `guard_id` | `email.dmarc` (`GUARD_DMARC` in `core/guards.py`: nothing in `core/machine.py` fires it) |
 | `name` | the DMARC test: an email record is verified only when the receiving server's topmost `Authentication-Results` shows DMARC pass for its single `From` address's domain |
-| `incident` | main's email bridge routes on an unauthenticated `From`, with no SPF, DKIM, or DMARC test (`docs/features/context-recall-advisory.md` on `main`, line 82). #2694's review found that address reaching a shell interpolation, mitigated by quoting. No forged mail is on record |
+| `incident` | the risk, stated as it stands: a spoofed `From` reaching the kernel as Tom and carrying his authority. main's email bridge routes on an unauthenticated `From`, with no SPF, DKIM, or DMARC test (`docs/features/context-recall-advisory.md` on `main`, line 82), and #2694's review found that address reaching a shell interpolation, mitigated by quoting. There is no record of a spoofed mail having arrived yet |
 | `mission_items` | `[6]`: without it, open question 17's option B asks Tom for a Telegram confirmation on every emailed request |
 | `source` | `docs/plans/rebuild-open-questions.md, 17; docs/bridges/email.md, Who counts as Tom` |
 | `granted_at` | 2026-10-01 |
@@ -340,14 +353,10 @@ IMAP and SMTP config objects only.
   three items in #3601 go with the code not carried.
 - #3124 and #2160: moot. Sends are held for Tom and carry exactly what he
   approved; steering is in `core/`.
-- Certificates unverified on IMAP and SMTP on `main`: both use
-  `ssl.create_default_context()`.
-- `_extract_body` raising on an unknown charset; the HTML regex leaving
-  script and style text and entities.
-- `parse_email_message` dropping empty-body mail and mail with no `From`.
-- `\Seen` set before the fetch on `main`, so a crash loses the message:
-  it is set after `receive` returns.
-- Docs that say the bridges' secrets go in the Keychain: they go in the
+- On `main`: unverified certificates, `_extract_body` raising on an
+  unknown charset, the HTML regex, dropped empty-body and no-`From`
+  mail, and `\Seen` set before the fetch; each is fixed above.
+- Docs placing the bridges' secrets in the Keychain: they go in the
   kernel key directory, for the reason machine.md gives.
 
 ## Left out
@@ -357,14 +366,13 @@ IMAP and SMTP config objects only.
 - Mail from senders this machine does not own is never received, so
   replies to Valor's mail from anyone else are not recorded as thread
   context. email.md says so.
-- Inbound attachment caps. Gmail bounds an inbound message's size, and a
-  kernel cap has no incident; main's 25 MiB total and 50-part caps go.
+- Inbound attachment caps (main's 25 MiB and 50 parts): Gmail bounds
+  inbound size, and a kernel cap has no incident.
 - Operator notices, approvals, and stops by email; IMAP IDLE; alerts on
-  a failing login, backoff, and a health key.
-- Subject coalescing, the vault mirror, the Redis history and dead
+  a failing login, backoff, and a health key. Subject coalescing, the vault mirror, the Redis history and dead
   letters, the relay's retries, per-sender project routing, the
-  customer-service handler, the drafter, and `gws` drafts.
-- Standing grants for any thread, and folders other than `INBOX`.
+  customer-service handler, the drafter, `gws` drafts, standing grants,
+  and folders other than `INBOX`.
 
 ## Tests
 
@@ -408,7 +416,8 @@ for the first case:
 
 - One mail lands as one row, then is `\Seen`; a second poll records
   nothing. Receive without the `\Seen` store (as a crash would leave
-  it), then a full poll: one row, then seen.
+  it), then a full poll: one row, no body fetch (`intake.recorded`),
+  then seen.
 - UIDVALIDITY change (`doveadm mailbox update --uid-validity`): mail
   received and seen before is not received again; mail received but not
   yet seen lands once after the change, with and without a `Message-ID`.
@@ -429,11 +438,10 @@ for the first case:
 - Reply-all: recipients, subject, threading as `reply_all` gives them;
   held; released once by the bridge process; one copy at the server; a
   second release returns the recorded outcome.
-- Two identical replies in one task: two effects, two Message-IDs, two
-  copies.
+- Two identical replies in one task: two effects, ids, and copies.
 - A file swapped in the workspace after approval, before release:
   nothing sent, the outcome `failed` or `effect.refused`, never `done`.
-- A stopped task's held send: release refused, nothing sent.
+  A stopped task's held send: release refused, nothing sent.
 - Crash between SMTP and outcome: both cases in Done. The upload case
   asserts the invariant (at most one copy; `done` exactly when one).
 - The 250 reply delayed past the deadline, the message stored: the
@@ -444,8 +452,12 @@ for the first case:
   on connect): a sweep after `settle_after_s` (set short in the test)
   writes `failed`, and nothing is sent.
 - Lookup with the IMAP server down: `Unknown`, nothing written.
-- 9 MB send through the held reading rate: done, attachment byte-equal;
-  unscaled, it fails with the timeout named.
+- 9 MB send through the held reading rate: done, attachment byte-equal.
+  Unscaled, the deadline fires mid-body: `Unknown` naming the timeout, no
+  outcome at once, `failed` from the sweep after `settle_after_s`.
+- `email_encoded_bytes` equals the length of the message the performer
+  serializes, for no files, one, and three of odd sizes; a request just
+  over 25,000,000 encoded is refused, one just under is held.
 - One recipient refused: `done` with it in `refused`. All refused:
   `failed`. Wrong password: `failed` with the server's reply.
 - A server whose certificate the test CA did not sign: IMAP and SMTP
@@ -547,29 +559,17 @@ The test window, with Tom:
 
 - **One process of its own**, `python -m bridges.email` under launchd,
   so an IMAP or SMTP stall never holds the kernel.
-- **Only owned senders are read**, through 2.1's `owns`. Each of Valor's
-  Macs owns its senders, and reading all of `INBOX` would mark seen mail
-  another Mac's bridge is waiting for. This is receive scope, not a gate:
-  authority comes only from `verified`, the operator comparison, and
-  Tom's tap.
+- **Only owned senders are read**, through `owns`, so no Mac marks seen
+  mail another Mac's bridge waits for. Receive scope, not a gate.
 - **`email_since`** keeps the backlog of unseen mail from arriving as new
   on the first poll, and marks the boundary with `main`'s bridge.
-- **No UID cursor.** The poll is `UNSEEN SINCE` over owned senders and
-  nothing else, so a UIDVALIDITY change or a gap between windows replays
-  nothing.
-- **`sha256:` ids** for mail with no `Message-ID`, stable across a
-  UIDVALIDITY change.
-- **No batch cap per poll.** Every matching message is received in UID
-  order.
+- **No UID cursor**, so a UIDVALIDITY change or a gap between windows
+  replays nothing.
 - **The mail credential in the kernel key directory**, as machine.md
   settles for kernel-held secrets.
-- **Reconcile waits per performer** (`settle_after_s`), since a large
-  upload and Gmail's filing outlast the wait sized for git.
 - **The local servers are Dovecot and `aiosmtpd`**, Dovecot because UID
   and UIDVALIDITY behavior is the thing under test, and it runs as the
   agent's user with no root.
-- **The DMARC guard's grant date** is 2026-10-01, the date open question
-  17's default took effect, so it expires with the four pipeline guards.
 
 ## Questions for Tom
 
@@ -592,7 +592,7 @@ password lives is settled by machine.md. The DMARC record and the
 | 8. DMARC on intra-domain mail | Tom's pre-window step 1; DKIM key in step 2 |
 | 9. Which backend to terminate | `valor-email-perform`; invariant asserted; exactly-one shown by the after-DATA hook |
 | 10. `LIST (SPECIAL-USE)` on Gmail | Plain `LIST`; `X-GM-RAW` when `X-GM-EXT-1`; the window records which works |
-| 11. Size arithmetic | Inbound caps dropped; `max_file_bytes` 18 MB raw from Gmail's encoded limit; deadline on encoded length; `__context__` in the error |
+| 11. Size arithmetic | Inbound caps dropped; `max_file_bytes` is Gmail's cited 25 MB encoded limit, compared with the encoded size; deadline on encoded length; a mid-body timeout is `Unknown` with `__context__` named |
 | 12. Poison message | Logged, left unseen, poll continues; test added |
 | 13. Recipient claim | Threat model reworded: Tom's tap on the full card is the control |
 | 14. Premise slips | Both SMTP sources named; `read_key` names the owning command; imports per port decision 30 |
