@@ -385,6 +385,6 @@ random bytes and one of zeros, `cp -c` clones of both, and a file with a
 APFS stores compressed would also report fewer blocks than its size and be
 refused; a turn writing files plainly never makes one. The reads of turn
 files moved off the event loop (Off the event loop). Tests: 11a, and a
-sparse verdict under 11. The full suite with this: 529 passed, 7 skipped,
-two tests that start a task's own Postgres having failed once in the full
+sparse verdict under 11. The full suite with this: 527 passed, 2 failed, 7 skipped, the
+two being tests that start a task's own Postgres, which failed in the full
 run and passed on their own; ruff clean.
