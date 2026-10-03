@@ -1,6 +1,8 @@
 """The four bounds on real Postgres, with no model call."""
 
 import asyncio
+import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -247,6 +249,65 @@ def test_a_turns_whole_output_is_in_files_no_turn_can_write_and_its_row_names_th
     assert ended["result"] == {"unparsed": True}
     line = _status_line(task, {"status": "failed", "state": {}, "turn": ended})
     assert line.endswith(f"the turn failed: {{'unparsed': True}}; its stderr is in {ended['stderr']}")
+
+
+def _pipe_turn(dsn, tmp_path, argv, stdin=None):
+    async def go():
+        task = await new_task(dsn)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=argv, env={}, cwd=str(tmp_path), harness="claude_code", stdin=stdin
+        )
+        ended = await runs.run_turn(gateway, task, build, dsn=dsn)
+        await gateway.close()
+        return ended
+
+    return run(go())
+
+
+def test_a_turns_stdout_and_stderr_are_pipes_and_its_files_hold_what_came_through_them(dsn, tmp_path):
+    child = (
+        "import os, stat, sys\n"
+        "kinds = [stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (1, 2)]\n"
+        "print(kinds); print('err', file=sys.stderr)"
+    )
+    ended = _pipe_turn(dsn, tmp_path, [sys.executable, "-c", child])
+    assert ended["outcome"] == "done"
+    assert Path(ended["stdout"]).read_text() == "[True, True]\n"
+    assert Path(ended["stderr"]).read_text() == "err\n"
+
+
+def test_a_large_output_on_both_streams_and_a_large_stdin_do_not_deadlock(dsn, tmp_path):
+    # Each stream is written far past a pipe's buffer before the other is
+    # touched and before stdin is read, so draining one at a time would block.
+    size = 4 << 20
+    child = (
+        "import hashlib, sys\n"
+        f"sys.stderr.write('e' * {size}); sys.stderr.flush()\n"
+        f"sys.stdout.write('o' * {size}); sys.stdout.flush()\n"
+        "sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"
+    )
+    data = b"i" * size
+    ended = _pipe_turn(dsn, tmp_path, [sys.executable, "-c", child], stdin=data)
+    assert ended["outcome"] == "done"
+    assert Path(ended["stdout"]).read_text() == "o" * size + hashlib.sha256(data).hexdigest()
+    assert Path(ended["stderr"]).read_text() == "e" * size
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS's")
+def test_node_starts_when_its_turn_runs_under_a_profile_that_denies_the_work_dir(dsn, tmp_path):
+    from core.settings import settings
+
+    if not Path(settings.node).exists():
+        pytest.skip("no node at the node setting")
+    work = os.path.realpath(Path(settings.work_dir).expanduser())
+    profile = tmp_path / "deny-work.sb"
+    profile.write_text(f'(version 1)\n(allow default)\n(deny file-read* (subpath "{work}"))\n')
+    argv = ["/usr/bin/sandbox-exec", "-f", str(profile), settings.node, "-e", "console.log('up')"]
+    ended = _pipe_turn(dsn, tmp_path, argv)
+    assert ended["outcome"] == "done" and ended["returncode"] == 0
+    assert Path(ended["stdout"]).read_text() == "up\n"
 
 
 def _lines(path) -> int:

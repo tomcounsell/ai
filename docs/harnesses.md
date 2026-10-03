@@ -51,8 +51,14 @@ request the broker decides (see the signal channel below).
 
 Serves the constraints **reliable stop** and **16 GB of RAM**.
 
-`core.runs.run_turn` starts the command with stdin closed, stdout and stderr
-written whole to files, and a new process group, then waits for whichever comes first: the
+`core.runs.run_turn` starts the command with stdin closed (or holding the
+prompt, for a harness that reads it there), stdout and stderr on pipes, and
+a new process group. The kernel copies both pipes at once, whole, into the
+turn's two output files until EOF, which comes once the reap has ended every
+process of the turn. The harness never holds the files themselves: they sit
+under the work dir, which every turn profile denies, and node aborts at
+startup when its stdout or stderr is a file at a path it cannot read. It then
+waits for whichever comes first: the
 process exits, or a stop notification for the task arrives from Postgres. On
 a stop it revokes the gateway, which cuts every in-flight model call, sends
 SIGKILL to the whole process group, waits for every call to be charged, and

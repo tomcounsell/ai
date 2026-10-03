@@ -27,7 +27,12 @@ Sandbox denies too) gets SIGTERM, then SIGKILL after `reap_grace_s` (settings), 
 
 A turn's whole stdout and stderr go to `<work_dir>/<task>/turns/<turn>.stdout`
 and `.stderr`, outside every path a turn can write; `turn.ended` names both
-files, and the harness reads its result from the stdout file. The sandbox mark is the one a daemon cannot shed:
+files, and the harness reads its result from the stdout file. The harness
+holds pipes, never the files: the kernel copies both pipes into the files at
+once, so neither fills while the other is read, until EOF, which comes once
+the reap has ended every process of the turn. A sandbox denies every path
+under the work dir, and node aborts at startup when its stdout or stderr is
+a file at a path it cannot read. The sandbox mark is the one a daemon cannot shed:
 it survives setsid, re-parenting to launchd, and a process retitling
 itself over its environment (redis-server does), and platform binaries hide
 their environment from other processes altogether.
@@ -135,25 +140,34 @@ async def run_turn(
                 env={**command.env, TURN_ENV: turn_id},
                 cwd=command.cwd,
                 stdin=asyncio.subprocess.DEVNULL if command.stdin is None else asyncio.subprocess.PIPE,
-                stdout=out,
-                stderr=err,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-        finished = asyncio.create_task(proc.communicate(command.stdin))
-        stopped = asyncio.create_task(_stop_heard(listener, task_id))
-        done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
-        if stopped in done:
-            gateway.revoke(task_id)
-            _kill_group(proc.pid)
-            await finished
-            outcome = "stopped"
-        else:
-            stopped.cancel()
-            gateway.retire(task_id)
-            gateway.cut(task_id)  # its process has exited: no client is left
-            outcome = "done" if proc.returncode == 0 else "failed"
-        await gateway.drain(task_id)
-        reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
+            pumped = asyncio.gather(
+                _pump(proc.stdout, out), _pump(proc.stderr, err), _feed(proc, command.stdin)
+            )
+            try:
+                finished = asyncio.create_task(proc.wait())
+                stopped = asyncio.create_task(_stop_heard(listener, task_id))
+                done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
+                if stopped in done:
+                    gateway.revoke(task_id)
+                    _kill_group(proc.pid)
+                    await finished
+                    outcome = "stopped"
+                else:
+                    stopped.cancel()
+                    gateway.retire(task_id)
+                    gateway.cut(task_id)  # its process has exited: no client is left
+                    outcome = "done" if proc.returncode == 0 else "failed"
+                await gateway.drain(task_id)
+                reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
+                # Every process of the turn has ended, so both pipes are at EOF.
+                await pumped
+            except BaseException:
+                pumped.cancel()
+                raise
     finally:
         await listener.close()
 
@@ -178,6 +192,25 @@ async def _stop_heard(listener, task_id: str) -> None:
     async for note in listener.notifies():
         if note.payload == task_id:
             return
+
+
+async def _pump(pipe: asyncio.StreamReader, file) -> None:
+    """Copy one of the turn's pipes into its file until EOF."""
+    while chunk := await pipe.read(1 << 16):
+        file.write(chunk)
+
+
+async def _feed(proc: asyncio.subprocess.Process, data: bytes | None) -> None:
+    """Write the turn's standard input and close it. A harness that exits
+    without reading all of it ends the write."""
+    if data is None:
+        return
+    try:
+        proc.stdin.write(data)
+        await proc.stdin.drain()
+        proc.stdin.close()
+    except BrokenPipeError, ConnectionResetError:
+        pass
 
 
 def _kill_group(pid: int) -> None:
