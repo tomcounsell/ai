@@ -193,13 +193,11 @@ def fee_item(item_type: str) -> str | None:
     return None
 
 
-def openai_unpriced(body: dict, price: dict) -> str | None:
+def openai_unpriced(body: dict) -> str | None:
     """What in a Responses body the table cannot price, named, or None:
-    a service tier the entry lacks, a tool with neither a fee line nor a
-    token-only type, or a stored prompt reference."""
-    tier = body.get("service_tier")
-    if tier not in (None, "auto") and openai_tier(price, tier) is None:
-        return f"service tier {tier}"
+    a tool with neither a fee line nor a token-only type, or a stored
+    prompt reference. A tier the entry lacks is not one: the charge prices
+    it at the highest tier, marked `tier_unpriced`."""
     if body.get("prompt") is not None:
         return "a stored prompt reference"
     for tool in body.get("tools") or []:
@@ -257,7 +255,8 @@ def openai_estimate(body: dict, price: dict) -> dict:
     kinds = [t.get("type", "") for t in body.get("tools") or [] if isinstance(t, dict)]
     looping = any(k in OPENAI_LOOPING_TOOLS or tool_fee_line(k) in OPENAI_LOOPING_TOOLS for k in kinds)
     max_calls = body.get("max_tool_calls")
-    max_calls = int(max_calls) if isinstance(max_calls, int) and not isinstance(max_calls, bool) else None
+    # The protocol takes no negative count; one sent anyway bounds nothing below 0.
+    max_calls = max(0, max_calls) if isinstance(max_calls, int) and not isinstance(max_calls, bool) else None
     if looping and max_calls is not None:
         estimated = max(estimated, (max_calls + 1) * window)
     max_output = body.get("max_output_tokens")

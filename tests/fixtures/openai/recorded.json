@@ -1,0 +1,176 @@
+{
+  "recorded": "2026-10-03",
+  "model": "gpt-6.1-sol",
+  "charges": [
+    {
+      "turn_id": "record-stream_text.sse",
+      "usd_micros": 76,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 13,
+        "total_tokens": 18,
+        "output_tokens": 5,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-stream_function.sse",
+      "usd_micros": 286,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 53,
+        "total_tokens": 71,
+        "output_tokens": 18,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-cache_first.sse",
+      "usd_micros": 4764,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 1886,
+        "total_tokens": 1891,
+        "output_tokens": 5,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 1883
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-cache_second.sse",
+      "usd_micros": 269,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 1886,
+        "total_tokens": 1891,
+        "output_tokens": 5,
+        "input_tokens_details": {
+          "cached_tokens": 1873,
+          "cache_write_tokens": 10
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-incomplete.sse",
+      "usd_micros": 188,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 14,
+        "total_tokens": 30,
+        "output_tokens": 16,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 16
+        }
+      }
+    },
+    {
+      "turn_id": "record-whole.json",
+      "usd_micros": 76,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 13,
+        "total_tokens": 18,
+        "output_tokens": 5,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-web_search.sse",
+      "usd_micros": 29998,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {
+        "web_search": 1
+      },
+      "usage": {
+        "input_tokens": 8697,
+        "total_tokens": 8744,
+        "output_tokens": 47,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 4267
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 27
+        }
+      }
+    },
+    {
+      "turn_id": "record-background_stream.sse",
+      "usd_micros": 76,
+      "price_checked": "2026-10-03",
+      "tier": "default",
+      "tool_calls": {},
+      "usage": {
+        "input_tokens": 13,
+        "total_tokens": 18,
+        "output_tokens": 5,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "turn_id": "record-background_queued.json",
+      "usd_micros": 6410,
+      "price_checked": "2026-10-03",
+      "tier": null,
+      "tool_calls": {},
+      "usage": null
+    },
+    {
+      "turn_id": "record-error_400.json",
+      "usd_micros": 0,
+      "price_checked": "2026-10-03",
+      "tier": null,
+      "tool_calls": {},
+      "usage": null
+    }
+  ]
+}

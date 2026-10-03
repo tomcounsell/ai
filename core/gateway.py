@@ -51,8 +51,11 @@ are dropped and the kernel's key set; with no kernel key the turn's own
 `authorization` is forwarded and metered the same way, recorded
 `credential: "turn"`. Only `v1/responses`, `v1/models`, and one model by
 id are forwarded; any other OpenAI path is a 403 whichever key it would
-carry. An upstream 401 is answered with the gateway's own body, since
-OpenAI's can echo part of the key, and invalidates only the OpenAI key.
+carry. The Responses API takes only POST and the model paths only GET and
+HEAD; any other method is a 403. An upstream 401 is answered with the
+gateway's own body naming which key was refused, since OpenAI's can echo
+part of the key; a refused kernel key invalidates only the OpenAI key. The
+turn's `proxy-authorization` is dropped on both routes.
 
 Every path is checked as it arrived, undecoded (no percent escape, no
 empty, `.`, or `..` segment), and forwarded byte for byte, never
@@ -79,7 +82,15 @@ from core.ledger import new_id
 from core.settings import settings
 
 # Hop-by-hop and length headers are recomputed on each side.
-DROP_REQUEST = {"host", "content-length", "accept-encoding", "connection", "transfer-encoding"}
+# A proxy credential is never the upstream's business, on either route.
+DROP_REQUEST = {
+    "host",
+    "content-length",
+    "accept-encoding",
+    "connection",
+    "transfer-encoding",
+    "proxy-authorization",
+}
 DROP_RESPONSE = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 
 
@@ -235,6 +246,10 @@ MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # model list. Retrieval of a stored response, files, batches, and the rest
 # are refused whichever key the call would carry.
 OPENAI_CREDENTIALED_PATHS = ("v1/responses", "v1/models")
+# The methods forwarded on each listed path; a model by id takes the
+# model list's. Any other method is a 403, so a turn cannot delete a
+# fine-tuned model or cancel a response with the kernel's key.
+OPENAI_METHODS = {"v1/responses": {"POST"}, "v1/models": {"GET", "HEAD"}}
 
 
 def safe_tail(tail: str) -> bool:
@@ -260,13 +275,16 @@ def credentialed(tail: str) -> bool:
     return _one_model(tail)
 
 
-def openai_credentialed(tail: str) -> bool:
-    """Whether a safe OpenAI tail (the `openai/` prefix removed) is listed:
-    the Responses API, the model list, or one model by id."""
+def openai_credentialed(tail: str, method: str) -> bool:
+    """Whether a safe OpenAI tail (the `openai/` prefix removed) is listed
+    for this method: POST on the Responses API, GET or HEAD on the model
+    list or one model by id."""
     if not safe_tail(tail):
         return False
     tail = tail.rstrip("/")
-    return tail in OPENAI_CREDENTIALED_PATHS or _one_model(tail)
+    if _one_model(tail):
+        tail = "v1/models"
+    return method in OPENAI_METHODS.get(tail, ())
 
 
 def _one_model(tail: str) -> bool:
@@ -523,8 +541,10 @@ class Gateway:
         account headers dropped, the kernel's key set when it has one and
         the turn's own forwarded when it has none, an upstream 401 answered
         with the gateway's own body."""
-        if not openai_credentialed(tail):
-            return _openai_error(403, "permission_error", f"the gateway carries no turn to openai/{tail}")
+        if not openai_credentialed(tail, request.method):
+            return _openai_error(
+                403, "permission_error", f"the gateway carries no turn to {request.method} openai/{tail}"
+            )
         headers = {k: v for k, v in headers.items() if k.lower() not in OPENAI_ACCOUNT_HEADERS}
         key = None
         if self.openai_credential is not None:
@@ -533,24 +553,27 @@ class Gateway:
             headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
             headers["authorization"] = "Bearer " + key
         url = self.openai_upstream + "/" + tail + query
-        if request.method == "POST" and tail.rstrip("/") == "v1/responses":
-            source = "kernel" if key is not None else "turn"
+        source = "kernel" if key is not None else "turn"
+        if request.method == "POST":  # only v1/responses takes POST
             response = await self._call(
                 grant, self._metered_openai(request, grant, url, headers, body, source)
             )
         else:
-            response = await self._forward(request, url, headers, body, openai=True)
+            response = await self._forward(request, url, headers, body, openai=source)
         if response.status == 401 and key is not None:
             self.openai_credential.invalidate()
         return response
 
-    async def _forward(self, request, url, headers, body, openai: bool = False) -> web.StreamResponse:
+    async def _forward(self, request, url, headers, body, openai: str | None = None) -> web.StreamResponse:
+        """Forward one unmetered call. `openai` names the credential an
+        OpenAI call carries ("kernel" or "turn"); None is the Anthropic
+        route."""
         try:
             async with self._session.request(
                 request.method, URL(url, encoded=True), headers=headers, data=body
             ) as up:
                 if openai and up.status == 401:
-                    return _openai_refused()
+                    return _openai_refused(openai)
                 return web.Response(
                     status=up.status, body=await up.read(), headers=_response_headers(up, openai)
                 )
@@ -592,7 +615,7 @@ class Gateway:
             body,
             Meter(),
             lambda meter, status, cut, unsent: self._close(grant, call, price, meter, status, cut, unsent),
-            openai=False,
+            openai=None,
         )
 
     async def _metered_openai(self, request, grant: Grant, url, headers, body, source) -> web.StreamResponse:
@@ -606,7 +629,7 @@ class Gateway:
         price = spending.openai_prices(model)
         if price is None:
             return _openai_error(400, "invalid_request_error", f"model {model} has no price")
-        unpriced = spending.openai_unpriced(message, price)
+        unpriced = spending.openai_unpriced(message)
         if unpriced is not None:
             return _openai_error(400, "invalid_request_error", f"{unpriced} has no price")
         estimate = spending.openai_estimate(message, price)
@@ -636,12 +659,13 @@ class Gateway:
             lambda meter, status, cut, unsent: self._close_openai(
                 grant, call, estimate, price, meter, status, cut, unsent
             ),
-            openai=True,
+            openai=source,
         )
 
-    async def _stream(self, request, grant: Grant, url, headers, body, meter, close, openai: bool):
+    async def _stream(self, request, grant: Grant, url, headers, body, meter, close, openai: str | None):
         """Forward one opened call and stream its response back, feeding the
-        meter, then charge it through `close` whatever happened."""
+        meter, then charge it through `close` whatever happened. `openai` is
+        as in `_forward`."""
         fail = _openai_error if openai else _error
         status = None
         cut = False
@@ -656,7 +680,7 @@ class Gateway:
                     meter.headers(up.headers)
                 if openai and status == 401:
                     # The upstream's body can echo part of the key.
-                    response = _openai_refused()
+                    response = _openai_refused(openai)
                     return response
                 response = web.StreamResponse(status=up.status, headers=_response_headers(up, openai))
                 await response.prepare(request)
@@ -751,7 +775,7 @@ class Gateway:
             await spending.charge(conn, grant.task_id, call["call_id"], charged, detail)
 
 
-def _response_headers(up: aiohttp.ClientResponse, openai: bool = False) -> dict[str, str]:
+def _response_headers(up: aiohttp.ClientResponse, openai: str | None = None) -> dict[str, str]:
     drop = DROP_RESPONSE | OPENAI_ACCOUNT_HEADERS if openai else DROP_RESPONSE
     return {k: v for k, v in up.headers.items() if k.lower() not in drop}
 
@@ -765,5 +789,7 @@ def _openai_error(status: int, kind: str, message: str) -> web.Response:
     return web.json_response({"error": {"message": message, "type": kind, "code": None}}, status=status)
 
 
-def _openai_refused() -> web.Response:
-    return _openai_error(401, "authentication_error", "the kernel's OpenAI key was refused")
+def _openai_refused(source: str) -> web.Response:
+    """The gateway's own 401, naming the key OpenAI refused: the kernel's,
+    or the turn's own when the kernel has none."""
+    return _openai_error(401, "authentication_error", f"the {source}'s OpenAI key was refused")

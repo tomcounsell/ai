@@ -304,6 +304,7 @@ def test_input_above_the_long_context_threshold_charges_long_rates_on_input_and_
         ("flex", "flex", ceil(13 * 1 + 5 * 5), False),
         ("priority", "priority", 13 * 4 + 5 * 20, False),
         ("scale", None, 13 * 4 + 5 * 20, True),  # charged at the highest tier
+        ("scale", "scale", 13 * 4 + 5 * 20, True),  # an unlisted tier asked for is forwarded
     ],
 )
 def test_the_tier_charged_is_the_one_the_response_reports(dsn, tmp_path, reported, requested, usd, unpriced):
@@ -436,6 +437,15 @@ def test_a_hosted_tool_with_max_tool_calls_estimates_that_many_windows_plus_one(
     assert out.charged["bounded"] is True
 
 
+def test_a_negative_max_tool_calls_counts_as_none_allowed(dsn, tmp_path):
+    sent = body(stream=True, tools=[{"type": "web_search"}], max_tool_calls=-5, max_output_tokens=1000)
+    out = charged(dsn, tmp_path, fixture("web_search.sse"), sent)
+    # One window and no fee cap; the search OpenAI ran is still charged.
+    assert out.opened["estimated_input"] == WINDOW
+    assert out.opened["estimate_usd_micros"] == WINDOW * 10 + 1000 * 30
+    assert out.charged["tool_calls"] == {"web_search": 1} and out.charged["usd_micros"] == 29_998
+
+
 def test_the_request_id_is_on_the_charge_not_the_opening(dsn, tmp_path):
     data = fixture("stream_text.sse")
     upstream = Upstream(data=data, content_type=SSE, headers={"x-request-id": "req_replayed1"})
@@ -451,7 +461,6 @@ def test_the_request_id_is_on_the_charge_not_the_opening(dsn, tmp_path):
     "sent",
     [
         body(model="gpt-4o"),
-        body(service_tier="scale"),
         body(tools=[{"type": "code_interpreter", "container": {"type": "auto"}}]),
         body(tools=[{"type": "shell", "environment": {"type": "container_auto"}}]),
         body(tools=[{"type": "shell"}]),
@@ -520,9 +529,40 @@ def test_unsafe_tails_are_a_400(dsn, tmp_path, path):
 
 
 def test_the_listed_paths():
-    assert openai_credentialed("v1/responses") and openai_credentialed("v1/responses/")
-    assert openai_credentialed("v1/models") and openai_credentialed(f"v1/models/{MODEL}")
-    assert not openai_credentialed("v1/models/../files") and not openai_credentialed("v1/responses/x")
+    assert openai_credentialed("v1/responses", "POST") and openai_credentialed("v1/responses/", "POST")
+    for method in ("GET", "HEAD"):
+        assert openai_credentialed("v1/models", method) and openai_credentialed(f"v1/models/{MODEL}", method)
+    assert not openai_credentialed("v1/models/../files", "GET")
+    assert not openai_credentialed("v1/responses/x", "POST")
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        (f"/openai/v1/models/{MODEL}", "delete"),
+        ("/openai/v1/models/ft-abc", "delete"),
+        ("/openai/v1/models", "post"),
+        (f"/openai/v1/models/{MODEL}", "post"),
+        ("/openai/v1/models", "put"),
+        ("/openai/v1/responses", "get"),
+        ("/openai/v1/responses", "delete"),
+        ("/openai/v1/responses", "put"),
+        ("/openai/v1/responses", "patch"),
+        ("/openai/v1/responses", "head"),
+    ],
+)
+@pytest.mark.parametrize("with_key", [True, False])
+def test_a_listed_path_with_another_method_is_a_403_with_nothing_sent(dsn, tmp_path, path, method, with_key):
+    out = exchange(
+        dsn, Upstream(), body(), path=path, method=method, tmp_path=tmp_path, key=KEY if with_key else None
+    )
+    assert out.status == 403 and not out.seen and out.opened is None
+
+
+def test_head_on_a_model_is_forwarded(dsn, tmp_path):
+    out = exchange(dsn, Upstream(), path=f"/openai/v1/models/{MODEL}", method="head", tmp_path=tmp_path)
+    assert out.status == 200 and out.seen[0]["method"] == "HEAD"
+    assert out.seen[0]["headers"]["authorization"] == f"Bearer {KEY}"
 
 
 def test_the_model_list_is_forwarded_with_the_key_and_charged_nothing(dsn, tmp_path):
@@ -584,6 +624,19 @@ def test_the_turns_key_and_account_headers_never_reach_the_upstream(dsn, tmp_pat
     assert not {"openai-organization", "openai-project"} & got and "x-request-id" in got
 
 
+@pytest.mark.parametrize("with_key", [True, False])
+def test_a_proxy_credential_never_reaches_the_upstream(dsn, tmp_path, with_key):
+    out = exchange(
+        dsn,
+        Upstream(data=fixture("whole.json")),
+        body(),
+        headers={"Proxy-Authorization": "Basic dHVybjpzZWNyZXQ="},
+        key=KEY if with_key else None,
+        tmp_path=tmp_path,
+    )
+    assert out.status == 200 and "proxy-authorization" not in {k.lower() for k in out.seen[0]["headers"]}
+
+
 def test_an_upstream_401_invalidates_only_the_openai_key_and_its_body_is_the_gateways(dsn, tmp_path):
     token = tmp_path / "claude-token"
     token.write_text("claude-first\n")
@@ -609,6 +662,23 @@ def test_an_upstream_401_invalidates_only_the_openai_key_and_its_body_is_the_gat
     assert out.charged["usd_micros"] == 0
     assert claude._cached is claude_cached and not claude._stale  # untouched
     assert openai.token() == "sk-second"  # re-read at once
+
+
+@pytest.mark.parametrize("metered", [True, False])
+def test_a_401_on_the_turns_own_key_names_the_turn_and_leaves_the_kernel_key(dsn, tmp_path, metered):
+    keyfile = tmp_path / "openai-key"  # absent: no kernel key
+    openai = OpenAIKey(str(keyfile), ttl_s=3600)
+    assert openai.token() is None
+    cached = openai._cached
+    kw = {} if metered else {"path": "/openai/v1/models", "method": "get"}
+    out = exchange(
+        dsn, Upstream(401, b'{"error":{"message":"bad key"}}'), body(), openai=openai, tmp_path=tmp_path, **kw
+    )
+    assert out.status == 401 and out.seen[0]["headers"]["authorization"] == "Bearer sk-turn-own"
+    assert json.loads(out.body)["error"]["message"] == "the turn's OpenAI key was refused"
+    assert openai._cached is cached  # not invalidated
+    keyfile.write_text(f"OPENAI_API_KEY={KEY}\n")
+    assert openai.token() is None  # still the cached read, within its ttl
 
 
 def test_no_part_of_the_kernel_key_reaches_a_turn_a_row_or_stderr(dsn, tmp_path, capfd):
