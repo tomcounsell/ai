@@ -10,9 +10,13 @@
   `verdicts.record_check(..., governance_from=ids)`, which recomputes the
   hunks from git and reads the rows itself.
 
-Both check calls are meant to run before the suite or the reviewer's turn,
-so a provider outage costs no suite run and no Opus turn, and each reuses
-an answered row on a rerun (1.4 settles the order in its runners) (breadth by candidate; governance by hunk id and input digest). A
+Breadth runs before the suite; governance before the reviewer's turn, and
+after the docs turn (the docs diff exists only then). So a provider outage
+costs no suite run and no Opus turn, and each reuses an answered row on a
+rerun (breadth by candidate; governance by hunk id and input digest). Both
+read git in the kernel mirror when the task has one, so a builder's clone
+that lost a commit, and a docs head that lives only in the mirror, are
+read the same way. A
 judgement both legs failed leaves its branch without a verdict, to be asked
 again on the next run; after `judgement.UNANSWERED_RUNS` such failures, or
 when the inputs were too large for both legs, the consumer applies caution
@@ -162,12 +166,13 @@ async def breadth(port: JudgementPort, dsn: str, task_id: str) -> str:
         return answered[-1]["payload"]["judgement_id"]
     if len(mine) >= UNANSWERED_RUNS:
         return mine[-1]["payload"]["judgement_id"]
-    paths = git.diff_paths(b.workspace, b.base_sha, f.candidate.sha)
+    repo = b.mirror or b.workspace
+    paths = git.diff_paths(repo, b.base_sha, f.candidate.sha)
     tests_ = [p for p in paths if is_test_path(p)]
     code = [p for p in paths if not is_test_path(p)]
     inputs = {
-        "diff": _diff(b.workspace, b.base_sha, f.candidate.sha, code),
-        "tests": _diff(b.workspace, b.base_sha, f.candidate.sha, tests_),
+        "diff": _diff(repo, b.base_sha, f.candidate.sha, code),
+        "tests": _diff(repo, b.base_sha, f.candidate.sha, tests_),
     }
     j = await port.judge(BREADTH, inputs, task_id=task_id, ref=ref, dsn=dsn)
     return j.judgement_id
@@ -278,8 +283,9 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
     async with await db.connect(dsn) as conn:
         rows = await ledger.read(conn, task_id)
         b = await tasks.brief(conn, task_id)
-    hunks = diff_hunks(b.workspace, older, newer)
-    paths = git.diff_paths(b.workspace, older, newer)
+    repo = b.mirror or b.workspace
+    hunks = diff_hunks(repo, older, newer)
+    paths = git.diff_paths(repo, older, newer)
     gate = asyncio.Semaphore(settings.judgement_concurrency)
 
     async def one(h: DiffHunk) -> str:
@@ -376,13 +382,14 @@ def unjudged_instance(unjudged: list[tuple[DiffHunk, str]]) -> dict[str, Any]:
 
 MAX_CASES = 50
 STREAM = "judgement"
-# The expected action per case label, by site.
-CASE_ACTIONS = {JUDGE.site: {"precise": "proceed", "thin": "caution"}}
+# A judge case's label and the action it expects.
+JUDGE_LABELS = {"precise": "proceed", "thin": "caution"}
+DRAFTED = "drafted"
 
 
 def load_cases(path: str | Path) -> tuple[str, list[dict[str, Any]]]:
-    """A cases file: `{"site": ..., "cases": [{"id", "label", "sub_label",
-    "source", "evidence", and "request" or "item"}]}`. An `item` is a replay
+    """A cases file: `{"site": ..., "cases": [...]}`, each case in its
+    site's shape (`check_calibration`). A judge case's `item` is a replay
     item file (relative to the cases file) whose `request` and `repo` are
     read."""
     path = Path(path)
@@ -401,6 +408,52 @@ def load_cases(path: str | Path) -> tuple[str, list[dict[str, Any]]]:
     return site, out
 
 
+@dataclass(frozen=True)
+class Expected:
+    """One human or drafted label of one case, on one question: the label
+    as the case gives it, the action it expects, and where it came from."""
+
+    label: str
+    action: str
+    source: str
+
+
+def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, Expected]]:
+    """A case's inputs and its expected action per question, by the site's
+    case shape:
+
+    - judge: `{"id", "request" or "item", "label": precise|thin, "sub_label", "source"}`;
+    - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`;
+    - governance: `{"id", "inputs": {"path", "hunk", "paths"}, "label": true|false, "source", "evidence"}`.
+
+    A label `false` expects proceed and `true` caution (each question's own
+    `proceed` set). Raises `ValueError` naming what is wrong."""
+    task = BY_SITE[site]
+    if site == JUDGE.site:
+        if c.get("label") not in JUDGE_LABELS:
+            raise ValueError(f"case {c.get('id')}: a judge label is precise or thin")
+        q = task.questions[0]
+        action = JUDGE_LABELS[c["label"]]
+        inputs = {"request": str(c["request"]), "thread": "", "project": str(c.get("project", ""))}
+        return inputs, {q.id: Expected(c["label"], action, str(c.get("source", "judge")))}
+    inputs = c.get("inputs")
+    if not isinstance(inputs, dict) or set(inputs) != set(task.inputs):
+        raise ValueError(f"case {c.get('id')}: inputs are {sorted(task.inputs)}")
+    if site == GOVERNANCE.site:
+        labels = {"adds": {"value": c.get("label"), "source": c.get("source")}}
+    else:
+        labels = c.get("labels") or {}
+    expected = {}
+    for q in task.questions:
+        lab = labels.get(q.id)
+        if not isinstance(lab, dict) or not isinstance(lab.get("value"), bool) or not lab.get("source"):
+            raise ValueError(f"case {c.get('id')}: no true or false label with a source for {q.id}")
+        label = "true" if lab["value"] else "false"
+        action = "proceed" if label in q.proceed else "caution"
+        expected[q.id] = Expected(label, action, str(lab["source"]))
+    return {k: str(v) for k, v in inputs.items()}, expected
+
+
 def check_calibration(cases_path: str | Path) -> tuple[str, list[dict[str, Any]]]:
     """The cases file and its site, before anything is asked: `ValueError`
     naming what is wrong."""
@@ -410,8 +463,13 @@ def check_calibration(cases_path: str | Path) -> tuple[str, list[dict[str, Any]]
         raise ValueError(f"no cases file {exc.filename}") from None
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{cases_path} is not a cases file ({exc!r})") from None
-    if site not in CASE_ACTIONS:
+    if site not in BY_SITE:
         raise ValueError(f"no calibration case shape for {site}")
+    for c in cases:
+        try:
+            case_shape(site, c)
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"case {c.get('id')} is not a {site} case ({exc!r})") from None
     return site, cases
 
 
@@ -422,43 +480,56 @@ def endpoint_hosts(port: JudgementPort) -> dict[str, str | None]:
 
 
 async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> dict[str, Any]:
-    """Both legs alone on every case, one calibration task, one record. The
-    record names each leg's endpoint host, so a run against anything but the
-    providers says so; the command line refuses one (`check_calibration`)."""
+    """Both legs alone on every case, every question scored, one calibration
+    task, one record. The record names each leg's endpoint host, so a run
+    against anything but the providers says so; the command line refuses
+    one."""
     site, cases = check_calibration(cases_path)
     task = BY_SITE[site]
-    expected = CASE_ACTIONS[site]
     async with await db.connect(dsn) as conn:
         task_id = await tasks.start_calibration(conn, site)
     results: list[dict[str, Any]] = []
     for c in cases:
-        inputs = {"request": c["request"], "thread": "", "project": c.get("project", "")}
+        inputs, expected = case_shape(site, c)
         per_leg = {}
         for leg in judgement.route(task):
             j = await port.ask_leg(leg, task, inputs, task_id=task_id, ref={"case": c["id"]}, dsn=dsn)
-            a = j.answers.get(task.questions[0].id)
-            action = j.action.get(task.questions[0].id) if j.answered else "caution"
+            questions = {}
+            for q in task.questions:
+                a = j.answers.get(q.id) if j.answered else None
+                action = j.action.get(q.id) if j.answered else "caution"
+                e = expected[q.id]
+                questions[q.id] = {
+                    "expected": e.label,
+                    "wants": e.action,
+                    "source": e.source,
+                    "label": a["label"] if a else None,
+                    "p_proceed": a["p_proceed"] if a else None,
+                    "decision": a["decision"] if a else "failed",
+                    "action": action,
+                    "correct": action == e.action,
+                }
+            first = questions[task.questions[0].id]
             per_leg[leg] = {
                 "answered": j.answered,
-                "label": a["label"] if a else None,
-                "p_proceed": a["p_proceed"] if a else None,
-                "decision": a["decision"] if a else "failed",
-                "verdict": "precise" if action == "proceed" else "thin",
-                "correct": action == expected[c["label"]],
+                "label": first["label"],
+                "p_proceed": first["p_proceed"],
+                "decision": first["decision"],
+                "verdict": _verdict_word(task, first["action"]),
+                "correct": all(q["correct"] for q in questions.values()),
+                "questions": questions,
                 "usd_micros": j.usd_micros,
                 "reason": None if j.answered else "; ".join(str(x.get("reason")) for x in j.attempts),
                 "judgement_id": j.judgement_id,
             }
+        label = c["label"] if site != BREADTH.site else {q: e.label for q, e in expected.items()}
         results.append(
-            {
-                "case": c["id"],
-                "label": c["label"],
-                "sub_label": c.get("sub_label"),
-                "source": c.get("source"),
-                **per_leg,
-            }
-        )
-    record = _record(task, port, cases, results, task_id)
+            {"case": c["id"], "label": label, "sub_label": c.get("sub_label"), "source": c.get("source"),
+             **per_leg}
+        )  # fmt: skip
+    async with await db.connect(dsn) as conn:
+        calls = await ledger.read(conn, task_id)
+    record = _record(task, port, results, task_id, calls)
     async with await db.connect(dsn) as conn, conn.transaction():
         await ledger.lock(conn, STREAM)
         prior = await (
@@ -473,25 +544,85 @@ async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> di
     return record
 
 
-def _record(task, port, cases, results, task_id) -> dict[str, Any]:
+def _verdict_word(task, action: str) -> str:
+    if task.site == JUDGE.site:
+        return "precise" if action == "proceed" else "thin"
+    return action
+
+
+def _counts(answers: list[dict[str, Any]]) -> dict[str, Any]:
+    confusion: dict[str, dict[str, int]] = {}
+    for a in answers:
+        row = confusion.setdefault(a["expected"], {})
+        row[a["action"]] = row.get(a["action"], 0) + 1
+    return {"n": len(answers), "wrong": sum(not a["correct"] for a in answers), "confusion": confusion}
+
+
+def estimate_check(rows: list[dict], leg: str) -> dict[str, Any]:
+    """Billed input tokens against `estimated_input`, from the calibration
+    task's own `gateway.opened` and `gateway.charged` rows for one leg: the
+    largest and the median ratio, and how many calls billed more than
+    estimated. The estimate sets the input-size limit and the charge when
+    a provider reports no usage, so any call over it means it is too low."""
+    import statistics
+
+    opened = {
+        r["payload"]["call_id"]: r["payload"]
+        for r in rows
+        if r["type"] == "gateway.opened" and r["payload"].get("leg") == leg
+    }
+    ratios = []
+    for r in rows:
+        call = opened.get(r["payload"].get("call_id")) if r["type"] == "gateway.charged" else None
+        billed = ((r["payload"].get("usage") or {}).get("input_tokens")) if call else None
+        if call and isinstance(billed, int) and call.get("estimated_input"):
+            ratios.append(billed / call["estimated_input"])
+    return {
+        "n": len(ratios),
+        "max_ratio": round(max(ratios), 4) if ratios else None,
+        "median_ratio": round(statistics.median(ratios), 4) if ratios else None,
+        "over_estimate": sum(x > 1 for x in ratios),
+    }
+
+
+def _record(task, port, results, task_id, calls) -> dict[str, Any]:
+    """Per leg: per question, the confusion counts over human labels
+    (`per_question`) and over drafted ones (`drafted`, information only);
+    the entry check, true when every question has a human `proceed` label
+    and a human `caution` label and the leg is right on every human label;
+    and the estimate re-check. The record's entry check is every leg's."""
     from datetime import UTC, datetime
 
     legs = {}
     for leg in judgement.route(task):
         rs = [r[leg] for r in results]
-        answered = [(r, c) for r, c in zip(rs, results, strict=True) if r["answered"]]
+        per_question, drafted = {}, {}
+        entry = True
+        for q in task.questions:
+            answers = [r["questions"][q.id] for r in rs]
+            human = [a for a in answers if a["source"] != DRAFTED]
+            counts = _counts(human)
+            directions = {d: sum(a["wants"] == d for a in human) for d in ("proceed", "caution")}
+            counts["labels"] = directions
+            per_question[q.id] = counts
+            drafted[q.id] = _counts([a for a in answers if a["source"] == DRAFTED])
+            entry = entry and counts["wrong"] == 0 and all(directions.values())
+        scored = [
+            (a["p_proceed"], a["wants"]) for r in rs if r["answered"]
+            for q in task.questions for a in [r["questions"][q.id]]
+        ]  # fmt: skip
         brier = (
-            sum(((1 - r["p_proceed"]) - (1.0 if c["label"] == "thin" else 0.0)) ** 2 for r, c in answered)
-            / len(answered)
-            if answered
+            sum(((1 - p) - (1.0 if want == "caution" else 0.0)) ** 2 for p, want in scored) / len(scored)
+            if scored
             else None
         )
         confusion: dict[str, dict[str, int]] = {}
         sub: dict[str, dict[str, int]] = {}
         for r, c in zip(rs, results, strict=True):
-            confusion.setdefault(c["label"], {}).setdefault(r["verdict"], 0)
-            confusion[c["label"]][r["verdict"]] += 1
-            key = c.get("sub_label") or c["label"]
+            first = r["questions"][task.questions[0].id]
+            confusion.setdefault(first["expected"], {}).setdefault(r["verdict"], 0)
+            confusion[first["expected"]][r["verdict"]] += 1
+            key = c.get("sub_label") or first["expected"]
             sub.setdefault(key, {}).setdefault(str(r["label"]), 0)
             sub[key][str(r["label"])] += 1
         abstains = [r for r in rs if r["decision"] == "abstain"]
@@ -504,9 +635,11 @@ def _record(task, port, cases, results, task_id) -> dict[str, Any]:
             "model": port.legs[leg].model,
             "n": len(rs),
             "brier": None if brier is None else round(brier, 4),
-            "brier_n": len(answered),
+            "brier_n": len(scored),
             "confusion": confusion,
             "sub_label_confusion": sub,
+            "per_question": per_question,
+            "drafted": drafted,
             "abstain_rate": round(len(abstains) / len(rs), 4) if rs else None,
             "accuracy_not_abstained": round(sum(r["correct"] for r in decided) / len(decided), 4)
             if decided
@@ -514,11 +647,15 @@ def _record(task, port, cases, results, task_id) -> dict[str, Any]:
             "error_rate": round(sum(errors.values()) / len(rs), 4) if rs else None,
             "errors": errors,
             "usd_micros_per_call": round(sum(r["usd_micros"] for r in rs) / len(rs), 2) if rs else None,
-            "all_correct": all(r["correct"] for r in rs),
+            "all_correct": all(c["wrong"] == 0 for c in per_question.values()),
+            "entry_check": entry,
+            "estimate": estimate_check(calls, leg),
         }
     sources: dict[str, int] = {"tom": 0, "role_played": 0, "judge": 0}
-    for c in cases:
-        sources[c.get("source", "judge")] = sources.get(c.get("source", "judge"), 0) + 1
+    for r in results:
+        any_leg = r[judgement.route(task)[0]]
+        for a in any_leg["questions"].values():
+            sources[a["source"]] = sources.get(a["source"], 0) + 1
     return {
         "site": task.site,
         "task_sha256": judgement.task_sha256(task, port.signature()),
@@ -527,10 +664,13 @@ def _record(task, port, cases, results, task_id) -> dict[str, Any]:
         "floor": task.floor,
         "at": datetime.now(UTC).isoformat(),
         "calibration_task": task_id,
-        "n": len(cases),
+        "n": len(results),
         "label_sources": sources,
         "legs": legs,
-        "entry_check": all(leg["all_correct"] for leg in legs.values()),
+        "entry_check": all(leg["entry_check"] for leg in legs.values()),
         "cases": results,
-        "note": "The Brier score is information beside its n, not evidence of calibration.",
+        "note": (
+            "The Brier score is information beside its n, not evidence of calibration. Drafted labels "
+            "are counted apart and never in the entry check."
+        ),
     }

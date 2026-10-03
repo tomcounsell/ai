@@ -839,3 +839,134 @@ def test_a_test_verdict_reads_failures_given_as_a_generator_once(dsn, tmp_path):
 
     decided = run(go())
     assert decided["verdict"] == "red" and decided["failures"] == ["test_x failed"]
+
+
+# -- calibration of breadth and governance (1.4b) -----------------------------------
+
+
+def _label(value: bool, source: str) -> dict:
+    return {"value": value, "source": source, "evidence": "a test"}
+
+
+def _breadth_case(cid: str, source: str, **values) -> dict:
+    labels = {q: _label(values.get(q, False), source) for q in BOOLS}
+    return {"id": cid, "inputs": {"diff": f"diff of {cid}", "tests": ""}, "labels": labels}
+
+
+def _cases_file(tmp_path, site: str, cases: list[dict]) -> Path:
+    path = tmp_path / f"{site}.json"
+    path.write_text(json.dumps({"site": site, "cases": cases}))
+    return path
+
+
+def _calibrate(tmp_path, site, cases, replies, dsn):
+    """`replies` in the order calibrate asks: each case, the primary then the
+    fallback leg."""
+    sid = UP.script(*({"probs": p} for p in replies))
+    return run(judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, site, cases)))
+
+
+def test_breadth_calibration_scores_every_question_and_counts_drafted_apart(dsn, tmp_path):
+    cases = [
+        _breadth_case("covered", "reference"),
+        _breadth_case("gaps", "tom", gap_state=True, gap_enum=True, gap_bound=True),
+        _breadth_case("trial", "drafted", gap_state=True),
+    ]
+    right = [gaps(), gaps(), gaps(*BOOLS), gaps(*BOOLS), gaps(), gaps()]  # the drafted case wrong
+    record = _calibrate(tmp_path, "checks.test.breadth", cases, right, dsn)
+    jev = record["legs"]["jev"]
+    assert set(jev["per_question"]) == set(BOOLS)
+    assert all(jev["per_question"][q]["n"] == 2 and jev["per_question"][q]["wrong"] == 0 for q in BOOLS)
+    assert jev["drafted"]["gap_state"] == {"n": 1, "wrong": 1, "confusion": {"true": {"proceed": 1}}}
+    assert jev["entry_check"] is True and record["entry_check"] is True
+    # The second question wrong on one human label fails it: not only the first question is scored.
+    wrong = [gaps(), gaps(), gaps("gap_state", "gap_bound"), gaps(*BOOLS), gaps(), gaps()]
+    record = _calibrate(tmp_path, "checks.test.breadth", cases, wrong, dsn)
+    assert record["legs"]["jev"]["per_question"]["gap_enum"]["wrong"] == 1
+    assert record["legs"]["jev"]["entry_check"] is False and record["entry_check"] is False
+    assert record["legs"]["open_weight"]["entry_check"] is True
+
+
+def _gov_case(cid: str, label: bool, source: str = "tom") -> dict:
+    return {"id": cid, "inputs": {"path": f"{cid}.py", "hunk": f"+{cid}", "paths": f"{cid}.py"},
+            "label": label, "source": source, "evidence": "a decision of Tom's"}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("replies", "entry"),
+    [
+        ([YES, YES, NO, NO, NO, YES], True),  # the drafted negative wrong: information only
+        ([YES, YES, YES, NO, NO, NO], False),  # one wrong true on a negative
+        ([NO, YES, NO, NO, NO, NO], False),  # one wrong false on a positive
+    ],
+)
+def test_governance_calibration_fails_on_one_wrong_label_either_way(dsn, tmp_path, replies, entry):
+    cases = [_gov_case("guard", True), _gov_case("test", False), _gov_case("bump", False, "drafted")]
+    record = _calibrate(tmp_path, "governance.adds", cases, replies, dsn)
+    assert record["entry_check"] is entry
+    assert record["legs"]["open_weight"]["drafted"]["adds"]["n"] == 1
+
+
+def test_a_one_sided_case_set_never_passes_the_entry_check(dsn, tmp_path):
+    cases = [_gov_case("test-a", False), _gov_case("test-b", False), _gov_case("guard", True, "drafted")]
+    record = _calibrate(tmp_path, "governance.adds", cases, [NO, NO, NO, NO, YES, YES], dsn)
+    assert all(leg["per_question"]["adds"]["wrong"] == 0 for leg in record["legs"].values())
+    assert record["entry_check"] is False
+    assert record["legs"]["jev"]["per_question"]["adds"]["labels"] == {"proceed": 2, "caution": 0}
+
+
+def test_the_record_rechecks_the_estimate_against_billed_input(dsn, tmp_path):
+    cases = [_gov_case("guard", True), _gov_case("test", False)]
+    sid = UP.script({"probs": YES, "input_tokens": 999_999}, {"probs": YES}, {"probs": NO}, {"probs": NO})
+    record = run(
+        judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, "governance.adds", cases))
+    )
+    jev, ow = record["legs"]["jev"]["estimate"], record["legs"]["open_weight"]["estimate"]
+    assert jev["n"] == 2 and jev["over_estimate"] == 1 and jev["max_ratio"] > 100
+    assert ow["over_estimate"] == 0 and 0 < ow["median_ratio"] < 1
+
+
+def test_calibrate_refuses_a_case_missing_a_question(tmp_path):
+    case = _breadth_case("x", "tom")
+    del case["labels"]["gap_enum"]
+    with pytest.raises(ValueError, match="gap_enum"):
+        judgement_sites.check_calibration(_cases_file(tmp_path, "checks.test.breadth", [case]))
+
+
+# -- the sites read the kernel mirror (1.4b) ---------------------------------------------
+
+
+def test_breadth_and_governance_read_the_mirror_when_the_clone_lost_the_candidate(dsn, tmp_path):
+    sid = UP.script(default={"probs": {**gaps(), **NO}})
+
+    async def setup():
+        task, b = await scripted.provisioned(dsn, tmp_path)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        await drive(dsn, task)
+        return task, b, machine.fold(await rows(dsn, task))
+
+    task, b, f = run(setup())
+    assert f.state is State.CHECKS
+    # The builder's clone loses every commit past the base.
+    git(b.workspace, "reset", "-q", "--hard", b.base_sha)
+    git(b.workspace, "reflog", "expire", "--expire=now", "--all")
+    git(b.workspace, "gc", "-q", "--prune=now")
+    lost = subprocess.run(["git", "-C", b.workspace, "cat-file", "-e", f.candidate.sha], check=False)
+    assert lost.returncode != 0
+    # A docs head that exists only in the mirror.
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", b.mirror, str(other)], check=True)
+    git(other, "checkout", "-q", f.candidate.sha)
+    head = commit(other, "docs/notes.md", "# Notes\n", "notes")
+    git(b.mirror, "fetch", "-q", str(other), f"{head}:refs/valor/docs/test")
+
+    async def go():
+        p = UP.port(script=sid)
+        jid = await judgement_sites.breadth(p, dsn, task)
+        ids = await judgement_sites.governance(p, dsn, task, b.base_sha, f.candidate.sha)
+        docs_ids = await judgement_sites.governance(p, dsn, task, f.candidate.sha, head)
+        return jid, ids, docs_ids
+
+    jid, ids, docs_ids = run(go())
+    assert jid and ids and len(docs_ids) == 1
