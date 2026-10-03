@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4s-signal-reads
 type: bug
-status: built; in review
+status: delivered-not-passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -426,3 +426,28 @@ writing plainly never makes a compressed file.
    records the UTF-8 decode; the build record records compressed files.
 
 The full suite after patch round 1: 535 passed, 7 skipped; ruff check and format clean.
+
+## Checks after patch round 1, at cbfd5a055 (review round 2 of 2)
+
+- Test: `gaps`. The earlier gaps are closed by probes (growth past the
+  checked size, a vanishing entry, reads off the loop, swaps after the
+  move, text that is not UTF-8). The suite passed apart from three
+  "Postgres did not start" failures, each passing alone.
+- Review: `changes`; governance boolean no; no invented caps.
+- Docs: `updated`, 0a5a53380 on `m1-4s-docs2`.
+
+The finding both raised: `session._plan` compares `git status --porcelain`
+lines with the plan path as plain text. Git quotes a path holding a space
+or a character outside ASCII, and names a rename's old path on the left of
+` -> `, so a plan with such a path, or a plan staged as renamed away, is
+accepted with changes not committed. The ledger still holds the committed
+blob, so nothing wrong is recorded; the refusal the plan promises does not
+happen. No test covers the three cases.
+
+## Delivery: delivered-not-passed
+
+Review rounds are spent. Recommendation: accept one more patch that runs
+`git status --porcelain --untracked-files=all -- ':(literal)<path>'` and
+treats any output as changes not committed, with tests for a space, a
+character outside ASCII, and a staged rename; rerun the three checks; merge
+if they pass. Everything else in the task passed both checks.
