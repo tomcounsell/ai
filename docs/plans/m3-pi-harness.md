@@ -2,7 +2,7 @@
 tracking: none
 slug: m3-pi-harness
 type: build
-status: delivered-not-passed
+status: merged
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -565,3 +565,23 @@ left `sub` unheld.
   directory) and that an install whose other directories are symlinks
   (pnpm, `npm link`) is not held, so Pi is installed by Homebrew or plain
   npm. Lead decision: those layouts are not covered in code.
+
+## Merged
+
+Merged 2026-10-04 by the merge train, fast-forward to abcd8da75.
+
+- **Checks.** review-3b-p5 `pass` on 7b426b15a (governance boolean: no).
+  test-3b-p5 `pass` (base 774 passed, head 776 passed, 17 skipped each).
+  docs-3b-p5 `no_change`.
+- **Rebase.** Squashed from m3b-pi at 7b426b15a onto 1.4u's merge. Folds:
+  1.4v's fixed `claude` path stays and `pi` and `node` are added at fixed
+  Homebrew paths; a turn's stdout and stderr go whole to files (1.4u) and
+  a prompt on stdin goes through `communicate`; `fresh_dir` keeps
+  `rmtree` and makes `pi`; the docs runner takes its seat's harness
+  through `resolve_seat`, as critique does; harnesses-codex-pi.md gives
+  way to harnesses.md's Pi section, and the Pi install denial goes into
+  sandbox-openings.md.
+- **Suite.** 1007 passed, 19 skipped; `ruff check` clean; `ruff format
+  --check` flags only docs/bridges/telegram.md and docs/plans/m2-1-port.md.
+- **Backup.** valor_rebuild-20261003T202331Z.dump.
+- **Follow-ups.** Rollout steps 3 and 4 wait for 1.4c and 1.5.
