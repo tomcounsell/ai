@@ -134,6 +134,10 @@ task's plan, never its unmerged branch.
 
 **Reports.** Agents report only to this session (in every brief: "Report
 only to the lead session through your final result; never address Tom").
+A final result longer than about 600 words is cut off, so every brief
+asks for the full report in a file under this session's scratchpad
+(`report-<agent name>.md`) and a final result that is its path plus a
+summary under 300 words.
 Keep a running table in this session, not a file, of task, stage, agent
 name, and head. When an agent finishes, start the next stage of that task
 at once, without waiting for the others.
