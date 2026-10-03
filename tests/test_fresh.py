@@ -380,7 +380,9 @@ def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
         await drive(dsn, task, scripted.fresh_runners(ws))
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="names the turn"):
-                await verdicts.record_check(conn, task, machine.Check.TEST, "pass", leg="test runner")
+                await verdicts.record_check(
+                    conn, task, machine.Check.TEST, "pass", leg="test runner", breadth="b"
+                )
             with pytest.raises(verdicts.VerdictRefused, match="not a full commit"):
                 await verdicts.record_check(
                     conn, task, machine.Check.DOCS, "updated", head="abc123", **scripted.MANUAL
