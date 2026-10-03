@@ -6,7 +6,7 @@ Everything that defines Valor as one identity.
 
 - Identity, voice, and conduct.
 - What acting as Valor means for tone and for what may be sent under Valor's name.
-- One persona: `identity.toml`, `turn.md`, `voice.md`, `conduct.md`, `governance.md`, and `delivery.md`. `core/persona.py` renders them, with the governance paragraph read from `CLAUDE.md` under `governance.md`'s heading, at the head of every turn's text. The fresh critique session gets the same persona.
+- One persona: `identity.toml`, `turn.md`, `voice.md`, `conduct.md`, `governance.md`, and `delivery.md`. `core/persona.py` renders them, with the governance paragraph and the "Tests are not governance." paragraph read from `CLAUDE.md` under `governance.md`'s heading, at the head of every turn's text. Every fresh session (critique, review, docs) gets the same persona.
 - This README is not rendered.
 
 Every outbound message and PR leaves as Valor. There is no per-space identity and no mode that sends as anyone else.
