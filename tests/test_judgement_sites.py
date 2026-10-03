@@ -494,6 +494,11 @@ def _cases(tmp_path, n=2) -> Path:
     return path
 
 
+def test_calibrate_loads_any_number_of_cases(tmp_path):
+    site, cases = judgement_sites.load_cases(_cases(tmp_path, 51))
+    assert site == "intake.underspecified" and len(cases) == 51
+
+
 def test_a_calibration_task_meters_both_legs_and_takes_nothing_else(dsn, tmp_path):
     sid = UP.script(default={"probs": PRECISE})
 

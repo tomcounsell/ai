@@ -255,7 +255,8 @@ async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None
     """`workspace.provision` in a thread, with no time limit on its git
     calls or setup commands. An interrupt of `start` (Ctrl-C, or SIGTERM or
     SIGHUP of the kernel while it provisions) ends them, and the thread is
-    waited for, so `provision:<task>` is held until its cleanup is done."""
+    waited for, so `provision:<task>` is held until its cleanup is done; a
+    second signal or cancel during that cleanup waits for it too."""
     loop = asyncio.get_running_loop()
     me = asyncio.current_task()
     with git.interruptible() as held:
@@ -265,8 +266,14 @@ async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
-            await asyncio.to_thread(held.interrupt)
-            await asyncio.wait({job})
+            # The handlers stay: without them a second signal would end the
+            # kernel with the cleanup half done.
+            stop = asyncio.ensure_future(asyncio.to_thread(held.interrupt))
+            while not (stop.done() and job.done()):
+                try:
+                    await asyncio.wait({stop, job})
+                except asyncio.CancelledError:
+                    me.uncancel()  # a second cancel waits for the same cleanup
             if not job.cancelled():
                 job.exception()  # the thread's own Refused; the interrupt is what is raised
             raise

@@ -718,6 +718,9 @@ def _remote_head(cache: Path) -> str:
         raise Refused("the repository names no default branch; give the spec a branch") from None
 
 
+SETUP_TAIL = 1500  # characters of a setup command's output kept in its result
+
+
 def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
     """Each setup command once, in the clone, under the turn's profile, with
     the turn's environment; a failure is recorded, never fatal. A command
@@ -744,9 +747,10 @@ def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> di
                 runs.reap(mark)
             if held and held.interrupted:
                 raise git.Interrupted()
-            log.seek(max(0, log.seek(0, os.SEEK_END) - 6000))
+            # At most 4 bytes a character, so these bytes hold the tail.
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 4 * SETUP_TAIL))
             text = log.read().decode(errors="replace")
-        out.append({"command": command, "exit": code, "tail": text[-1500:]})
+        out.append({"command": command, "exit": code, "tail": text[-SETUP_TAIL:]})
         if code != 0:
             return {"ok": False, "commands": out}
     return {"ok": True, "commands": out}

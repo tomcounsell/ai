@@ -628,7 +628,7 @@ def retry_after(value: str | None, now: float) -> float | None:
     if not value:
         return None
     value = value.strip()
-    if value.isdigit():
+    if value.isascii() and value.isdigit():
         return now + int(value)
     try:
         return parsedate_to_datetime(value).timestamp()

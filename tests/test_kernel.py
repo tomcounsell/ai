@@ -401,3 +401,46 @@ def test_a_term_or_hangup_of_the_kernel_interrupts_provisioning(monkeypatch):
 
         run(go())
         assert seen == {"interrupted": True}
+
+
+def test_a_second_signal_waits_for_the_provisioning_cleanup(monkeypatch):
+    """A second SIGTERM or SIGHUP while the thread cleans up after the first
+    does not end `_provision` early: it returns only once the thread is done,
+    so `provision:<task>` is still held while stop_services and rmtree run."""
+    import os
+    import signal
+    import threading
+    import time
+
+    from core import __main__ as kernel
+    from core import git
+
+    entered, cleaning, release = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def provision(task_id, spec, ports, *, base=None):
+        held = git.watch()
+        entered.set()
+        while not held.interrupted:
+            time.sleep(0.01)
+        cleaning.set()
+        release.wait(20)  # the cleanup, still running when the second signal comes
+        seen["cleaned"] = True
+        raise git.Interrupted()
+
+    monkeypatch.setattr(kernel.workspace, "provision", provision)
+
+    async def go():
+        job = asyncio.create_task(kernel._provision("t", None, {}, None))
+        assert await asyncio.to_thread(entered.wait, 20)
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert await asyncio.to_thread(cleaning.wait, 20)
+        os.kill(os.getpid(), signal.SIGHUP)
+        await asyncio.sleep(0.5)
+        assert not job.done()  # still waiting on the thread
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(job, 20)
+        return dict(seen)  # read the moment `_provision` ends
+
+    assert run(go()) == {"cleaned": True}

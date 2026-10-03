@@ -34,8 +34,8 @@ Line numbers are at `b3f9011c7`.
 | The fallback leg sends no `max_tokens`; its input limit is its endpoint's context | `test_open_weight_sends_no_output_limit`, `test_open_weight_input_limit_is_its_endpoints_context`; the too-large tests size their inputs from the settings |
 | An open-weight call with no reported usage is charged the most its endpoint can produce | `test_open_weight_worst_case_is_its_endpoints_largest_answer` |
 | A governance fan-out runs every hunk at once on one Postgres connection | `test_governance_fan_out_runs_past_eight_at_once`, `test_a_300_hunk_fan_out_opens_one_connection` |
-| The kernel's open-file limit is its hard limit | `test_start_raises_the_open_file_limit_to_the_hard_limit` |
-| A 429 is `rate_limited`; its endpoint is not asked again before its `Retry-After`, and nothing waits | `test_a_429_holds_its_endpoint_and_the_next_call_goes_to_the_fallback`, `test_a_429_without_retry_after_holds_nothing`, `test_retry_after_as_an_http_date_is_honoured` |
+| The kernel's open-file limit is raised to its hard limit, or OPEN_MAX, and never lowered | `test_start_raises_the_open_file_limit_and_never_lowers_it` |
+| A 429 is `rate_limited`; its endpoint is not asked again before its `Retry-After`, and nothing waits | `test_a_429_holds_its_endpoint_and_the_next_call_goes_to_the_fallback`, `test_a_429_without_retry_after_holds_nothing`, `test_retry_after_as_an_http_date_is_honoured`, `test_a_retry_after_of_non_ascii_digits_holds_nothing` |
 | A workspace turn's output per call is Claude Code's own default unless the project spec names one | `test_workspace_turn_sets_no_output_limit_by_default`, `test_a_spec_output_limit_reaches_the_turn` |
 | The gateway sets no read or connect timeout of its own | `test_the_gateway_sets_no_upstream_timeout_of_its_own` |
 | A call no client waits for is cut and charged | `test_a_turn_that_exits_cuts_its_silent_calls`, `test_a_client_that_disconnects_cuts_its_call` |
@@ -151,7 +151,8 @@ Authentication).
 **429.** `judgement.post` (`core/judgement.py:592-609`) returns
 `LegError("rate_limited", "none", status=429)` on a 429, and the reason
 joins the reasons table (`:137`). When the answer carries `Retry-After`
-(delta seconds or an HTTP date, RFC 9110 section 10.2.3), `post` records,
+(delta seconds in ASCII digits, or an HTTP date, RFC 9110 section
+10.2.3), `post` records,
 for that endpoint URL, the time before which it is not asked again. A
 later `post` to that URL inside the hold is not sent and does not wait: it
 returns `LegError("rate_limited", "none")` at once, billed nothing, and
@@ -160,8 +161,8 @@ the hunk goes to its fallback leg as every failed leg does
 documents a rate limit as a number: TypeSafe's API page says to back off
 on 429 or 529, OpenRouter's limits page names no limit for paid models
 and says to honour `Retry-After`. Not asking inside the hold is that
-documented behaviour, and it adds no number. A 429 without `Retry-After`
-holds nothing; the next run asks again, as it does for any failure
+documented behaviour, and it adds no number. A 429 without a readable
+`Retry-After` holds nothing; the next run asks again, as it does for any failure
 (`UNANSWERED_RUNS`, sourced in m1-3-judgement.md). A 429 is never recorded
 as a generic `http_status`.
 
@@ -215,7 +216,7 @@ call when no client waits for it, with no number:
   `handler_cancellation=True` a client that has read a whole 401 can
   leave before `handle` resumes, so the login cache is invalidated in
   `_metered` and `_forward` as soon as the status arrives, not after
-  `handle`'s await.
+  `handle`'s await. The decision is one method, `Gateway._answered`.
 
 ### Provisioning (row 7)
 
@@ -246,7 +247,9 @@ make provisioning interruptible, not a number. So:
   under `git.uninterrupted()`, so an interrupt mid-clone leaves no ref.
 - `_setup` starts each command through `git.start`, with its output to a
   temporary file the kernel holds open, not a pipe, and `wait()`s on the
-  process, with no timeout. A child the command leaves holding its output
+  process, with no timeout. The result keeps the last `SETUP_TAIL` (1500)
+  characters, read from the last 4 x `SETUP_TAIL` bytes, since a UTF-8
+  character is at most 4 bytes. A child the command leaves holding its output
   cannot hold the step open; `runs.reap(mark)` then sweeps it, as now. An
   interrupted provision ends in `Refused("provisioning failed:
   interrupted")`.
@@ -254,13 +257,14 @@ make provisioning interruptible, not a number. So:
   under a watch. Ctrl-C, SIGTERM, and SIGHUP of the kernel (the last two
   through `loop.add_signal_handler`) cancel it; on that cancel it calls
   `interrupt()` and awaits the thread before it re-raises, so
-  `provision:<task>` is held until the cleanup is done.
+  `provision:<task>` is held until the cleanup is done. The handlers stay
+  in place through that wait: a second signal cancels the wait, and the
+  wait absorbs it (`uncancel`) and goes on until the thread is done.
 - 2.1's provision job ("the task stays stoppable", m2-1-resident-kernel.md)
   hooks the task's stop into the same `interrupt()`.
 - 1.4c already races its build against the stop and interrupt alone
-  (m1-4c-verifier.md:171, :549). Its setup in the VM has the same pipe
-  question as `_setup`: a child left holding the output pipe holds the
-  read open. The lead relays this.
+  (m1-4c-verifier.md:171, :549), and its VM setup also writes its output
+  to files, waits on the process, and reaps the group.
 - 1.4d's leftover-file sweep relies on every git call that carries a
   credential ending at `git_timeout_s` (m1-4d-credential.md:126-129).
   Provisioning's git calls carry no credential, so that holds.
@@ -385,6 +389,15 @@ New, each of a removed cap's unbounded or honest behavior:
 27. `test_a_term_or_hangup_of_the_kernel_interrupts_provisioning`: SIGTERM
     and SIGHUP during `_provision` reach the thread's watch and cancel the
     start.
+28. `test_a_second_signal_waits_for_the_provisioning_cleanup`: SIGTERM,
+    then SIGHUP while the thread is still cleaning up; `_provision` is not
+    done until the thread is, so `provision:<task>` stays held.
+29. `test_a_retry_after_of_non_ascii_digits_holds_nothing`: `"²"` and
+    Arabic-Indic digits read as no `Retry-After`; the 429 is
+    `rate_limited`, goes to the fallback, and the next call asks again.
+30. `test_a_401_whose_client_leaves_at_once_still_rereads_the_credential`:
+    the upstream answers 401 with a stream that never ends, the client
+    reads the status and leaves, and the login is read again.
 
 Changed, since they enshrine a cap:
 
@@ -490,3 +503,24 @@ timeouts. The docs check writes these.
   asked; nothing waits on `Retry-After`.
 - The project spec's `max_output_tokens` key is kept as Tom's per-project
   choice.
+
+## Patch round 1 (review round 1 of 2)
+
+On top of the docs commit `936c377ae`. Every finding resolved:
+
+- **F1.** `test_calibrate_loads_any_number_of_cases` exists: a 51-case
+  file loads whole (test 1).
+- **F2.** A second SIGTERM or SIGHUP during `_provision`'s cleanup no
+  longer ends the wait: the handlers stay (without them the second signal
+  would end the kernel with the cleanup half done), and the wait absorbs
+  each further cancel until the interrupt and the thread are both done
+  (test 28).
+- **Nit.** `_setup`'s tail bytes are 4 x `SETUP_TAIL`, said beside it.
+- **T1.** `retry_after` reads only ASCII digits as delta seconds; anything
+  else is no hold, and the 429 stays `rate_limited` (test 29).
+- The Done table's open-file row names its test as it is,
+  `test_start_raises_the_open_file_limit_and_never_lowers_it`; every
+  other test the plan names exists, apart from the removed
+  `test_calibrate_refuses_too_many_cases`.
+- **T2.** The early-leave 401 is a test (30); with the invalidate moved
+  back after `handle`'s await it fails.

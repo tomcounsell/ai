@@ -695,6 +695,16 @@ def test_a_429_without_retry_after_holds_nothing(dsn):
     assert [r["leg"] for r in UP.seen(sid)] == ["jev", "open_weight", "jev"]
 
 
+def test_a_retry_after_of_non_ascii_digits_holds_nothing(dsn):
+    assert judgement.retry_after("²", 100.0) is None
+    assert judgement.retry_after("٣٠", 100.0) is None
+    sid = UP.script({"status": 429, "headers": {"Retry-After": "²"}}, default={"probs": PRECISE})
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.attempts[0]["reason"] == "rate_limited" and j.leg == "fallback"
+    j, _, _ = ask(dsn, port=UP.port(script=sid))
+    assert j.leg == "primary"  # nothing was held
+
+
 def test_retry_after_as_an_http_date_is_honoured():
     assert judgement.retry_after("Wed, 21 Oct 2037 07:28:00 GMT", 0.0) == 2139722880.0
     assert judgement.retry_after("60", 100.0) == 160.0

@@ -390,9 +390,9 @@ def test_an_allowed_path_with_an_escaped_query_reaches_upstream_byte_for_byte(ds
 # -- no timeout of its own: an exit or a disconnect cuts a call ----------------------------
 
 
-async def _raw_upstream(*, answer: bytes | None = None, hang_up: bool = False):
+async def _raw_upstream(*, answer: bytes | None = None, hang_up: bool = False, status: str = "200 OK"):
     """A local upstream on a bare socket: it reads a request's head, then
-    sends `answer` (if any) and waits, or hangs up at once. `seen` is set
+    sends `answer` (if any) under `status` and waits, or hangs up at once. `seen` is set
     when a request arrives; `closed` when the gateway closes its side."""
     seen, closed = asyncio.Event(), asyncio.Event()
 
@@ -403,7 +403,10 @@ async def _raw_upstream(*, answer: bytes | None = None, hang_up: bool = False):
             writer.close()
             return
         if answer is not None:
-            head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+            head = (
+                f"HTTP/1.1 {status}\r\n".encode()
+                + b"content-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+            )
             writer.write(head + f"{len(answer):x}\r\n".encode() + answer + b"\r\n")
             await writer.drain()
         while await reader.read(65536):
@@ -463,6 +466,35 @@ def test_a_client_that_disconnects_cuts_its_call(dsn):
     assert len(opened) == 1 and len(charged) == 1
     assert charged[0]["cut"] is True and charged[0]["unsent"] is False
     assert charged[0]["usd_micros"] == opened[0]["estimate_usd_micros"]  # nothing reported: the worst case
+
+
+def test_a_401_whose_client_leaves_at_once_still_rereads_the_credential(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("first\n")
+    login = ClaudeLogin(str(token), ttl_s=3600)
+    assert login.token() == "first"
+    token.write_text("second\n")
+
+    async def go():
+        started = STREAM[: STREAM.index(b"event: message_delta")]
+        server, url, _, closed = await _raw_upstream(answer=started, status="401 Unauthorized")
+        task = await _new_task(dsn)
+        gateway = Gateway(dsn, upstream=url, credential=login)
+        await gateway.start()
+        base = gateway.issue(task, "turn-1")
+
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+            got = r.status  # the head only; the client leaves before the body ends
+        await asyncio.wait_for(gateway.drain(task), 10)
+        await asyncio.wait_for(closed.wait(), 10)
+        await gateway.close()
+        server.close()
+        return got
+
+    assert asyncio.run(go()) == 401
+    assert login.token() == "second"
 
 
 def test_a_started_stream_whose_client_leaves_is_charged_once(dsn):
