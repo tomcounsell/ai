@@ -39,9 +39,11 @@ this task's.
 **2.1, the resident kernel** (`m2-1-resident-kernel.md`). `python -m core
 serve` (`core/serve.py`) folds every task that is not merged or stopped
 and `schedule` runs one step of each ready one. A harness step needs the
-turn slot, the session advisory lock `turn-slot:<machine>` in
-`core/router.py`, which `python -m core run` also takes. Ready tasks are
-taken in order of the id of their latest row. So a routine run is a task
+turn slot, `slot.held(holder)` in `core/slot.py`: the session lock
+`turn-slot:<machine>`, FIFO by Postgres's lock queue, reentrant within a
+process, taken around each `run_turn` and each check, and waited on by
+`python -m core run`. Ready tasks are taken in order of the id of their
+latest row. So a routine run is a task
 the kernel drives: `python -m core routine` starts or continues it, and
 the kernel's `schedule` runs its steps.
 
@@ -282,24 +284,27 @@ verdict, and refuses or holds nothing, and the rebuild plan's Done says it
 
 ### The slot's order
 
-These changes live in `core/serve.py` (2.1's `schedule`), `core/router.py`
-(2.1's slot), and `core/runs.py`:
+These changes live in `core/serve.py` (2.1's `schedule`), `core/slot.py`
+(2.1's slot), `core/runs.py`, and the check runners:
 
 - **The sort key.** `schedule`'s order of ready tasks becomes: background
   last, then the id of the latest row, oldest first.
-- **Preempting.** Before a foreground harness step waits for the slot
-  (in `schedule` or in `python -m core run`), it sends
-  `pg_notify('valor_preempt', id)` for each background task that has a
-  `turn.started` with no `turn.ended`. `run_turn` listens on `valor_preempt`
-  beside `valor_stop`. On hearing its own task, it runs the stop path
-  without writing `task.stopped`: revoke, kill the group, drain, reap, then
-  `turn.ended` with outcome `preempted`.
+- **Preempting.** `slot.held`'s holder names its task. A holder for a
+  foreground task sends `pg_notify('valor_preempt', '')` before it blocks;
+  `schedule` and `python -m core run` both take the slot through
+  `slot.held`, so both preempt. A reentrant inner `held` sends nothing.
+- **Being preempted.** A background holder's `slot.held`, once it holds
+  the slot, listens on `valor_preempt` and on a notification cancels the
+  body it guards. Only the holder listens, so the notice needs no id.
+  `run_turn`'s cancel path is the stop path without `task.stopped`:
+  revoke, kill the group, drain, reap, then `turn.ended` with outcome
+  `preempted`. A check runner's cancel path kills its process group and
+  writes no verdict, so the check runs again.
 - **After preemption.** A preempted turn did not finish. The session and
   fresh-session runners return from the step with the answer or findings
   unspent. It does not count toward the idle bound or the failed-turn
   count, and the state is unchanged, so `schedule` runs the step again.
-- **No bound on the wait.** A background step waits as long as foreground
-  steps keep coming.
+- **No bound on the wait** while foreground steps keep coming.
 
 This is a scheduling rule, not a check on the agent
 ([machine.md](../machine.md), Concurrency). It looks only at which task a
@@ -350,7 +355,7 @@ the kernel only through Tom's merge tap.
 
 `critique_rounds: 1`, `review_rounds: 1`, as the rebuild plan sets for 4.3.
 The sort key and the `preempted` outcome touch `core/serve.py`,
-`core/router.py`, `core/runs.py`, the session runners, and the fold. The
+`core/slot.py`, `core/runs.py`, the check runners, the session runners, and the fold. The
 schema gains one unique index. Both changes are additive, and the tests
 below cover them.
 
@@ -476,6 +481,8 @@ processes):
 - `schedule` takes one ready foreground task before two background ones,
   and among foreground tasks the oldest latest row first.
 - A preempted fresh session (critique) is rerun, and only that branch.
+- A background check holding the slot is cancelled for a foreground turn,
+  writes no verdict, and runs again; a reentrant `held` sends nothing.
 - The emulator report counts a replay's preempted turns.
 
 `tests/test_ui.py` (aiohttp test client):
@@ -502,9 +509,10 @@ time after 4.1 and 2.1.
 | File | Change |
 |---|---|
 | `core/routines.py` | new: toml loading, registration, `due`, the expiry runner, the period fold over `tree_spending`'s `charges`, `report`, `PLIST_ENV`, the plist |
-| `core/serve.py` (2.1's code, kernel) | `schedule`'s sort key: background last, then the latest row id; `valor_preempt` before a foreground harness step waits |
-| `core/router.py` (2.1's code, kernel) | `python -m core run` sends `valor_preempt` before waiting for the slot for a foreground step |
-| `core/runs.py` (kernel) | `valor_preempt` listen; the `preempted` outcome |
+| `core/serve.py` (2.1's code, kernel) | `schedule`'s sort key: background last, then the latest row id |
+| `core/slot.py` (2.1's code, kernel) | the holder's task; `valor_preempt` sent by a foreground holder before it blocks, heard by a background holder, which cancels its body |
+| `core/runs.py` (kernel) | the cancel path writes `turn.ended` `preempted` |
+| `core/checks.py` (kernel) | a cancelled check writes no verdict and runs again |
 | `core/session.py`, `core/fresh.py` (kernel) | a `preempted` turn leaves the step unspent |
 | `core/machine.py` (kernel) | `preempted` folds as unfinished, outside the idle and failed counts |
 | `core/tasks.py` | `Brief.routine`, `Brief.replay`, `marker` on `tasks.start`, `background`, `index`, `attention_log` |
@@ -547,16 +555,12 @@ is `.venv/bin/python -m ui`, at `http://127.0.0.1:8790/`.
 
 Each is reversible; Tom can overturn any.
 
-- **A guard that fired before its expiry** is listed again 90 days after
-  its last firing. An unfired guard is deleted by default at expiry. This
-  reads the governance paragraph ("a guard that has not fired by expiry is
-  deleted by default").
+- **A guard that fired before its expiry** is listed 90 days after its
+  last firing; an unfired one at expiry (the governance paragraph).
 - **Use of a routine** is as [routines.md](../routines.md) defines it: an
   effect performed, a question Tom answered, or a child task that
   delivered. The emulator sweep delivers, so it is not listed.
-- **Instance grants show "no firing record"** in the sweep's instruction,
-  and Tom's keep-or-delete call is made on that. No hook records their
-  firing.
+- **Instance grants show "no firing record"**; no hook records firing.
 - **The plist is printed, not committed.** It names the checkout and its
   interpreter, which differ per Mac; `core backup --plist` already works
   this way. The schedule is in the toml, in git.
@@ -565,19 +569,15 @@ Each is reversible; Tom can overturn any.
 - **The period is the rolling 30 days ending at the report**, by the
   charge row's time, and includes the emulator's calibration tasks for the
   routine's replays.
-- **A background turn is preempted** when a foreground step is ready. The
-  Done says Tom's task never waits for the slot, and waiting for the
-  routine's turn to end would break that. The preempted turn's spend is
-  metered and lost, and counted in the sweep's report.
+- **A background turn is preempted** when a foreground step is ready,
+  since waiting for it would break the Done. Its spend is metered and lost,
+  and counted in the sweep's report.
 - **Replays are background**, whether a routine or a person started them.
   The forced `clarify` arm would otherwise keep `intake.underspecified`
   alive, and a hand-run gate replay would preempt routine turns.
-- **The expiry sweep covers guards and routines**, the two whose use the
-  ledger records.
-- **One open sweep at a time.** Later firings continue it, so Tom sees one
-  deletion branch.
-- **The expiry routine is not listed by itself.** The constraint and
-  Mission item 5 require it.
+- **The expiry sweep covers guards and routines**, whose use is recorded.
+- **One open sweep at a time**, continued by later firings.
+- **The expiry routine is not listed by itself** (Mission item 5).
 - **Both routines carry ceiling `act`.** The sweep's merge and the replays'
   local pushes are `act`, and each waits for a tap. The replays' taps come
   under the standing permission emulator.md records, which this task does
@@ -596,4 +596,4 @@ Each is reversible; Tom can overturn any.
 
 ## Questions for Tom
 
-None. Both open points are decided by default above.
+None; both open points are decided by default above.
