@@ -548,7 +548,9 @@ rewritten. A task without `parent_id` reads as a root.
 - **Answers need no fence of their own.** An answer needs `waiting`; the walk
   gives every unmerged descendant its own row (it folds `stopped`) and a merged
   node is not `waiting`, so `answer`'s state check refuses one under a stopped
-  ancestor. Tested.
+  ancestor once the stop commits. A command-line answer folded before the
+  stop commits lands after the stop's row; the task stays stopped and runs
+  no turn. A bridge answer holds the tree lock and cannot. Tested.
 - **Smaller choices.** `ancestors` is one recursive query; the Brief's
   spending reads to the micro-dollar (`$1.500000`), the command line's to four
   places; the property test also draws merges, forged as `tests/test_machine.py`
