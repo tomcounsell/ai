@@ -317,3 +317,26 @@ From review-1-4c1-p4 (`changes`) at de44821cf. Base still 2418d02c8.
    modes, and tests say so.
 
 No cap, timeout, or guard added.
+
+## Merged
+
+Checks on round 5 (c38c549ac): test pass (settings from every source,
+before a turn, mid-turn, and before a resumed turn, set nothing; a
+malformed final message gives no verdict, never a forged pass), review
+pass (F8 and F9 closed; governance yes for the task, under the standing
+pipeline grant of 2026-10-01, and none added by the round), docs updated
+8f8cf7470 (architecture.md, sdlc-state-machine.md, m1-4c-outline.md).
+
+Merge: suite on 8f8cf7470, 1195 passed, 23 skipped, ruff clean. Backup
+`valor_rebuild-20261004T071116Z.dump`. `valor-cori-rebuild` fast-forwarded
+from 2418d02c8 to 8f8cf7470.
+
+Rollout: step 2 has no kernel process to restart until 2.1 merges; the
+kernel checkout is this repository and `uv sync` holds. Step 3 runs on the
+first real task after the merge. 1.5's takeover gate (its Done item 5) can
+now run.
+
+Follow-ups: docs and critique still read `.valor/verdict.json`; they move
+to `final_verdict` when the docs stage is registered. A Pi reviewer gets
+its own probes in milestone 3. `final_verdict` assumes the result text is
+a string, and `parse` raises on stdout that is a JSON list or number.
