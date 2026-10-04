@@ -52,6 +52,11 @@ class Brief:
     `parent_id` names the task this one is a child of (None for a root; a
     document written before the tree loads as one). A Brief is written
     once, so a node's parent and ceiling never change.
+
+    `routine` names the routine a task belongs to (its objective, its runs,
+    and what they start); `replay` marks a task the emulator drives. Either
+    makes the task, and every task under it, background work
+    (`background`): the kernel runs Tom's tasks first.
     """
 
     instruction: str
@@ -68,6 +73,8 @@ class Brief:
     push_url: str | None = None
     project: dict[str, Any] | None = None
     parent_id: str | None = None
+    routine: str | None = None
+    replay: bool = False
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -146,19 +153,30 @@ def child_ceiling(parent_ceiling: str, requested: str | None) -> str:
 
 
 async def start(
-    conn, brief: Brief, *, by: str = "tom", via: str = "the command line", role_played: bool = False
+    conn,
+    brief: Brief,
+    *,
+    marker: dict[str, Any] | None = None,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
 ) -> str:
     """Write the task document and its first event in one transaction. The
     task starts in `judge`; the judge runner decides it. A Brief naming a
-    parent starts through `start_child`, its ceiling the one asked for."""
+    parent starts through `start_child`, its ceiling the one asked for.
+    `marker` is laid into `task.started` as `start_child`'s is (`{"sdlc": 1}`
+    when None); a root with `{"objective": NAME}` is a routine's objective."""
     if brief.parent_id is not None:
         given = asdict(brief)
         parent_id, ceiling = given.pop("parent_id"), given.pop("max_effect_class")
         return await start_child(
-            conn, parent_id, ceiling=ceiling, by=by, via=via, role_played=role_played, **given
+            conn, parent_id, ceiling=ceiling, marker=marker, by=by, via=via, role_played=role_played, **given
         )
+    marker = {"sdlc": 1} if marker is None else dict(marker)
+    if "calibration" in marker:
+        raise CalibrationTask("a calibration task is started by start_calibration")
     async with conn.transaction():
-        await _write(conn, brief, {"sdlc": 1}, ledger.provenance(by, via, role_played))
+        await _write(conn, brief, marker, ledger.provenance(by, via, role_played))
     return brief.id
 
 
@@ -448,6 +466,24 @@ async def subtree(conn, task_id: str) -> list[str]:
     return found
 
 
+async def background(conn, task_id: str) -> bool:
+    """Whether the task is background work: it or an ancestor carries
+    `Brief.routine` or `Brief.replay`. An unknown task is foreground."""
+    row = await (
+        await conn.execute(
+            "WITH RECURSIVE up (id) AS ("
+            "  SELECT %s::text"
+            "  UNION ALL"
+            "  SELECT d.body->>'parent_id' FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
+            "  WHERE d.body->>'parent_id' IS NOT NULL"
+            ") SELECT 1 FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
+            " WHERE d.body->>'routine' IS NOT NULL OR (d.body->>'replay')::boolean IS TRUE LIMIT 1",
+            (task_id,),
+        )
+    ).fetchone()
+    return row is not None
+
+
 async def lock_tree(conn, task_id: str) -> str:
     """The tree's advisory lock, `tree:<root id>`, taken by the writers that
     change what a tree holds or whether a node may reopen (`start_child`,
@@ -669,6 +705,27 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     `tree_spent_usd_micros` and `tree_open_calls` beside the task's own."""
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
+    turns, effects, attention = _digest(rows)
+    return {
+        "task_id": task_id,
+        **f.summary(),
+        **spending(rows),
+        "turns": turns,
+        "effects": effects,
+        "attention": attention,
+        "attention_counts": _counts(attention),
+        "delivered": (f.delivery or {}).get("summary"),
+        "delivery": f.delivery,
+        "parent_id": next(iter(await ancestors(conn, task_id)), None),
+        "fenced_by": await fenced_by(conn, task_id),
+        "children": await reports(conn, task_id),
+        **{k: v for k, v in (await tree_spending(conn, task_id)).items() if k != "charges"},
+    }
+
+
+def _digest(rows: list[dict[str, Any]]) -> tuple[dict[str, str | None], dict[str, str], list[dict[str, Any]]]:
+    """The turns (each with its outcome, None while open), the effects (each
+    with its state), and the attention log of one task's rows."""
     turns: dict[str, str | None] = {}
     effects: dict[str, str] = {}
     attention: list[dict[str, Any]] = []
@@ -734,21 +791,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "provenance": provenance(row),
                 }
             )
-    return {
-        "task_id": task_id,
-        **f.summary(),
-        **spending(rows),
-        "turns": turns,
-        "effects": effects,
-        "attention": attention,
-        "attention_counts": _counts(attention),
-        "delivered": (f.delivery or {}).get("summary"),
-        "delivery": f.delivery,
-        "parent_id": next(iter(await ancestors(conn, task_id)), None),
-        "fenced_by": await fenced_by(conn, task_id),
-        "children": await reports(conn, task_id),
-        **{k: v for k, v in (await tree_spending(conn, task_id)).items() if k != "charges"},
-    }
+    return turns, effects, attention
 
 
 def provenance(row: dict[str, Any]) -> dict[str, Any]:
@@ -800,3 +843,61 @@ def audit(state: dict[str, Any]) -> list[str]:
         if effect_state == "in_flight":
             problems.append(f"effect {effect_id} has an intent and no outcome")
     return problems
+
+
+async def index(conn) -> list[dict[str, Any]]:
+    """Every task, newest first: its id, instruction, state, parent, metered
+    spending, attention counts, and the time of its last row. The status
+    page's task list."""
+    ids = await (
+        await conn.execute(
+            "SELECT id, body->>'instruction', body->>'parent_id' FROM documents WHERE kind = 'task'"
+        )
+    ).fetchall()
+    found = []
+    for task_id, instruction, parent_id in ids:
+        rows = await ledger.read(conn, task_id)
+        f = machine.fold(rows)
+        _, _, attention = _digest(rows)
+        state = (
+            "calibration"
+            if f.calibration
+            else "stopped"
+            if _stopped(rows)
+            else "node"
+            if f.legacy
+            else f.state.value
+        )
+        found.append(
+            {
+                "task_id": task_id,
+                "instruction": instruction,
+                "parent_id": parent_id,
+                "state": state,
+                "spent_usd_micros": spending(rows)["spent_usd_micros"],
+                "attention_counts": _counts(attention),
+                "last_at": max((r["at"] for r in rows if r.get("at")), default=None),
+            }
+        )
+    return sorted(found, key=lambda t: t["last_at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
+
+
+def _stopped(rows: list[dict[str, Any]]) -> bool:
+    return any(r["type"] == "task.stopped" for r in rows)
+
+
+async def attention_log(conn) -> list[dict[str, Any]]:
+    """Every task's attention entries in time order, each with its task id
+    and the row time it was recorded at (an unanswered question carries the
+    time it was asked)."""
+    entries = []
+    for (task_id,) in await (await conn.execute("SELECT id FROM documents WHERE kind = 'task'")).fetchall():
+        rows = await ledger.read(conn, task_id)
+        _, _, attention = _digest(rows)
+        asked = {r["payload"].get("question_id"): r["at"] for r in rows if r["type"] == "question.asked"}
+        for entry in attention:
+            at = (entry.get("provenance") or {}).get("at") or asked.get(entry.get("question_id"))
+            entries.append(
+                {"task_id": task_id, "at": at.isoformat() if hasattr(at, "isoformat") else at, **entry}
+            )
+    return sorted(entries, key=lambda e: e["at"] or "")

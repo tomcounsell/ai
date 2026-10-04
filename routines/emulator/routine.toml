@@ -1,0 +1,13 @@
+name = "emulator"
+runner = "emulator"
+ceiling = "act"
+model = "frontier"
+mission_item = "2; replays measure Valor against its own baseline"
+need = ["The 1.5 gate replays and every later gate run the same items in the same arms"]
+created = 2026-10-04
+instruction = "Replay every item in the replay directory in the bare, clarify and routed arms, judge each, and record the sweep's report."
+
+[schedule]
+weekday = 0
+hour = 1
+minute = 0

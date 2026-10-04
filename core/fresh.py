@@ -238,6 +238,8 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
             return {"status": "stopped"}
         async with await db.connect(ctx.dsn) as conn:
             now = await tasks.status(conn, ctx.task_id)
+        if ended["outcome"] == "preempted":
+            return dict(slot.PREEMPTED)
         if ended["outcome"] == "stopped":
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
@@ -550,6 +552,8 @@ async def _docs_turn(
         return {"status": "stopped"}
     async with await db.connect(ctx.dsn) as conn:
         now = await tasks.status(conn, ctx.task_id)
+    if ended["outcome"] == "preempted":
+        return dict(slot.PREEMPTED)
     if ended["outcome"] == "stopped":
         return {"status": "stopped", "state": now, "turn": ended}
     if ended["outcome"] != "done" or ended["result"].get("is_error"):
@@ -895,7 +899,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                 async with checks.stop_heard(ctx) as stop:
                     got = await container.verify(ctx, lay, b, candidate, rows, stop, record)
             except checks._Stopped:
-                return {"status": "stopped"}
+                return await checks.interrupted(ctx)
             if "verify" not in got:
                 return failed(got["turn"]["result"]) if got["status"] == "failed" else got
             verify, verify_id = got["verify"], got["id"]
@@ -961,7 +965,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                         lambda step: lay.checks / f"{check_dir.name}.{step}.out",
                     )  # fmt: skip
             except checks._Stopped:
-                return {"status": "stopped"}
+                return await checks.interrupted(ctx)
             # Setup ran before the inputs exist, so it can plant none, and
             # its profile kept it out of the session's own directories and
             # the checkout's repository. What it left in the checkout that
@@ -1002,6 +1006,8 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             await asyncio.to_thread(services.__exit__, None, None, None)
         async with await db.connect(ctx.dsn) as conn:
             now = await tasks.status(conn, ctx.task_id)
+        if ended["outcome"] == "preempted":
+            return dict(slot.PREEMPTED)
         if ended["outcome"] == "stopped":
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):

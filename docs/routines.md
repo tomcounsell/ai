@@ -14,39 +14,74 @@ rules.
 
 ## What a routine is
 
-A routine is a directory under `routines/<name>/` holding two files, both in
-git and both changed only by a reviewed diff:
+A routine is a directory under `routines/<name>/` in the kernel's own
+checkout holding `routine.toml`, changed only by a reviewed diff. The kernel
+reads it from `settings.routines_dir` and never from a task's workspace.
 
-| File | Holds | Serves |
+| Key | Holds | Serves |
 |---|---|---|
-| `routine.toml` | the instruction, the effect ceiling, the model, the mission item it serves, the two task ids that show its second need, and the date it was created | Bounded authority, metered spending; Mission item 5 |
-| `<label>.plist` | the launchd job: a `StartCalendarInterval` or `StartInterval` and one program argument list that calls the kernel CLI with the routine's name | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`) | Mac native (launchd for scheduling) |
+| `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
+| `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
+| `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
+| `project`, `branch` | the project spec and branch a runner that starts a workspace task provisions | |
+| `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month`, or `interval` in seconds | launchd |
 
-The plist never names a script of its own. Its program is the kernel's entry
-point, so the only path from a schedule to an effect runs through the broker.
-launchd starts a job missed during sleep once on wake and coalesces several
-missed intervals into one run, so a laptop that sleeps through a schedule
-gets one late run, never a burst.
+The launchd job is printed and never committed, since it names the checkout
+and its interpreter, which differ per Mac:
+`python -m core routine NAME --plist` prints a plist whose one program is
+`python -m core routine NAME` run by the kernel's own interpreter, with the
+schedule from the toml and the Postgres and replay settings that were set
+when it was printed (`VALOR_PG*`, `VALOR_DB*`, `VALOR_DEMO`). It names no
+script and carries no secret. launchd starts a job missed during sleep once
+on wake and coalesces several missed intervals into one run, so a laptop
+that sleeps through a schedule gets one late run, never a burst.
 
-The plist carries no secrets in its environment. A run that needs a
-credential reaches it through a tool that reads Keychain, inside a performer
-the broker calls (Mac native: Keychain for secrets).
+A run that needs a credential reaches it through a tool that reads Keychain,
+inside a performer the broker calls (Mac native: Keychain for secrets).
 
 ## How a run starts
 
-Design: launchd runs `python -m core routine <name>`. The kernel reads
-`routine.toml`, commits a Brief for this run, and runs its turns exactly as
-`python -m core run` does. The run ends the way any task ends: a delivery,
-a question, or a stop. One
-`python -m core stop <task>` stops it.
+launchd runs `python -m core routine NAME`. The command loads the toml and
+finds the routine's standing objective: a root task with `Brief.routine` set
+and the marker `{"objective": NAME}`, registered by a `routine.registered`
+row on the `routines` stream the first time it runs. A unique index keeps
+one live objective per name and ceiling. A change of the toml's ceiling
+registers a second objective, and the period report sums both.
 
-The current kernel has no `routine` command and no routine record. It has
-`start` and `run`, which already give a scheduled job everything that
-matters: a plist that calls `python -m core start ...
---ceiling read` and then `python -m core run <task>` gets a
-ceiling, the gateway, and the ledger. What it lacks is the routine's
-identity on the task (so the ledger can say which routine a run belongs to)
-and the period report of spending.
+The objective is a node: it folds as a task without the state machine, so
+the kernel passes it by, and stop and fencing still work on it. Each run is
+a child of the objective, so the tree's rollup is the routine's spending.
+The runner named in the toml starts the run or continues the open one, and a
+`routine.ran` row on the objective records the firing with its outcome
+(`started`, `continued`, `nothing_due`, `finished`, `failed`, `running`).
+The command prints one line: the run, its outcome, its metered spending, and
+the routine's spending over the period.
+
+Tasks a runner starts through `start --project` are children of the
+objective with `Brief.routine` set. The resident kernel drives them like any
+task, as background work (below). A task of the run ends the way any task
+ends: a delivery, a question, or a stop.
+
+Tom's stop holds. `python -m core stop <objective>` fences the whole tree;
+the next launchd firing writes nothing and says the routine is stopped.
+`python -m core routine NAME --restart` registers a fresh objective whose
+`replaces` names the stopped one; on a routine that is not stopped it
+changes nothing. `python -m core routines` lists every routine with its last
+run and its period spending.
+
+The two routines the kernel holds:
+
+- **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
+  and, when something is due, starts one task on the `valor` project with
+  the due list on its `task.started`. Nothing due starts no task and runs no
+  turn.
+- **emulator** (Sunday 01:00, ceiling `act`): replays every item in
+  `$VALOR_DEMO/items` in the `bare`, `clarify` and `routed` arms, each a
+  child of the run, judged, and writes `$VALOR_DEMO/sweeps/<run>.json` with
+  the baseline, scores, hidden-test exits, attention, spending and the count
+  of preempted turns. The runner holds the session lock `run:<run>`, so a
+  second process says `already running`. A run with no report is continued.
 
 ## Metered spending and ceiling
 
@@ -56,27 +91,38 @@ routine that makes no model call still runs as a task with metered spending
 of zero, so its effects still pass through the broker and land in the
 ledger. Constraint: Bounded authority, metered spending.
 
-**Period spending.** Design: a routine is a standing objective, and each
-run is a child whose metered spending rolls up into the routine's. The
-routine's spending over its thirty-day period is reported, so a routine that
-runs more often than expected shows it; nothing stops it on money. The
-kernel's objective tree rolls a child's spending into its parent's; the
-routine itself and its period report are design.
+**Period spending.** The routine's spending over its rolling thirty-day
+period (`settings.routine_period_days`) is the metered charges of every
+objective of the name and their subtrees, plus the calibration tasks that
+meter the emulator's stand-in and judge for items in those subtrees.
+Charges are counted by their own `at`. Open `gateway.reserved` calls are
+listed apart and never summed. `python -m core routines` and the status page
+print the same figure. Nothing stops a routine on money: a million dollars
+of earlier charges changes nothing about whether the next run starts.
 Constraint: Bounded authority, metered spending.
 
-**Ceiling.** The ceiling is set in `routine.toml`, copied into each run's
-Brief, and never widens at run time. Least privilege [11] sets the default:
-a routine gets the lowest class its job needs.
+**Ceiling.** The ceiling is set in `routine.toml`, copied into the
+objective's Brief, and never widens at run time; a child's ceiling is at or
+below its parent's. Least privilege [11] sets the default: a routine gets the
+lowest class its job needs.
 
 **Attention.** A routine spends Tom's attention only through a question or a
 held `act`, and both are ledgered against the run (Mission item 6). A
 routine's attention is counted on the same footing as its money when the
 ninety-day review below asks whether it earned its place.
 
-**One turn at a time.** On a 16 GB machine one `claude -p` runs at a time
-(`docs/machine.md`). A scheduled run that finds a turn already running waits
-for it; Tom's tasks are never queued behind a routine. Design: the current
-kernel does not serialize turns across tasks.
+**One turn at a time, Tom first.** On a 16 GB machine one `claude -p` runs at
+a time (`docs/machine.md`). Work under a task or ancestor with `Brief.routine`
+or `Brief.replay` is background; everything else is foreground. A foreground
+holder of the turn slot takes the shared lock `turn-slot-fg:<machine>` and
+sends `valor_preempt` before it waits. A background holder listens, and when
+it hears the notice or finds the lock held, its turn or check ends: the
+gateway grant is revoked, the process group is killed, the turn ends with
+outcome `preempted`, and no verdict is written. The task is ready again at
+once and runs after Tom's work. The kernel starts a foreground step beside a
+background one for this reason, and starts a background step only when no
+foreground step is ready. A replay run by hand is background too but sends no
+notice.
 
 ## What a routine may do
 
@@ -138,8 +184,11 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 - **The ledger.** Every run is a task, so its start, its turns, its spend,
   its effects, and its end are ledger rows like any task's. A run's result
   is its delivery, read with `python -m core status <task>`.
-- **The dashboard.** `ui/` shows routine runs beside Tom's tasks: spending
-  over the period, last run, last result. Read-only.
+- **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
+  `VALOR_UI_PORT`): every task, one task with its ledger, the effects held
+  for Tom, the attention log, and each routine with its last run, its last
+  result and its period spending. It is read-only and answers GET only; the
+  address is the loopback one, on a port no sandbox profile opens.
 - **Attention.** A question from a routine reaches Tom through the same
   path as any task's question and is ledgered with its answer and
   provenance. A held `act` appears in the pending approvals.
@@ -155,25 +204,31 @@ A first occurrence is a task, not a routine (Mission item 5).
 **Use.** A routine is in use when a run in the last ninety days led to
 something outside itself: an effect performed, a question Tom answered, or a
 child task that delivered. A routine that has run for ninety days and
-produced only "nothing found" is unused.
+produced only "nothing found" is unused. The emulator sweep's replays
+deliver, so it is in use while it runs.
 
 **Deletion.** An unused routine is deleted by default at ninety days. The
-expiry sweep is itself a routine: on a schedule it reads the ledger for
-unused routines, expired guards, and tools and skills unused for ninety
-days, and opens one branch removing all of them. Opening the branch is
-`propose`. Merging it is `act`, and waits for Tom's tap like any merge.
-Keeping something past expiry takes a reason in the branch's review, given
-by Tom; the default is the deletion (Mission item 5; the governance
-constraint).
+expiry sweep is itself a routine, and it never lists itself. `routines.due`
+reads kernel-written rows only and proposes:
+
+- a seeded guard unfired at its expiry, or fired only on background work; a
+  guard that fired on Tom's work, ninety days after its last firing and past
+  its expiry;
+- an instance grant past its expiry, shown with "no firing record" since no
+  hook records one; one on another project's task is listed apart as
+  outside this repository and not removed;
+- a routine whose first registration is over ninety days old and whose runs
+  in that window led to no use.
+
+An item a sweep listed is not listed again for ninety days. The sweep's one
+task has the ceiling `act` and opens one branch removing everything due.
+Opening the branch is `propose`. Merging it is `act`, and waits for Tom's tap
+like any merge. Keeping something past expiry takes a reason in the branch's
+review, given by Tom; the default is the deletion (Mission item 5; the
+governance constraint).
 
 ## Gaps
 
-- The `routine` command, the routine identity on a task, and the period
-  spending report do not exist in the current kernel.
-- Serializing turns across tasks so a routine never runs beside Tom's work
-  is design; the current kernel does not do it.
 - Whether the expiry sweep's deletion branch should merge without a tap is
   open. The constraint makes every merge `act`, and the kernel has no class
   for a merge Tom has granted in advance.
-- No routine ran in the demonstration or the replay baseline, so nothing in
-  this design has been exercised.

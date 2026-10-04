@@ -4,7 +4,7 @@ Every scheduled task and runner.
 
 ## Scope
 
-- launchd plists and the routines they run.
+- Each routine is a directory holding `routine.toml`, and a runner module when its work is not a plain task. `python -m core routine NAME --plist` prints the launchd plist; none is committed.
 - Every routine is an objective in `core/` with an effect ceiling. A routine is never a bare script.
 - Extraction follows the mission rule: a routine exists on a demonstrated second need, and one unused for ninety days is deleted by default.
 

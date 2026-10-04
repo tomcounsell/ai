@@ -4,7 +4,8 @@ The read-only dashboard.
 
 ## Scope
 
-- Views over `core/` read models: tasks, metered spending, the ledger, pending approvals, the attention log.
+- Views over `core/` read models: tasks, metered spending, the ledger, pending approvals, the attention log, and each routine with its last run and period spending.
+- `python -m ui` serves `127.0.0.1:8790` (`VALOR_UI_PORT`), aiohttp, GET only; `ui/app.py` holds the pages.
 - Read-only. Approvals are given on the approval surface, not here.
 
 Governed by [docs/tech-stack.md](../docs/tech-stack.md) (Surfaces) and [docs/mission.md](../docs/mission.md) (The attention log).

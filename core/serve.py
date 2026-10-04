@@ -106,7 +106,8 @@ LAST_WORKING_ENDED = (
     "SELECT DISTINCT ON (e.task_id) e.task_id, e.payload, s.payload FROM events e "
     "JOIN events s ON s.task_id = e.task_id AND s.type = 'turn.started' "
     "AND s.payload->>'turn_id' = e.payload->>'turn_id' "
-    "WHERE e.type = 'turn.ended' AND s.payload->>'state' IS NOT NULL "
+    "WHERE e.type = 'turn.ended' AND e.payload->>'outcome' <> 'preempted' "
+    "AND s.payload->>'state' IS NOT NULL "
     "AND COALESCE((s.payload->>'fresh')::boolean, false) = false "
     "AND (%(task)s::text IS NULL OR e.task_id = %(task)s) "
     "ORDER BY e.task_id, e.id DESC"
@@ -294,7 +295,8 @@ class Kernel:
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
         self.jobs: dict[str, asyncio.Task] = {}
-        self.harness: str | None = None  # the task whose harness job runs
+        self.harness: str | None = None  # the foreground task whose harness job runs
+        self.background: str | None = None  # the background task whose harness job runs
         self.services: dict[str, router._Services] = {}
         self.swept: set[str] = set()
         self.seen: dict[str, int] = {}  # the latest row a step of the task read or wrote
@@ -330,7 +332,7 @@ class Kernel:
         return [r[0] for r in rows]
 
     async def schedule(self, conn) -> None:
-        ready: list[tuple[int, str]] = []
+        ready: list[tuple[bool, int, str]] = []
         active = await self.active(conn)
         for task_id in [t for t in self.services if t not in active and t not in self.jobs]:
             # Stopped since its last step: its services stop and its lock is released.
@@ -348,14 +350,22 @@ class Kernel:
                 continue
             if found is not None:
                 ready.append(found)
-        if self.harness is None and ready:
-            latest, task_id = min(ready)
+        # A foreground step starts beside a background one: it waits for
+        # the slot and preempts the background turn holding it.
+        foreground = [r for r in ready if not r[0]]
+        if self.harness is None and foreground:
+            _, latest, task_id = min(foreground)
             self.harness = task_id
             self._start(task_id, self._step(task_id, latest), latest)
+        elif self.harness is None and self.background is None and ready:
+            _, latest, task_id = min(ready)
+            self.background = task_id
+            self._start(task_id, self._step(task_id, latest), latest)
 
-    async def _ready(self, conn, task_id: str) -> tuple[int, str] | None:
+    async def _ready(self, conn, task_id: str) -> tuple[bool, int, str] | None:
         """Start the task's job if it has one now; a harness step is
-        returned instead, for `schedule` to choose the oldest."""
+        returned instead, for `schedule` to choose: foreground before
+        background, then the oldest."""
         rows = await ledger.read(conn, task_id)
         f = machine.fold(rows)
         if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
@@ -383,7 +393,7 @@ class Kernel:
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)
         elif f.state in HARNESS:
-            return (latest, task_id)
+            return (await tasks.background(conn, task_id), latest, task_id)
         return None
 
     async def _kernel_release(self, conn, task_id: str) -> str | None:
@@ -406,6 +416,8 @@ class Kernel:
             self.jobs.pop(task_id, None)
             if self.harness == task_id:
                 self.harness = None
+            if self.background == task_id:
+                self.background = None
             if not job.cancelled() and job.exception() is not None:
                 _log(f"task {task_id}: job failed: {job.exception()!r}")
                 self.parked[task_id] = latest
@@ -517,7 +529,10 @@ class Kernel:
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, task_id)
         self.seen[task_id] = latest
-        if out.get("status") != "moved":
+        if out.get("preempted"):
+            # Nothing moved: the step is ready again, behind the foreground.
+            self.seen.pop(task_id, None)
+        elif out.get("status") != "moved":
             # Seen: the rows the step read, and the rows it wrote up to the
             # first another writer added while it ran, which steps it again.
             for r in rows:

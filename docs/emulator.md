@@ -187,11 +187,10 @@ holds authority only for pushes to the run's own local origin, which Tom
 pre-authorized.
 
 A run whose result file has no outcome resumes its task; one with an
-outcome is refused unless `--rebuild` is given. Each driver holds one of
-`VALOR_DEMO_SLOTS` lock files for its whole invocation, so at most that many
-replays run turns at once. The default is three, which the experiments ran on
-a 64 GB machine; on the 16 GB M4 Air set it to one, matching the constraint
-of one `claude -p` at a time.
+outcome is refused unless `--rebuild` is given. Each replay turn
+takes the kernel's turn slot, so one `claude -p` runs at a time on the
+machine, as a background turn that gives way to Tom's work. `--parent` and
+`--name` start a replay under a routine's run, as the sweep does.
 
 ### The stand-in: `tests/emulator/stand_in.py`
 

@@ -80,6 +80,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_instance_grant
     ON events (task_id, (payload->>'instance_id'))
     WHERE type = 'guard.granted' AND payload->>'instance_id' IS NOT NULL;
 
+-- A routine's standing objective (core/routines.py): one live objective per
+-- name and ceiling; a restart names the stopped one it replaces.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_routine
+    ON events ((payload->>'name'), (payload->>'ceiling'), (COALESCE(payload->>'replaces', '')))
+    WHERE type = 'routine.registered';
+
 -- The judgement port's rows (core/judgement.py): one outcome per judgement.
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_judgement
     ON events ((payload->>'judgement_id'))

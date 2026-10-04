@@ -6,8 +6,8 @@ on the `guards` stream, once each. A governance instance Tom grants on a
 task (one hunk that adds a check, gate, hook, round, or review step) is a
 `guard.granted` row on that task, bound to the instance's id: an unchanged
 hunk stays granted across patches, a changed or moved hunk is a new
-instance. This module records; deleting an expired guard is a routine for
-milestone 4.
+instance. This module records; the expiry routine (`core/routines.py`) reads the
+rows and proposes the deletion of what is due.
 """
 
 from datetime import UTC, date, datetime, timedelta

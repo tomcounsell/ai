@@ -794,15 +794,42 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
     return {"ran": ran}
 
 
+async def _stop_or_preempt(listener, task_id: str) -> None:
+    heard = asyncio.create_task(runs._stop_heard(listener, task_id))
+    moved = slot.preempting()
+    if moved is None:
+        await heard
+        return
+    waiting = asyncio.create_task(moved.wait())
+    try:
+        await asyncio.wait({heard, waiting}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        heard.cancel()
+        waiting.cancel()
+
+
+async def interrupted(ctx) -> dict[str, Any]:
+    """The step's return when `_Stopped` ended a check: a task stopped is
+    `stopped`; a check preempted for a foreground task writes nothing and
+    runs again."""
+    moved = slot.preempting()
+    if moved is not None and moved.is_set():
+        async with await db.connect(ctx.dsn) as conn:
+            if not await tasks.is_stopped(conn, ctx.task_id):
+                return dict(slot.PREEMPTED)
+    return {"status": "stopped"}
+
+
 @contextlib.asynccontextmanager
 async def stop_heard(ctx):
-    """A task that finishes when a stop for this task is heard, with its
-    listening connection, for one run's lifetime."""
+    """A task that finishes when a stop for this task is heard, or when a
+    background check is preempted, with its listening connection, for one
+    run's lifetime."""
     listener = await db.connect(ctx.dsn)
     stop = None
     try:
         await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
-        stop = asyncio.create_task(runs._stop_heard(listener, ctx.task_id))
+        stop = asyncio.create_task(_stop_or_preempt(listener, ctx.task_id))
         yield stop
     finally:
         if stop is not None:
@@ -859,7 +886,7 @@ def test_runner(port):
             async with stop_heard(ctx) as stop:
                 got = await base_and_head(ctx, lay, b, stop, candidate.sha, "head")
         except _Stopped:
-            return {"status": "stopped"}
+            return await interrupted(ctx)
         if "ran" not in got:
             return {**got, "state": state} if got["status"] == "failed" else got
         ran = got["ran"]
