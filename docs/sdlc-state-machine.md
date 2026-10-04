@@ -562,11 +562,14 @@ in the kernel:** held `act` effects, approve, release, one-time approval.
 
 ### `stopped`
 
-**Entry.** `task.stopped` from any state, written by `python -m core stop`.
+**Entry.** `task.stopped` from any state, written by `python -m core stop`,
+which writes it on the task and on every descendant not already stopped or
+merged (architecture.md, Stop).
 
 **What runs.** Nothing. The row is the fence: the gateway refuses every
-later model call and the broker every later effect by reading it. A stopped
-task takes no answer and no feedback. The off switch lives in the kernel,
+later model call and the broker every later effect by reading it, on the task
+or on any ancestor. A stopped task takes no answer and no feedback, and a task
+under a stopped ancestor takes no feedback. The off switch lives in the kernel,
 not in the model's incentives [8, 9, 10]; the demonstration's failed resume
 failed cleanly and metered $0 (rebuild-demonstration.md, Kernel findings,
 3). **Exists in the kernel.**

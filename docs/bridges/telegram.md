@@ -247,7 +247,7 @@ deterministically to the record the notice carried:
 | A delivery notice | Feedback on that delivery, which puts the task back to work | `feedback.given` |
 | An approval prompt, with exactly `approve` | His tap on that held effect; his literal message is the note | `approval.granted` |
 | An approval prompt, anything else | A message about the effect; the effect stays held | `message.received` only |
-| Any notice of a task, with exactly `stop` | Stop | `task.stopped` |
+| Any notice of a task, with exactly `stop` | Stop of the task and every task under it | `task.stopped`, one per task |
 
 `question.answered` and `feedback.given` already exist and already carry
 `provenance` with `by`, `via`, `at`, and `role_played`. A bridge-delivered
