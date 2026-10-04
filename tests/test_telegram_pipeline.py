@@ -193,6 +193,7 @@ async def _task_of(dsn, effect_id) -> str:
     return task
 
 
+@pytest.mark.macos
 def test_an_answer_by_reply_to_the_question_notice(emu, dsn, tmp_path, op):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -213,6 +214,7 @@ def test_an_answer_by_reply_to_the_question_notice(emu, dsn, tmp_path, op):
     run(go())
 
 
+@pytest.mark.macos
 def test_feedback_by_reply_to_the_delivered_notice(emu, dsn, tmp_path, op):
     ws, _ = scripted.workspace(tmp_path)
 

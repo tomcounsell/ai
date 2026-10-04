@@ -162,6 +162,23 @@ commit of HEAD's tree with HEAD as its base.
   in 80 tests and waited on a service start under `sandbox-exec` with no
   end.
 
+**Patch round 6** (the branch on 2.2, 1.5r and 4.1): the review runner is
+registered and `verdict` records only `docs` by hand; part two's rerun
+in a VM goes into that runner unchanged. `ruff` joins the dev group
+beside the merged `--import-mode=importlib`, and the lock adds it.
+Tests of 4.1 and 1.5r that need macOS itself carry the `macos` mark: the
+review runner's docs pause in `tests/test_emulator_metering.py`, the live
+stop of a root in `tests/test_objective_tree.py`, and the two replies in
+`tests/test_telegram_pipeline.py`.
+
+**Decided by default** (the lead's calls on patch round 5):
+1. A test that needs macOS itself carries the `macos` mark, merged tests
+   included, so the repository suite ends in the VM.
+2. A test that fails in the VM for a reason other than macOS keeps no
+   mark: `tests/test_emulator_package.py` (no git checkout in the VM)
+   and the deep request file in `tests/test_session.py` (the VM's
+   stack). It fails at base and head alike.
+
 **Decisions the plan left open:**
 - The VM mounts the source at `/valor/src` and the output at `/valor/out`
   under a root-only `/valor`.
@@ -179,8 +196,8 @@ commit of HEAD's tree with HEAD as its base.
   source tree that is not a checkout; and the deep request file in
   `tests/test_session.py`, which overflows the VM's 8 MB stack.
 
-**Tests:** the host suite (`-m "not container"`) passes 1,301 and skips 21
-(live spend, a measurement, Pi with no subagents, git that does not trust a
-planted commit-graph); the `container` tests pass 44 and skip 2 (live
-spend), the repository-suite test among them. `ruff check` passes; `ruff
-format --check` passes.
+**Tests:** the host suite (`-m "not container"`) passes 1,398 and skips 23
+(live spend, live Telegram, a measurement, Pi with no subagents, git that
+does not trust a planted commit-graph); the `container` tests pass 44 and
+skip 2 (live spend), the repository-suite test among them. `ruff check`
+passes; `ruff format --check` passes.

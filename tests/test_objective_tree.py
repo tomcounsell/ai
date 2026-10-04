@@ -900,6 +900,7 @@ def test_stopping_a_node_with_its_own_row_writes_nothing(dsn):
     assert n == 0 and again is False and before == after
 
 
+@pytest.mark.macos
 def test_a_live_stop_of_the_root_ends_a_scripted_grandchilds_turn(dsn, tmp_path):
     from tests.test_session import drive
 
