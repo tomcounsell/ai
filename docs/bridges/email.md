@@ -14,8 +14,8 @@ prints its launchd job. The last section lists the modules.
 
 | Mechanism | Serves |
 |---|---|
-| Email as a second door for requests, answers, and feedback | Mission item 1: work arrives the way the people around Tom already send it |
-| Threads bound to tasks through `Message-ID`, `In-Reply-To`, and `References` | Constraint "Reliable stop, recovery, and correction": feedback and answers carry provenance and reach the right task |
+| Email received and recorded, and sent as an approved `act` effect | Mission item 1: work arrives the way the people around Tom already send it |
+| Each send's `Message-ID` and thread root recorded with its result | Constraint "Reliable stop, recovery, and correction": a send carries provenance in the ledger |
 | Every send an `act` effect, with recipients inside the approved digest | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Receipt acknowledged only after the ledger commits; sends reconciled by `Message-ID` | Constraint "Reliable stop, recovery, and correction": nothing is lost or sent twice |
 | Inbound mail treated as data, never as authority | Retrieved content can act as instructions [7] |
@@ -87,9 +87,9 @@ inbound size or part cap.
 ## How a message becomes work
 
 The path is the one in [telegram.md](telegram.md#how-a-message-becomes-work):
-the kernel binds replies to notices by structure, and the judgement layer
-classifies the rest as a new request, a steer, feedback, an answer, a
-correction, an exemplar, or conversation. Three things differ for email.
+the bridge hands each message to intake, which records it. Two things
+differ for email, and together they mean no email reaches the judgement
+layer.
 
 **Who counts as Tom.** A `From` header is a claim anyone can write.
 `intake.receive` sets every email record's `verified` false, so a record
@@ -171,8 +171,9 @@ Sent Mail ("Choose your IMAP email client settings for Gmail", Gmail
 Help), and no document gives how long that takes, so a miss does not show
 the send failed. The bridge reads Sent Mail only for a send in doubt
 (below).
-The result's `sent` entry carries the `Message-ID` and the thread root, which
-is how a reply from any recipient binds back to its task.
+The result's `sent` entry carries the `Message-ID` and the thread root.
+No email reply binds to a task; every one is recorded with binding
+`none`.
 
 **One attempt.** `perform` submits once over SMTP with STARTTLS. No command
 has a timer: the greeting, EHLO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`,

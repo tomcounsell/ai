@@ -487,12 +487,12 @@ def test_a_killed_send_the_server_never_got_reconciles_failed(dsn, tmp_path):
             bridge.store.clear()  # the send never reached the server
             first = await box.reconcile()
             again = await box.reconcile()
-        return first, again
+        return effect, first, again
 
     with bridges.operator(tmp_path):
-        first, again = run(go())
-    assert [o.kind for o in first] == ["failed"]
-    assert again == []
+        effect, first, again = run(go())
+    assert [o.kind for o in first if o.effect_id == effect] == ["failed"]
+    assert [o for o in again if o.effect_id == effect] == []
 
 
 def test_outbox_listener_reconnects(dsn, op):

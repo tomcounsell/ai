@@ -27,8 +27,10 @@ The test window, with Tom:
    and stays unseen.
 4. A task Tom started on Telegram asks to reply to his mail with a 9 MB
    file; the send is held; Tom taps once; during
-   the upload, terminate the `valor-email-perform` backend by its pid.
-   The bridge restarts, a sweep settles the effect, and each inbox holds
+   the upload, terminate by its pid the `valor-email-perform` backend
+   opened at the release (the newer of the two with that name). The
+   outcome write fails, the bridge logs it and keeps running, the next
+   wake's sweep settles the effect from Sent Mail, and each inbox holds
    at most one copy, with `done` exactly when it holds one.
 5. Record the Sent Mail lookup form that works, Gmail's filing delay
    (from the 250 to the message in Sent Mail), the 9 MB upload rate,
