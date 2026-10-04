@@ -290,6 +290,13 @@ where it is written: `turn.collected` and the row that goes with it
 (`question.asked` or `plan.written`) are appended in one savepoint, and
 when jsonb refuses them, each error and each effect entry it refuses alone
 is replaced by kernel text with Postgres's reason; if that is refused too,
+the largest part left (an error, an effect entry, the question, the
+no-question statement, the plan, the delivery note, the screens, or the
+candidate) is dropped and the row asked again, until it is stored. A dropped
+effect entry keeps its `effect_id`, `kind` and `file` with an error holding
+Postgres's reason, so the effect rows the broker wrote still match it; any
+other dropped part is null and one error names it and gives the reason. The
+candidate is null in a reduced row. If no reduction is stored,
 `turn.collected` holds nothing the turn wrote (no signals or effects, the
 verdict `idle`, or `failed` for a turn that did not finish) and one error
 with Postgres's reason. The broker's rows for each request are judged the
