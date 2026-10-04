@@ -13,6 +13,9 @@ setup = ["uv sync --frozen"]
 suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
 merge_url = "https://github.com/tomcounsell/ai.git"
+# The operator group "Valor rebuild", received on the build Mac.
+chats = ["telegram:-1003890616618"]
+machine = "Mac"
 
 [env]
 VALOR_PGHOST = "127.0.0.1"

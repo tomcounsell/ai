@@ -534,3 +534,17 @@ are follow-ups.
   review or docs runner (the 1.5 gate); libpq's large sends over the Unix
   socket are slow (`db.connect`); file names and git's stderr in errors;
   the argv size limit for large requests.
+
+## Rollout, test window of 2026-10-04
+
+- Steps 2 and 3: the group "Valor rebuild" (`-1003890616618`), in
+  `projects/valor.toml` `chats`; the operator settings
+  (`VALOR_OPERATOR_TELEGRAM_ID`, `VALOR_OPERATOR_EMAIL`,
+  `VALOR_OPERATOR_CHAT`) are in the kernel's plist.
+- Step 4: `com.valor.kernel.plist` written to `~/Library/LaunchAgents` and
+  bootstrapped; it stays resident.
+- Step 5: a task started from the command line on a scratch project with a
+  local bare origin went from judge to plan with no `run`.
+- Step 6: the kernel killed by its launchd pid mid-turn; launchd
+  restarted it, recovery recollected the turn, the task went on to checks,
+  and `tasks.audit` of its status is empty. Spent $0.45.

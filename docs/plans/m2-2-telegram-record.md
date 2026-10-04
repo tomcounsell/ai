@@ -138,3 +138,28 @@ The port doc's paragraph on the Telegram lookup, which 2.2 added, stays.
   (API id and hash written). The test servers' live test and steps 3 to
   11 run in the test window with 2.1's steps 2 to 6.
 - Follow-ups: O1 to O3; the lost-record notice test.
+
+## Rollout, test window of 2026-10-04
+
+- Step 1: the test servers refuse the documented test login (a
+  `99966` 2 `xxxx` number with code `22222` returns PhoneCodeInvalid, three
+  tries), so `tests/test_live_telegram_dc.py` has not run. Open.
+- Step 3: the group "Valor rebuild" holds Tom and Valor's account, id
+  `-1003890616618`, created from the bridge's session. `main`'s
+  `projects.json` names no group the title contains. `projects/valor.toml`
+  lists it in `chats` with `machine = "Mac"` (this Mac's default machine
+  name, so the command line and the kernel share slot keys);
+  `VALOR_OPERATOR_CHAT` is its id.
+- Step 4: the running system disabled by label; its bridge ended.
+- Step 5: the bridge's session signed in from the vault phone and
+  password, user id 6914249008. The login code was read through a copy of
+  the stopped old bridge's session, deleted after; the old bridge
+  reconnected afterwards with no auth key error.
+- Step 6: `com.valor.kernel.telegram` bootstrapped from
+  `~/src/valor-build-notes/plists/`; it connected.
+- Step 7: open. It needs Tom's messages in the group, in a window.
+- Step 8: `tests/test_live_telegram_window.py` passed: one real send, the
+  child killed after Telegram accepted it, the lookup found exactly one.
+- Step 9: the bridge job booted out; the running system enabled and
+  started (bridge, worker, email).
+- Step 10: open, with step 7.
