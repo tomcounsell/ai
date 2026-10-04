@@ -198,8 +198,10 @@ same way in its own clone (`fresh.docs_runner`). Review
 (`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
 Redis, the kernel's own suite and lint run (`verify.ran`) among its inputs.
 Its setup runs under a profile that writes only the checkout, its caches,
-and its own `setup-tmp/`, so the candidate's setup cannot write the
-session's Pi or Claude Code directory or its `TMPDIR`.
+and its own `setup-tmp/`, never a `.git` in the checkout or the checkout
+directory itself, so the candidate's setup cannot write the session's Pi or
+Claude Code directory, its `TMPDIR`, or the repository whose config and
+commit subjects Claude Code reads at start.
 Both are registered once governance's judgement passes its entry check.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its

@@ -78,12 +78,17 @@ What the kernel must never do with any of it:
   `tasks.is_stopped` after it, before the run starts.
 - Follow a path inside a checkout after candidate code ran there. The
   kernel looks at the checkout through a descriptor, following no link;
-  a `.valor`, a `.pi`, or no directory where the checkout was, left by
-  the reviewer checkout's setup, is the commit's own and gets the
-  `kernel` leg `changes`. The kernel removes nothing in the checkout.
+  a `.valor`, a `.pi`, no directory where the checkout was, or an
+  error reading or writing the checkout, after the reviewer checkout's
+  setup, is the commit's own and gets the `kernel` leg `changes`. The
+  kernel removes nothing in the checkout.
 - Let candidate code set what the reviewer's session runs with. The
   setup's profile writes only the checkout, `cache/`, and `setup-tmp/`,
-  never the session's `claude/`, `pi/`, or `tmp/`.
+  never the session's `claude/`, `pi/`, or `tmp/`, never a `.git` in the
+  checkout (any case, as written and resolved), and never the checkout
+  directory itself (no rename, removal, mode, flags, or ACL). So the
+  repository holds the kernel's two commits and config, and no commit
+  message, hook, or fsmonitor of the setup's reaches the session.
 - Give the reviewer the task's live services. Its turn runs inside
   `check_services`, so its `DATABASE_URL`, `PGPASSFILE`, and `REDIS_*`
   name fresh instances; the live ones are stopped for the duration.
@@ -156,11 +161,13 @@ it.
    candidate, a clone of `checks/seed/` into `<check_dir>/cache/`, then,
    inside `check_services(lay, check_dir, project, task_id)`, the kernel
    runs the setup on the checkout under the mark, as 1.4b's head runs do,
-   with `setup_harness`: a profile writing only the checkout, `cache/`,
-   and `setup-tmp/` (its TMPDIR and uv's directories). Then
-   `setup_left` looks at the checkout by descriptor; a `.valor`, a
-   `BLIND_LEFT_OUT` entry, or no directory there records the `kernel`
-   leg `changes` naming it, as a `.valor` tree does. Its exit goes on `verify.json`
+   with `setup_harness`: `setup_profile` writes only the checkout,
+   `cache/`, and `setup-tmp/` (its TMPDIR and uv's directories), but no
+   `.git` in the checkout and not the checkout directory itself, and
+   reads `tmp/pgpass`. Then `setup_left` looks at the checkout by
+   descriptor; a `.valor`, a `BLIND_LEFT_OUT` entry, no directory there,
+   or an `OSError` there or in `write_inputs` records the `kernel` leg
+   `changes` naming it, as a `.valor` tree does. Its exit goes on `verify.json`
    (`reviewer_setup_exit`); a failure does not stop the turn. The turn
    then runs inside the same `check_services`, with `check_harness(lay,
    check_dir, ports, env, services=True)` built from that fresh

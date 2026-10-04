@@ -9,6 +9,7 @@ Live spend: none.
 """
 
 import asyncio
+import errno
 import json
 import os
 import subprocess
@@ -558,21 +559,135 @@ def _setup_run(dsn, tmp_path, setup):
     return run(go())
 
 
-def test_a_link_the_reviewer_setup_plants_is_never_followed(dsn, tmp_path):
-    """Setup swaps the checkout for a link to another directory holding a
-    `.valor`: the kernel follows nothing there, and since every rerun would
-    do the same, review is the kernel's `changes`."""
+def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
+    """Setup tries to swap the checkout for a link to another directory
+    holding a `.valor`: the checkout itself is not the setup's to rename, so
+    the swap is refused, the other directory is untouched, and the session
+    runs in the checkout the kernel built."""
     victim = tmp_path / "victim"
     (victim / ".valor").mkdir(parents=True)
     (victim / ".valor" / "done.md").write_text("kept\n")
     plant = f'case "$PWD" in */review-*/repo) cd .. && mv repo cache/repo.moved && ln -s {victim} repo;; esac'
-    _b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    b, ws, got = _setup_run(dsn, tmp_path, [plant])
     assert sorted(os.listdir(victim / ".valor")) == ["done.md"]
     assert (victim / ".valor" / "done.md").read_text() == "kept\n"
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
+    assert not (check_dir / "repo").is_symlink() and not (check_dir / "cache" / "repo.moved").exists()
+    (decided,) = reviews(got)
+    assert decided["leg"] == "session" and seen_turn(ws)
+
+
+def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path):
+    """Setup commits, sets an fsmonitor, a hooks path and an alias, and makes
+    nested repositories: every write is refused, so the reviewer's git log
+    holds only the kernel's two commits, and its `git status` runs nothing
+    the setup chose."""
+    tries = [
+        "git -c user.name=b -c user.email=b@b.invalid commit -q --allow-empty -m BUILDER-NARRATION",
+        'git config core.fsmonitor "$PWD/../cache/fsm"',
+        'git config core.hooksPath "$PWD/../cache"',
+        "echo planted > .git/info/exclude",
+        "git init -q sub",
+        "mkdir -p deep && git init -q deep/.GIT",
+        "echo 'gitdir: ../cache' > .git-file && mv .git-file nested.git && mkdir nest && cp nested.git nest/.git",
+    ]
+    plant = (
+        'case "$PWD" in */review-*/repo) '
+        "printf '#!/bin/sh\\necho planted > %s\\n' \"$PWD/../claude/settings.json\" > ../cache/fsm; "
+        "chmod +x ../cache/fsm; cp ../cache/fsm ../cache/post-checkout; "
+        + " ".join(f"{{ {t} ; }} 2>/dev/null; echo $? >> tries;" for t in tries)
+        + " touch setup-ran;; esac"
+    )
+    steer_cfg = {"review_probe": {"status": "git status --porcelain", "log": "git log --format=%s"}}
+
+    async def go():
+        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[plant])
+        steer(ws, **steer_cfg)
+        await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
+        return b, ws, await rows(dsn, task)
+
+    b, ws, got = run(go())
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
+    repo = check_dir / "repo"
+    assert (repo / "setup-ran").exists()
+    assert all(int(x) != 0 for x in (repo / "tries").read_text().split()), (repo / "tries").read_text()
+    for nested in ("sub/.git", "deep/.GIT", "nest/.git"):
+        assert not os.path.lexists(repo / nested), nested
+    (look,) = seen(Path(b.workspace))
+    assert look["probes"]["log"]["out"].split() == ["candidate", "base"], look["probes"]
+    assert look["probes"]["status"]["exit"] == 0, look["probes"]
+    (turn,) = seen_turn(ws)
+    assert turn["log"] == ["candidate", "base"]
+    settings_file = check_dir / "claude" / "settings.json"
+    assert not settings_file.exists() or "planted" not in settings_file.read_text()
+    (decided,) = reviews(got)
+    assert decided["leg"] == "session"
+
+
+@pytest.mark.parametrize("mode", ["500", "000"])
+def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode):
+    """Setup's `chmod` of the checkout is refused, so the kernel writes the
+    inputs and the session runs, rather than every rerun failing."""
+    plant = f'case "$PWD" in */review-*/repo) chmod {mode} . ; echo $? > ../cache/chmod-exit;; esac'
+    b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
+    assert (check_dir / "cache" / "chmod-exit").read_text().strip() != "0"
+    assert os.access(check_dir / "repo", os.R_OK | os.W_OK | os.X_OK)
+    (decided,) = reviews(got)
+    assert decided["leg"] == "session" and seen_turn(ws)
+
+
+@pytest.mark.parametrize("where", ["setup_left", "write_inputs"])
+def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypatch, where):
+    """An error the kernel meets in the checkout after setup is the commit's
+    own, since every rerun runs the same setup: the kernel's `changes` with
+    the error, not a failure."""
+
+    def refused(*_a, **_k):
+        raise PermissionError(errno.EACCES, "Permission denied", ".valor")
+
+    async def go():
+        task, _b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"])
+        steer(ws)
+        monkeypatch.setattr(kws, where, refused)  # after the runs before review, which write inputs too
+        await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
+        return ws, await rows(dsn, task)
+
+    ws, got = run(go())
     (decided,) = reviews(got)
     assert decided["verdict"] == "changes" and decided["leg"] == "kernel", decided
-    assert decided["findings"][0]["text"] == "the setup left no directory where the checkout was"
+    assert decided["findings"][0]["text"].startswith("the checkout after setup: [Errno 13]")
     assert not seen_turn(ws)
+
+
+def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
+    """Setup runs `psql` with the libpq defaults its environment names
+    (`PGPASSFILE` among them) against the review's fresh Postgres."""
+    psql = str(Path(settings.pg_bin) / "psql")
+    plant = (
+        f'case "$PWD" in */review-*/repo) {psql} -tAc "create table setup_made (x int)" '
+        f'&& {psql} -tAc "select 1" > setup-psql.out;; esac'
+    )
+
+    async def go():
+        task, b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, services=["postgres"], setup=[plant]
+        )
+        steer(ws, review_probe={"table": f"{psql} -tAc \"select to_regclass('public.setup_made')\""})
+        await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
+        return b, ws, await rows(dsn, task)
+
+    b, _ws, got = run(go())
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
+    assert (check_dir / "repo" / "setup-psql.out").read_text().strip() == "1"
+    (look,) = seen(Path(b.workspace))
+    assert look["probes"]["table"]["out"] == "setup_made", look["probes"]
+    (decided,) = reviews(got)
+    assert decided["leg"] == "session"
 
 
 @pytest.mark.parametrize("entry", [".valor", ".pi"])

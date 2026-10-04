@@ -1553,25 +1553,42 @@ def check_harness(
 SETUP_TMP = "setup-tmp"
 
 
+def _sb_regex(path: str) -> str:
+    return re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", path)
+
+
+def setup_profile(lay: Layout, check_dir: Path, ports: list[int]) -> str:
+    """The profile of a fresh session's setup: it writes the checkout,
+    `cache/`, and `setup-tmp/`, and reads the services' password file in
+    the session's tmp. The checkout's repository is the kernel's, so the
+    setup writes no `.git` anywhere in the checkout (any case, as written
+    and resolved), and does not rename, remove, or change the mode, flags,
+    or ACL of the checkout directory itself, so no other directory with its
+    own `.git` takes its place."""
+    repo = check_dir / "repo"
+    text = profile(
+        rw=[repo, check_dir / "cache", check_dir / SETUP_TMP],
+        ro=[lay.root.parent / "bin", check_dir / "tmp" / "pgpass"],
+        ports=ports,
+        work=lay.root.parent,
+        fresh=True,
+    )
+    forms = sorted({str(repo), os.path.realpath(repo)})
+    git_dirs = [f'    (regex #"^{_sb_regex(r)}/(.+/)?\\.[Gg][Ii][Tt](/|$)")' for r in forms]
+    return text + "\n".join(["(deny file-write*", *_paths("literal", forms), *git_dirs, ")"]) + "\n"
+
+
 def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[str, Any]) -> dict[str, Any]:
     """The harness a fresh session's setup runs with: the session's own
-    `harness`, except that its profile writes only the checkout, `cache/`,
-    and `setup-tmp/`, which is its TMPDIR and holds uv's cache and managed
-    Pythons. The setup is candidate code and runs before the session, so it
-    must not write what the session reads at start: its Claude Code and Pi
-    directories and its TMPDIR."""
+    `harness` under `setup_profile`, with `setup-tmp/` as its TMPDIR,
+    holding uv's cache and managed Pythons. The setup is candidate code and
+    runs before the session, so it must not write what the session reads
+    at start: its Claude Code and Pi directories, its TMPDIR, and the
+    checkout's repository."""
     tmp = check_dir / SETUP_TMP
     tmp.mkdir()
     path = lay.profiles / f"{check_dir.name}.setup.sb"
-    path.write_text(
-        profile(
-            rw=[check_dir / "repo", check_dir / "cache", tmp],
-            ro=[lay.root.parent / "bin"],
-            ports=ports,
-            work=lay.root.parent,
-            fresh=True,
-        )
-    )
+    path.write_text(setup_profile(lay, check_dir, ports))
     env = {**harness["env"], "UV_CACHE_DIR": str(tmp / "uv"), "UV_PYTHON_INSTALL_DIR": str(tmp / "python")}
     return {**harness, "sandbox_profile": str(path), "tmpdir": str(tmp), "env": env}
 

@@ -86,11 +86,19 @@ another run, or the working session, wrote.
 
 **A reviewer's setup.** Review sets up its checkout from the same check
 services, then runs the project's setup commands there
-(`workspace.setup_harness`) under a profile that writes only the checkout,
-its `cache/`, and `setup-tmp/`, which is the setup's `TMPDIR` and holds uv's
-cache and managed Pythons. The setup is candidate code and runs before the
-session, so it cannot write the session's Claude Code or Pi directory or its
-`TMPDIR`. Afterwards the kernel reads the checkout through descriptors with no
-link followed (`workspace.setup_left`): no directory where the checkout was,
-or a `.valor` or `.pi` entry in it, is the candidate's own doing, and review
-records `changes` naming it (leg `kernel`, no session, no reviewer's verdict).
+(`workspace.setup_profile`) that writes only the checkout, its `cache/`, and
+`setup-tmp/`, which is the setup's `TMPDIR` and holds uv's cache and managed
+Pythons, and reads the services' password file in the session's `tmp/`, so
+`psql` and libpq defaults work. The setup is candidate code and runs before
+the session, so it cannot write the session's Claude Code or Pi directory or
+its `TMPDIR`. Nor can it write a `.git` anywhere in the checkout, in any case,
+or rename, remove, or change the mode, flags, or ACL of the checkout
+directory itself: the repository the session finds holds only the kernel's
+two commits and the kernel's config, so no commit message, hook, or
+fsmonitor of the setup's reaches the session or runs in it. The rest of the
+checkout stays writable, since the project's setup (`uv sync --frozen`)
+makes `.venv` there. Afterwards the kernel reads the checkout through
+descriptors with no link followed (`workspace.setup_left`): no directory
+where the checkout was, a `.valor` or `.pi` entry in it, or an error reading
+or writing it, is the candidate's own doing, and review records `changes`
+naming it (leg `kernel`, no session, no reviewer's verdict).

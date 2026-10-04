@@ -217,3 +217,38 @@ registered", with the tip's line on the emulator's judge).
    on the kernel leg, as a `governance` finding.
 
 No cap, timeout, or guard added.
+
+## Patch round 3
+
+From review-1-4c1-p2 (`changes`) at 3ab97a19f, with the docs at
+7de450afd. Base still 2418d02c8. Only the reviewer's setup step.
+
+1. F4. `workspace.setup_profile` adds one write deny after the setup's
+   allows: the checkout directory as a literal, and every `.git` path
+   component under it, in any case, as written and resolved. Setup cannot
+   commit, set config, plant hooks or an fsmonitor, write
+   `.git/info/exclude`, make a nested `.git` (directory, file, or link),
+   hard-link into `.git`, or rename, remove, `chmod`, `chflags`, or set an
+   ACL or xattr on the checkout, so it cannot move the checkout aside and
+   put another repository in its place. With no write path left, no git
+   config pin was added to the session: its repository holds only what
+   `blind_checkout` wrote, and the tree cannot carry `.git`. The rest of
+   the checkout stays writable: the one project spec's setup is
+   `uv sync --frozen`, which makes `.venv` in the checkout. Test: a setup
+   that commits, sets `core.fsmonitor`, `core.hooksPath`, writes
+   `.git/info/exclude`, and makes `sub/.git`, `deep/.GIT`, and a
+   `nest/.git` file; every try exits nonzero, the reviewer's `git log`
+   is `candidate`, `base`, and its `git status` runs no fsmonitor.
+2. F5. An `OSError` from `setup_left` or `write_inputs` after setup goes
+   to `commits_own`: the `kernel` leg `changes` with the error.
+   `write_inputs` moved out of `review_inputs` so an error building the
+   inputs from the mirror stays `failed`. Tests: setup `chmod 500 .` and
+   `chmod 000 .` are refused and the session runs; an `OSError` from
+   either function records the `kernel` leg `changes`. The link test now
+   shows the swap refused and the session running in the kernel's
+   checkout.
+3. F6. The setup profile reads `<check_dir>/tmp/pgpass`. Test: setup
+   creates a table with `psql` on the fresh Postgres, and the reviewer
+   sees it.
+
+No cap, timeout, or guard added.

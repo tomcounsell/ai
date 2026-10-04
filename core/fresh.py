@@ -683,12 +683,11 @@ def governance_input(
 
 
 def review_inputs(
-    checkout: Path, rows: list[dict], f: machine.Fold, b: tasks.Brief, verify: dict[str, Any],
-    governance: dict[str, Any],
-) -> list[str]:  # fmt: skip
-    """The reviewer's inputs. `plan.md` is the stakes header and the plan
-    file's bytes at the commit critique read, from the mirror, so an edit
-    the builder made after critique shows only in `diff.patch`."""
+    rows: list[dict], f: machine.Fold, b: tasks.Brief, verify: dict[str, Any], governance: dict[str, Any],
+) -> dict[str, str]:  # fmt: skip
+    """The reviewer's inputs, by file name. `plan.md` is the stakes header
+    and the plan file's bytes at the commit critique read, from the mirror,
+    so an edit the builder made after critique shows only in `diff.patch`."""
     plan = f.plan or {}
     body = ""
     if plan.get("commit") and plan.get("path"):
@@ -702,7 +701,7 @@ def review_inputs(
         f"Critique rounds: {plan.get('critique_rounds')}; review rounds: {plan.get('review_rounds')}\n"
         f"Scope additions: {_quoted(plan.get('scope') or [])}\n"
     )
-    files = {
+    return {
         "request.md": b.instruction,
         "answers.md": _answers(rows),
         "plan.md": header + "\n" + (body or "No plan file."),
@@ -713,8 +712,6 @@ def review_inputs(
         "governance.json": json.dumps(governance, indent=2),
         "effects.md": _effects(rows),
     }
-    workspace.write_inputs(checkout, files)
-    return list(files)
 
 
 def _text(value: Any) -> bool:
@@ -957,20 +954,28 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             except checks._Stopped:
                 return {"status": "stopped"}
             # Setup ran before the inputs exist, so it can plant none, and
-            # its profile kept it out of the session's own directories. What
-            # it left in the checkout that the session must not start with
-            # is the commit's own: a `.valor`, a left-out entry, or a link.
+            # its profile kept it out of the session's own directories and
+            # the checkout's repository. What it left in the checkout that
+            # the session must not start with, and any error the kernel
+            # meets there now, is the commit's own: every rerun meets it.
             try:
                 left = await asyncio.to_thread(workspace.setup_left, checkout)
             except OSError as exc:
-                return failed(f"review inputs: {exc}")
+                return await commits_own(f"the checkout after setup: {exc}")
             if left:
                 return await commits_own(left)
             seen = {**verify, "reviewer_setup_exit": setup["commands"][-1]["exit"] if commands else None}
             try:
-                files = review_inputs(checkout, rows, f, b, seen, governance)
+                inputs = review_inputs(rows, f, b, seen, governance)
             except (OSError, ValueError, git.GitError) as exc:
                 return failed(f"review inputs: {exc}")
+            try:
+                await asyncio.to_thread(workspace.write_inputs, checkout, inputs)
+            except ValueError as exc:
+                return failed(f"review inputs: {exc}")
+            except OSError as exc:
+                return await commits_own(f"the checkout after setup: {exc}")
+            files = list(inputs)
             if not await ctx.alive():
                 return {"status": "lock lost"}
             try:
