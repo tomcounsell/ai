@@ -172,3 +172,22 @@ No cap, timeout or guard added.
 
 Suite on the rebased head: 1138 passed, 21 skipped. Ruff check and
 format check clean.
+
+## Merged
+
+The rebase onto 9e5090663 passed all three checks: test pass (base
+1098/21, head 1138/21), review pass (governance boolean no), docs updated
+at 4bde09032. The lead's suite on 4bde09032: 1138 passed, 21 skipped;
+`ruff check` and `ruff format --check` clean. Backup
+`valor_rebuild-20261004T021609Z.dump`. `valor-cori-rebuild` fast-forwarded
+to 4bde09032; `uv sync`; no migration.
+
+Rollout steps 1 to 4 are done. The takeover gate (Done item 5, rollout
+steps 5 to 8) is open: it runs once 1.4c part one merges, and before it
+scores #872 the psyoptimal item needs its `project` key.
+
+Review findings carried as follow-ups:
+
+- `judge.py` `export_final` runs `git archive` from `PATH`, not the
+  kernel's trusted git. The mirror is kernel-owned, so this is consistency.
+- `docs/harnesses.md` "Denied entirely" leaves out `performing_dir`.

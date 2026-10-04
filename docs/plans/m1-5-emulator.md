@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-5-emulator
 type: build
-status: passed
+status: merged; takeover gate open
 critique_rounds: 2
 review_rounds: 2
 ---
