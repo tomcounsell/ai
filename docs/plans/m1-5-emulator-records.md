@@ -191,3 +191,132 @@ Review findings carried as follow-ups:
 - `judge.py` `export_final` runs `git archive` from `PATH`, not the
   kernel's trusted git. The mirror is kernel-owned, so this is consistency.
 - `docs/harnesses.md` "Denied entirely" leaves out `performing_dir`.
+
+## Takeover gate
+
+Run on `m1-5-gate` at 6e123f88f. Result: all three items pass, each on
+one run that meets both bars.
+
+| Item | Passing run | Fidelity / correctness / simplicity | Hidden tests | Bar |
+|---|---|---|---|---|
+| pop-b (#191) | `pop-b-gate` | 3 / 4 / 1 | 11 of 11 | F2, 7 of 11 |
+| pso-a (#872) | `pso-a-gate-2` | 4 / 4 / 4 | 20 of 22 | F3, 20 of 22 |
+| pop-a (#633) | `pop-a-gate-b` | 4 / 4 / 3 | 14 of 14 | F4, 14 of 14 |
+
+The baseline is n = 1 per item and arm, and one judge point is noise
+(rebuild-baseline.md). The bars are the baseline's; the stand-in that
+answered here is the frontier seat, `claude-opus-5-5`, where the baseline
+had Sonnet, and no bare or clarify arm was rerun under it. The judge is
+`claude-sonnet-5-5` (`JUDGE_MODEL`); the baseline did not record its
+resolved id.
+
+### Setup
+
+- Suite at 6e123f88f: 1194 passed, 23 skipped, 1 failed. The failure is
+  `test_start_project_from_the_command_line`, a port race; it passes run
+  alone.
+- Ledger: `VALOR_DB=valor_rebuild_test_gate_1_5_ledger`, a fresh database,
+  so no gate row is in `valor_rebuild`. `VALOR_WORK=~/valor-tasks-gate-1-5`,
+  apart from `~/valor-tasks`, because the workspace sweep stops the
+  services of tasks it does not know. Ports 6460 to 6469.
+- pso-a's `project` key (in `~/src/valor-demo/items/pso-a.json`):
+
+  ```
+  {"kind": "django",
+   "setup": ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen"],
+   "env": {"UV_PYTHON": "3.12", "DJANGO_SETTINGS_MODULE": "settings.test"},
+   "suite": "uv run pytest -p no:cacheprovider -q --junitxml={junit} apps/team apps/public apps/api"}
+  ```
+
+  Sources: main's `projects.json` names psyoptimal's stack as Django and
+  PostgreSQL; the popoto items give the uv and pytest shape; the item's
+  own verify commands give `uv sync --frozen`, `settings.test` and the
+  scope; psyoptimal carries `pytest.ini` and pytest-django. `psycopg2`
+  builds from source: the setup sandbox's PATH has no keg-only
+  `pg_config`, and `xcrun` cannot write its cache there, so clang finds no
+  SDK without `SDKROOT`.
+- pop-a's suite carries `--ignore=tests/test_connection.py`, as the item's
+  broad verify command does. That file points popoto's global pool at
+  port 6379, which the turn profile denies, and every later test errors.
+
+### Runs
+
+Spend is in US dollars. Kernel spend is gateway-metered; emulator spend is
+the stand-in plus the judge.
+
+| Run | Task | Emulator task | Outcome | Kernel | Emulator | Attention | Held merge | Final rev | Judge diff |
+|---|---|---|---|---|---|---|---|---|---|
+| `pop-b-gate` | 92b0400691fe | ec919d8390f1 | held, accepted | 7.1435 | 0.4114 | 1 question, 4 verdicts, 0 feedback rounds | e84ac44608bd | 0c74745c | 54,684 chars, 1,374 lines, not truncated |
+| `pso-a-gate` | 9ed7c4dc84e8 | cfbeda1b06b9 | stopped, setup | 6.1915 | 0 | none | none | 24af1a58 | not judged |
+| `pso-a-gate-b` | 6fbf68b55f13 | 50585cacaa58 | stopped, setup | 3.1227 | 0 | none | none | none | not judged |
+| `pso-a-gate-c` | 1f7cd4127ea3 | 67a95752d601 | to Tom, loops spent | 4.4589 | 0.2802 | 4 verdicts | none | 88b7ff27 | 39,129 chars, 835 lines, not truncated |
+| `pso-a-gate-2` | 46b075964b5b | 2eb63b42a0a0 | held, accepted | 3.3063 | 0.4042 | 2 verdicts | ad4c6ef50a03 | ce071426 | 33,527 chars, 702 lines, not truncated |
+| `pop-a-gate` | 11f4eb44bf92 | 0bac6ef752af | stopped, suite | 5.3216 | 0 | none | none | fed015b3 | not judged |
+| `pop-a-gate-b` | d81b5826067c | e6f9f56ead84 | held, accepted | 3.4939 | 0.2750 | 4 verdicts | 4d4b1787478b | fec95c56 | 26,898 chars, 657 lines, not truncated |
+
+Total: kernel 33.0384, emulator 1.5711 with the trial's judge, 34.6096.
+
+- `pop-b-gate`: the stand-in answered the one question. Broad suite 338
+  passed, 11 skipped.
+- `pso-a-gate` and `pso-a-gate-b`: the setup step failed on
+  `pg_config`, then on clang's `stdlib.h`, so the test check went red on
+  an environment fault and the task was stopped. `pop-a-gate`: the
+  suite's `test_connection.py` fault above; 2258 tests errored at base
+  and head, so the candidate's own tests read as new failures, and the
+  task was stopped. These three runs are counted as environment runs of
+  the item keys, not as the item's two runs.
+- `pso-a-gate-c`: docs answered `changes` in both rounds (round 1, the
+  shipped plan file left in place; round 2, a doc saying the staff
+  permissions page grants permissions). With the loop spent the join is
+  did_not_pass and the task goes to Tom. Judged as information: 4 / 4 / 3.
+  The judge's hidden-test command errored on every test (0 ran, the
+  services not yet up); the same command rerun under the task's sandbox
+  gave 20 of 22. Below the bar as a to-Tom run, so pso-a ran again.
+- `pso-a-gate-c` and `pso-a-gate-2`, hidden tests: the two failing are
+  `test_archived_team_assign_and_revoke_return_json_403` and
+  `test_archived_team_member_detail_modal_hides_assign_and_revoke`. Broad
+  suite 1598 ran: 22 failing at base, 24 at head, the 2 new ones those.
+- `pop-a-gate-b`: round 1's test check was red on one real failure,
+  `test_meta_order_by_other_field_disables_pushdown`; review asked for it
+  and for three Meta tests whose bounds tested nothing. Round 2 passed.
+  The judge's broad suite shows 4 new failures, all Redis-down hook tests
+  (`test_integrations_hooks.py` 3, `test_production_contracts.py` 1); the
+  kernel's own test check lists all 4 as failing at base.
+
+### Verdicts recorded by hand
+
+Review and docs have no runner at 6e123f88f: `runners()` in
+`core/__main__.py` registers judge, the working states, critique and
+test, and `fresh.review_runner` is defined but not registered. Every
+review and docs verdict below was recorded with `python -m core verdict
+... --role-played` by a fresh Opus subagent from a blind checkout and the
+kernel's own input builders. None is metered.
+
+| Run | Round | Review | Docs |
+|---|---|---|---|
+| `pop-b-gate` | 1 | changes (KeyField SCAN WRONGTYPE; a docs tuple mismatch) | changes |
+| `pop-b-gate` | 2 | pass, predicted failure 0.1 | no_change |
+| `pso-a-gate-c` | 1 | pass | changes |
+| `pso-a-gate-c` | 2 | pass | changes |
+| `pso-a-gate-2` | 1 | pass, predicted failure 0.08 | no_change |
+| `pop-a-gate-b` | 1 | changes | no_change |
+| `pop-a-gate-b` | 2 | pass, predicted failure 0.06 | no_change |
+
+No review answered the governance boolean yes. A hand-played docs stage
+cannot commit, so its answers are `no_change` or `changes`; a doc edit
+it would make is a patch round instead.
+
+### The #191 trial
+
+Task 75c0902b6e25, head 1cfb6000, scored once as information with emulator
+task e93e0ad49f18: 1 / 2 / 1, hidden tests 4 of 11, broad suite 327
+passed. Diff 69,197 chars, 1,568 lines, not truncated. Emulator spend
+0.2003. It builds `Model.push(name, value)`, where the answer key has
+`field.push`.
+
+### Result files
+
+In `~/src/valor-demo/results/`, outside the repo (they hold the answer
+keys and hidden tests): `pop-b-gate.json`, `pso-a-gate.json`,
+`pso-a-gate-b.json`, `pso-a-gate-c.json`, `pso-a-gate-2.json`,
+`pop-a-gate.json`, `pop-a-gate-b.json`, `pop-b-trial-scored.json`.
