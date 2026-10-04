@@ -338,13 +338,7 @@ async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None
 
 
 # What refuses a start, each answered `start refused:` with its reason.
-START_REFUSED = (ValueError, KeyError, tasks.TaskStopped, tasks.CalibrationTask)
-
-
-def _refusal(exc: BaseException) -> str:
-    if isinstance(exc, KeyError):
-        return f"no task {exc.args[0]}"
-    return str(exc)
+START_REFUSED = (ValueError, tasks.UnknownParent, tasks.TaskStopped, tasks.CalibrationTask)
 
 
 async def _start_task(conn, args, **fields) -> str:
@@ -415,7 +409,7 @@ async def _start_project(conn, args) -> str:
         except BaseException as exc:
             await git.threaded(workspace.remove, task_id)
             if isinstance(exc, START_REFUSED):
-                raise SystemExit(f"start refused: {_refusal(exc)}") from None
+                raise SystemExit(f"start refused: {exc}") from None
             raise
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
@@ -573,7 +567,7 @@ async def _run(args) -> None:
                     **where,
                 )
             except START_REFUSED as exc:
-                raise SystemExit(f"start refused: {_refusal(exc)}") from None
+                raise SystemExit(f"start refused: {exc}") from None
             print(started)
         elif args.command == "workspace":
             print(await _workspace(conn, args))

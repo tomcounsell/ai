@@ -124,7 +124,7 @@ the one requested or inherited.
 
 1. takes the tree lock (`tree:<root id>`, the root found through
    `ancestors`; see The tree lock below);
-2. reads the parent's Brief (`KeyError` for an unknown parent), refuses a
+2. reads the parent's Brief (`UnknownParent` for an unknown parent), refuses a
    calibration parent (`CalibrationTask`) and a fenced one (`TaskStopped`,
    below);
 3. resolves the ceiling with `child_ceiling` before the Brief is built
@@ -213,7 +213,7 @@ takes no feedback.
 
 One advisory transaction lock per tree, `tree:<root id>`, taken by the
 three writers that change what a tree holds or whether it may reopen:
-`start_child`, `stop_tree`, and `session.feedback`. A root's tree lock is
+`start_child`, `stop_tree`, and `session.feedback`. The bridge's binding (`intake._bind`), which holds a task's lock while it calls `tasks.stop` or `session.feedback`, takes the tree lock first too. A root's tree lock is
 named by its own id, so a task with no children takes it too. Each takes it
 before any task lock, so the order is always tree, then task, and no cycle
 of waits forms. The readers of the fence (the gateway's open, the broker's
@@ -326,7 +326,7 @@ offer nothing, unchanged.
 
 - `start --parent ID`: starts a child through `start_child`. `--ceiling`
   defaults to absent: with `--parent` the child takes the parent's
-  ceiling, without it the default stays `propose`. `KeyError`,
+  ceiling, without it the default stays `propose`. `UnknownParent`,
   `TaskStopped`, `CalibrationTask`, and `CeilingRefused` each exit with
   `start refused:` and the reason, on both the `--workspace` and the
   `--project` path; on the `--project` path the provisioned workspace is
@@ -566,6 +566,7 @@ row is rewritten. A task without `parent_id` reads as a root.
 - **The Brief lists direct children only**; the rollup is over all time.
 - **The merged base is as the plan gives it.** `Performers.offered` takes a ceiling; `tasks.stop` keeps 2.1's signature and returns `stop_tree(...) > 0`, so the bridge's stop stops the subtree too; the tree is documented in architecture.md's The objective tree (no `docs/objective-tree.md` exists); `docs/metered-spending.md` also named `tasks.money` and is fixed.
 - **Scope is "Spending is metered only (Tom, 2026-10-03)"**; the plan has no separate feedback section, and nothing in the tree caps or refuses on money.
+- **Answers need no fence of their own.** An answer needs `waiting`; the walk gives every unmerged descendant its own row (it folds `stopped`) and a merged node is not `waiting`, so `answer`'s state check refuses one under a stopped ancestor. Tested.
 - **Smaller choices.** `ancestors` is one recursive query; the Brief's spending reads to the micro-dollar (`$1.500000`), the command line's to four places; the property test also draws merges, forged as `tests/test_machine.py` builds them; `stop` prints `stopped`, `stopped (and N descendants)`, or `already stopped`.
 
 ## Critique round 1 (of 2): revise
@@ -597,3 +598,7 @@ Both rounds are spent; each finding is folded in.
    4.3's.
 6. The render test allows the narrowed effects list.
 7. `tree_spending` returns `charges` with `at`; children in start order.
+
+## Patch round 1
+
+`intake._bind` takes the tree lock before the task lock (no other task-lock holder calls `start_child`, `stop_tree`, or `feedback`); tested by a bridge stop and a bridge feedback each bound while the command line's stop holds the tree lock, both deadlocked before. Tested: a bridge "stop" on a root stops child and grandchild. An unknown parent raises `UnknownParent`, the only lookup error the command line catches. `tree_spending` folds `spending` per node. Answers: "Decided by default", tested.

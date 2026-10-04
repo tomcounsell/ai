@@ -18,8 +18,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from core import broker, db, ledger, machine, session, spending, tasks
-from tests import scripted
+from core import broker, db, intake, ledger, machine, notices, session, spending, tasks
+from tests import bridges, scripted
 from tests.conftest import TEST_DB
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.test_machine import Ledger
@@ -97,19 +97,34 @@ def _own(value, prefix: str):
     return value
 
 
+def _delivered(summary: str | None) -> Ledger:
+    led = Ledger().plan().critique("sound").build().checks("pass", "pass", "no_change")
+    led.add("task.delivered", {"summary": summary or "merged work", "outcome": "passed"})
+    return led
+
+
+async def _append(conn, task_id: str, led: Ledger) -> None:
+    for row in led.rows[1:]:
+        await ledger.append(conn, task_id, row["type"], _own(row["payload"], task_id))
+
+
+async def to_merge(conn, task_id: str) -> None:
+    """Rows taking a task from `judge` to `merge`: delivered, waiting on Tom."""
+    await _append(conn, task_id, _delivered(None))
+    assert machine.fold(await ledger.read(conn, task_id)).state is machine.State.MERGE
+
+
 async def merge(conn, task_id: str, summary: str | None = None) -> None:
     """Rows taking a task from `judge` to `merged`, in the shapes the
     kernel writes, with a delivery carrying `summary`."""
-    led = Ledger().plan().critique("sound").build().checks("pass", "pass", "no_change")
+    led = _delivered(summary)
     effect = ledger.new_id()
-    led.add("task.delivered", {"summary": summary or "merged work", "outcome": "passed"})
     led.add(
         "effect.held", {"effect_id": effect, "action_type": "merge", "payload": {"candidate": led.candidate}}
     )
     led.add("effect.intent", {"effect_id": effect})
     led.add("effect.outcome", {"effect_id": effect, "kind": "done"})
-    for row in led.rows[1:]:
-        await ledger.append(conn, task_id, row["type"], _own(row["payload"], task_id))
+    await _append(conn, task_id, led)
     assert machine.fold(await ledger.read(conn, task_id)).state is machine.State.MERGED
 
 
@@ -319,7 +334,7 @@ def test_unknown_calibration_stopped_and_fenced_merged_parents_are_refused(dsn):
             await tasks.stop(conn, top, reason="test")
             out = {}
             for name, p, exc in (
-                ("unknown", "no-such-task", KeyError),
+                ("unknown", "no-such-task", tasks.UnknownParent),
                 ("calibration", cal, tasks.CalibrationTask),
                 ("stopped", stopped, tasks.TaskStopped),
                 ("fenced", mid, tasks.TaskStopped),
@@ -694,6 +709,133 @@ def test_feedback_racing_a_stop_is_refused_or_ordered_before_it(dsn):
     first, second = run(go())
     assert first["state"] == "stopped"
     assert second["state"] == "merged" and second["fenced_by"]
+
+
+def _replying(text: str, reply_to: str) -> intake.Inbound:
+    return intake.Inbound(
+        channel="telegram",
+        chat_id=bridges.OPERATOR_CHAT,
+        chat_kind="dm",
+        message_id=ledger.new_id(),
+        sender_id=bridges.OPERATOR,
+        sender_name="Tom",
+        sent_at="2026-10-04T00:00:00Z",
+        text=text,
+        reply_to=reply_to,
+    )
+
+
+async def _sent_notice(conn, task_id: str, kind: str, about_key: str) -> str:
+    """A notice on the task the bridge has sent: the message id a reply names."""
+    await notices.request(conn, task_id, kind=kind, about_key=about_key, text="about the task")
+    (notice_id,) = await (
+        await conn.execute(
+            "SELECT payload->>'notice_id' FROM events WHERE task_id = %s AND type = 'notice.requested' "
+            "AND payload->>'about_key' = %s",
+            (task_id, about_key),
+        )
+    ).fetchone()
+    mid = ledger.new_id()
+    sent = [{"channel": "telegram", "chat_id": bridges.OPERATOR_CHAT, "message_id": mid}]
+    await ledger.append(conn, task_id, "notice.sent", {"notice_id": notice_id, "sent": sent})
+    return mid
+
+
+async def _binding(conn, received_id: str) -> dict:
+    (bound,) = await (
+        await conn.execute(
+            "SELECT payload FROM events WHERE type = 'message.bound' AND payload->>'received_id' = %s",
+            (received_id,),
+        )
+    ).fetchone()
+    return bound
+
+
+def test_tom_replying_stop_by_telegram_stops_the_whole_subtree(dsn, tmp_path):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            r = await root(conn)
+            c = await child(conn, r)
+            g = await child(conn, c)
+            target = await _sent_notice(conn, r, "test", "test:stop")
+            got = await intake.receive(conn, _replying("stop", target))
+            await intake.bind(conn)
+            return (
+                await _binding(conn, got.received_id),
+                [len(await stop_rows(conn, x)) for x in (r, c, g)],
+                [(await stop_rows(conn, x))[0]["payload"].get("by_stop_of") for x in (c, g)],
+            )
+
+    with bridges.operator(tmp_path):
+        bound, rows, by = run(go())
+    assert bound["as"] == "stop"
+    assert rows == [1, 1, 1] and by[0] == by[1] and by[0] is not None
+
+
+async def _bridge_racing_a_stop(dsn, node: str, received_id: str) -> tuple[int, dict]:
+    """The command line's stop of `node` holds the tree's lock while the
+    bridge binds Tom's reply on the same node, then takes the node's task
+    lock. The bridge takes tree then task like the stop, so it waits, and
+    neither side is a deadlock's victim."""
+    async with await db.connect(dsn) as a, await db.connect(dsn) as b:
+        async with b.transaction():
+            await tasks.lock_tree(b, node)
+            binding = asyncio.create_task(intake.bind(a))
+            await asyncio.sleep(0.5)
+            assert not binding.done()
+            written = await tasks.stop_tree(b, node, reason="the command line's stop")
+        await binding
+        return written, await _binding(a, received_id)
+
+
+def test_a_bridge_stop_racing_a_command_line_stop_takes_the_locks_in_the_same_order(dsn, tmp_path):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            r = await root(conn)
+            c = await child(conn, r)
+            target = await _sent_notice(conn, c, "test", "test:race")
+            got = await intake.receive(conn, _replying("stop", target))
+        return await _bridge_racing_a_stop(dsn, c, got.received_id)
+
+    with bridges.operator(tmp_path):
+        written, bound = run(go())
+    assert written == 1
+    assert "error" not in bound and bound["as"] == "none"
+
+
+def test_bridge_feedback_racing_a_command_line_stop_takes_the_locks_in_the_same_order(dsn, tmp_path):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            r = await root(conn)
+            m = await child(conn, r)
+            await to_merge(conn, m)
+            sha = machine.fold(await ledger.read(conn, m)).candidate.sha
+            target = await _sent_notice(conn, m, "delivered", f"delivered:{sha}")
+            got = await intake.receive(conn, _replying("one more thing", target))
+        written, bound = await _bridge_racing_a_stop(dsn, m, got.received_id)
+        async with await db.connect(dsn) as conn:
+            return written, bound, await tasks.status(conn, m)
+
+    with bridges.operator(tmp_path):
+        written, bound, status = run(go())
+    assert written == 1
+    assert "error" not in bound and bound["as"] == "none"
+    assert status["state"] == "stopped"
+
+
+def test_an_answer_under_a_stopped_ancestor_is_refused_as_the_node_is_stopped(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            r = await root(conn)
+            g = await child(conn, await child(conn, r))
+            await _append(conn, g, Ledger().ask())
+            assert machine.fold(await ledger.read(conn, g)).state is machine.State.WAITING
+            await tasks.stop(conn, r, reason="test")
+            with pytest.raises(LookupError, match="stopped"):
+                await session.answer(conn, g, "this one")
+            return [r for r in await ledger.read(conn, g) if r["type"] == "question.answered"]
+
+    assert run(go()) == []
 
 
 def test_start_child_takes_a_marker_and_refuses_a_calibration_one(dsn):

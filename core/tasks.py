@@ -203,7 +203,7 @@ async def start_child(
     `governance_grant`, and `harness` are what `brief_fields` give, never
     the parent's. `marker` is laid into `task.started` (`{"sdlc": 1}` when
     None, so a child is an SDLC task by default). Refused, with nothing
-    written: an unknown parent (`KeyError`), a calibration parent or a
+    written: an unknown parent (`UnknownParent`), a calibration parent or a
     marker carrying `calibration` (`CalibrationTask`: stop cannot walk
     through one), a parent fenced by a stop (`TaskStopped`), and a ceiling
     above the parent's (`CeilingRefused`)."""
@@ -212,7 +212,10 @@ async def start_child(
         raise CalibrationTask("a calibration task cannot be a child; stop cannot walk through one")
     async with conn.transaction():
         await lock_tree(conn, parent_id)
-        parent = await brief(conn, parent_id)
+        try:
+            parent = await brief(conn, parent_id)
+        except KeyError:
+            raise UnknownParent(f"no task {parent_id}") from None
         if await is_calibration(conn, parent_id):
             raise CalibrationTask(f"task {parent_id} is a calibration task; it cannot be a parent")
         fence = await fenced_by(conn, parent_id)
@@ -274,6 +277,10 @@ async def is_calibration(conn, task_id: str) -> bool:
         )
     ).fetchone()
     return bool(row and row[0])
+
+
+class UnknownParent(LookupError):
+    """A child's start named a parent with no Brief."""
 
 
 class CalibrationTask(LookupError):
@@ -556,17 +563,14 @@ def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"spent_usd_micros": spent, "open_calls": open_calls}
 
 
-_OPENED = ("gateway.opened", LEGACY_OPENED)
-
-
 async def tree_spending(conn, task_id: str) -> dict[str, Any]:
-    """The metered spending of the task's subtree, itself included:
-    `tree_spent_usd_micros`, every charge summed; `tree_open_calls`, each
-    call opened and not yet charged, by call id, with its task id and
-    estimate; and `charges`, every `gateway.charged` row as `{task_id,
-    call_id, usd_micros, at}` in event id order. A report: nothing reads it
-    to decide anything, and a stopped node's spending counts like any
-    other."""
+    """The metered spending of the task's subtree, itself included, as
+    `spending` folds each node: `tree_spent_usd_micros`, every charge
+    summed; `tree_open_calls`, each call opened and not yet charged, by
+    call id, with its task id and estimate; and `charges`, every
+    `gateway.charged` row as `{task_id, call_id, usd_micros, at}` in event
+    id order. A report: nothing reads it to decide anything, and a stopped
+    node's spending counts like any other."""
     nodes = [task_id, *await subtree(conn, task_id)]
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -577,23 +581,21 @@ async def tree_spending(conn, task_id: str) -> dict[str, Any]:
         rows = await cur.fetchall()
     spent = 0
     open_calls: dict[str, dict[str, Any]] = {}
-    charges = []
-    for row in rows:
-        p = row["payload"]
-        if row["type"] in _OPENED:
-            estimate = p.get("estimate_usd_micros", p.get("usd_micros"))
-            open_calls[p["call_id"]] = {"task_id": row["task_id"], "estimate_usd_micros": estimate}
-        else:
-            open_calls.pop(p["call_id"], None)
-            spent += p["usd_micros"]
-            charges.append(
-                {
-                    "task_id": row["task_id"],
-                    "call_id": p["call_id"],
-                    "usd_micros": p["usd_micros"],
-                    "at": row["at"].isoformat(),
-                }
-            )
+    for node in nodes:
+        own = spending([r for r in rows if r["task_id"] == node])
+        spent += own["spent_usd_micros"]
+        for call_id, estimate in own["open_calls"].items():
+            open_calls[call_id] = {"task_id": node, "estimate_usd_micros": estimate}
+    charges = [
+        {
+            "task_id": r["task_id"],
+            "call_id": r["payload"]["call_id"],
+            "usd_micros": r["payload"]["usd_micros"],
+            "at": r["at"].isoformat(),
+        }
+        for r in rows
+        if r["type"] == "gateway.charged"
+    ]
     return {"tree_spent_usd_micros": spent, "tree_open_calls": open_calls, "charges": charges}
 
 

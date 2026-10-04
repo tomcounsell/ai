@@ -330,6 +330,9 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     task_id, replied = await _replied(conn, p)
     if task_id is None or replied is None:
         return await _start(conn, p)
+    # Tree, then task: the order every tree writer takes (a stop or
+    # feedback below takes the tree's lock again).
+    await tasks.lock_tree(conn, task_id)
     await ledger.lock(conn, f"task:{task_id}")
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
