@@ -458,13 +458,14 @@ def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="names the turn"):
                 await verdicts.record_check(
-                    conn, task, machine.Check.TEST, "pass", leg="test runner", breadth="b"
+                    conn, task, machine.Check.TEST, "pass", leg="session", breadth="b"
                 )
             for head in ("abc123", "1" * 40):
                 with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
                     await verdicts.record_check(
-                        conn, task, machine.Check.DOCS, "updated", head=head, **scripted.MANUAL
-                    )
+                        conn, task, machine.Check.DOCS, "updated", head=head, governance_from=[],
+                        **scripted.SESSION_LEG,
+                    )  # fmt: skip
 
     run(checks_refuse())
 
@@ -542,7 +543,13 @@ def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
         async with await db.connect(dsn) as conn:
             with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
                 await verdicts.record_check(
-                    conn, task, machine.Check.DOCS, "updated", head=head, **scripted.MANUAL
+                    conn,
+                    task,
+                    machine.Check.DOCS,
+                    "updated",
+                    head=head,
+                    governance_from=[],
+                    **scripted.SESSION_LEG,
                 )
 
     run(go())

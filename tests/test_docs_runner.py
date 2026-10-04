@@ -53,7 +53,7 @@ def docs_runners(ws: Path, port=None) -> dict:
 
 async def at_checks(dsn, tmp_path, *, test="pass", review="pass", **cfg):
     """A provisioned task whose candidate waits on its checks, with test
-    and review recorded by hand; the scripted session's config is `cfg`
+    and review written through `scripted.check`; the scripted session's config is `cfg`
     (its first fresh act is the critique)."""
     task, b = await scripted.provisioned(dsn, tmp_path)
     ws = Path(b.workspace)
@@ -375,7 +375,9 @@ def test_every_join_row_through_the_router(
             assert out["status"] == "no runner" and out["missing"] == ["review"], out
             governance = [verdicts.InstanceSpec("greeting.txt", 1)] if verdict == "governance_refused" else []
             findings = ["say it twice"] if verdict == "changes" else []
-            await scripted.check(dsn, task, "review", verdict, governance=governance, findings=findings)
+            # An ungranted instance makes the reviewer's pass governance_refused.
+            said = "pass" if verdict == "governance_refused" else verdict
+            await scripted.check(dsn, task, "review", said, governance=governance, findings=findings)
         return await rows(dsn, task)
 
     got = run(go())

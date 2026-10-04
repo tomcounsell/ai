@@ -268,7 +268,7 @@ marker, and `cause`:
   failure of the candidate, and is shown in the attention log so the
   default can be raised. It is reused like `commit`, so it never loops.
 
-`verify.json` gives the reviewer these fields, still with no free text.
+`verify.json` gives the reviewer these fields, still with no message or output tail.
 
 ### Specs inside the VM
 

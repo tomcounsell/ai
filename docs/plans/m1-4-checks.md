@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; then 1.4c after takeover, which deletes `verdict` (it keeps `review` until then)
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; 1.4c in two parts: part one, the review runner (m1-4c-review.md), built and merged unregistered, as docs is, until governance passes its entry check, with `verdict` kept until then; part two, the container verifier (m1-4c-verifier.md), planned
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -116,7 +116,7 @@ whole pipeline on its own branch, stacked on the one before.
 | **1.4a** | Kernel workspace provisioning (per-task clone, bare origin, kernel mirror read by the merge, `push_url`, per-task Postgres and Redis, project specs, `start --project`); per-turn `TMPDIR` and Claude Code config; fresh-session machinery; the critique runner; the fold fix; absorbs the replay teardown, shared role, and test-performer debts | nothing (waits for, or carries, 1.2's replace-ref fix) | `critique` |
 | **1.4b** | Frozen case sets for breadth and governance, routing on the entry check; the test runner (breadth, then suite at base and head in fresh checkouts) and the docs runner (own checkout, path drop, governance after the turn) | nothing (live judgement spend metered, expected about $1, through the builder's own key directory) | `test`, `docs` |
 | **1.4d** | The GitHub credential for the merge, held in the kernel key directory; the merge-target list; `merge_url` honoured; transcript copies with digests; performers registered per task; awaitable performers | granting the merge targets for the one live push (the token is in the vault); everything else is built and tested against a local smart-HTTP server | none |
-| **1.4c** | The container verifier (kernel-built images, a fresh VM per verification, RAM measured) and the review runner (Opus, blind, governance first); the `verdict` command deleted | installing `container` and Rosetta, starting the container system | `review`; the command is deleted |
+| **1.4c** | In two parts. Part one ([m1-4c-review.md](m1-4c-review.md)): the review runner (Opus, blind, governance first, the kernel's rerun on the host), registered with docs once governance passes its entry check, when the `verdict` command is deleted. Part two ([m1-4c-verifier.md](m1-4c-verifier.md)): the container verifier (kernel-built images, a fresh VM per verification, RAM measured) | installing `container` and Rosetta, starting the container system | `review`; the command is deleted |
 
 **Order: a, b, d, c.** 1.4a first because every runner needs provisioned
 checkouts and the fresh-session machinery. 1.4b next because its runners
@@ -140,7 +140,7 @@ added to it.
 | Fresh sessions for critique, review, and docs as runners in `RUNNERS`; each stage removed from `verdict` as its runner lands; the command deleted | a (critique), b (docs), c (review, delete) | `core/fresh.py` (new), `harnesses/claude_code.py` (`fresh_turn`), `core/machine.py`, `core/tasks.py`, `core/verdicts.py`, `skills/sdlc/verdict.md` (new) |
 | Through the router: docs commits outside `machine.is_doc_path` dropped at turn end and recorded as a `changes` finding; a failed or stopped branch leaves no verdict and the next run reruns only it; the docs session works in its own checkout so docs commits do not ride into the next candidate | b | `core/fresh.py`, `core/workspace.py` (mirror), `core/verdicts.py` |
 | `checks.test` runs the suite at head and base, then the breadth call; `test.decided` carries the command, the failures at head that do not fail at base, the behaviors, and breadth's model, confidence, cost, guard id; the order of breadth and suite settled | b | `core/checks.py` (new), `core/verdicts.py` |
-| The blind verifier: Opus in a fresh session, rerunning the tests in an Apple container built by the kernel; `review.decided` carries the governance boolean; container RAM measured | c | `core/container.py` (new), `core/checks.py`, `core/binaries.py`, `docs/machine.md` |
+| The blind verifier: Opus in a fresh session, rerunning the tests in an Apple container built by the kernel; `review.decided` carries the governance boolean; container RAM measured | c (part one reruns on the host; part two moves the rerun into the container) | `core/container.py` (new), `core/checks.py`, `core/binaries.py`, `docs/machine.md` |
 | `tools/push_branch.py` gains a GitHub credential held by the kernel and never by a turn, so a released merge reaches the rebuild branch on GitHub | d (`push_url` split in a) | `tools/push_branch.py`, `core/git.py`, `core/credentials.py`, `core/__main__.py` (`github-key`), the merge-target list |
 | Transcript copies kept in the store with a digest | d | `core/transcripts.py` (new), `core/runs.py` |
 | Review and docs runners always pass `governance_from`, the test runner always passes `breadth`; `record_check` accepts neither as optional from a runner | b (test, docs), c (review) | `core/verdicts.py` |
@@ -859,6 +859,11 @@ run on (the bridges need this too). Test: two tasks with different
 origins in one process never push to each other's.
 
 ## 1.4c outline: the container verifier and the review runner
+
+Built in two parts: [m1-4c-review.md](m1-4c-review.md), the review runner,
+with the kernel's rerun on the host until part two;
+[m1-4c-verifier.md](m1-4c-verifier.md), the rerun in a container VM. Those
+files govern where they differ from this outline.
 
 ### The review runner, `Check.REVIEW`
 

@@ -352,16 +352,16 @@ the system cannot perform against".
 **Built.** Every question is a `question.asked` row and its answer a
 `question.answered` row; every piece of feedback on a delivery is a
 `feedback.given` row naming the delivery it answers; every tap is an
-`approval.granted` row, every verdict recorded by hand a verdict row with `leg: manual`, and every
-governance grant a `guard.granted` row. Each carries provenance: `by`,
-`via`, `at`, and `role_played`, true when someone stood in for Tom.
-`tasks.status` folds these into the task's attention log, in ledger order,
-labelled by kind (`question`, `feedback`, `approval`,
-`verdict`, `grant`), and counts each kind apart in `attention_counts`, with
-how many were role-played and how many are unknown (a field a row never
-recorded reads as null). `role_played` exists because the first
-demonstration's second feedback round was role-played and the ledger could
-not say so (rebuild-demonstration.md, Kernel findings 5).
+`approval.granted` row, and every governance grant a `guard.granted` row.
+Each carries provenance: `by`, `via`, `at`, and `role_played`, true when
+someone stood in for Tom. `tasks.status` folds these into the task's
+attention log, in ledger order, labelled by kind (`question`, `feedback`,
+`approval`, `verdict` for a verdict recorded by hand with `leg: manual`,
+and `grant`), and counts each kind apart in
+`attention_counts`, with how many were role-played and how many are unknown
+(a field a row never recorded reads as null). `role_played` exists because
+the first demonstration's second feedback round was role-played and the
+ledger could not say so (rebuild-demonstration.md, Kernel findings 5).
 
 **Design.**
 
@@ -408,18 +408,25 @@ The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md
 one blind verification per candidate, beside test and docs, with as many
 send-backs to patch as the plan allows (0, 1, or 2, set by the stakes).
 
-**Design.** Nothing in the kernel verifies yet (review verdicts are recorded
-by hand); the emulator's judge (`tests/emulator/judge.py`) runs outside
-it, metered through the gateway. The verifier:
+**Built, not registered.** `fresh.review_runner` is the verifier. It is
+registered once governance's judgement passes its entry check; until then
+a person records review verdicts by hand (`python -m core verdict`). The
+emulator's judge (`tests/emulator/judge.py`) runs outside the kernel,
+metered through the gateway. The verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
-  deterministic check results, and the effect ledger. It never reads the
+  deterministic check results, the governance instances, and the task's
+  held and refused effects, as files the kernel writes. It never reads the
   agent's narrative (`done.md`, the transcript), so it judges what happened
   and not what Valor said happened.
-- **Runs deterministic checks first** in a fresh container from a
-  kernel-built image: the repository's tests and its linter. The results
-  are recorded before the verifier reads any prose, so a delivery saying
-  "all tests pass" is judged against the kernel's own record.
+- **Runs deterministic checks first**: the kernel reruns the repository's
+  tests and its linter at base and candidate in fresh sandboxed checkouts
+  on the host, with fresh services, and records `verify.ran` before the
+  verifier reads any prose, so a delivery saying "all tests pass" is
+  judged against the kernel's own record. The verifier's own checkout is
+  set up by the kernel with fresh services, so it reruns any test itself.
+  Running that rerun in a fresh container from a kernel-built image is
+  design (m1-4c-verifier.md).
 - **Is Opus-class, never cheaper** (Tom, 2026-10-01): the builder's own
   Opus model in a fresh blind session, or an Opus-class model from another
   vendor through another harness. A weaker judge underestimates a stronger
@@ -428,9 +435,10 @@ it, metered through the gateway. The verifier:
   (rebuild-baseline.md, Review rounds). A model grading its own output
   prefers it [16]; blindness (no narration, a session that did not build,
   checks it reran itself) is what counters that when the model is the same.
-- **Returns a typed verdict:** pass, changes, or governance refused, with a
-  result per requirement, a `predicted_failure` probability, and the
-  governance boolean. Every verdict is a ledger row from the first one.
+- **Returns a typed verdict:** the verifier answers pass or changes, with
+  a result per requirement and a `predicted_failure` probability; the
+  kernel records governance refused for a pass with an ungranted instance.
+  Every verdict is a ledger row from the first one.
 
 **Calibration and autonomy.** A human audit sample of verdicts, weighted
 toward work that left the workspace and every `act`, with a smaller share of
@@ -539,8 +547,8 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
-| Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
-| Verifier too lenient | Opus-class blind reviewer, never cheaper; human audit sample (design) | Evidence |
+| Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
+| Verifier too lenient | Opus-class blind reviewer, never cheaper (built); human audit sample (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
 
 ## Limits

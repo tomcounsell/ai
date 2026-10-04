@@ -688,19 +688,15 @@ class Hunk:
 
 def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk]:
     """The hunks of one path's diff between two commits, as git computes
-    them (three lines of context, so the header carries function context)."""
-    text = out(
-        workspace,
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        "--no-color",
-        older,
-        newer,
-        "--",
-        path,
-    )
+    them (three lines of context, so the header carries function context).
+    `path` is read as a file name only (`--literal-pathspecs`), never as a
+    pathspec with magic or a glob, and a directory (`.`, `hooks`) is no
+    file of the diff, so it has no hunks."""
+    diff = ("--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames")
+    named = [n for n in out(workspace, *diff, "--name-only", "-z", older, newer, "--", path).split("\0") if n]
+    if named != [path]:
+        return []
+    text = out(workspace, *diff, "--no-color", older, newer, "--", path)
     found: list[Hunk] = []
     current = None
     for line in text.splitlines():

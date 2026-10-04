@@ -5,8 +5,9 @@ held for Tom, and feedback after the merge patches in the same session.
 
 No model call: each turn is a scripted subprocess (`tests/scripted.py`)
 that plays its stage by writing `.valor/` files and committing, the way a
-`claude -p` turn would. Verdicts for stages with no runner yet are recorded
-by hand, as `python -m core verdict` records them.
+`claude -p` turn would. A check verdict a test does not run a runner for is
+written straight through `record_check` (`scripted.check`), with the
+judgements the local upstream gives.
 """
 
 import asyncio
