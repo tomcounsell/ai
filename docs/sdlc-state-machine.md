@@ -379,10 +379,13 @@ flagged hunk merges into it. Both legs failing leaves no verdict; after two
 such runs the unjudged hunks become one instance. The kernel computes the
 recorded verdict: a `pass` with an ungranted instance is
 `governance_refused`; a `changes` lists each such instance as a finding.
-The spec's setup runs in that checkout under a profile that writes only
-the checkout and its caches, never the session's config or `TMPDIR`.
-A candidate whose tree holds a `.valor` entry, or whose setup leaves
-`.valor`, `.pi`, or no directory where the checkout was, has no checkout
+The spec's setup runs in that checkout under a profile that writes the
+checkout (except the checkout directory itself and every `.git` in it), its
+caches, and its own `setup-tmp/`, and reads the services' password file,
+never the session's config or `TMPDIR`. A candidate whose tree holds a
+`.valor` entry, or whose setup leaves `.valor`, `.pi`, or no directory where
+the checkout was, or leaves the checkout so the kernel gets an error
+reading or writing it, has no checkout
 to review: after governance and the kernel's run, the kernel records
 `changes` naming it (leg `kernel`, no session, no reviewer's verdict).
 
