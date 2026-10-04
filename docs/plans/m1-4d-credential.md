@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4d-credential
 type: build
-status: passed; merge held for Tom's tap
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---

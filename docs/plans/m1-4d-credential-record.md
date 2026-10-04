@@ -195,3 +195,28 @@ directory. A probe under the builder profile blanked 708 of 8,872 kernel
    effect's lock, would stay open. Its docstring says so.
 
 Suite: 1098 passed, 21 skipped. `ruff check` and `ruff format --check` clean.
+
+## Merged
+
+Round 4 passed all three checks: test pass, review pass (governance
+boolean no), docs updated at 6219a7e38. The lead's suite on 6219a7e38:
+1098 passed, 21 skipped; `ruff check` and `ruff format --check` clean.
+Backup `valor_rebuild-20261004T002302Z.dump`. `valor-cori-rebuild`
+fast-forwarded to 6219a7e38.
+
+Rollout, by the build session under Tom's feedback of 2026-10-03:
+
+1. `uv sync`; no migration.
+2. `python -m core github-key`: `GITHUB_PUSH_TOKEN: written`.
+3. `merge-target add` granted `valor-cori-rebuild` and `valor/push-check`
+   of `https://github.com/tomcounsell/ai.git`, each with `--note` and
+   `--via` citing Tom's feedback.
+4. The live push test passed (no model spend): `valor/push-check` on
+   GitHub is at 905e53e7ac71. `merge-target remove ... valor/push-check
+   --by valor --note "live push done"` revoked that grant. The branch
+   stays on GitHub.
+5. Tom's ruleset on `main` waits for him; nothing depends on it.
+
+Follow-up, outside 1.4d's diff, from review round 4: `git.dirty()` makes
+its temporary index in `$TMPDIR`, which a turn can reach, as round 3's
+output files did. The fix is the same: `dir=git.output_dir()`.
