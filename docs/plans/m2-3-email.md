@@ -124,7 +124,7 @@ From [m2-1-port.md](m2-1-port.md), which wins where this plan differs:
   payload `to`, `cc`, `subject`, `body`, `in_reply_to`, `references`,
   `files: [{path, sha256}]`; refused at request time when the channel
   entry's size function, applied to the whole message, exceeds
-  `max_file_bytes`, the protocol limit the reason (D15b, D15c).
+  `max_message_bytes`, the protocol limit the reason (D15b, D15c).
 - Results carrying `sent: [{channel, chat_id, message_id}]`; binding on
   `(channel, chat_id, message_id)`. Email binds only `answer`, `steer`,
   and `start`; an `In-Reply-To` matching no sent message is not a reply;
@@ -144,7 +144,7 @@ Pure functions over raw bytes, plus the attachment write. No network.
 | Function on `main` (`bridge/email_bridge.py`) | Here |
 |---|---|
 | `_decode_header_value` | Kept |
-| `_extract_address`, `_extract_addresses` | Kept. A `From` with more than one address is reported as such, so `verified` can be false for it |
+| `_extract_address`, `_extract_addresses` | Kept. The first address in `From` is the sender; every raw `From` value is in `headers` |
 | `_extract_body` | Adapted: an unknown charset decodes as UTF-8 with replacement instead of raising `LookupError`; HTML-only mail is reduced to text with `html.parser`, dropping `script` and `style` and unescaping entities, in place of the tag regex |
 | `_sanitize_attachment_filename`, `_is_attachment_part` | Kept |
 | `_extract_attachment_metadata` | Adapted: no size or part-count cap (see "Left out"); a part that fails to decode is an entry with `skipped` and its reason, instead of a `truncated` flag |
@@ -213,7 +213,7 @@ The subject is the payload's, unchanged (main's
   `Message-ID` = `<valor.<first 32 hex of sha256(key)>@<Valor's domain>>`,
   so a retry of one effect repeats its id and two effects never share one.
 - **Send.** `smtplib.SMTP`, `starttls` with the default context, login,
-  `MAIL FROM` with `SIZE`, `RCPT` for each address, `DATA`, the
+  `MAIL FROM` with `SIZE` when the server advertises it, `RCPT` for each address, `DATA`, the
   dot-stuffed body, then the end of data line `.` on its own, sent apart.
   One attempt. No command has a timer: each waits until the server
   answers or a stop ends it, and the body goes in one `sendall`. A stop
@@ -268,7 +268,7 @@ The subject is the payload's, unchanged (main's
   builds with the same function, which the bridge reaches through
   `core.bridge` (D30), so the two lengths are equal by construction. The window records
   the `SIZE` smtp.gmail.com advertises, which replaces 25,000,000 if it
-  differs. `MAIL FROM` carries `SIZE`, so an oversize message is refused
+  differs. `MAIL FROM` carries `SIZE` when advertised, so an oversize message is refused
   before the body, a definite `failed`.
 
 Main's retries, dead letters, relay loop, drafter, history, and `react`

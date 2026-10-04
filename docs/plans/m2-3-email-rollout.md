@@ -6,7 +6,7 @@ The rollout and the test window for the email bridge in [m2-3-email.md](m2-3-ema
 1. `python -m core backup`; merge; pull and `python -m core migrate`.
 2. `brew install dovecot` on any machine that runs the suite.
 3. `python -m bridges.email keys`; set `VALOR_EMAIL_ADDRESS` and
-   `email_since` (the window's date) in the bridge's launchd environment,
+   `VALOR_EMAIL_SINCE` (the window's date) in the bridge's launchd environment,
    and `VALOR_EMAIL_ADDRESS` in the kernel's too (it fills reply-all and
    measures the message's size); confirm `operator_email` is set.
 4. Install the plist from `python -m bridges.email --plist`, unloaded.

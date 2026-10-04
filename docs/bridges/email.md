@@ -145,7 +145,7 @@ the sizes the kernel took without reading the files. A send over
 25,000,000 bytes is refused at request time with that limit as the
 reason, so Tom never approves an impossible send. The performer builds
 with the same builder, so the size measured is the size sent. `MAIL FROM`
-carries `SIZE`.
+carries `SIZE` when the server advertises it.
 
 **Recipients are `core/`'s choice.** A turn replies to a thread by
 requesting `email.send` with `reply_to` (the received email's
