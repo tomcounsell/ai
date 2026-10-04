@@ -500,7 +500,7 @@ different clusters, and a turn cannot reach the kernel's.
   on a scratch cluster secured the same way.
 
 How the sandbox is built, and which work runs under `sandbox-exec` and
-which in an Apple container, is `docs/architecture.md`'s.
+which in an Apple container, is `docs/sandbox.md`'s.
 
 **What is met, and what still rests on the sandbox.** Met: no role logs
 into a kernel database without the password, and a workspace turn can read

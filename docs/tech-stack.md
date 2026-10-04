@@ -423,7 +423,7 @@ machine ([machine.md](machine.md)).
 
 ### Which sandbox for which work
 
-[architecture.md](architecture.md) owns the split: turns run under
+[sandbox.md](sandbox.md) owns the split: turns run under
 `sandbox-exec`, which runs the app's own toolchain natively at no memory
 cost, and the blind verifier re-executes in a fresh container, which must
 never share the executor's environment [4]. Moving turns on a Linux
