@@ -297,15 +297,20 @@ def test_a_session_docs_head_must_be_one_the_kernel_kept(dsn, tmp_path):
     run(go())
 
 
-def test_a_review_verdict_has_no_kernel_leg(dsn, tmp_path):
+def test_a_kernel_review_verdict_names_no_turn(dsn, tmp_path):
     async def go():
         task, _b, _ws = await at_checks(dsn, tmp_path)
         async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="only the test and docs branches"):
-                await verdicts.record_check(conn, task, Check.REVIEW, "changes", leg="kernel")
+            await verdicts.record_check(
+                conn, task, Check.REVIEW, "changes", leg="kernel",
+                findings=[{"kind": "commit", "text": "no review checkout"}],
+            )  # fmt: skip
         return await rows(dsn, task)
 
-    assert not [r for r in run(go()) if r["type"] == "review.decided" and r["payload"]["leg"] == "kernel"]
+    kernel = [
+        r["payload"] for r in run(go()) if r["type"] == "review.decided" and r["payload"]["leg"] == "kernel"
+    ]
+    assert kernel and kernel[-1]["verdict"] == "changes" and "turn_id" not in kernel[-1]
 
 
 # -- the config read runs under the profile --------------------------------------------------

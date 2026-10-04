@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-review
 type: build
-status: passed; merge held for Tom's tap (records in m1-4c-review-records.md)
+status: passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -15,7 +15,7 @@ runner for `checks.review`: governance per hunk, then the kernel's own
 rerun of the candidate's suite and lint on the host in a fresh sandboxed
 checkout (1.4b's machinery), then a blind Opus session in a checkout the
 kernel has set up, whose verdict the runner turns into the recorded one.
-`python -m core verdict` is deleted in the same commit.
+The runner is registered with docs once governance passes its entry check.
 Part two, [m1-4c-verifier.md](m1-4c-verifier.md), moves the rerun into an
 Apple container VM.
 
@@ -38,7 +38,7 @@ gate, so the gate measures a real review runner.
 router's runner mapping, `record_check`'s review path, `record_critique`'s
 leg, the `suite.ran` reuse key, `git.hunk_at`), stored data (a
 `verify.ran` event, a `review.compared` event, new fields on
-`review.decided`), and the command line (one command deleted). A mistake
+`review.decided`), and the command line (none: `verdict` stays). A mistake
 either passes a candidate on its own claim, gives the reviewer the
 builder's narration or live data, or leaves a task stuck in checks with no
 way to Tom.
@@ -50,7 +50,7 @@ From valor-rebuild.md, 1.4:
 | Done item | What closes it here |
 |---|---|
 | The blind verifier: Opus in a fresh session, rerunning the tests in a fresh sandboxed checkout like the test branch's; `review.decided` carries the governance boolean | `fresh.review_runner`: seat `reviewer`, the kernel's own head run in a fresh checkout under the check profile with fresh services, before a blind session in its own set-up checkout reads anything |
-| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | review registered unconditionally, as 1.4b registers docs; `verdict` deleted in the same commit |
+| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | not closed here: review is built and registered with docs once governance passes its entry check, when `verdict` is deleted |
 | The review and docs runners always pass `governance_from` | the runner asks governance first and passes its ids; `record_check` already refuses a session-leg review without them (1.4b) |
 
 The Done line stands as written.
@@ -231,40 +231,25 @@ no verdict and the next run asks again.
 `git.hunk_at` runs git with `--literal-pathspecs`, so a path is only ever
 a file name.
 
-### Registration and deleting `verdict` (`core/__main__.py`, `core/verdicts.py`)
+### Registration (`core/__main__.py`, `core/verdicts.py`)
 
-`runners(judgement_port)` adds `Check.REVIEW:
-fresh.review_runner(_fresh_for, port)` unconditionally. Governance's
-calibration record is information: kernel instances route as CLAUDE.md's
-paragraph says (a yes with no grant is a refused merge), whatever the
-entry check says. An uncalibrated judge on the review path can only add
-caution, at the cost of a tap, and the reviewer still names its own
-instances.
+`fresh.review_runner(fresh_for, port, model=None, seat="reviewer")` is
+built and not registered. The kernel registers the review runner beside
+the docs runner once governance's judgement has a calibration record on
+the real ledger that passes its entry check (m1-4b-runners.md, Landing;
+m1-4-checks.md). Until then `python -m core verdict` records review and
+docs by hand, and the command is deleted by the task that registers them.
 
-1.4b registers the docs runner unconditionally too, so every check has a
-runner once review is registered, and `verdict` is deleted in this part's
-registering commit. In it:
-
-- `verdicts.MANUAL_STAGES`, `manual_allowed`, `_manual`, and the
-  manual-leg refusals are deleted; `leg` loses its `"manual"` default on
-  both `record_check` and `record_critique` and is required, one of
-  `session` or `kernel`; `_session_leg` loses its manual branch;
-- the `verdict` subcommand, its parser, its usage text, `_verdict`, and
-  `_instance` are deleted (1.4b removes `--behavior` and the test and
-  docs options);
-- `_status_line`'s "no runner" text names the stage and says no runner is
-  registered for it;
-- `tests/scripted.py`'s `**MANUAL` payloads and its
-  `checks(..., review="governance_refused")` callers become session-leg
-  payloads with a scripted turn id and model;
-- `leg: manual` rows in the ledger fold as before and stay in the
-  attention log.
+`record_check` computes a review's verdict for every leg but `manual`
+(The recorded verdict); the manual leg keeps its two refusals. A
+candidate whose tree holds `.valor` gets a `changes` review on the
+`kernel` leg naming why, as the critique and docs runners do.
 
 ### Skills
 
 `skills/sdlc/review.md` gains the inputs list and the `verdict.json` shape
 (step 4), and says the recorded verdict is computed from governance.
-`skills/sdlc/verdict.md` drops the manual channel when `verdict` goes.
+`skills/sdlc/verdict.md` keeps the manual channel while `verdict` stays.
 
 ### Docs fixed in the same build
 
@@ -359,13 +344,8 @@ Unit and router tests run with `VALOR_TEST_DB` and the scripted session.
 - A stop during the head run, the setup, and the turn each record nothing
   and return `stopped`, with the run's group gone.
 
-**Registration and deletion.**
-
-- With `GOVERNANCE.calibrated` unset, `runners()` holds the review runner.
-- In the deletion commit: `python -m core verdict` exits with the parser's
-  unknown-command error; `record_check` and `record_critique` without
-  `leg`, or with `leg="manual"`, raise; a ledger holding `leg: manual`
-  review and critique rows folds to the same state.
+**Manual rows.** A ledger holding `leg: manual` review and critique rows
+folds to the same state.
 
 **Live** (`VALOR_LIVE=1`, metered): one real blind Opus review of a toy
 candidate through the router; and one of a toy candidate whose diff adds a
@@ -380,8 +360,8 @@ Other tasks change `core/` too; these are the files this part touches.
 | File | Change |
 |---|---|
 | `core/fresh.py` | `review_runner` with `seat`, `review_inputs`, `review.compared` |
-| `core/verdicts.py` | the computed session-leg review verdict; new payload fields; at deletion, `MANUAL_STAGES`, `manual_allowed`, `_manual`, the manual leg and its refusals; `record_critique`'s `leg` required; docstring |
-| `core/__main__.py` | register `review_runner`; `_fresh_for` takes the seat; at deletion, `verdict`, `_verdict`, `_instance`, usage text; `_status_line` |
+| `core/verdicts.py` | the computed review verdict for every leg but `manual`; new payload fields; a `kernel` leg on review; docstring |
+| `core/__main__.py` | nothing: the review runner is not registered yet |
 | `core/checks.py` | the head run's reuse key includes the role (if 1.4b lands without it); the lint run and its parser; `role="review"` |
 | `core/git.py` | `hunk_at` with `--literal-pathspecs` |
 | `core/README.md` | the runner |
@@ -441,10 +421,9 @@ Reversible calls made by the build session, not questions for Tom.
    the reviewer's checkout is set up, so it can rerun any test to read
    one.
 5. **The reviewer gets fresh services and a set-up checkout.**
-6. **Review is registered unconditionally.** Governance's calibration is
-   information, under Tom's rule against invented safeguards, as for the
-   test runner and breadth and 1.4b's docs runner. `verdict` goes in the
-   same commit.
+6. **Review is registered with docs.** Both wait for governance's entry
+   check (m1-4b-runners.md, Landing); `verdict` goes when they are
+   registered.
 7. **A run at another seat is information (`review.compared`)**, never a
    second `review.decided`, so the join reads one verdict per candidate.
 8. **Lint locations only for a kind the kernel can parse**, with the
@@ -479,3 +458,35 @@ The critique rounds, the build record, and the patch rounds are in
 Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped, after 1.4b. If 1.4b is patched, this rebases onto it and its three checks run again; the tap covers the rebased head only if all three pass.
+
+## Rebase onto 9e5090663
+
+Part one's commits were squashed into one and replayed onto 9e5090663
+with `git rebase --onto 9e5090663 3e1b97989`, which leaves out the 1.4b
+commits already on the tip. The tip is the status quo; part one sits on
+top of it.
+
+| Conflict | Resolved |
+|---|---|
+| `core/__main__.py` | The tip's file whole: review and docs unregistered, `verdict` kept, `_fresh_for(..., harness_name)` |
+| `core/fresh.py` `FreshFor` and its callers | The tip's fifth argument, `harness_name`; `review_runner` takes `harness_name, model` from `resolve_seat(seat)` and passes it on |
+| `core/fresh.py` review checkout | A `workspace.ValorInTree` from the blind checkout records a `kernel` leg `changes` naming why, with the governance ids |
+| `core/verdicts.py` | The tip's file, with part one's `REVIEWER_VERDICTS`, `governance_instances`, `review_verdict`, the computed verdict and its fields for every leg but `manual`, and a `kernel` leg on review; `MANUAL_STAGES`, `_manual`, `manual_allowed`, and the manual refusals stay |
+| `core/fresh.py` the verdict file | The reviewer's verdict is read with the tip's `read_verdict(lay.checks, check_dir.name, turn_id)` in a worker thread, as docs reads its own |
+| `core/checks.py` imports | Both `contextlib` and `functools` |
+| `tests/scripted.py` | Part one's session-leg payload is `SESSION_LEG`, since the tip's `SESSION` is a session id; `check` asks `ensure_merge` with the tip's performers; the scripted fresh session has the tip's `big` act and part one's `review` act, with the tip's UUID session id; `make` takes `harness_name` |
+| `tests/test_pipeline.py`, `tests/test_live_session.py` | The tip's: the `verdict` command tests stay, and the live session records review and docs by hand |
+| `tests/test_live_fresh.py` | Part one's two live reviews, through the file's own `fresh_for` |
+| `tests/test_review.py` | The two tests asserting review is registered and the manual leg refused are left out; a candidate whose tree holds `.valor` is tested to get the `kernel` leg `changes` with no reviewer run |
+| `tests/test_docs_runner.py` | The tip's test that review has no `kernel` leg becomes one that a `kernel` review names no turn |
+| Docs (`core/README.md`, `docs/data.md`, `docs/harnesses.md`, `docs/judgement-layer.md`, `docs/sdlc-state-machine.md`, this plan) | The tip's text, with the review runner described as built and registered with docs once governance passes its entry check; `docs/architecture.md`, `docs/emulator.md`, `docs/mission.md`, and `m1-4-checks.md` say the same |
+
+No cap, timeout, or guard came in with the rebase. Part one's lint and
+suite runs go through the tip's `_race` with output files; its git calls
+are the tip's (`--literal-pathspecs` on the diff calls).
+
+Assumed answer, for the lead: the tip leaves docs unregistered until
+governance passes its entry check and says the review runner routes on
+the same check, so this part lands unregistered and keeps `verdict`. If
+review and docs are to be registered now, the change is `runners()`, the
+deleted command and manual leg, and the tests and docs that name them.

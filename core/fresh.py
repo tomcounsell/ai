@@ -983,7 +983,9 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             return {"status": "failed", "state": now, "turn": ended}
 
         # 4 and 5. The verdict file, its shape, and what the record takes.
-        data, why = workspace.read_verdict(checkout, ended["turn_id"])
+        data, why = await asyncio.to_thread(
+            workspace.read_verdict, lay.checks, check_dir.name, ended["turn_id"]
+        )
         if data is None:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         try:

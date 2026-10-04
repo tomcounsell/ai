@@ -20,7 +20,7 @@ from core import checks, db, fresh, git, guards, machine, router, tasks, verdict
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check, State
-from core.settings import settings
+from core.settings import resolve_seat, settings
 from tests import judgement_upstream, scripted, test_checks
 from tests.test_machine import Ledger
 
@@ -290,7 +290,7 @@ def test_a_review_through_the_router_then_a_grant_reruns_nothing(dsn, tmp_path):
     assert decided["verdict"] == "governance_refused" and decided["reviewer_verdict"] == "pass"
     assert decided["verify"] == verify["id"] and decided["predicted_failure"] == 0.2
     assert decided["requirements"] == [{"requirement": "greet", "met": True}]
-    assert decided["leg"] == "session" and decided["model"] == fresh.resolve_model("reviewer")
+    assert decided["leg"] == "session" and decided["model"] == resolve_seat("reviewer")[1]
     assert [i["path"] for i in decided["governance"]["instances"]] == ["hooks/gate.py"]
     # The inputs.
     assert sorted(inputs) == sorted(["request.md", "answers.md", "plan.md", "diff.patch", "verify.json",
@@ -565,3 +565,25 @@ def test_a_link_the_reviewer_setup_plants_is_never_followed(dsn, tmp_path):
     assert out["status"] == "failed" and "review inputs" in out["turn"]["result"], out
     assert (victim / ".valor" / "done.md").read_text() == "kept\n"
     assert not reviews(got) and not seen_turn(ws)
+
+
+def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_reviewer_runs(
+    dsn, tmp_path, monkeypatch
+):
+    # The builder's clone hides the entry from the kernel's look there (a
+    # replace ref would), so the mirror holds a candidate with `.valor`.
+    look = kws.tree_has_valor
+    monkeypatch.setattr(
+        kws, "tree_has_valor", lambda *a, trusted, **k: trusted and look(*a, trusted=trusted, **k)
+    )
+
+    async def go():
+        task, _b, ws = await at_review(dsn, tmp_path, writes={".VALOR/x": "x"})
+        await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
+        return await test_checks.rows(dsn, task), ws
+
+    got, ws = run(go())
+    first = next(r["payload"] for r in got if r["type"] == "review.decided")
+    assert first["verdict"] == "changes" and first["leg"] == "kernel" and "turn_id" not in first
+    assert "holds a .valor entry" in first["findings"][0]["text"]
+    assert not seen(ws)  # no reviewer ran
