@@ -496,7 +496,8 @@ cannot store, as the lead decided (R1 of the review of round 9).
    (round 9's NUL test, renamed and extended) on the test database,
    through `signals.collect` and `session.record`: round 9's four NUL
    requests, a lone high surrogate in a subject, a lone low surrogate as a
-   key, a swapped pair, a NaN, a negative infinity, and `1e400`, each
+   key, a swapped pair, a NaN, a negative and a positive infinity, `1e999`, and a lone surrogate
+   in an action type, a target, a nested value and a send's file path, each
    answered with its reason; a clean send holding a paired emoji is held
    with the emoji intact. Without the change it fails with
    `InvalidTextRepresentation` (the surrogate), and with the number check

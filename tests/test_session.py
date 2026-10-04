@@ -241,12 +241,18 @@ def test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected(dsn, tm
         "h_swapped.json": (surrogate, "no_such_action", "tom", {"note": "\ude00\ud83d"}),
         "i_nan.json": (number, "no_such_action", "tom", {"n": float("nan")}),
         "j_inf.json": (number, "no_such_action", "tom", {"n": [float("-inf")]}),
+        "l_type.json": (surrogate, "no_such\udfff", "tom", {}),
+        "m_target.json": (surrogate, "no_such_action", "x\udc00", {}),
+        "n_deep.json": (surrogate, "no_such_action", "tom", {"note": {"deep": ["x\udc00"]}}),
+        "o_path.json": (surrogate, "telegram.send_message", chat, {"text": "hi", "files": [
+            {"path": f"{ws}/a\ud800.txt", "sha256": "0" * 64}]}),
+        "p_pos_inf.json": (number, "no_such_action", "tom", {"n": float("inf")}),
         "e_ok.json": (None, "telegram.send_message", chat, {"text": "hi \U0001f600"}),
     }  # fmt: skip
     for name, (_, action_type, target, payload) in requests.items():
         body = {"action_type": action_type, "target": target, "payload": payload}
         (effects / name).write_text(json.dumps(body))
-    (effects / "k_big.json").write_text('{"action_type": "x", "target": "tom", "payload": {"n": 1e400}}')
+    (effects / "k_big.json").write_text('{"action_type": "x", "target": "tom", "payload": {"n": 1e999}}')
     requests["k_big.json"] = (number,)
 
     async def go():
