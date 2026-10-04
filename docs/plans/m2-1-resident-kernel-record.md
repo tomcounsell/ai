@@ -432,3 +432,44 @@ Nothing new limits, waits, or guards.
 
 Suite: 1232 passed, 21 skipped (`valor_rebuild_test_2_1p8`, ports
 6460-6469). Ruff check and format check clean.
+
+## Patch round 9
+
+Scope: a turn is never left uncollected because of a NUL character in an
+action, as the lead decided (the gap of the test of round 8, and the NUL
+the test of round 6 noted).
+
+1. A path holding a NUL character names no file, and `os.open` raised
+   `ValueError` on it out of `open_plain_file`, so `broker.request` raised
+   for a send naming one. `workspace._parts` now takes such a path as not a
+   plain relative path, so every descriptor walk answers it with a reason,
+   and a send's file gets the one file answer, "not a regular file in the
+   task's workspace". Test: `test_a_nul_in_a_file_path_gets_the_file_answer`
+   (a NUL in the file name and in a directory component).
+2. Postgres jsonb cannot store a NUL character. Every row an effect gets
+   (`effect.refused`, `effect.held`, `effect.intent`) holds the payload
+   whole, and `turn.collected` holds each request, so a request holding
+   one failed when it was ledgered, whatever its type, and the turn was
+   not collected; a send whose path holds one failed there too, after
+   item 1's refusal. Rewriting the payload would break the rule that a row
+   holds what its digest names and what Tom approves, so the request is
+   answered where the turn's files are read: `signals._request` records a
+   request holding a NUL anywhere (type, target, payload, keys included)
+   as unreadable, "it holds a NUL character, which the ledger's JSON
+   (Postgres jsonb) cannot store", without the request, as it records one
+   that is not JSON. It never reaches the broker; the turn is collected
+   and its next prompt names the file and the reason. Test:
+   `test_a_nul_in_a_request_is_answered_and_the_turn_collected` on the
+   test database, through `signals.collect` and `session.record` (which
+   calls `broker.request`): a send with a NUL in a file path, an email
+   with one in its subject, a request with one deep in its payload, and
+   one in a target, each answered; a clean send beside them is held. It
+   fails with `UntranslatableCharacter` without the change.
+3. `docs/harnesses.md` says such a request is recorded with an error.
+
+`broker.request` called directly with a payload holding a NUL still fails
+at the ledger: its callers are the turn's requests, read by `signals`,
+and the kernel's own merge. Nothing new limits, waits, or guards.
+
+Suite: 1234 passed, 21 skipped (`valor_rebuild_test_2_1p9`, ports 6430-6439).
+Ruff check and format check clean.

@@ -25,7 +25,7 @@ import pytest
 from core import broker, db, ledger, session, signals, spending, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
-from tests import judgement_upstream, scripted
+from tests import bridges, judgement_upstream, scripted
 from tests.conftest import TEST_DB
 from tests.scripted import git
 from tools.push_branch import PushBranch
@@ -217,6 +217,57 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert "merge.json: the merge is the kernel's to request" in prompt
     assert state["state"] == "plan" and list(state["effects"].values()) == ["refused"]
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
+
+
+def test_a_nul_in_a_request_is_answered_and_the_turn_collected(dsn, tmp_path):
+    """Postgres jsonb cannot hold a NUL character, and every row an effect
+    gets holds its payload whole, so a request holding one is answered as
+    unreadable, the turn is collected, and the next prompt says so. A send
+    whose file path holds one is the same; the other requests go on."""
+    ws, _ = scripted.workspace(tmp_path)
+    effects = ws / ".valor" / "effects"
+    effects.mkdir(parents=True)
+    chat = bridges.OPERATOR_CHAT
+    requests = {
+        "a_path.json": ("telegram.send_message", chat, {"text": "hi", "files": [
+            {"path": f"{ws}/a\x00.txt", "sha256": "0" * 64}]}),
+        "b_mail.json": ("email.send", bridges.OPERATOR_EMAIL, {"to": [bridges.OPERATOR_EMAIL], "subject": "a\x00b"}),
+        "c_other.json": ("no_such_action", "tom", {"note": {"deep": ["x\x00"]}}),
+        "d_target.json": ("no_such_action", "t\x00m", {}),
+        "e_ok.json": ("telegram.send_message", chat, {"text": "hi"}),
+    }  # fmt: skip
+    for name, (action_type, target, payload) in requests.items():
+        body = {"action_type": action_type, "target": target, "payload": payload}
+        (effects / name).write_text(json.dumps(body))
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        found = signals.collect(ws, "turn-nul")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": "turn-nul", "state": "plan"})
+            await ledger.append(
+                conn,
+                task,
+                "turn.ended",
+                {"turn_id": "turn-nul", "outcome": "done", "result": {"session_id": scripted.SESSION}},
+            )
+            verdict = await session.record(conn, task, "turn-nul", found, state=tasks.machine.State.PLAN,
+                                           workspace=str(ws), performers=bridges.declared(str(ws)))  # fmt: skip
+            rows = await ledger.read(conn, task)
+            return verdict, await session.next_prompt(conn, task), rows
+
+    with bridges.operator(tmp_path):
+        verdict, (prompt, _resume), rows = run(go())
+    assert verdict == "idle"
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    by_file = {e["file"]: e for e in collected["effects"]}
+    for name in ("a_path.json", "b_mail.json", "c_other.json", "d_target.json"):
+        assert "effect_id" not in by_file[name] and "request" not in by_file[name], by_file[name]
+        assert f"{name}: unreadable request: it holds a NUL character" in prompt
+    assert by_file["e_ok.json"]["kind"] == "pending"
+    assert [r["payload"]["action_type"] for r in rows if r["type"].startswith("effect.")] == [
+        "telegram.send_message"
+    ]
 
 
 def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):

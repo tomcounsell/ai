@@ -322,6 +322,16 @@ def test_well_formed_files_pass_to_sizing(dsn, op, tmp_path, files):
     assert out.kind == "pending", out
 
 
+def test_a_nul_in_a_file_path_gets_the_file_answer(op, tmp_path):
+    """A path holding a NUL character names no file, so it gets the one
+    file answer rather than an error from the open."""
+    (tmp_path / "a").write_text("a")
+    performer = declared(str(tmp_path)).get("telegram.send_message")
+    for path in (f"{tmp_path}/a\x00.txt", f"{tmp_path}/a\x00/b.txt"):
+        said = run(performer.refuse(None, send(files=[{"path": path, "sha256": "0" * 64}])))
+        assert said == f"file {path} is not a regular file in the task's workspace"
+
+
 def _no_read(*a, **k):
     raise AssertionError(f"the kernel read {a[:1]}")
 

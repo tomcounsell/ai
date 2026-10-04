@@ -12,7 +12,8 @@ task's workspace, read when the turn ends.
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
   workspace, `{"action_type", "target", "payload"}`. The kernel passes each
-  to the broker, which decides what it may do.
+  to the broker, which decides what it may do; one holding a NUL character
+  is answered as unreadable, since the ledger cannot store it.
 
 Which signal counts in which state is `core/session.py`'s. The text a turn
 reads about this channel is `skills/sdlc/channel.md`, rendered into its
@@ -208,19 +209,42 @@ def _effects(signals: Signals, valor: int, turn_id: str) -> None:
         os.close(effects)
 
 
+NUL = "unreadable request: it holds a NUL character, which the ledger's JSON (Postgres jsonb) cannot store"
+
+
 def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
+    """The request in `body`, or an `error` saying why it is unreadable. A
+    request holding a NUL character anywhere is unreadable: every row an
+    effect gets holds its payload whole, and `turn.collected` the request,
+    and jsonb cannot hold one, so it is answered here and never reaches
+    the broker."""
     try:
         request = json.loads(body)
         if not isinstance(request, dict):
             raise TypeError("not a JSON object")
-        entry["request"] = {
+        found = {
             "action_type": str(request["action_type"]),
             "target": str(request["target"]),
             "payload": dict(request.get("payload") or {}),
         }
     except (ValueError, KeyError, TypeError) as exc:
         entry["error"] = f"unreadable request: {exc!r}"
+        return entry
+    if _holds_nul(found):
+        entry["error"] = NUL
+    else:
+        entry["request"] = found
     return entry
+
+
+def _holds_nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_holds_nul(k) or _holds_nul(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_holds_nul(v) for v in value)
+    return False
 
 
 def _screens(signals: Signals, valor: int, turn_id: str) -> list[dict[str, Any]]:

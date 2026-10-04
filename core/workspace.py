@@ -1707,8 +1707,11 @@ FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def _parts(relpath: str) -> list[str] | None:
+    """The components of a plain relative path, or None. A path holding a
+    NUL character is not one: no file name holds NUL, and `os.open` raises
+    on it."""
     parts = relpath.split("/")
-    if relpath.startswith("/") or any(p in ("", ".", "..") for p in parts):
+    if relpath.startswith("/") or "\x00" in relpath or any(p in ("", ".", "..") for p in parts):
         return None
     return parts
 
