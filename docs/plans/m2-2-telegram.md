@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-2-telegram
 type: build
-status: delivered-not-passed
+status: merged
 critique_rounds: 1
 review_rounds: 2
 ---

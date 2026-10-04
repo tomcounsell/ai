@@ -115,3 +115,26 @@ what the code does and why a miss is final (the record precedes the first
 message). Test added: a record in an empty chat with nothing sent finds
 None. It passes without a code change; there was no code defect to fail it.
 The port doc's paragraph on the Telegram lookup, which 2.2 added, stays.
+
+## Round 3 checks
+
+- test-2-2-p3: pass. 1376 passed, 25 skipped; ruff clean; every earlier
+  test file collects as at base, plus 62 Telegram tests. Gap: no committed
+  test for a notice whose record was lost scanning the whole chat; the
+  probe found the notice and resent nothing, and two equal messages gave
+  `Unknown`.
+- review-2-2-p3: pass. Governance boolean no. D1 and D2 (two doc
+  sentences) fixed by the lead in f50b3ce24. Notes O1 a download is held
+  whole in memory (stream it to a file), O2 thread entries carry no
+  sender id, O3 a deleted sends file reads as no record.
+- docs-2-2-p3: updated, f0b16aac1.
+
+## Merged
+
+- Lead suite on f50b3ce24: 1376 passed, 25 skipped; ruff clean.
+- Backup `valor_rebuild-20261004T143014Z.dump`.
+- `valor-cori-rebuild` fast-forwarded fba1da1da to f50b3ce24.
+- Rollout step 1: `uv sync` and `python -m bridges.telegram keys` ran
+  (API id and hash written). The test servers' live test and steps 3 to
+  11 run in the test window with 2.1's steps 2 to 6.
+- Follow-ups: O1 to O3; the lost-record notice test.
