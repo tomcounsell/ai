@@ -302,8 +302,8 @@ These changes live in `core/serve.py` (2.1's `schedule`), `core/slot.py`
   writes no verdict, so the check runs again.
 - **After preemption.** A preempted turn did not finish. The session and
   fresh-session runners return from the step with the answer or findings
-  unspent. It does not count toward the failed-turn count, and the state
-  is unchanged, so `schedule` runs the step again.
+  unspent. It does not count toward the idle bound or the failed-turn
+  count, and the state is unchanged, so `schedule` runs the step again.
 - **No bound on the wait** while foreground steps keep coming.
 
 This is a scheduling rule, not a check on the agent
@@ -473,7 +473,7 @@ processes):
   - `tasks.audit` is empty for both.
 - **Resuming.** The preempted step runs again after the foreground turn and
   resumes the same session. It spent no answer and did not count toward
-  the failed-turn count.
+  the idle bound or the failed-turn count.
 - **Background.** A replay (a grandchild of a routine objective) is
   background, and so is a hand-run replay with `Brief.replay` and no
   routine.
@@ -514,7 +514,7 @@ time after 4.1 and 2.1.
 | `core/runs.py` (kernel) | the cancel path writes `turn.ended` `preempted` |
 | `core/checks.py` (kernel) | a cancelled check writes no verdict and runs again |
 | `core/session.py`, `core/fresh.py` (kernel) | a `preempted` turn leaves the step unspent |
-| `core/machine.py` (kernel) | `preempted` folds as unfinished, outside the failed count |
+| `core/machine.py` (kernel) | `preempted` folds as unfinished, outside the idle and failed counts |
 | `core/tasks.py` | `Brief.routine`, `Brief.replay`, `marker` on `tasks.start`, `background`, `index`, `attention_log` |
 | `core/schema.sql` | unique index on `routine.registered` (name, ceiling, `replaces`) |
 | `core/settings.py` | `routines_dir`, `routine_period_days` (30), `ui_port` (8790) |
