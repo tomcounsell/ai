@@ -43,6 +43,13 @@ DIR = ".valor"
 TEXT_SIGNALS = ("question", "no_question", "done")
 
 
+def kind(value: Any) -> str:
+    """A JSON value's type, as an error names it in place of the value."""
+    return {dict: "an object", list: "a list", str: "a string", bool: "a boolean", type(None): "null"}.get(
+        type(value), "a number"
+    )
+
+
 @dataclass
 class Signals:
     question: str | None = None
@@ -226,7 +233,7 @@ def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
             raise TypeError("not a JSON object")
         for key in ("action_type", "target"):
             if not isinstance(request[key], str):
-                raise TypeError(f"{key} is a {type(request[key]).__name__}, not a string")
+                raise TypeError(f"{key} is {kind(request[key])}, not a string")
         found = {
             "action_type": request["action_type"],
             "target": request["target"],

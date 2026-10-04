@@ -133,17 +133,17 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
     except KeyError as exc:
         return None, f"plan.json lacks {exc.args[0]!r}"
     if not isinstance(path, str):
-        return None, f"plan.json's path is {_kind(path)}, not a string"
+        return None, f"plan.json's path is {signals.kind(path)}, not a string"
     for k, v in counts.items():
         if not isinstance(v, int) or isinstance(v, bool):
-            return None, f"plan.json's {k} is {_kind(v)}; each count is 0, 1, or 2"
+            return None, f"plan.json's {k} is {signals.kind(v)}; each count is 0, 1, or 2"
         if v not in machine.ROUNDS:
             return None, f"plan.json's {k} is out of range; each count is 0, 1, or 2"
     stakes, scope = raw.get("stakes"), raw.get("scope")
     if stakes is not None and not isinstance(stakes, str):
-        return None, f"plan.json's stakes is {_kind(stakes)}, not a string"
+        return None, f"plan.json's stakes is {signals.kind(stakes)}, not a string"
     if scope is not None and not isinstance(scope, list):
-        return None, f"plan.json's scope is {_kind(scope)}, not a list"
+        return None, f"plan.json's scope is {signals.kind(scope)}, not a list"
     try:
         if not git.is_repo(workspace):
             return None, "the workspace is not a git repository, so the plan cannot be committed"
@@ -169,11 +169,6 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
     }, None
 
 
-def _kind(value: Any) -> str:
-    """A JSON value's type, as an error names it in place of the value."""
-    return {dict: "an object", list: "a list", str: "a string", bool: "a boolean", type(None): "null"}.get(
-        type(value), "a number"
-    )
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
@@ -294,7 +289,7 @@ def _size(value: Any) -> float:
     deep to serialize sorts first."""
     try:
         return len(json.dumps(value, ensure_ascii=False))
-    except RecursionError, ValueError, TypeError:
+    except (RecursionError, ValueError, TypeError):
         return float("inf")
 
 
@@ -488,8 +483,13 @@ async def record(
             collected = await _answered(conn, collected, why)
             why = await _written(conn, task_id, collected, follow)
         if why is not None:
-            collected = _bare(turn_id, state, finished, why)
-            await ledger.append(conn, task_id, "turn.collected", collected)
+            reduced = await _reduce(conn, state, collected, why)
+            if reduced is not None:
+                collected = reduced
+                await ledger.append(conn, task_id, "turn.collected", collected)
+            else:
+                collected = _bare(turn_id, state, finished, why)
+                await ledger.append(conn, task_id, "turn.collected", collected)
     return collected["verdict"]
 
 
@@ -536,6 +536,53 @@ async def _answered(conn, collected: dict[str, Any], why: str) -> dict[str, Any]
             }
         effects.append(entry)
     return {**collected, "errors": errors, "effects": effects}
+
+
+async def _reduce(conn, state: State, collected: dict[str, Any], why: str) -> dict[str, Any] | None:
+    """Reduce `collected` by dropping the largest part until the row fits.
+    Each dropped part is answered with Postgres's reason. Returns the reduced
+    row if it fits, or None to fall back to a fully bare row."""
+    parts: list[tuple[float, str, int | None]] = []
+
+    for i, e in enumerate(collected["errors"]):
+        parts.append((_size(e), "error", i))
+    for i, e in enumerate(collected["effects"]):
+        parts.append((_size(e), "effect", i))
+    for name in ("question", "no_question", "done", "plan"):
+        if collected.get(name) is not None:
+            parts.append((_size(collected[name]), name, None))
+    if collected.get("screens"):
+        parts.append((_size(collected["screens"]), "screens", None))
+    if collected.get("candidate") is not None:
+        parts.append((_size(collected["candidate"]), "candidate", None))
+
+    parts.sort(key=lambda p: p[0], reverse=True)
+    for size, part_name, index in parts:
+        reduced = {**collected}
+        if part_name == "error":
+            reduced["errors"] = [e for i, e in enumerate(collected["errors"]) if i != index]
+            reduced["errors"].append(
+                f"an error is unrecorded: {UNSTORABLE} beside the turn's other parts: {why}"
+            )
+        elif part_name == "effect":
+            entry = collected["effects"][index]
+            reduced["effects"] = [
+                e if i != index else {
+                    **{k: entry[k] for k in ("effect_id", "kind") if k in entry},
+                    "file": entry["file"],
+                    "error": f"unrecorded request: {UNSTORABLE} beside the turn's other parts: {why}",
+                } for i, e in enumerate(collected["effects"])
+            ]
+        else:
+            reduced[part_name] = None
+
+        test_why = await ledger.unstorable(conn, reduced)
+        if test_why is None:
+            reduced["candidate"] = None
+            reduced["errors"].append(f"dropped {part_name}: {UNSTORABLE} beside the turn's other parts: {why}")
+            return reduced
+
+    return None
 
 
 def _bare(turn_id: str, state: State, finished: bool, why: str) -> dict[str, Any]:

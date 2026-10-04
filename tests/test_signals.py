@@ -306,6 +306,19 @@ def test_an_unreadable_file_is_answered_without_its_contents(ws):
     assert found.plan_error.startswith("plan.json is unreadable: UnicodeDecodeError (")
     errors = {e["file"]: e["error"] for e in found.effects}
     assert errors["a_bytes.json"].startswith("unreadable request: UnicodeDecodeError (")
-    assert errors["b_type.json"] == "unreadable request: TypeError (action_type is a dict, not a string)"
+    assert errors["b_type.json"] == "unreadable request: TypeError (action_type is an object, not a string)"
     assert errors["c_target.json"] == "unreadable request: TypeError (target is a list, not a string)"
     assert MARKER not in found.plan_error + "".join(errors.values())
+
+
+def test_effect_request_with_int_action_type_uses_correct_article(tmp_path):
+    """An effect request with an int action_type produces an error with 'is a
+    number', not 'is a int'."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    effects = ws / ".valor" / "effects"
+    effects.mkdir(parents=True)
+    (effects / "int_action.json").write_text(json.dumps({"action_type": 42, "target": "tom"}))
+    found = collect(ws)
+    errors = {e["file"]: e["error"] for e in found.effects}
+    assert "is a number, not a string" in errors["int_action.json"]

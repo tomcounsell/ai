@@ -930,18 +930,27 @@ def test_a_refusal_the_ledger_cannot_store_is_refused_in_kernel_words(dsn, tmp_p
     assert by_file["ok.json"]["kind"] == "pending" and verdict == "idle"
 
 
-def test_a_turn_collected_row_past_what_jsonb_holds_is_written_bare(dsn, tmp_path):
-    """Two refusals each stored on their own are together more than one
-    jsonb value holds: `turn.collected` is written with no turn content and
-    Postgres's reason, and each effect row stands."""
+def test_a_turn_collected_row_past_what_jsonb_holds_is_written_reduced(dsn, tmp_path):
+    """Two large effect entries each stored on their own are together more
+    than one jsonb value holds: `turn.collected` is reduced by dropping the
+    largest, with it answered with Postgres's reason but keeping effect_id,
+    kind, file, and candidate is None."""
     ws, _ = scripted.workspace(tmp_path)
-    performers = _refusing_turn(ws, {"a.json": BIG, "b.json": BIG})
+    performers = _refusing_turn(ws, {"ok.json": b"", "a.json": BIG, "b.json": BIG})
     with bridges.operator(tmp_path):
         verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
-    [why] = collected["errors"]
-    assert why.startswith(f"the turn's signals: {session.UNSTORABLE} with all it holds: ProgramLimitExceeded")
-    assert collected["effects"] == [] and verdict == "idle"
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert verdict == "idle" and collected["candidate"] is None
+    assert by_file["ok.json"]["kind"] == "pending" and "effect_id" in by_file["ok.json"]
+    a_entry, b_entry = by_file["a.json"], by_file["b.json"]
+    if "error" in a_entry:
+        full, dropped = b_entry, a_entry
+    else:
+        full, dropped = a_entry, b_entry
+    assert "request" in full or ("effect_id" in full and "kind" in full and "error" not in full)
+    assert "effect_id" in dropped and "kind" in dropped and "file" in dropped and "error" in dropped
+    assert dropped["error"].startswith("unrecorded request: ") and "beside the turn's other parts" in dropped["error"]
     assert len([r for r in rows if r["type"] == "effect.refused"]) == 2
     assert len([r for r in rows if r["type"] == "effect.held"]) == 1
 
