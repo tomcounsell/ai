@@ -636,6 +636,7 @@ def test_every_stage_the_state_machine_schedules_has_a_runner_but_docs():
     assert set(runners(None)) == scheduled - MANUAL == set(RUNNERS)
 
 
+@pytest.mark.macos
 def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict(
     monkeypatch, dsn, tmp_path
 ):
