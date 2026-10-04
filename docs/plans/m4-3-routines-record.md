@@ -150,3 +150,27 @@ Review R1 and R2 and notes N1, N2, N4, N5, N6 (review-4-3).
   and the check's suite wait; other waits in a hold finish first. One line in
   machine.md.
 - **N3, N7** need no change.
+
+### Patch round 2, test-4-3 findings
+
+- **Printed line.** `routines.run` takes the report's time after the runner
+  (unless a caller gives `now`), so the line counts the run it made and
+  matches the page. Test.
+- **Paused replay.** When any arm's result still has no outcome after the
+  driver, the emulator runner writes no report and returns `running`
+  ("N replays paused"); the next firing finds the run without a report and
+  resumes it under the same names. Test: two firings, one run.
+- **Expiry merge.** The sweep's merge test now approves the held merge as the
+  build lead and releases it to `merged`; no other approval is asked.
+- **The real spec.** A test loads `projects/valor.toml` through the routine's
+  path (`Spec.load`, the routine's branch) and checks the merge target:
+  refused without a grant, accepted with one. No clone, no push.
+- **Decided by default:** the toml's `branch = "valor-cori-rebuild"` stays;
+  it is the granted merge target for now.
+- **Decided by default:** the hand-run replay's `machine_lock` (the
+  `VALOR_DEMO_SLOTS` throttle, 3 slots) stays removed. Its count had no
+  source. The kernel's turn slot now serialises the machine's turn resource,
+  and a replay is background work under it.
+- **Decided by default:** a judgement call inside a check (breadth,
+  governance) is not preempted; a foreground task waits for it.
+- `tests/emulator/replay.py`'s usage no longer lists `--replay`.

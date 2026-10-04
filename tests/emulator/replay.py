@@ -4,7 +4,7 @@ stand-in accepts (or its feedback rounds are spent), stops, or is handed
 to Tom. Writes the record to $VALOR_DEMO/results/<run>.json.
 
     .venv/bin/python -m tests.emulator.replay ITEM.json --arm bare|clarify|routed \
-        [--run NAME] [--judge] [--parent TASK] [--replay]
+        [--run NAME] [--judge] [--parent TASK]
 
 The arm is what the kernel's judge decides. `routed` uses the real
 judgement legs. `bare` and `clarify` force it without any switch in the
