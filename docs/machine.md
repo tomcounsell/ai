@@ -207,8 +207,8 @@ Two isolation mechanisms exist on macOS, and they cost memory differently.
   denies come before allows, since a network rule after the allows refused
   allowed gateway ports at random (rebuild-demonstration.md, Kernel
   findings 3).
-- **Apple containers** run each sandbox as a lightweight Linux VM with its
-  own memory allocation. The network mode is set on the host and cannot be
+- **Apple containers** run as lightweight Linux VMs, each with its own
+  memory allocation; the kernel uses them for the review's rerun. The network mode is set on the host and cannot be
   changed from inside: a host-only network reaches exactly one host, the
   Mac, where the gateway runs. Reaching a package registry from a
   host-only network needs a proxy on the Mac beside the gateway. The
@@ -219,9 +219,10 @@ Two isolation mechanisms exist on macOS, and they cost memory differently.
   the workload's open connection in 265 ms median.
 
 Both serve the constraint "bounded authority, metered spending" by least privilege
-[11]. On the Air, at most one Apple container runs at a time, in the turn
-slot. Which work runs under which mechanism is
-[architecture.md](architecture.md)'s to settle; this doc only fixes that a
+[11]. On the Air, one verification runs at a time on the machine (a lock on
+the container runtime), and a review check holds the turn slot while it
+does. Which work runs under which mechanism is
+[sandbox.md](sandbox.md)'s; this doc only fixes that a
 container costs its workload plus about 0.6 GB and sandbox-exec costs
 nothing. The review's rerun gets a 4 GB limit (`verify_memory_mb`): a
 Django suite with five test workers needed 2.2 GB, and at 1 GB the VM

@@ -95,7 +95,7 @@ The full bibliography is [REFERENCES.md](REFERENCES.md). Numbers here and in `do
 - **Judgement.** A hosted Jev-class model handles every decision that is not authority: classification, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as the fallback. Low-confidence calls go to a human. A classifier decides what a thing is; it never decides what a thing may do.
 - **Agents.** Frontier agents do the hard work, one `claude -p` turn at a time, each inside an effect ceiling set by the kernel, every call metered.
 
-Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for scheduling, Apple containers for sandboxes, the Keychain and a kernel key directory no turn can read for secrets, and Postgres as a document store (JSONB documents and an append-only events table) for the kernel's state.
+Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for scheduling, `sandbox-exec` for turns and Apple containers for the review's rerun, the Keychain and a kernel key directory no turn can read for secrets, and Postgres as a document store (JSONB documents and an append-only events table) for the kernel's state.
 
 ## Directory map
 
