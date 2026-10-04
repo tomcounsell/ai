@@ -39,9 +39,10 @@ only the kernel writes, into which plan commits, candidates, and docs heads
 are fetched and from which the merge predicate and the merge read; a Postgres
 cluster of the task's own (and a Redis when the project asks) on its own
 ports, under a service sandbox; and the project's setup, run once under the
-turn's sandbox. Services run only while a run of the task lasts; every run
-first stops those a killed kernel left up whose run or provisioning is not
-live. The disk is kept until `python -m core workspace remove`. The mirror's
+turn's sandbox. Services run while a run of the task lasts, or, under the resident
+kernel, between its steps until it needs Tom, is done, or is stopped; every
+run first stops those a killed kernel left up whose run, services, or
+provisioning is not live. The disk is kept until `python -m core workspace remove`. The mirror's
 fetch treats the builder's clone as hostile (workspace.md).
 Serves Mission item 1 and bounded authority.
 

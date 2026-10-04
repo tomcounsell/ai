@@ -135,9 +135,9 @@ context manager over the session lock `turn-slot:<settings.machine>` on
 a connection of its own, blocking; waiters are granted in the order they
 queued. It is reentrant within a process: a contextvar records that the
 current task already holds it, and an inner `held` is a no-op. It is
-taken per turn, around `runs.run_turn`, and by 1.4b's check runners
-around each check, so every check holds the slot, and 1.4b's docs check,
-which runs a turn inside its check, takes it once. `python -m core
+taken per turn, around `runs.run_turn`, and by the test, review, and docs
+runners around each check, so every check holds the slot, and a check
+that runs a turn inside it takes the slot once. `python -m core
 run` waits on the same lock. While held it runs `caffeinate -i -w <pid>`,
 which prevents idle sleep, not sleep on closing the lid
 (docs/machine.md). 4.3 adds its sort key and `valor_preempt` on top of

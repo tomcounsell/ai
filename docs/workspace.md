@@ -57,7 +57,10 @@ merged only) stops the services, deletes the directory, and frees the ports.
 
 A service program (`initdb`, `pg_ctl`, `redis-server`) runs to its own end,
 with no time limit of Valor's; `pg_ctl` waits up to its own default of 60
-seconds. A run starts the services before its first runner, and a stop of
+seconds. A run starts the services before its first runner (the resident kernel
+keeps them up between a task's steps and stops them when the task needs Tom,
+is done, or is stopped, and a sweep leaves alone the services a live kernel
+holds under `services:<task>`), and a stop of
 the task (or a cancel of the run) interrupts the start the way an interrupt
 of `start` ends provisioning; whatever had started is stopped when the run
 returns. A program's output goes to a file in that same `output/` directory. A program's refusal carries its stderr, up to the file-size limit.
