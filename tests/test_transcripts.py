@@ -228,17 +228,16 @@ def test_a_copy_cancelled_while_its_thread_reads_leaves_no_descriptor_open(dsn, 
     assert reading.is_set() and closed.is_set() and after <= before
 
 
-@pytest.mark.macos
 def test_a_sparse_file_is_skipped_without_reading_its_holes(dsn, tmp_path):
     lay = Layout(tmp_path)
     lay.session.write_bytes(b"ok\n")
     with lay.agent("holes").open("wb") as f:
-        f.truncate(1 << 50)  # a petabyte of apparent size, no disk used
+        f.truncate(1 << 43)  # 8 TiB of apparent size, no disk used; ext4 holds up to 16 TiB
     task = run(new_task(dsn))
     turn_id, out = run(asyncio.wait_for(copy(dsn, task, lay.t), 10))
     name = f"{lay.sid}/subagents/agent-holes.jsonl"
     assert out["transcript"]["skipped"] == [
-        {"name": name, "why": f"agent-holes.jsonl is sparse ({1 << 50} bytes claimed, 0 on disk)"}
+        {"name": name, "why": f"agent-holes.jsonl is sparse ({1 << 43} bytes claimed, 0 on disk)"}
     ]
     assert set(by_name(out)) == {lay.session_name}
     assert len(run(stored(dsn, turn_id))) == 1

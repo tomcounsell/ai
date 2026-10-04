@@ -378,15 +378,14 @@ def test_a_link_a_hard_link_a_fifo_and_a_directory_are_refused_unread(tmp_path):
     assert "secret" not in json.dumps(found.screens)
 
 
-@pytest.mark.macos
 def test_a_sparse_screen_is_sized_without_being_read(tmp_path):
     screens = plant(tmp_path)
     with open(screens / "huge.png", "wb") as f:
-        f.truncate(1 << 50)
+        f.truncate(1 << 43)  # 8 TiB, no disk used; ext4 holds up to 16 TiB
     started = time.monotonic()
     found = signals.collect(tmp_path, "t1")
     assert time.monotonic() - started < 5
-    assert found.screens == [{"name": "huge.png", "bytes": 1 << 50}]
+    assert found.screens == [{"name": "huge.png", "bytes": 1 << 43}]
 
 
 def test_a_screens_directory_that_is_a_link_is_not_followed(tmp_path):
