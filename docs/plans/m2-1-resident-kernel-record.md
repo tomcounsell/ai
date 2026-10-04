@@ -492,3 +492,16 @@ retry number of our own.
 
 Suite: 1316 passed, 23 skipped (`valor_rebuild_test_2_1p13`, ports
 6450-6459). Ruff check and format check clean.
+
+## Round 13, lead's addition
+
+test-2-1-p12 found that when parts are refused only together, the fallback
+answered every part as unreadable, a small clean send and `done.md`
+included. The lead added to `session._storable`: when the row is still
+refused after each part is asked alone, the largest part left is answered
+as unreadable ("beside the turn's other parts", with Postgres's reason) and
+the row asked again, until it is stored; the content-free row stays the
+last fallback. `test_parts_storable_alone_and_not_together` now holds two
+parts of 130 MiB and 130 MiB plus one byte beside a clean send: the larger
+is unreadable, the other is kept, and the send is held. It fails without
+the change.

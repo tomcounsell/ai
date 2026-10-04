@@ -281,8 +281,10 @@ character, a NaN or infinite number, nesting past the server's stack depth,
 more than one jsonb value holds), each part is asked alone, nested as the
 row nests it (each text signal, the plan, the screens, each request), and a
 part refused alone is recorded as unreadable with Postgres's reason, never
-its contents. If the row is still refused, every part is, and the row keeps
-the request file names and what the kernel wrote. The row is judged again
+its contents. If the row is still refused, the largest part left is
+recorded so and the row asked again, until it is stored, so the parts that
+fit together are kept; if none is left and it is still refused, every part
+is, and the row keeps the request file names and what the kernel wrote. The row is judged again
 where it is written: `turn.collected` and the row that goes with it
 (`question.asked` or `plan.written`) are appended in one savepoint, and
 when jsonb refuses them, each error and each effect entry it refuses alone

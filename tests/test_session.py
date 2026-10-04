@@ -401,36 +401,43 @@ BIG = 130 << 20
 @pytest.mark.parametrize("left", ["requests", "texts"])
 def test_parts_storable_alone_and_not_together(dsn, tmp_path, left):
     """Two requests, or two text signals, each storable on its own, are
-    together more than one jsonb value holds. The turn is still collected,
-    with every part answered as unreadable with Postgres's reason and no
-    request reaching the broker."""
+    together more than one jsonb value holds. The larger is answered as
+    unreadable with Postgres's reason, and the rest of the turn is kept:
+    the other part, and a clean send beside them, which is held."""
     ws, _ = scripted.workspace(tmp_path)
     valor = ws / ".valor"
     (valor / "effects").mkdir(parents=True)
+    send = {
+        "action_type": "telegram.send_message",
+        "target": bridges.OPERATOR_CHAT,
+        "payload": {"text": "hi"},
+    }
+    (valor / "effects" / "ok.json").write_text(json.dumps(send))
     if left == "requests":
-        for name in ("a.json", "b.json"):
-            body = {"action_type": "no_such_action", "target": "tom", "payload": {"note": "x" * BIG}}
+        for name, size in (("a.json", BIG + 1), ("b.json", BIG)):
+            body = {"action_type": "no_such_action", "target": "tom", "payload": {"note": "x" * size}}
             (valor / "effects" / name).write_text(json.dumps(body))
         state = tasks.machine.State.PLAN
     else:
-        (valor / "question.md").write_text("q" * BIG)
+        (valor / "question.md").write_text("q" * (BIG + 1))
         (valor / "done.md").write_text("d" * BIG)
         state = tasks.machine.State.BUILD
-    verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), state))
+    turn = ledger.new_id()
+    with bridges.operator(tmp_path):
+        _, rows = run(_record_ended(dsn, ws, turn, state, bridges.declared(str(ws))))
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
-    refused = "the ledger's JSON (Postgres jsonb) cannot store it with all it holds: ProgramLimitExceeded"
-    assert verdict == "idle"
-    assert not [r for r in rows if r["type"].startswith("effect.")]
+    refused = "the ledger's JSON (Postgres jsonb) cannot store it beside the turn's other parts: ProgramLimitExceeded"
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert by_file["ok.json"]["kind"] == "pending"
+    [held] = [r["payload"] for r in rows if r["type"] == "effect.held"]
+    assert held["request_id"] == f"{turn}/ok.json"
     if left == "requests":
-        assert [e["file"] for e in collected["effects"]] == ["a.json", "b.json"]
-        for entry in collected["effects"]:
-            assert set(entry) == {"file", "error"} and entry["error"].startswith(
-                f"unreadable request: {refused}"
-            )
+        assert set(by_file["a.json"]) == {"file", "error"}
+        assert by_file["a.json"]["error"].startswith(f"unreadable request: {refused}")
+        assert by_file["b.json"]["kind"] == "refused"
     else:
-        assert (collected["question"], collected["done"]) == (None, None)
-        for name in ("question", "done"):
-            assert any(e.startswith(f"{name}.md is unreadable: {refused}") for e in collected["errors"])
+        assert collected["question"] is None and len(collected["done"]) == BIG
+        assert any(e.startswith(f"question.md is unreadable: {refused}") for e in collected["errors"])
 
 
 def large_turn(ws: Path, field: str) -> None:

@@ -34,6 +34,7 @@ ledger (`tasks.status`).
 import asyncio
 import dataclasses
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -284,6 +285,45 @@ def _collected(
     }
 
 
+def _size(value: Any) -> float:
+    """The length of `value` as JSON text, to order parts by; a value too
+    deep to serialize sorts first."""
+    try:
+        return len(json.dumps(value, ensure_ascii=False))
+    except RecursionError, ValueError, TypeError:
+        return float("inf")
+
+
+def _parts(found: signals.Signals) -> list[tuple[float, tuple]]:
+    """Each part of `found` the turn wrote, with its size."""
+    parts = [
+        (_size(getattr(found, name)), ("text", name))
+        for name in signals.TEXT_SIGNALS
+        if getattr(found, name) is not None
+    ]
+    if found.plan is not None:
+        parts.append((_size(found.plan), ("plan",)))
+    if found.screens:
+        parts.append((_size(found.screens), ("screens",)))
+    parts += [(_size(e), ("effect", i)) for i, e in enumerate(found.effects) if "request" in e]
+    return parts
+
+
+def _drop(found: signals.Signals, part: tuple, reason: str) -> None:
+    """Answer one part of `found` as unreadable with `reason`."""
+    if part[0] == "text":
+        setattr(found, part[1], None)
+        found.unreadable.append(f"{part[1]}.md is unreadable: {reason}")
+    elif part[0] == "plan":
+        found.plan, found.plan_error = None, f"plan.json is unreadable: {reason}"
+    elif part[0] == "screens":
+        found.screens = []
+        found.unreadable.append(f"the screens are unrecorded: {reason}")
+    else:
+        entry = found.effects[part[1]]
+        found.effects[part[1]] = {"file": entry["file"], "error": f"unreadable request: {reason}"}
+
+
 async def _storable(conn, turn_id: str, state: State, found: signals.Signals) -> signals.Signals:
     """`found` as the `turn.collected` row can hold it, asked of Postgres
     (`ledger.unstorable`) of the row as it will be written. Postgres's
@@ -292,9 +332,10 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
     number of ours. When the row is refused, each part is asked alone,
     nested as the row nests it: a text signal, the plan, the screens, each
     request; a part refused alone is answered as unreadable with
-    Postgres's reason. If the row is still refused, every part is, and the
-    row keeps only what the kernel wrote and the file names of the
-    requests."""
+    Postgres's reason. If the row is still refused, the largest part left
+    is answered so and the row asked again, until it is stored; if no part
+    is left and it is still refused, every part is, and the row keeps only
+    what the kernel wrote and the file names of the requests."""
     errors = [*found.unreadable, *([found.plan_error] if found.plan_error else [])]
     why = await ledger.unstorable(conn, _collected(turn_id, state, found, None, None, errors, found.effects))
     if why is None:
@@ -317,6 +358,16 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
     why = await ledger.unstorable(conn, _collected(turn_id, state, kept, None, None, errors, kept.effects))
     if why is None:
         return kept
+    # Refused only together: drop the largest part left, answered with
+    # Postgres's reason, and ask again, so the parts that fit are kept.
+    for part in sorted(_parts(kept), key=lambda part: part[0], reverse=True):
+        _drop(kept, part[1], f"{UNSTORABLE} beside the turn's other parts: {why}")
+        errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
+        why = await ledger.unstorable(
+            conn, _collected(turn_id, state, kept, None, None, errors, kept.effects)
+        )
+        if why is None:
+            return kept
     reason = f"{UNSTORABLE} with all it holds: {why}"
     return signals.Signals(
         plan_error=f"plan.json is unreadable: {reason}" if found.plan is not None else kept.plan_error,
