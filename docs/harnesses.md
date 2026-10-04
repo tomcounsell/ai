@@ -258,7 +258,7 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
 | `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD and made in the kernel's `output/` directory, which no task profile reaches, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's), or with counts outside 0 to 2, is an error and no plan |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
-| `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one Postgres jsonb refuses to store as `turn.collected` nests it (a NUL character, a NaN or infinite number, nesting past the server's stack depth; asked of Postgres, and every effect row holds its payload whole), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
+| `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one the `turn.collected` row cannot hold (below), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
 it there, in a worker thread, so no signal is read twice. For a turn that ended and
@@ -275,7 +275,17 @@ entry that vanishes before it is read is recorded the same way, an effect
 file with an error. An entry that cannot be moved is removed unread (`docs/architecture.md`). An effect file that is not a JSON
 object with `action_type` and `target` is recorded with an error and no
 request. Everything a turn left is one `turn.collected` row with the state it
-ran in and its verdict; a question takes precedence over the other signals in
+ran in and its verdict. Postgres judges that row once, before the verdict
+and the broker (`session._storable`): when jsonb refuses it (a NUL
+character, a NaN or infinite number, nesting past the server's stack depth,
+more than one jsonb value holds), each part is asked alone, nested as the
+row nests it (each text signal, the plan, the screens, each request), and a
+part refused alone is recorded as unreadable with Postgres's reason, never
+its contents. If the row is still refused, every part is, and the row keeps
+the request file names and what the kernel wrote. A turn whose collection
+still fails does not stop the kernel: `serve` logs it and collects the turn
+in a job before the task's next step, parked between tries like any failed
+job. No size or depth is the kernel's own. A question takes precedence over the other signals in
 the same turn, and a signal that means nothing in the state (a `done.md`
 during plan) is an error, not acted on. `.valor/` is in the clone's
 `.git/info/exclude`, so signals never enter a commit. Files, because writing

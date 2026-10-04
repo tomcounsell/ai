@@ -32,6 +32,7 @@ ledger (`tasks.status`).
 """
 
 import asyncio
+import dataclasses
 import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -233,6 +234,86 @@ def _verdict(
     return ("idle" if finished else "failed"), extra, errors
 
 
+UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store it"
+
+
+def _collected(
+    turn_id: str,
+    state: State,
+    found: signals.Signals,
+    verdict: str | None,
+    candidate: dict[str, str] | None,
+    errors: list[str],
+    effects: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The `turn.collected` payload."""
+    return {
+        "turn_id": turn_id,
+        "state": state.value,
+        "verdict": verdict,
+        "question": found.question,
+        "no_question": found.no_question,
+        "done": found.done,
+        "plan": found.plan,
+        "candidate": candidate,
+        "errors": errors,
+        "effects": effects,
+        "screens": found.screens,
+    }
+
+
+async def _storable(conn, turn_id: str, state: State, found: signals.Signals) -> signals.Signals:
+    """`found` as the `turn.collected` row can hold it, asked of Postgres
+    (`ledger.unstorable`) of the row as it will be written. Postgres's
+    refusal (a NUL character, a NaN or infinite number, nesting past the
+    server's stack depth, a value past jsonb's size) is the answer, never a
+    number of ours. When the row is refused, each part is asked alone,
+    nested as the row nests it: a text signal, the plan, the screens, each
+    request; a part refused alone is answered as unreadable with
+    Postgres's reason. If the row is still refused, every part is, and the
+    row keeps only what the kernel wrote and the file names of the
+    requests."""
+    errors = [*found.unreadable, *([found.plan_error] if found.plan_error else [])]
+    why = await ledger.unstorable(conn, _collected(turn_id, state, found, None, None, errors, found.effects))
+    if why is None:
+        return found
+    kept = dataclasses.replace(found, effects=list(found.effects), unreadable=list(found.unreadable))
+    for name in signals.TEXT_SIGNALS:
+        value = getattr(kept, name)
+        if value is not None and (refused := await ledger.unstorable(conn, {name: value})):
+            setattr(kept, name, None)
+            kept.unreadable.append(f"{name}.md is unreadable: {UNSTORABLE}: {refused}")
+    if kept.plan is not None and (refused := await ledger.unstorable(conn, {"plan": kept.plan})):
+        kept.plan, kept.plan_error = None, f"plan.json is unreadable: {UNSTORABLE}: {refused}"
+    if kept.screens and (refused := await ledger.unstorable(conn, {"screens": kept.screens})):
+        kept.screens = []
+        kept.unreadable.append(f"the screens are unrecorded: {UNSTORABLE}: {refused}")
+    for i, entry in enumerate(kept.effects):
+        if "request" in entry and (refused := await ledger.unstorable(conn, {"effects": [entry]})):
+            kept.effects[i] = {"file": entry["file"], "error": f"unreadable request: {UNSTORABLE}: {refused}"}
+    errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
+    why = await ledger.unstorable(conn, _collected(turn_id, state, kept, None, None, errors, kept.effects))
+    if why is None:
+        return kept
+    reason = f"{UNSTORABLE} with all it holds: {why}"
+    return signals.Signals(
+        plan_error=f"plan.json is unreadable: {reason}" if found.plan is not None else kept.plan_error,
+        effects=[
+            {"file": e["file"], "error": f"unreadable request: {reason}"} if "request" in e else e
+            for e in found.effects
+        ],
+        unreadable=[
+            *found.unreadable,
+            *(
+                f"{name}.md is unreadable: {reason}"
+                for name in signals.TEXT_SIGNALS
+                if getattr(found, name) is not None
+            ),
+            *([f"the screens are unrecorded: {reason}"] if found.screens else []),
+        ],
+    )
+
+
 async def record(
     conn,
     task_id: str,
@@ -246,23 +327,20 @@ async def record(
     performers: broker.Performers | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
-    the broker. A request Postgres jsonb refuses, asked of Postgres nested
-    as `turn.collected` holds it, is answered as unreadable with Postgres's
-    reason and never reaches the broker. Returns the verdict. For a task
-    with a kernel mirror, a plan commit or a candidate counts only once it
-    is fetched into the mirror.
+    the broker. Postgres judges the `turn.collected` row once, before the
+    verdict and the broker (`_storable`): what jsonb refuses is answered as
+    unreadable with Postgres's reason, and a request so answered never
+    reaches the broker. Returns the verdict. For a task with a kernel
+    mirror, a plan commit or a candidate counts only once it is fetched
+    into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
     thread (`git.threaded`), so the kernel's loop runs meanwhile and a stop
     kills the fetch."""
+    found = await _storable(conn, turn_id, state, found)
     verdict, extra, errors = await git.threaded(_verdict, state, found, workspace, turn_id, finished, brief)
     effects = []
     for entry in found.effects:
-        if "request" in entry and (why := await ledger.unstorable(conn, {"effects": [entry]})):
-            entry = {
-                "file": entry["file"],
-                "error": f"unreadable request: the ledger's JSON (Postgres jsonb) cannot store it: {why}",
-            }
-        elif "request" in entry and entry["request"]["action_type"] == "merge":
+        if "request" in entry and entry["request"]["action_type"] == "merge":
             entry = {**entry, "error": "the merge is the kernel's to request"}
         elif "request" in entry:
             r = entry["request"]
@@ -282,19 +360,7 @@ async def record(
             conn,
             task_id,
             "turn.collected",
-            {
-                "turn_id": turn_id,
-                "state": state.value,
-                "verdict": verdict,
-                "question": found.question,
-                "no_question": found.no_question,
-                "done": found.done,
-                "plan": found.plan,
-                "candidate": extra.get("candidate"),
-                "errors": errors,
-                "effects": effects,
-                "screens": found.screens,
-            },
+            _collected(turn_id, state, found, verdict, extra.get("candidate"), errors, effects),
         )
         if current is state and verdict == "asked":
             await ledger.append(

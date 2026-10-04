@@ -12,7 +12,9 @@ On start it recovers (`recover`) what a killed kernel left:
   estimate, marked estimated;
 - the last working turn of a task that ended and was never collected: its
   signals are read again (`signals.recollect`) and recorded; the
-  broker's `request_id` makes a re-request return the first effect;
+  broker's `request_id` makes a re-request return the first effect. A
+  collection that raises is logged and the kernel starts; the task is
+  collected by a job before it is stepped, parked like any job that fails;
 - an intent of a kernel type with no outcome: reconciled;
 - services a killed kernel left up: swept.
 
@@ -20,7 +22,8 @@ Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
 (`intake.bind`), requests the notices each task owes (`notices.owe`), and
 schedules jobs (`schedule`). A job is one step of one task
-(`router.step`), a release Tom asked for, or a provisioning; one job per
+(`router.step`), a release Tom asked for, a provisioning, or the
+collection recover could not make; one job per
 task at a time, and one harness job at a time in this process. A turn also
 holds the machine's turn slot (`core/slot.py`), which `python -m core run`
 shares.
@@ -97,6 +100,64 @@ async def _unlock(conn, key: str) -> None:
     await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
 
 
+LAST_WORKING_ENDED = (
+    "SELECT DISTINCT ON (e.task_id) e.task_id, e.payload, s.payload FROM events e "
+    "JOIN events s ON s.task_id = e.task_id AND s.type = 'turn.started' "
+    "AND s.payload->>'turn_id' = e.payload->>'turn_id' "
+    "WHERE e.type = 'turn.ended' AND s.payload->>'state' IS NOT NULL "
+    "AND COALESCE((s.payload->>'fresh')::boolean, false) = false "
+    "AND (%(task)s::text IS NULL OR e.task_id = %(task)s) "
+    "ORDER BY e.task_id, e.id DESC"
+)
+
+
+async def recollect(conn, task_id: str, performers: router.PerformersFactory | None = None) -> str | None:
+    """Collect the task's last working turn if it ended and was never
+    collected. Returns the turn's id, or None when there is nothing to
+    collect or a live run holds the task."""
+    found = await (await conn.execute(LAST_WORKING_ENDED, {"task": task_id})).fetchone()
+    if found is None:
+        return None
+    return await _recollect(conn, task_id, found[1], found[2], performers)
+
+
+async def _recollect(
+    conn, task_id: str, ended: dict[str, Any], started: dict[str, Any], performers
+) -> str | None:
+    turn_id = ended["turn_id"]
+    collected = await (
+        await conn.execute(
+            "SELECT 1 FROM events WHERE task_id = %s AND type = 'turn.collected' AND payload->>'turn_id' = %s",
+            (task_id, turn_id),
+        )
+    ).fetchone()
+    if collected is not None:
+        return None
+    f = machine.fold(await ledger.read(conn, task_id))
+    if f.legacy or f.calibration or f.state is State.MERGED:
+        return None
+    key = f"run:{task_id}"
+    if not await _try(conn, key):
+        return None
+    try:
+        b = await tasks.brief(conn, task_id)
+        found = signals.recollect(b.workspace, turn_id) if b.workspace else signals.Signals()
+        await session.record(
+            conn,
+            task_id,
+            turn_id,
+            found,
+            state=State(started["state"]),
+            workspace=b.workspace,
+            finished=ended.get("outcome") == "done" and not (ended.get("result") or {}).get("is_error"),
+            brief=b,
+            performers=performers(b) if performers else None,
+        )
+    finally:
+        await _unlock(conn, key)
+    return turn_id
+
+
 async def recover(
     conn,
     performers: router.PerformersFactory | None = None,
@@ -107,6 +168,7 @@ async def recover(
         "charged": [],
         "interrupted": [],
         "recollected": [],
+        "uncollected": [],
         "reconciled": [],
         "swept": [],
     }
@@ -172,49 +234,17 @@ async def recover(
         finally:
             await _unlock(conn, key)
 
-    # The last working turn of a task, ended and never collected.
-    for task_id, ended, started in await (
-        await conn.execute(
-            "SELECT DISTINCT ON (e.task_id) e.task_id, e.payload, s.payload FROM events e "
-            "JOIN events s ON s.task_id = e.task_id AND s.type = 'turn.started' "
-            "AND s.payload->>'turn_id' = e.payload->>'turn_id' "
-            "WHERE e.type = 'turn.ended' AND s.payload->>'state' IS NOT NULL "
-            "AND COALESCE((s.payload->>'fresh')::boolean, false) = false "
-            "ORDER BY e.task_id, e.id DESC"
-        )
-    ).fetchall():
-        turn_id = ended["turn_id"]
-        collected = await (
-            await conn.execute(
-                "SELECT 1 FROM events WHERE task_id = %s AND type = 'turn.collected' AND payload->>'turn_id' = %s",
-                (task_id, turn_id),
-            )
-        ).fetchone()
-        if collected is not None:
-            continue
-        f = machine.fold(await ledger.read(conn, task_id))
-        if f.legacy or f.calibration or f.state is State.MERGED:
-            continue
-        key = f"run:{task_id}"
-        if not await _try(conn, key):
-            continue
+    # The last working turn of a task, ended and never collected. One whose
+    # collection raises is logged and left for the kernel to try again.
+    for task_id, ended, started in await (await conn.execute(LAST_WORKING_ENDED, {"task": None})).fetchall():
         try:
-            b = await tasks.brief(conn, task_id)
-            found = signals.recollect(b.workspace, turn_id) if b.workspace else signals.Signals()
-            await session.record(
-                conn,
-                task_id,
-                turn_id,
-                found,
-                state=State(started["state"]),
-                workspace=b.workspace,
-                finished=ended.get("outcome") == "done" and not (ended.get("result") or {}).get("is_error"),
-                brief=b,
-                performers=performers(b) if performers else None,
-            )
+            turn_id = await _recollect(conn, task_id, ended, started, performers)
+        except Exception as exc:  # noqa: BLE001  one task's collection fails alone; the kernel starts
+            _log(f"task {task_id}: collecting turn {ended['turn_id']} failed: {exc!r}")
+            done["uncollected"].append(task_id)
+            continue
+        if turn_id is not None:
             done["recollected"].append(turn_id)
-        finally:
-            await _unlock(conn, key)
 
     # Intents of a kernel type with no outcome.
     for effect_id in await broker.dangling(conn, list(kernel_types)):
@@ -251,8 +281,12 @@ class Kernel:
         runners: Mapping[State | machine.Check, router.Runner],
         performers: router.PerformersFactory | None,
         dsn: str,
+        uncollected: set[str] | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
+        # Tasks whose ended turn recover could not collect: collected by a
+        # job before the task is stepped.
+        self.uncollected: set[str] = set(uncollected or ())
         self.jobs: dict[str, asyncio.Task] = {}
         self.harness: str | None = None  # the task whose harness job runs
         self.services: dict[str, router._Services] = {}
@@ -326,6 +360,9 @@ class Kernel:
             if latest <= self.parked[task_id]:
                 return None
             del self.parked[task_id]
+        if task_id in self.uncollected:
+            self._start(task_id, self._recollect(task_id), latest)
+            return None
         released = await self._kernel_release(conn, task_id)
         if released is not None:
             self._start(task_id, self._release(task_id, released), latest)
@@ -369,6 +406,12 @@ class Kernel:
             self.wake.set()
 
         job.add_done_callback(finished)
+
+    async def _recollect(self, task_id: str) -> None:
+        """Collect the turn recover could not; a failure parks the task."""
+        async with await db.connect(self.dsn) as conn:
+            await recollect(conn, task_id, self.performers)
+        self.uncollected.discard(task_id)
 
     async def _release(self, task_id: str, effect_id: str) -> None:
         async with await db.connect(self.dsn) as conn:
@@ -519,7 +562,7 @@ async def serve(
 
             gateway = Gateway(dsn, credential=ClaudeLogin(), openai_credential=OpenAIKey())
             await gateway.start()
-        kernel = Kernel(gateway, runners, performers, dsn)
+        kernel = Kernel(gateway, runners, performers, dsn, set(done["uncollected"]))
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))
         try:

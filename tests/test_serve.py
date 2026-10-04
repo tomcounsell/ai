@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, router, runs, serve, signals, slot, spending, tasks
+from core import broker, db, ledger, machine, router, runs, serve, session, signals, slot, spending, tasks
 from core import workspace as kws
 from core.__main__ import _performers
 from core.gateway import Gateway
@@ -225,6 +225,65 @@ def test_kill_after_ended_before_collected(fresh, op, tmp_path):
     assert len(typed(written, "turn.collected", turn_id=turn)) == 1
     assert len(typed(written, "effect.held", request_id=f"{turn}/a.json")) == 1
     assert machine.fold(written).state is State.CRITIQUE
+
+
+def test_a_turn_that_cannot_be_collected_leaves_serve_running(fresh, op, tmp_path, monkeypatch):
+    """A recover over a turn whose collection raises logs it and the kernel
+    starts: another task is stepped. The turn is collected by a job on the
+    task's next row once its collection can be made, before the task is
+    stepped."""
+    ws, _ = scripted.workspace(tmp_path)
+    steps, broken = [], [True]
+    record = session.record
+
+    async def failing_record(*args, **kw):
+        if broken[0]:
+            raise RuntimeError("cannot collect")
+        return await record(*args, **kw)
+
+    async def judging(ctx):
+        steps.append(ctx.task_id)
+        return {"status": "idle"}
+
+    async def collected(conn, task, turn):
+        return typed(await ledger.read(conn, task), "turn.collected", turn_id=turn)
+
+    async def go():
+        task = await scripted.start(fresh, ws)
+        turn = ledger.new_id()
+        await _ended(fresh, task, turn, "plan")
+        (ws / ".valor").mkdir(exist_ok=True)
+        (ws / ".valor" / "question.md").write_text("which one?")
+        other = await new_task(fresh)
+        monkeypatch.setattr(session, "record", failing_record)
+        gateway = await gateway_for(fresh)
+        probe = await db.connect(fresh)
+        with bridges.configure(serve_tick_s=3600):
+            kernel = asyncio.create_task(serve.serve({State.JUDGE: judging}, dsn=fresh, gateway=gateway))
+            try:
+
+                async def stepped():
+                    return other in steps
+
+                await until(stepped, 30)
+                running, before = not kernel.done(), await collected(probe, task, turn)
+                broken[0] = False
+                await ledger.append(probe, task, "test.poke", {})
+
+                async def recollected():
+                    return await collected(probe, task, turn)
+
+                (after,) = await until(recollected, 30)
+            finally:
+                kernel.cancel()
+                await asyncio.gather(kernel, return_exceptions=True)
+                await probe.close()
+                await gateway.close()
+        return task, running, before, after
+
+    _task, running, before, after = run(go())
+    assert running and before == []
+    assert after["verdict"] == "asked"
 
 
 def test_live_call_not_charged(fresh, op):

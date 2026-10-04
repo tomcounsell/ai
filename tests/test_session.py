@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -379,6 +380,100 @@ def test_a_request_is_judged_as_turn_collected_nests_it(dsn, tmp_path):
     )
 
 
+async def _record_ended(dsn, ws, turn, state, performers=None):
+    """Start a task, end `turn` in `state`, and record what it left."""
+    task = await scripted.start(dsn, ws)
+    found = signals.collect(ws, turn)
+    async with await db.connect(dsn) as conn:
+        # libpq sends a message a send buffer at a time and moves the rest
+        # down after each, so a message of hundreds of MiB over macOS's
+        # default Unix socket buffer (8 KiB) takes minutes; a larger buffer
+        # makes it seconds. Speed only: Postgres's answers are the same.
+        sock = socket.socket(fileno=conn.fileno())
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SNDBUF)
+        finally:
+            sock.detach()
+        await ledger.append(conn, task, "turn.started", {"turn_id": turn, "state": state.value})
+        await ledger.append(conn, task, "turn.ended",
+                            {"turn_id": turn, "outcome": "done", "result": {"session_id": scripted.SESSION}})  # fmt: skip
+        verdict = await session.record(
+            conn, task, turn, found, state=state, workspace=str(ws), performers=performers
+        )
+        return verdict, await ledger.read(conn, task)
+
+
+# Each string is storable alone; two exceed jsonb's size for one value.
+BIG = 130 << 20
+SNDBUF = 4 << 20  # within macOS's default kern.ipc.maxsockbuf, 8 MiB
+
+
+@pytest.mark.parametrize("left", ["requests", "texts"])
+def test_parts_storable_alone_and_not_together(dsn, tmp_path, left):
+    """Two requests, or two text signals, each storable on its own, are
+    together more than one jsonb value holds. The turn is still collected,
+    with every part answered as unreadable with Postgres's reason and no
+    request reaching the broker."""
+    ws, _ = scripted.workspace(tmp_path)
+    valor = ws / ".valor"
+    (valor / "effects").mkdir(parents=True)
+    if left == "requests":
+        for name in ("a.json", "b.json"):
+            body = {"action_type": "no_such_action", "target": "tom", "payload": {"note": "x" * BIG}}
+            (valor / "effects" / name).write_text(json.dumps(body))
+        state = tasks.machine.State.PLAN
+    else:
+        (valor / "question.md").write_text("q" * BIG)
+        (valor / "done.md").write_text("d" * BIG)
+        state = tasks.machine.State.BUILD
+    verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), state))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    refused = "the ledger's JSON (Postgres jsonb) cannot store it with all it holds: ProgramLimitExceeded"
+    assert verdict == "idle"
+    assert not [r for r in rows if r["type"].startswith("effect.")]
+    if left == "requests":
+        assert [e["file"] for e in collected["effects"]] == ["a.json", "b.json"]
+        for entry in collected["effects"]:
+            assert set(entry) == {"file", "error"} and entry["error"].startswith(
+                f"unreadable request: {refused}"
+            )
+    else:
+        assert (collected["question"], collected["done"]) == (None, None)
+        for name in ("question", "done"):
+            assert any(e.startswith(f"{name}.md is unreadable: {refused}") for e in collected["errors"])
+
+
+def test_a_signal_postgres_refuses_is_unreadable(dsn, tmp_path):
+    """A text signal holding a NUL and a `plan.json` nested deeper than the
+    server's stack depth (yet within Python's parser) are each answered as
+    unreadable with Postgres's reason, and the rest of the turn is
+    collected: a clean send beside them is held."""
+    ws, _ = scripted.workspace(tmp_path)
+    valor = ws / ".valor"
+    (valor / "effects").mkdir(parents=True)
+    (valor / "question.md").write_text("which one?\x00")
+    (valor / "plan.json").write_text('{"p": %s}' % ("[" * 50_000 + "]" * 50_000))
+    send = {
+        "action_type": "telegram.send_message",
+        "target": bridges.OPERATOR_CHAT,
+        "payload": {"text": "hi"},
+    }
+    (valor / "effects" / "ok.json").write_text(json.dumps(send))
+    with bridges.operator(tmp_path):
+        verdict, rows = run(
+            _record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, bridges.declared(str(ws)))
+        )
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    store = "is unreadable: the ledger's JSON (Postgres jsonb) cannot store it: "
+    assert verdict == "idle"
+    assert (collected["question"], collected["plan"]) == (None, None)
+    assert any(e.startswith(f"question.md {store}UntranslatableCharacter") for e in collected["errors"])
+    assert any(e.startswith(f"plan.json {store}") for e in collected["errors"])
+    [entry] = collected["effects"]
+    assert entry["kind"] == "pending" and entry["request"] == send
+    assert not [r for r in rows if r["type"] == "question.asked"]
+
+
 def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     outside = tmp_path / "outside.txt"
@@ -685,7 +780,7 @@ def test_a_failing_git_call_raises_with_gits_whole_stderr(tmp_path):
     assert str(failed.value).endswith(f"'{ref}': File name too long")  # past the first 300 characters
 
 
-def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhile(tmp_path, monkeypatch):
+def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhile(dsn, tmp_path, monkeypatch):
     """The fetch into the kernel mirror runs in a worker thread: the loop
     keeps running while it does, and stopping `record` kills the fetch's
     whole process group (here a fetch that never ends, run as the real
@@ -715,16 +810,20 @@ def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhil
 
     async def go():
         found = signals.collect(ws, "turn-1")
-        recording = asyncio.create_task(
-            session.record(
-                None, "t", "turn-1", found, state=tasks.machine.State.PLAN, workspace=str(ws), brief=brief
+        async with await db.connect(dsn) as conn:
+            recording = asyncio.create_task(
+                session.record(
+                    conn, "t", "turn-1", found, state=tasks.machine.State.PLAN, workspace=str(ws), brief=brief
+                )
             )
-        )
-        while not pidfile.exists() or not pidfile.read_text().strip():  # the loop runs while the fetch does
-            await asyncio.sleep(0.05)
-        recording.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await recording
+            while (
+                not pidfile.exists() or not pidfile.read_text().strip()
+            ):  # the loop runs while the fetch does
+                assert not recording.done(), recording
+                await asyncio.sleep(0.05)
+            recording.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await recording
         return int(pidfile.read_text())
 
     child = run(go())
