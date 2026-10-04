@@ -109,7 +109,7 @@ otherwise.
    one task on the `valor` project whose instruction lists each item with
    its incident, mission item, grant date, expiry, and last firing (or "no
    firing record"), and the kernel carries it through the pipeline to one
-   merge held for Tom's tap. A later firing while that task is open
+   merge. A later firing while that task is open
    continues it and starts no other.
 7. **The status page.** `python -m ui` serves, on 127.0.0.1 only, pages for
    tasks (state, metered spending, attention counts), one task (its status
@@ -243,7 +243,7 @@ kernel renders from the due list; the due list also goes on its
 The working session plans, builds, and patches the deletion like any
 task: the guard's code, its seed in `core/guards.py`, its tests, and the
 docs that describe it, or the routine's directory. Critique, test, review,
-and docs run on it. The merge waits for Tom's tap. To keep an item, Tom
+and docs run on it. The deletion is the default, so its merge needs no tap from Tom. To keep an item, Tom
 gives feedback on the delivery, which sends the task to patch.
 
 The ledger keeps every `guard.granted` row. A deleted seeded guard leaves
@@ -358,7 +358,8 @@ the kernel only through Tom's merge tap.
   own.
 - Let a run's ceiling exceed its toml's or its objective's.
 - Let a background turn keep the slot from a foreground step.
-- Release a sweep's merge, or any `act`, without Tom's tap.
+- Release any `act` other than the expiry sweep's deletion merge without
+  Tom's tap.
 - Count a firing from a row type outside `machine.VERDICT_ROWS` or from a
   background task.
 - Put a secret in a plist.
@@ -374,8 +375,8 @@ schema gains one unique index. Both changes are additive, and the tests
 below cover them.
 
 **Governance.** This diff adds no check, gate, hook, round, or review
-step. The expiry sweep deletes, and its merge is an `act` like every
-merge. Preemption is a scheduling rule. The run lock is `run`'s lock; the
+step. The expiry sweep deletes, and its merge needs no tap because an
+unfired guard "is deleted by default". Preemption is a scheduling rule. The run lock is `run`'s lock; the
 stopped-objective exit is Tom's stop holding. The emulator sweep measures
 and blocks nothing. `need` is stored, never enforced. No firing hook is
 added for instance grants.
@@ -402,8 +403,6 @@ added for instance grants.
   skill's use beyond the performers, and every current tool and skill is
   used by every task. They are added when milestone 5's first tool lands.
 - **A firing record for instance grants.** Adding one would be a new hook.
-- **Merging the sweep's branch without Tom's tap** ([routines.md](../routines.md),
-  Gaps: open; every merge is `act`).
 - **Routines without a second need.** Verification runs, failure triage,
   workspace reclaim, and the cheap judgement sweeps over docs have none
   demonstrated.
@@ -569,6 +568,13 @@ is `.venv/bin/python -m ui`, at `http://127.0.0.1:8790/`.
 
 Each is reversible; Tom can overturn any.
 
+- **The expiry sweep's deletion branch merges without Tom's tap.** The
+  governance paragraph says an unfired guard "is deleted by default", so
+  the deletion is the default and needs no tap. Keeping an item is the
+  exception, and Tom gives it in review. The kernel's merge path has no
+  class for a merge approved in advance, so until one exists the merge is
+  released through the same approval surface as any merge.
+
 - **A guard that fired before its expiry** is listed 90 days after its
   last firing; an unfired one at expiry (the governance paragraph).
 - **Use of a routine** is as [routines.md](../routines.md) defines it: an
@@ -655,6 +661,23 @@ Built on 4.1 (e70a91d92) over the plan commit ca0cfb898. New tests:
 Docs rewritten to the built behavior: `routines.md`, `machine.md`,
 `emulator.md`, `tech-stack.md`, and the `routines`, `ui` and `core` READMEs.
 Suite and lint results are in the builder's report.
+
+## Patch round 1
+
+Rebased the three 4.3 commits onto the tip of the merged 4.1 (61241b374);
+the 4.1 candidate commits dropped out because the merged 4.1 holds them.
+The one conflict was `docs/tech-stack.md`: the Telegram and secrets rows
+follow the tip, the Scheduling and Dashboard rows follow 4.3.
+
+Locks checked against 4.1's order (slot session locks, then `tree:<root>`,
+then `task:<id>`; intake takes the tree first on every bound reply). 4.3
+takes `routine:<name>` alone, before `tasks.start` registers a root, which
+takes no tree lock for a root. `stop_tree`, `start_child`, intake and
+`session.feedback` take tree then task. The slot and the shared foreground
+lock are held on connections that open no transaction, and nothing takes
+them while a tree or task lock is held. No inversion found, no code change.
+`test_a_stop_of_the_tree_beside_a_preempting_step_deadlocks_nowhere` stays;
+it fails if a writer takes task before tree.
 
 ## Questions for Tom
 
