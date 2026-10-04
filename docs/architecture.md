@@ -451,7 +451,8 @@ merge run beside it. The rendered context is the same bytes from the same
 store in any process. The kernel holds no state of its own: on restart it
 charges calls whose holder died at their estimate, ends turns with no end
 as `interrupted` and reaps their processes, records a turn that ended and
-was never collected, settles kernel effects left between intent and
+was never collected (a collection that fails is logged and retried as a
+job before the task's next step), settles kernel effects left between intent and
 outcome, and stops services a killed kernel left up (not those a live kernel keeps). Serves reliable stop
 and recovery, and Mission item 1: Tom never coordinates the gaps between
 steps.

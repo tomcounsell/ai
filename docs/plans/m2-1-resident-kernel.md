@@ -83,7 +83,9 @@ leaves a turn running and spending with no process watching it.
      `session.record` come from the turn's rows: the state is the one
      `turn.started` records, `finished` is the `turn.ended` outcome. The
      broker's `request_id` makes the re-request of an effect return the
-     first.
+     first. A collection that raises is logged and the kernel starts; the
+     task is collected by a job (`serve.recollect`) before it is stepped,
+     parked between tries like any failed job.
    - Every `gateway.opened` with no `gateway.charged` whose `holder` lock
      is free: `spending.charge` at its `estimate_usd_micros` with
      `{"estimated": true, "reason": "kernel restarted"}`. `gateway.opened`
