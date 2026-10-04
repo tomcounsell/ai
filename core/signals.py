@@ -12,8 +12,9 @@ task's workspace, read when the turn ends.
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
   workspace, `{"action_type", "target", "payload"}`. The kernel passes each
-  to the broker, which decides what it may do; one holding a NUL character
-  is answered as unreadable, since the ledger cannot store it.
+  to the broker, which decides what it may do; one holding a NUL character,
+  an unpaired surrogate, or a NaN or infinite number is answered as
+  unreadable, since the ledger cannot store it.
 
 Which signal counts in which state is `core/session.py`'s. The text a turn
 reads about this channel is `skills/sdlc/channel.md`, rendered into its
@@ -32,6 +33,7 @@ contents. An entry that cannot be moved is removed unread.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -209,15 +211,13 @@ def _effects(signals: Signals, valor: int, turn_id: str) -> None:
         os.close(effects)
 
 
-NUL = "unreadable request: it holds a NUL character, which the ledger's JSON (Postgres jsonb) cannot store"
-
-
 def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
     """The request in `body`, or an `error` saying why it is unreadable. A
-    request holding a NUL character anywhere is unreadable: every row an
-    effect gets holds its payload whole, and `turn.collected` the request,
-    and jsonb cannot hold one, so it is answered here and never reaches
-    the broker."""
+    request holding what Postgres jsonb cannot store (a NUL character, an
+    unpaired surrogate, or a NaN or infinite number, all of which
+    `json.loads` accepts) is unreadable: every row an effect gets holds its
+    payload whole, and `turn.collected` the request, so it is answered here
+    and never reaches the broker."""
     try:
         request = json.loads(body)
         if not isinstance(request, dict):
@@ -230,21 +230,34 @@ def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
     except (ValueError, KeyError, TypeError) as exc:
         entry["error"] = f"unreadable request: {exc!r}"
         return entry
-    if _holds_nul(found):
-        entry["error"] = NUL
+    why = _unstorable(found)
+    if why:
+        entry["error"] = (
+            f"unreadable request: it holds {why}, which the ledger's JSON (Postgres jsonb) cannot store"
+        )
     else:
         entry["request"] = found
     return entry
 
 
-def _holds_nul(value: Any) -> bool:
+def _unstorable(value: Any) -> str | None:
+    """What in `value` Postgres jsonb refuses, or None. A surrogate pair is
+    stored as the one character it encodes; a surrogate alone is refused."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "a NaN or infinite number"
     if isinstance(value, str):
-        return "\x00" in value
+        if "\x00" in value:
+            return "a NUL character"
+        try:
+            value.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+        except UnicodeDecodeError:
+            return "an unpaired surrogate"
+        return None
     if isinstance(value, dict):
-        return any(_holds_nul(k) or _holds_nul(v) for k, v in value.items())
+        value = [part for pair in value.items() for part in pair]
     if isinstance(value, list):
-        return any(_holds_nul(v) for v in value)
-    return False
+        return next(filter(None, map(_unstorable, value)), None)
+    return None
 
 
 def _screens(signals: Signals, valor: int, turn_id: str) -> list[dict[str, Any]]:

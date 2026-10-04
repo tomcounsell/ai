@@ -219,26 +219,35 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
 
 
-def test_a_nul_in_a_request_is_answered_and_the_turn_collected(dsn, tmp_path):
-    """Postgres jsonb cannot hold a NUL character, and every row an effect
-    gets holds its payload whole, so a request holding one is answered as
-    unreadable, the turn is collected, and the next prompt says so. A send
-    whose file path holds one is the same; the other requests go on."""
+def test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected(dsn, tmp_path):
+    """Postgres jsonb cannot hold a NUL character, an unpaired surrogate, or
+    a NaN or infinite number, and every row an effect gets holds its payload
+    whole, so a request holding one is answered as unreadable, the turn is
+    collected, and the next prompt says so. A send whose file path holds a
+    NUL is the same; the other requests go on, a paired surrogate among them."""
     ws, _ = scripted.workspace(tmp_path)
     effects = ws / ".valor" / "effects"
     effects.mkdir(parents=True)
     chat = bridges.OPERATOR_CHAT
+    nul, surrogate, number = "a NUL character", "an unpaired surrogate", "a NaN or infinite number"
     requests = {
-        "a_path.json": ("telegram.send_message", chat, {"text": "hi", "files": [
+        "a_path.json": (nul, "telegram.send_message", chat, {"text": "hi", "files": [
             {"path": f"{ws}/a\x00.txt", "sha256": "0" * 64}]}),
-        "b_mail.json": ("email.send", bridges.OPERATOR_EMAIL, {"to": [bridges.OPERATOR_EMAIL], "subject": "a\x00b"}),
-        "c_other.json": ("no_such_action", "tom", {"note": {"deep": ["x\x00"]}}),
-        "d_target.json": ("no_such_action", "t\x00m", {}),
-        "e_ok.json": ("telegram.send_message", chat, {"text": "hi"}),
+        "b_mail.json": (nul, "email.send", bridges.OPERATOR_EMAIL, {"to": [bridges.OPERATOR_EMAIL], "subject": "a\x00b"}),
+        "c_other.json": (nul, "no_such_action", "tom", {"note": {"deep": ["x\x00"]}}),
+        "d_target.json": (nul, "no_such_action", "t\x00m", {}),
+        "f_high.json": (surrogate, "email.send", bridges.OPERATOR_EMAIL, {"subject": "a\ud800b"}),
+        "g_low_key.json": (surrogate, "no_such_action", "tom", {"note": {"\udc00": 1}}),
+        "h_swapped.json": (surrogate, "no_such_action", "tom", {"note": "\ude00\ud83d"}),
+        "i_nan.json": (number, "no_such_action", "tom", {"n": float("nan")}),
+        "j_inf.json": (number, "no_such_action", "tom", {"n": [float("-inf")]}),
+        "e_ok.json": (None, "telegram.send_message", chat, {"text": "hi \U0001f600"}),
     }  # fmt: skip
-    for name, (action_type, target, payload) in requests.items():
+    for name, (_, action_type, target, payload) in requests.items():
         body = {"action_type": action_type, "target": target, "payload": payload}
         (effects / name).write_text(json.dumps(body))
+    (effects / "k_big.json").write_text('{"action_type": "x", "target": "tom", "payload": {"n": 1e400}}')
+    requests["k_big.json"] = (number,)
 
     async def go():
         task = await scripted.start(dsn, ws)
@@ -261,13 +270,14 @@ def test_a_nul_in_a_request_is_answered_and_the_turn_collected(dsn, tmp_path):
     assert verdict == "idle"
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     by_file = {e["file"]: e for e in collected["effects"]}
-    for name in ("a_path.json", "b_mail.json", "c_other.json", "d_target.json"):
+    for name, (why, *_) in requests.items():
+        if why is None:
+            continue
         assert "effect_id" not in by_file[name] and "request" not in by_file[name], by_file[name]
-        assert f"{name}: unreadable request: it holds a NUL character" in prompt
+        assert f"{name}: unreadable request: it holds {why}" in prompt
     assert by_file["e_ok.json"]["kind"] == "pending"
-    assert [r["payload"]["action_type"] for r in rows if r["type"].startswith("effect.")] == [
-        "telegram.send_message"
-    ]
+    [effect] = [r["payload"] for r in rows if r["type"].startswith("effect.")]
+    assert (effect["action_type"], effect["payload"]["text"]) == ("telegram.send_message", "hi \U0001f600")
 
 
 def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):

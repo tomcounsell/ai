@@ -473,3 +473,40 @@ and the kernel's own merge. Nothing new limits, waits, or guards.
 
 Suite: 1234 passed, 21 skipped (`valor_rebuild_test_2_1p9`, ports 6430-6439).
 Ruff check and format check clean.
+
+## Patch round 10
+
+Scope: a turn is never left uncollected because of a request Postgres jsonb
+cannot store, as the lead decided (R1 of the review of round 9).
+
+1. `json.loads` accepts three things jsonb refuses: a `\u0000` escape (a
+   NUL character), an unpaired surrogate escape such as `\ud800`, and
+   `NaN`, `Infinity`, or a number too large for a float, which becomes
+   infinite and is written back as `Infinity`. Each failed at
+   `ledger.append`, so the turn was not collected. `signals._request` now
+   records a request holding any of them anywhere (type, target, payload,
+   keys included) as unreadable, "it holds a NUL character" (or "an
+   unpaired surrogate", or "a NaN or infinite number"), "which the
+   ledger's JSON (Postgres jsonb) cannot store". A surrogate pair is one
+   character to jsonb and is stored. Checked against jsonb on this
+   machine's Postgres 18: `"\u0000"`, `"\ud800"`, `"\udc00"`,
+   `"\ude00\ud83d"`, `NaN` and `Infinity` are refused; `1e400` as text
+   and a paired emoji are stored.
+2. Test: `test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected`
+   (round 9's NUL test, renamed and extended) on the test database,
+   through `signals.collect` and `session.record`: round 9's four NUL
+   requests, a lone high surrogate in a subject, a lone low surrogate as a
+   key, a swapped pair, a NaN, a negative infinity, and `1e400`, each
+   answered with its reason; a clean send holding a paired emoji is held
+   with the emoji intact. Without the change it fails with
+   `InvalidTextRepresentation` (the surrogate), and with the number check
+   alone removed, on the `NaN` token.
+3. The `effects` row in `docs/harnesses.md` and the signals module
+   docstring name all three.
+
+A NUL in `question.md`, `no_question.md`, `done.md` or `plan.json`, and an
+unpaired surrogate or non-finite number in `plan.json`, are a later
+follow-up. Nothing new limits, waits, or guards.
+
+Suite: 1234 passed, 21 skipped (`valor_rebuild_test_2_1p10`, ports 6470-6479).
+Ruff check and format check clean.
