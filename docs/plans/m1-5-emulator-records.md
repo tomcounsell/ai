@@ -327,9 +327,11 @@ keys and hidden tests): `pop-b-gate.json`, `pso-a-gate.json`,
   keys, a suite that needed a live connection) do not count: the bar
   measures the kernel, and those runs never reached its work. With them
   left out, all three items pass.
-- `__main__.runners()` registers no review or docs runner, so those
-  verdicts were played by fresh subagents and not metered. This is a bug
-  against the plan's runner list; task 1.5r fixes it, then one kernel run
-  of pop-a with review and docs carried by the kernel confirms it.
+- `__main__.runners()` registers no review runner, so review verdicts were
+  played by fresh subagents and not metered. This is a bug against the
+  plan's runner list, which has review registered unconditionally; task
+  1.5r fixes it. Docs was hand-played by design, through the driver's `NO
+  RUNNER` exit, while governance's calibration entry check fails. One
+  kernel run of pop-a with review carried by the kernel confirms the fix.
 - Item edits live in `~/src/valor-demo/items`; result files stay in
   `~/src/valor-demo/results`, uncommitted, since they hold the answer keys.

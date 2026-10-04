@@ -62,8 +62,8 @@ verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]...
       [--governance PATH:LINE]... [--incident T]
       [--mission-item N] [--head SHA] [--by B] [--via V] [--role-played]
                                record by hand the verdict of a stage that has
-                               no runner, `leg: manual`; every stage has one,
-                               so each is refused
+                               no runner (docs), `leg: manual`; every other
+                               stage has its runner
 grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
@@ -205,9 +205,10 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
-    """The runner for each state and check the state machine schedules.
-    Review and docs ask governance through `judgement_port`, as test asks
-    breadth."""
+    """The runner for each state and check this kernel can run.
+    Review asks governance through `judgement_port`, as test asks breadth.
+    Docs has none while governance's entry check fails: its verdict is
+    recorded by hand (`verdict`)."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
@@ -217,7 +218,6 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         State.CRITIQUE: fresh.critique_runner(_fresh_for),
         Check.TEST: checks.test_runner(judgement_port),
         Check.REVIEW: fresh.review_runner(_fresh_for, judgement_port),
-        Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port),
     }
 
 

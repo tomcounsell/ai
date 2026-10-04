@@ -160,7 +160,7 @@ GOVERNANCE = JudgementTask(
     # The record on the real ledger (task 405d06d5bb53, task_sha256 e47a2161d4dd2cc3...)
     # failed its entry check: the open-weight leg answered caution on one case Tom
     # labelled false (docs/plans/m1-4b-records.md). A site lands calibrated only on a
-    # record that passes, so this stays None.
+    # record that passes, so this stays None and the docs runner stays unregistered.
     calibrated=None,
 )
 

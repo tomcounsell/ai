@@ -618,32 +618,37 @@ def test_the_cli_runs_as_a_module():
     assert out.returncode == 0 and "--run" in out.stdout and "--stand-in-model" in out.stdout
 
 
-# The composition root's runners: every stage the state machine schedules has one.
+# The composition root's runners: every stage the state machine schedules has
+# one, except docs, which the plan leaves hand-played while governance's
+# calibration entry check fails (docs/plans/m1-5-emulator.md, m1-4b-records.md).
 
 # The router settles these itself (a question for Tom, the merge, an end); every
-# other state, and every check, is run by a runner.
+# other state, and every check but docs, is run by a runner.
 SETTLED = {machine.State.WAITING, machine.State.MERGE, machine.State.MERGED, machine.State.STOPPED}
+MANUAL = {Check.DOCS}
 
 
-def test_every_stage_the_state_machine_schedules_has_a_runner():
+def test_every_stage_the_state_machine_schedules_has_a_runner_but_docs():
     from core.__main__ import RUNNERS, runners
 
     scheduled = {s for s in machine.State if s not in SETTLED and s is not machine.State.CHECKS} | set(Check)
-    assert set(runners(None)) == scheduled == set(RUNNERS)
+    assert set(runners(None)) == scheduled - MANUAL == set(RUNNERS)
 
 
-def test_review_and_docs_are_run_by_the_kernels_runners_through_one_driver_step(monkeypatch, dsn, tmp_path):
+def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict(
+    monkeypatch, dsn, tmp_path
+):
     """The kernel's own `runners()`, its fresh sessions played by the scripted
     session and its judgement port the local upstream answering `false`,
-    carry critique, build, test, review, and docs to a delivery in one
-    `core run` the driver makes; no verdict is recorded by hand."""
+    carry critique, build, test, and review in one `core run` the driver
+    makes; docs has no runner, so the driver pauses on `NO RUNNER` and the
+    docs verdict recorded by hand completes the delivery."""
     import core.__main__ as kernel
     from tests import judgement_upstream, test_checks
 
     async def at_critique():
         task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes={"greeting.txt": "hi\n"})
-        scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review", "docs"],
-                       docs_commits=[{"files": {"docs/greeting.md": "Hi.\n"}}])  # fmt: skip
+        scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review"])
         return task, ws
 
     task, ws = asyncio.run(at_critique())
@@ -654,11 +659,18 @@ def test_review_and_docs_are_run_by_the_kernels_runners_through_one_driver_step(
         **{s: r for s, r in scripted.RUNNERS.items() if s in machine.WORKING},
     }
     result = _step_real(monkeypatch, dsn, task, runners=everything)
-    assert result["outcome"] is None and "paused" not in result, result
-    assert result["log"][-1]["said"].startswith("DELIVERED"), result["log"]
+    assert result["outcome"] is None and result["paused"].startswith("NO RUNNER"), result
+    assert "no runner for docs yet" in result["paused"]
     got = asyncio.run(_rows(dsn, task))
-    decided = {c: [r["payload"] for r in got if r["type"] == f"{c.value}.decided"] for c in Check}
-    assert [d["leg"] for d in decided[Check.REVIEW]] == ["session"]
-    assert [d["leg"] for d in decided[Check.DOCS]] == ["session"]
-    assert decided[Check.DOCS][0]["verdict"] == "updated"
+    assert [r["payload"]["leg"] for r in got if r["type"] == "review.decided"] == ["session"]
+    assert machine.fold(got).state is machine.State.CHECKS
+
+    out = subprocess.run(
+        [sys.executable, "-m", "core", "verdict", task, "docs", "no_change", "--by", "test", "--role-played"],
+        cwd=Path(__file__).resolve().parent.parent, env={**os.environ, "VALOR_DB": TEST_DB},
+        capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert out.returncode == 0, out.stderr
+    got = asyncio.run(_rows(dsn, task))
+    assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["manual"]
     assert machine.fold(got).state is machine.State.MERGE

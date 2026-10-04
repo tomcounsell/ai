@@ -208,7 +208,8 @@ and its own `setup-tmp/`, never a `.git` in the checkout or the checkout
 directory itself, and reads the services' password file, so the candidate's setup cannot write the session's Pi or
 Claude Code directory, its `TMPDIR`, or the repository whose config and
 commit subjects Claude Code reads at start.
-Both are registered in the kernel's `runners()`.
+Review is registered in the kernel's `runners()`; docs is registered once
+governance's judgement passes its entry check.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its
 `turn.collected`) and what became of the effects it requested, read from the ledger now, so a push
