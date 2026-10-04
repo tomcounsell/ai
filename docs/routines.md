@@ -56,7 +56,8 @@ The runner named in the toml starts the run or continues the open one, and a
 `routine.ran` row on the objective records the firing with its outcome
 (`started`, `continued`, `nothing_due`, `finished`, `failed`, `running`).
 The command prints one line: the run, its outcome, its metered spending, and
-the routine's spending over the period.
+the routine's spending over the period, taken after the run so it counts the
+run just made and matches the status page.
 
 Tasks a runner starts through `start --project` are children of the
 objective with `Brief.routine` set. The resident kernel drives them like any
@@ -82,6 +83,9 @@ The two routines the kernel holds:
   the baseline, scores, hidden-test exits, attention, spending and the count
   of preempted turns. The runner holds the session lock `run:<run>`, so a
   second process says `already running`. A run with no report is continued.
+  When a replay is paused before it has an outcome, the run writes no report
+  and says `running` with the count of paused replays; the next firing
+  resumes the same run under the same names.
 
 ## Metered spending and ceiling
 
