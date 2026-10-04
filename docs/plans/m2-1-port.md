@@ -163,8 +163,9 @@ importing a bridge, and bridges read them from there:
 - Email: `max_text` None. The limit is on the whole message: Gmail
   refuses a message over 25 MB, counted as 25,000,000 bytes of the whole
   encoded message (D15c): `max_message_bytes` 25,000,000. Its size
-  function, `message_bytes`, is 2.3's `email_encoded_bytes`; in 2.1 it is
-  unset, so 2.1 refuses no email for size at request time.
+  function, `message_bytes(action, sizes)`, given the files' sizes, is
+  2.3's `email_encoded_bytes`; in 2.1 it is unset, so 2.1 refuses no
+  email for size at request time.
 `split_text` splits a text over `max_text`, counting in the channel's
 units, into several messages, so `sent` is a list. A send over the
 limit (a Telegram file over `max_file_bytes`, an email whose
@@ -175,8 +176,9 @@ send.
 ## Performers (D9, D19, D22, D24)
 
 `perform(action, key)` returns the result. `lookup(action, key, since)`
-returns the result of a send that happened, None when the platform holds
-none. `since` is the `at` of the effect's intent (D34); `bridge.serve`
+returns the result of a send that happened. It returns None only when the
+platform can no longer record the send, and raises `broker.Unknown` while
+it still might. `since` is the `at` of the effect's intent (D34); `bridge.serve`
 wraps the bridge's lookup so the broker's two-argument call passes it,
 finding the intent by the effect id, the key's last segment.
 The scan covers own messages dated at or after `since`, less a clock
@@ -206,33 +208,43 @@ class Declared:
     effect_class: str
     usage: str
     owner: str  # "telegram" or "email"
-    refuse: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
+    check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
+    workspace: str | None = None
+
+    async def refuse(self, conn, action: broker.Action) -> str | None: ...
 
 
 DECLARED: dict[str, Declared]  # telegram.send_message, email.send
 
 
-def declared_performers() -> list[Declared]: ...
+def declared_performers(workspace: str | None = None) -> list[Declared]: ...
 ```
 
-`refuse` has 1.4d's shape, `async (conn, action)`. Reconcile (D22, D37)
+`refuse` has 1.4d's shape, `async (conn, action)`: the type's `check`,
+then the files sized in the task's `workspace`. Each file's path must
+name a regular file with one link inside the workspace, reached through
+no link (1.4s's `open_plain_file`); its size is the opened file's
+`fstat`, and the kernel never reads it. A file that is missing, a link,
+or outside the workspace gets one answer, so a refusal says nothing about
+a path outside. A bridge's `Bound` runs `check` alone; the bridge's
+`perform` reads the bytes. Reconcile (D22, D37)
 runs once the effect's performing lock is free, then reads the remote; it
-waits on no age. Every task's Performers holds `declared_performers()`, so `request` holds a send for
+waits on no age. Every task's Performers holds `declared_performers(brief.workspace)`, so `request` holds a send for
 Tom and `dispatch(offered=...)` tells the turn the send exists.
 
 - `telegram.send_message`, `act`. Target: the chat id as text. Payload
   `{"text": str, "reply_to": str | None, "topic_id": str | None,
   "files": [{"path": str, "sha256": str}]}`. Refused when the chat is not
   owned (this machine's bridge cannot send there), when text and files
-  are both empty (the platform sends nothing), when a file is missing or
-  its sha256 differs (it is not what Tom approved), or when a file is over
+  are both empty (the platform sends nothing), when a file is not a
+  regular file in the task's workspace, or when a file is over
   `max_file_bytes`, or a text that splits into no message.
 - `email.send`, `act`. Target: the `to` list, lowercased, sorted,
   comma-joined (D20). Payload `{"to": [str], "cc": [str], "subject": str,
   "body": str, "in_reply_to": str | None, "references": [str], "files":
   [{"path": str, "sha256": str}]}`. Refused when `to` is empty (no
-  recipient), a file is missing or differs, or the whole message is over
-  the limit.
+  recipient), a file is not a regular file in the task's workspace, or
+  the whole message is over the limit.
 - **Reply-all (D21)** lives in `core/session.py`'s request collection;
   2.3 owns that code. The turn's `reply_to` is removed before `request`.
 
@@ -270,7 +282,7 @@ class Outbox:
   start.
 - `perform(item)` calls `broker.release(conn, performers, effect_id)`:
   the checks, the intent, the bridge's `perform`, the outcome. A release
-  the checks refuse (task stopped, approval used, file changed) appends
+  the checks refuse (task stopped, approval used) appends
   `effect.refused` with the reason, once, and owes a notice, so it is
   never yielded again (D40 for the kernel's, the same rule).
 - `sent(item, sent)` appends `notice.sent` `{"notice_id", "sent"}` on the

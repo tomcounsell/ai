@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: passed
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -216,7 +216,8 @@ notification is delivered at commit. The trigger refuses nothing;
   writes no intent, and appends `release.requested` on the task stream.
   At request, a declared send whose files are over the channel's limit
   (`ChannelLimits` in `core/bridge.py`) is refused with the protocol
-  limit as the reason.
+  limit as the reason. The kernel sizes each file in the task's workspace
+  without reading it (the port, "Declared actions").
 - **A refused release, bridge or kernel** (the release checks fail:
   stopped, not approved, refused, merge predicate) appends
   `effect.refused` with the reason, once, under `events_one_effect_row`,
@@ -353,6 +354,8 @@ bridge performers.
 - `test_refused_kernel_release`: a release on a stopped task writes one
   `effect.refused`, owes one notice, and is not retried.
 - `test_slot_reentrant`: a check that runs a turn completes.
+- `test_a_check_holds_the_slot`: the test and docs checks wait while a
+  turn holds the slot and hold it while they run.
 - `test_one_turn_slot`: of two ready `build` tasks the older runs first;
   a `judge` task runs beside the turn; `core run` on a third waits for
   the slot; a second `serve` waits on `kernel:<machine>`.
@@ -406,9 +409,11 @@ bridge performers.
   `lookup` raises `Unknown`; the intent stays in flight, no outcome.
 - `test_two_identical_sends`: two equal signal files are two effects;
   one file collected twice is one.
-- `test_notice_crash_before_sent`, `test_file_hash_mismatch`,
-  `test_oversize_file_refused_at_request` (email sums files and body
-  through the size function), `test_split_utf16`,
+- `test_notice_crash_before_sent`, `test_files_refused_alike_and_never_read`
+  (a link, a missing path, and a path outside the workspace get one
+  answer; nothing is read), `test_oversize_file_refused_at_request`
+  (a sparse file sized unread; email sums file sizes and body through
+  the size function), `test_split_utf16`,
   `test_declared_in_every_task`, `test_tick_called`,
   `test_a_killed_send_the_server_never_got_reconciles_failed`.
 

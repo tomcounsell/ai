@@ -142,7 +142,8 @@ def _performers(b: tasks.Brief) -> broker.Performers:
     declared send (`core/bridge.py`). push_branch goes to the task's own bare
     origin; the merge pushes to the Brief's origin URL, from the kernel mirror
     with the GitHub credential when the kernel provisioned the task, and from
-    the workspace with none otherwise."""
+    the workspace with none otherwise. A declared send sizes its files in the
+    task's workspace."""
     from core.bridge import declared_performers
     from tools.push_branch import Merge, PushBranch
 
@@ -157,7 +158,7 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
-    return broker.Performers(*kernel, *declared_performers())
+    return broker.Performers(*kernel, *declared_performers(b.workspace))
 
 
 def _harnesses() -> dict:

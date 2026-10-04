@@ -95,8 +95,8 @@ class FakeBridge:
         self.ticked.set()
 
 
-def declared() -> broker.Performers:
-    return broker.Performers(*declared_performers())
+def declared(workspace: str | None = None) -> broker.Performers:
+    return broker.Performers(*declared_performers(workspace))
 
 
 async def new_task(dsn: str, **kw) -> str:

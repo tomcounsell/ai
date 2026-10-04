@@ -378,8 +378,9 @@ async def reconcile(conn, performers: Performers, effect_id: str) -> Outcome | N
     performer's worker thread and every git it started hold until they
     exit, so a perform whose database connection dropped, or whose kernel
     died while its push ran, is read only after the push was reaped.
-    Present: `done`. Absent: `failed`. Unknown (the target did not answer):
-    nothing; the effect stays in flight. Also nothing when there is
+    Present: `done`. Absent: `failed`; a lookup returns None only when the
+    target can no longer record the effect, and raises `Unknown` while it
+    still might (or did not answer): nothing; the effect stays in flight. Also nothing when there is
     nothing to settle, or when the task has no performer for it that can
     look it up (a bridge's send is settled by its bridge). Returns the
     outcome written, if any."""

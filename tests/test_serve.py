@@ -498,6 +498,68 @@ def test_slot_reentrant(fresh, op, tmp_path):
     assert ended["outcome"] == "done"
 
 
+@pytest.mark.parametrize("which", ["test", "docs"])
+def test_a_check_holds_the_slot(fresh, op, which, monkeypatch):
+    """A turn and a check do not run at once: a check waits while a turn
+    holds the slot, and holds it itself while it runs."""
+    from core import checks
+    from core import fresh as fresh_runs
+
+    async def taken(conn) -> bool:
+        got = await (
+            await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (slot.key(),))
+        ).fetchone()
+        if got[0]:
+            await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (slot.key(),))
+        return not got[0]
+
+    async def go():
+        task = await new_task(fresh)
+        probe = await db.connect(fresh)
+        seen: list[bool] = []
+        real = ledger.read
+
+        async def read(conn, task_id, *a, **k):
+            seen.append(await taken(probe))
+            return await real(conn, task_id, *a, **k)
+
+        monkeypatch.setattr(ledger, "read", read)
+        runner = checks.test_runner(None) if which == "test" else fresh_runs.docs_runner(None, None)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def turn():  # what `runs.run_turn` holds around a turn
+            async with slot.held("another-task", fresh):
+                entered.set()
+                await release.wait()
+
+        async def waiting() -> bool:
+            row = await (
+                await probe.execute(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                )
+            ).fetchone()
+            return row[0] > 0
+
+        try:
+            holder = asyncio.create_task(turn())
+            await entered.wait()
+            ctx = router.Context(None, task, fresh, alive=lambda: asyncio.sleep(0, True))
+            check = asyncio.create_task(runner(ctx))
+            await until(waiting)
+            before = (check.done(), list(seen))
+            release.set()
+            await holder
+            out = await check
+            return before, seen, out, await taken(probe)
+        finally:
+            await probe.close()
+
+    before, seen, out, after = run(go())
+    assert before == (False, [])
+    assert seen and all(seen) and after is False
+    assert out["status"] == "moved"
+
+
 def test_one_turn_slot(fresh, op, tmp_path):
     spaces = {name: scripted.workspace(tmp_path / name)[0] for name in "abjc"}
     for name in "ab":

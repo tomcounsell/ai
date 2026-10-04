@@ -51,7 +51,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from core import checks, db, git, judgement_sites, ledger, machine, runs, tasks, verdicts, workspace
+from core import checks, db, git, judgement_sites, ledger, machine, runs, slot, tasks, verdicts, workspace
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -418,11 +418,17 @@ def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
     the prefix the kernel keeps, governance over the kept diff, and the
     verdict the kernel computes from what was kept (the session's own
     `changes` stands). A `docs.kept` row for the candidate is reused, so a
-    run that died after the turn asks only governance again."""
+    run that died after the turn asks only governance again. The check
+    holds the turn slot throughout; its docs turn takes it again as a
+    no-op."""
 
     model_ = model
 
     async def run(ctx) -> dict[str, Any]:
+        async with slot.held(ctx.task_id, ctx.dsn):
+            return await _run(ctx)
+
+    async def _run(ctx) -> dict[str, Any]:
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
             f = machine.fold(rows)

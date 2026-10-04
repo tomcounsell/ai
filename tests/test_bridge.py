@@ -2,8 +2,10 @@
 declared send types, their refusals and limits, and reconcile."""
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
+import os
 from unittest import mock
 
 import pytest
@@ -197,32 +199,72 @@ def test_notice_crash_before_sent(dsn, op):
     run(go())
 
 
-def test_file_hash_mismatch(dsn, op, tmp_path):
-    f = tmp_path / "report.txt"
-    f.write_text("the report")
-    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+def test_files_refused_alike_and_never_read(dsn, op, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "report.txt").write_text("the report")
+    (ws / "hosts").symlink_to("/etc/hosts")
+    (ws / "etc").symlink_to("/etc")
+    os.mkfifo(ws / "pipe")
+    (ws / "copy.txt").write_text("a copy")
+    (ws / "twin").hardlink_to(ws / "copy.txt")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the task's")
+    named = {
+        "link": ws / "hosts",
+        "linked dir": ws / "etc" / "hosts",
+        "missing": ws / "nothing.txt",
+        "outside": outside,
+        "absent outside": tmp_path / "absent.txt",
+        "dotdot": f"{ws}/../outside.txt",
+        "fifo": ws / "pipe",
+        "hard link": ws / "twin",
+        "relative": "report.txt",
+    }
+    sent = declared(str(ws)).get("telegram.send_message")
 
     async def go():
+        said = {}
+        with contextlib.ExitStack() as stack:
+            for p in (mock.patch("builtins.open", _no_read), mock.patch("os.read", _no_read)):
+                stack.enter_context(p)
+            for what, path in named.items():
+                said[what] = await sent.refuse(None, send(files=[{"path": str(path), "sha256": "0" * 64}]))
+            # A regular file in the workspace is sized, never hashed: its
+            # bytes are the bridge's `perform` to check.
+            good = await sent.refuse(None, send(files=[{"path": str(ws / "report.txt"), "sha256": "0" * 64}]))
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
-            wrong = await broker.request(
-                conn, declared(), task, send(files=[{"path": str(f), "sha256": "0" * 64}])
+            out = await broker.request(
+                conn, declared(str(ws)), task, send(files=[{"path": str(ws / "hosts"), "sha256": "0" * 64}])
             )
-        assert wrong.kind == "refused" and "sha256 differs" in wrong.error
-        effect = await held(dsn, task, send(files=[{"path": str(f), "sha256": sha}]))
-        f.write_text("another report")
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="approve")
-            # A release from the command line refuses and writes nothing.
-            with pytest.raises(broker.Refused, match="sha256 differs"):
-                await broker.release(conn, declared(), effect)
-        assert not await of_type(dsn, "effect.refused", effect_id=effect)
+            nowhere = await broker.request(
+                conn, declared(), task, send(files=[{"path": str(ws / "report.txt"), "sha256": "0" * 64}])
+            )
+        return said, good, out, nowhere
 
-    run(go())
+    said, good, out, nowhere = run(go())
+    reasons = {what: why.replace(str(named[what]), "<path>") for what, why in said.items()}
+    assert set(reasons.values()) == {"file <path> is not a regular file in the task's workspace"}, reasons
+    assert good is None
+    assert out.kind == "refused" and "not a regular file in the task's workspace" in out.error
+    # A task with no workspace sends no file.
+    assert nowhere.kind == "refused"
+
+
+def _no_read(*a, **k):
+    raise AssertionError(f"the kernel read {a[:1]}")
 
 
 def test_oversize_file_refused_at_request(dsn, op, tmp_path):
-    f = tmp_path / "a.bin"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    limit = LIMITS["telegram"].max_file_bytes
+    big, edge = ws / "big.bin", ws / "edge.bin"
+    for f, size in ((big, limit + 1), (edge, limit)):
+        with f.open("wb") as fh:  # sparse: sized, never written or read
+            fh.truncate(size)
+    f = ws / "a.bin"
     f.write_bytes(b"x" * 3000)
     sha = hashlib.sha256(f.read_bytes()).hexdigest()
     to = bridges.OPERATOR_EMAIL
@@ -233,20 +275,32 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
 
     async def go():
         task = await new_task(dsn)
-        sized = dataclasses.replace(LIMITS["email"], message_bytes=lambda a: len(a.payload["body"]) + 3000)
+        sized = dataclasses.replace(
+            LIMITS["email"], message_bytes=lambda a, sizes: len(a.payload["body"]) + sum(sizes)
+        )
+        performers = declared(str(ws))
         async with await db.connect(dsn) as conn:
+            with mock.patch("builtins.open", _no_read), mock.patch("os.read", _no_read):
+                over_file = await broker.request(
+                    conn, performers, task, send(files=[{"path": str(big), "sha256": "0" * 64}])
+                )
+                at_file = await broker.request(
+                    conn, performers, task, send(files=[{"path": str(edge), "sha256": "0" * 64}])
+                )
             # Until the email bridge sets the size function, no email is
             # refused for size.
-            unmeasured = await broker.request(conn, declared(), task, email("b" * 30_000_000))
+            unmeasured = await broker.request(conn, performers, task, email("b" * 30_000_000))
             with mock.patch.dict(LIMITS, {"email": sized}):
-                over = await broker.request(conn, declared(), task, email("b" * (25_000_000 - 2999)))
-                under = await broker.request(conn, declared(), task, email("b" * (25_000_000 - 3000)))
+                over = await broker.request(conn, performers, task, email("b" * (25_000_000 - 2999)))
+                under = await broker.request(conn, performers, task, email("b" * (25_000_000 - 3000)))
             nobody = await broker.request(
-                conn, declared(), task, broker.Action("email.send", to, {"to": [], "body": "x"})
+                conn, performers, task, broker.Action("email.send", to, {"to": [], "body": "x"})
             )
-        return unmeasured, over, under, nobody
+        return over_file, at_file, unmeasured, over, under, nobody
 
-    unmeasured, over, under, nobody = run(go())
+    over_file, at_file, unmeasured, over, under, nobody = run(go())
+    assert over_file.kind == "refused" and f"over telegram's limit of {limit} bytes" in over_file.error
+    assert at_file.kind == "pending"
     assert LIMITS["email"].max_message_bytes == 25_000_000 and LIMITS["email"].message_bytes is None
     assert unmeasured.kind == "pending"
     assert over.kind == "refused" and "over email's limit of 25000000 bytes" in over.error

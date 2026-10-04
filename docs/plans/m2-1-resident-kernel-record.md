@@ -330,3 +330,49 @@ reconcile; one the server does not hold is `failed`
 
 Suite: 1211 passed, 21 skipped (`valor_rebuild_test_21build`, ports
 6430-6439). Ruff check and format check clean.
+
+## Patch round 6
+
+Scope: the two required findings of the review of the rebased candidate
+(e68a6b820, docs at 24a495320) and the port's lookup contract, as the
+lead decided.
+
+1. R1. The kernel no longer reads a file a send names. `Declared` carries
+   the task's workspace (`declared_performers(brief.workspace)` in
+   `_performers`); its `refuse` runs the type's `check`, then sizes each
+   file there through 1.4s's `open_plain_file`: every component opened
+   relative to a descriptor with `O_NOFOLLOW`, the file opened
+   nonblocking, its size from `fstat`, never a byte read, in a worker
+   thread. A path that is missing, a link (at any component), a FIFO, a
+   file with a second link, relative, or outside the workspace gets one
+   answer, "not a regular file in the task's workspace", so a refusal says
+   nothing about a path outside. A task with no workspace sends no file.
+   The sha256 comparison is gone from the kernel; the bridge's `perform`
+   reads each file once and refuses a mismatch (the port, unchanged). A
+   bridge's `Bound` runs `check` alone. `message_bytes` takes the files'
+   sizes, so email's size function needs no read either. Tests:
+   `test_files_refused_alike_and_never_read` (a link to `/etc/hosts`, a
+   linked directory, a missing path, a path outside, an absent path
+   outside, `..`, a FIFO, a hard link, and a relative path: one reason,
+   with `open` and `os.read` refused for the block),
+   `test_oversize_file_refused_at_request` (a sparse file one byte over
+   2000 MiB refused and one at the limit held, unread);
+   `test_file_hash_mismatch` is gone.
+2. R2. `checks.test_runner` and `fresh.docs_runner` hold the turn slot
+   (`slot.held(task_id, dsn)`) around the whole check, as the plan's
+   Design says; the docs check's inner turn takes it again as a no-op.
+   Test: `test_a_check_holds_the_slot` (both checks wait while a turn
+   holds the slot and hold it while they run); it fails without the
+   change.
+3. The port: `lookup` returns None only when the platform can no longer
+   record the send, and raises `broker.Unknown` while it still might.
+   `broker.reconcile` and `Bound` say so; the code already wrote nothing
+   on `Unknown`. `docs/plans/m2-2-telegram.md` no longer names a settle
+   time: a send killed before its send record is settled `failed` by the
+   first reconcile once its lock is free.
+
+Docs: `docs/bridges/telegram.md` and `docs/bridges/email.md` say where a
+file must be and who reads it. Nothing new limits, waits, or guards.
+
+Suite: 1213 passed, 21 skipped (`valor_rebuild_test_21p6`, ports 6430-6439).
+Ruff check and format check clean.

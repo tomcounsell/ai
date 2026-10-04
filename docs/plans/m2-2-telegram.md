@@ -99,9 +99,10 @@ types, and reconnect) is shown only on the test servers below.
   Killed at the pause point after the emulator accepted a send: on
   restart, the outbox's reconcile finds the message and writes `done`,
   reconciled, and the emulator holds one message. Killed before the send
-  was accepted and restarted at once: the effect stays in flight until
-  its intent is older than the settle time, then a later tick writes
-  `failed`, and nothing is sent.
+  record was written and restarted at once: the outbox's reconcile asks
+  `lookup` once the effect's performing lock is free, a key with no
+  record was never sent, so `lookup` returns None and the reconcile
+  writes `failed`, and nothing is sent.
 - **A send in doubt is not a failure.** The emulator accepts a send and
   drops the connection before replying: the effect ends `done` with one
   message on screen.
@@ -416,9 +417,8 @@ an approved send in the ledger for the outbox to yield.
   as two messages.
 - A second `run` waits on `serve`'s lock while the first keeps serving,
   and no process receives a signal.
-- Killed after the intent and before the send, restarted within a second,
-  with a settle time of 5 s: the effect is still in flight after the first
-  tick, `failed` on a tick after 5 s, zero messages.
+- Killed after the intent and before the send record, restarted within a
+  second: the first tick's reconcile writes `failed`, zero messages.
 - A released effect on a stopped task is refused, recorded once, and
   nothing is sent; effects of other owners (`push_branch`, `email.send`)
   are left alone.

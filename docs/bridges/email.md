@@ -106,7 +106,9 @@ addresses, lowercased, sorted, and comma-joined, and its payload is the whole me
 | `files` | Each attachment as a path and its sha256 |
 
 The digest Tom approves covers the recipients, the subject, the body, and
-each file's bytes. The bridge builds the MIME message from exactly these
+each file's bytes. Each file is a path in the task's workspace, sized there by
+the kernel without reading it; `perform` reads it once and sends nothing when
+its sha256 differs. The bridge builds the MIME message from exactly these
 fields: `text/plain` with attachments as `multipart/mixed` parts when there
 are files. It adds only the headers transport requires: `From` (Valor's
 address), `Date`, and `Message-ID`.

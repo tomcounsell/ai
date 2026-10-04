@@ -15,6 +15,14 @@ bridge supplies only how to send (`perform`) and how to find a send that
 happened (`lookup`); `serve` joins the two into the performer the broker
 runs.
 
+Each task's declared sends carry its workspace. A file a send names must
+be a regular file there, reached through no link; the kernel takes its
+size from the opened file's `fstat` and never reads it, and a file that is
+missing, a link, or outside the workspace gets one answer, so a refusal
+says nothing about a path outside. Whether the bytes are what Tom
+approved is the bridge's: `perform` reads each file once and refuses one
+whose sha256 differs.
+
 The limits (`LIMITS`) are protocol facts, so the kernel refuses an
 impossible send at request time without importing a bridge:
 
@@ -23,13 +31,13 @@ impossible send at request time without importing a bridge:
   4000 parts of 512 KiB).
 - Email: no per-message text limit. Gmail refuses a message over 25 MB
   (its maximum email size), counted as 25,000,000 bytes of the whole
-  encoded message. The size function that measures it (`message_bytes`)
-  is the email bridge's; until it is set, an email is not refused for
-  size at request time.
+  encoded message. The size function that measures it (`message_bytes`,
+  given the action and its files' sizes) is the email bridge's; until it
+  is set, an email is not refused for size at request time.
 """
 
 import asyncio
-import hashlib
+import dataclasses
 import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -39,6 +47,7 @@ from typing import Any, Protocol
 import psycopg
 
 from core import broker, db, ledger, tasks
+from core import workspace as ws
 from core.settings import settings
 
 
@@ -48,7 +57,7 @@ class ChannelLimits:
     text_units: str  # "utf16" or "chars"
     max_file_bytes: int | None  # per file
     max_message_bytes: int | None = None  # the whole message, measured by message_bytes
-    message_bytes: Callable[[broker.Action], int] | None = None
+    message_bytes: Callable[[broker.Action, list[int]], int] | None = None  # given the file sizes
 
 
 LIMITS: dict[str, ChannelLimits] = {
@@ -95,18 +104,50 @@ def split_text(channel: str, text: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
-def _file_refusal(channel: str, files: list[dict[str, Any]]) -> str | None:
-    limit = LIMITS[channel].max_file_bytes
-    for f in files:
-        path, sha = f.get("path"), f.get("sha256")
-        if not path or not os.path.isfile(path):
-            return f"file {path} is missing"
-        with open(path, "rb") as fh:
-            data = fh.read()
-        if hashlib.sha256(data).hexdigest() != sha:
-            return f"file {path} is not the file requested: its sha256 differs"
-        if limit is not None and len(data) > limit:
-            return f"file {path} is {len(data)} bytes, over {channel}'s limit of {limit} bytes per file"
+def _file_size(workspace: str, path: str) -> int | None:
+    """The size of `path` when it names a regular file with one link inside
+    `workspace`, reached without following a link; else None. Opens the
+    file and never reads it."""
+    prefix = workspace.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return None
+    try:
+        root = os.open(workspace, ws.DIR_FLAGS)
+    except OSError:
+        return None
+    try:
+        fd, st, _why = ws.open_plain_file(root, path[len(prefix) :])
+    finally:
+        os.close(root)
+    if fd is None:
+        return None
+    os.close(fd)
+    return st.st_size
+
+
+async def _size_refusal(channel: str, action: broker.Action, workspace: str | None) -> str | None:
+    """Each file must be a regular file in the task's workspace, within the
+    channel's limit, and the whole message within its limit once the
+    channel's size function is set. The kernel never reads a file a turn
+    names: one that is missing, a link, or outside the workspace gets the
+    same answer, and whether its bytes are what Tom approved is the
+    bridge's `perform`."""
+    limits = LIMITS[channel]
+    sizes = []
+    for f in action.payload.get("files") or []:
+        path = f.get("path")
+        size = None
+        if workspace and isinstance(path, str):
+            size = await asyncio.to_thread(_file_size, workspace, path)
+        if size is None:
+            return f"file {path} is not a regular file in the task's workspace"
+        if limits.max_file_bytes is not None and size > limits.max_file_bytes:
+            return f"file {path} is {size} bytes, over {channel}'s limit of {limits.max_file_bytes} bytes per file"
+        sizes.append(size)
+    if limits.message_bytes is not None and limits.max_message_bytes is not None:
+        total = limits.message_bytes(action, sizes)
+        if total > limits.max_message_bytes:
+            return f"the message is {total} bytes, over {channel}'s limit of {limits.max_message_bytes} bytes"
     return None
 
 
@@ -119,30 +160,32 @@ async def _refuse_telegram(conn, action: broker.Action) -> str | None:
     files = action.payload.get("files") or []
     if not split_text("telegram", text) and not files:
         return "the text and the files are both empty: Telegram would send nothing"
-    return _file_refusal("telegram", files)
+    return None
 
 
 async def _refuse_email(conn, action: broker.Action) -> str | None:
     if not action.payload.get("to"):
         return "the email has no recipient"
-    said = _file_refusal("email", action.payload.get("files") or [])
-    if said:
-        return said
-    limits = LIMITS["email"]
-    if limits.message_bytes is not None and limits.max_message_bytes is not None:
-        size = limits.message_bytes(action)
-        if size > limits.max_message_bytes:
-            return f"the message is {size} bytes, over email's limit of {limits.max_message_bytes} bytes"
     return None
 
 
 @dataclass(frozen=True)
 class Declared:
+    """A channel's send type as a task's Performers holds it. `refuse`
+    checks the send and, given the task's `workspace`, sizes its files
+    there; a bridge's `Bound` checks the send alone, since the bridge reads
+    each file at `perform` and refuses one that differs."""
+
     action_type: str
     effect_class: str
     usage: str
     owner: str  # "telegram" or "email"
-    refuse: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
+    check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
+    workspace: str | None = None
+
+    async def refuse(self, conn, action: broker.Action) -> str | None:
+        said = await self.check(conn, action) if self.check else None
+        return said or await _size_refusal(self.owner, action, self.workspace)
 
 
 DECLARED: dict[str, Declared] = {
@@ -155,7 +198,7 @@ DECLARED: dict[str, Declared] = {
             "sent once Tom approves."
         ),
         owner="telegram",
-        refuse=_refuse_telegram,
+        check=_refuse_telegram,
     ),
     "email.send": Declared(
         action_type="email.send",
@@ -166,13 +209,14 @@ DECLARED: dict[str, Declared] = {
             '"files": [{"path": "...", "sha256": "..."}]}`; sent once Tom approves.'
         ),
         owner="email",
-        refuse=_refuse_email,
+        check=_refuse_email,
     ),
 }
 
 
-def declared_performers() -> list[Declared]:
-    return list(DECLARED.values())
+def declared_performers(workspace: str | None = None) -> list[Declared]:
+    """Every declared send, sizing files in `workspace`, the task's."""
+    return [dataclasses.replace(d, workspace=workspace) for d in DECLARED.values()]
 
 
 PerformFn = Callable[[broker.Action, str], Awaitable[dict[str, Any]]]
@@ -183,7 +227,9 @@ class Bound:
     """A declared type joined with its bridge's perform and lookup: the
     performer the bridge's broker calls. The broker's two-argument lookup
     gets `since`, the intent's `at`, found by the effect id that ends the
-    key."""
+    key. The bridge's lookup returns the send it finds, None only when the
+    platform can no longer record the send, and raises `broker.Unknown`
+    while it still might, so a miss is `failed` only once it is final."""
 
     def __init__(self, declared: Declared, perform: PerformFn, lookup: LookupFn, conn):
         self.declared = declared
@@ -194,7 +240,7 @@ class Bound:
         self._perform, self._lookup, self._conn = perform, lookup, conn
 
     async def refuse(self, conn, action: broker.Action) -> str | None:
-        return await self.declared.refuse(conn, action) if self.declared.refuse else None
+        return await self.declared.check(conn, action) if self.declared.check else None
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:
         return await self._perform(action, key)

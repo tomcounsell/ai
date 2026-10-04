@@ -98,7 +98,11 @@ whether the message with that idempotency key exists.
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
-reply target, and each file's bytes, so what leaves is what he saw.
+reply target, and each file's bytes, so what leaves is what he saw. Each file
+is a path in the task's workspace: the kernel sizes it there without reading
+it, and refuses one that is missing, a link, or outside the workspace with one
+answer. The bridge's `perform` reads each file once and sends nothing when its
+sha256 differs from the payload's.
 
 ### The outbox
 

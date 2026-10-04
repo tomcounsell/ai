@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 from xml.parsers import expat
 
-from core import db, git, judgement_sites, ledger, machine, runs, tasks, verdicts, workspace
+from core import db, git, judgement_sites, ledger, machine, runs, slot, tasks, verdicts, workspace
 from core.machine import Check, State
 
 SUITE = "suite.ran"
@@ -809,9 +809,14 @@ async def stop_heard(ctx):
 
 
 def test_runner(port):
-    """The runner for `Check.TEST`."""
+    """The runner for `Check.TEST`. The check holds the turn slot
+    (`core/slot.py`) throughout, so no turn runs beside a suite."""
 
     async def run(ctx) -> dict[str, Any]:
+        async with slot.held(ctx.task_id, ctx.dsn):
+            return await _run(ctx)
+
+    async def _run(ctx) -> dict[str, Any]:
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
             f = machine.fold(rows)
