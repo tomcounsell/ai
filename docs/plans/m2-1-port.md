@@ -224,7 +224,11 @@ def declared_performers(workspace: str | None = None) -> list[Declared]: ...
 then the files sized in the task's `workspace`. `files` absent or null is
 no files; any other value that is not a list of `{path, sha256}` objects
 with string members is refused with "files must be a list of {path,
-sha256} objects". Each file's path must
+sha256} objects". A Telegram `text` that is not a string is refused with
+"the text must be a string"; an email's `subject`, `body` and
+`in_reply_to` must each be a string or null, and `to`, `cc` and
+`references` lists of strings, else it is refused with `EMAIL_SHAPE`
+(`core/bridge.py`), before the recipient check. Each file's path must
 name a regular file with one link inside the workspace, reached through
 no link (1.4s's `open_plain_file`); its size is the opened file's
 `fstat`, and the kernel never reads it. A file that is missing, a link,
