@@ -246,15 +246,23 @@ async def record(
     performers: broker.Performers | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
-    the broker. Returns the verdict. For a task with a kernel mirror, a plan
-    commit or a candidate counts only once it is fetched into the mirror.
+    the broker. A request Postgres jsonb refuses, asked of Postgres nested
+    as `turn.collected` holds it, is answered as unreadable with Postgres's
+    reason and never reaches the broker. Returns the verdict. For a task
+    with a kernel mirror, a plan commit or a candidate counts only once it
+    is fetched into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
     thread (`git.threaded`), so the kernel's loop runs meanwhile and a stop
     kills the fetch."""
     verdict, extra, errors = await git.threaded(_verdict, state, found, workspace, turn_id, finished, brief)
     effects = []
     for entry in found.effects:
-        if "request" in entry and entry["request"]["action_type"] == "merge":
+        if "request" in entry and (why := await ledger.unstorable(conn, {"effects": [entry]})):
+            entry = {
+                "file": entry["file"],
+                "error": f"unreadable request: the ledger's JSON (Postgres jsonb) cannot store it: {why}",
+            }
+        elif "request" in entry and entry["request"]["action_type"] == "merge":
             entry = {**entry, "error": "the merge is the kernel's to request"}
         elif "request" in entry:
             r = entry["request"]

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, session, signals, spending, tasks
+from core import bridge, broker, db, ledger, session, signals, spending, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
 from tests import bridges, judgement_upstream, scripted
@@ -219,24 +219,31 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
 
 
-def test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected(dsn, tmp_path):
-    """Postgres jsonb cannot hold a NUL character, an unpaired surrogate, or
-    a NaN or infinite number, and every row an effect gets holds its payload
-    whole, so a request holding one is answered as unreadable, the turn is
-    collected, and the next prompt says so. A send whose file path holds a
-    NUL is the same; the other requests go on, a paired surrogate among them."""
+def test_a_request_file_never_stops_the_turn_being_collected(dsn, tmp_path):
+    """Whatever a request file holds, it is answered and the turn collected.
+    What Postgres jsonb refuses (a NUL character, a NaN or infinite number,
+    nesting past the server's stack depth) is Postgres's to say, and every
+    row an effect gets holds its payload whole, so such a request is
+    unreadable with Postgres's reason. A surrogate code point left over
+    after parsing (lone, swapped, or a pair split between an escape and raw
+    bytes) is not text. Nesting past Python's parser is not JSON it can
+    read. A send whose text fields are not strings is refused for its
+    shape. The other requests go on: one nested 2000 deep reaches the
+    broker, and a clean send holding a paired emoji is held."""
     ws, _ = scripted.workspace(tmp_path)
     effects = ws / ".valor" / "effects"
     effects.mkdir(parents=True)
-    chat = bridges.OPERATOR_CHAT
-    nul, surrogate, number = "a NUL character", "an unpaired surrogate", "a NaN or infinite number"
+    chat, mail = bridges.OPERATOR_CHAT, bridges.OPERATOR_EMAIL
+    nul = "cannot store it: UntranslatableCharacter"
+    number = "cannot store it: InvalidTextRepresentation"
+    surrogate = "it holds a surrogate code point outside an escaped pair, which is not text"
     requests = {
         "a_path.json": (nul, "telegram.send_message", chat, {"text": "hi", "files": [
             {"path": f"{ws}/a\x00.txt", "sha256": "0" * 64}]}),
-        "b_mail.json": (nul, "email.send", bridges.OPERATOR_EMAIL, {"to": [bridges.OPERATOR_EMAIL], "subject": "a\x00b"}),
+        "b_mail.json": (nul, "email.send", mail, {"to": [mail], "subject": "a\x00b"}),
         "c_other.json": (nul, "no_such_action", "tom", {"note": {"deep": ["x\x00"]}}),
         "d_target.json": (nul, "no_such_action", "t\x00m", {}),
-        "f_high.json": (surrogate, "email.send", bridges.OPERATOR_EMAIL, {"subject": "a\ud800b"}),
+        "f_high.json": (surrogate, "email.send", mail, {"subject": "a\ud800b"}),
         "g_low_key.json": (surrogate, "no_such_action", "tom", {"note": {"\udc00": 1}}),
         "h_swapped.json": (surrogate, "no_such_action", "tom", {"note": "\ude00\ud83d"}),
         "i_nan.json": (number, "no_such_action", "tom", {"n": float("nan")}),
@@ -254,6 +261,39 @@ def test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected(dsn, tm
         (effects / name).write_text(json.dumps(body))
     (effects / "k_big.json").write_text('{"action_type": "x", "target": "tom", "payload": {"n": 1e999}}')
     requests["k_big.json"] = (number,)
+    head = (
+        b'{"action_type": "telegram.send_message", "target": "%s", "payload": {"text": "hi ' % chat.encode()
+    )
+    (effects / "q_split.json").write_bytes(head + b"\\ud83d" + b"\xed\xb8\x80" + b'"}}')
+    (effects / "r_cesu.json").write_bytes(head + b"\xed\xa0\xbd\xed\xb8\x80" + b'"}}')
+    requests["q_split.json"] = requests["r_cesu.json"] = (surrogate,)
+
+    def nested(depth: int) -> str:
+        return '{"action_type": "no_such_action", "target": "tom", "payload": {"n": %s}}' % (
+            "[" * depth + "]" * depth
+        )
+
+    (effects / "s_deep_stored.json").write_text(nested(2000))
+    (effects / "t_deep_postgres.json").write_text(nested(100_000))
+    requests["t_deep_postgres.json"] = ("cannot store it: StatementTooComplex (stack depth limit exceeded)",)
+    (effects / "u_deep_parse.json").write_text(nested(400_000))
+    requests["u_deep_parse.json"] = ("RecursionError(",)
+    shapes = {
+        "v_text_int.json": ("telegram.send_message", chat, {"text": 5}, bridge.TEXT_SHAPE),
+        "w_text_list.json": ("telegram.send_message", chat, {"text": ["hi"]}, bridge.TEXT_SHAPE),
+        "x_subject.json": ("email.send", mail, {"to": [mail], "subject": 5, "body": "b"}, bridge.EMAIL_SHAPE),
+        "y_to.json": ("email.send", mail, {"to": [5], "subject": "s", "body": "b"}, bridge.EMAIL_SHAPE),
+        "z_body.json": (
+            "email.send",
+            mail,
+            {"to": [mail], "subject": "s", "body": {"a": 1}},
+            bridge.EMAIL_SHAPE,
+        ),
+    }
+    for name, (action_type, target, payload, _) in shapes.items():
+        (effects / name).write_text(
+            json.dumps({"action_type": action_type, "target": target, "payload": payload})
+        )
 
     async def go():
         task = await scripted.start(dsn, ws)
@@ -280,10 +320,63 @@ def test_a_request_jsonb_cannot_store_is_answered_and_the_turn_collected(dsn, tm
         if why is None:
             continue
         assert "effect_id" not in by_file[name] and "request" not in by_file[name], by_file[name]
-        assert f"{name}: unreadable request: it holds {why}" in prompt
+        assert why in by_file[name]["error"] and by_file[name]["error"].startswith("unreadable request: "), (
+            by_file[name]
+        )
+        assert f"{name}: unreadable request" in prompt
+    for name, (*_, why) in shapes.items():
+        assert (by_file[name]["kind"], by_file[name]["error"]) == ("refused", why), by_file[name]
+    assert (by_file["s_deep_stored.json"]["kind"], by_file["s_deep_stored.json"]["error"]) == (
+        "refused", "no performer for no_such_action")  # fmt: skip
     assert by_file["e_ok.json"]["kind"] == "pending"
-    [effect] = [r["payload"] for r in rows if r["type"].startswith("effect.")]
+    [effect] = [r["payload"] for r in rows if r["type"] == "effect.held"]
     assert (effect["action_type"], effect["payload"]["text"]) == ("telegram.send_message", "hi \U0001f600")
+
+
+def test_a_request_is_judged_as_turn_collected_nests_it(dsn, tmp_path):
+    """Postgres's stack depth counts the levels the row holds, and
+    `turn.collected` holds a request three levels down, so a request at the
+    deepest nesting jsonb stores on its own is answered as unreadable rather
+    than failing the turn's collection. The depth is found from Postgres."""
+    ws, _ = scripted.workspace(tmp_path)
+    effects = ws / ".valor" / "effects"
+    effects.mkdir(parents=True)
+
+    def request(depth: int) -> dict:
+        n: list = []
+        for _ in range(depth - 1):
+            n = [n]
+        return {"action_type": "no_such_action", "target": "tom", "payload": {"n": n}}
+
+    async def deepest() -> int:
+        low, high = 1, 1 << 20
+        async with await db.connect(dsn) as conn:
+            while high - low > 1:
+                mid = (low + high) // 2
+                low, high = (mid, high) if await ledger.unstorable(conn, request(mid)) is None else (low, mid)
+        return low
+
+    depth = run(deepest())
+    (effects / "deep.json").write_text(json.dumps(request(depth)))
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        found = signals.collect(ws, "turn-deep")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": "turn-deep", "state": "plan"})
+            await ledger.append(conn, task, "turn.ended",
+                                {"turn_id": "turn-deep", "outcome": "done", "result": {"session_id": scripted.SESSION}})  # fmt: skip
+            await session.record(
+                conn, task, "turn-deep", found, state=tasks.machine.State.PLAN, workspace=str(ws)
+            )
+            return await ledger.read(conn, task)
+
+    rows = run(go())
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    [entry] = collected["effects"]
+    assert (
+        entry["error"].endswith("StatementTooComplex (stack depth limit exceeded)") and "request" not in entry
+    )
 
 
 def test_an_unreadable_signal_reaches_the_turn_collected_errors(dsn, tmp_path):

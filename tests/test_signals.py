@@ -274,3 +274,17 @@ def test_text_that_is_not_utf8_is_read_with_replacement(ws):
     found = collect(ws)
     assert found.question == "caf� or tea?"
     assert found.plan is None and found.plan_error.startswith("plan.json is unreadable")
+
+
+def test_a_plan_nested_past_the_parser_is_a_plan_error(ws):
+    """A `plan.json` nested past what Python's parser recurses through is
+    unreadable, read fresh or read again from `handled/`: neither raises."""
+    deep = "[" * 400_000 + "]" * 400_000
+    (ws / ".valor" / "plan.json").write_text(deep)
+    found = collect(ws)
+    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError(")
+    handled = ws / ".valor" / "handled" / "turn-2"
+    handled.mkdir(parents=True)
+    (handled / "plan.json").write_text(deep)
+    found = signals.recollect(ws, "turn-2")
+    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError(")

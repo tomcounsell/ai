@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -38,6 +39,30 @@ def canonical(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+DATA_REFUSED = ("22", "54")  # SQLSTATE classes: data exception, program limit exceeded
+
+
+async def unstorable(conn, value: Any) -> str | None:
+    """Why Postgres jsonb refuses `value` as a row holds it, or None: asked
+    of Postgres, adapted as `append` adapts a payload, inside a savepoint so
+    a refusal leaves a caller's transaction usable. What jsonb refuses (a
+    NUL character, a NaN or infinite number, nesting past the server's
+    stack depth) is Postgres's to say, never predicted here: a data
+    exception or a program limit exceeded is that answer, as is nesting
+    past what Python's encoder recurses through; any other error is
+    raised."""
+    try:
+        async with conn.transaction():
+            await conn.execute("SELECT %s::jsonb", (Jsonb(value),))
+    except RecursionError as exc:
+        return f"{exc!r}, serializing it"
+    except psycopg.Error as exc:
+        if (exc.sqlstate or "")[:2] not in DATA_REFUSED:
+            raise
+        return f"{type(exc).__name__} ({exc.diag.message_primary})"
+    return None
 
 
 async def append(conn, task_id: str, type: str, payload: dict[str, Any]) -> int:

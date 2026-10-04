@@ -126,6 +126,21 @@ def _file_size(workspace: str, path: str) -> int | None:
 
 
 FILES_SHAPE = "files must be a list of {path, sha256} objects"
+TEXT_SHAPE = "the text must be a string"
+EMAIL_SHAPE = (
+    "subject, body and in_reply_to must each be a string or null, and to, cc and references lists of strings"
+)
+
+
+def _strings(payload: dict[str, Any], strings: tuple[str, ...], lists: tuple[str, ...] = ()) -> bool:
+    """Whether each field in `strings` is absent, None, or a string, and each
+    in `lists` absent, None, or a list of strings: the port's shape, which
+    the refusals and the size function read as text."""
+    return all(payload.get(k) is None or isinstance(payload[k], str) for k in strings) and all(
+        payload.get(k) is None
+        or (isinstance(payload[k], list) and all(isinstance(v, str) for v in payload[k]))
+        for k in lists
+    )
 
 
 async def _size_refusal(channel: str, action: broker.Action, workspace: str | None) -> str | None:
@@ -168,6 +183,8 @@ async def _refuse_telegram(conn, action: broker.Action) -> str | None:
 
     if not intake.owns("telegram", action.target):
         return f"chat {action.target} is not one this machine's Telegram bridge receives"
+    if not _strings(action.payload, ("text",)):
+        return TEXT_SHAPE
     text = action.payload.get("text") or ""
     files = action.payload.get("files") or []
     if not split_text("telegram", text) and not files:
@@ -176,6 +193,8 @@ async def _refuse_telegram(conn, action: broker.Action) -> str | None:
 
 
 async def _refuse_email(conn, action: broker.Action) -> str | None:
+    if not _strings(action.payload, ("subject", "body", "in_reply_to"), ("to", "cc", "references")):
+        return EMAIL_SHAPE
     if not action.payload.get("to"):
         return "the email has no recipient"
     return None

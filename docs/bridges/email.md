@@ -106,7 +106,11 @@ addresses, lowercased, sorted, and comma-joined, and its payload is the whole me
 | `files` | Each attachment as a path and its sha256 |
 
 The digest Tom approves covers the recipients, the subject, the body, and
-each file's bytes. `files` is absent, null, or a list of objects each with
+each file's bytes. `subject`, `body` and `in_reply_to` are each absent,
+null, or a string, and `to`, `cc` and `references` each absent, null, or a
+list of strings; any other shape is refused with "subject, body and
+in_reply_to must each be a string or null, and to, cc and references lists
+of strings". `files` is absent, null, or a list of objects each with
 a string `path` and a string `sha256`; any other shape is refused with
 "files must be a list of {path, sha256} objects". Each path is absolute and
 inside the task's workspace, sized there by the kernel without reading it,

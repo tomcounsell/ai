@@ -98,7 +98,9 @@ whether the message with that idempotency key exists.
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
-reply target, and each file's bytes, so what leaves is what he saw. `files`
+reply target, and each file's bytes, so what leaves is what he saw. `text`
+is absent, null, or a string; any other value is refused with "the text
+must be a string". `files`
 is absent, null, or a list of objects each with a string `path` and a string
 `sha256`; any other shape is refused with "files must be a list of {path,
 sha256} objects". Each path is absolute and inside the task's workspace: the
