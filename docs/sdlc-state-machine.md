@@ -374,7 +374,8 @@ model, or an Opus-class model from another vendor through another harness,
 never a cheaper class. It reads the request, Tom's answers and feedback,
 the plan, the diff, the kernel's run, and the instances, never the
 executor's narration, reruns any test itself, and answers `pass` or
-`changes`; it adds instances, never removes one, and a line it names in a
+`changes` as its final message, which the kernel reads from the turn's
+result, not from a file in the checkout; it adds instances, never removes one, and a line it names in a
 flagged hunk merges into it. Both legs failing leaves no verdict; after two
 such runs the unjudged hunks become one instance. The kernel computes the
 recorded verdict: a `pass` with an ungranted instance is

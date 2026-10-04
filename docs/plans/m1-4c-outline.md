@@ -30,7 +30,7 @@ files govern where they differ from this outline.
    session's work. The profile makes the never-reads unreachable, not
    merely unmentioned. It may also run commands in its own checkout under
    its profile, with its own database in the task's cluster.
-4. `verdict.json`: verdict, findings with kinds, governance instances by
+4. The verdict, the session's final message as one JSON object: verdict, findings with kinds, governance instances by
    path and line with summary, incident, mission item, notes by instance
    id, `predicted_failure`, and a result per requirement.
 5. `record_check(REVIEW, ..., governance_from=ids, governance=specs,

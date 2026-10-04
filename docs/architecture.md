@@ -233,8 +233,9 @@ file claims a size the turn never wrote), and only up to the size it
 checked, in a worker thread off the router's event loop; anything else, and
 an entry that vanishes before it is read, is recorded as unreadable with
 its reason, never its contents, and an entry that cannot be moved is
-removed unread (`core/workspace.py`). The same walk reads a fresh session's verdict from the
-kernel's checks directory. `turn.collected` records what the turn left, its
+removed unread (`core/workspace.py`). The same walk reads a critique or docs session's verdict file from the
+kernel's checks directory; a review session's verdict is its final message,
+read from the turn's result on the harness's stdout. `turn.collected` records what the turn left, its
 state, its verdict, the screens `look` kept (name and size each, or the
 reason one was refused), and what was unreadable; `task.delivered` waits
 for the checks ([sdlc-state-machine.md](sdlc-state-machine.md)).
