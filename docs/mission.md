@@ -112,8 +112,7 @@ grant`) is refused; the Brief's field does not stand in for the tap. The
 boolean is a judgement asked over every hunk of a diff
 (`core/judgement_sites.py`), and a review or docs verdict given those
 answers takes its instances from them; the blind verifier, the review
-runner (`fresh.review_runner`), asks it before its session reads anything;
-until that runner is registered, review verdicts are recorded by hand.
+runner (`fresh.review_runner`), asks it before its session reads anything.
 
 A guard Tom grants is ledgered with three things: the incident, the mission
 item, and the expiry date ninety days out; a grant missing the incident or

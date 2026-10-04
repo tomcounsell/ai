@@ -616,3 +616,49 @@ def test_the_cli_runs_as_a_module():
         check=False, env={**os.environ},
     )  # fmt: skip
     assert out.returncode == 0 and "--run" in out.stdout and "--stand-in-model" in out.stdout
+
+
+# The composition root's runners: every stage the state machine schedules has one.
+
+# The router settles these itself (a question for Tom, the merge, an end); every
+# other state, and every check, is run by a runner.
+SETTLED = {machine.State.WAITING, machine.State.MERGE, machine.State.MERGED, machine.State.STOPPED}
+
+
+def test_every_stage_the_state_machine_schedules_has_a_runner():
+    from core.__main__ import RUNNERS, runners
+
+    scheduled = {s for s in machine.State if s not in SETTLED and s is not machine.State.CHECKS} | set(Check)
+    assert set(runners(None)) == scheduled == set(RUNNERS)
+
+
+def test_review_and_docs_are_run_by_the_kernels_runners_through_one_driver_step(monkeypatch, dsn, tmp_path):
+    """The kernel's own `runners()`, its fresh sessions played by the scripted
+    session and its judgement port the local upstream answering `false`,
+    carry critique, build, test, review, and docs to a delivery in one
+    `core run` the driver makes; no verdict is recorded by hand."""
+    import core.__main__ as kernel
+    from tests import judgement_upstream, test_checks
+
+    async def at_critique():
+        task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes={"greeting.txt": "hi\n"})
+        scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review", "docs"],
+                       docs_commits=[{"files": {"docs/greeting.md": "Hi.\n"}}])  # fmt: skip
+        return task, ws
+
+    task, ws = asyncio.run(at_critique())
+    monkeypatch.setattr(kernel, "_fresh_for", scripted.fresh_for(ws / ".git"))
+    port = judgement_upstream.shared().port(fixed="false")
+    everything = {
+        **kernel.runners(port),
+        **{s: r for s, r in scripted.RUNNERS.items() if s in machine.WORKING},
+    }
+    result = _step_real(monkeypatch, dsn, task, runners=everything)
+    assert result["outcome"] is None and "paused" not in result, result
+    assert result["log"][-1]["said"].startswith("DELIVERED"), result["log"]
+    got = asyncio.run(_rows(dsn, task))
+    decided = {c: [r["payload"] for r in got if r["type"] == f"{c.value}.decided"] for c in Check}
+    assert [d["leg"] for d in decided[Check.REVIEW]] == ["session"]
+    assert [d["leg"] for d in decided[Check.DOCS]] == ["session"]
+    assert decided[Check.DOCS][0]["verdict"] == "updated"
+    assert machine.fold(got).state is machine.State.MERGE

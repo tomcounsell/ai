@@ -88,8 +88,8 @@ file for its state from `skills/sdlc/`.
 
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
 `build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
-workspace the kernel provisioned), and `checks.test` (`core/checks.py`). `checks.review` and `checks.docs` have none: the review
-runner (`fresh.review_runner`) and the docs runner (`fresh.docs_runner`) are registered once governance's judgement has a calibration record on the real ledger that passes its entry check. Where a
+workspace the kernel provisioned), `checks.test` (`core/checks.py`), `checks.review`
+(`fresh.review_runner`), and `checks.docs` (`fresh.docs_runner`). Where a
 stage has no runner the router stops there and says so, and a person records the verdict with `python -m core verdict TASK
 STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
 has a runner.
@@ -363,8 +363,7 @@ The suite at base and at head, then breadth: see [sdlc-checks-test.md](sdlc-chec
 **Goal.** An independent verdict on whether the candidate does what was
 asked, correctly, and adds no ungranted governance.
 
-**What runs.** Until review is registered, a person records its verdict
-by hand (`python -m core verdict`). The runner it registers is
+**What runs.** The registered runner is
 `fresh.review_runner`, the blind verifier
 ([architecture.md](architecture.md)). The kernel first asks the governance
 boolean per hunk (use shape 6), then runs the suite and the lint itself at

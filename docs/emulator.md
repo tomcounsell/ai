@@ -167,9 +167,9 @@ After each `core run` the driver reads the first word of its answer.
 `QUESTION`, `DELIVERED`, `STOPPED` and `MERGED` go on to the next step.
 `ALREADY RUNNING` waits on the task's run lock until it is free, then goes
 on. Every other answer exits the driver with the outcome unset and the
-answer recorded as the reason: `NO RUNNER` (a check stage with no runner,
-whose verdict is recorded by hand from a blind checkout of the kernel
-mirror), `FAILED`, `LOCK LOST`, `LEGACY`, and any answer the driver does
+answer recorded as the reason: `NO RUNNER` (a stage with no runner, whose
+verdict is recorded by hand from a blind checkout of the kernel mirror),
+`FAILED`, `LOCK LOST`, `LEGACY`, and any answer the driver does
 not know. A stage awaiting Tom's grant exits the same way. The next
 invocation resumes the same task.
 

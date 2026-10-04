@@ -14,8 +14,8 @@ what it may do. The layer is built so that the second sentence holds by structur
 Status. Built: the port, router, and gate (`core/judgement.py`); the legs (`tools/jev.py`,
 `tools/open_weight.py`); the three tasks (`core/judgement_tasks.py`); the judge runner and the
 breadth and governance calls (`core/judgement_sites.py`); metering; and `python -m core calibrate`.
-The test runner calls breadth, and the review and docs runners call governance; those two are
-registered once governance passes its entry check. The images leg, live scoring, and use shapes 2
+The test runner calls breadth, and the review and docs runners call governance; all three are
+registered. The images leg, live scoring, and use shapes 2
 to 5, 7, 9, and 10 are design, and each section says which.
 
 ## Terms
@@ -70,8 +70,7 @@ never from the requester, treats such a merge as `act`, and refuses it while
 any instance lacks Tom's tap. The other half is use shape 6:
 `judgement_sites.governance` asks the governance boolean once per hunk of
 the diff, and `record_check` takes the instances from those rows. The
-review and docs runners call it; until they are registered, a person
-records those verdicts by hand.
+review and docs runners call it.
 
 ## Task taxonomy
 

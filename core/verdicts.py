@@ -8,11 +8,10 @@ then requests the merge effect, and the router calls it again on every run
 that finds the task in `merge`, so a crash between the two strands nothing.
 
 The judge's verdict is the kernel's reading of a judgement row
-(`record_judge`); nobody records it by hand. Until the critique and check
-runners (1.4) exist, a person records those verdicts by hand (`python -m
-core verdict`), each row `leg: manual` with provenance. `manual_allowed`
-refuses a stage that has a runner, so the stand-in closes as runners
-arrive. A test verdict given a breadth judgement, and a review or docs
+(`record_judge`); nobody records it by hand. A stage with no runner has
+its verdict recorded by hand (`python -m core verdict`), each row `leg:
+manual` with provenance. `manual_allowed` refuses a stage that has a
+runner, and the kernel's `runners()` registers one for every stage. A test verdict given a breadth judgement, and a review or docs
 verdict given governance judgements, read those rows themselves: the
 behaviors and instances come from the kernel's tables, never from the
 caller's text.

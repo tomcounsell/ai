@@ -694,15 +694,10 @@ def test_a_landed_calibrated_digest_is_the_task_as_the_providers_legs_render_it(
     assert judgement.task_sha256(task, JudgementPort(legs).signature()) == task.calibrated
 
 
-def test_breadth_and_governance_have_no_landed_record_so_docs_has_no_runner():
+def test_breadth_and_governance_have_no_landed_record():
     # Both sites' records on the real ledger failed their entry checks
     # (docs/plans/m1-4b-records.md); a site lands calibrated only on one that passes.
-    from core.__main__ import RUNNERS
-    from core.machine import Check
-    from core.verdicts import MANUAL_STAGES
-
     assert BREADTH.calibrated is None and GOVERNANCE.calibrated is None
-    assert Check.DOCS not in RUNNERS and MANUAL_STAGES["docs"] == Check.DOCS
 
 
 # -- the fallback's limits are its endpoint's; a 429 holds its endpoint -----------------

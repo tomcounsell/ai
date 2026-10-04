@@ -733,7 +733,7 @@ def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):
     assert f.candidate.sha == git(ws, "rev-parse", "HEAD") and f.candidate.turn_id
 
 
-def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_path):
+def test_the_verdict_command_refuses_every_stage_since_each_has_a_runner(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     task = run(scripted.start(dsn, ws))
     run(drive(dsn, task))
@@ -742,25 +742,18 @@ def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_pat
     assert critique.returncode == 1 and "critique has a runner" in critique.stderr
     run(scripted.critique(dsn, task))
     run(drive(dsn, task))
-    refused = cli("verdict", task, "test", "pass", *who)
-    assert refused.returncode == 1 and "test has a runner" in refused.stderr
-    run(scripted.check(dsn, task, "test", "pass"))
-    out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
-    assert out.returncode == 0, out.stderr
-    out = cli("verdict", task, "docs", "no_change", *who)
-    assert out.returncode == 0, out.stderr
+    assert run(fold(dsn, task)).state is State.CHECKS
+    for stage, verdict in (
+        ("test", "pass"),
+        ("review", "pass"),
+        ("docs", "no_change"),
+        ("build", "candidate"),
+    ):
+        refused = cli("verdict", task, stage, verdict, *who)
+        assert refused.returncode == 1 and f"{stage} has a runner" in refused.stderr
     assert "unrecognized arguments: --head" in cli("verdict", task, "review", "pass", "--head", "x").stderr
-    assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
-    run(drive(dsn, task))
-    run(scripted.check(dsn, task, "test", "pass"))
-    assert cli("verdict", task, "review", "pass", *who).returncode == 0
-    run(scripted.check(dsn, task, "docs", "no_change"))
-    f = run(fold(dsn, task))
-    assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
-    refused = cli("verdict", task, "review", "pass", *who)
-    assert refused.returncode == 1 and "not checks" in refused.stderr
-    assert "build has a runner" in cli("verdict", task, "build", "candidate").stderr
     assert "no manual verdict" in cli("verdict", task, "merge", "released").stderr
+    assert run(fold(dsn, task)).checks == {}
 
 
 def test_a_stage_with_a_runner_takes_no_manual_verdict():
