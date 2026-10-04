@@ -902,25 +902,28 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
         model = model_ or seat_model
         check_dir = workspace.fresh_dir(lay.checks / f"review-{candidate[:12]}")
         checkout = check_dir / "repo"
-        try:
-            await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, candidate, checkout)
-        except workspace.ValorInTree as exc:
-            # The candidate's own tree: no rerun would ever check it out, so
+
+        async def commits_own(why: str) -> dict[str, Any]:
+            # The commit's own doing: every rerun would meet it again, so
             # review says `changes` with the reason and the join moves on.
             if not registered:
-                return failed(f"review checkout: {exc}")
+                return failed(why)
             if not await ctx.alive():
                 return {"status": "lock lost"}
             try:
                 async with await db.connect(ctx.dsn) as conn:
                     await verdicts.record_check(
                         conn, ctx.task_id, machine.Check.REVIEW, "changes", governance_from=ids,
-                        findings=[{"kind": "commit", "text": f"no review checkout: {exc}"}],
-                        verify=verify_id, leg="kernel",
+                        findings=[{"kind": "commit", "text": why}], verify=verify_id, leg="kernel",
                     )  # fmt: skip
             except verdicts.VerdictRefused as refused:
                 return failed(f"verdict refused: {refused}")
             return {"status": "moved"}
+
+        try:
+            await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, candidate, checkout)
+        except workspace.ValorInTree as exc:
+            return await commits_own(f"no review checkout: {exc}")
         except git.GitError as exc:
             return failed(f"review checkout: {exc}")
         seed = lay.checks / checks.SEED
@@ -937,6 +940,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             names = list(project.get("services") or ())
             ports = [int((project.get("ports") or {})[n]) for n in names]
             harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
+            setup_harness = workspace.setup_harness(lay, check_dir, ports, harness)
             commands = list(project.get("setup") or ())
             if not await ctx.alive():
                 return {"status": "lock lost"}
@@ -947,14 +951,21 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                         if await tasks.is_stopped(conn, ctx.task_id):
                             return {"status": "stopped"}
                     setup = await checks._setup(
-                        checkout, harness, commands, f"review-{ctx.task_id}-setup", stop,
+                        checkout, setup_harness, commands, f"review-{ctx.task_id}-setup", stop,
                         lambda step: lay.checks / f"{check_dir.name}.{step}.out",
                     )  # fmt: skip
             except checks._Stopped:
                 return {"status": "stopped"}
-            # Setup ran before the inputs exist, so it can plant none: a
-            # `.valor` it made, or a link where the checkout was, makes
-            # `write_inputs` refuse, and the kernel follows nothing it left.
+            # Setup ran before the inputs exist, so it can plant none, and
+            # its profile kept it out of the session's own directories. What
+            # it left in the checkout that the session must not start with
+            # is the commit's own: a `.valor`, a left-out entry, or a link.
+            try:
+                left = await asyncio.to_thread(workspace.setup_left, checkout)
+            except OSError as exc:
+                return failed(f"review inputs: {exc}")
+            if left:
+                return await commits_own(left)
             seen = {**verify, "reviewer_setup_exit": setup["commands"][-1]["exit"] if commands else None}
             try:
                 files = review_inputs(checkout, rows, f, b, seen, governance)

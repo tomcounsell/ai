@@ -240,13 +240,17 @@ async def record_check(
     A review not recorded by hand gives the reviewer's own `verdict`,
     `pass` or `changes`; the recorded verdict is computed (`review_verdict`)
     and the reviewer's kept as `reviewer_verdict`, with `predicted_failure`,
-    `requirements`, and `verify` (the `verify.ran` event the review read)."""
+    `requirements`, and `verify` (the `verify.ran` event the review read).
+    A `kernel` review is `changes` only, since no reviewer ran: it keeps
+    `verify` and the computed verdict, and no `reviewer_verdict`."""
     failures, behaviors = list(failures), list(behaviors)  # once: a generator is read one time
     suites = list(suites) if suites is not None else None
     if leg != "manual" and check is Check.TEST and breadth is None:
         raise VerdictRefused("a test verdict not recorded by hand names its breadth judgement")
     if leg not in ("manual", "kernel") and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
         raise VerdictRefused(f"a {check.value} verdict not recorded by hand names its governance judgements")
+    if leg == "kernel" and check is Check.REVIEW and verdict != "changes":
+        raise VerdictRefused("a kernel-leg review is changes: no reviewer ran to pass it")
     if verdict is None and leg != "kernel":
         raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
     if leg != "manual" and check is Check.REVIEW and verdict not in REVIEWER_VERDICTS:
@@ -352,12 +356,13 @@ async def record_check(
             ungranted = [i for i in instances if i["id"] not in f.granted]
             if check is Check.REVIEW and leg != "manual":
                 computed, added = review_verdict(verdict, instances, f.granted)
-                payload["reviewer_verdict"] = verdict
                 payload["verdict"] = computed
                 payload["findings"] += added
-                payload["predicted_failure"] = predicted_failure
-                payload["requirements"] = list(requirements)
                 payload["verify"] = verify
+                if leg != "kernel":
+                    payload["reviewer_verdict"] = verdict
+                    payload["predicted_failure"] = predicted_failure
+                    payload["requirements"] = list(requirements)
             elif check is Check.REVIEW:
                 if verdict == "pass" and ungranted:
                     raise VerdictRefused(

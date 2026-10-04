@@ -363,7 +363,9 @@ The suite at base and at head, then breadth: see [sdlc-checks-test.md](sdlc-chec
 **Goal.** An independent verdict on whether the candidate does what was
 asked, correctly, and adds no ungranted governance.
 
-**What runs.** `fresh.review_runner`, the blind verifier
+**What runs.** Until review is registered, a person records its verdict
+by hand (`python -m core verdict`). The runner it registers is
+`fresh.review_runner`, the blind verifier
 ([architecture.md](architecture.md)). The kernel first asks the governance
 boolean per hunk (use shape 6), then runs the suite and the lint itself at
 base and candidate (`verify.ran`), then sets up a checkout of the candidate
@@ -377,9 +379,12 @@ flagged hunk merges into it. Both legs failing leaves no verdict; after two
 such runs the unjudged hunks become one instance. The kernel computes the
 recorded verdict: a `pass` with an ungranted instance is
 `governance_refused`; a `changes` lists each such instance as a finding.
-A candidate whose tree holds a `.valor` entry has no checkout to
-review: after governance and the kernel's run, the kernel records `changes`
-naming it (leg `kernel`, no session), as critique and docs do.
+The spec's setup runs in that checkout under a profile that writes only
+the checkout and its caches, never the session's config or `TMPDIR`.
+A candidate whose tree holds a `.valor` entry, or whose setup leaves
+`.valor`, `.pi`, or no directory where the checkout was, has no checkout
+to review: after governance and the kernel's run, the kernel records
+`changes` naming it (leg `kernel`, no session, no reviewer's verdict).
 
 **Exit evidence.** `review.decided`: the candidate, the verdict and the
 reviewer's own, the findings (each with a kind, `debt` among them), the

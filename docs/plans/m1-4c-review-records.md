@@ -181,3 +181,39 @@ Notes for the merge:
 - Not blocking: a reviewer setup that exits nonzero has no committed test;
   a lint command that already passes `--output-format` gets the flag
   twice and ruff exits 2 (the valor spec does not).
+
+## Patch round 2
+
+From review-1-4c1-rb (`changes`) and test-1-4c1-rb (`pass`) at eb8fda0ad,
+with the docs at 22948b08c. Rebased onto 2418d02c8 first: the conflicts
+were `docs/emulator.md` (the tip's text whole, which already names
+`NO RUNNER`) and `docs/architecture.md` (the verifier "built, not
+registered", with the tip's line on the emulator's judge).
+
+1. F1. The reviewer's setup runs with `workspace.setup_harness`: a
+   profile whose writable roots are the checkout, `cache/`, and
+   `setup-tmp/`, its TMPDIR and uv's cache and Pythons there. It cannot
+   write the session's `claude/`, `pi/`, or `tmp/`. After setup,
+   `workspace.setup_left` looks at the checkout through a descriptor,
+   following no link, for `.valor` and each `BLIND_LEFT_OUT` entry.
+   Tests: a setup writing `.pi/settings.json` gets the `kernel` leg
+   `changes` and no reviewer turn; a setup writing into `../pi`,
+   `../claude`, and `../tmp` lands nothing there and the session runs.
+2. F2. A setup that leaves `.valor`, or no directory where the checkout
+   was (a link), gets the `kernel` leg `changes` naming why, with the
+   governance ids and `verify`, through the same code as a `.valor`
+   tree. `failed` stays for kernel faults. Tests: `.valor` from setup;
+   the planted link, whose target is untouched.
+3. `_lint` reads the output file line by line in a worker thread.
+4. `record_check` takes a `kernel` review as `changes` only, the tip's
+   refusal narrowed, as the docstring and data.md say: a `pass` there
+   would be a review pass with no blind session. The kernel row keeps
+   `verify` and the computed verdict, with no `reviewer_verdict`,
+   `predicted_failure`, or `requirements`. Test: `pass` and
+   `governance_refused` on the kernel leg are refused.
+5. architecture.md's risk table and sdlc-state-machine.md's "What runs"
+   say review is built and not registered, recorded by hand until then.
+6. Test: a `.valor` candidate with a governance hunk names the instance
+   on the kernel leg, as a `governance` finding.
+
+No cap, timeout, or guard added.

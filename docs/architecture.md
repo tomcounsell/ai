@@ -547,7 +547,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
-| Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
+| Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built, not registered: `fresh.review_runner`) | docs describe reality |
 | Verifier too lenient | Opus-class blind reviewer, never cheaper (built); human audit sample (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
 

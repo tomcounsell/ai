@@ -1550,6 +1550,55 @@ def check_harness(
     }
 
 
+SETUP_TMP = "setup-tmp"
+
+
+def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[str, Any]) -> dict[str, Any]:
+    """The harness a fresh session's setup runs with: the session's own
+    `harness`, except that its profile writes only the checkout, `cache/`,
+    and `setup-tmp/`, which is its TMPDIR and holds uv's cache and managed
+    Pythons. The setup is candidate code and runs before the session, so it
+    must not write what the session reads at start: its Claude Code and Pi
+    directories and its TMPDIR."""
+    tmp = check_dir / SETUP_TMP
+    tmp.mkdir()
+    path = lay.profiles / f"{check_dir.name}.setup.sb"
+    path.write_text(
+        profile(
+            rw=[check_dir / "repo", check_dir / "cache", tmp],
+            ro=[lay.root.parent / "bin"],
+            ports=ports,
+            work=lay.root.parent,
+            fresh=True,
+        )
+    )
+    env = {**harness["env"], "UV_CACHE_DIR": str(tmp / "uv"), "UV_PYTHON_INSTALL_DIR": str(tmp / "python")}
+    return {**harness, "sandbox_profile": str(path), "tmpdir": str(tmp), "env": env}
+
+
+def setup_left(checkout: Path) -> str | None:
+    """What a setup left that no session may start in, read through
+    descriptors with no link followed: the checkout gone or not a directory,
+    or a `.valor` or `BLIND_LEFT_OUT` entry in it. None when there is
+    nothing. Either is the candidate's own doing, so every rerun meets it."""
+    try:
+        root = os.open(checkout, DIR_FLAGS)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return "the setup left no directory where the checkout was"
+        raise
+    try:
+        for name in (VALOR_DIR, *BLIND_LEFT_OUT):
+            try:
+                os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            return f"the setup left {name} in the checkout"
+        return None
+    finally:
+        os.close(root)
+
+
 def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     """Make `.valor/inputs/` in a checkout the kernel just made and write each
     input there, every step relative to a descriptor: `.valor` must not

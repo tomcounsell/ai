@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-review
 type: build
-status: passed
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -76,9 +76,14 @@ What the kernel must never do with any of it:
   marked, with no time limit, their group killed on a stop, which alone
   ends them. A stop written before a run's `LISTEN` is read from
   `tasks.is_stopped` after it, before the run starts.
-- Follow a path inside a checkout after candidate code ran there. A
-  `.valor` or a link the reviewer checkout's setup leaves makes
-  `write_inputs` refuse; the kernel removes nothing in the checkout.
+- Follow a path inside a checkout after candidate code ran there. The
+  kernel looks at the checkout through a descriptor, following no link;
+  a `.valor`, a `.pi`, or no directory where the checkout was, left by
+  the reviewer checkout's setup, is the commit's own and gets the
+  `kernel` leg `changes`. The kernel removes nothing in the checkout.
+- Let candidate code set what the reviewer's session runs with. The
+  setup's profile writes only the checkout, `cache/`, and `setup-tmp/`,
+  never the session's `claude/`, `pi/`, or `tmp/`.
 - Give the reviewer the task's live services. Its turn runs inside
   `check_services`, so its `DATABASE_URL`, `PGPASSFILE`, and `REDIS_*`
   name fresh instances; the live ones are stopped for the duration.
@@ -150,8 +155,12 @@ it.
    f"review-{candidate[:12]}")`, `blind_checkout` from the mirror at the
    candidate, a clone of `checks/seed/` into `<check_dir>/cache/`, then,
    inside `check_services(lay, check_dir, project, task_id)`, the kernel
-   runs `run_setup` on the checkout under the check profile and mark, as
-   1.4b's head runs do. Its exit goes on `verify.json`
+   runs the setup on the checkout under the mark, as 1.4b's head runs do,
+   with `setup_harness`: a profile writing only the checkout, `cache/`,
+   and `setup-tmp/` (its TMPDIR and uv's directories). Then
+   `setup_left` looks at the checkout by descriptor; a `.valor`, a
+   `BLIND_LEFT_OUT` entry, or no directory there records the `kernel`
+   leg `changes` naming it, as a `.valor` tree does. Its exit goes on `verify.json`
    (`reviewer_setup_exit`); a failure does not stop the turn. The turn
    then runs inside the same `check_services`, with `check_harness(lay,
    check_dir, ports, env, services=True)` built from that fresh

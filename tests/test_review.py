@@ -125,12 +125,15 @@ def test_a_reviewer_line_with_no_added_code_and_an_unknown_note_are_findings(tmp
     assert "unchanged line" in found[1]["text"] and '"stray"' in found[2]["text"]
 
 
-def test_lint_locations_keep_path_line_and_rule_and_drop_the_message():
+def test_lint_locations_keep_path_line_and_rule_and_drop_the_message(tmp_path):
     text = f"core/a.py:3:1: E501 {NARRATION}\nFound 1 error.\nsrc/b c.py:10:4: F401 unused\n"
-    assert checks.lint_locations(text) == [
+    assert checks.lint_locations(text.splitlines()) == [
         {"path": "core/a.py", "line": 3, "rule": "E501"},
         {"path": "src/b c.py", "line": 10, "rule": "F401"},
     ]
+    out = tmp_path / "lint.out"
+    out.write_text(text.replace("\n", "\r\n", 1))
+    assert checks._lint_file(out) == checks.lint_locations(text.splitlines())
     uv = {"kind": "python-uv", "lint": "uv run ruff check ."}
     assert checks.lint_command(uv) == "uv run ruff check --output-format concise ."
     both = {"kind": "python-uv", "lint": "uv run ruff check . && uv run ruff format --check ."}
@@ -543,28 +546,70 @@ def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path
     assert not reviews(got) and not seen_turn(ws)
 
 
+def _setup_run(dsn, tmp_path, setup):
+    """A candidate with the spec's `setup`, run to the review runner's end."""
+
+    async def go():
+        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=setup)
+        steer(ws)
+        await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
+        return b, ws, await rows(dsn, task)
+
+    return run(go())
+
+
 def test_a_link_the_reviewer_setup_plants_is_never_followed(dsn, tmp_path):
     """Setup swaps the checkout for a link to another directory holding a
-    `.valor`: the kernel refuses to write the inputs and deletes nothing
-    there."""
+    `.valor`: the kernel follows nothing there, and since every rerun would
+    do the same, review is the kernel's `changes`."""
     victim = tmp_path / "victim"
     (victim / ".valor").mkdir(parents=True)
     (victim / ".valor" / "done.md").write_text("kept\n")
-    plant = f'case "$PWD" in */review-*/repo) cd .. && mv repo repo.moved && ln -s {victim} repo;; esac; true'
-
-    async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[plant])
-        steer(ws)
-
-        async def alive():
-            return True
-
-        return await _run_review(dsn, task, ws, alive), ws, await rows(dsn, task)
-
-    out, ws, got = run(go())
-    assert out["status"] == "failed" and "review inputs" in out["turn"]["result"], out
+    plant = f'case "$PWD" in */review-*/repo) cd .. && mv repo cache/repo.moved && ln -s {victim} repo;; esac'
+    _b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    assert sorted(os.listdir(victim / ".valor")) == ["done.md"]
     assert (victim / ".valor" / "done.md").read_text() == "kept\n"
-    assert not reviews(got) and not seen_turn(ws)
+    (decided,) = reviews(got)
+    assert decided["verdict"] == "changes" and decided["leg"] == "kernel", decided
+    assert decided["findings"][0]["text"] == "the setup left no directory where the checkout was"
+    assert not seen_turn(ws)
+
+
+@pytest.mark.parametrize("entry", [".valor", ".pi"])
+def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(dsn, tmp_path, entry):
+    """A setup that writes `.pi/settings.json` (what Pi reads whatever its
+    flags) or makes `.valor` in the checkout: the session never starts
+    there, and review is the kernel's `changes` naming why, not a failure
+    every rerun would repeat."""
+    plant = f'case "$PWD" in */review-*/repo) mkdir {entry} && echo {{}} > {entry}/settings.json;; esac'
+    _b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    (decided,) = reviews(got)
+    assert decided["verdict"] == "changes" and decided["leg"] == "kernel", decided
+    assert decided["findings"][0] == {"kind": "commit", "text": f"the setup left {entry} in the checkout"}
+    assert "reviewer_verdict" not in decided and "turn_id" not in decided
+    assert decided["verify"] == next(r["id"] for r in got if r["type"] == fresh.VERIFY)
+    assert not seen_turn(ws) and not review_turns(got)
+    f = machine.fold(got)
+    assert f.state is State.CHECKS and Check.REVIEW in f.checks
+
+
+def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_path):
+    """The setup's profile writes the checkout and its caches only: what it
+    tries to put in the session's Pi and Claude Code directories and its
+    TMPDIR never lands, and the session runs as usual."""
+    tries = " ; ".join(
+        f"echo planted > ../{d}/{n} 2>/dev/null"
+        for d, n in (("pi", "AGENTS.md"), ("claude", "settings.json"), ("tmp", "x"))
+    )
+    plant = f'case "$PWD" in */review-*/repo) {tries} ; touch setup-ran;; esac'
+    b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    lay = kws.Layout(Path(b.mirror).parent)
+    check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
+    assert (check_dir / "repo" / "setup-ran").exists()
+    for d, n in (("pi", "AGENTS.md"), ("claude", "settings.json"), ("tmp", "x")):
+        assert not (check_dir / d / n).exists(), d
+    (decided,) = reviews(got)
+    assert decided["leg"] == "session" and seen_turn(ws)
 
 
 def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_reviewer_runs(
@@ -587,3 +632,44 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_re
     assert first["verdict"] == "changes" and first["leg"] == "kernel" and "turn_id" not in first
     assert "holds a .valor entry" in first["findings"][0]["text"]
     assert not seen(ws)  # no reviewer ran
+
+
+def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(dsn, tmp_path, monkeypatch):
+    """The kernel's `changes` on a `.valor` tree still answers governance:
+    each ungranted instance is a `governance` finding the patch sees."""
+    look = kws.tree_has_valor
+    monkeypatch.setattr(
+        kws, "tree_has_valor", lambda *a, trusted, **k: trusted and look(*a, trusted=trusted, **k)
+    )
+    sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
+
+    async def go():
+        task, _b, ws = await at_review(dsn, tmp_path, writes={".VALOR/x": "x", "hooks/gate.py": GATE})
+        await drive(
+            dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
+        )
+        return await rows(dsn, task), ws
+
+    got, ws = run(go())
+    (decided,) = reviews(got)
+    assert decided["verdict"] == "changes" and decided["leg"] == "kernel"
+    assert "reviewer_verdict" not in decided
+    assert [i["path"] for i in decided["governance"]["instances"]] == ["hooks/gate.py"]
+    assert decided["governance"]["adds"] is True and decided["governance"]["judgements"]
+    assert [f["kind"] for f in decided["findings"]] == ["commit", "governance"]
+    assert decided["findings"][1]["text"]
+    assert not seen(ws)
+
+
+@pytest.mark.parametrize("verdict", ["pass", "governance_refused"])
+def test_a_kernel_leg_review_is_changes_only(dsn, tmp_path, verdict):
+    async def go():
+        task, _b, _ws = await at_review(dsn, tmp_path)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="kernel-leg review is changes"):
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, verdict, governance_from=None, leg="kernel"
+                )
+        return await rows(dsn, task)
+
+    assert not reviews(run(go()))

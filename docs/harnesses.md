@@ -197,6 +197,9 @@ verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
 same way in its own clone (`fresh.docs_runner`). Review
 (`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
 Redis, the kernel's own suite and lint run (`verify.ran`) among its inputs.
+Its setup runs under a profile that writes only the checkout, its caches,
+and its own `setup-tmp/`, so the candidate's setup cannot write the
+session's Pi or Claude Code directory or its `TMPDIR`.
 Both are registered once governance's judgement passes its entry check.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its

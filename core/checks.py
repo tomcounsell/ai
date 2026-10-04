@@ -38,7 +38,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 from xml.parsers import expat
@@ -610,12 +610,12 @@ def lint_command(project: dict[str, Any]) -> str | None:
     return command
 
 
-def lint_locations(text: str) -> list[dict[str, Any]]:
-    """Path, line, and rule of each ruff concise line in `text`; every other
+def lint_locations(lines: Iterable[str]) -> list[dict[str, Any]]:
+    """Path, line, and rule of each ruff concise line in `lines`; every other
     line, and every message, dropped."""
     out = []
-    for raw in text.splitlines():
-        m = RUFF_LINE.match(raw)
+    for raw in lines:
+        m = RUFF_LINE.match(raw.rstrip("\r\n"))
         if m:
             out.append({"path": m["path"], "line": int(m["line"]), "rule": m["rule"]})
     return out
@@ -640,8 +640,14 @@ async def _lint(project: dict[str, Any], checkout: Path, harness: dict[str, Any]
         "duration_s": round(time.monotonic() - started, 1),
     }
     if project.get("kind") == "python-uv":
-        record["locations"] = lint_locations(out.read_bytes().decode(errors="replace"))
+        record["locations"] = await asyncio.to_thread(_lint_file, out)
     return record
+
+
+def _lint_file(path: Path) -> list[dict[str, Any]]:
+    """The ruff locations in the whole output file, read line by line."""
+    with path.open(encoding="utf-8", errors="replace", newline="") as f:
+        return lint_locations(f)
 
 
 async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str, stop: asyncio.Task,
