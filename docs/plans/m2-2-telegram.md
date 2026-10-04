@@ -26,8 +26,7 @@ explicitly, awaitable perform and lookup).
 ## Stakes
 
 `critique_rounds: 1`, `review_rounds: 2`. The bridge sends to real people
-under Valor's name and holds the account's session. It changes no kernel
-file.
+under Valor's name and holds the account's session. It changes no kernel file.
 
 ## Port used
 
@@ -76,13 +75,12 @@ types, and reconnect) is shown only on the test servers below.
 
 - **Receipt is idempotent and lossless.** Killed between commit and the
   read acknowledgement, a message lands once after restart. The live
-  handler and the gap fill receiving one message at once write one row.
-  A live update Telethon drops (104 dropped, 105 delivered) is recorded
-  within one tick.
+  handler and the gap fill receiving one message at once write one row. A
+  live update Telethon drops (104 dropped, 105 delivered) is recorded within
+  one tick.
 - **Gap fill.** After the bridge was down, every message in each owned
-  chat that `intake.recorded` does not list is received once, oldest
-  first, across more than one page; a chat with no rows backfills
-  nothing.
+  chat that `intake.recorded` does not list is received once, oldest first,
+  across more than one page; a chat with no rows backfills nothing.
 - **An inbound message from Tom starts a task** through 2.1's kernel, and
   `python -m core status` shows its metered spending.
 - **A question reaches Tom and his reply binds.** A question notice goes to
@@ -103,13 +101,13 @@ types, and reconnect) is shown only on the test servers below.
   `lookup` once the effect's performing lock is free, a key with no
   record was never sent, so `lookup` returns None and the reconcile
   writes `failed`, and nothing is sent.
-- **A send in doubt is not a failure.** The emulator accepts a send and
-  drops the connection before replying: the effect ends `done` with one
-  message on screen.
+- **A send in doubt is not a failure.** The emulator accepts a send and drops
+  the connection before replying: the effect ends `done` with one message on
+  screen.
 - **`telegram.send_message` sends verbatim**: plain text with no parse
   mode and no link preview, the reply target and forum topic honored, text
-  over 4,096 split into several messages, files sent as documents from
-  the bytes hashed.
+  over 4,096 split into several messages, files sent as documents from the
+  bytes hashed.
 - **The inbound record carries the forum topic id** (#2652).
 
 ### Shown on Telegram's test servers, with test accounts
@@ -170,8 +168,8 @@ What the bridge must never do with any of it:
   sandbox profile denies; nothing prints any part of the hash.
 
 Inbound files under `inbound_dir` (default `~/valor-inbound`) are readable
-by every turn, as 2.1's sandbox stands; they are data a sender chose to
-send to Valor.
+by every turn, as 2.1's sandbox stands; they are data a sender chose to send
+to Valor.
 
 ## Per file, from `main`
 
@@ -180,7 +178,7 @@ Read with `git show origin/main:<path>`; nothing is imported from it.
 | New file | Source on `main` | Kept | What changes |
 |---|---|---|---|
 | `bridges/telegram/wire.py` | `bridge/telegram_bridge.py` (client construction, connect loop), `bridge/telegram_relay.py` (`_send_queued_message`) | Telethon client setup; a connect flood wait honored | The only module that imports Telethon. `sequential_updates=True`, `flood_sleep_threshold=0`, `request_retries=1`, `connection_retries=1`, `catch_up=False`, `auto_reconnect=False`, so Telethon repeats no request on its own: the bridge owns reconnect and runs the gap fill on each connect. No attempt count; after a failure, one `serve_tick_s` between connects; a flood wait for exactly its seconds. Sends are raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, `no_webpage=True`, no parse mode, `reply_to` with `top_msg_id` for a topic. The session path, API id, and hash come from the kernel key directory. Sentry, liveness, hibernation, the lsof session cleanup and its signals, and the `data/flood-backoff` and `data/last_connected` files go. Never deletes the session's `-journal` file |
-| `bridges/telegram/inbound.py` | the head of `handler` in `bridge/telegram_bridge.py`; `bridge/media.py` (`get_media_type`, `compute_media_timeout`, `download_media`); `_download_media_with_retry`; `bridge/context.py` (`fetch_reply_chain`, `media_descriptor`) | Media typing; the reply-chain walk (cycle stop) | The handler builds one `Inbound` and ends at `intake.receive`, then marks the message read. Redis dedup, the replay cursor, `/update`, project routing, screening, and storage go. Text is `message.message`, never Telethon's rendered `.text`. Outgoing and service messages, and messages from the account itself, are skipped. The download has no timer and no retry (below). Files are named by sha256. The chain walks to its root, stopping at a deleted message or a cycle. A message in a forum topic has `topic_id` set and `reply_to` None unless it replies to a message other than the topic's root. `thread` entries are `{id, text, attachments}`, attachments listed as `skipped: "earlier message"`. Transcription and image description go |
+| `bridges/telegram/inbound.py` | the head of `handler` in `bridge/telegram_bridge.py`; `bridge/media.py` (`get_media_type`, `compute_media_timeout`, `download_media`); `_download_media_with_retry`; `bridge/context.py` (`fetch_reply_chain`, `media_descriptor`) | Media typing; the reply-chain walk (cycle stop) | The handler builds one `Inbound` and ends at `intake.receive`, then marks the message read. Redis dedup, the replay cursor, `/update`, project routing, screening, and storage go. Text is `message.message`, never Telethon's rendered `.text`. Outgoing and service messages, and messages from the account itself, are skipped. The download has no timer of its own and no retry; the tick cancels a stalled one (below). Files are named by sha256. The chain walks to its root, stopping at a deleted message or a cycle. A message in a forum topic has `topic_id` set and `reply_to` None unless it replies to a message other than the topic's root. `thread` entries are `{id, text, attachments}`, attachments listed as `skipped: "earlier message"`. Transcription and image description go |
 | `bridges/telegram/gap.py` | `bridge/history_fetch.py` | Backward paging that accepts only strictly older ids and stops on a short page | Pages to a floor (below), receives ids `intake.recorded` does not list, oldest first, through the same path as the handler; no per-chat ceiling |
 | `bridges/telegram/send.py` | `_send_queued_message` in `bridge/telegram_relay.py`; `_find_already_sent_poll` | The scan of the account's own messages in a chat, newest first; two matches adopt nothing | The `telegram.send_message` perform and lookup, and the notice send. One attempt per message. Text is split, then files are sent as documents. `random_id` per part. Voice notes, albums, custom emoji, markdown, the oversized-as-file path, and dead letters go |
 | `bridges/telegram/bridge.py` | the body of `main()` in `bridge/telegram_bridge.py` | Graceful shutdown on SIGTERM | `TelegramBridge`: `run(outbox)` connects, runs the gap fill, registers the handler, and iterates the outbox. On SIGTERM an in-flight perform and its outcome finish before exit |
@@ -193,10 +191,10 @@ so the sandbox deny on that directory covers them.
 
 ## Behaviour in detail
 
-**Sending.** Text goes as the parts `core.bridge.split_text` gives, each
-at most 4,096 UTF-16 code units, Telegram's count (item 15c), so the
-kernel's render and the bridge's send agree. The first part carries the reply target; every part
-carries the topic. Then each file is sent as a document named by its
+**Sending.** Text goes as the parts `core.bridge.split_text` gives, each at
+most 4,096 UTF-16 code units, Telegram's count (item 15c), so the kernel's
+render and the bridge's send agree. The first part carries the reply target;
+every part carries the topic. Then each file is sent as a document named by its
 `path`'s base name, from the bytes hashed. Part `n` has `random_id` from
 the first 8 bytes of SHA-256 of `key:n`, a signed int64, never zero. The
 result is `{"sent": [...]}`, one entry per message, in order.
@@ -212,8 +210,8 @@ result is `{"sent": [...]}`, one entry per message, in order.
 | Killed mid-perform | | nothing; reconcile settles it |
 
 `random_id` is defence in depth for effects: the broker never performs one
-effect twice. It is the main mechanism for notices, which the outbox
-yields again until marked sent.
+effect twice. It is the main mechanism for notices, which the outbox yields
+again until marked sent.
 
 **Later parts.** A flood wait on a part after the first, once earlier
 parts are on screen, is waited out for exactly Telegram's seconds and the
@@ -222,22 +220,21 @@ part sent under its own `random_id`; the send goes on.
 **Lookup** (`lookup(action, key, since)`). Before a send's first part, the
 bridge records the chat's newest message id under the effect id in
 `telegram-sends.json` beside the session. Lookup reads the chat's history
-(not search, whose index can lag a send) above the recorded id, keeping
-the account's own messages, since ids in a chat only grow; no date is
-read, so clock skew cannot hide a message. A key with no record was never
-sent: None. Skip ids in `intake.claimed`. Compare full texts after
-Telegram's trim of leading and trailing whitespace, with the same reply
-target and topic; a file by its document name and size. Every part found
-once: the result. No part found: None, final, because the record precedes
-the send's first message, so a send that reached Telegram is above it. Any
-part with two matches: `broker.Unknown`.
-Some parts found and others not: the missing parts are sent under their
-own `random_id`s, Telegram refusing any it already holds, and the whole
-is the result; a flood wait or a send in doubt there is `broker.Unknown`,
-retried on a later wake, and a refusal or a changed file settles with the
-messages on screen. A record is dropped once the ledger settles its send;
-an unreadable file is set aside and a send in flight with no record stays in
-doubt, never scanned over the whole chat.
+(not search, whose index can lag a send) above the recorded id, keeping the
+account's own messages, since ids in a chat only grow; no date is read, so
+clock skew cannot hide a message. A key with no record was never sent: None.
+Skip ids in `intake.claimed`. Compare full texts after Telegram's trim of
+leading and trailing whitespace, with the same reply target and topic; a
+file by its document name and size. Every part found once: the result. No
+part found: None, final, because the record precedes the send's first
+message, so a send that reached Telegram is above it. Any part with two
+matches: `broker.Unknown`. Some parts found and others not: the missing
+parts are sent under their own `random_id`s, Telegram refusing any it
+already holds, and the whole is the result; a flood wait or a send in doubt
+there is `broker.Unknown`, retried on a later wake, and a refusal or a
+changed file settles with the messages on screen. A record is dropped once
+the ledger settles its send; an unreadable file is set aside and a send in
+flight with no record stays in doubt, never scanned over the whole chat.
 
 **Notices.** For each `NoticeDue`, first scan as above, under the key
 `notice:<notice id>`, for the notice's parts by full text. Each part not
@@ -266,16 +263,15 @@ while one is held. An unreadable seen file is set aside; each chat then
 stops at `intake.lowest`.
 
 **Downloads.** A message with a file is received as its own task, off the
-sequential update stream, so a slow download holds up no later message.
-No timer and no retry: a download ends when the file is in, when the
-connection fails (Telethon pings every 60 s and drops a connection whose
-ping went unanswered, failing its pending requests), or when the bridge
-stops. A pass never records a chat as seen past a receive still running,
-so one cut off is taken by the next pass.
+sequential update stream, so a slow download holds up no later message. A
+download ends when the file is in, when the connection fails (Telethon pings
+every 60 s and drops a connection whose ping went unanswered; a download from
+another data centre has no ping), when the bridge stops, or when a tick finds
+it received no bytes since the previous tick and cancels it. A pass never
+records a chat as seen past a receive still running, so the next pass retakes it.
 
-**Flood waits.** A flood wait on a request is held in memory; later
-requests wait it out. A restart forgets it, and Telegram answers the next
-request with the remaining wait.
+**Flood waits.** A flood wait on a request is held in memory; later requests
+wait it out. A restart forgets it; Telegram answers with the remaining wait.
 
 ## Tech debt absorbed
 
@@ -358,13 +354,13 @@ an approved send in the ledger for the outbox to yield.
 `tests/test_telegram_send.py`
 - `random_id` is the same for the same key and part and differs for two
   effects with identical payloads in one task.
-- Sent text carries no parse mode and no link preview; the reply target
-  and topic are honored; the result carries one `sent` entry per message.
-- 4,096 units go as one message; a longer text goes as the parts
-  `split_text` gives, one message each: 2,049 astral-plane emoji, two
-  UTF-16 units each, go as two.
-- A file whose bytes changed after approval raises before anything is
-  sent; a file is sent from the bytes hashed.
+- Sent text carries no parse mode and no link preview; the reply target and
+  topic are honored; the result carries one `sent` entry per message.
+- 4,096 units go as one message; a longer text goes as the parts `split_text`
+  gives, one message each: 2,049 astral-plane emoji, two UTF-16 units each,
+  go as two.
+- A file whose bytes changed after approval raises before anything is sent; a
+  file is sent from the bytes hashed.
 - A flood wait on send writes `failed` carrying the seconds, and the next
   request waits it out; a flood wait in gap fill holds later passes.
 - The emulator accepts a send and drops the connection before replying:
@@ -373,20 +369,19 @@ an approved send in the ledger for the outbox to yield.
 - `RandomIdDuplicate` on an effect: `broker.Unknown`, no outcome, and the
   reconcile's lookup writes `done` with the message already on screen.
 - Lookup: a key with no record finds nothing; a record in an empty chat, with
-  nothing sent, finds nothing; the same text sent before
-  the key's first send is not adopted; a message dated before the
-  intent's `at` (the Mac's clock ahead of Telegram's) is found; a
-  claimed id is skipped; a payload with a trailing newline matches the
-  trimmed message; a sent message older than a later claimed one is found;
-  two unclaimed matches give `broker.Unknown` and nothing is written; a
-  split send half on screen is finished and found whole.
+  nothing sent, finds nothing; the same text sent before the key's first send
+  is not adopted; a message dated before the intent's `at` (the Mac's clock
+  ahead of Telegram's) is found; a claimed id is skipped; a payload with a
+  trailing newline matches the trimmed message; a sent message older than a
+  later claimed one is found; two unclaimed matches give `broker.Unknown` and
+  nothing is written; a split send half on screen is finished and found
+  whole.
 - A flood wait after a split send's first part is waited out and the send
   is `done`; a send cut off after its first part is `unknown`, and the
   reconcile sends the rest and writes `done`.
-- A send's record stays while it is in flight and is dropped once settled;
-  an unreadable sends file is set aside and a send with no record stays
-  in doubt (only a notice whose record was lost is scanned over the whole
-  chat, since its text carries its own id).
+- A send's record stays while it is in flight and is dropped once settled; an
+  unreadable sends file is set aside and a send with no record stays in doubt
+  (only a notice is scanned over the whole chat, its text carrying its id).
 
 `tests/test_telegram_outbox.py`
 - A notice goes to the row's `chat_id` and `notice.sent` is recorded
@@ -394,8 +389,8 @@ an approved send in the ledger for the outbox to yield.
   finds it on restart and nothing is sent again.
 - `RandomIdDuplicate` on a notice with a scan miss: one notice on screen
   afterwards, and `notice.sent` recorded.
-- A notice cut off after its first part is finished on the next try,
-  each part on screen once.
+- A notice cut off after its first part is finished on the next try, each
+  part on screen once.
 - A notice failing on every attempt logs its reason once.
 - The bridge takes a `Release` to `outbox.perform` and sends a
   `NoticeDue` itself.

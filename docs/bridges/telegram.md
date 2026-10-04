@@ -342,7 +342,10 @@ message of the send on its full text (trimmed, as Telegram trims), or its
 file name and size, with its reply target and topic. History, not search,
 since search reads an index that can lag a send. Clock skew between the
 Mac and Telegram cannot hide a message, since no date is read. A key with
-no record was never sent, so its lookup finds nothing. Two matches for
+no record was never sent, since the record precedes the first message, so
+its lookup finds nothing, and so does a record above which no message of
+the send is on screen: that answer is final. A send whose record was lost
+with its file is the exception and stays in doubt (Local state). Two matches for
 one message is `broker.Unknown`: nothing is concluded. When some of a
 split send's messages are on screen and the rest are not, `lookup` sends
 the rest, each under its own `random_id`, and the send settles as done:
