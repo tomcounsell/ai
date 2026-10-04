@@ -413,6 +413,7 @@ class Settings:
         keys are."""
         return str(Path(self.pg_passfile).parent / "github-keys")
 
+    @property
     def mail_keyfile(self) -> str:
         """The mail bridge's IMAP and SMTP logins, in the kernel key
         directory (`python -m bridges.email keys`)."""
