@@ -426,7 +426,7 @@ bridge performers.
 | --- | --- | --- |
 | `core/serve.py` | new: serve, recover, schedule | 4.3 |
 | `core/slot.py` | new: the turn slot | 4.3 |
-| `core/intake.py` | new: the inbound record, receive, bind | 2.3 (`dmarc_verified`) |
+| `core/intake.py` | new: the inbound record, receive, bind | 2.3 |
 | `core/notices.py` | new | |
 | `core/bridge.py` | new: the port's bridge side | |
 | `core/broker.py` | key, `request_id`, release path, refused rows, the action on the intent, `dangling` | 1.4d |
@@ -554,7 +554,7 @@ in, are in [m2-1-resident-kernel-record.md](m2-1-resident-kernel-record.md).
 
 ## Tom's feedback (2026-10-03)
 
-Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03).
 
 Scope: the Delivery's recommendation in m2-1-resident-kernel-record.md (settle a stopped task, mark seen only rows the step read, bigint id match, `services:<task>` in docs/data.md). Second in the order; 2.2, 2.3 and 4.1 merge after it.
 

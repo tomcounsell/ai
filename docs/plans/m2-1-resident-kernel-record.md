@@ -40,7 +40,7 @@ Each finding of critique-2-1-r1.md, and how this revision handles it.
 - F16: `Spec` fields, the plist `PATH`, plists printed for Tom (decision
   31), the caffeinate limit, a connection per concurrent intake call,
   notices deduplicated across kernels.
-- F17: no governance added (the DMARC check is 2.3's, round 2 E).
+- F17: no governance added (the DMARC check is parked, round 2 E).
 - F18: Q2 decided by default (decision 15).
 - F19: limits cited as protocol facts with split and request-time refusal
   (decision 15b); near-miss notices (15a); the start rule widened to
@@ -57,8 +57,8 @@ Each finding of critique-2-1-r2.md and how it is built in.
   reads the effect first (port item 39); test added.
 - D: a refused kernel release appends `effect.refused` once and owes a
   notice (item 40); test added.
-- E: the DMARC check is 2.3's, under its grant (item 11a); email is
-  `verified: false` until it lands.
+- E: the DMARC check is 2.3's and parked (open question 17); email is
+  `verified: false`.
 - F: a provision job off the loop; a failure owes a notice; test added.
 - G: `settle_after_s` is a number or a function (item 37).
 - H, I: the limits live in `core/bridge.py`; Telegram counts UTF-16

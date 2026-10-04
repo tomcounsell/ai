@@ -30,10 +30,10 @@ impossible send at request time without importing a bridge:
   message length limit); 2000 MiB per file (its upload documentation:
   4000 parts of 512 KiB).
 - Email: no per-message text limit. Gmail refuses a message over 25 MB
-  (its maximum email size), counted as 25,000,000 bytes of the whole
-  encoded message. The size function that measures it (`message_bytes`,
-  given the action and its files' sizes) is the email bridge's; until it
-  is set, an email is not refused for size at request time.
+  ("Gmail sending limits in Google Workspace", Admin Help: maximum email
+  size 25 MB), counted as 25,000,000 bytes of the whole encoded message.
+  `message_bytes` measures it with `core.mail`, the builder the email
+  bridge's performer sends from, so the size refused is the size sent.
 """
 
 import asyncio
@@ -46,9 +46,15 @@ from typing import Any, Protocol
 
 import psycopg
 
-from core import broker, db, ledger, tasks
+from core import broker, db, ledger, mail, tasks
 from core import workspace as ws
 from core.settings import settings
+
+# The email bridge builds and measures its messages with the kernel's
+# builder, reached here (a bridge imports core.bridge, never core.mail).
+email_message = mail.email_message
+email_serialized = mail.serialized
+email_message_id = mail.message_id
 
 
 @dataclass(frozen=True)
@@ -60,10 +66,18 @@ class ChannelLimits:
     message_bytes: Callable[[broker.Action, list[int]], int] | None = None  # given the file sizes
 
 
+def _email_message_bytes(action: broker.Action, sizes: list[int]) -> int:
+    return mail.email_encoded_bytes(action.payload, sizes)
+
+
 LIMITS: dict[str, ChannelLimits] = {
     "telegram": ChannelLimits(max_text=4096, text_units="utf16", max_file_bytes=2000 * 1024 * 1024),
     "email": ChannelLimits(
-        max_text=None, text_units="chars", max_file_bytes=None, max_message_bytes=25_000_000
+        max_text=None,
+        text_units="chars",
+        max_file_bytes=None,
+        max_message_bytes=25_000_000,
+        message_bytes=_email_message_bytes,
     ),
 }
 
@@ -238,6 +252,8 @@ DECLARED: dict[str, Declared] = {
             '`email.send`: target the `to` addresses, lowercased, sorted, comma-joined, payload `{"to": '
             '[...], "cc": [...], "subject": "...", "body": "...", "in_reply_to": null, "references": [], '
             '"files": [{"path": "...", "sha256": "..."}]}`, each path absolute and inside your workspace; '
+            'or, to reply to all of a received email, payload `{"reply_to": "<its message id>", "body": "...", '
+            '"files": [...]}` with any target, and the recipients, subject, and threading are filled in from it; '
             "sent once Tom approves."
         ),
         owner="email",
@@ -316,6 +332,10 @@ class Bridge(Protocol):
 
     async def run(self, outbox: Outbox) -> None: ...
 
+    # A bridge may define `async def reconcile(self, outbox)`, which then
+    # replaces the outbox's own serial reconcile at start and on each wake,
+    # for a bridge that settles each effect as its own task.
+
     async def tick(self) -> None: ...
 
 
@@ -352,19 +372,32 @@ class Outbox:
             for item in await self.due():
                 yield item
             await self.wait()
-            await self.reconcile()
+            if hasattr(self.bridge, "reconcile"):
+                await self.bridge.reconcile(self)
+            else:
+                await self.reconcile()
             await self.bridge.tick()
 
     def types(self) -> list[str]:
         return [d.action_type for d in DECLARED.values() if d.owner == self.channel]
 
     async def reconcile(self) -> list[broker.Outcome]:
+        """Every dangling send of this channel settled in turn, on the
+        outbox's connection."""
         settled = []
-        for effect_id in await broker.dangling(self.conn, self.types()):
-            outcome = await broker.reconcile(self.conn, self.performers, effect_id)
+        for effect_id in await self.dangling():
+            outcome = await self.settle(effect_id)
             if outcome is not None:
                 settled.append(outcome)
         return settled
+
+    async def dangling(self) -> list[str]:
+        return await broker.dangling(self.conn, self.types())
+
+    async def settle(self, effect_id: str, conn=None) -> broker.Outcome | None:
+        """One dangling effect asked of its target (`broker.reconcile`) on
+        `conn`, the outbox's connection when None."""
+        return await broker.reconcile(conn or self.conn, self.performers, effect_id)
 
     async def due(self) -> list[Release | NoticeDue]:
         releases = await (
@@ -408,12 +441,14 @@ class Outbox:
             await self.listener.close()
             self.listener = listener
 
-    async def perform(self, item: Release) -> broker.Outcome:
+    async def perform(self, item: Release, conn=None) -> broker.Outcome:
         """Release the effect through the broker: the checks, the intent,
         the bridge's perform, the outcome. A release the checks refuse is
-        recorded refused, once, and never yielded again."""
+        recorded refused, once, and never yielded again. `conn` is a
+        connection the caller owns, for a bridge that performs releases
+        side by side; the outbox's own is used when None."""
         try:
-            return await broker.release(self.perform_conn, self.performers, item.effect_id)
+            return await broker.release(conn or self.perform_conn, self.performers, item.effect_id)
         except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
             return broker.Outcome(item.effect_id, "refused", error=str(exc) or type(exc).__name__)
 
@@ -454,7 +489,8 @@ async def serve(bridge: Bridge, dsn: str | None = None) -> None:
         )
         await listener.execute("LISTEN valor_events")
         outbox = Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener, dsn)
-        await outbox.reconcile()
+        if not hasattr(bridge, "reconcile"):
+            await outbox.reconcile()
         await bridge.run(outbox)
     finally:
         for c in (outbox.listener if outbox else listener, perform_conn, conn):

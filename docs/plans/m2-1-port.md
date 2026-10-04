@@ -76,9 +76,8 @@ def owned(channel: str) -> list[str]: ...
   only after `receive` returns. A caller that runs `receive` concurrently
   uses one connection per concurrent call.
 - **`verified` (D11, D11a)** is set by `receive`, not by the bridge:
-  - email: false. 2.3 adds `intake.dmarc_verified` beside `receive` in
-    `core/intake.py`, under its Brief's `governance_grant` (open
-    question 17), and `receive` calls it for email.
+  - email: false. Email starts, answers, and steers nothing (open
+    question 17: no mail check is added).
   - Telegram: true for every record, since MTProto authenticates the
     sender. Whether the sender is the operator is decided at bind
     (`sender_id == operator_telegram_id`).
@@ -88,7 +87,7 @@ def owned(channel: str) -> list[str]: ...
 - **`highest` (D3)** is the largest `message_id` recorded for the chat,
   compared as an integer (all-digit ids that fit a bigint), for channels
   with integer ids; a paging hint
-  only. Email has no cursor; it polls UNSEEN SINCE for owned senders.
+  only. Email has no cursor; it searches UNSEEN SINCE for owned senders after each IDLE wake.
 - **`lowest` (D32)** is the smallest integer `message_id` recorded for
   the chat, or None: a gap fill of a chat with no seen entry stops there,
   by membership, not at the high-water mark.

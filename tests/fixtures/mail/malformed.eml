@@ -1,0 +1,16 @@
+From: ann@example.com
+Subject: broken
+Message-ID: <broken-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain
+
+the body survives
+--b1
+Content-Type: application/pdf; name="cut.pdf"
+Content-Disposition: attachment; filename="cut.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK%%not base64

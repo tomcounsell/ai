@@ -24,7 +24,9 @@ What a turn left under `.valor/` (see `core.signals`) is one
 one. A signal that means nothing in the state, a plan not committed, or a
 candidate on a tree with uncommitted changes goes to `errors`, and the next
 prompt says so. The merge is the kernel's to request: a turn's request for
-one never reaches the broker.
+one never reaches the broker. An `email.send` naming `reply_to` is made
+the reply to all of that received email before it is requested, so Tom's
+approval covers its final recipients.
 
 Every question is a `question.asked` row and its answer a
 `question.answered` row with Tom's provenance, and his feedback a
@@ -39,9 +41,10 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from core import broker, db, git, ledger, machine, runs, signals, tasks, workspace
+from core import broker, db, git, ledger, machine, mail, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
+from core.settings import settings
 
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
@@ -388,6 +391,30 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
     )
 
 
+async def _reply_all(conn, action: broker.Action) -> tuple[broker.Action, str | None]:
+    """An `email.send` naming `reply_to` (a received email's `received_id`
+    or `message_id`) as the reply to all of it: recipients, subject, and
+    threading from `mail.reply_all`, the turn's `body` and `files` kept.
+    Returns the action, or an error when no email was received under that
+    id."""
+    ref = str(action.payload["reply_to"])
+    row = await (
+        await conn.execute(
+            "SELECT payload FROM events WHERE type = 'message.received' AND task_id = 'email' "
+            "AND (payload->>'received_id' = %s OR payload->>'message_id' = %s) ORDER BY id LIMIT 1",
+            (ref, ref),
+        )
+    ).fetchone()
+    if row is None:
+        return action, f"reply_to {ref} names no received email"
+    payload = {
+        **mail.reply_all(row[0], settings.email_address),
+        "body": action.payload.get("body") or "",
+        "files": action.payload.get("files") or [],
+    }
+    return broker.Action("email.send", ",".join(sorted(payload["to"])), payload), None
+
+
 async def record(
     conn,
     task_id: str,
@@ -424,11 +451,17 @@ async def record(
             entry = {**entry, "error": "the merge is the kernel's to request"}
         elif "request" in entry:
             r = entry["request"]
+            action = broker.Action(r["action_type"], r["target"], r["payload"])
+            if action.action_type == "email.send" and "reply_to" in action.payload:
+                action, said = await _reply_all(conn, action)
+                if said:
+                    effects.append({**entry, "error": said})
+                    continue
             outcome = await broker.request(
                 conn,
                 performers or broker.Performers(),
                 task_id,
-                broker.Action(r["action_type"], r["target"], r["payload"]),
+                action,
                 request_id=f"{turn_id}/{entry['file']}",
             )
             entry = {**entry, "effect_id": outcome.effect_id, "kind": outcome.kind, "error": outcome.error}

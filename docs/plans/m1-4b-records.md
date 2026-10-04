@@ -263,7 +263,7 @@ four findings. 1.4c part one is built on 3e1b97989 and is checked there.
 
 ## Tom's feedback (2026-10-03)
 
-Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03).
 
 Scope: the four findings under Delivery (parametrize ids kept outside the decorator, `rmtree` on a directory with no read bit, BOM-less UTF-16 JUnit, a `.valor` entry rerunning as cause `kernel`).
 

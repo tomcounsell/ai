@@ -208,8 +208,6 @@ requests from the last 12 months; $25 cap per full emulator run.
 - **A.** Yes, and treat it as an approved check now. **(Recommended)** Without it anyone could spoof your address. **B.** No, email can only start tasks after a Telegram confirmation.
 (docs/bridges/email.md)
 
-**Default stands from 2026-10-01: A**, unless Tom says otherwise.
-
 **Answered 2026-10-03:** Tom: "yuda.me email is managed by google workspace.
 you decide". Decided: not granted for now, since no spoofed mail has
 arrived and the governance paragraph needs an incident. The DMARC commit

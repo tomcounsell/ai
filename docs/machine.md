@@ -55,8 +55,10 @@ services and no user apps, is estimated at 3.5 GB on a 16 GB Air.
 **What exists today.** The machine cluster runs under launchd as a
 Homebrew service. The kernel process is `python -m core serve`, kept alive
 by its LaunchAgent (`python -m core serve --plist` prints it); the gateway
-lives in it and outlives any one task. The bridges are not in this branch
-yet; their port in `core/` is.
+lives in it and outlives any one task. The email bridge is in
+`bridges/email/`, kept alive by its own LaunchAgent
+(`python -m bridges.email --plist` prints it); the Telegram bridge is not in
+this branch.
 
 ## What runs on demand
 
@@ -266,7 +268,7 @@ authority, and a turn holds none.
 | The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run`, `calibrate`, or `serve` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on the OpenAI route's listed calls (`POST v1/responses`, `GET` or `HEAD` on `v1/models` and one model by id; any other method is a 403) and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge, at start | `telegram-keys` (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, mode 600) in the kernel key directory, written only by `python -m bridges.telegram keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`; the session is `telegram.session` beside it, mode 600, written by `python -m bridges.telegram login`, which Tom runs and types the code and password into. No output holds any part of the hash |
-| Mail credentials | The email bridge | Not built |
+| Mail credentials, `IMAP_USER`, `IMAP_PASSWORD`, `SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password) | The email bridge, at start | `mail-keys` in the kernel key directory (mode 600), written only by `python -m bridges.email keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the bridge's `Config` only, never in `os.environ`, a ledger row, or a log line |
 | The GitHub push token, `GITHUB_PUSH_TOKEN` | The merge performer of a task the kernel provisioned, for a released merge to a granted remote, never the turn and never `push_branch` | `github-keys` in the kernel key directory (mode 600), written only by `python -m core github-key`, which copies it from the vault `.env` and prints `written`, `kept`, or `missing`. For each git call against the remote the kernel writes a config file of its own, mode 600, in the same directory, holding one header (`Authorization: Basic`, user `x-access-token`) scoped to that exact URL, with `http.followRedirects=false` so the header never follows a redirect, gives git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits; the call also pins no redirect and no proxy on its command line, which outranks the repository's config; the file is named by the PID of the process writing it, and a file a crash left is removed by the next merge once that process no longer exists. GitHub's refusal of the token fails the merge saying to rotate it |
 
 **Where a merge lands.** A merge to a remote lands only on a (URL,
@@ -310,7 +312,7 @@ the gateway is for visibility and honest metering, not a hard wall.
 **The kernel key directory.** The passwords for `valor_kernel` and the
 owner role on the kernel databases live in a libpq password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
-the judgement keys in `judgement-keys`, the OpenAI key in `openai-key`, and the optional long-lived Claude
+the judgement keys in `judgement-keys`, the mail credentials in `mail-keys`, the OpenAI key in `openai-key`, and the optional long-lived Claude
 token in `claude-token` beside it, paths derived from the password file's
 so the sandbox deny, derived from the same setting, cannot drift from
 them. A Keychain item is readable by a turn through `security`,

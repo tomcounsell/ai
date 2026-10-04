@@ -559,7 +559,7 @@ a stage section ends the text, which a turn with no workspace lacks.
 
 ## Tom's feedback (2026-10-03)
 
-Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
+Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped.
 

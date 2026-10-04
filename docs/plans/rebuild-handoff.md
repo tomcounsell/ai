@@ -39,7 +39,9 @@ switch it off `main`; the rebuild is a separate checkout.
    Homebrew `postgresql@18` running as a service on port 5432 (if an older
    Homebrew Postgres holds the port, dump its databases with `pg_dumpall`,
    stop it, start 18, restore, and put `postgresql@18/bin` first on PATH),
-   `uv`, and the `claude` CLI logged in.
+   `uv`, the `claude` CLI logged in, and Homebrew `dovecot` and `openssl`
+   for the email tests (Dovecot is only run by the tests, as the user, never
+   as a service).
 2. **Checkout.**
    `git clone -b valor-cori-rebuild https://github.com/tomcounsell/ai.git ~/src/valor-rebuild`
    (Valor's Macs reach GitHub over HTTPS through `gh`, not SSH),

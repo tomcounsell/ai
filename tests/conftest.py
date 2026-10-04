@@ -70,3 +70,24 @@ def release_ports(request):
                 "INSERT INTO events (task_id, type, payload) VALUES (%s, 'workspace.removed', %s)",
                 (task_id, Jsonb({"path": mirror, "by": "tests"})),
             )
+
+
+@pytest.fixture(scope="session")
+def mail(tmp_path_factory):
+    """Dovecot behind a TLS terminator, and the local SMTP server, started
+    once (`tests/mailserver.py`). Fails naming what is missing."""
+    from tests import mailserver
+
+    try:
+        servers = mailserver.start(tmp_path_factory.mktemp("mail"))
+    except (RuntimeError, OSError) as e:
+        pytest.fail(f"the local mail servers did not start: {e}")
+    yield servers
+    mailserver.stop(servers)
+
+
+@pytest.fixture
+def mailbox(mail):
+    """The servers with empty folders and default behavior."""
+    mail.reset()
+    return mail

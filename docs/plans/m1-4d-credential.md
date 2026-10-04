@@ -565,6 +565,6 @@ The critique rounds, the patch round, the checks, and the delivery are in
 
 ## Tom's feedback (2026-10-03)
 
-Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
+Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped, after 1.4b and 1.4s land, per Rollout. Rollout steps 3 and 5 named Tom; step 5 is done (ruleset 24370170). Under the 2026-10-03 feedback the build session runs step 3's `merge-target add` commands itself, with `--note` and `--via` citing this feedback.

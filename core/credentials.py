@@ -226,17 +226,18 @@ def _parse_env(text: str) -> dict[str, str]:
 
 def read_key(keyfile: str | Path, name: str, command: str = "judgement-keys") -> str:
     """One key from a kernel key file, or `MissingKey` naming it and the
-    command that writes that file."""
+    command that writes that file. `command` is a `python -m core`
+    subcommand, or a whole command starting `python`."""
     path = Path(keyfile)
     try:
         found = _parse_env(path.read_text())
     except FileNotFoundError:
-        raise MissingKey(
-            f"{name}: the key file {path} does not exist; run `python -m core {command}`"
-        ) from None
+        run = command if command.startswith("python ") else f"python -m core {command}"
+        raise MissingKey(f"{name}: the key file {path} does not exist; run `{run}`") from None
     value = found.get(name)
     if not value:
-        raise MissingKey(f"{name} is not in {path}; run `python -m core {command}`")
+        run = command if command.startswith("python ") else f"python -m core {command}"
+        raise MissingKey(f"{name} is not in {path}; run `{run}`")
     return value
 
 

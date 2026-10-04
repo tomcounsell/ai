@@ -63,9 +63,9 @@ outside the model is AI Control [4].
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
-| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email chosen, not built |
-| Scheduling | launchd: the kernel's LaunchAgent and the backup job; routines | the kernel in use; routines chosen, not built |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session) in the kernel key directory, durable copy of the keys in the vault | in use |
+| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`) |
+| Scheduling | launchd: the kernel's LaunchAgent, the email bridge's, and the backup job; routines | launchd in use; routines chosen, not built |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -491,9 +491,8 @@ conforming to one port in `core/` (`core/bridge.py`, in use), with sending
 as an `act` through the broker. The Telegram bridge is built in
 `bridges/telegram/` on **Telethon** (pinned in `uv.lock`), a user account
 over MTProto, with the library confined to `bridges/telegram/wire.py`.
-Email is **chosen, not built**; its libraries (the standard library's
-`imaplib` and `smtplib`) are the candidates, **open** until it is built.
-What each bridge does
+Email is **in use**, on the standard library's `imaplib` and `smtplib`,
+tested against Dovecot and a local SMTP server. What each bridge does
 is [bridges/telegram.md](bridges/telegram.md) and
 [bridges/email.md](bridges/email.md).
 
@@ -514,7 +513,8 @@ password file, the judgement keys in `judgement-keys` and the OpenAI key in `ope
 beside it, copied from the vault `.env` by `python -m core judgement-keys` and
 `python -m core openai-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. Telegram's keys and
-session sit there too (**in use**); email's: [email.md](bridges/email.md). Nothing secret is
+session sit there too (**in use**), and email's `mail-keys`, written by
+`python -m bridges.email keys` ([email.md](bridges/email.md)). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.
 

@@ -12,8 +12,8 @@ The kernel and the control loop. Authority lives here and nowhere else.
 - The supervisor turn and the prompt it builds.
 - The SDLC state machine as a typed state model. Stages are skills; the states, verdicts, and transitions are here.
 - The judgement layer's task taxonomy and router, `JudgementPort`, the three judgement sites, and calibration.
-- Ports that `bridges/`, `harnesses/`, and `memory/` conform to.
-- One typed settings module. Kernel-held secrets (the kernel databases' passwords, the judgement keys, the GitHub push token, the optional long-lived Claude token the gateway sends upstream, and the OpenAI key it sends on its OpenAI route) live in the kernel key directory, the password file's directory, which every sandbox profile denies ([docs/machine.md](../docs/machine.md), Keychain).
+- Ports that `bridges/`, `harnesses/`, and `memory/` conform to. Email's kernel side is here: `mail.py` (reply-all, the message an `email.send` becomes, and its encoded size, which `core/bridge.py` uses to refuse an oversize send when it is requested).
+- One typed settings module. Kernel-held secrets (the kernel databases' passwords, the judgement keys, the mail credentials, the GitHub push token, the optional long-lived Claude token the gateway sends upstream, and the OpenAI key it sends on its OpenAI route) live in the kernel key directory, the password file's directory, which every sandbox profile denies ([docs/machine.md](../docs/machine.md), Keychain).
 - State lives in Postgres as JSONB documents plus an append-only events table.
 - The corrections and exemplar streams in the ledger. `memory/` reads them; `core/` owns them.
 

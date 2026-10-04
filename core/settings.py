@@ -376,6 +376,18 @@ class Settings:
     # wake interval, not a limit.
     serve_tick_s: float = field(default_factory=lambda: float(_env("VALOR_SERVE_TICK_S", "60")))
 
+    # -- the email bridge (bridges/email): Valor's mailbox, read and sent by
+    # one process of its own; Tom's addresses are `operator_email` ---------
+    email_address: str = field(default_factory=lambda: _env("VALOR_EMAIL_ADDRESS", ""))
+    # Unseen mail dated before this day (YYYY-MM-DD) is never received.
+    email_since: str = field(default_factory=lambda: _env("VALOR_EMAIL_SINCE", ""))
+    imap_host: str = field(default_factory=lambda: _env("VALOR_IMAP_HOST", "imap.gmail.com"))
+    imap_port: int = field(default_factory=lambda: int(_env("VALOR_IMAP_PORT", "993")))
+    smtp_host: str = field(default_factory=lambda: _env("VALOR_SMTP_HOST", "smtp.gmail.com"))
+    smtp_port: int = field(default_factory=lambda: int(_env("VALOR_SMTP_PORT", "587")))
+    # A CA file for the mail servers' certificates; unset, the system's.
+    mail_cafile: str = field(default_factory=lambda: _env("VALOR_MAIL_CAFILE", ""))
+
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a
     # call with no reported usage is charged. An underestimate charges less
@@ -400,6 +412,11 @@ class Settings:
         the merge performer. Derived from `pg_passfile` as the judgement
         keys are."""
         return str(Path(self.pg_passfile).parent / "github-keys")
+
+    def mail_keyfile(self) -> str:
+        """The mail bridge's IMAP and SMTP logins, in the kernel key
+        directory (`python -m bridges.email keys`)."""
+        return str(Path(self.pg_passfile).parent / "mail-keys")
 
     @property
     def claude_token_file(self) -> str:

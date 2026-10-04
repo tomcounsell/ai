@@ -1,0 +1,9 @@
+From: "Ann" <ann@example.com>
+To: valor@test.local
+Subject: html only
+Message-ID: <html-1@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>p { color: red }</style><script>alert("x")</script></head>
+<body><p>Fish &amp; chips</p><div>second   line</div></body></html>

@@ -496,7 +496,7 @@ The critique rounds, the build record, and the patch rounds are in
 
 ## Tom's feedback (2026-10-03)
 
-Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
+Tom, asked to tap the five passed deliveries (3a, 3c, 4.2, 1.4d, 1.4c part one): "All five". The same day he ruled that merges are Valor's call from now on (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03), so this tap is the last one asked.
 
 Merge: tapped, after 1.4b. If 1.4b is patched, this rebases onto it and its three checks run again; the tap covers the rebased head only if all three pass.
 

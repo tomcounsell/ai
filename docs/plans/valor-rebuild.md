@@ -45,7 +45,7 @@ branch.
 
 How the loops end (Tom, delegated decision of 2026-10-02):
 
-Superseded in part by Tom's feedback of 2026-10-03 (end of this file):
+Superseded in part by Tom's feedback of 2026-10-03 (valor-rebuild-feedback.md):
 Valor decides stops, extra rounds, and merges; Tom is asked about vision,
 business priorities, and cost-benefit tradeoffs only.
 
@@ -67,9 +67,9 @@ Governance binds every milestone. A milestone that needs a new check, gate,
 hook, or review step names the incident and mission item and waits for
 Tom's tap. The checkpoints already granted are the ones in the state
 machine doc (the request judge, the breadth check, critique and review
-loops), each ledgered with its ninety-day expiry, and the DMARC test on
-mail from Tom (open question 17, taken as an approved check), ledgered the
-same way when milestone 2 builds it.
+loops), each ledgered with its ninety-day expiry. The DMARC test on mail
+from Tom (open question 17) is parked: no check is granted, and email
+starts nothing, until spoofed mail gives the incident.
 
 ## Execution: who builds what
 
@@ -409,8 +409,7 @@ About 450 lines kept, 350 adapted, 1,700 not carried.
 - **Not carried:** subject coalescing, the vault mirror, Redis history and
   dead letters, the email relay's retries, per-sender project routing.
 
-**Done.** On Valor's real mailbox during a test window: a mail from Tom
-passing DMARC starts a task; a reply-all is held and released once; a crash
+**Done.** On Valor's real mailbox during a test window: a reply-all is held and released once; a crash
 between SMTP and outcome does not double-send; a 9 MB attachment sends.
 
 **Absorbs.** #3601 (SMTP timeout scaled for large uploads; the other three
@@ -576,44 +575,6 @@ Tom can overturn any of these; each is reversible.
   and popoto #188 (needed in 1.5).
 - Skill system requirements (before `skills/` grows past `skills/sdlc/`).
 
-## Tom's feedback (2026-10-03)
+## Tom's feedback
 
-On the "Stop means stop" amendment, in Tom's words: "I think this meant for
-the orchestration between Valor and his subagents. Valor decides who stops
-and who gets more budget. Valor's communication with the user is as a
-project manager speaks to a CEO, so this kind of think would never come
-up."
-
-And: "Yes, AND the human also doesn't even get merge taps. Valor also
-decides that based on his high level objective. The guiding principle is a
-CEO x project manager relationship. If a CEO wants to get technical he can,
-but it'd be on the CEO's lead. by defualt, Valor should never raise
-technical decisions to a CEO, only ask about vision, business priorities,
-and cost benefits of tradeoffs that need to be made in the context of the
-how the company works"
-
-What this changes:
-
-- **Stop means stop** governs Valor's subagents. When a task's rounds are
-  spent, Valor (and, until takeover, the /build lead) decides whether it
-  gets another patch round or stops. It does not go to Tom.
-- **Merges are Valor's call**, against the task's objective. "A merge held
-  for Tom's tap" in this plan, in each task plan, and in
-  `.claude/skills/build/SKILL.md` no longer holds; the skill text gets the
-  matching edit at the next /build.
-- **Tom's queue** holds questions about vision, business priorities, and
-  the cost and benefit of tradeoffs in how the company works, plus things
-  only Tom holds (a password, an account). Technical decisions are never
-  raised unless Tom asks to get technical.
-- Unchanged: the governance paragraph in `CLAUDE.md`. Adding a check,
-  gate, hook, review step, or guard still needs an incident, a mission
-  item, and Tom's tap, one per instance.
-- **The Macs' admin password** (the same on all of Valor's machines) is in
-  1Password, vault `m-valor`, item `bgqjftkvj4witkswgdoxegdjsy`. A step
-  that needs `sudo` reads it from there and never prints it.
-
-Decided the same day, recorded in each task's plan: the five passed
-deliveries merge (3a, 3c, 4.2, 1.4d, 1.4c part one); one more patch round
-for 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, and 1.5, in that order; no
-timers on email commands, a stop ends a hung one; open question 17's DMARC
-check refused for now; `idle_turns` removed.
+Tom's rulings and what they change are in [valor-rebuild-feedback.md](valor-rebuild-feedback.md).

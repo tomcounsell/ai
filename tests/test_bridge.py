@@ -161,6 +161,24 @@ def test_unknown_leaves_intent(dsn, op, how):
     run(go())
 
 
+def test_a_definite_failure_is_failed_and_asks_no_lookup(dsn, op):
+    async def go():
+        task = await new_task(dsn)
+        effect = await held(dsn, task, send())
+        await approved(dsn, task, effect)
+        bridge = FakeBridge()
+        bridge.fail = broker.Failed("refused")
+        bridge.lookup_fail = AssertionError("a definite failure asks no lookup")
+        async with bridges.outbox(dsn, bridge) as box:
+            (item,) = [i for i in await box.due() if isinstance(i, Release) and i.effect_id == effect]
+            out = await box.perform(item)
+        (row,) = await of_type(dsn, "effect.outcome", effect_id=effect)
+        return out, row
+
+    out, row = run(go())
+    assert out.kind == "failed" and row["kind"] == "failed" and "refused" in row["error"]
+
+
 def test_two_identical_sends(dsn, op):
     async def go():
         task = await new_task(dsn)
@@ -366,22 +384,21 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
                 at_file = await broker.request(
                     conn, performers, task, send(files=[{"path": str(edge), "sha256": "0" * 64}])
                 )
-            # Until the email bridge sets the size function, no email is
-            # refused for size.
-            unmeasured = await broker.request(conn, performers, task, email("b" * 30_000_000))
+            # The email size function measures the whole encoded message.
+            measured = await broker.request(conn, performers, task, email("b" * 30_000_000))
             with mock.patch.dict(LIMITS, {"email": sized}):
                 over = await broker.request(conn, performers, task, email("b" * (25_000_000 - 2999)))
                 under = await broker.request(conn, performers, task, email("b" * (25_000_000 - 3000)))
             nobody = await broker.request(
                 conn, performers, task, broker.Action("email.send", to, {"to": [], "body": "x"})
             )
-        return over_file, at_file, unmeasured, over, under, nobody
+        return over_file, at_file, measured, over, under, nobody
 
-    over_file, at_file, unmeasured, over, under, nobody = run(go())
+    over_file, at_file, measured, over, under, nobody = run(go())
     assert over_file.kind == "refused" and f"over telegram's limit of {limit} bytes" in over_file.error
     assert at_file.kind == "pending"
-    assert LIMITS["email"].max_message_bytes == 25_000_000 and LIMITS["email"].message_bytes is None
-    assert unmeasured.kind == "pending"
+    assert LIMITS["email"].max_message_bytes == 25_000_000
+    assert measured.kind == "refused" and "over email's limit of 25000000 bytes" in measured.error
     assert over.kind == "refused" and "over email's limit of 25000000 bytes" in over.error
     assert under.kind == "pending"
     assert nobody.kind == "refused" and "no recipient" in nobody.error

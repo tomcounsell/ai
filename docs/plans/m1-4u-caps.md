@@ -564,7 +564,7 @@ error-output cuts the same way; rerun the three checks; merge if they pass.
 
 ## Tom's feedback (2026-10-03)
 
-Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild.md, Tom's feedback of 2026-10-03).
+Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03).
 
 Scope: the Delivery's recommendation (setup output to log files, the constant and the seek dropped, the other unsourced error-output cuts removed), plus the lead's additions: `setup_timeout_s` 1200, `_service_run`'s `timeout=120`, and `suite_timeout_s` each sourced or removed; Jev's `max_input_tokens` 30k replaced by the documented 32,000 (state and longest question) and 64,000 (whole request), no margin, estimate factors cited or replaced by Jev's own refusal.
 

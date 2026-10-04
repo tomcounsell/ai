@@ -125,6 +125,12 @@ class Unknown(RuntimeError):
     flight with no outcome, for `reconcile`."""
 
 
+class Failed(RuntimeError):
+    """A performer knows the effect did not happen (the target refused it,
+    or the attempt ended where the target could not have taken it). The
+    outcome is `failed` at once; no `lookup` is asked."""
+
+
 class Refused(RuntimeError):
     """A release the performer will not take (`refuse`), checked before the
     intent, so nothing is written and the approval stays unused."""
@@ -627,13 +633,16 @@ async def dangling(conn, action_types: list[str] | tuple[str, ...]) -> list[str]
 async def _perform(conn, performers, task_id, effect_id, action, described) -> Outcome:
     """Run the performer after its intent committed, then write the
     outcome. `Unknown`, from `perform` or from the `lookup` asked after a
-    failed perform, writes nothing: the intent stays in flight."""
+    failed perform, writes nothing: the intent stays in flight. `Failed`
+    is `failed` with no lookup; any other exception asks `lookup`."""
     performer = performers.get(action.action_type)
     key = described["idempotency_key"]
     try:
         result, kind, error = await performer.perform(action, key), "done", None
     except Unknown as exc:
         return Outcome(effect_id, "unknown", error=repr(exc))
+    except Failed as exc:
+        result, kind, error = {}, "failed", repr(exc)
     except Exception as exc:  # noqa: BLE001  the target said no, or its state is in doubt
         try:
             found = await performer.lookup(action, key)
