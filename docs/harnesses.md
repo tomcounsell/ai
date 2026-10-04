@@ -428,7 +428,12 @@ must not reach. It runs as Tom's user.
   turn's `PATH`, then the trusted git's directory, so `git` and `python3` are not `/usr/bin`'s shims,
   which cache in the user temp directory; for the working session, its task's
   `home/` and bare origin. **Stat only:** the allowed directories'
-  ancestors (not listable), so real paths resolve.
+  ancestors (not listable), so real paths resolve. A fresh session's profile
+  also lets it read the metadata, never the content, of the output files the
+  kernel opens for its steps beside the check directory
+  (`<check directory>.<step>.out`, as written and resolved). Those files are
+  the step's stdout and stderr, and pytest takes a descriptor it cannot
+  `fstat` for closed, so without that read it loses all its output.
 - **Denied entirely:** the kernel's own paths, each named by its setting: the
   kernel key directory (`pg_passfile`'s), the machine cluster's data directory
   (`pg_data_dir`), and the backup disk (`backup_dir`).
