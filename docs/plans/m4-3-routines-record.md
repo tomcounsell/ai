@@ -174,3 +174,11 @@ Review R1 and R2 and notes N1, N2, N4, N5, N6 (review-4-3).
 - **Decided by default:** a judgement call inside a check (breadth,
   governance) is not preempted; a foreground task waits for it.
 - `tests/emulator/replay.py`'s usage no longer lists `--replay`.
+
+### Decided by default, patch round 2
+
+- **Instance grants only.** A grant that a merged sweep listed is removed for
+  good (option (a)); keeping one means issuing a new grant.
+- **A kept guard returns every 90 days.** A seeded guard a merged sweep kept
+  is listed again 90 days later. That is the governance paragraph's expiry
+  working: a guard is reviewed again at each expiry.
