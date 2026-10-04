@@ -221,7 +221,10 @@ def declared_performers(workspace: str | None = None) -> list[Declared]: ...
 ```
 
 `refuse` has 1.4d's shape, `async (conn, action)`: the type's `check`,
-then the files sized in the task's `workspace`. Each file's path must
+then the files sized in the task's `workspace`. `files` absent or null is
+no files; any other value that is not a list of `{path, sha256}` objects
+with string members is refused with "files must be a list of {path,
+sha256} objects". Each file's path must
 name a regular file with one link inside the workspace, reached through
 no link (1.4s's `open_plain_file`); its size is the opened file's
 `fstat`, and the kernel never reads it. A file that is missing, a link,
