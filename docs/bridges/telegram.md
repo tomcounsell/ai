@@ -117,8 +117,8 @@ the release checks. The bridge listens on a Postgres notification channel
 yields what is due and reconciles its own dangling intents. `Outbox.perform`
 calls `broker.release` in the bridge's process: it reads the `task.stopped`
 fence, binds the unused approval, writes the intent, calls the performer,
-and writes the outcome. A refused release writes `effect.refused` once and
-is not yielded again. The bridge calls nothing the outbox did not yield.
+and writes the outcome. A refused release writes `effect.refused` once, with a notice
+to Tom, and is not yielded again. The bridge calls nothing the outbox did not yield.
 
 ### Operator notices
 

@@ -134,7 +134,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/targets.py` | `merge_target.granted` | on the `merge_targets` stream: url, branch, Tom's note, provenance (`by` always tom). A merge to a remote lands only on a pair whose latest row is this | Bounded authority |
 | `core/targets.py` | `merge_target.revoked` | url, branch, note, provenance (`by` anyone) | Bounded authority |
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
-| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
+| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason; `at: release` when a release Tom asked for was refused, with an `effect_refused` notice | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id`, and the action: `action_type`, target, payload, `payload_sha256`, `effect_class`. Older rows hold the first three only | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error | Legibility |
