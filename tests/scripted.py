@@ -478,7 +478,7 @@ def toy_repo(tmp_path: Path) -> Path:
 
 
 async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", services=(),
-                      files: dict[str, str] | None = None, **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
+                      files: dict[str, str] | None = None, brief_kw: dict | None = None, **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
     """A task on a workspace the kernel provisioned from a toy repository,
     under `tmp_path/work`, judged by the real judge runner. `files` are
     committed to the toy repository first, so the base holds them."""
@@ -506,7 +506,7 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
     made = kws.provision(task_id, spec, ports, work=tmp_path / "work")
     b = tasks.Brief(
         id=task_id, instruction="Write Tom a greeting.", max_effect_class="act",
-        **made.brief_fields(),
+        **made.brief_fields(), **(brief_kw or {}),
     )  # fmt: skip
     async with await db.connect(dsn) as conn:
         await tasks.start(conn, b)

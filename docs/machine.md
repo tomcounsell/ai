@@ -145,13 +145,23 @@ task's own Postgres and Redis and starts fresh ones on the same ports for
 itself, so a check adds no service to the memory budget; its copy of the
 package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
 
-The emulator's replay driver holds a lock-file slot per run; a kernel-held
-turn slot is the session advisory lock `turn-slot:<machine>`
-(`core/slot.py`): every harness turn holds it, so a second kernel or a
-`python -m core run` beside `serve` waits for it. It is reentrant within
-the task that holds it. The test, review, and docs checks hold it for their
+The turn slot is the session advisory lock `turn-slot:<machine>`
+(`core/slot.py`): every harness turn holds it, replay turns included, so a
+second kernel or a `python -m core run` beside `serve` waits for it. It is
+reentrant within the task that holds it. The test, review, and docs checks hold it for their
 whole run, and the turn a review or docs check runs takes it again as a
 no-op.
+
+**Tom's work first.** Work under a task or ancestor whose Brief has
+`routine` or `replay` is background; the rest is foreground. A foreground
+hold takes the shared lock `turn-slot-fg:<machine>` and sends
+`valor_preempt`. A background turn or check hears it, or finds the lock
+held, and ends: the gateway grant is revoked, the process group is killed,
+the turn ends with outcome `preempted`, and no verdict is written. The
+task is ready again and runs after Tom's work. The kernel starts a
+foreground step beside a background one and a background step only when no
+foreground step is ready. A replay run by hand is background and sends no
+notice ([routines.md](routines.md)).
 
 **What runs beside the turn.** Bridges keep receiving and delivering
 released messages while a turn runs; an incoming request becomes a queued
@@ -162,7 +172,7 @@ turn holds the slot.
 
 **What the baseline says about concurrency.** The baseline series
 (rebuild-baseline.md) ran its 13 replay runs on a 64 GB machine, up to
-three at once (three lock-file slots, `VALOR_DEMO_SLOTS`), each run with one
+three at once, each run with one
 Valor turn at a time metered through the kernel's gateway beside its
 stand-in and judge calls, and met no rate limit. That bounds the API side: at this
 account's limits, the Air will not be throttled by running one turn at a
@@ -239,9 +249,10 @@ scheduler, supervisor, or watchdog on the machine.
   age or memory; stop and recovery are the kernel's (constraint "reliable
   stop, recovery, and correction").
 - **LaunchAgents with `StartCalendarInterval`**: routines. Each firing
-  starts a task through the kernel (`python -m core start`), so a
-  routine's turn takes the turn slot and its spend is metered like any
-  other. A schedule is not a standing approval; see
+  runs `python -m core routine NAME`, which starts or continues a run that
+  is a child of the routine's objective, so a routine's turn takes the turn
+  slot and its spend is metered like any other. `routine NAME --plist`
+  prints the plist for this Mac. A schedule is not a standing approval; see
   [routines.md](routines.md).
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the

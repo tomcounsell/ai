@@ -190,12 +190,18 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
             try:
                 finished = asyncio.create_task(proc.wait())
                 stopped = asyncio.create_task(_stop_heard(listener, task_id))
-                done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
-                if stopped in done:
+                moved = slot.preempting()
+                preempted = asyncio.create_task(moved.wait()) if moved is not None else None
+                waits = {finished, stopped} | ({preempted} if preempted else set())
+                done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                if preempted is not None:
+                    preempted.cancel()
+                if stopped in done or preempted in done:
                     gateway.revoke(task_id)
                     _kill_group(proc.pid)
                     await finished
-                    outcome = "stopped"
+                    outcome = "stopped" if stopped in done else "preempted"
+                    stopped.cancel()
                 else:
                     stopped.cancel()
                     gateway.retire(task_id)
@@ -215,7 +221,7 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
         "turn_id": turn_id,
         "outcome": outcome,
         "returncode": proc.returncode,
-        "result": command.parse(out_path.read_bytes()) if outcome != "stopped" else {},
+        "result": command.parse(out_path.read_bytes()) if outcome not in ("stopped", "preempted") else {},
         "stdout": str(out_path),
         "stderr": str(err_path),
     }

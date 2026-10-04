@@ -4,7 +4,7 @@ stand-in accepts (or its feedback rounds are spent), stops, or is handed
 to Tom. Writes the record to $VALOR_DEMO/results/<run>.json.
 
     .venv/bin/python -m tests.emulator.replay ITEM.json --arm bare|clarify|routed \
-        [--run NAME] [--judge]
+        [--run NAME] [--judge] [--parent TASK] [--replay]
 
 The arm is what the kernel's judge decides. `routed` uses the real
 judgement legs. `bare` and `clarify` force it without any switch in the
@@ -63,8 +63,10 @@ free, then steps again. `NO RUNNER` (a check stage with no runner),
 `FAILED`, `LOCK LOST` and `LEGACY`, and any other answer, exit the driver with the outcome
 unset and the answer recorded as the reason; the next invocation resumes
 the same task. A run whose result has an outcome is refused unless `--rebuild` is
-given. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine
-slots ($VALOR_DEMO/claude-turn.lock.N) for its whole invocation.
+given. The task is a replay (`Brief.replay`), so the kernel runs its turns as
+background work: a foreground task's step takes the turn slot first
+(docs/machine.md). With `--parent TASK` the task is a child of that
+task, as a routine's sweep starts it; `--name` is `--run`.
 
 Spend: the item task's metered spending through the kernel's gateway
 (`kernel_spend_usd`), and the stand-in's and judge's calls, metered through
@@ -89,7 +91,6 @@ from tests.emulator.common import (
     DEMO,
     Meter,
     core,
-    machine_lock,
     mirror_diff,
     now,
     review_rev,
@@ -278,70 +279,71 @@ def _replay(item: dict, arm: str, args) -> dict:
     if result is None or args.rebuild:
         result = None
 
-    with machine_lock(f"replay {run_name}"):
-        started = time.monotonic()
-        ws = replay_workspace.build(
-            item["repo"],
-            item["base"],
-            run_name,
-            item["services"],
-            max_output_tokens=args.max_output_tokens,
-            rebuild=args.rebuild,
-            **item.get("project", {}),
+    started = time.monotonic()
+    ws = replay_workspace.build(
+        item["repo"],
+        item["base"],
+        run_name,
+        item["services"],
+        max_output_tokens=args.max_output_tokens,
+        rebuild=args.rebuild,
+        **item.get("project", {}),
+    )
+    if result is not None and result.get("task_id"):
+        ws = replay_workspace.attach(
+            {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
         )
-        if result is not None and result.get("task_id"):
-            ws = replay_workspace.attach(
-                {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
-            )
-        if result is None:
-            result = {
-                "run": run_name,
-                "item": item,
-                "arm": arm,
-                "model": args.model,
-                "stand_in_model": args.stand_in_model,
-                "max_feedback": args.max_feedback,
-                "workspace": ws,
-                "result_file": str(result_file),
-                "started_at": now(),
-                "wall_seconds": 0.0,
-                "outcome": None,
-                "log": [],
-            }
-            result["task_id"] = core(
-                "start",
-                item["request"],
-                "--ceiling",
-                "act",
-                "--project",
-                ws["spec"],
-                "--base",
-                ws["base"],
-                "--model",
-                args.model,
-            )
-            ws = replay_workspace.attach(
-                {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
-            )
-            result["workspace"] = ws
-            _save(result)
-        if not result.get("emulator_task"):
-            result["emulator_task"] = start_emulator_task(run_name, result["task_id"])
-            _save(result)
-        result.pop("paused", None)
-        task_id = result["task_id"]
-        print(f"{run_name}: task {task_id}, emulator task {result['emulator_task']}", file=sys.stderr)
-
-        with Meter(result["emulator_task"]) as meter:
-            while result["outcome"] is None and not result.get("paused"):
-                step(result, item, ws, args, meter)
-                result["wall_seconds"] = round(result["wall_seconds"] + time.monotonic() - started, 1)
-                started = time.monotonic()
-                _save(result)
-            if result["outcome"] is not None:
-                result["ended_at"] = now()
-            summarize(result, meter)
+    if result is None:
+        result = {
+            "run": run_name,
+            "item": item,
+            "arm": arm,
+            "model": args.model,
+            "stand_in_model": args.stand_in_model,
+            "max_feedback": args.max_feedback,
+            "workspace": ws,
+            "result_file": str(result_file),
+            "started_at": now(),
+            "wall_seconds": 0.0,
+            "outcome": None,
+            "log": [],
+        }
+        result["task_id"] = core(
+            "start",
+            item["request"],
+            "--ceiling",
+            "act",
+            "--project",
+            ws["spec"],
+            "--base",
+            ws["base"],
+            "--model",
+            args.model,
+            "--replay",
+            *(["--parent", args.parent] if args.parent else []),
+        )
+        ws = replay_workspace.attach(
+            {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
+        )
+        result["workspace"] = ws
         _save(result)
+    if not result.get("emulator_task"):
+        result["emulator_task"] = start_emulator_task(run_name, result["task_id"])
+        _save(result)
+    result.pop("paused", None)
+    task_id = result["task_id"]
+    print(f"{run_name}: task {task_id}, emulator task {result['emulator_task']}", file=sys.stderr)
+
+    with Meter(result["emulator_task"]) as meter:
+        while result["outcome"] is None and not result.get("paused"):
+            step(result, item, ws, args, meter)
+            result["wall_seconds"] = round(result["wall_seconds"] + time.monotonic() - started, 1)
+            started = time.monotonic()
+            _save(result)
+        if result["outcome"] is not None:
+            result["ended_at"] = now()
+        summarize(result, meter)
+    _save(result)
     if result.get("paused"):
         print(f"{run_name}: paused, outcome unset: {result['paused']}", file=sys.stderr)
     return result
@@ -409,7 +411,8 @@ def main() -> None:
     )
     parser.add_argument("item")
     parser.add_argument("--arm", required=True, choices=["bare", "clarify", "routed"])
-    parser.add_argument("--run", help="the run's name; default <item>-<arm>")
+    parser.add_argument("--run", "--name", dest="run", help="the run's name; default <item>-<arm>")
+    parser.add_argument("--parent", help="start the task as a child of this task")
     parser.add_argument("--model", default="claude-opus-5-5", help="the working turn's model")
     parser.add_argument("--stand-in-model", default=STAND_IN_MODEL)
     parser.add_argument("--max-feedback", type=int, default=2)

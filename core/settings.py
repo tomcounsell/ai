@@ -327,6 +327,18 @@ class Settings:
     # -- the replay and demonstration workspaces ------------------------------
     demo_dir: str = field(default_factory=lambda: _env("VALOR_DEMO", str(Path.home() / "src" / "valor-demo")))
 
+    # -- routines: the directories of toml files the kernel's own checkout
+    # holds (routines/), the rolling period their spending is reported over,
+    # and the loopback port of the status page (outside the dev, Postgres,
+    # and Redis spans a turn's sandbox reaches) ------------------------------
+    routines_dir: str = field(
+        default_factory=lambda: _env(
+            "VALOR_ROUTINES", str(Path(__file__).resolve().parent.parent / "routines")
+        )
+    )
+    routine_period_days: int = field(default_factory=lambda: int(_env("VALOR_ROUTINE_PERIOD_DAYS", "30")))
+    ui_port: int = field(default_factory=lambda: int(_env("VALOR_UI_PORT", "8790")))
+
     # -- kernel workspaces: one directory per task, outside ~/src (which the
     # turn sandbox denies); project specs; per-task service ports ----------
     work_dir: str = field(default_factory=lambda: _env("VALOR_WORK", str(Path.home() / "valor-tasks")))

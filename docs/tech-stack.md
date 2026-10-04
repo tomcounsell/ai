@@ -64,9 +64,9 @@ outside the model is AI Control [4].
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`) |
-| Scheduling | launchd: the kernel's LaunchAgent, the email bridge's, and the backup job; routines | launchd in use; routines chosen, not built |
+| Scheduling | launchd: the kernel's LaunchAgent, the email bridge's, and the backup job; routines | in use |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials) in the kernel key directory, durable copy of the keys in the vault | in use |
-| Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
+| Dashboard | read-only views over `core/` read models | in use: `ui/`, aiohttp, loopback only |
 | Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
 
@@ -497,14 +497,15 @@ is [bridges/telegram.md](bridges/telegram.md) and
 [bridges/email.md](bridges/email.md).
 
 **Dashboard.** Read-only views over `core/` read models: tasks, spend, the
-ledger, pending approvals, the attention log (`ui/README.md`). Status:
-**chosen, not built**; the web framework is **open**.
+ledger, pending approvals, the attention log, and each routine's last run
+and period spending (`ui/README.md`). It is aiohttp, serves GET only on
+`127.0.0.1:8790`. Status: **in use**.
 
 ## 10. Scheduling, secrets, telemetry
 
-**Scheduling.** launchd, one plist per routine, each routine an
-objective and never a bare script ([routines.md](routines.md)). Status:
-**chosen, not built**. Serves "Bounded authority, metered spending": scheduled work
+**Scheduling.** launchd, one plist per routine printed by
+`python -m core routine NAME --plist`, each routine an objective and never
+a bare script ([routines.md](routines.md)). Status: **in use**. Serves "Bounded authority, metered spending": scheduled work
 is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which

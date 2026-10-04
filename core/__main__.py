@@ -24,6 +24,13 @@ start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] ...
                                start it; the merge lands on the spec's
                                merge_url when Tom granted the pair (never the
                                remote's default branch), else on its own origin
+start ... --replay             background work: a foreground task's step takes
+                               the turn slot first
+routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
+                               first run registers its objective; stops at once
+                               when Tom stopped it; --restart begins a fresh one
+routine NAME --plist           print the launchd job for it
+routines                       every routine, its last run, and its spending
 workspace show TASK_ID         where the kernel provisioned the task
 workspace remove TASK_ID       delete a stopped or merged task's workspace and
                                free its ports
@@ -126,6 +133,7 @@ from core import (
     ledger,
     machine,
     router,
+    routines,
     session,
     targets,
     tasks,
@@ -342,13 +350,23 @@ START_REFUSED = (ValueError, tasks.UnknownParent, tasks.TaskStopped, tasks.Calib
 
 
 async def _start_task(conn, args, **fields) -> str:
-    """Start a root, or with `--parent` a child (`tasks.start_child`)."""
+    """Start a root, or with `--parent` a child (`tasks.start_child`).
+    `--replay` marks it background work; `marker` is laid into `task.started`."""
+    marker = fields.pop("marker", None)
+    if getattr(args, "replay", False):
+        fields["replay"] = True
     if args.parent:
         return await tasks.start_child(
-            conn, args.parent, ceiling=args.ceiling, by=args.by, role_played=args.role_played, **fields
+            conn,
+            args.parent,
+            ceiling=args.ceiling,
+            marker=marker,
+            by=args.by,
+            role_played=args.role_played,
+            **fields,
         )
     brief = tasks.Brief(max_effect_class=args.ceiling or "propose", **fields)
-    return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
+    return await tasks.start(conn, brief, marker=marker, by=args.by, role_played=args.role_played)
 
 
 async def _start_project(conn, args) -> str:
@@ -405,6 +423,7 @@ async def _start_project(conn, args) -> str:
                 model=resolve_model(args.model),
                 harness_name=args.harness or resolve_seat(args.model)[0],
                 **made.brief_fields(),
+                **getattr(args, "extra", {}),
             )
         except BaseException as exc:
             await git.threaded(workspace.remove, task_id)
@@ -413,6 +432,37 @@ async def _start_project(conn, args) -> str:
             raise
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+
+
+async def _routine_project(
+    conn, *, parent, instruction, routine, ceiling, model, project, branch, marker
+) -> str:
+    """A routine run's task on a provisioned workspace: the same start as
+    `start --project`, a child of the routine's objective."""
+    args = argparse.Namespace(
+        parent=parent,
+        ceiling=ceiling,
+        by="routine",
+        role_played=False,
+        project=project,
+        branch=branch,
+        base=None,
+        workspace=None,
+        harness_config=None,
+        target_branch=None,
+        instruction=instruction,
+        model=model,
+        harness=None,
+        replay=False,
+        extra={"routine": routine, "marker": marker},
+    )
+    return await _start_project(conn, args)
+
+
+def _routine_runners() -> dict:
+    from routines.emulator import runner as emulator
+
+    return {routines.EXPIRY_RUNNER: routines.expiry_runner, "emulator": emulator.run}
 
 
 async def _workspace(conn, args) -> str:
@@ -545,8 +595,27 @@ async def _run(args) -> None:
             raise SystemExit(f"calibrate refused: {exc}") from None
         print(json.dumps(record, indent=2))
         return
+    if args.command == "routine":
+        async with await db.connect() as conn:
+            try:
+                print(
+                    await routines.run(
+                        conn,
+                        args.name,
+                        _routine_runners(),
+                        restart=args.restart,
+                        start_project=_routine_project,
+                        dsn=settings.dsn(),
+                    )
+                )
+            except routines.Refused as exc:
+                raise SystemExit(f"routine refused: {exc}") from None
+        return
     async with await db.connect() as conn:
-        if args.command == "start" and args.project:
+        if args.command == "routines":
+            for rep in await routines.reports(conn):
+                print(routines.listing(rep))
+        elif args.command == "start" and args.project:
             print(await _start_project(conn, args))
         elif args.command == "start":
             harness = json.loads(Path(args.harness_config).read_text()) if args.harness_config else {}
@@ -760,6 +829,11 @@ def _sync(args) -> bool:
             f"{manifest['documents']['rows']} documents, {manifest['dump_bytes']} bytes to {path}; "
             f"pruned {len(pruned)} files"
         )
+    elif args.command == "routine" and args.plist:
+        try:
+            print(routines.plist(routines.load(args.name)).decode(), end="")
+        except routines.Refused as exc:
+            raise SystemExit(f"routine refused: {exc}") from None
     elif args.command == "serve" and args.plist:
         from core import serve
 
@@ -824,6 +898,9 @@ def main() -> None:
     )
     start.add_argument("--base", help="with --project: the base commit (default: the branch's head)")
     start.add_argument("--branch", help="with --project: the branch to start from and merge onto")
+    start.add_argument(
+        "--replay", action="store_true", help="background work: a foreground task's step goes first"
+    )
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
@@ -896,6 +973,11 @@ def main() -> None:
     target_cmd.add_parser("list")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
+    routine = sub.add_parser("routine")
+    routine.add_argument("name")
+    routine.add_argument("--plist", action="store_true", help="print the launchd job and exit")
+    routine.add_argument("--restart", action="store_true", help="begin a fresh objective after a stop")
+    sub.add_parser("routines")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
     restore = sub.add_parser("restore")

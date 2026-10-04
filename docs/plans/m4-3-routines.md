@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-3-routines
 type: plan
-status: planned
+status: built
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -593,6 +593,44 @@ Each is reversible; Tom can overturn any.
   task. No routine sets a timeout, a run count, or a spending figure. The
   numbers are the 30-day period (the rebuild plan), the 90 days (the
   governance paragraph, Mission item 5), the schedules, and the port.
+
+## Decided by default at build
+
+Where the code at e70a91d92 differs from what the plan assumed, the build
+follows the code. Each is reversible.
+
+- **A preempted step returns `{"status": "moved", "preempted": True}`.** The
+  kernel pops the task from `seen` so it runs again; `router.run` loops on
+  "moved" and the kernel uses `router.step`.
+- **`schedule` yields `(background, latest, task_id)`** and the kernel starts
+  a foreground step beside a background one, and a background step only when
+  no foreground step is ready.
+- **A preempted turn** writes `turn.ended` with outcome `preempted` and result
+  `{}`. `machine.fold` already counts a turn only when it is done, and
+  `LAST_WORKING_ENDED` excludes preempted, so no fold changed.
+- **`--name` is an alias of `--run` in the replay driver**, and `--parent`
+  starts a replay under a routine's run. The driver's lock-file slot is
+  gone; `machine_lock` stays in `tests/emulator/common.py` for the judge.
+- **The emulator's open-run rule.** A run with no report is continued; the
+  session lock `run:<run>` makes a second process say `already running`.
+- **The expiry toml names the `valor` project and the
+  rebuild branch**, the project and branch this checkout builds.
+- **The status page answers 404 for an unknown task**, by reading the Brief
+  before the status.
+- **`core/__main__.py` has `_routine_runners()`** where the plan named a
+  `ROUTINE_RUNNERS` table.
+- **`tests/scripted.provisioned` takes `brief_kw`** to put `routine` or
+  `replay` in a test task's Brief.
+- **The emulator sweep runs Sunday 01:00**, as planned.
+
+## Build record
+
+Built on 4.1 (e70a91d92) over the plan commit ca0cfb898. New tests:
+`test_routines.py`, `test_slot_priority.py`, `test_expiry.py`,
+`test_ui.py`, and `test_live_routine.py` (gated on `VALOR_LIVE=1`, not run).
+Docs rewritten to the built behavior: `routines.md`, `machine.md`,
+`emulator.md`, `tech-stack.md`, and the `routines`, `ui` and `core` READMEs.
+Suite and lint results are in the builder's report.
 
 ## Questions for Tom
 
