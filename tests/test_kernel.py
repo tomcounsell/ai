@@ -187,6 +187,7 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
 # -- stop is immediate and lossless ---------------------------------------------
 
 
+@pytest.mark.macos
 def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_ledger(dsn, tmp_path):
     async def go():
         task = await new_task(dsn)
@@ -326,7 +327,15 @@ def _lines(path) -> int:
 def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(dsn):
     async def go():
         task = await new_task(dsn)
-        gateway = Gateway(dsn, upstream="http://10.255.255.1")  # a route that never answers
+        held = []
+
+        async def never_answers(reader, writer):
+            held.append(writer)
+            await reader.read()
+
+        silent = await asyncio.start_server(never_answers, "127.0.0.1", 0)
+        port = silent.sockets[0].getsockname()[1]
+        gateway = Gateway(dsn, upstream=f"http://127.0.0.1:{port}")  # accepts and never answers
         await gateway.start()
         base = gateway.issue(task, "turn-1")
         body = {
@@ -353,6 +362,9 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
         elapsed = asyncio.get_running_loop().time() - started
         await pending
         await gateway.close()
+        for w in held:
+            w.close()
+        silent.close()
         async with await db.connect(dsn) as conn:
             charged = [r for r in await ledger.read(conn, task) if r["type"] == "gateway.charged"]
             return elapsed, await tasks.status(conn, task), charged

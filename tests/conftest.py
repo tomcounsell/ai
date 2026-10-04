@@ -11,12 +11,19 @@ The effect lock files (`settings.performing_dir`) go to a temporary
 directory of the session's own, set in the environment before the settings
 are built, so the suite and every process it starts write nothing under the
 kernel key directory.
+
+A test marked `macos` needs macOS itself (`sandbox-exec`, `sandbox_check`,
+`/bin/ps -E`, the Command Line Tools' git, `security`) and is skipped off
+Darwin, so the verification VM runs the rest. A test marked `container`
+needs Apple's `container` and is skipped where it is not installed.
 """
 
 import atexit
 import os
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -25,8 +32,23 @@ atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
 
-from core import db  # settings read VALOR_WORK on import
+from core import binaries, db  # settings read VALOR_WORK on import
 from core.settings import settings
+
+# The skip reason of a `macos` test; `core.container` counts the skips that
+# carry it.
+MACOS_ONLY = "macOS only"
+
+
+def pytest_collection_modifyitems(config, items):
+    darwin = sys.platform == "darwin"
+    runtime = Path(binaries.CONTAINER).exists()
+    for item in items:
+        if not darwin and item.get_closest_marker("macos"):
+            item.add_marker(pytest.mark.skip(reason=f"{MACOS_ONLY}: needs macOS itself"))
+        if not runtime and item.get_closest_marker("container"):
+            item.add_marker(pytest.mark.skip(reason=f"needs Apple's container at {binaries.CONTAINER}"))
+
 
 TEST_DB = settings.test_database
 

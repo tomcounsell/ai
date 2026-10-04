@@ -420,6 +420,8 @@ def profile(
     and may bind `bind_ports` only; a turn's profile is marked by
     `valor.turn.<VALOR_TURN>`, may bind the dev ports, and reaches the
     gateway (`GATEWAY_PORT`) and `ports` on loopback."""
+    from core import container  # imports this module
+
     denied = [home / d for d in HOME_DENIED]
     if work is not None:
         denied.append(work)
@@ -489,6 +491,16 @@ def profile(
         '    (global-name "com.apple.coreservices.appleevents")',
         r'    (global-name-regex #"^com\.apple\.lsd\."))',
         '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
+        # Apple's `container`: its CLI and helpers, its mach services, its
+        # data directory (which holds its launch-agent plists), and the
+        # kernel's machine lock and image records.
+        "(deny process-exec",
+        *_paths("literal", [binaries.CONTAINER, binaries.CONTAINER_HELPERS[0]]),
+        f'    (subpath "{binaries.CONTAINER_LIBEXEC}"))',
+        f'(deny mach-lookup (global-name-prefix "{container.MACH_PREFIX}"))',
+        "(deny file-read* file-write*",
+        *_paths("subpath", [home / container.DATA_DIR, home / container.STATE_DIR]),
+        ")",
     ]
     if service:
         lines += [

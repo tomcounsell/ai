@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; 1.4c in two parts: part one, the review runner (m1-4c-review.md), built, merged, and registered, while docs stays unregistered until governance passes its entry check, with `verdict` kept for docs until then; part two, the container verifier (m1-4c-verifier.md), planned
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; 1.4c in two parts: part one, the review runner (m1-4c-review.md), built, merged, and registered, while docs stays unregistered until governance passes its entry check, with `verdict` kept for docs until then; part two, the container verifier (m1-4c-verifier.md), built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -89,9 +89,8 @@ hands a turn a credential. So every task is `critique_rounds: 2`,
   that are root's alone, file and every directory above it.
   `/usr/local/bin` on this Mac is `root:wheel 755`. Homebrew's prefix is
   Tom's.
-- Apple's `container` CLI is not installed. Rosetta is not installed
-  (`oahd` is not running; `/Library/Apple/usr/libexec/oah` holds only
-  `RosettaLinux`).
+- Apple's `container` 1.5.0 is installed from its signed package, and
+  Rosetta is installed (`arch -x86_64 /usr/bin/true` succeeds).
 - `tomcounsell/ai` is public on GitHub; its default branch is `main`, the
   live old system. A clone or fetch needs no credential; a push does.
 - The rebuild repository's own suite is macOS-bound in places: it runs
@@ -562,8 +561,7 @@ outline.
 - Every turn's own `TMPDIR` and Claude Code config directory.
 - A test that passed at base and is absent or skipped at head fails unless
   the diff deletes its definition.
-- Container: 2 GB and 4 CPUs per VM by default, no network at run time,
-  three dependency images kept per project.
+- Container: 4 GB and 4 CPUs per VM by default, no network at run time.
 - Transcripts: deltas per turn, raw bytes as base64, no size cap.
 - The token: Valor's classic `repo` token (Tom's answer to Questions, 3),
   restricted by the merge-target list and the default-branch refusal.

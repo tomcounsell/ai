@@ -90,6 +90,7 @@ def _turn(dsn, build) -> tuple[dict, list[dict]]:
     return asyncio.run(go())
 
 
+@pytest.mark.macos
 def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
     pidfile = tmp_path / "daemon.pid"
     bystander = subprocess.Popen(["sleep", "30"])

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from core import checks, db, fresh, git, guards, machine, router, tasks, verdicts
+from core import checks, container, db, fresh, git, guards, machine, router, tasks, verdicts
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -164,19 +164,6 @@ def test_effects_md_quotes_every_value():
     assert fresh._effects([]) == "No effect was held or refused."
 
 
-def test_a_vm_or_kernel_verify_is_not_reused_for_a_host_run():
-    def ran(where, cause=None):
-        return {
-            "type": fresh.VERIFY,
-            "payload": {"candidate": "c", "digest": "d", "where": where, "cause": cause},
-        }
-
-    assert fresh.reusable_verify([ran("vm")], "c", "d", "host") is None
-    assert fresh.reusable_verify([ran("host", "kernel")], "c", "d", "host") is None
-    assert fresh.reusable_verify([ran("host", "commit")], "c", "d", "host") is not None
-    assert fresh.reusable_verify([ran("host")], "c", "other", "host") is None
-
-
 # -- manual rows ----------------------------------------------------------------------------------
 
 
@@ -222,10 +209,11 @@ def roles(got) -> list[str]:
 async def at_review(dsn, tmp_path, *, writes=None, test=True, **spec):
     """A provisioned task whose candidate adds `writes` (default a gate and a
     plan rewrite), with the test verdict recorded by hand unless `test` is
-    false, left waiting on review."""
+    false, left waiting on review. The suite runs on the host and in a
+    verification VM alike."""
     task, b, ws = await test_checks.to_candidate(
         dsn, tmp_path, writes=writes or {"hooks/gate.py": GATE, "docs/plan.md": "rewritten after critique\n"},
-        **spec,
+        suite=spec.pop("suite", test_checks.VM_SUITE), **spec,
     )  # fmt: skip
     if test:
         out = await drive(dsn, task, scripted.fresh_runners(ws))
@@ -238,9 +226,11 @@ def steer(ws: Path, **cfg) -> None:
     scripted.steer(ws, critique="sound", build="reasons", **cfg)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_review_through_the_router_then_a_grant_reruns_nothing(dsn, tmp_path):
-    """The whole path: governance, the kernel's own head run and lint, the
-    set-up checkout, the inputs, the profile's denials, the computed verdict,
+    """The whole path: governance, the kernel's base and head runs and lint
+    in VMs, the set-up checkout, the inputs, the profile's denials, the computed verdict,
     and the rerun after Tom's grant."""
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
     tests_b = f"def test_kept():\n    print({NARRATION!r})\n    assert False, {NARRATION!r}\n"
@@ -284,11 +274,11 @@ def test_a_review_through_the_router_then_a_grant_reruns_nothing(dsn, tmp_path):
 
     ws, first, again, got, after, inputs = run(go())
     assert first["status"] == "no runner" and first["missing"] == ["docs"], first
-    # The head run is the review's own; the base is shared with the test branch.
-    assert sorted(roles(got)) == ["base", "head", "review"]
+    # The host runs are the test branch's; the review's runs are in VMs.
+    assert sorted(roles(got)) == ["base", "head"]
     (verify,) = [r for r in got if r["type"] == fresh.VERIFY]
     v = verify["payload"]
-    assert v["where"] == "host" and v["failures"] == ["tests.test_b::test_kept"] and v["cause"] is None
+    assert v["where"] == "vm" and v["failures"] == ["tests.test_b::test_kept"] and v["cause"] is None
     assert v["lint"]["exit"] == 1 and "locations" not in v["lint"]  # a plain kind: the exit code only
     (decided,) = reviews(got)
     assert decided["verdict"] == "governance_refused" and decided["reviewer_verdict"] == "pass"
@@ -334,6 +324,8 @@ def test_a_review_through_the_router_then_a_grant_reruns_nothing(dsn, tmp_path):
     assert len(review_turns(rerun)) == 2
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tmp_path):
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
 
@@ -355,6 +347,8 @@ def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tm
     assert f.state is State.PATCH and f.join.row == 3
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can_write(dsn, tmp_path):
     """The candidate's code, run by the reviewer, leaves a process that keeps
     `.valor/verdict.json` saying `pass`; the reviewer's final message says
@@ -396,6 +390,8 @@ def test_the_final_message_is_the_verdict_object(text, verdict):
     assert data == verdict and (why is None) == (verdict is not None)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_governance_runs_first_and_a_judge_outage_starts_no_run_and_no_turn(dsn, tmp_path):
     down = UP.script(default={"status": 503})
 
@@ -413,6 +409,8 @@ def test_governance_runs_first_and_a_judge_outage_starts_no_run_and_no_turn(dsn,
     assert not [r for r in got if r["type"] == fresh.VERIFY]
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_reviewer_naming_paths_outside_the_diff_still_records(dsn, tmp_path):
     async def go():
         task, _b, ws = await at_review(dsn, tmp_path)
@@ -433,6 +431,8 @@ def test_a_reviewer_naming_paths_outside_the_diff_still_records(dsn, tmp_path):
     assert len([f for f in decided["findings"] if f["kind"] == "governance"]) == 2
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewers_database_is_fresh_and_the_tasks_comes_back(dsn, tmp_path):
     psql = str(Path(settings.pg_bin) / "psql")
 
@@ -465,6 +465,8 @@ def test_the_reviewers_database_is_fresh_and_the_tasks_comes_back(dsn, tmp_path)
         kws.stop_services(b.id, lay)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tmp_path):
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
 
@@ -505,10 +507,12 @@ def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tm
 
 
 @pytest.mark.parametrize("where", ["head run", "lint", "setup", "turn"])
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
     hang = {
-        "head run": {"suite": 'case "$PWD" in */test-review-*) sleep 300 & sleep 300;; esac; true'},
-        "lint": {"lint": "sleep 300 & sleep 300"},
+        "head run": {"suite": f"[ -e greeting.txt ] && exec sleep 600; {test_checks.VM_SUITE}"},
+        "lint": {"lint": "[ -e greeting.txt ] && exec sleep 600; true"},
         "setup": {"setup": ['case "$PWD" in */review-*/repo) sleep 300 & sleep 300;; esac; true']},
         "turn": {},
     }[where]
@@ -519,15 +523,17 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
         running = asyncio.create_task(
             drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
         )
-        mark = {"head run": f"test-{task}-review", "lint": f"test-{task}-review-lint",
-                "setup": f"review-{task}-setup-0", "turn": None}[where]  # fmt: skip
+        mark = {"setup": f"review-{task}-setup-0"}.get(where)
+        vm = container.run_name(task, "head")
 
         def started():
+            if where in ("head run", "lint"):
+                return vm in [c["id"] for c in container.containers()]
             if mark:
                 return len(test_checks._marked(mark)) >= 1
             return bool(seen_turn(ws))
 
-        assert await asyncio.to_thread(test_checks._wait, started), f"the {where} never started"
+        assert await asyncio.to_thread(test_checks._wait, started, 900), f"the {where} never started"
         before = test_checks._marked(mark) if mark else []
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, task, reason="test", by="test")
@@ -537,8 +543,10 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
     out, mark, before, got = run(go())
     assert out["status"] == "stopped", out
     assert not reviews(got) and not reviews(got, fresh.REVIEW_COMPARED)
-    if where != "turn":
-        assert not [r for r in got if r["type"] == fresh.VERIFY] or where == "setup"
+    assert not container.running()
+    if where in ("head run", "lint"):
+        assert not [r for r in got if r["type"] == fresh.VERIFY]
+    if where == "setup":
         assert test_checks._wait(lambda: not test_checks._marked(mark), 10), test_checks._marked(mark)
         for pid in before:
             with pytest.raises(ProcessLookupError):
@@ -560,6 +568,8 @@ async def _run_review(dsn, task, ws, alive):
         await gateway.close()
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path):
     """A stop written after the head run and before the setup's LISTEN: the
     setup never starts and nothing is recorded."""
@@ -600,6 +610,8 @@ def _setup_run(dsn, tmp_path, setup):
     return run(go())
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
     """Setup tries to swap the checkout for a link to another directory
     holding a `.valor`: the checkout itself is not the setup's to rename, so
@@ -619,6 +631,8 @@ def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
     assert decided["leg"] == "session" and seen_turn(ws)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path):
     """Setup commits, sets an fsmonitor, a hooks path and an alias, and makes
     nested repositories: every write is refused, so the reviewer's git log
@@ -668,6 +682,8 @@ def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path)
 
 
 @pytest.mark.parametrize("mode", ["500", "000"])
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode):
     """Setup's `chmod` of the checkout is refused, so the kernel writes the
     inputs and the session runs, rather than every rerun failing."""
@@ -682,6 +698,8 @@ def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode):
 
 
 @pytest.mark.parametrize("where", ["setup_left", "write_inputs"])
+@pytest.mark.macos
+@pytest.mark.container
 def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypatch, where):
     """An error the kernel meets in the checkout after setup is the commit's
     own, since every rerun runs the same setup: the kernel's `changes` with
@@ -704,6 +722,8 @@ def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypa
     assert not seen_turn(ws)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
     """Setup runs `psql` with the libpq defaults its environment names
     (`PGPASSFILE` among them) against the review's fresh Postgres."""
@@ -732,6 +752,8 @@ def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
 
 
 @pytest.mark.parametrize("entry", [".valor", ".pi"])
+@pytest.mark.macos
+@pytest.mark.container
 def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(dsn, tmp_path, entry):
     """A setup that writes `.pi/settings.json` (what Pi reads whatever its
     flags) or makes `.valor` in the checkout: the session never starts
@@ -749,6 +771,8 @@ def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(dsn,
     assert f.state is State.CHECKS and Check.REVIEW in f.checks
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_path):
     """The setup's profile writes the checkout and its caches only: what it
     tries to put in the session's Pi and Claude Code directories and its
@@ -768,6 +792,8 @@ def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_p
     assert decided["leg"] == "session" and seen_turn(ws)
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_reviewer_runs(
     dsn, tmp_path, monkeypatch
 ):
@@ -790,6 +816,8 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_re
     assert not seen(ws)  # no reviewer ran
 
 
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(dsn, tmp_path, monkeypatch):
     """The kernel's `changes` on a `.valor` tree still answers governance:
     each ungranted instance is a `governance` finding the patch sees."""
@@ -818,6 +846,8 @@ def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(dsn,
 
 
 @pytest.mark.parametrize("verdict", ["pass", "governance_refused"])
+@pytest.mark.macos
+@pytest.mark.container
 def test_a_kernel_leg_review_is_changes_only(dsn, tmp_path, verdict):
     async def go():
         task, _b, _ws = await at_review(dsn, tmp_path)

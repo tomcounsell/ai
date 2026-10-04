@@ -1,0 +1,59 @@
+# The base image every verification runs in (core/container.py). The kernel
+# builds it from the files in this directory only, never from a candidate,
+# and names it by the digest of these files. Every download is pinned: the
+# Debian base by digest, uv and Node by checksum, PostgreSQL and Redis by
+# package version from signed apt repositories. A C toolchain and libpq's
+# headers are here for the dependencies that build from source. Git's exec
+# path is linked at /usr/libexec/git-core, where `core/binaries.py` looks
+# beside /usr/bin/git.
+FROM debian@sha256:0c8bbb8e987a035fe1d9704eb2e571b7e9a836e1caa46345290674b45b69e417
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git jq pkg-config procps xz-utils \
+      redis-server=5:7.0.15-1~deb12u7 redis-tools=5:7.0.15-1~deb12u7 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/lib/git-core /usr/libexec/git-core
+
+# PostgreSQL 18 from the PostgreSQL Debian repository; its signing key
+# (fingerprint B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8) is a file here.
+COPY pgdg.asc /etc/apt/keyrings/pgdg.asc
+RUN echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-common=293.pgdg12+1 \
+ && echo "create_main_cluster = false" >> /etc/postgresql-common/createcluster.conf \
+ && apt-get install -y --no-install-recommends \
+      postgresql-18=18.6-1.pgdg12+2 postgresql-client-18=18.6-1.pgdg12+2 libpq5=18.6-1.pgdg12+2 libpq-dev=18.6-1.pgdg12+2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv, by checksum.
+RUN curl -fsSL -o /tmp/uv.tgz https://github.com/astral-sh/uv/releases/download/0.12.22/uv-aarch64-unknown-linux-gnu.tar.gz \
+ && echo "6f66a14e8239871fb477f9746c941fedfa77e8fe28a8bc7c07e1dc7f53a66712  /tmp/uv.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 \
+ && rm /tmp/uv.tgz
+
+# Node LTS, by checksum.
+RUN curl -fsSL -o /tmp/node.txz https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz \
+ && echo "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2  /tmp/node.txz" | sha256sum -c - \
+ && tar -xJf /tmp/node.txz -C /usr/local --strip-components=1 --exclude=CHANGELOG.md --exclude=README.md --exclude=LICENSE \
+ && rm /tmp/node.txz
+
+# The unprivileged user every candidate command runs as, its uv state and
+# work directory its own; the Pythons the projects pin, installed by uv.
+RUN useradd --create-home --shell /bin/bash valor \
+ && mkdir /work && chown valor:valor /work
+ENV UV_CACHE_DIR=/home/valor/.cache/uv UV_PYTHON_INSTALL_DIR=/home/valor/.local/share/uv/python \
+    npm_config_cache=/home/valor/.npm UV_LINK_MODE=copy
+RUN su valor -c "uv python install 3.14 3.13 3.12" \
+ && ln -s "$(su valor -c 'uv python find 3.14')" /usr/local/bin/python3
+
+# The kernel's scripts, root's alone: /valor is 0700, so nothing the
+# candidate runs can read the spec or reach the output mount under it.
+COPY run.sh deps.sh /valor/
+RUN chmod 0700 /valor && chmod 0700 /valor/run.sh /valor/deps.sh \
+ && mkdir -p /valor/src /valor/out /var/log/valor && chmod 0755 /var/log/valor
+
+ENTRYPOINT ["/valor/run.sh"]

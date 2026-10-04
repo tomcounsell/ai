@@ -380,13 +380,12 @@ metered through the gateway. The verifier:
   agent's narrative (`done.md`, the transcript), so it judges what happened
   and not what Valor said happened.
 - **Runs deterministic checks first**: the kernel reruns the repository's
-  tests and its linter at base and candidate in fresh sandboxed checkouts
-  on the host, with fresh services, and records `verify.ran` before the
-  verifier reads any prose, so a delivery saying "all tests pass" is
-  judged against the kernel's own record. The verifier's own checkout is
-  set up by the kernel with fresh services, so it reruns any test itself.
-  Running that rerun in a fresh container from a kernel-built image is
-  design (m1-4c-verifier.md).
+  tests and its linter at base and candidate, each in a fresh VM from an
+  image the kernel built from the commit's manifests, with fresh services
+  and no network, and records `verify.ran` before the verifier reads any
+  prose, so a delivery saying "all tests pass" is judged against the
+  kernel's own record. The verifier's own checkout is set up by the kernel
+  on the host with fresh services, so it reruns any test itself.
 - **Is Opus-class, never cheaper** (Tom, 2026-10-01): the builder's own
   Opus model in a fresh blind session, or an Opus-class model from another
   vendor through another harness. A weaker judge underestimates a stronger

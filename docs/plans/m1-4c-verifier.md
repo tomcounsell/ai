@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: planned; revised after critique round 2 (both rounds spent)
+status: built (record in m1-4c-verifier-records.md)
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -158,8 +158,9 @@ in `core/images/base/`, never from a candidate:
 - an unprivileged user `valor`;
 - the entrypoint `/valor/run.sh`.
 
-**Dependency images**, one per project and manifest digest (1.4b's
-environment digest, read in the mirror), `FROM` the base by digest. The
+**Dependency images**, one per project and dependency key: the base
+image's tag, `core/images/deps/Containerfile`, the spec's kind and setup,
+and the manifests as the mirror lists them, `FROM` the base by digest. The
 build context holds only the manifests (`pyproject.toml`, `uv.lock`,
 `package.json`, `package-lock.json`, as the spec's kind has them) and a
 kernel-written `spec.json`. The build runs the spec's own setup commands
@@ -186,6 +187,9 @@ image labelled with this database's `valor.db` and not named by the
 latest `verify.ran` of an open task or by an open task's base manifests
 is deleted; another database's images are its own to prune. Nothing else
 holds the lock, so no build or run can lose its image.
+Each image delete is raced against the stop; a stop while pruning ends the
+run with `stopped` and leaves the stopped image's record, so the next
+prune deletes it.
 
 ### The run
 
@@ -228,9 +232,13 @@ null and a memory kill is read from an exit of 137 with the kernel's OOM
 line in `dmesg`.
 
 The CLI call is an async subprocess in its own session, raced against
-`runs._stop_heard`. No command in the VM has a timeout, as on the host
-(1.4b runs setup and the suite with none); a stop ends the run. On a stop
-or an interrupt:
+`runs._stop_heard`, and so is each short call made before a stop
+(`system start`, `image inspect`, `image delete` when checking or
+pruning, `kill`, `delete`, `builder delete` before and after a build, and
+`system stop` at the end); the removal, builder delete or system stop a
+stop runs is not raced. No command in the VM has a timeout, as
+on the host (1.4b runs setup and the suite with none); a stop ends the
+run. On a stop or an interrupt:
 `container kill`, then `container delete --force`, never a graceful stop
 (machine.md: a graceful stop left the workload running). Every run ends
 in `container delete --force`.
@@ -263,10 +271,14 @@ marker, and `cause`:
   branch reruns.
 - `commit`: the candidate's manifests will not install, setup fails, no
   JUnit file. Goes to the reviewer.
-- `memory`: `oom_kill` above zero, or `peak_mb` reached `memory_mb`. Goes
-  to the reviewer as "the VM ran out of memory at N MB", not as a
-  failure of the candidate, and is shown in the attention log so the
-  default can be raised. It is reused like `commit`, so it never loops.
+- `memory`: the suite did not exit 0, and `oom_kill` is above zero or
+  `peak_mb` reached `memory_mb`; a clean exit at the peak has no cause.
+  Goes to the reviewer as "the VM ran out of memory at N MB", not as a
+  failure of the candidate, and stays on `verify.ran` in the task's
+  ledger. The attention log holds only Tom's acts, so it does not list
+  it; raising `verify_memory_mb` is a machine setting set from the
+  measurement, not a question for Tom. It is reused like `commit`, so it
+  never loops.
 
 `verify.json` gives the reviewer these fields, still with no message or output tail.
 
@@ -327,7 +339,7 @@ them.
 | Another verification holds the machine lock | this one waits for it, and stops waiting on a stop |
 | A dependency build fails on the network | `kernel`; retried |
 | The candidate's manifests will not install | `commit`; the reviewer sees it |
-| The VM runs out of memory | `memory`; the reviewer and the attention log see it |
+| The VM runs out of memory | `memory`; the reviewer sees it on `verify.ran` |
 | A stop during a build or a run | builder or VM killed and deleted, system stopped, `stopped` |
 | A kernel killed mid-verification | the next run of any task under the same database, finding the lock free, kills and deletes that database's labelled VMs and builders, and stops the system when no owner's remain |
 | A forged JUnit file, or a `/out` the suite's user can write | recorded as the candidate's claim, `result_owner` says which |
@@ -507,68 +519,11 @@ Reversible calls made by the build session, not questions for Tom.
 
 None. No identity or credential choice is involved.
 
-## Critique round 1 (of 2): revise
-
-The report covered both parts. The lead split the task: findings 1, 2, 3,
-5, 6, 11, 12, and 13 are handled in m1-4c-review.md; these are handled
-here. The governance question moved to Decided by default (item 9 here,
-item 7 in part one).
-
-4. The candidate controlled its base's environment and the shared
-   builder: the base runs in the base manifests' image, every build uses
-   a fresh builder with no cache, `manifests_differ` goes to the
-   reviewer, and the builder's reach to host services is tested (Images;
-   Tests).
-7. Pruning raced running verifications: the machine lock is held from
-   system start to system stop, and pruning runs under it (Runtime;
-   Images).
-8. Orphan cleanup was too narrow: any task's run start reaps every
-   labelled VM and builder when the lock is free; builds are raced
-   against a stop (Runtime; Images).
-9. The spec's source was wrong and its rendering unspecified: the spec is
-   the task document's, written into the VM as `spec.json`; `run.sh`
-   renders `env`, `{port}`, `{passfile}`, and the roles; dependency images
-   run the spec's own setup (Specs inside the VM; Images; The run).
-10. Deny placement and an overclaim: the denies sit after the allows; the
-    `launchctl` and `open` openings are tested and documented, not
-    claimed closed (Profile denies; Threat model; Tests).
-14. A memory kill was blamed on the candidate: `cause: memory`; the suite
-    runs in a child cgroup, with a fallback where its files are absent
-    (The run; Reading the result).
-15. Runtime behaviour unverified: fallbacks for the read-only mount (a
-    directory holding only the tar and spec), run by digest (a checked
-    tag), and `/out` ownership (`result_owner`) (The run; Images).
-16. Rollout gaps: the install is in rebuild-handoff.md for any machine;
-    the system is started and stopped per verification, keeping
-    tech-stack.md's statement true (Runtime; Docs fixed; Rollout).
-17. The `../../escape` test could not arise from `git archive` and is
-    dropped; m1-4-checks.md's Rosetta and "64 GB" lines are in Docs fixed.
-
-## Critique round 2 (of 2): revise
-
-Both rounds are spent; every finding is folded in. Findings 1 and 3 to 11
-are part one's (m1-4c-review.md); 2 and 12 are handled here.
-
-2. A per-database advisory lock guarded a machine-wide runtime: the lock
-   is an `fcntl.flock` on a fixed file, every container and builder is
-   labelled with its owning database, a sweep reaps only its own label
-   and stops the system only when no owner's container remains, tested
-   with two test databases (Runtime; Tests).
-12. Smaller gaps: the wait on the lock races a stop; the base run in the
-    VM is reused by base sha, base image digest, `memory_mb`, and
-    `where`; part one's key carries `where`, so no host result is reused
-    for a VM run; `memory_mb` in every VM key, so a raised default reruns
-    a memory kill; nothing in the VM has a timeout (image builds, setup,
-    the suite, and the lint), as 1.4b runs them on the host;
-    `read_turn_file` is cited for its walk only (Runtime; The run;
-    Reading the result).
-
-After round 2, from 1.4u's critique: with no timeout, a command whose
-output is read through a pipe waits for end of file, so a setup command
-that leaves a child holding stdout hangs. Every command in the VM and
-every CLI call on the host writes its output to a file, is waited on by
-its exit, and has its group killed after (The run; Tests, Results).
-
 ## Tom's feedback (2026-10-03)
 
-Installing Apple's `container` from its signed package needs the Mac's admin password. Tom, same day: it is in 1Password, vault `m-valor`, item `bgqjftkvj4witkswgdoxegdjsy`, and is the same on all of Valor's machines. The build reads it from there at install time and never prints it; nothing waits on Tom. Otherwise the plan stands.
+Installing Apple's `container` from its signed package needs the Mac's admin password, which only Tom holds; the build asks him for it when 1.4c part two's rerun reaches this step, and otherwise the plan stands.
+
+## Records
+
+The critique rounds, the build record, and any patch rounds are in
+[m1-4c-verifier-records.md](m1-4c-verifier-records.md).

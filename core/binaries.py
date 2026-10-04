@@ -20,11 +20,23 @@ from pathlib import Path
 # directories no one else can write. Xcode's copy sits under
 # `/Applications`, which the admin group can write, and `/usr/bin/git` is
 # the `xcrun` shim, which resolves the real one through a per-user cache a
-# turn can poison; neither passes `untrusted`.
-GIT_CANDIDATES = ("/Library/Developer/CommandLineTools/usr/bin/git",)
+# turn can poison; neither passes `require_git`. On Linux (the verification
+# VM) the distribution's `/usr/bin/git` is a real install.
+GIT_CANDIDATES = ("/Library/Developer/CommandLineTools/usr/bin/git", "/usr/bin/git")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 PS = "/bin/ps"
 SECURITY = "/usr/bin/security"
+# Apple's `container` (core/container.py), from its signed package: the CLI
+# and the programs it starts as launchd services.
+CONTAINER = "/usr/local/bin/container"
+CONTAINER_LIBEXEC = "/usr/local/libexec/container"
+CONTAINER_HELPERS = (
+    "/usr/local/bin/container-apiserver",
+    "/usr/local/libexec/container/plugins/container-core-images/bin/container-core-images",
+    "/usr/local/libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet",
+    "/usr/local/libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux",
+    "/usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver",
+)
 
 
 class Untrusted(RuntimeError):
@@ -64,8 +76,14 @@ def require(path: str | Path) -> str:
 
 
 def git() -> str | None:
-    """The first trusted git among `GIT_CANDIDATES`, or None."""
-    return next((c for c in GIT_CANDIDATES if untrusted(c) is None), None)
+    """The first git among `GIT_CANDIDATES` that `require_git` accepts, or
+    None."""
+    for c in GIT_CANDIDATES:
+        try:
+            return require_git(c)
+        except Untrusted:
+            continue
+    return None
 
 
 def require_git(path: str | Path | None) -> str:

@@ -47,8 +47,8 @@ fetch treats the builder's clone as hostile (workspace.md).
 Serves Mission item 1 and bounded authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which
-sandbox. Turns run under sandbox-exec on the host, as built and as both
-experiments ran. The verifier re-executes in an Apple container started
-fresh from a kernel-built image, because its value is an environment the
-executor never touched. The runtime's status is in [tech-stack.md](tech-stack.md),
-its memory cost in [machine.md](machine.md).
+sandbox. Turns, checks, and services run under sandbox-exec on the host.
+The review's rerun runs in Apple `container` VMs started fresh from
+kernel-built images with no network, because its value is an environment
+the executor never touched (`core/container.py`). The runtime is in
+[tech-stack.md](tech-stack.md), its memory cost in [machine.md](machine.md).

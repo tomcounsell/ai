@@ -84,8 +84,8 @@ async def _review(dsn, tmp_path, writes):
     """A toy candidate adding `writes`, its test recorded, reviewed by a real
     blind Opus session through the router, with governance on the real
     judgement port; then, after Tom's grant of every instance and the docs
-    verdict, driven again."""
-    task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes=writes)
+    verdict, driven again. The review's rerun is in verification VMs."""
+    task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes=writes, suite=test_checks.VM_SUITE)
     await scripted.check(dsn, task, "test", "pass")
     gateway = Gateway(dsn, credential=ClaudeLogin())
     await gateway.start()
@@ -113,6 +113,7 @@ def _decided(rows) -> list[dict]:
 
 
 @pytest.mark.spend(usd=1.50)
+@pytest.mark.container
 def test_a_real_blind_review_of_a_toy_candidate(dsn, tmp_path):
     first, before, _after = asyncio.run(_review(dsn, tmp_path, {"greeting.txt": "Morning, Tom.\n"}))
     assert _decided(before), first
@@ -120,9 +121,12 @@ def test_a_real_blind_review_of_a_toy_candidate(dsn, tmp_path):
     assert d["leg"] == "session" and d["model"] == resolve_model("reviewer") and d["usd_micros"] > 0
     assert d["reviewer_verdict"] in ("pass", "changes") and d["verdict"] == d["reviewer_verdict"]
     assert d["verify"] and not d["governance"]["instances"]
+    (v,) = [r["payload"] for r in before if r["type"] == "verify.ran"]
+    assert v["where"] == "vm" and v["cause"] is None and v["counts"]["passed"], v
 
 
 @pytest.mark.spend(usd=3.00)
+@pytest.mark.container
 def test_a_real_review_of_an_added_validator_holds_it_for_a_grant(dsn, tmp_path):
     gate = (
         "def validate_request(request):\n"

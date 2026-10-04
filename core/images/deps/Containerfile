@@ -1,0 +1,10 @@
+# A project's dependency image (core/container.py): the base image, checked
+# by digest just before the build and given here by its tag, with the
+# project's manifests and the kernel-written spec.json in /work, and the
+# installing setup commands run with the network open (deps.sh). The build
+# context holds only the manifests and spec.json.
+ARG BASE
+FROM ${BASE}
+COPY --chown=valor:valor manifests/ /work/
+COPY spec.json /valor/deps.json
+RUN /valor/deps.sh

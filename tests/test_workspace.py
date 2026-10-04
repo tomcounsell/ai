@@ -24,7 +24,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from core import db, ledger, router, runs, tasks
+from core import binaries, container, db, ledger, router, runs, tasks
 from core import git as kgit
 from core import workspace as kws
 from core.gateway import Gateway
@@ -155,6 +155,7 @@ def test_a_bad_base_leaves_no_directory(tmp_path):
     assert not (tmp_path / "work" / "abcdef000002").exists()
 
 
+@pytest.mark.macos
 def test_a_failing_setup_is_recorded_and_the_workspace_kept(tmp_path):
     _task, made = provision(tmp_path, setup=["echo made > made.txt", "exit 3"])
     result = made.project["setup_result"]
@@ -181,6 +182,7 @@ def test_spec_refusals(tmp_path):
 # -- the task's Postgres --------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tmp_path):
     task, made = provision(tmp_path, services=["postgres"], roles=["valor_kernel"])
     lay = kws.Layout(Path(made.mirror).parent)
@@ -220,6 +222,7 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
     assert postmaster in {p["pid"] for p in stopped}
 
 
+@pytest.mark.macos
 def test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other(tmp_path):
     _a, made_a = provision(tmp_path, services=["postgres"])
     taken = {made_a.project["ports"]["postgres"]}
@@ -243,6 +246,7 @@ def test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other(tmp_pa
     assert got == ["denied", "denied", "denied", "open", "open", "denied"]
 
 
+@pytest.mark.macos
 def test_redis_runs_sandboxed_and_is_gone_after_the_services_stop(tmp_path):
     task, made = provision(tmp_path, services=["redis"])
     lay = kws.Layout(Path(made.mirror).parent)
@@ -259,6 +263,7 @@ def test_redis_runs_sandboxed_and_is_gone_after_the_services_stop(tmp_path):
 # -- the profiles' reach --------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_fresh_session_reads_nothing_the_builder_wrote(tmp_path):
     _task, made = provision(tmp_path)
     lay = kws.Layout(Path(made.mirror).parent)
@@ -303,6 +308,7 @@ def test_a_fresh_session_reads_nothing_the_builder_wrote(tmp_path):
     assert got == ["denied"] * 7 + ["open", "open"] + ["denied"] * 3
 
 
+@pytest.mark.macos
 def test_a_check_step_can_fstat_the_output_file_the_kernel_opened_for_it(tmp_path):
     lay = kws.Layout(tmp_path / "work" / "t1")
     check_dir = lay.checks / "test-base-abc"
@@ -320,6 +326,7 @@ def test_a_check_step_can_fstat_the_output_file_the_kernel_opened_for_it(tmp_pat
         assert (done.returncode, done.stderr, out.read_text()) == (0, "", "seen\n")
 
 
+@pytest.mark.macos
 def test_the_working_session_cannot_write_where_a_later_process_of_the_user_runs_things(tmp_path):
     _task, made = provision(tmp_path)
     home = tmp_path / "home"
@@ -506,6 +513,7 @@ def fetch(made, sha, ref="refs/valor/candidates/t", profile=None, **kw):
     )
 
 
+@pytest.mark.macos
 def test_a_candidate_is_fetched_into_the_mirror_and_the_sending_side_is_sandboxed(tmp_path):
     _task, made = provision(tmp_path)
     sha = candidate(made)
@@ -522,6 +530,7 @@ def test_a_candidate_is_fetched_into_the_mirror_and_the_sending_side_is_sandboxe
 
 
 @pytest.mark.parametrize("plant", ["alternates", "http-alternates", "shallow", "config"])
+@pytest.mark.macos
 def test_a_clone_with_alternates_a_shallow_file_or_hostile_config_is_refused(tmp_path, plant):
     _task, made = provision(tmp_path)
     sha = candidate(made)
@@ -628,6 +637,7 @@ def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
     assert sorted(str(p) for p in outside.rglob("*")) == before
 
 
+@pytest.mark.macos
 def test_grafts_and_replace_refs_in_the_clone_do_not_reach_the_mirror(tmp_path):
     _task, made = provision(tmp_path)
     repo = Path(made.workspace)
@@ -648,6 +658,7 @@ def test_grafts_and_replace_refs_in_the_clone_do_not_reach_the_mirror(tmp_path):
     assert git(mirror, "for-each-ref", "refs/replace") == ""
 
 
+@pytest.mark.macos
 def test_a_fetch_past_its_size_limit_fails_and_leaves_no_ref(tmp_path):
     _task, made = provision(tmp_path)
     blob = Path(made.workspace) / "big.bin"
@@ -742,6 +753,7 @@ def _delta_bomb_repo(path: Path, expand_to: int) -> str:
     return sha_commit.hex()
 
 
+@pytest.mark.macos
 def test_a_delta_that_expands_past_the_limits_is_cut_and_leaves_no_ref(tmp_path):
     _task, made = provision(tmp_path)
     lay = kws.Layout(Path(made.mirror).parent)
@@ -787,6 +799,7 @@ def _service_pids(task) -> list[int]:
     return out
 
 
+@pytest.mark.macos
 def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(dsn, tmp_path):
     a, b_a = _start(dsn, tmp_path / "a", ["postgres", "redis"])
     b, _b_b = _start(dsn, tmp_path / "b", ["postgres"])
@@ -824,6 +837,7 @@ def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(d
     assert all("redis" in p["command"] or "postgres" in p["command"] for p in found[-1]["processes"])
 
 
+@pytest.mark.macos
 def test_after_the_sweep_the_services_left_fit_in_16_gb(dsn, tmp_path):
     a, b_a = _start(dsn, tmp_path / "a", ["postgres", "redis"])
     b, b_b = _start(dsn, tmp_path / "b", ["postgres"])
@@ -845,6 +859,7 @@ def test_after_the_sweep_the_services_left_fit_in_16_gb(dsn, tmp_path):
         kws.stop_services(b, lay_b)
 
 
+@pytest.mark.macos
 def test_workspace_remove_is_refused_while_the_task_runs_and_frees_the_ports_after_a_stop(dsn, tmp_path):
     task, b = _start(dsn, tmp_path, ["postgres"])
     env = {**os.environ, "VALOR_DB": __import__("tests.conftest", fromlist=["TEST_DB"]).TEST_DB}
@@ -888,6 +903,7 @@ def _partials(repo) -> list[str]:
     ]
 
 
+@pytest.mark.macos
 def test_the_file_size_limit_is_the_limit_asked_for(tmp_path):
     out = tmp_path / "big"
     code, _ = kws.bounded(
@@ -1068,6 +1084,7 @@ def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
 
 
 @pytest.mark.parametrize("plant", ["gitfile", "commondir"])
+@pytest.mark.macos
 def test_a_clone_whose_git_directory_lives_elsewhere_is_refused(tmp_path, plant):
     _, made = provision(tmp_path)
     sha = candidate(made)
@@ -1106,6 +1123,7 @@ def test_cache_refusals(tmp_path):
     assert not kws.needs_credential("fatal: unable to access: Failed to connect to 127.0.0.1 port 9")
 
 
+@pytest.mark.macos
 def test_a_cluster_that_will_not_start_leaves_no_directory_and_no_services(tmp_path):
     import socket
 
@@ -1124,6 +1142,7 @@ def test_a_cluster_that_will_not_start_leaves_no_directory_and_no_services(tmp_p
     assert not runs.marked_services([task])
 
 
+@pytest.mark.macos
 def test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_live(dsn, tmp_path):
     other = ledger.new_id()
     work = tmp_path / "work"
@@ -1165,6 +1184,7 @@ def test_a_sweep_never_waits_on_the_ports_lock(dsn, tmp_path):
     assert run(go()) == []
 
 
+@pytest.mark.macos
 def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_spends_no_turn(dsn, tmp_path):
     task, b = run(scripted.provisioned(dsn, tmp_path, services=["postgres"]))
     lay = kws.Layout(Path(b.mirror).parent)
@@ -1183,6 +1203,7 @@ def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_s
     assert not [r for r in run(_rows(dsn, task)) if r["type"] == "turn.started"]
 
 
+@pytest.mark.macos
 def test_the_tasks_postgres_is_up_while_a_runners_turn_runs_and_down_after(dsn, tmp_path):
     task, b = run(scripted.provisioned(dsn, tmp_path, services=["postgres"]))
     port = b.project["ports"]["postgres"]
@@ -1233,6 +1254,7 @@ def _spec_file(tmp_path, **extra) -> Path:
     return path
 
 
+@pytest.mark.macos
 def test_start_project_from_the_command_line(dsn, tmp_path):
     spec_path = _spec_file(tmp_path, services=["postgres"])
     for flag in (["--workspace", "x"], ["--harness-config", "x"], ["--target-branch", "x"]):
@@ -1359,6 +1381,7 @@ async def _become_task(dsn, task_id):
         await tasks.start(conn, tasks.Brief(id=task_id, instruction="x"))
 
 
+@pytest.mark.macos
 def test_a_directory_that_becomes_a_task_after_the_scan_is_left_to_its_run(dsn, tmp_path):
     work, orphan, lay = _orphan_with_services(tmp_path)
     try:
@@ -1376,6 +1399,7 @@ def test_a_directory_that_becomes_a_task_after_the_scan_is_left_to_its_run(dsn, 
 
 
 @pytest.mark.parametrize("when", ["before the lock", "under the lock"])
+@pytest.mark.macos
 def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, monkeypatch, when):
     import argparse
 
@@ -1904,3 +1928,77 @@ def test_a_64_character_role_is_refused():
                 "roles": ["r" * 64],
             }
         )
+
+
+# -- Apple's container under every profile --------------------------------------------------
+
+
+def _profiles(tmp_path: Path) -> dict[str, str]:
+    lay = kws.Layout(tmp_path / "work" / "abc123")
+    return {
+        "turn": kws.turn_profile(lay, []),
+        "check": kws.check_profile(lay, lay.checks / "test-head-abc", []),
+        "fresh": kws.profile(rw=[tmp_path / "fresh"], work=lay.root.parent, fresh=True),
+        "service": kws.service_profile(lay, "abc123", [], work=lay.root.parent),
+    }
+
+
+def _under(profile: Path, *argv: str, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [binaries.SANDBOX_EXEC, "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile), *argv],
+        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, **kw,
+    )  # fmt: skip
+
+
+@pytest.mark.macos
+@pytest.mark.container
+@pytest.mark.parametrize("which", ["turn", "check", "fresh", "service"])
+def test_every_profile_refuses_the_container_runtime(tmp_path, which):
+    """The CLI, a helper, each mach service, the data directory, and a plist
+    named like the runtime's in ~/Library/LaunchAgents."""
+    profile = tmp_path / f"{which}.sb"
+    profile.write_text(_profiles(tmp_path)[which])
+    cli = _under(profile, binaries.CONTAINER, "list")
+    assert cli.returncode != 0 and "not permitted" in cli.stderr, cli
+    helper = _under(profile, binaries.CONTAINER_HELPERS[-1], "--help")
+    assert helper.returncode != 0 and "not permitted" in helper.stderr, helper
+    plist = (
+        Path.home()
+        / "Library"
+        / "LaunchAgents"
+        / f"{container.MACH_PREFIX}valor-probe-{uuid.uuid4().hex}.plist"
+    )
+    assert probe(profile, f"list:{Path.home() / container.DATA_DIR}", f"create:{plist}") == [
+        "denied",
+        "denied",
+    ]
+    held = subprocess.Popen(
+        [binaries.SANDBOX_EXEC, "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile),
+         "/bin/sh", "-c", "echo ready; exec /bin/cat"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )  # fmt: skip
+    try:
+        assert held.stdout.readline() == "ready\n"  # the profile is applied
+        check = runs._sandbox_check()
+        assert all(check(held.pid, name) for name in container.MACH_NAMES)
+        assert not check(held.pid, "com.apple.containermanagerd")
+    finally:
+        held.kill()
+        held.wait()
+
+
+@pytest.mark.macos
+def test_from_a_turn_launchctl_submit_is_refused(tmp_path):
+    """What sandbox-openings.md records: `launchctl submit` exits non-zero and loads
+    no job."""
+    profile = tmp_path / "turn.sb"
+    profile.write_text(_profiles(tmp_path)["turn"])
+    label = f"valor.probe.{uuid.uuid4().hex}"
+    marker = tmp_path / "submitted"
+    try:
+        submit = _under(profile, "/bin/launchctl", "submit", "-l", label, "--", "/usr/bin/touch", str(marker))
+        assert submit.returncode != 0, submit
+        listed = subprocess.run(["/bin/launchctl", "list", label], capture_output=True, check=False)
+        assert listed.returncode != 0
+    finally:
+        subprocess.run(["/bin/launchctl", "remove", label], capture_output=True, check=False)
