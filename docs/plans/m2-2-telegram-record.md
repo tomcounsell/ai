@@ -143,7 +143,17 @@ The port doc's paragraph on the Telegram lookup, which 2.2 added, stays.
 
 - Step 1: the test servers refuse the documented test login (a
   `99966` 2 `xxxx` number with code `22222` returns PhoneCodeInvalid, three
-  tries), so `tests/test_live_telegram_dc.py` has not run. Open.
+  tries), so `tests/test_live_telegram_dc.py` has not run. Probed
+  (probe-tg-testdc, 2026-10-04): the bridge's wiring reaches the test
+  servers (`help.getConfig` returns `test_mode`, DCs 1 to 3 at the test
+  addresses), `send_code_request` succeeds and migrates to the phone's DC,
+  and `sign_in` with the DC digit five times still returns
+  PhoneCodeInvalid, for the repository's API id and for a public one, on
+  ports 80 and 443, with other suffixes and code lengths. The refusal is
+  the server's, not the code's. Not runnable from this machine; the lead
+  recorded step 1 as not run, since the emulator suite and step 8's live
+  send carry the evidence. It runs if the API development tools panel for
+  this api id shows test settings that make the documented login work.
 - Step 3: the group "Valor rebuild" holds Tom and Valor's account, id
   `-1003890616618`, created from the bridge's session. `main`'s
   `projects.json` names no group the title contains. `projects/valor.toml`
