@@ -82,3 +82,36 @@ with the file lost waits for a human) over starting above the newest claimed
 message, which has no floor when the chat holds no claims.
 
 Suite and lint: see the head commit's report in valor-build-notes.
+
+## Patch round 3: onto the merged 2.1, and L3
+
+Rebased: 2.2's ten own commits (79b63700b through ee784c54e) now sit on
+fba1da1da, the merged 2.1; the eight older 2.1 commits are dropped.
+
+Conflicts and how each went:
+- `docs/bridges/telegram.md`, two hunks (the performer line and the
+  idempotency paragraph): kept 2.2's text. It states the bridge's
+  `lookup(action, key, since)` of the merged `LookupFn`, and the
+  record-based scan.
+- `tests/test_replay.py`: kept the merged version whole; 2.2's only change
+  there was an import order.
+- `docs/README.md`: the merged list of top-level docs, with
+  `objective-tree.md` added. `architecture.md` kept its earlier splits and
+  holds only a pointer to `objective-tree.md`.
+
+Follow-ups to the merged port, in tests only: `reconcile_after_s` and the
+settle time are gone, so the telegram port helpers call `broker.request`,
+`release` and `reconcile` with `performers` second, `release` takes the
+task's workspace for sends that name files, and the killed-before-send test
+now expects `failed` at the first reconcile. `test_emulator_metering.py`
+imports `tests.conftest`, since 2.2's `--import-mode=importlib` has no
+top-level `conftest`.
+
+L3 (lookup against the port's "None only when final"): the code already
+returns None for a record that finds nothing and never scans a send over the
+whole chat; only a notice with a lost record is. The plan said "None: None"
+and "a send with no record is looked up over the whole chat"; both now say
+what the code does and why a miss is final (the record precedes the first
+message). Test added: a record in an empty chat with nothing sent finds
+None. It passes without a code change; there was no code defect to fail it.
+The port doc's paragraph on the Telegram lookup, which 2.2 added, stays.

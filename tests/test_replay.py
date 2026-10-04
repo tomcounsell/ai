@@ -16,9 +16,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.conftest import TEST_DB
 
 from core import broker, db, tasks
+from tests.conftest import TEST_DB
 from tests.emulator import common as replay_common
 from tests.emulator import replay
 from tests.emulator import workspace as replay_workspace

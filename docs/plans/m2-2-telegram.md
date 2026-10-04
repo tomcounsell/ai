@@ -228,13 +228,16 @@ read, so clock skew cannot hide a message. A key with no record was never
 sent: None. Skip ids in `intake.claimed`. Compare full texts after
 Telegram's trim of leading and trailing whitespace, with the same reply
 target and topic; a file by its document name and size. Every part found
-once: the result. None: None. Any part with two matches: `broker.Unknown`.
+once: the result. No part found: None, final, because the record precedes
+the send's first message, so a send that reached Telegram is above it. Any
+part with two matches: `broker.Unknown`.
 Some parts found and others not: the missing parts are sent under their
 own `random_id`s, Telegram refusing any it already holds, and the whole
 is the result; a flood wait or a send in doubt there is `broker.Unknown`,
 retried on a later wake, and a refusal or a changed file settles with the
 messages on screen. A record is dropped once the ledger settles its send;
-an unreadable file is set aside and a send with no record stays in doubt.
+an unreadable file is set aside and a send in flight with no record stays in
+doubt, never scanned over the whole chat.
 
 **Notices.** For each `NoticeDue`, first scan as above, under the key
 `notice:<notice id>`, for the notice's parts by full text. Each part not
@@ -369,7 +372,8 @@ an approved send in the ledger for the outbox to yield.
   with one message on screen.
 - `RandomIdDuplicate` on an effect: `broker.Unknown`, no outcome, and the
   reconcile's lookup writes `done` with the message already on screen.
-- Lookup: a key with no record finds nothing; the same text sent before
+- Lookup: a key with no record finds nothing; a record in an empty chat, with
+  nothing sent, finds nothing; the same text sent before
   the key's first send is not adopted; a message dated before the
   intent's `at` (the Mac's clock ahead of Telegram's) is found; a
   claimed id is skipped; a payload with a trailing newline matches the
@@ -381,7 +385,8 @@ an approved send in the ledger for the outbox to yield.
   reconcile sends the rest and writes `done`.
 - A send's record stays while it is in flight and is dropped once settled;
   an unreadable sends file is set aside and a send with no record stays
-  in doubt (a notice is looked up over the whole chat).
+  in doubt (only a notice whose record was lost is scanned over the whole
+  chat, since its text carries its own id).
 
 `tests/test_telegram_outbox.py`
 - A notice goes to the row's `chat_id` and `notice.sent` is recorded

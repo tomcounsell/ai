@@ -22,12 +22,12 @@ from pathlib import Path
 import aiohttp
 import pytest
 from aiohttp import web
-from conftest import TEST_DB
 
 from core import db, guards, ledger, machine, runs, session, settings, spending, tasks, verdicts
 from core.gateway import TURN_TOKEN, Gateway
 from core.machine import Check
 from tests import scripted
+from tests.conftest import TEST_DB
 from tests.emulator import common, judge, replay, stand_in
 
 pytestmark = pytest.mark.spend(usd=0)

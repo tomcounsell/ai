@@ -5,7 +5,6 @@ replies come back through it."""
 import asyncio
 import signal
 import sys
-import time
 
 import pytest
 
@@ -23,7 +22,6 @@ from tests.telegram_port import (
     due,
     emu_chat,
     ids,
-    outcome,
     release,
     send,
     until,
@@ -131,9 +129,7 @@ def test_approve_by_reply_to_the_effect_notice_and_the_send_goes_out(emu, dsn, t
         task = await new_task(dsn)
         async with connected(emu.url, dsn, tmp_path) as bridge:
             async with await db.connect(dsn) as conn:
-                held = await broker.request(
-                    conn, task, send(op, "the approved words"), performers=bridges.declared()
-                )
+                held = await broker.request(conn, bridges.declared(), task, send(op, "the approved words"))
             target = (await deliver(dsn, bridge, task))["effect"]
 
             near = await tom(emu, dsn, op, "Approve.", reply_to=int(target))
@@ -271,7 +267,7 @@ def test_a_second_bridge_waits_on_the_lock_while_the_first_serves(emu, dsn, tmp_
     run(go())
 
 
-def test_killed_before_the_send_the_effect_fails_after_the_settle_time(emu, dsn, tmp_path, op):
+def test_killed_before_the_send_the_effect_fails_at_reconcile(emu, dsn, tmp_path, op):
     async def go():
         effect = await release(dsn, send(op, "never accepted"))
         proc = await child(tmp_path, op, "perform", emu.url, dsn, str(tmp_path), effect, "before")
@@ -280,13 +276,9 @@ def test_killed_before_the_send_the_effect_fails_after_the_settle_time(emu, dsn,
         finally:
             proc.kill()
             await asyncio.wait_for(proc.wait(), 10)
-        started = time.monotonic()
         async with connected(emu.url, dsn, tmp_path) as bridge, await db.connect(dsn) as conn:
             performers = port.bound_performers(bridge, conn)
-            assert await broker.reconcile(conn, effect, 5, performers=performers) is None
-            assert await outcome(dsn, effect) is None
-            await asyncio.sleep(max(0, 5.2 - (time.monotonic() - started)))
-            assert (await broker.reconcile(conn, effect, 5, performers=performers)).kind == "failed"
+            assert (await broker.reconcile(conn, performers, effect)).kind == "failed"
         assert emu.own(int(op)) == []
 
     run(go())

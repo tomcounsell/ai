@@ -57,7 +57,7 @@ def machine(tmp_path: Path, chats: list[str]):
     _spec(tmp_path, chats[1:])
     with (
         bridges.operator(tmp_path),
-        bridges.configure(operator_chat=chats[0], inbound_dir=str(tmp_path / "inbound"), reconcile_after_s=0),
+        bridges.configure(operator_chat=chats[0], inbound_dir=str(tmp_path / "inbound")),
     ):
         yield
 
@@ -117,20 +117,21 @@ def send(target: str, text: str = "", **payload: Any) -> broker.Action:
     )
 
 
-async def release(dsn: str, action: broker.Action) -> str:
-    """A send held, approved by Tom, and requested of the bridge."""
+async def release(dsn: str, action: broker.Action, workspace: str | None = None) -> str:
+    """A send held, approved by Tom, and requested of the bridge; the files
+    it names are in `workspace`."""
     task = await bridges.new_task(dsn)
     async with await db.connect(dsn) as conn:
-        held = await broker.request(conn, task, action, performers=bridges.declared())
+        held = await broker.request(conn, bridges.declared(workspace), task, action)
         await broker.approve(conn, held.effect_id, note="approve")
-        out = await broker.release(conn, held.effect_id, performers=bridges.declared())
+        out = await broker.release(conn, bridges.declared(workspace), held.effect_id)
     assert out.kind == "released", out
     return held.effect_id
 
 
 async def reconcile(dsn: str, bridge, effect_id: str) -> broker.Outcome | None:
     async with await db.connect(dsn) as conn:
-        return await broker.reconcile(conn, effect_id, 0, performers=bound_performers(bridge, conn))
+        return await broker.reconcile(conn, bound_performers(bridge, conn), effect_id)
 
 
 async def outcome(dsn: str, effect_id: str) -> dict[str, Any] | None:

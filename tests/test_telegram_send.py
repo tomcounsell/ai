@@ -366,7 +366,9 @@ def test_a_send_cut_off_whose_file_is_gone_settles_done_with_the_parts_on_screen
     async def go():
         async with connected(emu.url, dsn, tmp_path) as bridge:
             effect = await release(
-                dsn, send(group, "the text goes out", files=[{"path": str(f), "sha256": digest}])
+                dsn,
+                send(group, "the text goes out", files=[{"path": str(f), "sha256": digest}]),
+                str(tmp_path),
             )
             emu.control(lose_send_next=True, send_after=1)
             assert (await perform(dsn, bridge, effect)).kind == "unknown"
@@ -375,5 +377,25 @@ def test_a_send_cut_off_whose_file_is_gone_settles_done_with_the_parts_on_screen
             [m] = emu.own(int(group))
             sent = (await outcome(dsn, effect))["result"]["sent"]
             assert [e["message_id"] for e in sent] == [str(m["id"])]
+
+    run(go())
+
+
+def test_lookup_in_an_empty_chat_with_a_record_finds_nothing(emu, dsn, tmp_path, c):
+    """A send whose start was recorded in a chat with no messages, and which
+    never reached Telegram: the whole chat is above the record, nothing is
+    there, and lookup answers None, the port's answer for a send that
+    cannot be recorded."""
+    group, _ = c
+
+    async def go():
+        async with connected(emu.url, dsn, tmp_path) as bridge:
+            _, lookup = bridge.performers()[SEND]
+            emu.control(lose_send_next=True)
+            with pytest.raises(Unknown):
+                await bridge.performers()[SEND][0](send(group, "lost"), "t:empty")
+            assert emu.own(int(group)) == []
+            assert bridge.sender.starts.get("empty") == 0
+            assert await lookup(send(group, "lost"), "t:empty", "") is None
 
     run(go())
