@@ -747,9 +747,10 @@ def test_the_verdict_command_records_docs_by_hand_and_requests_the_merge(dsn, tm
         assert refused.returncode == 1 and f"{stage} has a runner" in refused.stderr
     run(scripted.check(dsn, task, "test", "pass"))
     run(scripted.check(dsn, task, "review", "changes", findings=[{"kind": "naming", "text": "rename x"}]))
-    out = cli("verdict", task, "docs", "no_change", *who)
+    out = cli("verdict", task, "docs", "changes", "--finding", "naming:rename the heading", *who)
     assert out.returncode == 0, out.stderr
     assert "unrecognized arguments: --head" in cli("verdict", task, "docs", "no_change", "--head", "x").stderr
+    assert "rename the heading" in cli("ledger", task).stdout  # the finding parsed and recorded
     assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
     run(drive(dsn, task))
     run(scripted.check(dsn, task, "test", "pass"))
