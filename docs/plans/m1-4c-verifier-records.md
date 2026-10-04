@@ -143,6 +143,25 @@ commit of HEAD's tree with HEAD as its base.
 - Tests: the hung-call test covers the new calls; it passes 30 of 30 runs
   alone.
 
+**Patch round 5** (the branch on 1.4c part one, 1.5 and 2.1):
+- Part two is one commit on the merged code. Conflicts resolve toward the
+  merged code: its review runner, serve, slot and session collection
+  stay; `fresh.reusable_verify` and a host `verify.ran` are gone, so the
+  rerun uses `container.reusable` and `container.verify`; the manual
+  rows, the final-message checks and the setup checks of the merged
+  `tests/test_review.py` stay. Tests of code the merged branch removed
+  are dropped: host reuse, manual-leg registration, command time limits.
+- `read_result` passes `checks.lint_locations` the lint output's lines.
+- Docs keep the merged splits: `docs/sandbox.md` owns the sandbox split,
+  `docs/sandbox-openings.md` the openings, `m1-4c-outline.md` the
+  outline. `docs/machine.md` totals the container row with the measured
+  headless browser: peak 12,078 MB.
+- Tests of the merged code that need macOS itself (`sandbox-exec`, `ps
+  -E`, `libproc`, `setattrlist`, `hdiutil`, the Homebrew Postgres, APFS
+  sparse files) carry the `macos` mark. Without it the VM suite failed
+  in 80 tests and waited on a service start under `sandbox-exec` with no
+  end.
+
 **Decisions the plan left open:**
 - The VM mounts the source at `/valor/src` and the output at `/valor/out`
   under a root-only `/valor`.
@@ -153,14 +172,15 @@ commit of HEAD's tree with HEAD as its base.
 - A `.command` opens with `open -g -j`.
 - `ruff` is a dev dependency, so the VM lints with the pinned version.
 - `read_result` adds lint locations only for `python-uv`.
-- In the VM this repository's suite passes 370, skips 246 (the `macos`
-  tests among them) and fails 18 in `tests/test_credentials.py` and
-  `tests/test_judgement.py`, which assume the host's local Postgres roles.
+- In the VM this repository's suite passes 895, skips 453 (the `macos`
+  tests among them) and fails 20 in 184 s: 18 in `tests/test_credentials.py`
+  and `tests/test_judgement.py`, which assume the host's local Postgres
+  roles; `tests/test_emulator_package.py`, which runs `git ls-files` in a
+  source tree that is not a checkout; and the deep request file in
+  `tests/test_session.py`, which overflows the VM's 8 MB stack.
 
-**Tests:** the host suite (`-m "not container"`) passes 619 and skips 9;
-the `container` tests in `tests/test_review.py`, `tests/test_workspace.py`
-and `tests/test_live_fresh.py` pass 16 and skip 2 (live spend); in
-`tests/test_container.py` the five fixed tests pass, each rerun alone after
-the first pass, and the repository-suite test passes (150 s) against the
-build commit. `ruff check` passes; `ruff format --check` flags only
-`docs/bridges/telegram.md` and `docs/plans/m2-1-port.md`, as before.
+**Tests:** the host suite (`-m "not container"`) passes 1,301 and skips 21
+(live spend, a measurement, Pi with no subagents, git that does not trust a
+planted commit-graph); the `container` tests pass 44 and skip 2 (live
+spend), the repository-suite test among them. `ruff check` passes; `ruff
+format --check` passes.

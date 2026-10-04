@@ -362,6 +362,7 @@ def test_the_working_session_cannot_write_where_a_later_process_of_the_user_runs
     assert got == ["denied"] * 10 + ["open", "denied", "denied", "open"]
 
 
+@pytest.mark.macos
 def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_path):
     """Renaming a directory above a denied path, by any name or call, would
     move the denied path's contents to a name no rule covers, or let a turn
@@ -436,6 +437,7 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
             subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mountpoint)], check=False)
 
 
+@pytest.mark.macos
 # Under the denial `hdiutil create` fails with no error naming it.
 @pytest.mark.skipif(denials.met(denials._disks), reason=denials.DISKS)
 def test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox(tmp_path):
@@ -487,6 +489,7 @@ def test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox(tmp_path):
             subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(volume)], check=False)
 
 
+@pytest.mark.macos
 def test_a_turn_can_neither_read_nor_write_a_scratch_cluster(tmp_path, monkeypatch):
     """`initdb`, `pg_ctl` and the server run on a scratch cluster outside any
     sandbox, so its directory is by default inside the kernel key directory,
@@ -552,6 +555,7 @@ def test_a_clone_with_alternates_a_shallow_file_or_hostile_config_is_refused(tmp
         fetch(made, sha)
 
 
+@pytest.mark.macos
 def test_a_clone_reached_through_a_link_is_refused_at_every_lookup(tmp_path):
     _task, made = provision(tmp_path)
     sha = candidate(made)
@@ -621,6 +625,7 @@ def test_a_hard_linked_verdict_is_refused(tmp_path):
     assert verdict is None and why == "verdict.json has 2 links"
 
 
+@pytest.mark.macos
 def test_a_sparse_verdict_is_refused_unread(tmp_path):
     checks = checks_with_verdict(tmp_path)
     with open(checks / "critique-abc" / "repo" / ".valor" / "verdict.json", "r+b") as f:
@@ -918,6 +923,7 @@ def test_the_file_size_limit_is_the_limit_asked_for(tmp_path):
     assert code != 0 and out.stat().st_size == 1024 * 1024
 
 
+@pytest.mark.macos
 def test_a_stopped_caller_kills_the_command_and_its_group(tmp_path):
     pidfile = tmp_path / "pid"
 
@@ -1014,6 +1020,7 @@ def test_a_stopped_git_call_returns_though_a_program_git_started_in_its_own_sess
         os.kill(int(held.read_text()), 9)
 
 
+@pytest.mark.macos
 def test_a_bounded_command_ends_when_it_exits_though_a_program_it_started_holds_its_stderr(tmp_path):
     argv = ["/bin/bash", "-c", _detached_holder(tmp_path) + "echo err >&2; exit 3\n"]
     try:
@@ -1025,6 +1032,7 @@ def test_a_bounded_command_ends_when_it_exits_though_a_program_it_started_holds_
         os.kill(int((tmp_path / "held.pid").read_text()), 9)
 
 
+@pytest.mark.macos
 def test_no_turn_can_open_or_list_the_kernels_output_files_and_git_output_is_read_whole(
     tmp_path, monkeypatch
 ):
@@ -1452,6 +1460,7 @@ def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_p
     assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("mode", [0o000, 0o100, 0o300])
 @pytest.mark.parametrize("where", ["inside", "top"])
 def test_fresh_dir_removes_a_directory_with_no_read_bit(tmp_path, mode, where):
@@ -1465,6 +1474,7 @@ def test_fresh_dir_removes_a_directory_with_no_read_bit(tmp_path, mode, where):
     assert sorted(p.name for p in check.iterdir()) == ["claude", "pi", "tmp"]
 
 
+@pytest.mark.macos
 def test_fresh_dir_removes_a_read_only_tree_a_run_left(tmp_path):
     check = tmp_path / "checks" / "test-head-abc"
     stuck = check / "repo" / "x" / "y"
@@ -1496,6 +1506,7 @@ def _chain(top: Path, depth: int, name: str, mode: int, bottom: int | None = Non
     os.close(cur)
 
 
+@pytest.mark.macos
 def test_rmtree_removes_a_deep_chain_of_directories_with_no_mode_bits(tmp_path):
     """600 nested 0000 directories (300 overflowed the recursion that
     removed them one level at a time)."""
@@ -1506,6 +1517,7 @@ def test_rmtree_removes_a_deep_chain_of_directories_with_no_mode_bits(tmp_path):
     assert (tmp_path / "keep").read_text() == "outside"
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("bottom", [0o000, 0o500, 0o300, 0o444])
 def test_rmtree_removes_a_locked_directory_past_path_max(tmp_path, bottom):
     """400 readable levels, 1600 bytes of path, then one directory a
@@ -1517,6 +1529,7 @@ def test_rmtree_removes_a_locked_directory_past_path_max(tmp_path, bottom):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["keep"]
 
 
+@pytest.mark.macos
 def test_rmtree_removes_a_directory_that_can_be_listed_but_not_searched(tmp_path):
     check = tmp_path / "checks" / "test-head-abc"
     (check / "repo" / "a" / "b").mkdir(parents=True)
@@ -1526,6 +1539,7 @@ def test_rmtree_removes_a_directory_that_can_be_listed_but_not_searched(tmp_path
     assert sorted(p.name for p in check.iterdir()) == ["claude", "pi", "tmp"]
 
 
+@pytest.mark.macos
 def test_rmtree_unlinks_a_link_and_never_touches_its_target(tmp_path):
     target = tmp_path / "target"
     (target / "d").mkdir(parents=True)
@@ -1585,6 +1599,7 @@ def _locked_by_a_turn(tmp_path: Path, script: str) -> Path:
         "acl-and-flag",
     ],
 )
+@pytest.mark.macos
 def test_rmtree_clears_the_flags_and_acls_a_turn_sets(tmp_path, script):
     """A turn may set `uchg`, `uappnd` or an ACL deny entry on anything in
     its checkout; a mode alone moved none of them, and every rerun of a
@@ -1626,6 +1641,7 @@ _CHFLAGS = """/usr/bin/perl -e 'for (@ARGV) { my ($p, $v) = split /=/; syscall(3
         "readattr-moved-name",
     ],
 )
+@pytest.mark.macos
 def test_rmtree_clears_an_acl_that_hides_the_entry(tmp_path, script, hidden):
     """An ACL denying `readattr` or `readsecurity` makes an entry's `lstat`
     fail even for its owner, and a turn may set one on anything in its
@@ -1756,6 +1772,7 @@ def test_a_call_marked_uninterrupted_runs_after_an_interrupt(tmp_path):
             assert len(git.trusted(repo, "rev-parse", "HEAD")) == 40
 
 
+@pytest.mark.macos
 def test_interrupting_start_kills_a_setup_command(tmp_path):
     from core import git
 
@@ -1771,6 +1788,7 @@ def test_interrupting_start_kills_a_setup_command(tmp_path):
     assert _running(marker) == []
 
 
+@pytest.mark.macos
 def test_a_setup_command_whose_child_holds_its_output_still_ends(tmp_path):
     import time
 
@@ -1783,6 +1801,7 @@ def test_a_setup_command_whose_child_holds_its_output_still_ends(tmp_path):
     assert _running(marker) == []  # reaped by its mark
 
 
+@pytest.mark.macos
 def test_a_setup_commands_whole_output_is_in_its_log_which_no_turn_can_write(tmp_path):
     _task, made = provision(
         tmp_path,
@@ -1818,6 +1837,7 @@ def _service_layout(tmp_path) -> kws.Layout:
     return lay
 
 
+@pytest.mark.macos
 def test_a_service_program_has_no_time_limit_and_an_interrupt_ends_it(tmp_path):
     import inspect
     import time
@@ -1848,6 +1868,7 @@ def test_a_service_programs_whole_stderr_is_in_its_refusal(tmp_path, monkeypatch
     assert str(refused.value) == f"initdb: {long}"
 
 
+@pytest.mark.macos
 def test_a_failing_bounded_command_returns_its_whole_stderr(tmp_path):
     code, err = kws.bounded(
         ["/bin/bash", "-c", "head -c 5000 /dev/zero | tr '\\0' e >&2; exit 4"], cwd=tmp_path, env={},
@@ -1856,6 +1877,7 @@ def test_a_failing_bounded_command_returns_its_whole_stderr(tmp_path):
     assert code == 4 and err == "e" * 5000
 
 
+@pytest.mark.macos
 def test_a_stop_of_the_task_interrupts_its_services_starting(dsn, tmp_path, monkeypatch):
     lay = _service_layout(tmp_path)
     marker = f"65.{uuid.uuid4().int % 10**6}"
@@ -1881,6 +1903,7 @@ def test_a_stop_of_the_task_interrupts_its_services_starting(dsn, tmp_path, monk
     assert services.started is True  # so `down` stops whatever had started
 
 
+@pytest.mark.macos
 def test_a_cancelled_run_interrupts_its_services_starting(dsn, tmp_path, monkeypatch):
     lay = _service_layout(tmp_path)
     marker = f"66.{uuid.uuid4().int % 10**6}"
@@ -1911,6 +1934,7 @@ def test_a_run_whose_services_are_refused_returns_the_reason(dsn, monkeypatch):
     assert run(services.up()) == "the task's Postgres did not start"
 
 
+@pytest.mark.macos
 def test_a_63_character_role_is_accepted_and_created(tmp_path):
     role = "r" * 63
     task, made = provision(tmp_path, services=["postgres"], roles=[role])

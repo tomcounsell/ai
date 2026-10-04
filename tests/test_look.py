@@ -235,6 +235,7 @@ def test_look_under_the_fresh_sessions_profile_runs_with_its_own_tmp(tmp_path):
         assert not list(Path(harness["tmpdir"]).glob("look-profile.*"))  # cleaned up
 
 
+@pytest.mark.macos
 def test_a_missing_browser_exits_non_zero_with_the_reason(tmp_path):
     lay, _ = provision(tmp_path)
     profile = turn_profile(lay, tmp_path, 6451)
@@ -377,6 +378,7 @@ def test_a_link_a_hard_link_a_fifo_and_a_directory_are_refused_unread(tmp_path):
     assert "secret" not in json.dumps(found.screens)
 
 
+@pytest.mark.macos
 def test_a_sparse_screen_is_sized_without_being_read(tmp_path):
     screens = plant(tmp_path)
     with open(screens / "huge.png", "wb") as f:

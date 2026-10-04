@@ -136,6 +136,7 @@ def kernel_child(tmp_path, dsn, runners, log) -> subprocess.Popen:
     )
 
 
+@pytest.mark.macos
 def test_kill_mid_turn(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     task = run(scripted.start(fresh, ws))
@@ -428,6 +429,7 @@ def test_kill_between_intent_and_outcome(fresh, op):
     assert [o["kind"] for o in typed(written, "effect.outcome", effect_id=missing)] == ["failed"]
 
 
+@pytest.mark.macos
 def test_merge_restarts_its_kernel(fresh, op, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -464,6 +466,7 @@ def test_dangling_propose_intent(fresh, op):
     assert [o["kind"] for o in typed(written, "effect.outcome", effect_id=effect)] == ["done"]
 
 
+@pytest.mark.macos
 def test_recollect_mid_move(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -569,6 +572,7 @@ def test_refused_kernel_release(fresh, op):
 # -- the turn slot ------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_slot_reentrant(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -673,6 +677,7 @@ def test_a_check_holds_the_slot(fresh, op, which, monkeypatch):
     assert out["status"] == "moved"
 
 
+@pytest.mark.macos
 def test_one_turn_slot(fresh, op, tmp_path):
     spaces = {name: scripted.workspace(tmp_path / name)[0] for name in "abjc"}
     for name in "ab":
@@ -754,6 +759,7 @@ def own_ports(monkeypatch):
         monkeypatch.setattr(kws, "choose_port", lambda span, taken: choose((low, high), taken))
 
 
+@pytest.mark.macos
 def test_services_survive_between_steps(fresh, op, tmp_path, monkeypatch):
     own_ports(monkeypatch)
 
@@ -1002,6 +1008,7 @@ def test_a_failure_in_one_task_leaves_the_others(fresh, op, monkeypatch, capsys)
     assert f"task {bad}: notices failed" in err and f"task {bad}: scheduling failed" in err
 
 
+@pytest.mark.macos
 def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, sleep_once=30)
@@ -1056,6 +1063,7 @@ def test_settle_releases_the_lock_when_stopping_the_services_fails():
     assert run(go()) == {} and closed == [True]
 
 
+@pytest.mark.macos
 def test_a_stop_between_steps_settles_the_task(fresh, op, tmp_path, monkeypatch):
     """A task stopped while no step runs: its services stop and
     `services:<task>` is released when the kernel reads the stop."""

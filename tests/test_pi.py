@@ -50,6 +50,7 @@ def _flag_value(argv: list[str], flag: str) -> str:
 # -- the command ----------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_the_command_runs_node_and_the_script_under_the_turn_profile_with_every_loader_off(tmp_path):
     command, harness = _build(tmp_path, resume="sess-1")
     argv = command.argv
@@ -68,6 +69,7 @@ def test_the_command_runs_node_and_the_script_under_the_turn_profile_with_every_
     assert command.harness == "pi" and command.harness_version == pi.version(settings.pi)
 
 
+@pytest.mark.macos
 def test_the_prompt_is_stdin_and_never_an_argument(tmp_path):
     command, _ = _build(tmp_path, prompt="--not-a-flag @not-a-file")
     assert command.stdin == b"--not-a-flag @not-a-file"
@@ -110,6 +112,7 @@ def test_the_real_binary_receives_each_prompt_whole(tmp_path, prompt):
 # -- the turn's configuration ---------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_models_json_points_at_the_gateway_with_the_placeholder_key_and_the_briefs_output_cap(tmp_path):
     _command, harness = _build(tmp_path, base_url="http://127.0.0.1:4242/t/tok")
     models = json.loads((Path(harness["pi_agent_dir"]) / "models.json").read_text())
@@ -132,6 +135,7 @@ def test_context_window_is_found_by_the_price_tables_id_matching():
         pi.context_window("gpt-6.1-sol-pro")
 
 
+@pytest.mark.macos
 def test_max_output_tokens_comes_from_the_harness_settings(tmp_path):
     _task, made = provision(tmp_path)
     harness = {**made.harness, "max_output_tokens": 1234}
@@ -151,6 +155,7 @@ def test_the_cost_fields_are_the_gateways_default_tier_rates_when_it_has_them():
         assert cost["input"] == base["input"] / 1_000_000 and cost["output"] == base["output"] / 1_000_000
 
 
+@pytest.mark.macos
 def test_a_link_planted_in_the_agent_directory_is_replaced_not_followed(tmp_path):
     _task, made = provision(tmp_path)
     secret = tmp_path / "secret.txt"
@@ -254,6 +259,7 @@ def test_the_openai_reviewer_seat_is_pi_on_the_gateways_priced_model():
 # -- the blind checkout ---------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_blind_checkout_leaves_pi_configuration_out_of_the_tree_but_in_the_diff(tmp_path):
     _task, made = provision(tmp_path)
     ws = Path(made.workspace)
@@ -276,6 +282,7 @@ def test_a_blind_checkout_leaves_pi_configuration_out_of_the_tree_but_in_the_dif
     assert status.strip() == ""
 
 
+@pytest.mark.macos
 def test_a_blind_checkout_leaves_out_a_pi_link_to_a_directory_too(tmp_path):
     _task, made = provision(tmp_path)
     ws = Path(made.workspace)
@@ -369,6 +376,7 @@ def _pi_layout(root: Path) -> Path:
     return link
 
 
+@pytest.mark.macos
 def test_a_turn_cannot_rename_an_ancestor_of_the_install_and_put_its_own_tree_there(tmp_path, monkeypatch):
     link = _pi_layout(tmp_path / "cache")
     monkeypatch.setattr(kws, "settings", dataclasses.replace(settings, pi=str(link)))
@@ -383,6 +391,7 @@ def test_a_turn_cannot_rename_an_ancestor_of_the_install_and_put_its_own_tree_th
         assert _under_profile(tmp_path, f"mv {inside} {inside}.old").returncode != 0
 
 
+@pytest.mark.macos
 def test_a_link_reached_through_a_symlinked_parent_is_denied_by_its_resolved_directory(tmp_path, monkeypatch):
     real = tmp_path / "real"
     inst = _pi_layout(tmp_path / "inst")
@@ -400,6 +409,7 @@ def test_a_link_reached_through_a_symlinked_parent_is_denied_by_its_resolved_dir
     assert _under_profile(tmp_path, f"mv {tmp_path}/spelled {tmp_path}/other").returncode != 0
 
 
+@pytest.mark.macos
 def test_a_node_outside_homebrew_is_denied_like_the_install(tmp_path, monkeypatch):
     node = tmp_path / "nvm" / "versions" / "v1" / "bin" / "node"
     node.parent.mkdir(parents=True)
@@ -418,6 +428,7 @@ def test_a_node_outside_homebrew_is_denied_like_the_install(tmp_path, monkeypatc
     assert _under_profile(tmp_path, f"touch {tmp_path}/nvm/new").returncode == 0
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("which", ["pi", "node"])
 def test_a_two_hop_chain_is_held_at_the_middle_link_and_its_directory(tmp_path, monkeypatch, which):
     real = tmp_path / "pfx" / "lib" / "real.js"
@@ -445,6 +456,7 @@ def test_a_two_hop_chain_is_held_at_the_middle_link_and_its_directory(tmp_path, 
     assert (mid / which).resolve() == real.resolve()
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("which", ["pi", "node"])
 def test_a_symlinked_directory_inside_the_links_target_is_held(tmp_path, monkeypatch, which):
     pfx = tmp_path / "pfx"
@@ -473,6 +485,7 @@ def test_a_symlinked_directory_inside_the_links_target_is_held(tmp_path, monkeyp
     assert (store / "cli.js").read_text() == "good"
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("which", ["pi", "node"])
 def test_a_link_before_dotdot_in_a_targets_path_is_held_as_the_kernel_walks_it(tmp_path, monkeypatch, which):
     real = tmp_path / "r" / "x"

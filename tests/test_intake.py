@@ -138,6 +138,7 @@ def test_duplicate_inbound(dsn, op):
     assert len(run(of_type(dsn, "message.bound", received_id=a.received_id))) == 1
 
 
+@pytest.mark.macos
 def test_binding_table(dsn, op, tmp_path, monkeypatch):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -192,6 +193,7 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
     assert machine.fold(run(rows(dsn, task))).state is State.STOPPED
 
 
+@pytest.mark.macos
 def test_feedback_on_the_delivered_notice(dsn, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -340,6 +342,7 @@ def test_steer_while_awaiting_approval(dsn, op):
     assert "waiting on approval" in n["text"]
 
 
+@pytest.mark.macos
 def test_steer_mid_turn(dsn, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -381,6 +384,7 @@ async def scripted_answer(conn, task) -> None:
     await session.answer(conn, task, "a short one", by="test", via="the test suite", role_played=True)
 
 
+@pytest.mark.macos
 def test_steer_during_checks(dsn, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -411,6 +415,7 @@ def toy_spec(tmp_path, repo, **more) -> None:
     (tmp_path / "projects" / "toy.toml").write_text("\n".join(lines) + "\n")
 
 
+@pytest.mark.macos
 def test_start_provisions(dsn, op, tmp_path):
     src = scripted.toy_repo(tmp_path)
     toy_spec(tmp_path, src)

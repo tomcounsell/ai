@@ -351,6 +351,7 @@ def test_a_plan_that_commits_a_valor_entry_is_no_plan_and_nothing_is_written_thr
     assert [p["turn_id"] for p in plans] == [collected[1]["turn_id"]]  # the next plan turn's, not this one's
 
 
+@pytest.mark.macos
 def test_a_plan_whose_tree_holds_valor_goes_back_with_the_reason_and_critique_does_not_rerun(
     dsn, tmp_path, monkeypatch
 ):
@@ -578,6 +579,7 @@ def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
     run(go())
 
 
+@pytest.mark.macos
 def test_a_critique_at_the_openai_seat_builds_its_turn_for_pi(dsn, tmp_path):
     task, _b, ws = planned(dsn, tmp_path, critique="sound")
     inner = scripted.fresh_for(ws / ".git")

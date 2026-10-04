@@ -1059,6 +1059,7 @@ async def _many_hunks(dsn, ws, n: int) -> str:
     return task
 
 
+@pytest.mark.macos
 def test_governance_fan_out_runs_past_eight_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -1074,6 +1075,7 @@ def test_governance_fan_out_runs_past_eight_at_once(dsn, tmp_path):
     assert len(hunks) >= 12 and len(ids) == len(hunks) and most == len(hunks)
 
 
+@pytest.mark.macos
 def test_a_300_hunk_fan_out_opens_one_connection(dsn, tmp_path, monkeypatch):
     ws, _ = scripted.workspace(tmp_path)
     real = db.connect
@@ -1099,6 +1101,7 @@ def test_a_300_hunk_fan_out_opens_one_connection(dsn, tmp_path, monkeypatch):
     assert not state["open_calls"] and tasks.audit(state) == []
 
 
+@pytest.mark.macos
 def test_a_stop_between_two_hunks_opens_leaves_every_opened_call_charged(dsn, tmp_path, monkeypatch):
     from core import spending
 
