@@ -289,3 +289,18 @@ connection. The merge with 2.1 takes these as additions to its port.
   mail, and `\Seen` set before the fetch; each is fixed above.
 - Docs placing the bridges' secrets in the Keychain: they go in the
   kernel key directory, for the reason machine.md gives.
+
+## Merged
+
+- Patch round 11 (27d389a02) passed all three checks: test-2-3-p11 pass,
+  review-2-3-p11 pass with three minor findings, docs-2-3-p11 updated
+  f3f5be65d. The lead folded the three findings in at the merge (6dfdab88c):
+  rollout window step 4 names the release's backend and says the next
+  wake's sweep settles the effect; email.md says no email binds; the
+  killed-send test in test_bridge.py asserts on its own effect only.
+- Lead suite on 6dfdab88c: 1514 passed, 25 skipped; ruff clean (254 files).
+- Backup `valor_rebuild-20261004T194051Z.dump`. `valor-cori-rebuild`
+  fast-forwarded to 6dfdab88c.
+- Decided by default: the DMARC check stays parked (aec2bff7f); follow-up
+  tests for a kernel-level stop at BODY, AUTH, DATA and TLS, and for a watch
+  starting while the database is unreachable.

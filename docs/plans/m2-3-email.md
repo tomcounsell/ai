@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-3-email
 type: build
-status: delivered-not-passed (record in m2-3-email-record.md)
+status: merged (record in m2-3-email-record.md)
 critique_rounds: 1
 review_rounds: 2
 governance_grant: none (open question 17, the DMARC check, is parked: aec2bff7f stays unmerged)
