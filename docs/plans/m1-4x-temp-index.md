@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4x-temp-index
 type: bugfix
-status: passed
+status: merged
 critique_rounds: 0
 review_rounds: 1
 ---
@@ -60,3 +60,24 @@ Built on 9e5090663. Docs: `docs/data.md`, `docs/harnesses.md`, and
 `core/README.md` name `output/` as where the fresh index is made.
 Full suite: 1099 passed, 21 skipped. `ruff check` and `ruff format --check`
 clean.
+
+## Checks
+
+On b645fb790 (base 9e5090663): test pass (1098 to 1099 passed, 21
+skipped), review pass (governance no), docs updated in bda6bba5f.
+Rebased onto 6e123f88f as e130dc2fd and 9c7e9d5a1: test pass (base 1195,
+head 1196 passed, 23 skipped; fifteen sandbox operations on `output/` and a
+live index denied under the turn, check, setup, and service profiles),
+review pass (governance no), docs no change. The plan's defect sentence
+was corrected to name the profiles that reach the shared temp directory
+(b1535f985).
+
+## Merged
+
+Lead suite on b1535f985: 1196 passed, 23 skipped; ruff clean. Backup
+`valor_rebuild-20261004T084756Z.dump`. Fast-forward from 6e123f88f to
+b1535f985. No rollout step: the kernel reads the new path on its next
+start.
+
+Follow-up: a kernel killed during `dirty` leaves a `valor-index-*`
+directory in `output/`; nothing reads it.
