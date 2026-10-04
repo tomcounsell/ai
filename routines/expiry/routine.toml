@@ -7,7 +7,7 @@ need = ["Mission item 5 and the governance constraint: a guard that has not fire
 created = 2026-10-04
 project = "valor"
 branch = "valor-cori-rebuild"
-instruction = """Delete what the list below names as due: for each guard, remove its code, its seed in core/guards.py, its tests, and the docs that describe it; for each routine, remove its directory and the docs that name it. Keep nothing the list does not name. One branch, one delivery, held for Tom's tap."""
+instruction = """Delete what the list below names as due: for each guard, remove its code, its seed in core/guards.py, its tests, and the docs that describe it; for each routine, remove its directory and the docs that name it. Remove nothing the list does not name, and keep everything else. One branch, one delivery; its merge is released like any merge."""
 
 [schedule]
 hour = 4

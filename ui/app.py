@@ -81,7 +81,7 @@ async def tasks_page(conn) -> web.Response:
             [
                 [
                     link(t["task_id"]),
-                    esc((t["instruction"] or "")[:200]),
+                    esc(t["instruction"] or ""),
                     esc(t["state"]),
                     usd(t["spent_usd_micros"]),
                     esc(t["attention_counts"]),

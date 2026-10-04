@@ -173,8 +173,6 @@ async def start(
             conn, parent_id, ceiling=ceiling, marker=marker, by=by, via=via, role_played=role_played, **given
         )
     marker = {"sdlc": 1} if marker is None else dict(marker)
-    if "calibration" in marker:
-        raise CalibrationTask("a calibration task is started by start_calibration")
     async with conn.transaction():
         await _write(conn, brief, marker, ledger.provenance(by, via, role_played))
     return brief.id

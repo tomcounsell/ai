@@ -19,7 +19,7 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 
 - A routine's ceiling is set when its objective is committed and never widens at run time.
 - Most routines are `read` (sweeps, reports) or `propose` (drafts, branches, proposed memory).
-- An `act` inside a routine needs Tom's tap per action like any other. A schedule is not a standing approval.
+- An `act` inside a routine is released like any other `act`. A schedule is not a standing approval. The expiry sweep's deletion merge is released as any merge is, by the lead's call.
 - Spend is metered on each run's task and the routine's spending over its period is reported; money never stops a routine.
 
 ## Not here

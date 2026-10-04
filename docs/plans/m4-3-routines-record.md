@@ -123,3 +123,30 @@ lock are held on connections that open no transaction, and nothing takes
 them while a tree or task lock is held. No inversion found, no code change.
 `test_a_stop_of_the_tree_beside_a_preempting_step_deadlocks_nowhere` stays;
 it fails if a writer takes task before tree.
+
+## Patch round 2
+
+Review R1 and R2 and notes N1, N2, N4, N5, N6 (review-4-3).
+
+- **R1.** The expiry instruction now reads "Remove nothing the list does not
+  name, and keep everything else. One branch, one delivery; its merge is
+  released like any merge." The tap wording is gone. Test: the rendered
+  sweep prompt says so.
+- **R2.** `routines.due` treats an instance grant that a merged sweep listed
+  as removed (fix (a)): the grant has no code to check, so the merged
+  deletion is its removal and the fold reads it from the sweep's
+  `task.started` and the sweep's state. A seeded guard and a routine already
+  leave the fold when their code leaves the checkout. Test fails without it.
+- **N1.** `routines.PLIST_ENV` adds `VALOR_MACHINE`, `VALOR_WORK`,
+  `VALOR_PROJECTS` (set only when present; test).
+- **N4.** `tasks.start` no longer refuses a calibration marker; no caller
+  passes one, and a root started that way breaks nothing `start_child`'s
+  refusal protects.
+- **N5.** The page shows the whole instruction; the sweep report keeps the
+  whole output of a failed replay.
+- **N6.** `routines/README.md` and `docs/routines.md` no longer say Tom taps
+  a sweep's merge or gives the keep reason.
+- **N2.** Decided by default: preemption is heard at the turn's process wait
+  and the check's suite wait; other waits in a hold finish first. One line in
+  machine.md.
+- **N3, N7** need no change.

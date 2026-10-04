@@ -50,7 +50,7 @@ async def _drive(item: Path, arm: str, run: str, name: str) -> tuple[int, str]:
         stderr=asyncio.subprocess.STDOUT,
     )
     out, _ = await proc.communicate()
-    return proc.returncode, out.decode(errors="replace")[-2000:]
+    return proc.returncode, out.decode(errors="replace")
 
 
 async def _preempted(conn, task_id: str | None) -> int:

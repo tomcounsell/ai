@@ -158,7 +158,10 @@ hold takes the shared lock `turn-slot-fg:<machine>` and sends
 `valor_preempt`. A background turn or check hears it, or finds the lock
 held, and ends: the gateway grant is revoked, the process group is killed,
 the turn ends with outcome `preempted`, and no verdict is written. The
-task is ready again and runs after Tom's work. The kernel starts a
+task is ready again and runs after Tom's work. A background turn hears
+the notice while its process runs, and a check while its suite runs; a
+background step inside a hold that waits elsewhere (the test runner's
+judgement, a review's setup) finishes that wait first. The kernel starts a
 foreground step beside a background one and a background step only when no
 foreground step is ready. A replay run by hand is background and sends no
 notice ([routines.md](routines.md)).
