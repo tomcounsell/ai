@@ -129,13 +129,14 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
     """Each file must be a regular file in the task's workspace, within the
     channel's limit, and the whole message within its limit once the
     channel's size function is set. The kernel never reads a file a turn
-    names: one that is missing, a link, or outside the workspace gets the
-    same answer, and whether its bytes are what Tom approved is the
+    names: one that is missing, a link, outside the workspace, or not an
+    object with a path gets the same answer, and whether its bytes are what Tom approved is the
     bridge's `perform`."""
     limits = LIMITS[channel]
     sizes = []
-    for f in action.payload.get("files") or []:
-        path = f.get("path")
+    files = action.payload.get("files") or []
+    for f in files if isinstance(files, list) else [files]:
+        path = f.get("path") if isinstance(f, dict) else f
         size = None
         if workspace and isinstance(path, str):
             size = await asyncio.to_thread(_file_size, workspace, path)
@@ -194,8 +195,8 @@ DECLARED: dict[str, Declared] = {
         effect_class="act",
         usage=(
             '`telegram.send_message`: target the chat id as text, payload `{"text": "...", '
-            '"reply_to": null, "topic_id": null, "files": [{"path": "...", "sha256": "..."}]}`; '
-            "sent once Tom approves."
+            '"reply_to": null, "topic_id": null, "files": [{"path": "...", "sha256": "..."}]}`, each path absolute '
+            "and inside your workspace; sent once Tom approves."
         ),
         owner="telegram",
         check=_refuse_telegram,
@@ -206,7 +207,8 @@ DECLARED: dict[str, Declared] = {
         usage=(
             '`email.send`: target the `to` addresses, lowercased, sorted, comma-joined, payload `{"to": '
             '[...], "cc": [...], "subject": "...", "body": "...", "in_reply_to": null, "references": [], '
-            '"files": [{"path": "...", "sha256": "..."}]}`; sent once Tom approves.'
+            '"files": [{"path": "...", "sha256": "..."}]}`, each path absolute and inside your workspace; '
+            "sent once Tom approves."
         ),
         owner="email",
         check=_refuse_email,

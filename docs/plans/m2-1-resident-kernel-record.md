@@ -376,3 +376,27 @@ file must be and who reads it. Nothing new limits, waits, or guards.
 
 Suite: 1213 passed, 21 skipped (`valor_rebuild_test_21p6`, ports 6430-6439).
 Ruff check and format check clean.
+
+## Patch round 7
+
+Scope: G1 of the test of round 6 and L1 of its review, as the lead
+decided.
+
+1. G1. A send whose `files` is not a list, or holds an entry that is not
+   an object, is refused at request with the one answer every unsized
+   file gets, "not a regular file in the task's workspace", and the
+   refusal is ledgered, so the turn is collected. `_size_refusal` takes a
+   non-list `files` as its one entry and a non-object entry as its own
+   path. Test: `test_malformed_files_refused_at_request` (`["x"]`,
+   `[null]`, `5`, `{"a": 1}`, `[[1]]` through `broker.request` on the test
+   database, each refused with one `effect.refused` on the task); it fails
+   without the change.
+2. L1. The usage strings of `telegram.send_message` and `email.send` say
+   each file path is absolute and inside the turn's workspace.
+
+Nothing new limits, waits, or guards. A NUL in a send's payload fails in
+Postgres when the request is ledgered; that is the ledger's and not this
+round's.
+
+Suite: 1218 passed, 21 skipped (`valor_rebuild_test_2_1p7`, ports
+6430-6439). Ruff check and format check clean.

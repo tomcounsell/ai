@@ -252,6 +252,23 @@ def test_files_refused_alike_and_never_read(dsn, op, tmp_path):
     assert nowhere.kind == "refused"
 
 
+@pytest.mark.parametrize("files", [["x"], [None], 5, {"a": 1}, [[1]]], ids=repr)
+def test_malformed_files_refused_at_request(dsn, op, tmp_path, files):
+    """A `files` that is not a list of objects is refused with the same
+    answer as any other file the kernel cannot size, and the refusal is
+    ledgered, so the turn is collected."""
+
+    async def go():
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            return task, await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
+
+    task, out = run(go())
+    assert out.kind == "refused" and out.error.endswith("is not a regular file in the task's workspace"), out
+    refused = run(of_type(dsn, "effect.refused", effect_id=out.effect_id))
+    assert [r["task_id"] for r in refused] == [task], refused
+
+
 def _no_read(*a, **k):
     raise AssertionError(f"the kernel read {a[:1]}")
 
