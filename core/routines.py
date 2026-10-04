@@ -47,6 +47,11 @@ SCHEDULE_KEYS = {"minute": "Minute", "hour": "Hour", "day": "Day", "weekday": "W
 PLIST_ENV = (
     *(n for n in backup.PLIST_ENV if n.startswith(("VALOR_PG", "VALOR_DB"))),
     "VALOR_DEMO",
+    # What shapes the turn slot, the projects and the workspaces must match
+    # the kernel's, or a routine's turns run beside Tom's and resolve other paths.
+    "VALOR_MACHINE",
+    "VALOR_WORK",
+    "VALOR_PROJECTS",
 )
 
 
@@ -485,10 +490,14 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
     project, listed and not removed. One fold over kernel-written rows."""
     today = _day(now)
     listed: dict[tuple[str, str], date] = {}
+    removed: set[str] = set()  # instance grants a merged sweep listed
     for sweep in await _sweeps(conn):
+        merged = await state_of(conn, sweep["task_id"]) == "merged"
         for item in sweep["payload"]["due"]:
             key = (item["kind"], item["id"])
             listed[key] = max(listed.get(key, date.min), _day(sweep["at"]))
+            if merged and item["kind"] == "grant":
+                removed.add(item["id"])
 
     def listed_recently(key: tuple[str, str]) -> bool:
         return key in listed and today < listed[key] + timedelta(days=USE_DAYS)
@@ -522,6 +531,8 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
         kind = "grant" if instance else "guard"
         if not instance and guard_id not in seeded:
             continue  # a seeded guard the checkout no longer holds is gone
+        if instance and guard_id in removed:
+            continue  # a grant has no code left to check: the merged sweep removed it
         fired = firings.get(guard_id)
         if instance or fired is None:
             is_due = today > expires

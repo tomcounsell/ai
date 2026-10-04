@@ -21,7 +21,7 @@ from core.settings import settings
 from tests import scripted
 from tests.conftest import TEST_DB
 from tests.test_docs_runner import docs_runners
-from tests.test_objective_tree import run
+from tests.test_objective_tree import merge, run
 from tests.test_routines import write_toml
 from tests.test_workspace import _spec_file
 
@@ -159,6 +159,44 @@ def test_an_item_a_sweep_listed_is_not_listed_again_until_ninety_days_on(world):
     soon, later = run(go())
     assert guard not in listed(soon) and listed(soon, "guard") == SEEDED - {guard}
     assert guard in listed(later)
+
+
+def test_an_instance_grant_a_merged_sweep_listed_is_gone_and_never_due_again(world):
+    dsn, owner, _ = world
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            ours = await tasks.start(conn, tasks.Brief(instruction="ours", project={"name": "valor"}))
+            sweep = await tasks.start(conn, tasks.Brief(instruction="sweep"))
+        await put(
+            owner,
+            ours,
+            "guard.granted",
+            {"guard_id": "g-x", "instance_id": "x", "name": "x", "incident": "i", "mission_items": [2],
+             "granted_at": "2026-09-01", "expires": "2026-09-30"},
+            datetime(2026, 9, 1, tzinfo=UTC),
+        )  # fmt: skip
+        listing = {"due": [{"kind": "grant", "id": "g-x"}], "sweep": "expiry", "sdlc": 1}
+        await put(owner, sweep, "task.started", listing, datetime(2026, 10, 1, tzinfo=UTC))
+        before = await due(dsn, datetime(2026, 12, 15, tzinfo=UTC))  # sweep open: held off 90 days
+        async with await db.connect(dsn) as conn:
+            await merge(conn, sweep)
+        return (
+            before,
+            await due(dsn, datetime(2027, 1, 1, tzinfo=UTC)),
+            await due(dsn, datetime(2028, 1, 1, tzinfo=UTC)),
+        )
+
+    before, after, much_later = run(go())
+    assert "g-x" not in listed(before)
+    assert "g-x" not in listed(after) and "g-x" not in listed(much_later)
+
+
+def test_the_rendered_sweep_prompt_removes_only_what_the_list_names(world):
+    _, _, _ = world
+    text = routines.render({"items": [], "outside": []}, routines.load("expiry"))
+    assert "Remove nothing the list does not name" in text
+    assert "Keep nothing" not in text and "Tom" not in text
 
 
 def test_a_seeded_guard_the_checkout_no_longer_holds_is_not_due(world):

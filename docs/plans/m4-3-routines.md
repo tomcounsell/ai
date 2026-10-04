@@ -132,7 +132,8 @@ One fold over kernel-written rows, `routines.due(conn, now)`:
 - **A guard that fired** is due 90 days after its last firing, and not
   before its `expires` date.
 - **A guard a sweep listed** (an open sweep, or a merged one that kept it)
-  is not due again until 90 days after that sweep listed it.
+  is not due again until 90 days after that sweep listed it. An instance
+  grant a merged sweep listed is removed and never due again.
 - **A seeded guard** absent from `guards.SEEDED` in the kernel's checkout
   is gone and never due.
 - **An instance grant** (`guards.grant`, `guard_id` `grant-<id>`) has no

@@ -251,6 +251,9 @@ def test_the_plist_names_the_kernels_interpreter_the_schedule_and_the_settings_s
     write_toml(where, name)
     monkeypatch.setenv("VALOR_DEMO", "/some/demo")
     monkeypatch.setenv("VALOR_PGHOST", "db.example")
+    monkeypatch.setenv("VALOR_MACHINE", "pink")
+    monkeypatch.setenv("VALOR_WORK", "/some/work")
+    monkeypatch.setenv("VALOR_PROJECTS", "/some/projects")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-appear")
     got = plistlib.loads(routines.plist(routines.load(name), python="/py/bin/python", root=ROOT))
     assert got["Label"] == f"com.valor.routine.{name}"
@@ -259,6 +262,8 @@ def test_the_plist_names_the_kernels_interpreter_the_schedule_and_the_settings_s
     assert got["WorkingDirectory"] == str(ROOT)
     env = got["EnvironmentVariables"]
     assert env["VALOR_DEMO"] == "/some/demo" and env["VALOR_PGHOST"] == "db.example"
+    assert env["VALOR_MACHINE"] == "pink" and env["VALOR_WORK"] == "/some/work"
+    assert env["VALOR_PROJECTS"] == "/some/projects"
     assert set(env) <= {"HOME", "PATH", *routines.PLIST_ENV}
     assert "must-not-appear" not in routines.plist(routines.load(name)).decode()
 

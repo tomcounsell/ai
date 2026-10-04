@@ -220,12 +220,13 @@ reads kernel-written rows only and proposes:
 - a routine whose first registration is over ninety days old and whose runs
   in that window led to no use.
 
-An item a sweep listed is not listed again for ninety days. The sweep's one
+An item a sweep listed is not listed again for ninety days. An instance
+grant that a merged sweep listed is removed and never listed again. The sweep's one
 task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the
 default, so Tom's tap is not asked for it: the merge is the build lead's call
 and is released like any other merge. Keeping something past expiry takes a reason in the branch's
-review, given by Tom; the default is the deletion (Mission item 5; the
+review; the default is the deletion (Mission item 5; the
 governance constraint).
 
 ## Gaps
