@@ -357,11 +357,9 @@ on screen. The outcome records `chat_id` and
 its task.
 
 **One attempt.** `perform` makes one delivery attempt. A flood wait or a
-refusal on the first message returns a failed outcome with the reason and,
-for a flood wait, the wait time, which later requests wait out. With no
-connection on the first message the send stays in flight: `lookup` needs
-the connection, so the outbox's reconcile settles it as failed once one is
-up. A flood wait on a later message, once earlier ones are on
+refusal on the first message, or no connection for it, returns a failed
+outcome with the reason (`NotConnected` when there is no connection) and,
+for a flood wait, the wait time, which later requests wait out. A flood wait on a later message, once earlier ones are on
 screen, is waited out for exactly the seconds Telegram gives, and the
 send goes on. A
 connection lost after a request was written is `broker.Unknown`: no

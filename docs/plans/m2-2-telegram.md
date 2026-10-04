@@ -161,7 +161,7 @@ What the bridge must never do with any of it:
   release; send other bytes than those hashed.
 - Change what Tom approved: no parse mode, no link preview, no trimming;
   splitting keeps every character in order.
-- Conclude `done` from anything but own messages dated after the intent,
+- Conclude `done` from anything but own messages above the send's record,
   unclaimed, matching the payload; two matches conclude nothing.
 - Let the session reach a turn, a log, or a ledger row. The session and
   the API id and hash live in the kernel key directory, which every
