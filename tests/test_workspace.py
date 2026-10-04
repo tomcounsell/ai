@@ -361,7 +361,12 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
     (planted / "bin/claude").write_text("planted")
     lay = kws.Layout(tmp_path / "work" / "abc123")
     profile = tmp_path / "turn.sb"
-    profile.write_text(kws.turn_profile(lay, [], home=home, kernel=[keys, home / "absent" / "keys"]))
+    # The fake home is under pytest's temp directory, which a turn's profile
+    # denies whole; `tmp` leaves it reachable so the rules shown are the
+    # ancestors' and the home's own.
+    profile.write_text(
+        kws.turn_profile(lay, [], home=home, kernel=[keys, home / "absent" / "keys"], tmp=True)
+    )
     got = probe(
         profile,
         f"rename:{home / '.local'}>{home / '.local-old'}",

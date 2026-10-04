@@ -20,7 +20,7 @@ The choices [m1-5-emulator.md](m1-5-emulator.md) made without asking Tom.
   so there is no pathspec to make literal. Size and truncation are recorded.
 - The hidden-test tree lives at `<task_dir>/checks/verify-<run>/`.
 - `MAX_RUNS` and `MAX_FAILED_RUNS` are removed; a failed run, a
-  `NO RUNNER` stage, `IDLE`, `LOCK LOST`, `LEGACY`, an unknown answer and
+  `NO RUNNER` stage, `LOCK LOST`, `LEGACY`, an unknown answer and
   an awaited grant each exit for a resume; a delivery that did not pass
   and a refused merge end `to tom`. `ALREADY RUNNING` blocks on the run
   lock, not a sleep loop, and takes nothing for itself.

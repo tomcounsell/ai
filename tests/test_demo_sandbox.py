@@ -336,7 +336,14 @@ def _turn_shell(tmp_path: Path, lay: kws.Layout, script: str) -> subprocess.Comp
     kws.write_tools(lay.root.parent / "bin")
     own = lay.work_state / "tmp"
     own.mkdir(exist_ok=True)
-    env = kws.harness_env(lay, kws.Spec(name="p", repo="r", kind="python", suite="true"), {}, {})
+    env = kws.harness_env(
+        lay,
+        kws.Spec(name="p", repo="r", kind="python", suite="true"),
+        {},
+        {},
+        bin_dir=lay.root.parent / "bin",
+        passfile=lay.home / "pgpass",
+    )
     env.update({"HOME": str(lay.home), "TMPDIR": str(own)})
     sandbox = [
         "sandbox-exec",

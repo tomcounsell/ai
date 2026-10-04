@@ -33,7 +33,7 @@ from core.settings import SEATS
 from tests.emulator.common import DEMO, Meter, claude_json, core, mirror_diff, review_rev, status
 
 DIFF_LIMIT = 80_000  # the baseline's value, kept so scores compare (5d90b4776:scripts/role_play_tom.py:37)
-MODEL = SEATS["frontier"]
+_, MODEL = SEATS["frontier"]  # the frontier seat's pinned id
 
 ANSWER_SYSTEM = """You are standing in for Tom, who made the request below and is the product owner. \
 Valor, the engineer building it, has sent him a message. Reply as Tom.

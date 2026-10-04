@@ -60,8 +60,7 @@ Each answer of `core run` ends the step one way. `QUESTION`, `DELIVERED`,
 `STOPPED` and `MERGED` go back to the task's status. `ALREADY RUNNING`
 (another run of the task holds its run lock) waits on that lock until it is
 free, then steps again. `NO RUNNER` (a check stage with no runner),
-`FAILED`, `IDLE` (turns that ended without their stage's signal), `LOCK
-LOST` and `LEGACY`, and any other answer, exit the driver with the outcome
+`FAILED`, `LOCK LOST` and `LEGACY`, and any other answer, exit the driver with the outcome
 unset and the answer recorded as the reason; the next invocation resumes
 the same task. A run whose result has an outcome is refused unless `--rebuild` is
 given. Each driver holds one of $VALOR_DEMO_SLOTS (default 3) machine
@@ -399,8 +398,8 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
         wait_run_lock(task_id)
     elif not said.startswith(GOES_ON):
         # NO RUNNER (a verdict recorded by hand, from a blind checkout of
-        # the mirror, lets the next invocation resume), FAILED, IDLE, LOCK
-        # LOST, LEGACY, or an answer this driver does not know.
+        # the mirror, lets the next invocation resume), FAILED, LOCK LOST,
+        # LEGACY, or an answer this driver does not know.
         result["paused"] = said or "core run said nothing"
 
 

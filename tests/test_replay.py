@@ -235,8 +235,6 @@ def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_s
 def test_a_replay_spec_carries_the_items_setup_suite_and_env(tmp_path, monkeypatch):
     import tomllib
 
-    import replay_workspace
-
     from core import workspace
     from tests import scripted
 

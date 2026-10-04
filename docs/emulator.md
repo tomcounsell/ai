@@ -169,10 +169,9 @@ After each `core run` the driver reads the first word of its answer.
 on. Every other answer exits the driver with the outcome unset and the
 answer recorded as the reason: `NO RUNNER` (a check stage with no runner,
 whose verdict is recorded by hand from a blind checkout of the kernel
-mirror), `FAILED`, `IDLE` (turns that ended without their stage's signal),
-`LOCK LOST`, `LEGACY`, and any answer the driver does not know. A stage
-awaiting Tom's grant exits the same way. The next invocation resumes the
-same task.
+mirror), `FAILED`, `LOCK LOST`, `LEGACY`, and any answer the driver does
+not know. A stage awaiting Tom's grant exits the same way. The next
+invocation resumes the same task.
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
 

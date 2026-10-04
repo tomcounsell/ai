@@ -263,7 +263,7 @@ def test_the_emulator_task_is_a_calibration_task_every_writer_refuses(dsn, tmp_p
 
 
 def test_models_are_pinned_ids():
-    assert stand_in.MODEL == settings.SEATS["frontier"] == "claude-opus-5-5"
+    assert stand_in.MODEL == settings.SEATS["frontier"][1] == "claude-opus-5-5"
     model = judge.JUDGE_MODEL
     assert model.startswith("claude-sonnet-") and model not in ("sonnet", "opus", "haiku")
     assert not model.endswith("-latest") and spending.prices(model) is not None
@@ -517,14 +517,6 @@ def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
     )
     assert calls["run"] == 1
     return result
-
-
-def test_an_idle_run_ends_the_item_with_its_answer_as_the_reason(monkeypatch, dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-    scripted.steer(ws, plan="uncommitted")
-    task = asyncio.run(scripted.start(dsn, ws))
-    result = _step_real(monkeypatch, dsn, task)
-    assert result["outcome"] is None and result["paused"].startswith(f"IDLE (task {task}")
 
 
 def test_a_lost_lock_ends_the_item_with_its_answer_as_the_reason(monkeypatch, dsn, owner_dsn, tmp_path):

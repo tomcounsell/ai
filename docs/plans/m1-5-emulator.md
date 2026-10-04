@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-5-emulator
 type: build
-status: delivered-not-passed
+status: passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -228,7 +228,7 @@ turn's `state/work/tmp/verify` to this directory.
 - `MAX_FAILED_RUNS` goes. After each `core run` the driver reads its
   answer's first word: `QUESTION`, `DELIVERED`, `STOPPED`, `MERGED` go on;
   `ALREADY RUNNING` blocks on the task's run lock (`pg_advisory_lock` on
-  `run:<task>`), lets it go, and goes on; `FAILED`, `IDLE`, `LOCK LOST`,
+  `run:<task>`), lets it go, and goes on; `FAILED`, `LOCK LOST`,
   `LEGACY` and any other answer exit with the outcome unset and the answer
   as the reason. The next invocation resumes, as an unset outcome does.
 - `release_pushes` approves and releases a held `push_branch` when the push
@@ -413,8 +413,8 @@ pointed at a local fake provider as `tests/test_gateway_meter.py` does.
     second held merge, the first still does not, and the rev is read from
     the second; a held effect of another action does trip it;
   - a stopped task ends `stopped`;
-  - with the real router and its answer line: `IDLE`, `LOCK LOST` and
-    `LEGACY` exit with the answer as the reason; `ALREADY RUNNING` waits
+  - with the real router and its answer line: `LOCK LOST` and `LEGACY`
+    exit with the answer as the reason; `ALREADY RUNNING` waits
     until the holder lets the lock go, then returns with nothing set;
   - a push is released only when the record's URL is the kernel's origin;
   - `--run` names the result file; a name with an outcome is refused
@@ -621,3 +621,55 @@ Suite on the rebased head: 739 passed, 11 skipped; the cache test above
 failed before its fix, and the 16 GB sweep test failed once under load
 and passes alone. Ruff check clean; format check flags only
 `docs/bridges/telegram.md` and the 2.1 plan.
+
+## Rebase onto 9e5090663
+
+Rebased from `m1-5-docs3` (base `ca620a91f`) onto `9e5090663`, after
+1.4i, 1.4b, 1.4s, 1.4u, 1.4v, 1.4w, 3b and 1.4d. What merged on the tip is
+the status quo; 1.5's changes ride on top.
+
+Conflicts and their resolution:
+
+1. **`core/workspace.py`, `profile`.** The tip collects every denied path
+   in `hidden` so their ancestors are write-denied. 1.5's `tmp` flag keeps
+   its form: a profile without `tmp` (every turn's) denies the three temp
+   directories, a `fresh` one adds `~/.claude*`, and each adds what it
+   denies to `hidden`.
+2. **`core/workspace.py`, `harness_env`.** The tip's signature stands
+   (`bin_dir` and `passfile` passed, so a check's service layout gets the
+   task's `bin/`); 1.5 adds the trusted git's directory after `bin_dir` on
+   `PATH` and keeps `MKTEMP` and `write_tools`, which provisioning calls
+   before `_install_tools`.
+3. **`docs/harnesses.md`.** The Known openings and The workspace sections
+   moved to `sandbox-openings.md` and `workspace.md` on the tip; the
+   pointers stand, and 1.5's edits move with them: the working session
+   writes no shared temp directory, and a replay's spec is written by
+   `tests/emulator/workspace.py`. The Files bullet keeps the tip's uv
+   lines and 1.5's temp deny, `mktemp`, and git directory.
+4. **`docs/tech-stack.md`.** The tip's wrapping, without the removed
+   demonstration script.
+5. **`tests/emulator/replay.py`.** The item format keeps the tip's
+   `project` field and 1.5's "on the final commit".
+6. **`tests/test_replay.py`.** The tip builds performers per task, so the
+   push test passes `PushBranch(workdir, url=origin)` in `broker.Performers`
+   where 1.5 registered it; the Brief carries `push_url` as in 1.5.
+
+Carried for what the tip removed or changed, found by the suite:
+
+- `idle_turns` is gone and `core run` no longer answers `IDLE`; a stop ends
+  a hung turn. `IDLE` is out of the driver, `docs/emulator.md`, this plan
+  and the decided doc, and the idle test is deleted (with no idle stop its
+  scripted task runs on).
+- `SEATS` entries are `(harness, model)` since 3b; the stand-in's `MODEL`
+  is the frontier seat's id.
+- 1.4b's replay spec test imports `replay_workspace` from `scripts/`; it
+  uses the `tests.emulator.workspace` import.
+- 1.4v's ancestor test makes its home under pytest's temp directory, which
+  a turn's profile now denies whole; it passes `tmp`, so what it shows is
+  the ancestor rule.
+- The `mktemp` tests pass `bin_dir` and `passfile` to `harness_env`.
+
+No cap, timeout or guard added.
+
+Suite on the rebased head: 1138 passed, 21 skipped. Ruff check and
+format check clean.
