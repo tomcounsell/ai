@@ -171,6 +171,17 @@ review runner's docs pause in `tests/test_emulator_metering.py`, the live
 stop of a root in `tests/test_objective_tree.py`, and the two replies in
 `tests/test_telegram_pipeline.py`.
 
+**Patch round 7** (review 7743b80d8: changes): the two sparse-file tests
+`tests/test_look.py::test_a_sparse_screen_is_sized_without_being_read`
+and `tests/test_transcripts.py::test_a_sparse_file_is_skipped_without_reading_its_holes`
+carry no `macos` mark. They use only `st_size`, `st_blocks` and
+`os.pread`. In the VM both failed: a file truncated to 1 PB raises
+`EFBIG` on the VM's ext4, whose largest file is 16 TiB, while 8 TiB
+truncates with no block used. Both now plant an 8 TiB file and pass on
+the host and in the VM, and the repository-suite test asserts that both
+pass in the VM. `docs/machine.md` gives the Django suite's 2 GB peak as
+1,855 MB, as this record does.
+
 **Decided by default** (the lead's calls on patch round 5):
 1. A test that needs macOS itself carries the `macos` mark, merged tests
    included, so the repository suite ends in the VM.
@@ -189,12 +200,14 @@ stop of a root in `tests/test_objective_tree.py`, and the two replies in
 - A `.command` opens with `open -g -j`.
 - `ruff` is a dev dependency, so the VM lints with the pinned version.
 - `read_result` adds lint locations only for `python-uv`.
-- In the VM this repository's suite passes 895, skips 453 (the `macos`
-  tests among them) and fails 20 in 184 s: 18 in `tests/test_credentials.py`
-  and `tests/test_judgement.py`, which assume the host's local Postgres
-  roles; `tests/test_emulator_package.py`, which runs `git ls-files` in a
-  source tree that is not a checkout; and the deep request file in
-  `tests/test_session.py`, which overflows the VM's 8 MB stack.
+- In the VM this repository's suite passes 990, skips 457 (331 of them
+  `macos` tests) and has 6 failures and 14 errors in 367 s, none new at
+  head. Patch round 5 named the failing tests: 18 in
+  `tests/test_credentials.py` and `tests/test_judgement.py`, which assume
+  the host's local Postgres roles; `tests/test_emulator_package.py`,
+  which runs `git ls-files` in a source tree that is not a checkout; and
+  the deep request file in `tests/test_session.py`, which overflows the
+  VM's 8 MB stack.
 
 **Tests:** the host suite (`-m "not container"`) passes 1,398 and skips 23
 (live spend, live Telegram, a measurement, Pi with no subagents, git that

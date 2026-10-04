@@ -855,3 +855,9 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
     v = got["verify"]
     assert v["cause"] is None and v["macos_skipped"] > 0, v
     assert v["counts"]["skipped"] >= v["macos_skipped"] and v["counts"]["passed"] > 0
+    # Sparse-file sizing is portable POSIX, so it runs (and passes) in the VM.
+    passed = set(v["base_run"]["tests"]["passed"])
+    assert {
+        "tests.test_look::test_a_sparse_screen_is_sized_without_being_read",
+        "tests.test_transcripts::test_a_sparse_file_is_skipped_without_reading_its_holes",
+    } <= passed, v["base_run"]["tests"]["failed"]
