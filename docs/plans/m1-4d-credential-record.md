@@ -218,5 +218,5 @@ Rollout, by the build session under Tom's feedback of 2026-10-03:
 5. Tom's ruleset on `main` waits for him; nothing depends on it.
 
 Follow-up, outside 1.4d's diff, from review round 4: `git.dirty()` makes
-its temporary index in `$TMPDIR`, which a turn can reach, as round 3's
-output files did. The fix is the same: `dir=git.output_dir()`.
+its temporary index in `git.output_dir()`, which no task profile reaches,
+as the kernel's output files are (task 1.4x, `m1-4x-temp-index.md`).
