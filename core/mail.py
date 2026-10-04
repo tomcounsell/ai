@@ -54,7 +54,10 @@ def email_message(
     msg.set_content(payload.get("body") or "", charset="utf-8")
     for name, data in blobs:
         ctype, encoding = mimetypes.guess_type(name)
-        if ctype is None or encoding is not None:
+        if ctype is None or encoding is not None or ctype.startswith("message/"):
+            # A `message/*` part may be only 7bit, 8bit or binary (RFC 2046
+            # 5.2.1), and its lines would need rewriting to CRLF; the file
+            # goes as its own bytes, base64, which also measures exactly.
             ctype = "application/octet-stream"
         maintype, _, subtype = ctype.partition("/")
         msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)

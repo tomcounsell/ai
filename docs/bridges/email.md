@@ -96,25 +96,11 @@ correction, an exemplar, or conversation. Three things differ for email.
 from Tom's address is recorded and starts nothing. The bridge never sets
 `verified`.
 
-**No approvals or stops by email.** An email reply carries quoted history,
-signatures, and client furniture around what the person typed, so a fixed
-token such as `approve` cannot be read from it without interpretation, and
-interpretation does not decide authority. Email binds only `answer`,
-`steer`, and `start`: a reply whose text is exactly `stop` or `approve`
-binds as a steer. Approvals and stops come through Telegram or the command
-line.
-
-**Answers and feedback.** A reply from Tom whose `In-Reply-To` is the
-`Message-ID` of a question or delivery notice binds to that record and is
-ledgered as `question.answered` or `feedback.given` with `by` Tom,
-`via: email`, and `role_played: false`. The provenance fields are the ones
-the kernel records so that a row can tell Tom from a stand-in
-(rebuild-demonstration.md, Kernel findings, item 5).
-
-A new request that arrives by email meets the same request-underspecification
-classifier (`intake.underspecified`) as one from Telegram, the guard Tom granted for Mission items 3
-and 6 with its incidents in rebuild-demonstration.md (Attention log) and
-rebuild-baseline.md (popoto #191 and #188).
+**Nothing binds.** Every email record is unverified, so intake binds it as
+`none`: mail from Tom is recorded in the ledger and does not start, answer,
+steer, approve, or stop anything. Approvals and stops come through Telegram
+or the command line, which an email reply could not carry reliably anyway
+(quoted history and signatures surround what the person typed).
 
 ## Sending
 
@@ -144,7 +130,10 @@ with the payload's; a mismatch or a missing file fails before SMTP
 connects, so a file changed after Tom's tap never leaves. The message is
 built by `core/mail.py`'s `email_message`, which the bridge reaches through
 `core.bridge`: a UTF-8 `text/plain` body, files as `multipart/mixed`
-parts, the subject and `References` chain unchanged, and only the headers
+parts (each file's own bytes in base64; a `message/*` type, such as
+`.eml`, goes as `application/octet-stream`, since `message/rfc822` may not be
+base64 and would need its lines rewritten), the subject and `References`
+chain unchanged, and only the headers
 transport requires added: `From` (Valor's address), `Date`, and
 `Message-ID`.
 
@@ -198,9 +187,10 @@ server accepts a message only on the end of data line (RFC 5321 section
 4.1.1.4). Before that line has gone out in full, any end (a refused
 connection or login, a refused `MAIL`, every recipient refused, a refused
 `DATA`, or a write that fails) is definite: the outcome is `failed`
-with the reason, and Sent Mail is not read. A stop writes no outcome at
-any point: the send stays in flight, as after a kill, and the next wake
-reads Sent Mail for it. After it, a 250 is `done`, and
+with the reason, and Sent Mail is not read. A stop before that line went is the same: nothing was sent, so the
+outcome is `failed`, with no Sent Mail read and no notice. A stop after the
+line writes no outcome: the send stays in flight, as after a kill, and the
+next wake reads Sent Mail for it. After it, a 250 is `done`, and
 a 4xx or 5xx reply is `failed` (section 4.2.1: the action did not occur).
 Any other end (no reply because the connection closed, a garbled reply, a reply
 line too long to read, another code) raises `broker.Unknown`: the server
@@ -227,15 +217,15 @@ A stopped task's held sends stay held, and `broker.release` refuses a
 release for it on the `task.stopped` fence and records it refused. The
 bridge ends a call only around its own server call: an SMTP send, after the
 broker has written the intent, and a Sent Mail lookup. When Tom stops the
-task, a send blocked on its server ends: its connection is shut down, and no
-outcome and no notice is written. What Tom sees after his own stop is
-nothing at that moment. The send stays in flight, and each later wake asks
+task, a send blocked on its server ends: its connection is shut down. A send
+that had not yet sent the end of data line is settled `failed` with no
+notice, since the server cannot have taken it. A send that had is written
+no outcome and no notice, and what Tom sees after his own stop is nothing at
+that moment. It stays in flight, and each later wake asks
 Sent Mail for it (a lookup for a task stopped earlier runs in full, and only
 a stop that arrives while it runs ends it). Sent Mail holding it settles it
 `done`, silently. A miss sends the one `send_in_doubt` notice, which says
-the email may or may not have gone. A stop before the end of the data line
-means the server never took the message, so every lookup misses and the send
-stays in flight. A failure of the stop listener is not a stop: the call
+the email may or may not have gone. A failure of the stop listener is not a stop: the call
 runs on, and a listener that dropped is set up again on the next wake, so
 Tom's stop still ends a send or lookup blocked on its server. The new
 listener also reads at once whether the task was stopped while none was
@@ -262,7 +252,9 @@ it exits.
   directory.
 - **Alerts.** It raises no operator alerts of its own. A login that fails is
   a line in its log and, for a send, a failed outcome on the ledger;
-  telling Tom is `core/`'s job.
+  telling Tom is `core/`'s job. The one notice it writes is `send_in_doubt`
+  (`EmailBridge.in_doubt`), a `notice.requested` row for a send that may or
+  may not have gone, which Telegram's outbox delivers.
 
 ## The implementation
 
@@ -279,8 +271,8 @@ it exits.
 | `core/session.py` | A `reply_to` request filled in as reply-all |
 
 The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
-`core.settings`, `core.db`, and `core.credentials`, and nothing from the
-Telegram bridge. Its tests run against Dovecot and a local SMTP server
+`core.settings`, `core.db`, `core.credentials`, `core.notices`, and
+`core.tasks`, and nothing from the Telegram bridge. Its tests run against Dovecot and a local SMTP server
 (`tests/mailserver.py`) with a real Postgres and no mocks.
 
 ## Gaps
@@ -299,6 +291,6 @@ Telegram bridge. Its tests run against Dovecot and a local SMTP server
   effect until the connection drops or a stop (Tom's task stop or SIGTERM) ends it; the outbox,
   the watch, and every other send go on.
 - **Email starts, answers, and steers nothing.** No email record is
-  verified, so mail from Tom is recorded and binds as nothing.
+  verified, so mail from Tom is recorded and binds as `none`.
 - **Approving every send.** As on Telegram, each send to anyone but Tom
   waits for his tap, and the broker has no standing grants.

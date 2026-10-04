@@ -232,6 +232,9 @@ def parse_email_message(raw: bytes, internaldate: datetime | None = None) -> Par
     return Parsed(fields, payloads)
 
 
+_NAME_MAX = 255  # the longest file name in bytes on APFS, ext4 and most filesystems
+
+
 def persist(parsed: Parsed, directory: str | Path) -> None:
     """Write each decoded attachment under `directory`, named by the sha256
     of its bytes with its sanitized extension, and set its `path`. The
@@ -240,7 +243,9 @@ def persist(parsed: Parsed, directory: str | Path) -> None:
     for att, data in zip(parsed.fields["attachments"], parsed.payloads, strict=True):
         if data is None:
             continue
-        suffix = re.sub(r"[^A-Za-z0-9]", "", Path(att["name"]).suffix)[:16]
+        suffix = re.sub(r"[^A-Za-z0-9]", "", Path(att["name"]).suffix)
+        if len(f".{hashlib.sha256(b'').hexdigest()}.{suffix}.{os.getpid()}") > _NAME_MAX:
+            suffix = ""  # the staged file's name would be longer than a filesystem allows
         target = directory / (hashlib.sha256(data).hexdigest() + (f".{suffix.lower()}" if suffix else ""))
         if not target.exists():
             directory.mkdir(parents=True, exist_ok=True)

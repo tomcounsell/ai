@@ -13,6 +13,13 @@ critique round, and its build, in order.
   marks the boundary with `main`'s bridge.
 - **No UID cursor**: a UIDVALIDITY change or a gap replays nothing.
 - **The mail credential in the kernel key directory**, per machine.md.
+- **A send stopped before its end of data line is `failed`** (patch round
+  11; it reverses the earlier default that such a send stays in flight).
+  The server accepts a message only on that line (RFC 5321 4.1.1.4), so the
+  send is certainly not sent. Left in flight, it was looked up in Sent Mail
+  on every wake for ever and, on the first miss, Tom was told it "may or
+  may not have gone", which is false. A stop after the line is still in
+  doubt and stays in flight.
 - **Dovecot and a hand-written SMTP server**: UID and UIDVALIDITY behavior is under
   test, and Dovecot runs as the agent's user with no root.
 
@@ -90,7 +97,10 @@ commit, which merges with Tom's grant under open question 17.
 **Not built here.** The upload case that terminates the
 `valor-email-perform` backend, the stopped task's held send, and
 `tests/test_live_email.py`. The steer binding of Tom's reply and the
-guard's firing are in the DMARC commit.
+guard's firing are in the DMARC commit. The bridge-level UIDVALIDITY and
+`email_since` cases, and the password's absence from a ledger row and a log
+line, are not built either (only the UIDVALIDITY read and the exception
+text are tested).
 
 ## Patch round 1
 
@@ -256,6 +266,17 @@ connection. The merge with 2.1 takes these as additions to its port.
 |---|---|---|
 | 2.3 sat on a 2.1 without the merged 2.2 | Rebased onto the merged head. Two doc conflicts, `machine.md` and `tech-stack.md`, resolved by keeping Telegram's merged rows and layering email's. The fake bridges module is `tests/bridges.py` with `--import-mode=importlib` in `pyproject.toml`, which is how the `bridges` package is not shadowed; the 2.3 suite passes under it | the full suite |
 | `read_key` took a whole `python ...` command | Kept: the email bridge's only key command is `python -m bridges.email keys`, not a `python -m core` subcommand, and this plan (the key directory section) has `credentials.read_key` name the owning command in its errors. The email bridge is its only caller of that form | `test_a_missing_mail_key_names_the_bridge_command_that_writes_it` |
+
+## Patch round 11 (the lead's decisions on the blind review)
+
+| Finding | Change | Test |
+|---|---|---|
+| 1. The kernel never had `email_address`: reply-all copied Valor to itself and the size measured was not the size sent | `VALOR_EMAIL_ADDRESS` is in the kernel's `PLIST_ENV`; the rollout sets it in the kernel's environment | `test_the_kernel_job_knows_valors_address_when_it_fills_a_reply_all` runs `reply_all` and the size in the plist's own environment |
+| 2. A stop before the end of data line left the send in flight for ever, with a false notice | `Ends` keeps what its thread raised; `EmailBridge.perform` re-raises a `broker.Failed` from the thread when a stop ended it, so the effect is `failed`, with no lookup and no notice. See Decided by default | `test_tom_stopping_the_task_ends_a_send_blocked_on_its_server` and the hung-send case, now `failed` with no notice |
+| 3. A `.eml` attachment was base64 `message/rfc822` with bare LFs | A `message/*` guess goes as `application/octet-stream`: the file's own bytes, base64, CRLF, measured exactly. Sending it as `message/rfc822` in 7bit or 8bit would rewrite the file's line ends and its size could not be known without reading it | `test_an_eml_attachment_goes_out_as_wire_valid_mime_that_measures_exactly` |
+| 4. The watch's database connection was never replaced | `imap.watch` takes a `connect` function: a dropped connection (`poll` raises `OperationalError` for it) is replaced on the next wake (`retry`), and the last one is closed when the watch ends. No new backoff | `test_a_watch_whose_database_connection_dropped_gets_a_new_one_on_the_next_tick` |
+| `persist` cut the extension to 16 characters | Removed, no source. One filesystem fact remains: an extension that would make the staged file's name longer than 255 bytes is dropped, since the write would fail and the message could never be received | `test_an_extension_is_kept_whole_unless_the_filesystem_cannot_name_the_file` |
+| Docs | Rollout (no Tom step, window steps as the build is), email.md (nothing binds, the stop outcomes, `send_in_doubt`, imports, `.eml`), architecture.md and machine.md (Telegram is built), the port doc (`Bridge.reconcile`, `Outbox.dangling`, `Outbox.settle`, `Outbox.perform(item, conn)`, `broker.Failed`), this plan's tests and files (parked and unbuilt cases marked) | |
 
 ## Tech debt absorbed (moved from the plan)
 

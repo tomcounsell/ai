@@ -213,6 +213,50 @@ def _send_and_receive(dsn, mailbox, deliver_after: bool):
     assert len(run(of_type(dsn, "effect.outcome", effect_id=effect_id))) == 1
 
 
+def test_a_watch_whose_database_connection_dropped_gets_a_new_one_on_the_next_tick(dsn, op, mailbox):
+    before, after = mid(), mid()
+
+    async def watch_backends() -> list[int]:
+        async with await db.connect(dsn) as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND application_name = 'valor-email-watch'"
+                )
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    async def go():
+        email = EmailBridge(mailbox.config(), dsn)
+        watching = asyncio.create_task(email.watches())
+        try:
+            mailbox.dovecot.deliver(from_tom(message_id=before, body="one"))
+            for _ in range(300):
+                if await received(dsn, before):
+                    break
+                await asyncio.sleep(0.1)
+            assert await received(dsn, before)
+            (pid,) = await watch_backends()
+            async with await db.connect(dsn) as conn:
+                await conn.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            mailbox.dovecot.deliver(from_tom(message_id=after, body="two"))
+            await asyncio.sleep(1.0)  # the watch fails on it and waits for a tick
+            assert not await received(dsn, after) and not watching.done()
+            await email.tick()
+            for _ in range(300):
+                if await received(dsn, after):
+                    break
+                await asyncio.sleep(0.1)
+            return await received(dsn, after), pid, await watch_backends()
+        finally:
+            watching.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await watching
+
+    got, old, now = run(go())
+    assert got and len(now) == 1 and now != [old]
+
+
 def test_a_watch_that_cannot_connect_connects_again_on_the_next_tick(dsn, op, mailbox):
     incoming = mid()
     mailbox.imap.stop()
@@ -360,6 +404,62 @@ def test_the_size_refused_at_request_is_the_whole_encoded_message(dsn, op, tmp_p
         at, over = run(go())
     assert at.kind == "pending"
     assert over.kind == "refused" and "is 25000001 bytes, over email's limit of 25000000 bytes" in over.error
+
+
+def test_the_kernel_job_knows_valors_address_when_it_fills_a_reply_all(monkeypatch):
+    """The kernel runs `reply_all` and the request-time size check, so the
+    environment its launchd job carries must hold Valor's address: run in
+    exactly that environment, Valor's own address is not copied on a
+    reply-all, and the size measured is of a message from that address."""
+    import plistlib
+
+    from core import serve
+
+    monkeypatch.setenv("VALOR_EMAIL_ADDRESS", "valor@test.local")
+    job = plistlib.loads(serve.plist())
+    code = (
+        "import json; from core import mail\n"
+        "row = {'sender_id': 'tom@yuda.me', 'message_id': '<m@x>', 'headers': "
+        "{'to': ['valor@test.local'], 'cc': ['x@y.z']}}\n"
+        "print(json.dumps([mail.reply_all(row, mail.settings.email_address)['cc'],"
+        " mail.email_encoded_bytes({'to': ['a@b.c'], 'body': ''}, [])]))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        env=job["EnvironmentVariables"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cc, size = json.loads(out.stdout)
+    assert cc == ["x@y.z"]
+    own = mail.email_encoded_bytes({"to": ["a@b.c"], "body": ""}, [], "valor@test.local")
+    assert size == own != mail.email_encoded_bytes({"to": ["a@b.c"], "body": ""}, [], "")
+
+
+def test_an_eml_attachment_goes_out_as_wire_valid_mime_that_measures_exactly():
+    """`message/rfc822` may not be base64 (RFC 2046 5.2.1) and a bare LF may
+    not be sent in DATA (RFC 5321 2.3.8): the file goes as its own bytes in
+    an `application/octet-stream` part, every line ending CRLF, and the size
+    measured is the size sent."""
+    import email
+
+    eml = b"From: a@b.c\nSubject: forwarded\n\nbody\n" * 40
+    payload = {"to": ["tom@yuda.me"], "body": "see attached", "files": [{"path": "/x/fwd.eml"}]}
+    msg = mail.email_message(
+        payload,
+        [("fwd.eml", eml)],
+        message_id=mail.message_id("", "valor@test.local"),
+        sender="valor@test.local",
+        date=mail._PLACEHOLDER_DATE,
+    )
+    wire = mail.serialized(msg)
+    assert b"\n" not in wire.replace(b"\r\n", b"")
+    part = email.message_from_bytes(wire).get_payload()[1]
+    assert part.get_content_type() == "application/octet-stream"
+    assert part["Content-Transfer-Encoding"] == "base64" and part.get_payload(decode=True) == eml
+    assert mail.email_encoded_bytes(payload, [len(eml)], "valor@test.local") == len(wire)
 
 
 # -- a kill at every point of a send ----------------------------------------------------
@@ -820,8 +920,9 @@ def sending_threads() -> list[int]:
 
 def test_tom_stopping_the_task_ends_a_send_blocked_on_its_server(dsn, op, mailbox):
     """The stop reaches a send that is already performing: its connection is
-    shut down and its thread returns. No outcome is written; the send stays
-    in flight."""
+    shut down and its thread returns. The server was muted before the end
+    of data line, so nothing was sent: the outcome is `failed`, with no
+    Sent Mail lookup and no `send_in_doubt` notice."""
     mailbox.smtp.behavior.mute_at = "RCPT"
 
     async def go():
@@ -842,14 +943,25 @@ def test_tom_stopping_the_task_ends_a_send_blocked_on_its_server(dsn, op, mailbo
                     break
                 await asyncio.sleep(0.1)
             assert sending_threads() == []
-            return effect, await of_type(dsn, "effect.outcome", effect_id=effect)
+            for _ in range(100):
+                if await of_type(dsn, "effect.outcome", effect_id=effect):
+                    break
+                assert not served.done(), served
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.6)  # more wakes: no lookup, no notice
+            return (
+                effect,
+                await of_type(dsn, "effect.outcome", effect_id=effect),
+                await of_type(dsn, "notice.requested", about_key=f"send-in-doubt:{effect}"),
+            )
         finally:
             served.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await served
 
-    effect, outcomes = run(go())
-    assert outcomes == [] and in_flight(dsn, effect)
+    _, outcomes, notices = run(go())
+    assert [o["kind"] for o in outcomes] == ["failed"] and notices == []
+    assert "before the end of data line" in outcomes[0]["error"]
     assert mailbox.smtp.accepted == []
 
 
@@ -901,7 +1013,8 @@ def test_tom_stopping_a_hung_send_after_the_stop_listener_dropped_ends_it(dsn, o
     """The listener's connection drops while the server is muted at RCPT.
     The next wake listens again, and a stop, heard on the new connection or
     found in the durable row for one that landed in the gap, ends the send:
-    no outcome, the effect in flight, one `send_in_doubt` on the next wake."""
+    the effect settles `failed` (the end of data line never went), with
+    no `send_in_doubt`."""
     mailbox.smtp.behavior.mute_at = "RCPT"
 
     async def go():
@@ -923,7 +1036,7 @@ def test_tom_stopping_a_hung_send_after_the_stop_listener_dropped_ends_it(dsn, o
             assert sending_threads() == []
             key = f"send-in-doubt:{effect}"
             for _ in range(100):
-                if await of_type(dsn, "notice.requested", about_key=key):
+                if await of_type(dsn, "effect.outcome", effect_id=effect):
                     break
                 assert not served.done(), served
                 await asyncio.sleep(0.1)
@@ -938,8 +1051,8 @@ def test_tom_stopping_a_hung_send_after_the_stop_listener_dropped_ends_it(dsn, o
             with pytest.raises(asyncio.CancelledError):
                 await served
 
-    effect, outcomes, notices = run(go())
-    assert outcomes == [] and len(notices) == 1 and in_flight(dsn, effect)
+    _, outcomes, notices = run(go())
+    assert [o["kind"] for o in outcomes] == ["failed"] and notices == []
     assert mailbox.smtp.accepted == []
 
 

@@ -15,7 +15,7 @@ from core import bridge, broker, db, notices, tasks
 
 from . import imap, smtp
 from .config import Config
-from .stop import in_thread
+from .stop import Ends, in_thread
 
 log = logging.getLogger("valor.email")
 
@@ -41,11 +41,22 @@ class EmailBridge:
         self._tasks: asyncio.TaskGroup | None = None
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:
-        """The SMTP call, ended when Tom stops the effect's task. The broker
-        has written the intent by now, so a stop here leaves it in flight."""
-        return await self.until_stopped(
-            key, lambda: in_thread(smtp.perform, self.cfg, action, key), check=True
-        )
+        """The SMTP call, ended when Tom stops the effect's task. A stop
+        that ends the send before its end of data line went leaves nothing
+        sent: the thread's own `SendRefused` is raised, so the effect
+        settles `failed`. A stop after that line leaves the effect in
+        flight for Sent Mail to settle."""
+        ends = Ends()
+        try:
+            return await self.until_stopped(
+                key, lambda: ends.call(smtp.perform, self.cfg, action, key, ends), check=True
+            )
+        except Stopped:
+            if isinstance(ends.error, broker.Failed):
+                raise ends.error from None
+            raise
+        finally:
+            ends.close()
 
     async def lookup(self, action: broker.Action, key: str, since: str) -> dict[str, Any] | None:
         """The Sent Mail read, ended by a stop that arrives while it runs."""
@@ -57,12 +68,13 @@ class EmailBridge:
         return {"email.send": (self.perform, self.lookup)}
 
     async def watches(self) -> None:
-        """The IMAP watch (`imap.watch`) on its own database connection."""
-        conn = await db.connect(self.dsn, application_name="valor-email-watch")
-        try:
-            await imap.watch(self.cfg, conn, self._retry)
-        finally:
-            await conn.close()
+        """The IMAP watch (`imap.watch`) on its own database connection,
+        replaced on the next wake when it drops."""
+
+        def connect():
+            return db.connect(self.dsn, application_name="valor-email-watch")
+
+        await imap.watch(self.cfg, None, self._retry, connect)
 
     async def run(self, outbox) -> None:
         """The watch beside the outbox. Each `Release` is performed as its

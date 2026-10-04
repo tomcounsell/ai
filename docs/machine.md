@@ -57,8 +57,9 @@ Homebrew service. The kernel process is `python -m core serve`, kept alive
 by its LaunchAgent (`python -m core serve --plist` prints it); the gateway
 lives in it and outlives any one task. The email bridge is in
 `bridges/email/`, kept alive by its own LaunchAgent
-(`python -m bridges.email --plist` prints it); the Telegram bridge is not in
-this branch.
+(`python -m bridges.email --plist` prints it); the Telegram bridge is in
+`bridges/telegram/`, kept alive the same way (`python -m bridges.telegram
+--plist`).
 
 ## What runs on demand
 

@@ -124,8 +124,11 @@ effect has no intent, outcome, or `effect.refused`, then every
 The kernel writes `release.requested` when Tom approves a send, after
 the release checks. The bridge listens on a Postgres notification channel
 (`valor_events`, notified by every new row) and on each wake the outbox
-yields what is due and reconciles its own dangling intents. `Outbox.perform`
-calls `broker.release` in the bridge's process: it reads the `task.stopped`
+yields what is due and reconciles its own dangling intents:
+`Outbox.dangling()` lists them and `Outbox.settle(effect_id, conn)` asks the
+target about one (`broker.reconcile`) on a connection the caller gives.
+`Outbox.perform(item, conn)` calls `broker.release` in the bridge's
+process, on the caller's connection when one is given: it reads the `task.stopped`
 fence, binds the unused approval, writes the intent, calls the performer,
 and writes the outcome. A refused release writes `effect.refused` once, with a notice
 to Tom, and is not yielded again. The bridge calls nothing the outbox did not yield.
@@ -158,13 +161,21 @@ class Bridge(Protocol):
     def performers(self) -> dict[str, tuple[PerformFn, LookupFn]]: ...
     async def run(self, outbox: Outbox) -> None: ...
     async def tick(self) -> None: ...
+
+    # Optional: async def reconcile(self, outbox: Outbox) -> None
 ```
 
 `performers` maps each send type the kernel declares for the channel to how
 the bridge sends it and how it finds a send that happened. `run` owns the
 connection: it receives, records each message through `intake.receive`,
 acknowledges, and sends what the outbox yields until the process stops. The
-outbox calls `tick` on every wake. The limits (`LIMITS` in `core/bridge.py`)
+outbox calls `tick` on every wake. A bridge may also define `reconcile`,
+which then replaces the outbox's own serial reconcile at start and on each
+wake: the email bridge uses it to settle each dangling send as a task of its
+own, through `Outbox.dangling` and `Outbox.settle`. A performer raises
+`broker.Failed` for an outcome it knows (nothing happened: `failed`, no
+lookup) and `broker.Unknown` for one it cannot know (no outcome, the intent
+stays in flight). The limits (`LIMITS` in `core/bridge.py`)
 are protocol facts the kernel holds, so it refuses an impossible send when
 it is requested and the bridge never changes a message to send it.
 

@@ -69,6 +69,17 @@ def test_large_attachments_and_many_parts_are_all_saved(tmp_path):
     assert all(Path(a["path"]).exists() for a in p.fields["attachments"])
 
 
+def test_an_extension_is_kept_whole_unless_the_filesystem_cannot_name_the_file(tmp_path):
+    long = "a" * 40
+    p = parse.parse_email_message(
+        message(body="x", files=[(f"f.{long}", b"one"), ("g." + "b" * 400, b"two")])
+    )
+    parse.persist(p, tmp_path)
+    one, two = (Path(a["path"]) for a in p.fields["attachments"])
+    assert one.name.endswith(f".{long}") and one.read_bytes() == b"one"
+    assert "." not in two.name and two.read_bytes() == b"two"
+
+
 def test_filenames_are_sanitized_and_files_named_by_their_bytes(tmp_path):
     files = [("../../etc/passwd", b"one"), (".", b"two"), ("", b"three"), ("report.pdf", b"four"),
              ("report.pdf", b"five")]  # fmt: skip

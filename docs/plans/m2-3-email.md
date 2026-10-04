@@ -206,7 +206,8 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
   connects. The MIME is built from the bytes it hashed, so a file changed
   after Tom's tap never leaves.
 - **MIME.** `EmailMessage`, a `text/plain` UTF-8 body, files as
-  `multipart/mixed` parts. The subject is the payload's, unchanged (main's
+  `multipart/mixed` parts (a `message/*` guess goes as `application/octet-stream`).
+The subject is the payload's, unchanged (main's
   `force_reply_prefix` goes). `References` is the payload's whole chain.
   Headers added: `From` (`email_address`), `To`, `Cc`, `Date`, and
   `Message-ID` = `<valor.<first 32 hex of sha256(key)>@<Valor's domain>>`,
@@ -286,7 +287,9 @@ Tom's task stop reaches the SMTP call inside `EmailBridge.perform`, after the br
 intent, and a Sent Mail lookup that is running (`EmailBridge.until_stopped` listens on `valor_stop` and
 cancels it; only `perform` also reads an earlier `task.stopped` row; a listener that fails is not a stop: the call runs on, and the next outbox wake listens again and reads whether the task was stopped meanwhile), so a release for a stopped task is still
 recorded refused by the broker. SIGTERM cancels the whole run (`bridges.email.serve`), so every blocked call is
-ended. A stopped call writes no outcome and no notice: the effect stays in flight, and a later wake's lookup
+ended. A send stopped before its end of data line went is settled `failed`
+(the thread's own `SendRefused` is raised, with no lookup and no notice). A send stopped after that line
+writes no outcome and no notice: the effect stays in flight, and a later wake's lookup
 settles it or, on a miss, sends `send_in_doubt`. `__main__` has three
 verbs: `run` (`asyncio.run(serve(EmailBridge()))`), `keys` (the
 credential copy below), and `--plist`, which prints the launchd job
@@ -329,7 +332,9 @@ back for a grant.
 
 ### Settings and the credential
 
-`core/settings.py` gains: `email_address` (Valor's), `email_since` (a
+`core/settings.py` gains: `email_address` (Valor's, `VALOR_EMAIL_ADDRESS`,
+carried by the kernel's launchd job as well as the bridge's, since the kernel
+fills reply-all and measures the size), `email_since` (a
 date), `imap_host`, `imap_port`
 (993), `smtp_host`, `smtp_port` (587), and `mail_cafile` (unset; tests
 point it at their CA). There is no poll interval and no SMTP or IMAP timeout. Tom's address is 2.1's `operator_email`.
@@ -397,21 +402,22 @@ in `headers`; no test of the DMARC function exists, since none is built.
 - UIDVALIDITY change (`doveadm mailbox update --uid-validity`): mail
   received and seen before is not received again; mail received but not
   yet seen lands once after the change, with and without a `Message-ID`.
+  Built only as the read of UIDVALIDITY following the mailbox
+  (`test_email_imap.py`); the bridge-level case is not built.
 - Mail from an owned address with any `Authentication-Results`, forged
   or passing: one row, `verified: false`, no task.
 - Mail from a sender not owned stays unseen and unrecorded, including
   `xtom@yuda.me`, which `FROM` matches as a substring. Unseen mail
-  before `email_since` is not received.
+  before `email_since` is not received (the `email_since` case is not built).
 - A message whose persist raises (the inbound directory made read-only
   for that one key): logged, left unseen, and the next message in the
   same search is received.
 - Mail delivered while the watch is in IDLE is received; IDLE returns on
   `EXISTS`; a connection dropped under IDLE ends it; a watch that cannot
   connect connects on the next tick.
-- A mail from Tom passing the test, in no chat a spec lists, starts one
-  task under `valor`. Tom's reply to a mail Valor sent binds to that task
-  as a steer, through the sent entry's thread root; a reply whose text is
-  exactly `stop` or `approve` also binds as a steer.
+- Parked with the DMARC check (open question 17), not built: a mail from
+  Tom starting a task, and his reply binding as a steer. Every email
+  record is unverified and binds `none`.
 - Reply-all: recipients, subject, threading as `reply_all` gives them;
   held; released once by the bridge process; one copy at the server; a
   second release returns the recorded outcome.
@@ -441,15 +447,15 @@ in `headers`; no test of the DMARC function exists, since none is built.
   `failed`. Wrong password: `failed` with the server's reply.
 - A server whose certificate the test CA did not sign: IMAP and SMTP
   both refuse to connect.
-- With a known test password, after a run including a refused login, the
-  password appears in no ledger row, log line, or exception text.
+- With a known test password, after a refused login, the password appears
+  in no exception text (`test_email_smtp.py`); the ledger row and log line
+  checks are not built.
 
 **Kernel**: `reply_all` cases: Valor's address in `To`, the sender also in `Cc`, repeats, `RE:`
 subjects, an empty `References`.
 
-**Window** (`tests/test_live_email.py`, run only with `VALOR_LIVE=1` and
-the window's settings): the four Done items and the Sent Mail lookup on
-Valor's mailbox, driven by the steps below.
+**Window** (no test file is built): the Done items and the Sent Mail lookup
+on Valor's mailbox, driven by the steps in the rollout.
 
 ## Files it changes
 
@@ -459,7 +465,7 @@ New:
   `imap.py`, `smtp.py`
 - `core/mail.py`; `tests/mailserver.py` (Dovecot and SMTP fixtures);
   `tests/test_` `email_parse`, `email_smtp`, `email_imap`,
-  `mail`, `email_bridge`, and `live_email` (`.py`);
+  `mail`, `email_bridge`, `email_kernel`, and `mailserver` (`.py`);
   `tests/fixtures/mail/*.eml`
 
 Changed:
@@ -482,7 +488,7 @@ and rebases before its checks.
 
 ## Rollout
 
-The install steps, Tom's steps before the window, and the test window are in
+The install steps and the test window are in
 [m2-3-email-rollout.md](m2-3-email-rollout.md).
 
 ## Questions for Tom

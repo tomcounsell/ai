@@ -23,6 +23,7 @@ class Ends:
         self._lock = threading.Lock()
         self._dups: list[socket.socket] = []
         self._ended = False
+        self.error: BaseException | None = None  # what the call's thread raised, once it returned
 
     def register(self, sock: socket.socket) -> None:
         """Called by the thread that opens `sock`; a connection opened after
@@ -76,6 +77,7 @@ class Ends:
                 value, error = fn(*args), None
             except BaseException as e:  # noqa: BLE001  handed to the awaiting task
                 value, error = None, e
+            self.error = error
             loop.call_soon_threadsafe(settle, value, error)
 
         threading.Thread(target=work, name="email-call").start()

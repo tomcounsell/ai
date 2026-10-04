@@ -15,6 +15,8 @@ import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
+
 from core import intake
 from core.settings import settings
 
@@ -166,28 +168,46 @@ def _open(cfg: Config, ends: Ends, opened: list) -> imaplib.IMAP4_SSL:
     return opened[0]
 
 
-async def watch(cfg: Config, db, retry: asyncio.Event) -> None:
+async def watch(cfg: Config, db, retry: asyncio.Event, connect=None) -> None:
     """Receives what is unseen, then IDLEs until new mail or the re-issue
     time, then again, on one IMAP connection. A failure is one line in the
     log; the watch reconnects when `retry` is next set (the bridge's
-    `tick`, on each outbox wake)."""
-    while True:
-        conn, ends, opened = None, Ends(), []
-
-        try:
-            conn = await ends.call(_open, cfg, ends, opened)
-            while True:
-                await poll(cfg, conn, db, ends)
-                await ends.call(idle, conn)
-        except Exception:
-            log.exception("email watch failed; it reconnects on the next tick")
-        finally:
-            ends.end()
-            for c in opened:
-                drop(c)
-            ends.close()
-        retry.clear()
-        await retry.wait()
+    `tick`, on each outbox wake). `db` is the database connection intake
+    records into; when `connect` (a coroutine function) is given and `db`
+    has dropped, the same wake replaces it with `connect()`, and the
+    connection the watch made last is closed when it ends."""
+    made = None
+    try:
+        while True:
+            conn, ends, opened = None, Ends(), []
+            if connect is not None and (db is None or db.closed or db.broken):
+                if made is not None:
+                    await made.close()
+                    made = None
+                try:
+                    made = db = await connect()
+                except psycopg.OperationalError:
+                    log.exception("email watch: the database is not reachable; it tries on the next tick")
+                    retry.clear()
+                    await retry.wait()
+                    continue
+            try:
+                conn = await ends.call(_open, cfg, ends, opened)
+                while True:
+                    await poll(cfg, conn, db, ends)
+                    await ends.call(idle, conn)
+            except Exception:
+                log.exception("email watch failed; it reconnects on the next tick")
+            finally:
+                ends.end()
+                for c in opened:
+                    drop(c)
+                ends.close()
+            retry.clear()
+            await retry.wait()
+    finally:
+        if made is not None:
+            await made.close()
 
 
 async def _thread(ends: Ends | None, fn, *args):
@@ -230,8 +250,8 @@ async def poll(cfg: Config, conn: imaplib.IMAP4, db, ends: Ends | None = None) -
             parsed = parse.parse_email_message(raw, internal)
             parse.persist(parsed, directory)
             result = await intake.receive(db, inbound(parsed, u, uidvalidity))
-        except imaplib.IMAP4.abort:
-            raise
+        except imaplib.IMAP4.abort, psycopg.OperationalError:
+            raise  # the IMAP connection or the database's is gone; the watch replaces it
         except Exception:
             log.exception("email uid %s (uidvalidity %s) not received; left unseen", u.decode(), uidvalidity)
             continue
