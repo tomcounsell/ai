@@ -553,8 +553,12 @@ def check_profile(
     lay: Layout, check_dir: Path, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
 ) -> str:
     """A fresh session's profile: its own checkout, tmp, and Claude Code
-    config, and nothing else of the work directory."""
-    return profile(
+    config, and nothing else of the work directory. The output files the
+    kernel opens for its steps beside the check directory
+    (`<check_dir>.<step>.out`) are its stdout and stderr: their metadata is
+    readable, since pytest takes a descriptor it cannot `fstat` for closed
+    and replaces it with `/dev/null`."""
+    text = profile(
         rw=[check_dir],
         ro=[lay.root.parent / "bin"],
         ports=ports,
@@ -563,6 +567,9 @@ def check_profile(
         fresh=True,
         kernel=kernel,
     )
+    forms = sorted({str(check_dir), os.path.realpath(check_dir)})
+    outs = [f'    (regex #"^{_sb_regex(f)}\\.[^/]+\\.out$")' for f in forms]
+    return text + "\n".join(["(allow file-read-metadata", *outs, ")"]) + "\n"
 
 
 def service_profile(

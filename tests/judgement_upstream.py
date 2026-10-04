@@ -132,20 +132,29 @@ class Upstream:
         self._ready = threading.Event()
         self._port = port
         self.loop = asyncio.new_event_loop()
+        self._failed: BaseException | None = None
         threading.Thread(target=self._serve, daemon=True).start()
         self._ready.wait()
+        if self._failed is not None:
+            raise self._failed
 
     def _serve(self) -> None:
+        """Listen, then serve; a listen that fails is raised by `__init__`."""
         asyncio.set_event_loop(self.loop)
-        app = web.Application()
-        app.router.add_post("/fixed/{answer}/{leg}", self.handle)
-        app.router.add_post("/s/{script}/{leg}", self.handle)
-        runner = web.AppRunner(app)
-        self.loop.run_until_complete(runner.setup())
-        site = web.TCPSite(runner, "127.0.0.1", self._port)
-        self.loop.run_until_complete(site.start())
-        self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
-        self._ready.set()
+        try:
+            app = web.Application()
+            app.router.add_post("/fixed/{answer}/{leg}", self.handle)
+            app.router.add_post("/s/{script}/{leg}", self.handle)
+            runner = web.AppRunner(app)
+            self.loop.run_until_complete(runner.setup())
+            site = web.TCPSite(runner, "127.0.0.1", self._port)
+            self.loop.run_until_complete(site.start())
+            self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        except BaseException as exc:  # noqa: BLE001  raised again by `__init__`
+            self._failed = exc
+            return
+        finally:
+            self._ready.set()
         self.loop.run_forever()
 
     # -- steering ----------------------------------------------------------------

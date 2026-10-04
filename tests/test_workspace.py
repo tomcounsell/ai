@@ -303,6 +303,23 @@ def test_a_fresh_session_reads_nothing_the_builder_wrote(tmp_path):
     assert got == ["denied"] * 7 + ["open", "open"] + ["denied"] * 3
 
 
+def test_a_check_step_can_fstat_the_output_file_the_kernel_opened_for_it(tmp_path):
+    lay = kws.Layout(tmp_path / "work" / "t1")
+    check_dir = lay.checks / "test-base-abc"
+    check_dir.mkdir(parents=True)
+    profile = tmp_path / "check.sb"
+    profile.write_text(kws.check_profile(lay, check_dir, []))
+    for step in ("setup-0", "suite", "lint"):
+        out = lay.checks / f"{check_dir.name}.{step}.out"
+        with out.open("w") as f:
+            done = subprocess.run(
+                ["/usr/bin/sandbox-exec", "-D", "GATEWAY_PORT=1", "-D", "VALOR_TURN=probe", "-f", str(profile),
+                 PYTHON, "-I", "-S", "-c", "import os; os.fstat(1); print('seen')"],
+                stdout=f, stderr=subprocess.PIPE, text=True, check=False, env={"PATH": "/usr/bin:/bin"},
+            )  # fmt: skip
+        assert (done.returncode, done.stderr, out.read_text()) == (0, "", "seen\n")
+
+
 def test_the_working_session_cannot_write_where_a_later_process_of_the_user_runs_things(tmp_path):
     _task, made = provision(tmp_path)
     home = tmp_path / "home"

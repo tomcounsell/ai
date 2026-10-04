@@ -92,6 +92,14 @@ def ask(dsn, *replies, task_kind=JUDGE, inputs=REQUEST, default=None, port=None)
 # -- the gate -----------------------------------------------------------------
 
 
+def test_an_upstream_that_cannot_listen_raises_instead_of_waiting_for_ever():
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        with pytest.raises(OSError):
+            judgement_upstream.Upstream(held.getsockname()[1])
+
+
 def test_the_judge_gates_on_the_probability_of_precise_never_the_argmax(dsn):
     # precise is the argmax with a .25 margin, but P(precise) .45 is under the .70 floor
     j, task, seen = ask(
