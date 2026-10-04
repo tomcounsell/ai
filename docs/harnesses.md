@@ -84,7 +84,7 @@ Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a t
 `harnesses/claude_code.py` builds two kinds of turn.
 
 **`turn`** is one self-contained call: no tools by default, no session
-persistence, safe mode and `--setting-sources user` as below, a system prompt of the dispatched text (persona, then Brief).
+persistence, safe mode and `--setting-sources ""` as below, a system prompt of the dispatched text (persona, then Brief).
 The live tests use it. It copies the kernel's environment minus Claude Code's
 own variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no sandbox profile, so it can read whatever Tom's user can, the
 kernel's password file included; it must not be given tools without one.
@@ -96,7 +96,7 @@ what a real task runs. Its arguments:
 |---|---|---|
 | `-p --output-format json` | one non-interactive turn; one JSON result on stdout | the port's `parse` |
 | `--safe-mode` | no hooks, skills, plugins, or `CLAUDE.md` from this machine | bounded authority: the prompt layer of the machine holds no authority over a turn |
-| `--setting-sources user` | settings only from the turn's own Claude Code config directory; a `.claude/settings.json` or `settings.local.json` in the working directory is never read, so it cannot set the model URL, environment, model, permissions, or an `apiKeyHelper` | metered spending: every model call goes through the gateway; a candidate's tree does not set what its reviewer runs with |
+| `--setting-sources ""` | no settings file is read: not a `.claude/settings.json` or `settings.local.json` in the working directory, and not the `settings.json` of the turn's own config directory, which the turn and everything it runs can write and which Claude Code re-reads mid-turn; so nothing the turn runs can set the model URL, environment, model, permissions, or an `apiKeyHelper`. The kernel puts nothing in that file: the gateway supplies the credential and the environment is the kernel's | metered spending: every model call goes through the gateway; a candidate's code does not set what its reviewer runs with |
 | `--strict-mcp-config` | no MCP servers | bounded authority; least privilege [11] |
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--disallowedTools WebFetch WebSearch` | no web tools | independent checks: a replay cannot fetch its own answer (rebuild-baseline.md, Caveats); retrieved pages carry no instructions into the turn [7] |
@@ -198,6 +198,11 @@ verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
 same way in its own clone (`fresh.docs_runner`). Review
 (`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
 Redis, the kernel's own suite and lint run (`verify.ran`) among its inputs.
+The reviewer runs the candidate's code, and a process that code leaves
+running can rewrite any file in the checkout until the turn is reaped, so
+review's verdict is the session's final message, read from the turn's
+result on the harness's stdout, which no process the session starts holds
+(`fresh.final_verdict`).
 Its setup runs under a profile that writes the checkout, its caches,
 and its own `setup-tmp/`, never a `.git` in the checkout or the checkout
 directory itself, and reads the services' password file, so the candidate's setup cannot write the session's Pi or
@@ -528,4 +533,4 @@ machine (safe mode). The stage instructions are plain files in
 text, so they need nothing harness-specific. A repository's own `CLAUDE.md`
 and `.claude/` stay in the clone as files the turn can read, as they did in
 the baseline (rebuild-baseline.md, Setup); Claude Code itself loads neither
-(safe mode, `--setting-sources user`).
+(safe mode, `--setting-sources ""`).

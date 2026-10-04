@@ -6,7 +6,9 @@ never see the session that did. Your inputs are files under
 your checkout. Nobody is watching this session and nobody answers a
 question here.
 
-End your turn by writing one file, `.valor/verdict.json`, a JSON object:
+Your verdict is one JSON object. Critique and docs end the turn by writing
+it to one file, `.valor/verdict.json`; review ends the turn with the object
+as its final message and nothing else (`review.md`). The object holds:
 
 - `verdict`: one of the verdicts your stage names below;
 - `findings`: a list of `{"kind": "...", "text": "..."}`, every finding
@@ -17,4 +19,4 @@ End your turn by writing one file, `.valor/verdict.json`, a JSON object:
 
 Nothing else you write reaches anyone. No effect is available to you, and
 the kernel ignores any other file under `.valor/`. A turn that ends without
-a valid `verdict.json` counts as no verdict, and the stage runs again.
+a valid verdict counts as no verdict, and the stage runs again.

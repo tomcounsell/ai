@@ -348,9 +348,10 @@ dispatched text (persona, then Brief) re-rendered every turn
 
 - `--safe-mode` and `--strict-mcp-config`: no hooks, skills, plugins,
   `CLAUDE.md`, or MCP servers from this machine;
-- `--setting-sources user`: no `.claude/` settings file from the working
-  directory, so a repository cannot set the turn's model URL or
-  environment;
+- `--setting-sources ""`: no settings file, neither a `.claude/` one in
+  the working directory nor the one in the turn's own config directory,
+  which the turn can write and Claude Code re-reads mid-turn, so nothing
+  the turn runs can set its model URL or environment;
 - `--permission-mode bypassPermissions`: the kernel bounds the turn, not a
   permission prompt nobody is there to answer;
 - `WebFetch` and `WebSearch` disallowed;

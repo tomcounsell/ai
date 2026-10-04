@@ -277,3 +277,43 @@ cf4487b4e. Base still 2418d02c8.
    command line.
 
 No cap, timeout, or guard added.
+
+## Patch round 5
+
+From review-1-4c1-p4 (`changes`) at de44821cf. Base still 2418d02c8.
+
+1. F8. Every Claude Code session the harness starts, `workspace_turn`
+   (fresh and resumed) and `turn`, runs with `--setting-sources ""`
+   (Claude Code 2.1.289's `--help`: a comma-separated list of `user`,
+   `project`, `local`; the empty list loads none). The kernel puts
+   nothing in a settings file: the credential is the gateway's and the
+   environment is the kernel's. A config directory the turn cannot write
+   was not an option: Claude Code writes its sessions, transcript, and
+   `.claude.json` there, and the profile covers `claude` and everything
+   it starts alike. Test: a turn writes `$CLAUDE_CONFIG_DIR/settings.json`
+   mid-turn, naming a second scripted upstream on a dev port the profile
+   lets a turn reach and a marker model; every later call goes to the
+   gateway with the kernel's model, and the second upstream gets none.
+   With `user` the test failed: the next call reached the second upstream.
+2. F9. Review's verdict is the session's final message, one JSON object,
+   bare or in one fenced block, read from the turn's result on the
+   harness's stdout (`fresh.final_verdict`); the runner reads no verdict
+   file. A tool process under Claude Code holds `/dev/null` and a regular
+   file on fds 0 to 2 and no pipe or socket, so nothing it leaves running
+   can write that result. Findings, governance instances, notes,
+   `predicted_failure`, and `requirements` come in the same object.
+   Tests: under the real Claude Code, a process the turn leaves running
+   keeps `.valor/verdict.json` forged and writes into every pipe, socket,
+   and stdio fd it holds; the file ends forged and the turn's result is
+   the model's own final message. Through the runner, a scripted reviewer
+   whose left-running process keeps the file saying `pass` and whose final
+   message says `changes` records `changes` (with the file read, it
+   recorded `pass`). `final_verdict` takes bare and fenced objects and
+   refuses prose, a list, and no text.
+3. `skills/sdlc/review.md` and `verdict.md` give review's verdict as the
+   final message; critique and docs keep the file. harnesses.md,
+   tech-stack.md, workspace.md, `core/README.md`, the `claude_code.py` and
+   `fresh.py` docstrings, and this plan's threat model, design, failure
+   modes, and tests say so.
+
+No cap, timeout, or guard added.

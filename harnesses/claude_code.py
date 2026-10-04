@@ -11,9 +11,10 @@ carries no profile and has no tools by default; it must not be given tools
 without one.
 
 A `turn` runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
-from this machine), only the user's settings (`--setting-sources user`: a
-`.claude/settings.json` or `settings.local.json` in the working directory,
-which can name a model URL, an environment, or a model, is never read), no
+from this machine), no settings file (`--setting-sources ""`: neither the
+config directory's `settings.json` nor a `.claude/settings.json` or
+`settings.local.json` in the working directory, any of which can name a
+model URL, an environment, or a model, is read), no
 session persistence, and `ANTHROPIC_BASE_URL` set to
 the gateway, so every model call it makes is metered against the task.
 A test `turn` sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS`; a workspace turn sets
@@ -85,7 +86,7 @@ def turn(
             model,
             "--safe-mode",
             "--setting-sources",
-            "user",
+            "",
             "--strict-mcp-config",
             "--no-session-persistence",
             "--system-prompt",
@@ -147,10 +148,14 @@ def workspace_turn(
     edits files and runs commands without asking (`bypassPermissions`): the
     kernel bounds it, not a permission prompt nobody is there to answer.
     Safe mode keeps this machine's hooks, skills, plugins, CLAUDE.md, and
-    MCP servers out; `--setting-sources user` reads settings only from the
-    turn's own Claude Code config directory, never a `.claude/` settings
-    file in `cwd`, so a checkout cannot set the session's model URL,
-    environment, model, or permissions; web fetch and web search are off.
+    MCP servers out; `--setting-sources ""` reads no settings file: not a
+    `.claude/` settings file in `cwd`, and not the `settings.json` of the
+    turn's own config directory, which the turn must be able to write (its
+    sessions and transcript live there) and so can everything it runs, and
+    which Claude Code re-reads mid-turn. So nothing the session runs can set
+    its model URL, environment, model, or permissions, and every model call
+    goes through the gateway; the kernel puts nothing in that file. Web fetch
+    and web search are off.
 
     `harness` carries the task's isolation: `sandbox_profile` (required;
     without it this raises `Unsandboxed`), a sandbox-exec profile the whole
@@ -217,7 +222,7 @@ def workspace_turn(
             model,
             "--safe-mode",
             "--setting-sources",
-            "user",
+            "",
             "--strict-mcp-config",
             "--permission-mode",
             "bypassPermissions",

@@ -21,7 +21,11 @@ add a check, gate, hook, round, or review step?
   hunk left unjudged;
 - `effects.md`, the task's held, released, and refused effects.
 
-**Exit evidence.** `.valor/verdict.json`:
+**Exit evidence.** Your final message, the verdict object alone (bare or
+in one fenced block). The kernel reads it from your session's result, which
+nothing the checks you run can write; a file in the checkout can be
+rewritten by the candidate's code to the end of your turn, so the kernel
+reads no verdict file here. The object:
 
 - `verdict`: `pass` or `changes`, your judgement of the work;
 - `findings`: each with a kind (`debt` for related tech debt worth

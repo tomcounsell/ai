@@ -63,8 +63,10 @@ What the turns control:
   the plan file as committed at the candidate, test ids, exit codes, the
   JUnit file, lint output, and everything it writes in its checkouts.
 - **The reviewer's turn**: its checkout, its `tmp/` and cache copy, its
-  own fresh service instances, and `.valor/verdict.json`, including every
-  path and id it writes there.
+  Claude Code config directory, its own fresh service instances, and its
+  final message, the verdict, including every path and id in it. The
+  turn includes the candidate's code the reviewer runs, and any process it
+  leaves running until the turn is reaped.
 - **The builder's session**: its clone, caches, `TMPDIR`, Claude Code
   config, and the task's live Postgres and Redis (1.4b).
 - **Effect payloads** the builder's turns requested.
@@ -90,9 +92,17 @@ What the kernel must never do with any of it:
   directory itself (no rename, removal, mode, flags, or ACL). So the
   repository holds the kernel's two commits and config, and no commit
   message, hook, or fsmonitor of the setup's reaches the session. Claude
-  Code starts with `--setting-sources user`, so a `.claude/settings.json`
-  or `settings.local.json` in the checkout, from the tree or the setup,
-  sets no model URL, environment, model, or permissions of the session.
+  Code starts with `--setting-sources ""`, so no settings file sets the
+  session's model URL, environment, model, or permissions: not a
+  `.claude/settings.json` or `settings.local.json` in the checkout, and
+  not the `settings.json` of the session's own config directory, which the
+  candidate's code the session runs can write and Claude Code re-reads
+  mid-turn. Every task turn starts the same way, so no turn's model calls
+  leave the gateway.
+- Take the reviewer's verdict from anything the candidate's code can
+  write. It is the session's final message, in the turn's result on the
+  harness's stdout pipe, which no process the session starts holds; the
+  kernel reads no verdict file in the checkout.
 - Give the reviewer the task's live services. Its turn runs inside
   `check_services`, so its `DATABASE_URL`, `PGPASSFILE`, and `REDIS_*`
   name fresh instances; the live ones are stopped for the duration.
@@ -191,7 +201,8 @@ it.
      fields, every value through `_quoted`.
    `runs.run_turn(ctx.gateway, ctx.task_id, fresh_for(prompt(files),
    checkout, model, harness, seat), dsn=ctx.dsn, state=..., fresh="review")`.
-4. `read_verdict` gives: `verdict` (`pass` or `changes`, the reviewer's
+4. The reviewer's final message (`final_verdict`: one JSON object, bare or
+   in one fenced block, from the turn's result) gives: `verdict` (`pass` or `changes`, the reviewer's
    judgement of the work); `findings`, each with a kind; `governance`,
    instances the reviewer adds by path and line with summary, incident,
    and mission item; `notes` by the ids in `governance.json`;
@@ -267,8 +278,10 @@ candidate whose tree holds `.valor` gets a `changes` review on the
 
 ### Skills
 
-`skills/sdlc/review.md` gains the inputs list and the `verdict.json` shape
-(step 4), and says the recorded verdict is computed from governance.
+`skills/sdlc/review.md` gains the inputs list and the verdict's shape
+(step 4), given as the final message, and says the recorded verdict is
+computed from governance. `skills/sdlc/verdict.md` says review's verdict
+is the final message and critique's and docs' the file.
 `skills/sdlc/verdict.md` keeps the manual channel while `verdict` stays.
 
 ### Docs fixed in the same build
@@ -299,7 +312,8 @@ candidate whose tree holds `.valor` gets a `changes` review on the
 | The candidate's suite or its setup fails | `cause: commit`; the reviewer sees it in `verify.json` |
 | The reviewer checkout's setup fails | `reviewer_setup_exit` says so; the turn runs |
 | A forged JUnit file or exit 0 from `conftest.py` | recorded as the candidate's claim; the reviewer reads the diff |
-| `verdict.json` missing, malformed, or with another verdict value | `Malformed`, no verdict, the branch reruns |
+| The final message is not a JSON object, is malformed, or has another verdict value | `Malformed`, no verdict, the branch reruns |
+| A process the candidate's code left running rewrites `.valor/verdict.json` | nothing: the verdict is the final message |
 | The reviewer names a path outside the diff, a line with no added code, or an unknown id | a `governance` finding; the record is written |
 | The reviewer passes a diff with an ungranted kernel instance | `governance_refused`, `reviewer_verdict: "pass"` kept; the task goes to Tom for a grant |
 | The reviewer asks for changes on a diff with an ungranted instance | `changes`, the instance a finding; Tom is asked after the patch, on the code that stays |
@@ -326,7 +340,13 @@ Unit and router tests run with `VALOR_TEST_DB` and the scripted session.
   outside every kernel hunk is added; none is removed.
 - An unjudged-hunk instance with a reviewer `pass` makes the verdict
   `governance_refused`.
-- `verdict: "governance_refused"` in `verdict.json` is `Malformed`.
+- `verdict: "governance_refused"` in the verdict is `Malformed`; a final
+  message that is not one JSON object is no verdict.
+- A process the turn leaves running that keeps `.valor/verdict.json`
+  saying `pass` does not change a reviewer's `changes`; under the real
+  Claude Code it cannot write the turn's result either.
+- A `settings.json` the turn writes in its own config directory mid-turn,
+  naming a reachable model URL and a model, gets no model call.
 - Before the deletion commit, `leg="manual"` keeps both refusals.
 
 **The runner.**
@@ -492,7 +512,7 @@ top of it.
 | `core/fresh.py` `FreshFor` and its callers | The tip's fifth argument, `harness_name`; `review_runner` takes `harness_name, model` from `resolve_seat(seat)` and passes it on |
 | `core/fresh.py` review checkout | A `workspace.ValorInTree` from the blind checkout records a `kernel` leg `changes` naming why, with the governance ids |
 | `core/verdicts.py` | The tip's file, with part one's `REVIEWER_VERDICTS`, `governance_instances`, `review_verdict`, the computed verdict and its fields for every leg but `manual`, and a `kernel` leg on review; `MANUAL_STAGES`, `_manual`, `manual_allowed`, and the manual refusals stay |
-| `core/fresh.py` the verdict file | The reviewer's verdict is read with the tip's `read_verdict(lay.checks, check_dir.name, turn_id)` in a worker thread, as docs reads its own |
+| `core/fresh.py` the verdict | The reviewer's verdict is the session's final message (`final_verdict`); critique and docs read theirs with the tip's `read_verdict` |
 | `core/checks.py` imports | Both `contextlib` and `functools` |
 | `tests/scripted.py` | Part one's session-leg payload is `SESSION_LEG`, since the tip's `SESSION` is a session id; `check` asks `ensure_merge` with the tip's performers; the scripted fresh session has the tip's `big` act and part one's `review` act, with the tip's UUID session id; `make` takes `harness_name` |
 | `tests/test_pipeline.py`, `tests/test_live_session.py` | The tip's: the `verdict` command tests stay, and the live session records review and docs by hand |

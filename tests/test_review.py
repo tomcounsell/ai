@@ -3,7 +3,7 @@
 services, and the real `sandbox-exec`. The reviewer is the scripted fresh
 session (`tests/scripted.py`, act `review`): it lists its inputs, runs each
 `review_probe` command under its own profile and environment, and writes
-`review_verdict` as its file. Governance is the local upstream.
+`review_verdict` as its final message. Governance is the local upstream.
 
 Live spend: none.
 """
@@ -353,6 +353,47 @@ def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tm
     assert [i["path"] for i in decided["governance"]["instances"]] == ["hooks/gate.py"]
     f = machine.fold(got)
     assert f.state is State.PATCH and f.join.row == 3
+
+
+def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can_write(dsn, tmp_path):
+    """The candidate's code, run by the reviewer, leaves a process that keeps
+    `.valor/verdict.json` saying `pass`; the reviewer's final message says
+    `changes`, and `changes` is recorded."""
+    sid = UP.script(default={"probs": NO})
+
+    async def go():
+        task, _b, ws = await at_review(dsn, tmp_path, writes={"lib/a.py": "A = 1\n"})
+        steer(
+            ws,
+            review_forger=True,
+            review_verdict={"verdict": "changes", "findings": [{"kind": "x", "text": "y"}]},
+        )
+        await drive(
+            dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
+        )
+        (turn,) = [t for t in scripted.turns(ws) if t["stage"] == "review"]
+        forged = "".join(p.read_text() for p in (Path(turn["cwd"]) / ".valor").rglob("verdict.json"))
+        return await rows(dsn, task), forged
+
+    got, forged = run(go())
+    assert forged and "FORGED" in forged, "the candidate's process kept the file forged to the end"
+    (decided,) = reviews(got)
+    assert decided["verdict"] == "changes" and decided["reviewer_verdict"] == "changes"
+
+
+@pytest.mark.parametrize(
+    ("text", "verdict"),
+    [
+        ('{"verdict": "pass"}', {"verdict": "pass"}),
+        ('```json\n{"verdict": "changes"}\n```', {"verdict": "changes"}),
+        ("All good, passing it.", None),
+        ('["pass"]', None),
+        (None, None),
+    ],
+)
+def test_the_final_message_is_the_verdict_object(text, verdict):
+    data, why = fresh.final_verdict(text)
+    assert data == verdict and (why is None) == (verdict is not None)
 
 
 def test_governance_runs_first_and_a_judge_outage_starts_no_run_and_no_turn(dsn, tmp_path):

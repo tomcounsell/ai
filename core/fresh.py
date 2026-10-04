@@ -34,9 +34,13 @@ A fresh session gets:
   no effect;
 - one turn, recorded with `fresh: true`, whose session is never resumed.
 
-Its verdict is `.valor/verdict.json`, read without following links or
-blocking (`workspace.read_verdict`); the kernel validates it and writes the
-verdict row. A turn that fails, is stopped, or leaves no valid verdict
+Critique's and docs' verdict is `.valor/verdict.json`, read without
+following links or blocking (`workspace.read_verdict`). Review's is the
+session's final message, read from the turn's result on the harness's
+stdout (`final_verdict`): the reviewer runs the candidate's code, and a
+process that code leaves running can rewrite any file in the checkout to
+the end of the turn, but cannot write that pipe. The kernel validates the
+verdict and writes the verdict row. A turn that fails, is stopped, or leaves no valid verdict
 writes no verdict: the runner returns `failed` (or `stopped`), and the next
 run starts the stage again.
 """
@@ -714,12 +718,31 @@ def review_inputs(
     }
 
 
+def final_verdict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """The reviewer's verdict: its final message, the one JSON object, bare
+    or in one fenced block. The kernel reads it from the turn's result on
+    the harness's stdout, which no process the session starts can write; a
+    file in the checkout can be rewritten by the candidate's code the
+    reviewer runs, to the end of the turn. Returns (verdict, why not)."""
+    body = (text or "").strip()
+    if body.startswith("```") and body.endswith("```"):
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+        body = body[: body.rfind("```")].strip()
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, "the final message is not a JSON object"
+    if not isinstance(data, dict):
+        return None, "the final message is not a JSON object"
+    return data, None
+
+
 def _text(value: Any) -> bool:
     return value is None or isinstance(value, str)
 
 
 def _review_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """The reviewer's `verdict.json`, checked for shape: `verdict` is `pass`
+    """The reviewer's verdict object, checked for shape: `verdict` is `pass`
     or `changes`; anything else, or a malformed field, is `Malformed`."""
     verdict = data.get("verdict")
     findings = data.get("findings") or []
@@ -809,7 +832,8 @@ def normalize(
 def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str = SEATS["review"]):
     """The runner for `Check.REVIEW`: governance per hunk first, then the
     kernel's own base and head runs with the lint (`verify.ran`), then one
-    blind session in a checkout the kernel set up, inside fresh services.
+    blind session in a checkout the kernel set up, inside fresh services,
+    whose final message is its verdict (`final_verdict`).
     The recorded verdict is computed from the reviewer's `pass` or
     `changes`, the instances, and the grants (`verdicts.review_verdict`).
     At the registered seat it records `review.decided`; at any other seat
@@ -998,10 +1022,8 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
             return {"status": "failed", "state": now, "turn": ended}
 
-        # 4 and 5. The verdict file, its shape, and what the record takes.
-        data, why = await asyncio.to_thread(
-            workspace.read_verdict, lay.checks, check_dir.name, ended["turn_id"]
-        )
+        # 4 and 5. The verdict, its shape, and what the record takes.
+        data, why = final_verdict(ended["result"].get("text"))
         if data is None:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         try:
