@@ -10,8 +10,8 @@ email.
 `core/intake.py`, `core/notices.py`); the email bridge process is not.
 Every email record is `verified=false`, so it binds as nothing until DMARC
 verification is built. `core/bridge.py` states Gmail's limit as 25,000,000
-bytes of the whole encoded message; its size function is the email
-bridge's, and until the bridge sets it, an email is not refused for size
+bytes of the whole encoded message; its size function, `message_bytes(action, sizes)`, takes the files'
+sizes and is the email bridge's, and until the bridge sets it, an email is not refused for size
 at request time. Until the bridge is built, answers and feedback reach a task
 through `python -m core` and record `via: "the command line"`. The email
 code that exists today can be adapted to the port; the last sections say
@@ -121,7 +121,9 @@ the addresses in the payload and to no others.
 **Idempotency.** The performer derives the `Message-ID` from the broker's
 idempotency key, so the same effect always carries the same id. `lookup`
 reconciles a dangling intent by searching the mailbox's sent folder for that
-`Message-ID` header. The outcome records the `Message-ID`, which is how a
+`Message-ID` header. It returns nothing only when the provider can no
+longer record the send, and raises `Unknown` while it still might, so a miss
+is `failed` only once it is final. The outcome records the `Message-ID`, which is how a
 reply to the sent message binds back to its task.
 
 **One attempt.** `perform` submits once over SMTP with STARTTLS. A refused

@@ -350,7 +350,7 @@ answers findings with reasons and no code change still gets fresh checks.
 
 **Scheduling.** The three run concurrently when the machine has the slots,
 and back to back when it does not; the join waits for all three either
-way. On the 16 GB Air the suite and the two agent turns each take the one
+way. On the 16 GB Air the suite and the two agent turns each hold the one
 turn slot ([machine.md](machine.md), Concurrency), so it runs test, review,
 then docs, with judgement calls beside whatever holds the slot.
 

@@ -291,7 +291,9 @@ uses to detect a repeated send. The performer derives it from the broker's
 idempotency key, so a resend of the same effect after a crash is refused by
 Telegram as a duplicate rather than delivered twice. `lookup` reconciles a
 dangling intent by scanning the account's recent outgoing messages in the
-target chat for that send. The outcome records `chat_id` and `message_id`,
+target chat for that send. It returns nothing only when Telegram can no
+longer record the send, and raises `Unknown` while it still might, so a
+miss is `failed` only once it is final. The outcome records `chat_id` and `message_id`,
 which is how a later reply to the sent message binds back to its task.
 
 **One attempt.** `perform` makes one delivery attempt. A flood wait, a

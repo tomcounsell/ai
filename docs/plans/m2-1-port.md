@@ -164,7 +164,7 @@ importing a bridge, and bridges read them from there:
   refuses a message over 25 MB, counted as 25,000,000 bytes of the whole
   encoded message (D15c): `max_message_bytes` 25,000,000. Its size
   function, `message_bytes(action, sizes)`, given the files' sizes, is
-  2.3's `email_encoded_bytes`; in 2.1 it is unset, so 2.1 refuses no
+  2.3's, built from the message with attachments of those sizes; in 2.1 it is unset, so 2.1 refuses no
   email for size at request time.
 `split_text` splits a text over `max_text`, counting in the channel's
 units, into several messages, so `sent` is a list. A send over the

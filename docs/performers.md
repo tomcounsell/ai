@@ -10,6 +10,13 @@ sandbox, which is what lets it write a remote the turn cannot. Git runs in a
 worker thread, so the gateway's streams never wait on a push. The composition
 root builds a `broker.Performers` for each task from its Brief and passes it
 to every broker call, so one task's performer never acts for another.
+
+A bridge's send types (`telegram.send_message`, `email.send`) are declared in
+`core/bridge.py`; the kernel sizes each file a send names in the task's
+workspace without reading it and refuses an impossible send at request time.
+The bridge's `perform` reads each file once and refuses one whose sha256
+differs. Its `lookup` returns nothing only when the platform can no longer
+record the send, and raises `Unknown` while it still might.
 Status: **in use**.
 
 - **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to

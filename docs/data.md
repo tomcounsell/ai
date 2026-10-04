@@ -285,7 +285,9 @@ then rebuilds the action from the intent row (from the effect's
 `effect.held` row for an older intent that lacks it; with neither it
 concludes nothing) and asks the target through the performer's `lookup`, which answers
 present (the target branch holds the commit, at its tip or below it),
-absent, or unknown (the target did not answer). Present is written `done`,
+absent, or unknown (the target did not answer). A bridge's `lookup`
+returns nothing only when the platform can no longer record the send, and
+raises `Unknown` while it still might. Present is written `done`,
 absent `failed`. Unknown writes nothing, and the effect stays in flight. Either outcome is marked `reconciled`. The router does this for a
 task's merge on its next run; other dangling intents stay listed by
 `tasks.audit` (`docs/architecture.md`, the broker).

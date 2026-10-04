@@ -267,9 +267,10 @@ and `_send_smtp_sync` (`bridge/email_relay.py`).
   `max_text` `None`; `max_message_bytes` 25,000,000, Gmail's limit on the
   whole encoded message ("Gmail sending limits in Google Workspace",
   Admin Help: maximum email size 25 MB); and the size function
-  `message_bytes`, `email_encoded_bytes(payload)` from `core/mail.py`,
-  the length of the message `core/mail.py` builds from the payload's
-  files, which the request-time refusal uses. The performer
+  `message_bytes(action, sizes)`, which the request-time refusal calls
+  with the sizes of the files the kernel measured unread in the task's
+  workspace. It returns the length of the message `core/mail.py` builds
+  from the payload with attachments of those sizes. The performer
   builds with the same function, which the bridge reaches through
   `core.bridge` (D30), so the two lengths are equal by construction. The window records
   the `SIZE` smtp.gmail.com advertises, which replaces 25,000,000 if it
@@ -307,9 +308,9 @@ and the hook calls it (D11a). The bridge never sets `verified`.
 ### `core/mail.py`: reply-all and the message
 
 `email_message(payload, blobs, message_id, sender, date)` builds the
-MIME (below); `email_encoded_bytes(payload)` is the length of that
-message built from the payload's files, with an id and date of fixed
-width.
+MIME (below); `email_encoded_bytes(payload, sizes)` is the length of that
+message built from the payload with attachments of the given sizes, with
+an id and date of fixed width.
 
 `reply_all(row, own)`, pure: `to` is the sender; `cc` is every `To` and
 `Cc` address minus Valor's own and minus the sender, lowercased, in
@@ -483,7 +484,7 @@ for the first case:
   (EPIPE before the end of data line): a definite refusal, no lookup.
   After the end of data line: `554` is a definite refusal; a garbled
   reply, a `251`, or a line too long is `Unknown`.
-- `email_encoded_bytes` equals the length of the message the performer
+- `message_bytes(action, sizes)` equals the length of the message the performer
   serializes, for no files, one, and three of odd sizes; a request just
   over 25,000,000 encoded is refused, one of exactly 25,000,000 is held.
 - One recipient refused: `done` with it in `refused`. All refused:
@@ -537,50 +538,8 @@ and rebases before its checks.
 
 ## Rollout
 
-1. `python -m core backup`; merge; pull and `python -m core migrate`.
-2. `brew install dovecot` on any machine that runs the suite.
-3. `python -m bridges.email keys`; set `email_address` and `email_since`
-   (the window's date) in the bridge's launchd environment, and confirm
-   `operator_email` is set.
-4. Install the plist from `python -m bridges.email --plist`, unloaded.
-
-Before the window, Tom's steps (the builder never logs in to the
-mailbox):
-
-1. Tom opens "Show original" on one mail he sent to Valor's address and
-   reports its topmost `Authentication-Results` line. Both addresses are
-   on one Google Workspace domain, so this shows whether such mail
-   carries a `dmarc=` result at all. If it carries none even after step
-   2, how email proves Tom is an identity question for him, and the
-   window waits.
-2. Tom publishes a DMARC record for `yuda.me` (none exists today; for
-   example `v=DMARC1; p=none`), and the Google DKIM key from the Admin
-   console as `google._domainkey.yuda.me`, a second aligned path besides
-   SPF. `dig +short TXT _dmarc.yuda.me` shows the record.
-
-The test window, with Tom:
-
-1. Disable the email bridge on `main` on the build Mac (`email-disable`)
-   and on the Mac whose `projects.json` lists Tom's address (Valor the
-   Captain, project cuttlefish today), so no other poller marks his mail
-   seen. Load the new bridge.
-2. Tom sends a request from his address with a `Cc` to his second
-   address: one task starts, its spending shown.
-3. Tom sends one mail from another address of his: it is not received
-   and stays unseen.
-4. The task's reply carrying a 9 MB file is held; Tom taps once; during
-   the upload, terminate the `valor-email-perform` backend by its pid.
-   The bridge restarts, a sweep settles the effect, and each inbox holds
-   at most one copy, with `done` exactly when it holds one.
-5. Record the Sent Mail lookup form that works, Gmail's filing delay
-   (from the 250 to the message in Sent Mail), the 9 MB upload rate,
-   and the bridge's RSS. Note for Tom that the
-   `email.dmarc` guard rarely fires and its expiry tap decides whether
-   email can start work.
-6. Unload the new bridge and enable the email bridge on `main` on both
-   Macs. Mail in the window belongs to the new system and is not
-   replayed; mail between windows stays with `main` because
-   `email_since` moves to each window's date.
+The install steps, Tom's steps before the window, and the test window are in
+[m2-3-email-rollout.md](m2-3-email-rollout.md).
 
 ## Questions for Tom
 
