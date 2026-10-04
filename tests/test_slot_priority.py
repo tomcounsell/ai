@@ -279,3 +279,49 @@ def test_the_emulator_report_counts_the_preempted_turns(dsn):
             return await runner._preempted(conn, t), await runner._preempted(conn, None)
 
     assert run(go()) == (2, 0)
+
+
+def test_a_stop_of_the_tree_beside_a_preempting_step_deadlocks_nowhere(dsn):
+    """The order is the slot's session locks (the foreground notice, then the
+    slot), then `tree:<root>`, then `task:<id>`, in transactions that never
+    wait for a session lock. A stop of the tree, a new child, and a foreground
+    waiter that preempts the background holder all run at once, many times."""
+
+    async def once():
+        async with await db.connect(dsn) as conn:
+            top = await root(conn, routine="r")
+            under = await tasks.start_child(conn, top, instruction="under")
+            fg = await root(conn)
+        events = []
+
+        async def background():
+            async with slot.held(under, dsn):
+                async with await db.connect(dsn) as conn, conn.transaction():
+                    await tasks.lock_tree(conn, under)  # a step's writers, inside its hold
+                    await ledger.lock(conn, f"task:{under}")
+                await asyncio.wait_for(slot.preempting().wait(), 30)
+                events.append("bg preempted")
+
+        async def foreground():
+            await asyncio.sleep(0.05)
+            async with slot.held(fg, dsn):
+                events.append("fg held")
+
+        async def stopping():
+            await asyncio.sleep(0.05)
+            async with await db.connect(dsn) as conn:
+                await tasks.stop_tree(conn, top, reason="test", by="test")
+
+        async def starting():
+            await asyncio.sleep(0.05)
+            async with await db.connect(dsn) as conn:
+                try:
+                    await tasks.start_child(conn, top, instruction="late")
+                except Exception as exc:  # noqa: BLE001  a stopped tree refusing is the rule, not a deadlock
+                    assert "eadlock" not in str(exc), exc
+
+        await asyncio.wait_for(asyncio.gather(background(), foreground(), stopping(), starting()), 60)
+        return events
+
+    for _ in range(5):
+        assert run(once()) == ["bg preempted", "fg held"]
