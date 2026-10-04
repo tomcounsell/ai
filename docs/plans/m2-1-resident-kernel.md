@@ -202,7 +202,8 @@ notification is delivered at commit. The trigger refuses nothing;
 ### The broker (`core/broker.py`)
 
 - **The key gains the effect id.** `Action.key(effect_id)` is
-  `f"{action_type}:{target}:{digest(payload)[:16]}:{effect_id}"`, written
+  `f"{digest(action)[:16]}:{effect_id}"`, the action being its type,
+  target and payload, written
   as `idempotency_key` and passed to `perform` and `lookup`. Two identical
   sends in one task are two effects.
 - **A repeated request matches by `request_id`.** `request(conn,

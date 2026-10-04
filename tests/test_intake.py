@@ -678,3 +678,32 @@ def test_highest_and_lowest_skip_ids_past_a_bigint(dsn, op):
             )
 
     assert run(go()) == (3, int(biggest))
+
+
+async def _held_row(dsn, task, payload) -> str:
+    """An effect held for Tom with `payload`, as the broker writes it, and
+    the notices owed."""
+    effect_id = ledger.new_id()
+    action = broker.Action("telegram.send_message", OPERATOR_CHAT, payload)
+    async with await bridges.connect(dsn) as conn:
+        await ledger.append(
+            conn, task, "effect.held", {"effect_id": effect_id, **action.describe("act", False, effect_id)}
+        )
+        await notices.owe(conn, task)
+    return effect_id
+
+
+def test_a_notice_whose_text_the_ledger_cannot_store_is_written_in_kernel_words(dsn, op):
+    """A held send's text the ledger stores once is rendered twice in its
+    notice, more than jsonb holds: the notice is written with kernel text
+    naming the effect and Postgres's reason, so Tom still hears of it."""
+
+    async def go():
+        task = await new_task(dsn)
+        effect_id = await _held_row(dsn, task, {"text": "x" * (130 << 20)})
+        return task, effect_id, await of_type(dsn, "notice.requested")
+
+    task, effect_id, written = run(go())
+    [notice] = [n for n in written if n["about_key"] == f"effect:{effect_id}"]
+    assert notice["text"].startswith(f"Task {task} has a notice (effect, effect:{effect_id}) whose text ")
+    assert "ProgramLimitExceeded" in notice["text"] and len(notice["text"]) < 1000

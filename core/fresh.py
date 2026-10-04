@@ -138,7 +138,7 @@ def _verdict_fields(data: dict[str, Any]) -> tuple[str, list, dict[str, int]]:
         if isinstance(x, dict) and not isinstance(x.get("text"), str):
             raise Malformed("a finding has no text")
     if verdict not in machine.VERDICTS[State.CRITIQUE]:
-        raise Malformed(f"verdict {verdict!r} is not one of {sorted(machine.VERDICTS[State.CRITIQUE])}")
+        raise Malformed(f"the verdict is not one of {sorted(machine.VERDICTS[State.CRITIQUE])}")
     if not isinstance(raised, dict):
         raise Malformed("raise is not an object")
     for k, v in raised.items():
@@ -148,7 +148,7 @@ def _verdict_fields(data: dict[str, Any]) -> tuple[str, list, dict[str, int]]:
             or isinstance(v, bool)
             or v not in machine.ROUNDS
         ):
-            raise Malformed(f"raise {k}={v!r}: each count is critique_rounds or review_rounds, 0 to 2")
+            raise Malformed("each count raised is critique_rounds or review_rounds, 0 to 2")
     return verdict, findings, raised
 
 
@@ -355,14 +355,14 @@ def _docs_fields(data: dict[str, Any]) -> tuple[str, list, str | None]:
     findings = data.get("findings") or []
     head = data.get("head")
     if verdict not in machine.VERDICTS[machine.Check.DOCS]:
-        raise Malformed(f"verdict {verdict!r} is not one of {sorted(machine.VERDICTS[machine.Check.DOCS])}")
+        raise Malformed(f"the verdict is not one of {sorted(machine.VERDICTS[machine.Check.DOCS])}")
     if not isinstance(findings, list) or not all(isinstance(x, (dict, str)) for x in findings):
         raise Malformed("findings is not a list of findings")
     for x in findings:
         if isinstance(x, dict) and not isinstance(x.get("text"), str):
             raise Malformed("a finding has no text")
     if head is not None and not (isinstance(head, str) and verdicts.re_sha(head)):
-        raise Malformed(f"head {head!r} is not a full commit id")
+        raise Malformed("the head is not a full commit id")
     return verdict, findings, head
 
 
@@ -577,7 +577,10 @@ async def _docs_turn(
         await ledger.lock(conn, f"task:{ctx.task_id}")
         if await tasks.is_stopped(conn, ctx.task_id):
             return {"status": "stopped"}
-        await ledger.append(conn, ctx.task_id, DOCS_KEPT, payload)
+        try:
+            await verdicts._append(conn, ctx.task_id, DOCS_KEPT, payload)
+        except verdicts.VerdictRefused as exc:
+            return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
     return {"kept": payload}
 
 
@@ -757,7 +760,7 @@ def _review_fields(data: dict[str, Any]) -> dict[str, Any]:
     predicted = data.get("predicted_failure")
     requirements = data.get("requirements") or []
     if verdict not in verdicts.REVIEWER_VERDICTS:
-        raise Malformed(f"verdict {verdict!r} is not one of {list(verdicts.REVIEWER_VERDICTS)}")
+        raise Malformed(f"the verdict is not one of {list(verdicts.REVIEWER_VERDICTS)}")
     if not isinstance(findings, list) or not all(isinstance(x, (dict, str)) for x in findings):
         raise Malformed("findings is not a list of findings")
     for x in findings:
@@ -1084,24 +1087,27 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             computed, added = verdicts.review_verdict(
                 fields["verdict"], instances, machine.fold(rows).granted
             )
-            await ledger.append(
-                conn,
-                ctx.task_id,
-                REVIEW_COMPARED,
-                {
-                    "seat": seat,
-                    "model": model,
-                    "candidate": candidate,
-                    "verdict": computed,
-                    "reviewer_verdict": fields["verdict"],
-                    "findings": verdicts._findings([*findings, *added]),
-                    "instances": instances,
-                    "predicted_failure": fields["predicted_failure"],
-                    "verify": verify_id,
-                    "turn_id": ended["turn_id"],
-                    "usd_micros": usd,
-                },
-            )
+            compared = {
+                "seat": seat,
+                "model": model,
+                "candidate": candidate,
+                "verdict": computed,
+                "reviewer_verdict": fields["verdict"],
+                "findings": verdicts._findings([*findings, *added]),
+                "instances": instances,
+                "predicted_failure": fields["predicted_failure"],
+                "verify": verify_id,
+                "turn_id": ended["turn_id"],
+                "usd_micros": usd,
+            }
+            try:
+                await verdicts._append(conn, ctx.task_id, REVIEW_COMPARED, compared)
+            except verdicts.VerdictRefused as exc:
+                return {
+                    "status": "failed",
+                    "state": now,
+                    "turn": {**ended, "result": f"verdict refused: {exc}"},
+                }
         return {"status": "compared", "state": now}
 
     return run

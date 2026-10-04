@@ -171,7 +171,7 @@ async def record_critique(
         }
         sent_back = verdict == "revise" and _would(rows, "critique.decided", payload).state is State.PLAN
         payload["guard_id"] = machine.GUARD_CRITIQUE if sent_back else None
-        return await ledger.append(conn, task_id, "critique.decided", payload)
+        return await _append(conn, task_id, "critique.decided", payload)
 
 
 def _instances(workspace: str, older: str, newer: str, specs: Iterable[InstanceSpec]) -> list[dict[str, Any]]:
@@ -254,9 +254,7 @@ async def record_check(
     if verdict is None and leg != "kernel":
         raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
     if leg != "manual" and check is Check.REVIEW and verdict not in REVIEWER_VERDICTS:
-        raise VerdictRefused(
-            f"a reviewer's verdict is one of {', '.join(REVIEWER_VERDICTS)}, not {verdict!r}"
-        )
+        raise VerdictRefused(f"a reviewer's verdict is one of {', '.join(REVIEWER_VERDICTS)}")
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CHECKS)
@@ -379,11 +377,22 @@ async def record_check(
         after = _would(rows, kind, payload)
         if after.join is not None and f.join is None and after.join.row in (3, 5):
             payload["guard_id"] = machine.GUARD_REVIEW
-        event_id = await ledger.append(conn, task_id, kind, payload)
+        event_id = await _append(conn, task_id, kind, payload)
         after = machine.fold(await ledger.read(conn, task_id))
         if f.state is State.CHECKS and after.state is State.MERGE and after.join is not None:
-            await ledger.append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
+            await _append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
     return after
+
+
+async def _append(conn, task_id: str, kind: str, payload: dict[str, Any]) -> int:
+    """A verdict's row, judged where it is written: what Postgres jsonb
+    refuses (findings a session wrote past what one value holds, say) is
+    `VerdictRefused` with Postgres's reason, and the caller's transaction
+    rolls back whole."""
+    event_id, why = await ledger.try_append(conn, task_id, kind, payload)
+    if event_id is None:
+        raise VerdictRefused(f"the {kind} row: {ledger.UNSTORABLE}: {why}")
+    return event_id
 
 
 def governance_instances(

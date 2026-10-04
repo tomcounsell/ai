@@ -228,8 +228,36 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
         async with conn.transaction():
             if reaped:
                 await ledger.append(conn, task_id, "turn.reaped", {"turn_id": turn_id, "processes": reaped})
-            await ledger.append(conn, task_id, "turn.ended", ended)
+            ended = await _ended(conn, task_id, ended)
     return ended
+
+
+# What a harness's parsed result holds besides the turn's own words.
+RESULT_FIELDS = ("is_error", "num_turns", "harness_reported_usd", "session_id")
+KERNEL_FIELDS = ("turn_id", "outcome", "returncode", "stdout", "stderr", "metered_usd_micros")
+
+
+async def _ended(conn, task_id: str, ended: dict[str, Any]) -> dict[str, Any]:
+    """Write `turn.ended` and return what was written. The result holds the
+    turn's final message, which Postgres jsonb may refuse (a NUL, or a size
+    past its limit): then the row is written without the message, and if
+    that is refused too, with only the kernel's fields, the result saying
+    why."""
+    _, why = await ledger.try_append(conn, task_id, "turn.ended", ended)
+    if why is None:
+        return ended
+    unrecorded = f"the turn's result: {ledger.UNSTORABLE}: {why}"
+    result = ended["result"]
+    kept = {
+        **ended,
+        "result": {**{k: result[k] for k in RESULT_FIELDS if k in result}, "unrecorded": unrecorded},
+    }
+    _, again = await ledger.try_append(conn, task_id, "turn.ended", kept)
+    if again is None:
+        return kept
+    bare = {**{k: ended[k] for k in KERNEL_FIELDS if k in ended}, "result": {"unrecorded": unrecorded}}
+    await ledger.append(conn, task_id, "turn.ended", bare)
+    return bare
 
 
 async def _stop_heard(listener, task_id: str) -> None:

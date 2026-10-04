@@ -1,4 +1,4 @@
-# 2.1 record, patch rounds 9 to 11
+# 2.1 record, patch rounds 9 to 12
 
 Continues [m2-1-resident-kernel-record.md](m2-1-resident-kernel-record.md).
 
@@ -169,3 +169,62 @@ within jsonb's size limit could together exceed it in the one
 
 Suite: 1294 passed, 23 skipped (`valor_rebuild_test_2_1p11`, ports 6480-6489).
 Ruff check and format check clean.
+
+## Patch round 12
+
+Scope: R1 of the review of round 11, as the lead decided, with the
+deferred `plan.json` and text-signal cases closed here.
+
+1. The `turn.collected` row is judged by Postgres once
+   (`session._storable`), before the verdict and the broker: one
+   `ledger.unstorable` of the row as it will be written. When jsonb
+   refuses it (SQLSTATE class 22 or 54, or a `RecursionError` from the
+   adapter), each part is asked alone, nested as the row nests it: each
+   text signal, the plan, the screens, each request. A part refused alone
+   is answered as unreadable with Postgres's reason, never its contents (a
+   text signal to `errors`, the plan to `plan_error`, a request to `{file,
+   error}`). If the row is still refused, every part is, with the row's
+   reason; the row keeps the request file names and what the kernel
+   wrote. Round 11's per-request ask is now the second step, so a request
+   refused alone still never reaches the broker, and none of a turn whose
+   requests are only refused together does. No size or depth of our own.
+   The verdict reads what is left: a `question.md` refused is no question.
+2. A turn whose collection raises for any other reason does not stop the
+   kernel. `serve.recover` logs it per task and returns it under
+   `uncollected`; `Kernel` takes that set and, before the task is
+   stepped, runs a job (`serve.recollect`, the same collection for one
+   task) that collects it; a job that raises parks the task, tried again
+   on its next row or the next `serve_tick_s` wake, as every failed job.
+3. Tests, each failing without its change:
+   `test_parts_storable_alone_and_not_together[requests]` (two requests
+   of 130 MiB each: without the change `ProgramLimitExceeded` from the
+   append; with it both unreadable, no effect row) and `[texts]`
+   (`question.md` and `done.md` of 130 MiB each, the same);
+   `test_a_signal_postgres_refuses_is_unreadable` (a `question.md` with a
+   NUL and a `plan.json` 50000 deep, each unreadable with Postgres's
+   reason, the verdict `idle`, a clean send beside them held; without the
+   change `UntranslatableCharacter`);
+   `test_a_turn_that_cannot_be_collected_leaves_serve_running` (in
+   process, `session.record` raising: another task is stepped, the turn is
+   uncollected; once it can be, a row on the task collects it, `asked`;
+   without the change serve never steps).
+4. The size tests raise their connection's socket send buffer to 4 MiB:
+   libpq sends a message a buffer at a time and moves the rest down each
+   time, so 270 MiB over macOS's 8 KiB Unix socket buffer takes about
+   eight minutes (32 MiB measured at 6.6 s; at 4 MiB, 128 MiB took 1.8 s).
+   Speed only; Postgres's answers are the same.
+5. Docs: `docs/harnesses.md` (the effects row and the collection
+   paragraph), `docs/data.md` (`turn.collected` errors), `core/README.md`
+   (recover), the docstrings.
+
+Note, not closed here: the kernel's own connection has the same quadratic
+send, so collecting a turn that left hundreds of MiB takes minutes of
+the kernel's loop thread; it completes. Nothing new limits, waits, or
+guards.
+
+`test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhile`
+passed `record` no connection, which it now needs before the verdict; it
+connects to the test database.
+
+Suite: 1298 passed, 23 skipped (`valor_rebuild_test_2_1p12`, ports
+6450-6459). Ruff check and format check clean.

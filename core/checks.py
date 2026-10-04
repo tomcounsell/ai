@@ -784,7 +784,9 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
             await ledger.lock(conn, f"task:{ctx.task_id}")
             if await tasks.is_stopped(conn, ctx.task_id):
                 return {"status": "stopped"}
-            event_id = await ledger.append(conn, ctx.task_id, SUITE, payload)
+            event_id, why = await ledger.try_append(conn, ctx.task_id, SUITE, payload)
+        if event_id is None:
+            return {"status": "failed", "turn": {"result": f"the {SUITE} row: {ledger.UNSTORABLE}: {why}"}}
         ran[key] = {"id": event_id, "payload": payload}
     return {"ran": ran}
 

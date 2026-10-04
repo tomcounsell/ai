@@ -262,7 +262,7 @@ workspace, which the kernel reads when the turn ends:
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
 it there, in a worker thread, so no signal is read twice. For a turn that ended and
-was never collected, `recollect` reads what is still in `.valor/` first
+was never collected, `recollect`, in a worker thread as well, reads what is still in `.valor/` first
 (moving it aside), then what `handled/<turn_id>/` holds; a file in both
 places is read once, as the copy in `.valor/`, which replaces the filed one,
 so what is read is what is kept. The turn controls
@@ -282,7 +282,17 @@ more than one jsonb value holds), each part is asked alone, nested as the
 row nests it (each text signal, the plan, the screens, each request), and a
 part refused alone is recorded as unreadable with Postgres's reason, never
 its contents. If the row is still refused, every part is, and the row keeps
-the request file names and what the kernel wrote. A turn whose collection
+the request file names and what the kernel wrote. The row is judged again
+where it is written: `turn.collected` and the row that goes with it
+(`question.asked` or `plan.written`) are appended in one savepoint, and
+when jsonb refuses them, each error and each effect entry it refuses alone
+is replaced by kernel text with Postgres's reason; if that is refused too,
+`turn.collected` holds nothing the turn wrote (no signals or effects, the
+verdict `idle`, or `failed` for a turn that did not finish) and one error
+with Postgres's reason. The broker's rows for each request are judged the
+same way where they are written (`docs/data.md`). A reason, key or error
+the kernel writes names the field and what is wrong with it (its JSON type,
+Postgres's reason, git's answer about a path), never the turn's value. A turn whose collection
 still fails does not stop the kernel: `serve` logs it and collects the turn
 in a job before the task's next step, parked between tries like any failed
 job. No size or depth is the kernel's own. A question takes precedence over the other signals in

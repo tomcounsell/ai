@@ -412,6 +412,8 @@ elif act == "docs":
     if "docs_head" in cfg:
         out["head"] = cfg["docs_head"]
     (v / "verdict.json").write_text(json.dumps(out))
+elif act == "nul":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "a\x00b"}]}))
 elif act == "big":
     (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
 elif act == "review":

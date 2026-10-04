@@ -430,7 +430,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             return f"judge verdict in {s}"
         verdict = p["verdict"]
         if verdict not in VERDICTS[State.JUDGE]:
-            return f"verdict {verdict!r} outside its enum"
+            return "verdict outside its enum"
         _enter(f, TRANSITIONS[(State.JUDGE, verdict)], entry)
         return None
     if kind == "turn.collected":
@@ -441,7 +441,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if state != s.value:
             return f"collected in {state}, the task is in {s}"
         if verdict not in VERDICTS[s]:
-            return f"verdict {verdict!r} outside its enum"
+            return "verdict outside its enum"
         if verdict == "no_material_question":
             _enter(f, State.PLAN, entry)
         elif verdict == "candidate":
@@ -460,7 +460,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         question_id = p["question_id"]
         if not isinstance(question_id, str):
             # Its answer could never name it: an answer's id is compared as written.
-            return f"malformed: question_id {question_id!r} is not a string"
+            return "malformed: question_id is not a string"
         f.return_to = s
         f.open_question = question_id
         _enter(f, State.WAITING, entry)
@@ -489,7 +489,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             return "critique of a plan that is not the current one"
         verdict = p["verdict"]
         if verdict not in VERDICTS[State.CRITIQUE]:
-            return f"verdict {verdict!r} outside its enum"
+            return "verdict outside its enum"
         raised = p.get("raised") or {}
         if not isinstance(raised, dict) or any(
             k in f.raised and (not isinstance(v, int) or isinstance(v, bool) or v not in ROUNDS)
@@ -514,7 +514,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if candidate != f.candidate:
             return "stale: keyed to a candidate that is not the current one"
         if p["verdict"] not in VERDICTS[check]:
-            return f"verdict {p['verdict']!r} outside its enum"
+            return "verdict outside its enum"
         f.checks[check] = CheckVerdict(
             check, candidate, p["verdict"], _findings(check.value, p), _instances(p), row.get("id") or 0, p
         )

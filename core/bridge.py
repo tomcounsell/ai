@@ -149,7 +149,8 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
     its shape, since the bridge's `perform` reads each entry's path and
     sha256. Each file must then be a regular file in the task's workspace,
     within the channel's limit, and the whole message within its limit once
-    the channel's size function is set. The kernel never reads a file a turn
+    the channel's size function is set. A refusal names the file by its
+    place in `files`, not its path. The kernel never reads a file a turn
     names: one that is missing, a link, or outside the workspace gets the
     same answer, and whether its bytes are what Tom approved is the bridge's
     `perform`."""
@@ -163,13 +164,12 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
     ):
         return FILES_SHAPE
     sizes = []
-    for f in files:
-        path = f["path"]
-        size = await asyncio.to_thread(_file_size, workspace, path) if workspace else None
+    for i, f in enumerate(files):
+        size = await asyncio.to_thread(_file_size, workspace, f["path"]) if workspace else None
         if size is None:
-            return f"file {path} is not a regular file in the task's workspace"
+            return f"files[{i}] is not a regular file in the task's workspace"
         if limits.max_file_bytes is not None and size > limits.max_file_bytes:
-            return f"file {path} is {size} bytes, over {channel}'s limit of {limits.max_file_bytes} bytes per file"
+            return f"files[{i}] is {size} bytes, over {channel}'s limit of {limits.max_file_bytes} bytes per file"
         sizes.append(size)
     if limits.message_bytes is not None and limits.max_message_bytes is not None:
         total = limits.message_bytes(action, sizes)
@@ -182,7 +182,7 @@ async def _refuse_telegram(conn, action: broker.Action) -> str | None:
     from core import intake
 
     if not intake.owns("telegram", action.target):
-        return f"chat {action.target} is not one this machine's Telegram bridge receives"
+        return "the target chat is not one this machine's Telegram bridge receives"
     if not _strings(action.payload, ("text",)):
         return TEXT_SHAPE
     text = action.payload.get("text") or ""

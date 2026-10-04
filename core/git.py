@@ -381,7 +381,8 @@ def hostile(
     workspace: str | Path, profile: str | Path | None = None, mark: str = "valor-git-config"
 ) -> list[str]:
     """Every key in the workspace's local or worktree config (includes
-    followed) that the kernel will not run git under. With `profile`, the
+    followed) that the kernel will not run git under, named without its
+    value. With `profile`, the
     read runs under that sandbox profile, marked `mark`, so an include
     naming a file the profile denies fails the read."""
     prefix = (
@@ -398,9 +399,10 @@ def hostile(
         scope, _, entry = line.partition("\t")
         if scope not in ("local", "worktree"):
             continue
-        key = entry.split("=", 1)[0].lower()
+        name = entry.split("=", 1)[0]
+        key = name.lower()
         if key.startswith(HOSTILE_PREFIXES) or key.endswith(HOSTILE_SUFFIXES):
-            found.append(f"{scope}: {entry}")
+            found.append(f"{scope}: {name}")  # the key, never the value the turn set
     return found
 
 
@@ -462,7 +464,8 @@ def out(
 ) -> Any:
     done = run(workspace, *args, text=text, extra_env=extra_env, credential=credential, url=url)
     if done.returncode != 0:
-        raise GitError(f"git {' '.join(args)}: {_text(done.stderr).strip()}")
+        named = args[: args.index("--")] if "--" in args else args  # never the pathspecs
+        raise GitError(f"git {' '.join(named)}: {_text(done.stderr).strip()}")
     return done.stdout.strip()
 
 

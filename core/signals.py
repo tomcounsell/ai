@@ -91,7 +91,7 @@ def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
                     raise TypeError("not a JSON object")
                 signals.plan = value
             except (ValueError, TypeError, RecursionError) as exc:
-                signals.plan_error = f"plan.json is unreadable: {exc!r}"
+                signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
         _effects(signals, valor, turn_id)
@@ -148,7 +148,7 @@ def _filed(signals: Signals, handled: int) -> None:
                     raise TypeError("not a JSON object")
                 signals.plan = value
             except (ValueError, TypeError, RecursionError) as exc:
-                signals.plan_error = f"plan.json is unreadable: {exc!r}"
+                signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
     seen = {e["file"] for e in signals.effects}
@@ -212,7 +212,8 @@ def _effects(signals: Signals, valor: int, turn_id: str) -> None:
 def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
     """The request in `body`, or an `error` saying why it is unreadable:
     not JSON (nested past what Python's parser recurses through included),
-    not an object with an action type and a target, or holding a surrogate
+    not an object with an action type and a target that are strings, or
+    holding a surrogate
     code point. `json.loads` joins an escaped surrogate pair into the one
     character it encodes, so a surrogate left over (a lone escape, or a
     pair split between an escape and raw bytes) is not text: no UTF-8
@@ -223,9 +224,12 @@ def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
         request = json.loads(body)
         if not isinstance(request, dict):
             raise TypeError("not a JSON object")
+        for key in ("action_type", "target"):
+            if not isinstance(request[key], str):
+                raise TypeError(f"{key} is a {type(request[key]).__name__}, not a string")
         found = {
-            "action_type": str(request["action_type"]),
-            "target": str(request["target"]),
+            "action_type": request["action_type"],
+            "target": request["target"],
             "payload": dict(request.get("payload") or {}),
         }
         json.dumps(found, ensure_ascii=False).encode("utf-8")
@@ -235,10 +239,17 @@ def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
         )
         return entry
     except (ValueError, KeyError, TypeError, RecursionError) as exc:
-        entry["error"] = f"unreadable request: {exc!r}"
+        entry["error"] = f"unreadable request: {_why(exc)}"
         return entry
     entry["request"] = found
     return entry
+
+
+def _why(exc: BaseException) -> str:
+    """A parse error as the kernel writes it: its type and message, never
+    its repr. A `UnicodeDecodeError`'s repr holds the bytes it was given,
+    the turn's file; its message, like `json`'s, names a position."""
+    return f"{type(exc).__name__} ({exc})"
 
 
 def _screens(signals: Signals, valor: int, turn_id: str) -> list[dict[str, Any]]:

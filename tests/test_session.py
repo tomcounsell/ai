@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import json
 import os
-import socket
 import subprocess
 import sys
 import threading
@@ -214,7 +213,8 @@ def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_p
     verdict, (prompt, resume), state = run(go())
     assert verdict == "idle" and resume == scripted.SESSION and prompt.startswith("Continue.")
     assert "bad.json: unreadable request" in prompt
-    assert "no_such_action -> tom" in prompt and "refused: no performer" in prompt
+    assert "- send.json (effect " in prompt and "refused: no performer for this action type" in prompt
+    assert "no_such_action" not in prompt  # the request is not repeated into the prompt
     assert "merge.json: the merge is the kernel's to request" in prompt
     assert state["state"] == "plan" and list(state["effects"].values()) == ["refused"]
     assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
@@ -278,7 +278,7 @@ def test_a_request_file_never_stops_the_turn_being_collected(dsn, tmp_path):
     (effects / "t_deep_postgres.json").write_text(nested(100_000))
     requests["t_deep_postgres.json"] = ("cannot store it: StatementTooComplex (stack depth limit exceeded)",)
     (effects / "u_deep_parse.json").write_text(nested(400_000))
-    requests["u_deep_parse.json"] = ("RecursionError(",)
+    requests["u_deep_parse.json"] = ("RecursionError (",)
     shapes = {
         "v_text_int.json": ("telegram.send_message", chat, {"text": 5}, bridge.TEXT_SHAPE),
         "w_text_list.json": ("telegram.send_message", chat, {"text": ["hi"]}, bridge.TEXT_SHAPE),
@@ -328,7 +328,7 @@ def test_a_request_file_never_stops_the_turn_being_collected(dsn, tmp_path):
     for name, (*_, why) in shapes.items():
         assert (by_file[name]["kind"], by_file[name]["error"]) == ("refused", why), by_file[name]
     assert (by_file["s_deep_stored.json"]["kind"], by_file["s_deep_stored.json"]["error"]) == (
-        "refused", "no performer for no_such_action")  # fmt: skip
+        "refused", "no performer for this action type")  # fmt: skip
     assert by_file["e_ok.json"]["kind"] == "pending"
     [effect] = [r["payload"] for r in rows if r["type"] == "effect.held"]
     assert (effect["action_type"], effect["payload"]["text"]) == ("telegram.send_message", "hi \U0001f600")
@@ -384,16 +384,7 @@ async def _record_ended(dsn, ws, turn, state, performers=None):
     """Start a task, end `turn` in `state`, and record what it left."""
     task = await scripted.start(dsn, ws)
     found = signals.collect(ws, turn)
-    async with await db.connect(dsn) as conn:
-        # libpq sends a message a send buffer at a time and moves the rest
-        # down after each, so a message of hundreds of MiB over macOS's
-        # default Unix socket buffer (8 KiB) takes minutes; a larger buffer
-        # makes it seconds. Speed only: Postgres's answers are the same.
-        sock = socket.socket(fileno=conn.fileno())
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SNDBUF)
-        finally:
-            sock.detach()
+    async with await bridges.connect(dsn) as conn:
         await ledger.append(conn, task, "turn.started", {"turn_id": turn, "state": state.value})
         await ledger.append(conn, task, "turn.ended",
                             {"turn_id": turn, "outcome": "done", "result": {"session_id": scripted.SESSION}})  # fmt: skip
@@ -405,7 +396,6 @@ async def _record_ended(dsn, ws, turn, state, performers=None):
 
 # Each string is storable alone; two exceed jsonb's size for one value.
 BIG = 130 << 20
-SNDBUF = 4 << 20  # within macOS's default kern.ipc.maxsockbuf, 8 MiB
 
 
 @pytest.mark.parametrize("left", ["requests", "texts"])
@@ -441,6 +431,59 @@ def test_parts_storable_alone_and_not_together(dsn, tmp_path, left):
         assert (collected["question"], collected["done"]) == (None, None)
         for name in ("question", "done"):
             assert any(e.startswith(f"{name}.md is unreadable: {refused}") for e in collected["errors"])
+
+
+def large_turn(ws: Path, field: str) -> None:
+    """A turn whose one field is large, beside a clean send. Kernel text
+    names such a field and never copies it, so every row fits."""
+    valor = ws / ".valor"
+    (valor / "effects").mkdir(parents=True, exist_ok=True)
+    send = {
+        "action_type": "telegram.send_message",
+        "target": bridges.OPERATOR_CHAT,
+        "payload": {"text": "hi"},
+    }
+    (valor / "effects" / "ok.json").write_text(json.dumps(send))
+    if field == "action_type":
+        big = {"action_type": "a" * (90 << 20), "target": "tom", "payload": {}}
+        (valor / "effects" / "big.json").write_text(json.dumps(big))
+    else:
+        plan = {"path": "p", "critique_rounds": "x" * (140 << 20), "review_rounds": 0}
+        (valor / "plan.json").write_text(json.dumps(plan))
+
+
+def assert_large_turn(field: str, turn: str, rows: list) -> None:
+    [collected] = [
+        r["payload"] for r in rows if r["type"] == "turn.collected" and r["payload"]["turn_id"] == turn
+    ]
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert by_file["ok.json"]["kind"] == "pending"
+    [held] = [r["payload"] for r in rows if r["type"] == "effect.held"]
+    assert held["request_id"] == f"{turn}/ok.json"
+    if field == "action_type":
+        [refused] = [r["payload"] for r in rows if r["type"] == "effect.refused"]
+        assert refused["reason"] == broker.NO_PERFORMER and len(refused["action_type"]) == 90 << 20
+        assert (by_file["big.json"]["kind"], by_file["big.json"]["error"]) == ("refused", broker.NO_PERFORMER)
+        assert len(refused["idempotency_key"]) < 100
+    else:
+        assert not [r for r in rows if r["type"] == "plan.written"]
+        assert "plan.json's critique_rounds is a string; each count is 0, 1, or 2" in collected["errors"]
+    assert all(len(e) < 1000 for e in collected["errors"])
+
+
+@pytest.mark.parametrize("field", ["action_type", "critique_rounds"])
+def test_a_large_turn_field_is_named_never_copied(dsn, tmp_path, field):
+    """A 90 MiB action type with no performer, or a 140 MiB critique_rounds,
+    each fits a row once. The kernel's reason, key and errors name the field
+    and never repeat it, so the turn is collected with it refused and the
+    clean send beside it held."""
+    ws, _ = scripted.workspace(tmp_path)
+    large_turn(ws, field)
+    turn = ledger.new_id()
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, turn, tasks.machine.State.PLAN, bridges.declared(str(ws))))
+    assert verdict == "idle"
+    assert_large_turn(field, turn, rows)
 
 
 def test_a_signal_postgres_refuses_is_unreadable(dsn, tmp_path):
@@ -524,7 +567,7 @@ def test_a_plan_path_that_is_a_link_to_a_fifo_or_climbs_out_is_never_opened(tmp_
         target = str(tmp_path / "outside" / "fifo").encode()
         assert why is None and plan["sha256"] == hashlib.sha256(target).hexdigest()
     else:
-        assert plan is None and why == "../outside/fifo is not committed at HEAD"
+        assert plan is None and why == "plan.json's path is not committed at HEAD"
 
 
 def test_a_plan_changed_after_its_commit_is_no_plan(tmp_path):
@@ -534,7 +577,7 @@ def test_a_plan_changed_after_its_commit_is_no_plan(tmp_path):
     plan, why = session._plan(str(ws), raw)
     assert why is None and plan["sha256"] == hashlib.sha256(b"the plan\n").hexdigest()
     (ws / "docs" / "plans" / "p.md").write_text("changed\n")
-    assert session._plan(str(ws), raw) == (None, "docs/plans/p.md has changes not committed")
+    assert session._plan(str(ws), raw) == (None, "plan.json's path has changes not committed")
 
 
 @pytest.mark.parametrize(
@@ -557,7 +600,7 @@ def test_a_plan_git_quotes_or_renames_away_with_changes_not_committed_is_no_plan
         (ws / path).write_text("changed\n")
     else:
         git(ws, "mv", path, "docs/plans/elsewhere.md")
-    assert session._plan(str(ws), raw) == (None, f"{path} has changes not committed")
+    assert session._plan(str(ws), raw) == (None, "plan.json's path has changes not committed")
 
 
 @pytest.mark.parametrize("path", ["docs/plans/p.md", "docs/plans/*.md"])
@@ -608,7 +651,7 @@ def test_a_plan_changed_where_the_turns_index_or_config_hides_it_is_no_plan(tmp_
     raw = {"path": path, "critique_rounds": 1, "review_rounds": 1}
     assert session._plan(str(ws), raw)[1] is None
     _hide_an_edit(ws, path, route)
-    assert session._plan(str(ws), raw) == (None, f"{path} has changes not committed")
+    assert session._plan(str(ws), raw) == (None, "plan.json's path has changes not committed")
 
 
 @pytest.mark.parametrize("route", HIDDEN)
@@ -835,3 +878,93 @@ def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhil
         time.sleep(0.05)
     else:
         raise AssertionError("the fetch outlived its stopped caller")
+
+
+class Refusing:
+    """A performer whose refusal is as long as the request asks."""
+
+    action_type = "refusing"
+    effect_class = "propose"
+
+    async def refuse(self, conn, action):
+        return "r" * action.payload["n"]
+
+
+def _refusing_turn(ws: Path, sizes: dict[str, int]):
+    effects = ws / ".valor" / "effects"
+    effects.mkdir(parents=True, exist_ok=True)
+    send = {
+        "action_type": "telegram.send_message",
+        "target": bridges.OPERATOR_CHAT,
+        "payload": {"text": "hi"},
+    }
+    (effects / "ok.json").write_text(json.dumps(send))
+    for name, n in sizes.items():
+        (effects / name).write_text(
+            json.dumps({"action_type": "refusing", "target": "tom", "payload": {"n": n}})
+        )
+    return broker.Performers(Refusing(), *bridge.declared_performers(str(ws)))
+
+
+def test_a_refusal_the_ledger_cannot_store_is_refused_in_kernel_words(dsn, tmp_path):
+    """A performer's reason past what jsonb holds: the broker's row is
+    written with no turn content and Postgres's reason, and the turn is
+    collected with the clean send beside it held."""
+    ws, _ = scripted.workspace(tmp_path)
+    performers = _refusing_turn(ws, {"big.json": 260 << 20})
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
+    [refused] = [r["payload"] for r in rows if r["type"] == "effect.refused"]
+    assert set(refused) <= {"effect_id", "reason", *broker.BARE_FIELDS}
+    assert refused["reason"].startswith(f"{broker.UNSTORABLE}: ProgramLimitExceeded")
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert (by_file["big.json"]["kind"], by_file["big.json"]["error"]) == ("refused", refused["reason"])
+    assert by_file["ok.json"]["kind"] == "pending" and verdict == "idle"
+
+
+def test_a_turn_collected_row_past_what_jsonb_holds_is_written_bare(dsn, tmp_path):
+    """Two refusals each stored on their own are together more than one
+    jsonb value holds: `turn.collected` is written with no turn content and
+    Postgres's reason, and each effect row stands."""
+    ws, _ = scripted.workspace(tmp_path)
+    performers = _refusing_turn(ws, {"a.json": BIG, "b.json": BIG})
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    [why] = collected["errors"]
+    assert why.startswith(f"the turn's signals: {session.UNSTORABLE} with all it holds: ProgramLimitExceeded")
+    assert collected["effects"] == [] and verdict == "idle"
+    assert len([r for r in rows if r["type"] == "effect.refused"]) == 2
+    assert len([r for r in rows if r["type"] == "effect.held"]) == 1
+
+
+def test_an_error_the_ledger_cannot_store_is_answered_in_its_place(dsn, tmp_path, monkeypatch):
+    """An error in `turn.collected` that jsonb refuses on its own is
+    replaced by kernel text with Postgres's reason, and the rest of the
+    row is written."""
+    ws, _ = scripted.workspace(tmp_path)
+    (ws / ".valor").mkdir()
+    (ws / ".valor" / "question.md").write_text("which one?")
+    verdict_of = session._verdict
+
+    def with_nul(*args, **kw):
+        verdict, candidate, errors = verdict_of(*args, **kw)
+        return verdict, candidate, [*errors, "a\x00b"]
+
+    monkeypatch.setattr(session, "_verdict", with_nul)
+    verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    assert verdict == "asked" and collected["question"] == "which one?"
+    assert collected["errors"][-1].startswith(
+        f"an error is unrecorded: {session.UNSTORABLE}: UntranslatableCharacter"
+    )
+
+
+def test_a_plan_path_too_long_for_gits_arguments_is_no_plan(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    plan = {"path": "p" * (2 << 20), "critique_rounds": 0, "review_rounds": 0}
+    assert session._plan(str(ws), plan) == (
+        None,
+        "plan.json's path cannot be passed to git: Argument list too long",
+    )

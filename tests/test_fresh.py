@@ -154,7 +154,7 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
     task, _b, ws = planned(dsn, tmp_path, fresh_acts=["bad_raise", "raise"])
     runners = scripted.fresh_runners(ws)
     first = run(drive(dsn, task, runners))
-    assert first["status"] == "failed" and "raise review_rounds=5" in str(first["turn"]["result"])
+    assert first["status"] == "failed" and "each count raised is" in str(first["turn"]["result"])
     assert not [r for r in run(rows(dsn, task)) if r["type"] == "critique.decided"]
     run(drive(dsn, task, runners))
     f = machine.fold(run(rows(dsn, task)))
@@ -170,6 +170,10 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
         ("symlink", "verdict.json is a link, not a plain file"),
         ("fifo", "not a regular file"),
         ("dir_symlink", ".valor is not a plain directory"),
+        (
+            "nul",
+            "the critique.decided row: the ledger's JSON (Postgres jsonb) cannot store it: Untranslatable",
+        ),
     ],
 )
 def test_a_critique_that_leaves_no_valid_verdict_writes_none_and_only_critique_reruns(

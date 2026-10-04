@@ -11,7 +11,7 @@ On start it recovers (`recover`) what a killed kernel left:
 - a call opened with no charge whose holder lock is free: charged at its
   estimate, marked estimated;
 - the last working turn of a task that ended and was never collected: its
-  signals are read again (`signals.recollect`) and recorded; the
+  signals are read again (`signals.recollect`, in a worker thread) and recorded; the
   broker's `request_id` makes a re-request return the first effect. A
   collection that raises is logged and the kernel starts; the task is
   collected by a job before it is stepped, parked like any job that fails;
@@ -141,7 +141,11 @@ async def _recollect(
         return None
     try:
         b = await tasks.brief(conn, task_id)
-        found = signals.recollect(b.workspace, turn_id) if b.workspace else signals.Signals()
+        found = (
+            await asyncio.to_thread(signals.recollect, b.workspace, turn_id)
+            if b.workspace
+            else signals.Signals()
+        )
         await session.record(
             conn,
             task_id,

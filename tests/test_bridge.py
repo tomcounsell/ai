@@ -245,8 +245,7 @@ def test_files_refused_alike_and_never_read(dsn, op, tmp_path):
         return said, good, out, nowhere
 
     said, good, out, nowhere = run(go())
-    reasons = {what: why.replace(str(named[what]), "<path>") for what, why in said.items()}
-    assert set(reasons.values()) == {"file <path> is not a regular file in the task's workspace"}, reasons
+    assert set(said.values()) == {"files[0] is not a regular file in the task's workspace"}, said
     assert good is None
     assert out.kind == "refused" and "not a regular file in the task's workspace" in out.error
     # A task with no workspace sends no file.
@@ -329,7 +328,7 @@ def test_a_nul_in_a_file_path_gets_the_file_answer(op, tmp_path):
     performer = declared(str(tmp_path)).get("telegram.send_message")
     for path in (f"{tmp_path}/a\x00.txt", f"{tmp_path}/a\x00/b.txt"):
         said = run(performer.refuse(None, send(files=[{"path": path, "sha256": "0" * 64}])))
-        assert said == f"file {path} is not a regular file in the task's workspace"
+        assert said == "files[0] is not a regular file in the task's workspace"
 
 
 def _no_read(*a, **k):

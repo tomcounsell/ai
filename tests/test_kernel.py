@@ -636,3 +636,79 @@ def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one
     from_held, without, unknown = run(go())
     assert from_held.kind == "done" and from_held.result["key"] == described["idempotency_key"]
     assert without is None and unknown is None
+
+
+class Answering:
+    """A performer whose answer holds a NUL, which jsonb refuses: from
+    `perform`, or from the `lookup` asked after `perform` raised."""
+
+    action_type = "answering"
+    effect_class = "propose"
+
+    async def perform(self, action, key: str) -> dict:
+        if action.payload["from"] == "lookup":
+            raise ValueError("timed out")
+        return {"said": "a\x00b"}
+
+    async def lookup(self, action, key: str) -> dict | None:
+        return {"said": "a\x00b"}
+
+
+@pytest.mark.parametrize("where", ["perform", "lookup"])
+def test_a_performer_answer_the_ledger_cannot_store_is_recorded_without_it(dsn, where):
+    async def go():
+        task = await new_task(dsn)
+        action = broker.Action("answering", "t", {"from": where})
+        async with await db.connect(dsn) as conn:
+            out = await broker.request(conn, broker.Performers(Answering()), task, action)
+            rows = await ledger.read(conn, task)
+        return out, rows
+
+    out, rows = run(go())
+    [outcome] = [r["payload"] for r in rows if r["type"] == "effect.outcome"]
+    assert outcome["kind"] == "done" and outcome["result"] == {}
+    assert outcome["error"].startswith(
+        "the performer's answer: the ledger's JSON (Postgres jsonb) cannot store it: UntranslatableCharacter"
+    )
+    assert (out.kind, out.result, out.error) == ("done", {}, outcome["error"])
+
+
+@pytest.mark.parametrize("where", ["result", "session_id"])
+def test_a_turn_result_the_ledger_cannot_store_ends_the_turn_without_it(dsn, tmp_path, where):
+    """The turn's final message holding a NUL is dropped from `turn.ended`
+    and the rest kept; a NUL beyond it leaves only the kernel's fields."""
+    from harnesses import claude_code
+
+    said = {"result": "done", "session_id": "s", "is_error": False, where: "a\x00b"}
+
+    async def go():
+        task = await new_task(dsn)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", f"print({json.dumps(json.dumps(said))})"],
+            env={},
+            cwd=str(tmp_path),
+            harness="claude_code",
+            parse=claude_code.parse,
+        )
+        ended = await runs.run_turn(gateway, task, build, dsn=dsn)
+        await gateway.close()
+        async with await db.connect(dsn) as conn:
+            rows = await ledger.read(conn, task)
+        return ended, rows
+
+    ended, rows = run(go())
+    [row] = [r["payload"] for r in rows if r["type"] == "turn.ended"]
+    assert row == ended and ended["outcome"] == "done"
+    unrecorded = ended["result"].pop("unrecorded")
+    assert unrecorded.startswith("the turn's result: the ledger's JSON (Postgres jsonb) cannot store it: ")
+    if where == "result":
+        assert ended["result"] == {
+            "is_error": False,
+            "num_turns": None,
+            "harness_reported_usd": None,
+            "session_id": "s",
+        }
+    else:
+        assert ended["result"] == {} and set(ended) == {*runs.KERNEL_FIELDS, "result"}

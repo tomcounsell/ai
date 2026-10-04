@@ -113,8 +113,9 @@ code that carries out one action type, and it declares that type's class;
 the requester never names a class. For each request the broker, under the
 task's lock:
 
-- derives the idempotency key from the action (type, target, payload
-  digest) and the effect's id, so two identical sends are two effects; a
+- derives the idempotency key from the digest of the action (type,
+  target, payload) and the effect's id, so two identical sends are two
+  effects and the key holds nothing the turn wrote; a
   repeated request from one turn file returns the first by `request_id`;
 - refuses, with an `effect.refused` row, an action with no performer, on a
   stopped task, above the task's ceiling, adding governance without Tom's

@@ -282,9 +282,30 @@ def test_a_plan_nested_past_the_parser_is_a_plan_error(ws):
     deep = "[" * 400_000 + "]" * 400_000
     (ws / ".valor" / "plan.json").write_text(deep)
     found = collect(ws)
-    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError(")
+    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError (")
     handled = ws / ".valor" / "handled" / "turn-2"
     handled.mkdir(parents=True)
     (handled / "plan.json").write_text(deep)
     found = signals.recollect(ws, "turn-2")
-    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError(")
+    assert found.plan is None and found.plan_error.startswith("plan.json is unreadable: RecursionError (")
+
+
+def test_an_unreadable_file_is_answered_without_its_contents(ws):
+    """A `plan.json` or a request that is not UTF-8 is unreadable with the
+    decoder's message, which names a position; its repr, which holds the
+    file's bytes, is never written. A request whose action type or target
+    is not a string is unreadable, named by its type, not its value."""
+    body = b"\xff" + MARKER.encode()
+    (ws / ".valor" / "plan.json").write_bytes(body)
+    effects = ws / ".valor" / "effects"
+    effects.mkdir()
+    (effects / "a_bytes.json").write_bytes(body)
+    (effects / "b_type.json").write_text(json.dumps({"action_type": {MARKER: 1}, "target": "tom"}))
+    (effects / "c_target.json").write_text(json.dumps({"action_type": "x", "target": [MARKER]}))
+    found = collect(ws)
+    assert found.plan_error.startswith("plan.json is unreadable: UnicodeDecodeError (")
+    errors = {e["file"]: e["error"] for e in found.effects}
+    assert errors["a_bytes.json"].startswith("unreadable request: UnicodeDecodeError (")
+    assert errors["b_type.json"] == "unreadable request: TypeError (action_type is a dict, not a string)"
+    assert errors["c_target.json"] == "unreadable request: TypeError (target is a list, not a string)"
+    assert MARKER not in found.plan_error + "".join(errors.values())

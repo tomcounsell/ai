@@ -15,7 +15,10 @@ A notice with no channel or chat (the operator's unset) is written with a
 sent. `request` writes one notice; binding (`core/intake.py`) and a refused
 release (`core/broker.py`) use it for theirs. A notice is requested once
 per task and `about_key` (`events_one_notice`): a second request, from
-another kernel or a retry, is skipped in a savepoint. Each text carries the
+another kernel or a retry, is skipped in a savepoint. A notice whose text
+Postgres jsonb refuses (a held send's text, as large as the ledger stores
+once, rendered twice) is written with kernel text in its place, naming
+what it is about and Postgres's reason. Each text carries the
 notice's short id, so a bridge's lookup matches the sent message exactly.
 Notices are not held for approval; the bridge sends them as they come.
 """
@@ -62,20 +65,19 @@ async def request(
     chat_id = chat_id if chat_id is not None else settings.operator_chat
     try:
         async with conn.transaction():
-            await ledger.append(
-                conn,
-                task_id,
-                "notice.requested",
-                {
-                    "notice_id": notice_id,
-                    "channel": channel,
-                    "chat_id": chat_id,
-                    "kind": kind,
-                    "about_key": about_key,
-                    "text": f"{text}\n\n{tag(notice_id)}",
-                    "reply_to": reply_to,
-                },
-            )
+            notice = {
+                "notice_id": notice_id,
+                "channel": channel,
+                "chat_id": chat_id,
+                "kind": kind,
+                "about_key": about_key,
+                "text": f"{text}\n\n{tag(notice_id)}",
+                "reply_to": reply_to,
+            }
+            written, why = await ledger.try_append(conn, task_id, "notice.requested", notice)
+            if written is None:
+                await ledger.append(conn, task_id, "notice.requested", {**notice, "text": _unstorable(
+                    task_id, kind, about_key, why, notice_id)})  # fmt: skip
             if not channel or not chat_id:
                 # No bridge sends a notice with no chat: the ledger says so.
                 await ledger.append(
@@ -150,6 +152,15 @@ def _held(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif r["type"] in ("approval.granted", "effect.intent", "effect.outcome", "effect.refused"):
             held.pop(p.get("effect_id"), None)
     return list(held.values())
+
+
+def _unstorable(task_id: str, kind: str, about_key: str, why: str, notice_id: str) -> str:
+    """A notice's text when Postgres jsonb refuses the one rendered: kernel
+    words only, naming what it is about, so Tom still hears of it."""
+    return (
+        f"Task {task_id} has a notice ({kind}, {about_key}) whose text the ledger's JSON (Postgres jsonb) "
+        f"cannot store: {why}. The task's ledger holds what it is about.\n\n{tag(notice_id)}"
+    )
 
 
 def effect_text(task_id: str, effect: dict[str, Any]) -> str:

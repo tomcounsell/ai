@@ -42,6 +42,21 @@ def digest(value: Any) -> str:
 
 
 DATA_REFUSED = ("22", "54")  # SQLSTATE classes: data exception, program limit exceeded
+UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store it"
+
+
+def refused(exc: BaseException) -> str | None:
+    """Why Postgres jsonb (or Python's encoder, adapting a value for it)
+    refused a value, from the error it raised, or None when `exc` is not
+    such a refusal. A data exception or a program limit exceeded is
+    Postgres's answer, as is nesting past what Python's encoder recurses
+    through. The reason is Postgres's primary message, which names the
+    limit or the kind of character, never the value."""
+    if isinstance(exc, RecursionError):
+        return "RecursionError, serializing it"
+    if isinstance(exc, psycopg.Error) and (exc.sqlstate or "")[:2] in DATA_REFUSED:
+        return f"{type(exc).__name__} ({exc.diag.message_primary})"
+    return None
 
 
 async def unstorable(conn, value: Any) -> str | None:
@@ -49,20 +64,32 @@ async def unstorable(conn, value: Any) -> str | None:
     of Postgres, adapted as `append` adapts a payload, inside a savepoint so
     a refusal leaves a caller's transaction usable. What jsonb refuses (a
     NUL character, a NaN or infinite number, nesting past the server's
-    stack depth) is Postgres's to say, never predicted here: a data
-    exception or a program limit exceeded is that answer, as is nesting
-    past what Python's encoder recurses through; any other error is
-    raised."""
+    stack depth) is Postgres's to say, never predicted here; any error that
+    is not such a refusal is raised."""
     try:
         async with conn.transaction():
             await conn.execute("SELECT %s::jsonb", (Jsonb(value),))
-    except RecursionError as exc:
-        return f"{exc!r}, serializing it"
-    except psycopg.Error as exc:
-        if (exc.sqlstate or "")[:2] not in DATA_REFUSED:
+    except (RecursionError, psycopg.Error) as exc:
+        why = refused(exc)
+        if why is None:
             raise
-        return f"{type(exc).__name__} ({exc.diag.message_primary})"
+        return why
     return None
+
+
+async def try_append(conn, task_id: str, type: str, payload: dict[str, Any]) -> tuple[int | None, str | None]:
+    """`append` inside a savepoint: the row's id, or None and why Postgres
+    jsonb refused the payload. A refusal rolls back to the savepoint, so
+    the caller's transaction stays usable and the caller writes the row it
+    can store instead. Any other error is raised."""
+    try:
+        async with conn.transaction():
+            return await append(conn, task_id, type, payload), None
+    except (RecursionError, psycopg.Error) as exc:
+        why = refused(exc)
+        if why is None:
+            raise
+        return None, why
 
 
 async def append(conn, task_id: str, type: str, payload: dict[str, Any]) -> int:

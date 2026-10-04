@@ -8,6 +8,7 @@ bridge with no platform: `perform` records the send under its key, and
 
 import asyncio
 import contextlib
+import socket
 from typing import Any
 
 from core import broker, db, ledger, tasks
@@ -17,6 +18,22 @@ from core.settings import settings
 OPERATOR = "42"
 OPERATOR_CHAT = "1000"
 OPERATOR_EMAIL = "tom@example.com"
+SNDBUF = 4 << 20  # within macOS's default kern.ipc.maxsockbuf, 8 MiB
+
+
+async def connect(dsn: str):
+    """A ledger connection with a wider send buffer. libpq sends a message
+    a send buffer at a time and moves the rest down after each, so a
+    message of hundreds of MiB over macOS's default Unix socket buffer
+    (8 KiB) takes minutes; a larger buffer makes it seconds. Speed only:
+    Postgres's answers are the same."""
+    conn = await db.connect(dsn)
+    sock = socket.socket(fileno=conn.fileno())
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SNDBUF)
+    finally:
+        sock.detach()
+    return conn
 
 
 @contextlib.contextmanager

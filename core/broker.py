@@ -87,9 +87,12 @@ class Action:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def key(self, effect_id: str) -> str:
-        """Ends in the effect id: a platform id derived from it differs
-        between two identical sends and repeats for a retry of one."""
-        return f"{self.action_type}:{self.target}:{ledger.digest(self.payload)[:16]}:{effect_id}"
+        """The action's digest, then the effect id: it ends in the effect
+        id, so a platform id derived from it differs between two identical
+        sends and repeats for a retry of one. The action is the turn's, so
+        the key holds its digest, never its fields."""
+        whole = {"action_type": self.action_type, "target": self.target, "payload": self.payload}
+        return f"{ledger.digest(whole)[:16]}:{effect_id}"
 
     def describe(self, effect_class: str, adds_governance: bool, effect_id: str) -> dict[str, Any]:
         return {
@@ -236,7 +239,7 @@ async def _request(
         reason = None
         refuse = getattr(performer, "refuse", None)
         if performer is None:
-            reason = f"no performer for {action.action_type}"
+            reason = NO_PERFORMER
         elif await tasks.is_stopped(conn, task_id):
             reason = "task stopped"
         elif EFFECT_RANK[effect_class] > EFFECT_RANK[brief.max_effect_class]:
@@ -248,15 +251,40 @@ async def _request(
         elif refuse is not None and (said := await refuse(conn, action)):
             reason = said
         if reason is not None:
-            await ledger.append(
-                conn, task_id, "effect.refused", {"effect_id": effect_id, **described, "reason": reason}
-            )
+            row = "effect.refused", {"effect_id": effect_id, **described, "reason": reason}
+        elif effect_class == "act" or declared(performer):
+            row = "effect.held", {"effect_id": effect_id, **described}
+        else:
+            row = "effect.intent", _intent_row(effect_id, described, approval_id=None)
+        written, why = await ledger.try_append(conn, task_id, *row)
+        if written is None:
+            reason = f"{UNSTORABLE}: {why}"
+            await ledger.append(conn, task_id, "effect.refused", _bare(effect_id, described, reason))
             return Outcome(effect_id, "refused", error=reason)
-        if effect_class == "act" or declared(performer):
-            await ledger.append(conn, task_id, "effect.held", {"effect_id": effect_id, **described})
+        if row[0] == "effect.refused":
+            return Outcome(effect_id, "refused", error=reason)
+        if row[0] == "effect.held":
             return Outcome(effect_id, "pending")
-        await _intent(conn, task_id, effect_id, described, approval_id=None)
     return await _perform(conn, performers, task_id, effect_id, action, described)
+
+
+NO_PERFORMER = "no performer for this action type"
+UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store the request"
+# The fields of an effect row the kernel made, none of them the turn's.
+BARE_FIELDS = ("effect_class", "adds_governance", "payload_sha256", "request_id")
+
+
+def _bare(effect_id: str, described: dict[str, Any], reason: str, **more: Any) -> dict[str, Any]:
+    """An `effect.refused` payload holding nothing the turn wrote: the
+    row written when Postgres jsonb refuses the one that holds the action.
+    It keeps the request id and digest, so a re-collected request finds it
+    (`_prior`)."""
+    return {
+        "effect_id": effect_id,
+        **{f: described[f] for f in BARE_FIELDS if f in described},
+        "reason": reason,
+        **more,
+    }
 
 
 async def approve(
@@ -327,19 +355,17 @@ async def _refused_release(conn, effect_id: str, reason: str) -> None:
             "effect.intent",
         }:
             return
-        await ledger.append(
-            conn,
-            task_id,
-            "effect.refused",
-            {**described, "effect_id": effect_id, "reason": reason, "at": "release"},
-        )
+        refused = {**described, "effect_id": effect_id, "reason": reason, "at": "release"}
+        written, why = await ledger.try_append(conn, task_id, "effect.refused", refused)
+        if written is None:
+            bare = _bare(effect_id, described, f"{reason}; {UNSTORABLE} again: {why}", at="release")
+            await ledger.append(conn, task_id, "effect.refused", bare)
         await notices.request(
             conn,
             task_id,
             kind="effect_refused",
             about_key=f"effect-refused:{effect_id}",
-            text=f"{described['action_type']} -> {described['target']} (effect {effect_id}) was not "
-            f"released: {reason}",
+            text=f"Effect {effect_id} ({described['action_type']}) was not released: {reason}",
         )
 
 
@@ -420,10 +446,9 @@ async def reconcile(conn, performers: Performers, effect_id: str) -> Outcome | N
             return None
         kind = "done" if found else "failed"
         async with conn.transaction():
-            await ledger.append(
+            written = await _outcome(
                 conn,
                 task_id,
-                "effect.outcome",
                 {
                     "effect_id": effect_id,
                     "idempotency_key": described["idempotency_key"],
@@ -435,7 +460,7 @@ async def reconcile(conn, performers: Performers, effect_id: str) -> Outcome | N
                     "reconciled": True,
                 },
             )
-        return Outcome(effect_id, kind, found or {})
+        return Outcome(effect_id, kind, written["result"])
     finally:
         await _unlock(conn, key)
 
@@ -464,7 +489,7 @@ async def _release(conn, performers: Performers, effect_id: str) -> Outcome:
         action = Action(described["action_type"], described["target"], described["payload"])
         performer = performers.get(action.action_type)
         if performer is None:
-            raise Refused(f"no performer for {action.action_type}")
+            raise Refused(NO_PERFORMER)
         refuse = getattr(performer, "refuse", None)
         if refuse is not None and (said := await refuse(conn, action)):
             raise Refused(said)
@@ -535,20 +560,22 @@ INTENT_FIELDS = ("action_type", "target", "payload", "payload_sha256", "effect_c
 
 
 async def _intent(conn, task_id, effect_id, described, *, approval_id) -> None:
-    """The intent row, inside the caller's transaction. It carries the
-    action whole, so `reconcile` rebuilds what to look up from it alone."""
+    """The intent row, inside the caller's transaction."""
     await ledger.append(
-        conn,
-        task_id,
-        "effect.intent",
-        {
-            "effect_id": effect_id,
-            "idempotency_key": described["idempotency_key"],
-            "approval_id": approval_id,
-            **{f: described[f] for f in INTENT_FIELDS},
-            **({"request_id": described["request_id"]} if described.get("request_id") else {}),
-        },
+        conn, task_id, "effect.intent", _intent_row(effect_id, described, approval_id=approval_id)
     )
+
+
+def _intent_row(effect_id: str, described: dict[str, Any], *, approval_id: str | None) -> dict[str, Any]:
+    """The intent's payload. It carries the action whole, so `reconcile`
+    rebuilds what to look up from it alone."""
+    return {
+        "effect_id": effect_id,
+        "idempotency_key": described["idempotency_key"],
+        "approval_id": approval_id,
+        **{f: described[f] for f in INTENT_FIELDS},
+        **({"request_id": described["request_id"]} if described.get("request_id") else {}),
+    }
 
 
 async def _intended(conn, effect_id: str) -> dict[str, Any] | None:
@@ -612,10 +639,9 @@ async def _perform(conn, performers, task_id, effect_id, action, described) -> O
         result, kind, error = found or {}, ("done" if found else "failed"), repr(exc)
     try:
         async with conn.transaction():
-            await ledger.append(
+            written = await _outcome(
                 conn,
                 task_id,
-                "effect.outcome",
                 {
                     "effect_id": effect_id,
                     "idempotency_key": key,
@@ -628,7 +654,19 @@ async def _perform(conn, performers, task_id, effect_id, action, described) -> O
         # `reconcile` settled it first (this process had lost its session);
         # the recorded outcome stands.
         return await _standing(conn, effect_id)
-    return Outcome(effect_id, kind, result, error)
+    return Outcome(effect_id, kind, written["result"], written["error"])
+
+
+async def _outcome(conn, task_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
+    """Write `effect.outcome` and return what was written. The performer's
+    result and error can carry what the turn asked for, which Postgres
+    jsonb may refuse: then the row holds neither, its error saying why."""
+    _, why = await ledger.try_append(conn, task_id, "effect.outcome", outcome)
+    if why is None:
+        return outcome
+    bare = {**outcome, "result": {}, "error": f"the performer's answer: {ledger.UNSTORABLE}: {why}"}
+    await ledger.append(conn, task_id, "effect.outcome", bare)
+    return bare
 
 
 async def _held(conn, effect_id: str) -> dict[str, Any]:

@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows
 from tests.conftest import TEST_DB
 from tests.scripted import commit
 from tests.test_pipeline import _dangling, drive
+from tests.test_session import assert_large_turn, large_turn
 from tests.test_workspace import _service_pids
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -225,6 +227,53 @@ def test_kill_after_ended_before_collected(fresh, op, tmp_path):
     assert len(typed(written, "turn.collected", turn_id=turn)) == 1
     assert len(typed(written, "effect.held", request_id=f"{turn}/a.json")) == 1
     assert machine.fold(written).state is State.CRITIQUE
+
+
+@pytest.mark.parametrize("field", ["action_type", "critique_rounds"])
+def test_recover_collects_a_large_turn_field(fresh, op, tmp_path, field):
+    """recover collects a turn left with a 90 MiB action type or a 140 MiB
+    critique_rounds, the field refused and the clean send beside it held,
+    and a second recover has nothing left."""
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(fresh, ws)
+        turn = ledger.new_id()
+        await _ended(fresh, task, turn, "plan")
+        large_turn(ws, field)
+        async with await bridges.connect(fresh) as conn:
+            done = await serve.recover(conn, _performers)
+            again = await serve.recover(conn, _performers)
+        return task, turn, done, again
+
+    task, turn, done, again = run(go())
+    assert done["recollected"] == [turn] and again["recollected"] == []
+    assert not done.get("uncollected") and not again.get("uncollected")
+    assert_large_turn(field, turn, run(rows(fresh, task)))
+
+
+def test_recover_reads_a_turns_signals_off_the_loop_thread(fresh, op, tmp_path, monkeypatch):
+    """Reading a turn's files again runs in a worker thread, as a live
+    turn's collection does, so the kernel's loop runs meanwhile."""
+    ws, _ = scripted.workspace(tmp_path)
+    read_on, recollect = [], signals.recollect
+
+    def recording(*args):
+        read_on.append(threading.current_thread() is threading.main_thread())
+        return recollect(*args)
+
+    monkeypatch.setattr(signals, "recollect", recording)
+
+    async def go():
+        task = await scripted.start(fresh, ws)
+        turn = ledger.new_id()
+        await _ended(fresh, task, turn, "plan")
+        _plan_signals(ws, turn)
+        async with await db.connect(fresh) as conn:
+            return turn, await serve.recover(conn, _performers)
+
+    turn, done = run(go())
+    assert done["recollected"] == [turn] and read_on == [False]
 
 
 def test_a_turn_that_cannot_be_collected_leaves_serve_running(fresh, op, tmp_path, monkeypatch):

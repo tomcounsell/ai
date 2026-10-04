@@ -420,3 +420,14 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_docs_
     assert not fresh_docs_turns(got)  # no docs session ran
     at = next(i for i, r in enumerate(got) if r["type"] == "docs.decided")
     assert machine.fold(got[: at + 1]).state is State.PATCH  # the join moved on: the repair round
+
+
+def test_docs_findings_the_ledger_cannot_store_fail_the_stage_with_the_reason(dsn, tmp_path):
+    _task, _b, _ws, out, got = docs_run(dsn, tmp_path, docs_verdict="no_change",
+                                        docs_findings=[{"kind": "x", "text": "a\x00b"}])  # fmt: skip
+    assert out["status"] == "failed"
+    assert out["turn"]["result"].startswith(
+        f"verdict refused: the {fresh.DOCS_KEPT} row: the ledger's JSON (Postgres jsonb) cannot store it: "
+        "UntranslatableCharacter"
+    )
+    assert not [r for r in got if r["type"] in (fresh.DOCS_KEPT, "docs.decided")]

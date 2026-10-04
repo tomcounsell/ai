@@ -118,35 +118,57 @@ async def run(
 
 
 def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """A `plan.written` payload from a turn's `plan.json`, or why not."""
+    """A `plan.written` payload from a turn's `plan.json`, or why not. Why
+    not names the field and what is wrong with it (its JSON type, or git's
+    answer about the path), never the field's value: the turn wrote it, and
+    the reason is kernel text."""
     try:
-        path = str(raw["path"])
+        path = raw["path"]
         counts = {k: raw[k] for k in ("critique_rounds", "review_rounds")}
     except KeyError as exc:
         return None, f"plan.json lacks {exc.args[0]!r}"
+    if not isinstance(path, str):
+        return None, f"plan.json's path is {_kind(path)}, not a string"
     for k, v in counts.items():
-        if not isinstance(v, int) or isinstance(v, bool) or v not in machine.ROUNDS:
-            return None, f"plan.json {k} is {v!r}; each count is 0, 1, or 2"
+        if not isinstance(v, int) or isinstance(v, bool):
+            return None, f"plan.json's {k} is {_kind(v)}; each count is 0, 1, or 2"
+        if v not in machine.ROUNDS:
+            return None, f"plan.json's {k} is out of range; each count is 0, 1, or 2"
+    stakes, scope = raw.get("stakes"), raw.get("scope")
+    if stakes is not None and not isinstance(stakes, str):
+        return None, f"plan.json's stakes is {_kind(stakes)}, not a string"
+    if scope is not None and not isinstance(scope, list):
+        return None, f"plan.json's scope is {_kind(scope)}, not a list"
     try:
         if not git.is_repo(workspace):
             return None, "the workspace is not a git repository, so the plan cannot be committed"
         head = git.head(workspace)
-        body = git.show(workspace, "HEAD", path) if head else None
-        left = git.dirty(workspace, path) if body is not None else []
+        try:
+            body = git.show(workspace, "HEAD", path) if head else None
+            left = git.dirty(workspace, path) if body is not None else []
+        except (OSError, ValueError) as exc:  # the path cannot be an argument: too long, or a NUL
+            return None, f"plan.json's path cannot be passed to git: {getattr(exc, 'strerror', None) or exc}"
     except git.GitError as exc:
         return None, str(exc)
     if body is None:
-        return None, f"{path} is not committed at HEAD"
+        return None, "plan.json's path is not committed at HEAD"
     if left:
-        return None, f"{path} has changes not committed"
+        return None, "plan.json's path has changes not committed"
     return {
         "path": path,
         "commit": head,
         "sha256": hashlib.sha256(body).hexdigest(),
-        "stakes": str(raw.get("stakes") or ""),
+        "stakes": stakes or "",
         **counts,
-        "scope": list(raw.get("scope") or []),
+        "scope": scope or [],
     }, None
+
+
+def _kind(value: Any) -> str:
+    """A JSON value's type, as an error names it in place of the value."""
+    return {dict: "an object", list: "a list", str: "a string", bool: "a boolean", type(None): "null"}.get(
+        type(value), "a number"
+    )
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
@@ -234,7 +256,7 @@ def _verdict(
     return ("idle" if finished else "failed"), extra, errors
 
 
-UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store it"
+UNSTORABLE = ledger.UNSTORABLE
 
 
 def _collected(
@@ -327,10 +349,16 @@ async def record(
     performers: broker.Performers | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
-    the broker. Postgres judges the `turn.collected` row once, before the
-    verdict and the broker (`_storable`): what jsonb refuses is answered as
-    unreadable with Postgres's reason, and a request so answered never
-    reaches the broker. Returns the verdict. For a task with a kernel
+    the broker. Postgres judges the signals before the verdict and the
+    broker (`_storable`): what jsonb refuses is answered as unreadable with
+    Postgres's reason, so the verdict reads only what the ledger holds and
+    a request so answered never reaches the broker. The broker judges its
+    own rows where it writes them. The `turn.collected` row, and the
+    `question.asked` or `plan.written` beside it, are judged where they are
+    written (`_written`): when Postgres refuses them, each error and effect
+    entry it refuses alone is answered (`_answered`) and the rows are
+    written again, and when it still refuses, one `turn.collected` holding
+    nothing the turn wrote is (`_bare`). Returns the verdict recorded. For a task with a kernel
     mirror, a plan commit or a candidate counts only once it is fetched
     into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
@@ -356,16 +384,10 @@ async def record(
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         current = machine.fold(await ledger.read(conn, task_id)).state
-        await ledger.append(
-            conn,
-            task_id,
-            "turn.collected",
-            _collected(turn_id, state, found, verdict, extra.get("candidate"), errors, effects),
-        )
+        collected = _collected(turn_id, state, found, verdict, extra.get("candidate"), errors, effects)
+        follow = None
         if current is state and verdict == "asked":
-            await ledger.append(
-                conn,
-                task_id,
+            follow = (
                 "question.asked",
                 {
                     "question_id": ledger.new_id(),
@@ -375,8 +397,77 @@ async def record(
                 },
             )
         elif current is state and verdict == "planned":
-            await ledger.append(conn, task_id, "plan.written", {"turn_id": turn_id, **extra["plan"]})
-    return verdict
+            follow = "plan.written", {"turn_id": turn_id, **extra["plan"]}
+        why = await _written(conn, task_id, collected, follow)
+        if why is not None:
+            collected = await _answered(conn, collected, why)
+            why = await _written(conn, task_id, collected, follow)
+        if why is not None:
+            collected = _bare(turn_id, state, finished, why)
+            await ledger.append(conn, task_id, "turn.collected", collected)
+    return collected["verdict"]
+
+
+async def _written(
+    conn, task_id: str, collected: dict[str, Any], follow: tuple[str, dict] | None
+) -> str | None:
+    """Append `turn.collected` and the row that goes with it, judged where
+    they are written: in a savepoint, so when Postgres jsonb refuses either
+    the two are rolled back together and the caller writes what it can
+    store instead. Why it refused, or None once both are written."""
+    try:
+        async with conn.transaction():
+            _, why = await ledger.try_append(conn, task_id, "turn.collected", collected)
+            if why is None and follow is not None:
+                _, why = await ledger.try_append(conn, task_id, *follow)
+            if why is not None:
+                raise _Refused(why)
+    except _Refused as refused:
+        return str(refused)
+    return None
+
+
+class _Refused(Exception):
+    """Rolls a savepoint back; never leaves `_written`."""
+
+
+async def _answered(conn, collected: dict[str, Any], why: str) -> dict[str, Any]:
+    """`collected` with each part Postgres refuses alone answered as
+    unreadable with its reason: each error and each effect entry, the parts
+    added after `_storable` judged the signals (the verdict's errors, and
+    the broker's answer on each request)."""
+    errors = []
+    for e in collected["errors"]:
+        refused = await ledger.unstorable(conn, {"errors": [e]})
+        errors.append(f"an error is unrecorded: {UNSTORABLE}: {refused}" if refused else e)
+    effects = []
+    for entry in collected["effects"]:
+        refused = await ledger.unstorable(conn, {"effects": [entry]})
+        if refused:
+            entry = {
+                **{k: entry[k] for k in ("effect_id", "kind") if k in entry},
+                "file": entry["file"],
+                "error": f"unrecorded request: {UNSTORABLE}: {refused}",
+            }
+        effects.append(entry)
+    return {**collected, "errors": errors, "effects": effects}
+
+
+def _bare(turn_id: str, state: State, finished: bool, why: str) -> dict[str, Any]:
+    """The `turn.collected` row that holds nothing the turn wrote, for when
+    Postgres jsonb refuses every row that does: the turn counts as
+    finished with nothing (or failed), and the next prompt says why."""
+    verdict = "idle" if finished else "failed"
+    found = signals.Signals()
+    return _collected(
+        turn_id,
+        state,
+        found,
+        verdict,
+        None,
+        [f"the turn's signals: {UNSTORABLE} with all it holds: {why}"],
+        [],
+    )
 
 
 async def answer(
@@ -524,7 +615,9 @@ def _errors_report(collected: dict[str, Any] | None) -> str:
 
 def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> str:
     """What became of the last turn's effect requests, as the ledger has
-    them now (a held push Tom has since released reads as done)."""
+    them now (a held push Tom has since released reads as done), each named
+    by its request file and effect id: the request itself is the turn's
+    and is not repeated into its next prompt."""
     if not collected or not collected.get("effects"):
         return ""
     lines = ["What became of the effects you requested last turn:"]
@@ -532,7 +625,6 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
         if "error" in e and "effect_id" not in e:
             lines.append(f"- {e['file']}: {e['error']}")
             continue
-        r = e["request"]
         kind = now.get(e["effect_id"], e["kind"])
         said = {
             "pending": "held for Tom's approval",
@@ -540,5 +632,5 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
             "refused": f"refused: {e['error']}",
             "failed": f"failed: {e['error']}",
         }.get(kind, kind)
-        lines.append(f"- {r['action_type']} -> {r['target']} (effect {e['effect_id']}): {said}")
+        lines.append(f"- {e['file']} (effect {e['effect_id']}): {said}")
     return "\n".join(lines)
