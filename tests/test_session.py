@@ -837,6 +837,7 @@ def test_a_failing_git_call_raises_with_gits_whole_stderr(tmp_path):
     assert str(failed.value).endswith(f"'{ref}': File name too long")  # past the first 300 characters
 
 
+@pytest.mark.macos
 def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhile(dsn, tmp_path, monkeypatch):
     """The fetch into the kernel mirror runs in a worker thread: the loop
     keeps running while it does, and stopping `record` kills the fetch's

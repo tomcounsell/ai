@@ -306,6 +306,7 @@ def test_a_session_docs_head_must_be_one_the_kernel_kept(dsn, tmp_path):
     run(go())
 
 
+@pytest.mark.macos
 def test_a_kernel_review_verdict_names_no_turn(dsn, tmp_path):
     async def go():
         task, _b, _ws = await at_checks(dsn, tmp_path)
@@ -405,6 +406,7 @@ def test_every_join_row_through_the_router(
         assert f.state is State.MERGE and joined and joined[-1]["join_row"] == row, joined
 
 
+@pytest.mark.macos
 def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_docs_does_not_rerun(
     dsn, tmp_path, monkeypatch
 ):
@@ -433,6 +435,7 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_docs_
     assert machine.fold(got[: at + 1]).state is State.PATCH  # the join moved on: the repair round
 
 
+@pytest.mark.macos
 def test_docs_findings_the_ledger_cannot_store_fail_the_stage_with_the_reason(dsn, tmp_path):
     _task, _b, _ws, out, got = docs_run(dsn, tmp_path, docs_verdict="no_change",
                                         docs_findings=[{"kind": "x", "text": "a\x00b"}])  # fmt: skip

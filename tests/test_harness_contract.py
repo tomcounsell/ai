@@ -248,6 +248,7 @@ def test_a_stray_credential_is_never_used(harness, dsn, tmp_path, monkeypatch):
         assert TURN_TOKEN in (call.headers.get("Authorization", "") + call.headers.get("x-api-key", ""))
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "workspace"])
 def test_the_machine_users_pi_credentials_are_unreadable_inside_a_turn(dsn, tmp_path, fresh):
     home = tmp_path / "home"

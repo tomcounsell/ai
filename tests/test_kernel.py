@@ -225,6 +225,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     assert state["state"] == "stopped" and tasks.audit(state) == []
 
 
+@pytest.mark.macos
 def test_a_turns_whole_output_is_in_files_no_turn_can_write_and_its_row_names_them(dsn, tmp_path):
     from core.__main__ import _status_line
     from core.settings import settings
@@ -276,6 +277,7 @@ def _pipe_turn(dsn, tmp_path, argv, stdin=None):
     return run(go())
 
 
+@pytest.mark.macos
 def test_a_turns_stdout_and_stderr_are_pipes_and_its_files_hold_what_came_through_them(dsn, tmp_path):
     child = (
         "import os, stat, sys\n"
@@ -288,6 +290,7 @@ def test_a_turns_stdout_and_stderr_are_pipes_and_its_files_hold_what_came_throug
     assert Path(ended["stderr"]).read_text() == "err\n"
 
 
+@pytest.mark.macos
 def test_a_large_output_on_both_streams_and_a_large_stdin_do_not_deadlock(dsn, tmp_path):
     # Each stream is written far past a pipe's buffer before the other is
     # touched and before stdin is read, so draining one at a time would block.
@@ -375,6 +378,7 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
     assert state["spent_usd_micros"] > 0  # sent or not is unknown: charged its worst case
 
 
+@pytest.mark.macos
 def test_a_turn_that_exits_cuts_its_silent_calls(dsn, tmp_path):
     """A turn leaves a child holding a call to an upstream that never
     answers, then exits: the run still ends, the call is charged its worst
@@ -446,6 +450,7 @@ def test_a_turn_that_exits_cuts_its_silent_calls(dsn, tmp_path):
 # -- no invented output or file limit ----------------------------------------------------
 
 
+@pytest.mark.macos
 def test_workspace_turn_sets_no_output_limit_by_default(tmp_path):
     from harnesses import claude_code
 
@@ -453,6 +458,7 @@ def test_workspace_turn_sets_no_output_limit_by_default(tmp_path):
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in built("http://127.0.0.1:1/t/x", "brief", "t1").env
 
 
+@pytest.mark.macos
 def test_a_spec_output_limit_reaches_the_turn(tmp_path):
     from harnesses import claude_code
 
@@ -685,6 +691,7 @@ def test_a_performer_answer_the_ledger_cannot_store_is_recorded_without_it(dsn, 
     assert (out.kind, out.result, out.error) == ("done", {}, outcome["error"])
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("where", ["result", "session_id"])
 def test_a_turn_result_the_ledger_cannot_store_ends_the_turn_without_it(dsn, tmp_path, where):
     """The turn's final message holding a NUL is dropped from `turn.ended`

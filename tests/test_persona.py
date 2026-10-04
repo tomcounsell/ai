@@ -235,6 +235,7 @@ def test_a_fresh_session_reads_the_persona_first_with_the_verdict_channel(dsn, t
     assert "# How this task reaches Tom" not in text
 
 
+@pytest.mark.macos
 def test_turn_started_carries_the_persona_digest_and_the_brief_digest_covers_it(dsn, tmp_path, persona_dir):
     async def go():
         async with await db.connect(dsn) as conn:
@@ -251,6 +252,7 @@ def test_turn_started_carries_the_persona_digest_and_the_brief_digest_covers_it(
     assert argv[argv.index("--system-prompt") + 1] == first["brief"]
 
 
+@pytest.mark.macos
 def test_a_persona_edit_reaches_the_next_turn_of_a_running_task(dsn, tmp_path, persona_dir):
     async def go():
         async with await db.connect(dsn) as conn:
@@ -267,6 +269,7 @@ def test_a_persona_edit_reaches_the_next_turn_of_a_running_task(dsn, tmp_path, p
     assert "A line added between turns." in after["brief"] and "A line added" not in before["brief"]
 
 
+@pytest.mark.macos
 def test_turn_started_records_the_commit_its_persona_was_read_from(dsn, tmp_path, monkeypatch):
     """One process, a checkout that moves between turns: each `turn.started`
     records the HEAD its persona was read from."""

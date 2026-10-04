@@ -935,6 +935,7 @@ def test_the_check_layout_profile_and_a_planted_pgpass_link(dsn, tmp_path):
     kws.stop_services(task, lay)
 
 
+@pytest.mark.macos
 def test_the_tasks_own_services_come_back_when_the_check_services_removal_raises(dsn, tmp_path, monkeypatch):
     async def go():
         return await scripted.provisioned(dsn, tmp_path, services=["postgres"])
@@ -957,6 +958,7 @@ def test_the_tasks_own_services_come_back_when_the_check_services_removal_raises
     kws.stop_services(task, lay)
 
 
+@pytest.mark.macos
 def test_a_failed_check_services_stop_is_the_error_raised_when_the_restart_then_fails(
     dsn, tmp_path, monkeypatch
 ):

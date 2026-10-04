@@ -749,6 +749,7 @@ def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):
     assert f.candidate.sha == git(ws, "rev-parse", "HEAD") and f.candidate.turn_id
 
 
+@pytest.mark.macos
 def test_the_verdict_command_records_docs_by_hand_and_requests_the_merge(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     task = run(scripted.start(dsn, ws))

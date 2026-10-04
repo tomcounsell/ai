@@ -195,6 +195,7 @@ def test_plain_files_are_collected_and_moved(ws):
     assert collect(ws, "turn-2") == signals.Signals()
 
 
+@pytest.mark.macos
 def test_a_sparse_file_is_refused_and_written_or_cloned_files_are_read(ws):
     v = ws / ".valor"
     with open(v / "question.md", "wb") as f:

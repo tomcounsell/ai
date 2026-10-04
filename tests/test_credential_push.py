@@ -295,6 +295,7 @@ def test_every_call_carrying_the_credential_pins_redirects_and_proxy_at_both_sco
 # -- no leak ---------------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_the_token_is_in_no_process_no_row_and_no_file_a_turn_can_open(
     dsn, tmp_path, keyfile, token, monkeypatch
 ):

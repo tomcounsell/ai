@@ -227,6 +227,7 @@ def test_a_copy_cancelled_while_its_thread_reads_leaves_no_descriptor_open(dsn, 
     assert reading.is_set() and closed.is_set() and after <= before
 
 
+@pytest.mark.macos
 def test_a_sparse_file_is_skipped_without_reading_its_holes(dsn, tmp_path):
     lay = Layout(tmp_path)
     lay.session.write_bytes(b"ok\n")
@@ -371,6 +372,7 @@ def test_a_fifo_or_a_directory_named_like_a_subagent_file_is_skipped_without_blo
 # -- the turn ------------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_stopped_turn_s_transcript_is_copied(dsn, tmp_path):
     lay = Layout(tmp_path)
     ready = tmp_path / "ready"
