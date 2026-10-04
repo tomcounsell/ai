@@ -320,3 +320,16 @@ In `~/src/valor-demo/results/`, outside the repo (they hold the answer
 keys and hidden tests): `pop-b-gate.json`, `pso-a-gate.json`,
 `pso-a-gate-b.json`, `pso-a-gate-c.json`, `pso-a-gate-2.json`,
 `pop-a-gate.json`, `pop-a-gate-b.json`, `pop-b-trial-scored.json`.
+
+### Lead's decisions on the gate
+
+- The three runs stopped by the items' own setup faults (wrong project
+  keys, a suite that needed a live connection) do not count: the bar
+  measures the kernel, and those runs never reached its work. With them
+  left out, all three items pass.
+- `__main__.runners()` registers no review or docs runner, so those
+  verdicts were played by fresh subagents and not metered. This is a bug
+  against the plan's runner list; task 1.5r fixes it, then one kernel run
+  of pop-a with review and docs carried by the kernel confirms it.
+- Item edits live in `~/src/valor-demo/items`; result files stay in
+  `~/src/valor-demo/results`, uncommitted, since they hold the answer keys.
