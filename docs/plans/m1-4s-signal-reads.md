@@ -281,7 +281,8 @@ No test opens a real key or password file; the outside files are
 `tests/scripted.py`. Docs: the signal channel paragraph in
 `docs/architecture.md`, the signal sentence in `core/README.md`,
 `skills/sdlc/channel.md` if it describes what the kernel does with a file
-it cannot read, `docs/plans/m1-4-checks.md` lines 331, 624, and 1089,
+it cannot read, `docs/plans/m1-4-checks.md` (now lines 333 and 554, and
+`m1-4a-provisioning.md`'s signal-read line),
 where "at most 256 KB" and "over 256 KB" become "a regular file with one
 link", and `docs/plans/m1-4c-verifier.md` line 215, where "1.4b's walk and
 bounds" becomes "1.4b's walk".
@@ -364,7 +365,7 @@ The rounds are spent; each finding is built in.
    test 11 fetches from a plain clone.
 5. Missing and refused were not told apart: a missing entry is `(None,
    None)` (The fix; test 9).
-6. `m1-4-checks.md:1089` named; `m1-4c-verifier.md:215` edited; the 1.4b
+6. `m1-4-checks.md`'s Decided by default verdict line named; `m1-4c-verifier.md:215` edited; the 1.4b
    branch says what this task deletes if 1.4b lands first; `read_verdict`
    holds the `.valor` descriptor itself.
 

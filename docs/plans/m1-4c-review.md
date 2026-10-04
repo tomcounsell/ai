@@ -254,8 +254,8 @@ candidate whose tree holds `.valor` gets a `changes` review on the
 ### Docs fixed in the same build
 
 - `docs/sdlc-state-machine.md`, checks.review and "What exists": the
-  review runner and how the verdict is computed; no manual command once
-  deleted.
+  review runner and how the verdict is computed; `verdict` still recorded
+  by hand for review and docs until both runners are registered.
 - `docs/architecture.md`, Verification: the verifier as built (the
   kernel's rerun on the host, then the blind session); the container is
   part two's.
@@ -365,9 +365,9 @@ Other tasks change `core/` too; these are the files this part touches.
 | `core/checks.py` | the head run's reuse key includes the role (if 1.4b lands without it); the lint run and its parser; `role="review"` |
 | `core/git.py` | `hunk_at` with `--literal-pathspecs` |
 | `core/README.md` | the runner |
-| `skills/sdlc/review.md`, `skills/sdlc/verdict.md` | inputs, verdict shape; no manual channel |
+| `skills/sdlc/review.md`, `skills/sdlc/verdict.md` | review.md: inputs, verdict shape; verdict.md keeps the manual channel while `verdict` stays |
 | `tests/test_review.py` | new |
-| `tests/test_pipeline.py`, `tests/test_fresh.py`, `tests/test_attention.py`, `tests/test_judgement.py`, `tests/test_judgement_sites.py`, `tests/test_session.py`, `tests/test_workspace.py`, `tests/test_machine.py`, `tests/test_migrate_history.py`, `tests/test_git_history.py`, `tests/scripted.py` | review through the router; callers of `verdict` and the manual leg moved to session or kernel legs; the literal pathspec |
+| `tests/test_pipeline.py`, `tests/test_fresh.py`, `tests/test_attention.py`, `tests/test_judgement.py`, `tests/test_judgement_sites.py`, `tests/test_session.py`, `tests/test_workspace.py`, `tests/test_machine.py`, `tests/test_migrate_history.py`, `tests/test_git_history.py`, `tests/scripted.py` | review through the router; the literal pathspec; the `verdict` command and manual leg tests stay |
 | `tests/test_live_fresh.py` | the two live reviews |
 | `tests/README.md` | the tests |
 | `docs/sdlc-state-machine.md`, `docs/architecture.md`, `docs/data.md`, `docs/plans/m1-4-checks.md`, `docs/plans/valor-rebuild.md` | as in Docs fixed |
