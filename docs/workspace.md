@@ -83,3 +83,14 @@ and the ACL of each entry the suite wrote, before reading it, so none blocks
 it) and the task's
 own started again, even when the stop or the removal fails. No run sees what
 another run, or the working session, wrote.
+
+**A reviewer's setup.** Review sets up its checkout from the same check
+services, then runs the project's setup commands there
+(`workspace.setup_harness`) under a profile that writes only the checkout,
+its `cache/`, and `setup-tmp/`, which is the setup's `TMPDIR` and holds uv's
+cache and managed Pythons. The setup is candidate code and runs before the
+session, so it cannot write the session's Claude Code or Pi directory or its
+`TMPDIR`. Afterwards the kernel reads the checkout through descriptors with no
+link followed (`workspace.setup_left`): no directory where the checkout was,
+or a `.valor` or `.pi` entry in it, is the candidate's own doing, and review
+records `changes` naming it (leg `kernel`, no session, no reviewer's verdict).
