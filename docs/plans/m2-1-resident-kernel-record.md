@@ -505,3 +505,32 @@ last fallback. `test_parts_storable_alone_and_not_together` now holds two
 parts of 130 MiB and 130 MiB plus one byte beside a clean send: the larger
 is unreadable, the other is kept, and the send is held. It fails without
 the change.
+
+## Round 13 checks
+
+- test-2-1-p13: gaps, minor. Head 1316 passed, 23 skipped; ruff clean; no
+  regression. Round 12's gap is closed. Untested: the last fallbacks (the
+  review runner's refused verdict, the suite row's refusal, the broker's
+  bare rows, `session._bare`, the middle and bare `turn.ended` rows).
+- review-2-1-p13: pass. Governance boolean no. Round 12's P1 and P2
+  closed. Notes: N1 `record`'s bare row drops every part when the row
+  after the broker is refused only together; N2 `docs/harnesses.md` does
+  not say a plan field of the wrong type is an error; N3 one message reads
+  "a int".
+- docs-2-1-p13: updated, 4ae720a3b.
+
+The lead merged: the gaps are last tiers below tested ones, and the notes
+are follow-ups.
+
+## Merged
+
+- Lead suite on 4ae720a3b: 1316 passed, 23 skipped; ruff clean.
+- Backup `valor_rebuild-20261004T120640Z.dump`.
+- `valor-cori-rebuild` fast-forwarded cf6836ff8 to 4ae720a3b.
+- Rollout step 1: `python -m core migrate` ran. Steps 2 to 6 (the
+  Telegram group, the operator settings, `serve --plist`, the test window)
+  run once 2.2 merges.
+- Follow-ups: review notes N1 to N3; `__main__.runners()` registers no
+  review or docs runner (the 1.5 gate); libpq's large sends over the Unix
+  socket are slow (`db.connect`); file names and git's stderr in errors;
+  the argv size limit for large requests.

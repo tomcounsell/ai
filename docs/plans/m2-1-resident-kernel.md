@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: built
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
