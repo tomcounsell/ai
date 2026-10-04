@@ -101,6 +101,7 @@ def _refs_and_objects(repo: str) -> tuple[str, list[str]]:
 # -- what is kept ----------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_docs_commit_is_kept_in_the_mirror_and_the_join_merges(dsn, tmp_path):
     before = {}
 
@@ -138,6 +139,7 @@ def test_a_docs_commit_is_kept_in_the_mirror_and_the_join_merges(dsn, tmp_path):
     assert inputs == {"request.md", "plan.md", "diff.patch"}
 
 
+@pytest.mark.macos
 def test_no_commits_is_no_change(dsn, tmp_path):
     _task, _b, _ws, _out, got = docs_run(dsn, tmp_path, docs_verdict="no_change")
     d = decided(got)
@@ -161,6 +163,7 @@ LATER = {"files": {"docs/b.md": "B.\n"}}
     ],
     ids=["core", "claude-md", "skills-case", "symlink", "gitlink", "valor"],
 )
+@pytest.mark.macos
 def test_a_commit_the_kernel_will_not_keep_is_dropped_with_every_later_one(
     dsn, tmp_path, commits, kept_count, named
 ):
@@ -176,6 +179,7 @@ def test_a_commit_the_kernel_will_not_keep_is_dropped_with_every_later_one(
 
 
 @pytest.mark.parametrize("how", ["merge", "orphan", "fsmonitor"])
+@pytest.mark.macos
 def test_a_head_the_kernel_cannot_take_keeps_nothing(dsn, tmp_path, how):
     marker = tmp_path / "fsmonitor-ran"
     hook = tmp_path / "fsmonitor.sh"
@@ -194,6 +198,7 @@ def test_a_head_the_kernel_cannot_take_keeps_nothing(dsn, tmp_path, how):
 
 
 @pytest.mark.parametrize("bad", ["short_head", "symlink"])
+@pytest.mark.macos
 def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(dsn, tmp_path, bad):
     target = tmp_path / "elsewhere.json"
     target.write_text('{"verdict": "no_change"}')
@@ -215,6 +220,7 @@ def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(d
     assert len([r for r in got if r["type"] == "review.decided"]) == 1
 
 
+@pytest.mark.macos
 def test_a_run_that_dies_after_the_turn_asks_only_governance_again(dsn, tmp_path):
     down = UP.port(script=UP.script(default={"status": 503}))
 
@@ -236,6 +242,7 @@ def test_a_run_that_dies_after_the_turn_asks_only_governance_again(dsn, tmp_path
     assert d["verdict"] == "updated" and d["head"] == kept[0]["kept"] and d["turn_id"] == kept[0]["turn_id"]
 
 
+@pytest.mark.macos
 def test_after_a_send_back_the_candidate_holds_no_docs_commit_and_the_next_session_sees_them(dsn, tmp_path):
     async def go():
         task, b, ws = await at_checks(
@@ -257,6 +264,7 @@ def test_after_a_send_back_the_candidate_holds_no_docs_commit_and_the_next_sessi
     assert "docs/greeting.md" in (inputs / "previous-docs.patch").read_text()
 
 
+@pytest.mark.macos
 def test_a_docs_turn_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
     async def go():
         task, _b, ws = await at_checks(dsn, tmp_path, fresh_acts=["sound", "hang"])
@@ -278,6 +286,7 @@ def test_a_docs_turn_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
 # -- the head a session verdict names --------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_session_docs_head_must_be_one_the_kernel_kept(dsn, tmp_path):
     async def go():
         task, _b, ws = await at_checks(dsn, tmp_path)
@@ -317,6 +326,7 @@ def test_a_kernel_review_verdict_names_no_turn(dsn, tmp_path):
 # -- the config read runs under the profile --------------------------------------------------
 
 
+@pytest.mark.macos
 def test_the_config_read_runs_under_the_profile_passed(dsn, tmp_path):
     task, b = run(scripted.provisioned(dsn, tmp_path))
     lay = kws.Layout(Path(b.mirror).parent)
@@ -356,6 +366,7 @@ RED = {"tests/test_b.py": "def test_kept():\n    assert False\n"}
         (7, GREEN, ["pass", "pass"], 1, True),
     ],
 )
+@pytest.mark.macos
 def test_every_join_row_through_the_router(
     dsn, tmp_path, monkeypatch, row, writes, reviews, rounds, calibrated
 ):

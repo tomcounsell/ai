@@ -239,6 +239,7 @@ def test_a_replay_workspace_resolves_main(tmp_path):
 
 
 @pytest.mark.parametrize("rewrite", ["url", "pushurl", "insteadof", "plain-insteadof", "include"])
+@pytest.mark.macos
 def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
     ws, origin = scripted.workspace(tmp_path)
     stranger = tmp_path / "stranger.git"
@@ -283,6 +284,7 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
         assert not [r for r in written if r["type"] == "effect.intent"]  # the approval stays unused
 
 
+@pytest.mark.macos
 def test_push_branch_cannot_target_the_merge_branch_and_a_turn_cannot_request_a_merge(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -311,6 +313,7 @@ def _gate(ws) -> int:
     return 1
 
 
+@pytest.mark.macos
 def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reruns(dsn, tmp_path):
     ws, _origin = scripted.workspace(tmp_path)
 
@@ -362,6 +365,7 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
     assert held_row["action_type"] == "merge" and held_row["adds_governance"] is True
 
 
+@pytest.mark.macos
 def test_a_grant_without_an_incident_is_refused(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -394,6 +398,7 @@ def test_a_grant_without_an_incident_is_refused(dsn, tmp_path):
 # -- the merge predicate, term by term -------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_all_five_terms_hold_and_the_merge_lands_on_the_recorded_origin(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -414,6 +419,7 @@ def test_all_five_terms_hold_and_the_merge_lands_on_the_recorded_origin(dsn, tmp
     assert f.state is State.MERGED
 
 
+@pytest.mark.macos
 def test_a_red_test_refuses_the_merge_even_when_one_is_requested_and_approved(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -467,6 +473,7 @@ def _docs_head(ws, *paths) -> str:
         (["docs/guide.md", "core/x.py"], False),
     ],
 )
+@pytest.mark.macos
 def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_path, paths, holds):
     """Doc paths are Markdown only, never a file that instructs a turn, and a
     plan cannot widen them: anything else in a docs commit would merge with
@@ -494,6 +501,7 @@ def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_p
         assert isinstance(out, broker.MergeRefused) and [t[0] for t in out.terms] == ["4"]
 
 
+@pytest.mark.macos
 def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     commit(ws, "core/x.py", "x = 1\n", "code")
@@ -519,6 +527,7 @@ def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
     assert [t[0] for t in refused.terms] == ["4"] and "core/x.py" in paths
 
 
+@pytest.mark.macos
 def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -541,6 +550,7 @@ def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
     run(go())
 
 
+@pytest.mark.macos
 def test_an_approval_for_another_digest_releases_nothing(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -600,6 +610,7 @@ def test_the_predicate_terms_that_need_no_workspace():
 # -- recovery, one run at a time ------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_next_run(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -620,6 +631,7 @@ def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_
     assert len([r for r in written if r["type"] == "effect.held"]) == 1
 
 
+@pytest.mark.macos
 def test_feedback_waits_while_the_merge_is_in_flight(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -668,6 +680,7 @@ def test_a_second_run_of_a_task_returns_already_running_and_a_lost_lock_stops_th
 # -- the working session's evidence ---------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_dirty_tree_is_no_candidate_and_the_next_prompt_says_what_is_uncommitted(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -688,6 +701,7 @@ def test_a_dirty_tree_is_no_candidate_and_the_next_prompt_says_what_is_uncommitt
     ("plan", "why"),
     [("uncommitted", "is not committed at HEAD"), ("done", "done means nothing in plan")],
 )
+@pytest.mark.macos
 def test_a_plan_turn_without_a_committed_plan_is_no_plan(dsn, tmp_path, plan, why):
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, plan=plan, turns=1)
@@ -704,6 +718,7 @@ def test_a_plan_turn_without_a_committed_plan_is_no_plan(dsn, tmp_path, plan, wh
     assert len(plans) == 1 and plans[0]["payload"]["path"] == "docs/plan.md"
 
 
+@pytest.mark.macos
 def test_plan_counts_outside_zero_to_two_are_no_plan(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, counts={"critique_rounds": 3, "review_rounds": 0}, turns=1)
@@ -719,6 +734,7 @@ def test_plan_counts_outside_zero_to_two_are_no_plan(dsn, tmp_path):
     assert [p["payload"]["critique_rounds"] for p in plans] == [0]
 
 
+@pytest.mark.macos
 def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -771,6 +787,7 @@ def test_a_stage_with_a_runner_takes_no_manual_verdict():
 
 
 @pytest.mark.parametrize("where", ["judge", "plan", "critique", "checks", "merge"])
+@pytest.mark.macos
 def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -949,6 +966,7 @@ def _plant(tmp_path: Path, ws: Path) -> Path:
     return marker
 
 
+@pytest.mark.macos
 def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     commit(ws, ".gitattributes", "*.py filter=evil diff=evil\n*.txt filter=other\n", "attributes")
@@ -1031,6 +1049,7 @@ def scripted_signals(ws):
 # -- the review's test gaps ---------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(
         judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
@@ -1055,6 +1074,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(d
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
 
 
+@pytest.mark.macos
 def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -1085,6 +1105,7 @@ def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp
     assert done.kind == "done" and git(origin, "rev-parse", "main") == head
 
 
+@pytest.mark.macos
 def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -1109,6 +1130,7 @@ def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tm
     run(go())
 
 
+@pytest.mark.macos
 def test_a_failed_merge_stays_in_merge_and_the_next_run_requests_it_again(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -1134,6 +1156,7 @@ def test_a_failed_merge_stays_in_merge_and_the_next_run_requests_it_again(dsn, t
     assert effect["state"] == "held" and effect["effect_id"] != first
 
 
+@pytest.mark.macos
 def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -1169,6 +1192,7 @@ def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters
         tasks.Brief(instruction="x", mode="bare")
 
 
+@pytest.mark.macos
 def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     ran: list = []
@@ -1195,6 +1219,7 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
 
 
 @pytest.mark.parametrize("order", ["feedback first", "release first", "together"])
+@pytest.mark.macos
 def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn, tmp_path, order):
     """Release checks the predicate and writes its intent under the task's
     lock in one transaction; feedback takes the same lock. Each order is
@@ -1252,6 +1277,7 @@ def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn
     assert tasks.audit(st) == [], happened
 
 
+@pytest.mark.macos
 def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -1386,6 +1412,7 @@ def test_kernel_git_drops_inherited_git_variables_and_a_planted_git_on_path(tmp_
     assert not marker.exists()
 
 
+@pytest.mark.macos
 def test_a_tag_the_turn_made_is_not_pushed_and_push_settings_refuse(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -1430,6 +1457,7 @@ def _outcomes(written, effect) -> list[dict]:
     ]
 
 
+@pytest.mark.macos
 def test_a_merge_that_landed_before_the_crash_is_reconciled_as_done(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -1448,6 +1476,7 @@ def test_a_merge_that_landed_before_the_crash_is_reconciled_as_done(dsn, tmp_pat
     assert outcome["kind"] == "done" and outcome["reconciled"] is True and out["status"] == "merged"
 
 
+@pytest.mark.macos
 def test_a_merge_landed_and_then_built_on_is_still_done(dsn, tmp_path):
     """Ancestry, not equality: the target moved on after the landing."""
     ws, origin = scripted.workspace(tmp_path)
@@ -1470,6 +1499,7 @@ def test_a_merge_landed_and_then_built_on_is_still_done(dsn, tmp_path):
     assert outcome["kind"] == "done" and out["status"] == "merged"
 
 
+@pytest.mark.macos
 def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
@@ -1486,6 +1516,7 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
     assert out["status"] == "delivered" and out["state"]["merge_effect"]["state"] == "in_flight"
 
 
+@pytest.mark.macos
 def test_a_missing_merge_is_failed_only_once_no_process_holds_it(dsn, tmp_path):
     """A performer whose database connection dropped frees its session
     lock while its thread and its git may still run; they hold the
@@ -1554,6 +1585,7 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
     assert failed.kind == "unknown" and lock_free is True and none is None
 
 
+@pytest.mark.macos
 def test_a_grant_is_refused_in_patch(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -1567,6 +1599,7 @@ def test_a_grant_is_refused_in_patch(dsn, tmp_path):
     run(go())
 
 
+@pytest.mark.macos
 def test_the_kernel_runs_only_a_root_owned_real_git(tmp_path, monkeypatch):
     from core import binaries
     from core.settings import Settings
@@ -1594,6 +1627,7 @@ def test_the_kernel_runs_only_a_root_owned_real_git(tmp_path, monkeypatch):
         assert kgit.head(ws) == git(ws, "rev-parse", "HEAD")
 
 
+@pytest.mark.macos
 def test_a_poisoned_xcrun_cache_reaches_the_shim_and_never_the_kernel(tmp_path, monkeypatch):
     """Apple's /usr/bin/git finds the real git through a per-user cache; a
     turn can write that cache. A scratch copy (named by `xcrun_db`, so the

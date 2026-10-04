@@ -188,6 +188,7 @@ def test_the_driver_skips_every_merge_and_leaves_any_other_held_effect(dsn, tmp_
     )
 
 
+@pytest.mark.macos
 def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_shared_cluster(
     dsn, tmp_path, monkeypatch
 ):

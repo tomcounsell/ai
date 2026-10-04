@@ -79,19 +79,20 @@ as before and stay in the attention log.
   (`uv sync --frozen --no-install-project`, `npm ci`). The run itself has
   no network, so the tests reach nothing; the project installs offline
   from what the image holds. A patch that changes no lockfile reuses the
-  image. The newest three dependency images per project are kept, the
-  rest pruned after a build; the builder VM is stopped after each build to
+  image. After a verification, the dependency images of this database that
+  no open task's latest VM `verify.ran` names are deleted; the builder VM is stopped after each build to
   give its memory back.
-- **Isolation.** Images are run by digest, never by tag. With the denies
-  above, no turn can retag, replace, or enter an image or a VM. The VM mounts the exported source read-only and one
+- **Isolation.** A local image is run by tag, its digest recorded at build
+  time and read back just before the run; a mismatch deletes the tag. With
+  the denies above, no turn can retag, replace, or enter an image or a VM. The VM mounts the exported source read-only and one
   output directory; nothing else of the host, never the key directory. It
-  is killed, not stopped, on a stop or a timeout (machine.md: a graceful
-  stop left the workload running), and removed after every run.
-- **RAM.** `verify_memory_mb` (default 2,048) and `verify_cpus` (4). On
+  is killed, not stopped, on a stop (machine.md: a graceful stop left the
+  workload running), and removed after every run. No step has a time limit.
+- **RAM.** `verify_memory_mb` (default 4,096) and `verify_cpus` (4). On
   the 16 GB machine the VM runs alone in the turn slot, before the Opus
   turn, with only the kernel, Postgres, and the task's services beside it
-  (about 4.7 GB with the bridges); 2 GB fits the slot. The build
-  measures, on this 64 GB machine, the VM's footprint idle, under this
+  (about 4.7 GB with the bridges); 4 GB fits the slot. The build
+  measures, on this 16 GB M4, the VM's footprint idle, under this
   repository's suite, and under a Django suite with Postgres, at 1 GB, 2
   GB, and 4 GB limits, plus the container system's resident daemons, and
   replaces machine.md's 1,024 MB estimate with the measurements.

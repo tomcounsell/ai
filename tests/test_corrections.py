@@ -119,6 +119,7 @@ def test_a_correction_cannot_be_edited_deleted_or_renumbered(dsn, owner_dsn, fir
         conn.execute("UPDATE events SET payload = '{}' WHERE id = %s", (first["event_id"],))
 
 
+@pytest.mark.macos
 def test_every_turn_renders_the_corrections_in_force_when_it_starts(dsn, first, tmp_path):
     """A task started before a correction still gets it on its next turn:
     the Brief is rendered from the ledger at dispatch, not copied at start."""

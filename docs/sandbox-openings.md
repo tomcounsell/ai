@@ -77,8 +77,5 @@ Stated so the boundary is drawn where it is [4]:
   5439, so a turn there could connect to another run's database. A task
   the kernel provisions has its own cluster, roles, and passwords, and its
   profiles reach only its own ports.
-- sandbox-exec is marked deprecated by Apple. The plan names Apple
-  containers for sandboxes; which one runs which work is
-  `docs/sandbox.md`'s. A container closes
-  the keychain, internet, and `/tmp` openings by construction and costs RAM the 16 GB machine
-  has to find.
+- `launchctl submit` from a turn is refused.
+- sandbox-exec is marked deprecated by Apple; turns run under it.

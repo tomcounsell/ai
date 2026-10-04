@@ -57,7 +57,7 @@ outside the model is AI Control [4].
 | Harness | the `claude` CLI, one `claude -p` per turn; Pi (`docs/pi.md`) as the second | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
-| Sandbox for the verifier | Apple `container` (hypervisor-isolated Linux VMs) | chosen, not built |
+| Sandbox for the verifier | Apple `container` 1.5.0 (hypervisor-isolated Linux VMs), the review's rerun | in use |
 | Which sandbox for which work | owned by [sandbox.md](sandbox.md); containers for turns | open |
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
@@ -199,8 +199,8 @@ the replays did (rebuild-baseline.md, Infrastructure fixed during the
 series, item 5). Status: **in use**.
 
 **pgvector.** Not used by the kernel. Built into one replay cluster only,
-because the app under test needed it. Whether memory needs it is decided
-with memory. Status: **open**.
+because the app under test needed it. The verification VM's base has
+none. Whether memory needs it is decided with memory. Status: **open**.
 
 ### Memory
 
@@ -410,15 +410,15 @@ that holds authority. Measured on Apple silicon: boot about one second,
 `exec` 65 to 110 ms, a host-only network set from outside the VM that
 reaches the Mac and nothing else, `kill` confirmed by a probe from outside
 the VM, and the bind-mounted disk retained after a kill in 40 of 40 trials.
-Building images needs Rosetta even for arm64. Status: **chosen, not
-built**; the `container` CLI is not installed on the machine the
-demonstration ran on.
+Building images needs Rosetta even for arm64. Status: **in use** for the
+review's rerun (`core/container.py`), release 1.5.0 from Apple's signed
+package, started for each verification and stopped after it.
 
 What containers give that `sandbox-exec` does not: a separate user and filesystem, so a Keychain
 read is impossible rather than unfenced; a network whose shape is set from outside; a fresh VM per
 verification, so the blind verifier never runs in the executor's environment [4]. What they cost:
 RAM per running VM, Linux toolchains only, and dependencies baked into an image from a lockfile,
-since a host-only network reaches no package registry. Each of those costs lands on the 16 GB
+since a run VM has no network at all. Each of those costs lands on the 16 GB
 machine ([machine.md](machine.md)).
 
 ### Which sandbox for which work

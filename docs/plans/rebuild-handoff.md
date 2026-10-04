@@ -41,7 +41,13 @@ switch it off `main`; the rebuild is a separate checkout.
    stop it, start 18, restore, and put `postgresql@18/bin` first on PATH),
    `uv`, the `claude` CLI logged in, and Homebrew `dovecot` and `openssl`
    for the email tests (Dovecot is only run by the tests, as the user, never
-   as a service).
+   as a service). Apple's `container` 1.5.0 from
+   the signed package on its GitHub releases (`apple/container`; the
+   installer needs the Mac's admin password, and the Homebrew build fails
+   the kernel's root-owned check), then `container system start` once,
+   accepting its default Linux kernel, and `container system stop`.
+   Rosetta, which its image builder needs, where `arch -x86_64
+   /usr/bin/true` fails: `softwareupdate --install-rosetta --agree-to-license`.
 2. **Checkout.**
    `git clone -b valor-cori-rebuild https://github.com/tomcounsell/ai.git ~/src/valor-rebuild`
    (Valor's Macs reach GitHub over HTTPS through `gh`, not SSH),
@@ -132,7 +138,5 @@ approved `email.send` waits for an email bridge that this Mac does not run.
   `GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
 - 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
   and popoto #188.
-- 1.4c, after takeover: install Apple's `container` from Apple's signed
-  package (the Homebrew build fails the kernel's root-owned binary check).
 - Milestone 2: which Mac hosts the new bridges, and the test windows in
   which its old bridge, email bridge, and worker are disabled.

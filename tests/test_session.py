@@ -49,6 +49,7 @@ async def drive(dsn, task) -> dict:
         await gateway.close()
 
 
+@pytest.mark.macos
 def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -83,6 +84,7 @@ def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, 
     assert (st["attention_counts"]["question"]["total"], st["attention_counts"]["verdict"]["total"]) == (1, 0)
 
 
+@pytest.mark.macos
 def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
     scripted.steer(ws, push="valor/greeting")
@@ -125,6 +127,7 @@ def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(d
     assert "Plan: docs/plan.md" in t[1]["brief"] and "# Stage: build" in t[1]["brief"]
 
 
+@pytest.mark.macos
 def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -147,6 +150,7 @@ def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
 
 
+@pytest.mark.macos
 def test_turns_with_no_signal_do_not_end_the_run_and_the_next_prompt_says_continue(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -164,6 +168,7 @@ def test_turns_with_no_signal_do_not_end_the_run_and_the_next_prompt_says_contin
     assert [x["prompt"] for x in t[1:]] == ["Continue."] * 3
 
 
+@pytest.mark.macos
 def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -684,6 +689,7 @@ def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input(
     assert spending.cost({"cache_creation_input_tokens": 1_000_000}, price) == 8_000_000
 
 
+@pytest.mark.macos
 def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "secret")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent")
@@ -781,6 +787,7 @@ def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(tmp_path):
     assert not marker.exists()
 
 
+@pytest.mark.macos
 def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path):
     """Tom's request for pso-a began "- Create new flag ..."; as a bare argv
     element after `-p`, claude rejected it ("unknown option") and the turn

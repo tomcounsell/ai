@@ -20,7 +20,11 @@ testpaths = ["tests"]
 pythonpath = ["."]
 # tests/bridges.py would otherwise shadow the top-level bridges package
 addopts = "--import-mode=importlib"
-markers = ["spend(usd): the money one run of the test is expected to cost"]
+markers = [
+    "spend(usd): the money one run of the test is expected to cost",
+    "macos: needs macOS itself; skipped off Darwin",
+    "container: needs Apple's container; skipped where it is not installed",
+]
 
 [tool.ruff]
 line-length = 110

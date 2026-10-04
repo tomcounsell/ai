@@ -74,7 +74,7 @@ The kernel starts and stops these; launchd never does.
 | The turn's work | Commands the turn runs: test suites, dev servers on ports 8000 to 8009, package installs, builds | Mission item 1 ("testing actual use") | Not measured | 3,000 MB (estimate; a Django test run with its own Postgres database is the reference load) |
 | The workspace cluster | A Postgres cluster of the workspace's own, separate from the machine cluster, for the app's tests | Constraint "a ledger the system cannot edit": a turn's tests never share a cluster with the kernel's ledger (rebuild-demonstration.md, Kernel findings 1) | Fresh: 36 MB, as above. The replay series' workspace cluster after every run's test suites: 352 MB summed (383 MB RSS), of which the checkpointer and background writer each count the touched shared buffers | 400 MB |
 | A Redis per run | Only when the project under work needs Redis for its tests | Mission item 1 | An idle `redis-server`: 2 MB RSS | 50 MB |
-| One Apple container | Work that needs a VM boundary rather than a process sandbox (see Sandboxes) | Constraint "bounded authority, metered spending" | Not measured for memory. Boot about 1 s, an exec 65 to 110 ms, a write 45 ms, a read 30 ms, destroy 1.5 s with a one-second grace, export of a 285 MB root filesystem 2.4 to 14.6 s, on apple/container 1.4.1 | 1,024 MB (estimate: the VM's default allocation) |
+| One Apple container | The review's rerun of a candidate's suite and lint, in a VM with no network (see Sandboxes) | Constraint "bounded authority, metered spending" | Measured on 2026-10-03 on this 16 GB M4, apple/container 1.5.0, 4 processors: this repository's suite peaks at 418 MB inside the VM, a footprint of 995 MB at a 1 GB limit, 1,095 MB at 2 GB, 1,224 MB at 4 GB; a Django suite with Postgres, Redis, and five test workers peaks at 1,854 MB at 2 GB (footprint 2,215 MB) and 2,154 MB at 4 GB (footprint 2,898 MB), and at 1 GB thrashes without a memory kill. An idle VM 293 to 427 MB. The runtime's daemons 85 to 145 MB RSS while a VM runs. `system start` 0.3 to 1.0 s. Boot about 1 s, an exec 65 to 110 ms, destroy 1.5 s with a one-second grace (1.4.1) | 2,900 (the Django suite's footprint at the 4 GB limit the kernel sets) |
 | A headless browser | When a turn opens the app it built to look at it | Mission item 1 ("testing actual use"); rebuild-demonstration.md, Recommendations; rebuild-baseline.md, Browser use | One page of a Django app's admin login, rendered by `look` (a screenshot run and a page-dump run), five times: peak resident memory of the browser's process tree 372, 343, 344, 330, and 343 MB, summed per process by `ps` so shared pages count more than once | 372 MB |
 | The dashboard (`ui/`) | When Tom opens it | Mission item 6 (the attention log is readable without asking) | Not measured | 100 MB (estimate) |
 | A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's line: a routine's turn takes the turn slot like any other |
@@ -113,16 +113,16 @@ that, which is why it is stopped rather than left up.
 | The turn's work | 3,000 |
 | Workspace cluster | 400 |
 | Redis per run | 50 |
-| One Apple container | 1,024 |
+| One Apple container | 2,900 |
 | Headless browser | 372 |
 | Dashboard | 100 |
-| **Peak with everything on demand running at once** | **10,202** |
-| **Left of 16,384** | **about 6,000** |
+| **Peak with everything on demand running at once** | **12,078** |
+| **Left of 16,384** | **about 4,000** |
 
-The 6 GB left is file cache and memory compression. The machine is
+The 4 GB left is file cache and memory compression. The machine is
 Valor's, so no desktop apps of Tom's share it. It is not room for a second
 turn: a second turn and its
-work add about 4 GB, which leaves almost nothing for the cache that keeps
+work add about 4 GB, which leaves nothing for the cache that keeps
 git, the test runner, and Postgres fast. It is not room for a local model
 either (see Judgement).
 
@@ -187,7 +187,7 @@ is not resident on the Air.
 
 Why: a Jev-class open-weight model in the 7 to 8 billion parameter range,
 quantized to 4 bits, needs about 5 GB for its weights and cache (estimate;
-not measured). Resident, it takes most of the 6 GB headroom with every
+not measured). Resident, it takes more than the 4 GB headroom with every
 turn. Loaded beside a turn, it pushes the machine into swap.
 
 The fallback is hosted too: Qwen3-235B-A22B Instruct 2507 on Parasail,
@@ -223,7 +223,10 @@ Both serve the constraint "bounded authority, metered spending" by least privile
 [11]. On the Air, at most one Apple container runs at a time, in the turn
 slot. Which work runs under which mechanism is
 [architecture.md](architecture.md)'s to settle; this doc only fixes that a
-container costs about 1 GB and sandbox-exec costs nothing.
+container costs its workload plus about 0.6 GB and sandbox-exec costs
+nothing. The review's rerun gets a 4 GB limit (`verify_memory_mb`): a
+Django suite with five test workers needed 2.2 GB, and at 1 GB the VM
+thrashed rather than reporting a memory kill.
 
 ## launchd
 
@@ -420,4 +423,4 @@ Each estimate above is a gap until measured on the Air:
 - A connected Telegram bridge after a week of traffic.
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
-- An Apple container's real memory cost at its default allocation.
+- A Django suite's peak in the VM with every test reaching its database (the measured suite's vector tests failed at setup because the VM's base image has no pgvector).

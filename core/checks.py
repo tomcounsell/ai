@@ -70,8 +70,11 @@ LOCKFILES = (
 # -- JUnit -------------------------------------------------------------------------
 
 
-def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None, str | None]:
-    """The per-test results the suite wrote at `<name>/tmp/junit.xml` under
+def read_junit(
+    checks_dir: Path, name: str, relpath: str = JUNIT
+) -> tuple[dict[str, list[str]] | None, str | None]:
+    """The per-test results the suite wrote at `<name>/<relpath>` (by
+    default `tmp/junit.xml`; a VM run's is `out/junit.xml`) under
     the kernel-owned `checks_dir`: `checks_dir` and the check directory
     `name` each opened with `O_NOFOLLOW | O_DIRECTORY`, the file read whole
     with `workspace.read_turn_file` (no link followed, no FIFO blocked on).
@@ -89,7 +92,7 @@ def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None
         except OSError as exc:
             return None, f"{name} is not a plain directory ({exc.strerror})"
         try:
-            body, why = workspace.read_turn_file(check, JUNIT)
+            body, why = workspace.read_turn_file(check, relpath)
         finally:
             os.close(check)
     finally:

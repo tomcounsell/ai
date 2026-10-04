@@ -79,6 +79,9 @@ pathlib.Path(out).write_text(f'<testsuite tests="{len(cases)}">{body}</testsuite
 sys.exit(1 if failed else 0)
 """
 SUITE = f"{PYTHON} -B run.py {{junit}}"
+# The same suite where the Command Line Tools are absent: in a verification
+# VM, the base image's `python3`.
+VM_SUITE = f'p={PYTHON}; [ -x "$p" ] || p=python3; "$p" -B run.py {{junit}}'
 BASE_TESTS = {
     ".gitignore": "setup-*\n",  # what setup writes in the builder's clone stays uncommitted
     "run.py": RUN_PY,
@@ -543,6 +546,7 @@ def test_a_byte_in_bin_changes_the_digest_and_a_changed_digest_is_not_reused(tmp
 # -- the runner through the router --------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_passing_candidate_records_pass_with_both_suite_runs(dsn, tmp_path):
     _task, _b, out, got = through_test(dsn, tmp_path, writes={"greeting.txt": "hello\n"})
     assert out["status"] == "no runner" and out["missing"] == ["review", "docs"], out
@@ -555,6 +559,7 @@ def test_a_passing_candidate_records_pass_with_both_suite_runs(dsn, tmp_path):
     assert d["command"] == SUITE and d["failures"] == [] and "provenance" not in d
 
 
+@pytest.mark.macos
 def test_a_conftest_that_exits_before_collecting_is_red(dsn, tmp_path):
     _task, _b, _out, got = through_test(dsn, tmp_path, writes={"conftest.py": "import os\nos._exit(0)\n"})
     d = decided(got)
@@ -565,6 +570,7 @@ def test_a_conftest_that_exits_before_collecting_is_red(dsn, tmp_path):
     )
 
 
+@pytest.mark.macos
 def test_skipping_a_failing_test_is_red(dsn, tmp_path):
     _task, _b, _out, got = through_test(dsn, tmp_path, writes={
         "greeting.py": "X = 0\n",
@@ -574,6 +580,7 @@ def test_skipping_a_failing_test_is_red(dsn, tmp_path):
     assert d["verdict"] == "red" and d["failures"] == ["tests.test_b::test_kept"]
 
 
+@pytest.mark.macos
 def test_deleting_a_test_or_a_parameter_is_listed_and_not_red(dsn, tmp_path):
     a = BASE_TESTS["tests/test_a.py"].replace("def test_two():\n    assert True\n\n\n", "")
     a = a.replace("@parametrize(1, 2, 3)", "@parametrize(1, 2)")
@@ -587,6 +594,7 @@ def test_deleting_a_test_or_a_parameter_is_listed_and_not_red(dsn, tmp_path):
     ]  # fmt: skip
 
 
+@pytest.mark.macos
 def test_a_test_failing_at_base_and_head_does_not_make_red(dsn, tmp_path):
     files = {**BASE_TESTS, "tests/test_c.py": "def test_broken():\n    assert False\n"}
     _task, _b, _out, got = through_test(dsn, tmp_path, files=files, writes={"greeting.txt": "hi\n"})
@@ -601,6 +609,7 @@ def test_a_test_failing_at_base_and_head_does_not_make_red(dsn, tmp_path):
         ("exit 1", "red", [checks.BOTH_FAIL]),
     ],
 )
+@pytest.mark.macos
 def test_no_junit_on_either_side_is_decided_by_exit_codes(dsn, tmp_path, base_suite, verdict, failures):
     # The suite runs the commit's own script, so base and head differ by what it says.
     files = {"suite.sh": base_suite + "\n"}
@@ -611,6 +620,7 @@ def test_no_junit_on_either_side_is_decided_by_exit_codes(dsn, tmp_path, base_su
     assert d["verdict"] == verdict and d["failures"] == failures
 
 
+@pytest.mark.macos
 def test_an_uncalibrated_breadth_behavior_is_information_and_the_join_merges(dsn, tmp_path):
     assert judgement_tasks.BREADTH.calibrated is None
     sid = UP.script(default={"probs": _gaps("gap_enum")})
@@ -631,6 +641,7 @@ def test_an_uncalibrated_breadth_behavior_is_information_and_the_join_merges(dsn
     assert delivered["information"] == listed and delivered["gaps"] == [] and delivered["join_row"] == 1
 
 
+@pytest.mark.macos
 def test_a_calibrated_breadth_behavior_is_gaps(dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(
         judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
@@ -654,6 +665,7 @@ def _gaps(*true) -> dict:
     }
 
 
+@pytest.mark.macos
 def test_breadth_with_both_legs_down_fails_before_any_suite(dsn, tmp_path):
     sid = UP.script(default={"status": 503})
     _task, _b, out, got = through_test(
@@ -664,6 +676,7 @@ def test_breadth_with_both_legs_down_fails_before_any_suite(dsn, tmp_path):
     assert not [r for r in got if r["type"] == "test.decided"]
 
 
+@pytest.mark.macos
 def test_the_base_runs_once_across_two_candidates_and_the_seed_stays_clean(dsn, tmp_path):
     # Each suite fails if it finds the file a previous suite planted in its cache.
     plant = 'test ! -e "$UV_CACHE_DIR/planted" || exit 7; mkdir -p "$UV_CACHE_DIR"; touch "$UV_CACHE_DIR/planted"; '
@@ -706,6 +719,7 @@ def _marked(mark: str) -> list[int]:
     return runs._turn_processes(mark, None)
 
 
+@pytest.mark.macos
 def test_a_stop_kills_the_running_suite_and_records_nothing(dsn, tmp_path, monkeypatch):
     files = {"suite.sh": "exit 0\n"}
 
@@ -745,6 +759,7 @@ def test_a_stop_kills_the_running_suite_and_records_nothing(dsn, tmp_path, monke
         ({"suite.sh": "exit 3\n"}, {}, "no JUnit report"),
     ],
 )
+@pytest.mark.macos
 def test_a_head_the_commit_broke_is_red_with_the_failure(dsn, tmp_path, writes, kw, finding):
     files = {**BASE_TESTS, "suite.sh": f"{SUITE.replace('{junit}', '$1')}\n"}
     _task, _b, out, got = through_test(
@@ -755,6 +770,7 @@ def test_a_head_the_commit_broke_is_red_with_the_failure(dsn, tmp_path, writes, 
     assert out["status"] == "no runner" and out["missing"] == ["review", "docs"]  # not rerun
 
 
+@pytest.mark.macos
 def test_each_setup_command_keeps_its_own_output_file(dsn, tmp_path):
     setup = ["echo first-step", "echo second-step"]
     _task, b, _out, got = through_test(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=setup)
@@ -767,6 +783,7 @@ def test_each_setup_command_keeps_its_own_output_file(dsn, tmp_path):
     assert decided(got)["verdict"] == "pass"
 
 
+@pytest.mark.macos
 def test_a_candidate_whose_tree_holds_valor_is_red_and_not_rerun(dsn, tmp_path, monkeypatch):
     # The builder's clone hides the entry from the kernel's look there (a
     # replace ref would), so the mirror holds a candidate with `.valor`.
@@ -782,6 +799,7 @@ def test_a_candidate_whose_tree_holds_valor_is_red_and_not_rerun(dsn, tmp_path, 
     assert out["status"] == "no runner" and out["missing"] == ["review", "docs"]  # not rerun
 
 
+@pytest.mark.macos
 def test_a_base_setup_failure_decides_its_run_and_is_never_reused(dsn, tmp_path):
     _task, _b, _out, got = through_test(dsn, tmp_path, writes={"fixed": "x"}, setup=["test -e fixed"])
     base = next(r["payload"] for r in got if r["type"] == checks.SUITE and r["payload"]["role"] == "base")
@@ -791,6 +809,7 @@ def test_a_base_setup_failure_decides_its_run_and_is_never_reused(dsn, tmp_path)
     assert decided(got)["verdict"] == "pass"
 
 
+@pytest.mark.macos
 def test_a_service_that_will_not_start_records_nothing_and_fails(dsn, tmp_path, monkeypatch):
     def refuse(*_a, **_k):
         raise kws.Refused("initdb would not run")
@@ -847,6 +866,7 @@ def _psql(b, sql: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False)  # fmt: skip
 
 
+@pytest.mark.macos
 def test_the_suite_gets_fresh_services_and_the_tasks_come_back(dsn, tmp_path, monkeypatch):
     monkeypatch.setenv("VIRTUAL_ENV", "/nowhere/venv")
     monkeypatch.setenv("PGPASSFILE", "/nowhere/pgpass")
@@ -892,6 +912,7 @@ def test_the_suite_gets_fresh_services_and_the_tasks_come_back(dsn, tmp_path, mo
         kws.stop_services(task, lay)
 
 
+@pytest.mark.macos
 def test_the_check_layout_profile_and_a_planted_pgpass_link(dsn, tmp_path):
     async def go():
         return await scripted.provisioned(dsn, tmp_path, services=["postgres"])
@@ -982,6 +1003,7 @@ asyncio.run(main(sys.argv[1], sys.argv[2]))
 """
 
 
+@pytest.mark.macos
 def test_a_kernel_killed_mid_suite_leaves_nothing_on_the_tasks_port(dsn, tmp_path):
     files = {"suite.sh": "exit 0\n", "key.py": PROBE_SET}
 

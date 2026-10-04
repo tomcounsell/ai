@@ -197,7 +197,8 @@ verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
 `.valor/verdict.json`, read by the same walk as the signals. Docs runs the
 same way in its own clone (`fresh.docs_runner`). Review
 (`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
-Redis, the kernel's own suite and lint run (`verify.ran`) among its inputs.
+Redis, the kernel's suite and lint run in VMs (`verify.ran`) among its
+inputs.
 The reviewer runs the candidate's code, and a process that code leaves
 running can rewrite any file in the checkout until the turn is reaped, so
 review's verdict is the session's final message, read from the turn's
@@ -511,6 +512,10 @@ from listening beyond its dev ports and reap what it leaves running").
   unauthenticated.
 - The profile denies the mach name `valor.turn.<VALOR_TURN>`, which marks
   every process of the turn for the reaper.
+- Every profile denies Apple's `container`: its CLI, API server, and
+  `/usr/local/libexec/container/`, its `com.apple.container.*` mach names,
+  its data directory, and plists named like its launch agents in
+  `~/Library/LaunchAgents`. Only the kernel starts VMs.
 
 ### Known openings
 

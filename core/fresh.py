@@ -51,7 +51,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from core import checks, db, git, judgement_sites, ledger, machine, runs, slot, tasks, verdicts, workspace
+from core import (
+    checks,
+    container,
+    db,
+    git,
+    judgement_sites,
+    ledger,
+    machine,
+    runs,
+    slot,
+    tasks,
+    verdicts,
+    workspace,
+)
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -588,49 +601,6 @@ async def _docs_turn(
 
 VERIFY = "verify.ran"
 REVIEW_COMPARED = "review.compared"
-WHERE = "host"
-
-
-def reusable_verify(rows: list[dict], candidate: str, digest: str, where: str) -> dict | None:
-    """The latest `verify.ran` with this candidate, environment digest, and
-    `where`, and a cause other than `kernel`: a review rerun after Tom's
-    grant reruns nothing, and a host result never stands in for a VM run."""
-    for r in reversed(rows):
-        p = r["payload"]
-        if (
-            r["type"] == VERIFY
-            and p.get("candidate") == candidate
-            and p.get("digest") == digest
-            and p.get("where") == where
-            and p.get("cause") != "kernel"
-        ):
-            return r
-    return None
-
-
-def verify_payload(
-    candidate: str, base_sha: str, digest: str, base: dict, head: dict, lists: dict[str, list[str]]
-) -> dict[str, Any]:
-    """The `verify.ran` fields from the base and head `suite.ran` rows:
-    ids, counts, codes, and lint locations, never a message the candidate's
-    tests or lint printed."""
-    hp = head["payload"]
-    tests = hp.get("tests")
-    return {
-        "where": WHERE,
-        "candidate": candidate,
-        "base": base_sha,
-        "digest": digest,
-        "suites": [base["id"], head["id"]],
-        "exit": hp.get("exit"),
-        "counts": {k: len(v) for k, v in tests.items()} if tests is not None else None,
-        "lint": hp.get("lint"),
-        "failures": lists["failures"],
-        "failing_at_base": lists["failing_at_base"],
-        "deleted_at_head": lists["deleted_at_head"],
-        "duration_s": hp.get("duration_s"),
-        "cause": hp.get("cause"),
-    }
 
 
 def _effects(rows: list[dict]) -> str:
@@ -901,34 +871,34 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
         except git.GitError as exc:
             return failed(f"the diff: {exc}")
 
-        # 2. The kernel's own head run and lint, against the shared base run.
-        bin_dir = lay.root.parent / "bin"
-        digest = await asyncio.to_thread(checks.environment_digest, b.mirror, candidate, project, bin_dir)
-        kept = reusable_verify(rows, candidate, digest, WHERE)
+        # 2. The kernel's own base and head runs and lint, each in a fresh
+        # VM (`core/container.py`).
+        try:
+            head_key = (await asyncio.to_thread(container.keys, b, candidate))["head"]
+        except git.GitError as exc:
+            return failed(f"the manifests: {exc}")
+        kept = container.reusable(rows, candidate, head_key)
         if kept is None:
             if not await ctx.alive():
                 return {"status": "lock lost"}
+
+            async def record(verify: dict[str, Any]) -> dict[str, Any]:
+                if not await ctx.alive():
+                    return {"status": "lock lost"}
+                async with await db.connect(ctx.dsn) as conn, conn.transaction():
+                    await ledger.lock(conn, f"task:{ctx.task_id}")
+                    if await tasks.is_stopped(conn, ctx.task_id):
+                        return {"status": "stopped"}
+                    return {"verify": verify, "id": await ledger.append(conn, ctx.task_id, VERIFY, verify)}
+
             try:
                 async with checks.stop_heard(ctx) as stop:
-                    got = await checks.base_and_head(ctx, lay, b, stop, candidate, "review", lint=True)
+                    got = await container.verify(ctx, lay, b, candidate, rows, stop, record)
             except checks._Stopped:
                 return {"status": "stopped"}
-            if "ran" not in got:
+            if "verify" not in got:
                 return failed(got["turn"]["result"]) if got["status"] == "failed" else got
-            base, head = got["ran"]["base"], got["ran"]["head"]
-            try:
-                deleted = await asyncio.to_thread(checks.removed_definitions, b.mirror, b.base_sha, candidate)
-            except git.GitError as exc:
-                return failed(f"the diff: {exc}")
-            lists = checks.compare(base["payload"], head["payload"], deleted)
-            verify = verify_payload(candidate, b.base_sha, digest, base, head, lists)
-            if not await ctx.alive():
-                return {"status": "lock lost"}
-            async with await db.connect(ctx.dsn) as conn, conn.transaction():
-                await ledger.lock(conn, f"task:{ctx.task_id}")
-                if await tasks.is_stopped(conn, ctx.task_id):
-                    return {"status": "stopped"}
-                verify_id = await ledger.append(conn, ctx.task_id, VERIFY, verify)
+            verify, verify_id = got["verify"], got["id"]
         else:
             verify, verify_id = kept["payload"], kept["id"]
 

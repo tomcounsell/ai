@@ -251,6 +251,7 @@ def test_the_cli_secures_a_cluster_and_prints_no_password(tmp_path):
             _connect(cluster, cluster.host, KERNEL_DBS[0], KERNEL, passfile="/dev/null")
 
 
+@pytest.mark.macos
 def test_no_turn_environment_carries_the_credential(monkeypatch, tmp_path):
     """Tom exports `PGPASSFILE` for his own psql; neither harness builder
     passes it, or any other libpq or `VALOR_PG*` variable, to a turn."""

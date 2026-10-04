@@ -64,6 +64,7 @@ def planned(dsn, tmp_path, **steer):
     return run(go())
 
 
+@pytest.mark.macos
 def test_a_sound_critique_goes_to_build_and_the_build_resumes_the_working_session(dsn, tmp_path):
     task, _b, ws = planned(dsn, tmp_path, critique="sound")
     out = run(drive(dsn, task, scripted.fresh_runners(ws)))
@@ -84,6 +85,7 @@ def test_a_sound_critique_goes_to_build_and_the_build_resumes_the_working_sessio
     assert not [r for r in written if r["type"].startswith("effect.")]
 
 
+@pytest.mark.macos
 def test_turn_files_are_read_off_the_event_loop(dsn, tmp_path, monkeypatch):
     """The router runs every task on one loop, so the kernel's reads of
     files a turn controls run in a worker thread."""
@@ -112,6 +114,7 @@ def test_turn_files_are_read_off_the_event_loop(dsn, tmp_path, monkeypatch):
     assert seen == {"read_verdict": [False], "collect": [False], "_verdict": [False]}
 
 
+@pytest.mark.macos
 def test_the_critique_checkout_is_blind_and_has_its_own_tmp_and_config(dsn, tmp_path):
     task, b, ws = planned(dsn, tmp_path)
     run(drive(dsn, task, scripted.fresh_runners(ws)))
@@ -135,6 +138,7 @@ def test_the_critique_checkout_is_blind_and_has_its_own_tmp_and_config(dsn, tmp_
     assert "docs/plan.md" in (checkout / ".valor" / "inputs" / "diff.patch").read_text()
 
 
+@pytest.mark.macos
 def test_revise_with_a_round_left_goes_back_to_plan_and_without_one_to_build_with_findings(dsn, tmp_path):
     counts = {"critique_rounds": 1, "review_rounds": 1}
     task, _b, ws = planned(dsn, tmp_path, counts=counts, fresh_acts=["revise", "revise"])
@@ -151,6 +155,7 @@ def test_revise_with_a_round_left_goes_back_to_plan_and_without_one_to_build_wit
     assert guards == [machine.GUARD_CRITIQUE, None]
 
 
+@pytest.mark.macos
 def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
     task, _b, ws = planned(dsn, tmp_path, fresh_acts=["bad_raise", "raise"])
     runners = scripted.fresh_runners(ws)
@@ -177,6 +182,7 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
         ),
     ],
 )
+@pytest.mark.macos
 def test_a_critique_that_leaves_no_valid_verdict_writes_none_and_only_critique_reruns(
     dsn, tmp_path, act, why
 ):
@@ -197,6 +203,7 @@ def test_a_critique_that_leaves_no_valid_verdict_writes_none_and_only_critique_r
     assert second["missing"] == ["test", "review", "docs"]
 
 
+@pytest.mark.macos
 def test_a_critique_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
     task, _b, ws = planned(dsn, tmp_path, fresh_acts=["hang"])
 
@@ -225,6 +232,7 @@ def test_a_critique_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
     assert ended["outcome"] == "stopped"
 
 
+@pytest.mark.macos
 def test_a_task_the_kernel_did_not_provision_gets_no_fresh_session(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -267,6 +275,7 @@ def test_a_fresh_turn_never_names_the_session_in_either_fold():
     assert machine.fold(legacy).legacy and machine.fold(legacy).session == WORKING
 
 
+@pytest.mark.macos
 def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_origin(dsn, tmp_path):
     task, b, ws = planned(dsn, tmp_path)
 
@@ -297,6 +306,7 @@ def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_o
     assert os.path.isdir(b.mirror)
 
 
+@pytest.mark.macos
 def test_a_turn_with_its_own_config_dir_carries_the_placeholder_and_never_a_credential(tmp_path):
     from core.gateway import TURN_TOKEN
     from harnesses import claude_code
@@ -320,6 +330,7 @@ def test_a_turn_with_its_own_config_dir_carries_the_placeholder_and_never_a_cred
 
 
 @pytest.mark.parametrize("act", ["valor_symlink", "valor_verdict"])
+@pytest.mark.macos
 def test_a_plan_that_commits_a_valor_entry_is_no_plan_and_nothing_is_written_through_it(dsn, tmp_path, act):
     target = tmp_path / "zshenv-stand-in"
     target.write_text("# untouched\n")
@@ -361,6 +372,7 @@ def test_a_plan_whose_tree_holds_valor_goes_back_with_the_reason_and_critique_do
     assert "holds a .valor entry" in scripted.turns(ws)[-1]["prompt"]
 
 
+@pytest.mark.macos
 def test_a_blind_checkout_refuses_a_tree_with_valor_and_inputs_never_overwrite(dsn, tmp_path):
     from core import git as kgit
     from core import workspace as kws
@@ -392,6 +404,7 @@ def _fresh_checkout(lay, b):
     return d
 
 
+@pytest.mark.macos
 def test_a_refused_mirror_fetch_is_no_plan(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
@@ -420,6 +433,7 @@ def test_a_refused_mirror_fetch_is_no_plan(dsn, tmp_path):
     assert [p["turn_id"] for p in plans] == [collected[1]["turn_id"]]
 
 
+@pytest.mark.macos
 def test_critique_gets_no_database_credential_and_no_service_port(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path, services=["postgres"])
@@ -441,6 +455,7 @@ def test_critique_gets_no_database_credential_and_no_service_port(dsn, tmp_path)
 # -- writers -------------------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
     from core import verdicts
 
@@ -492,6 +507,7 @@ def test_a_lower_raise_changes_nothing():
     assert machine.fold(rows).loops.review_rounds == 2
 
 
+@pytest.mark.macos
 def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line(dsn, tmp_path):
     from tests.conftest import TEST_DB
 
@@ -524,6 +540,7 @@ def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line
         os.kill(pid, 0)
 
 
+@pytest.mark.macos
 def test_a_lower_raise_from_a_critique_turn_changes_nothing(dsn, tmp_path):
     task, _b, ws = planned(
         dsn, tmp_path, counts={"critique_rounds": 0, "review_rounds": 1}, fresh_acts=["lower_raise"]
@@ -535,6 +552,7 @@ def test_a_lower_raise_from_a_critique_turn_changes_nothing(dsn, tmp_path):
     assert machine.fold(written).loops.review_rounds == 1
 
 
+@pytest.mark.macos
 def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
     """A docs head counts only once the docs runner kept it in the mirror;
     the kernel never fetches one from the builder's clone."""

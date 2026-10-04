@@ -81,6 +81,7 @@ async def rows(dsn, task, kind=None) -> list[dict]:
 # -- the judge ---------------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_a_precise_request_is_judged_before_any_turn_and_goes_to_plan(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": PRECISE})
@@ -121,6 +122,7 @@ def test_a_precise_request_is_judged_before_any_turn_and_goes_to_plan(dsn, tmp_p
     ],
     ids=["thin", "abstained", "both-down"],
 )
+@pytest.mark.macos
 def test_a_thin_abstained_or_unanswered_request_goes_to_clarify_under_its_guard(dsn, tmp_path, replies):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(*replies)
@@ -136,6 +138,7 @@ def test_a_thin_abstained_or_unanswered_request_goes_to_clarify_under_its_guard(
     assert scripted.turns(ws)[0]["stage"] == "clarify" and out["status"] == "waiting"
 
 
+@pytest.mark.macos
 def test_an_answer_written_before_a_crash_is_used_without_asking_again(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": PRECISE})
@@ -226,6 +229,7 @@ def breadth_calibrated(monkeypatch):
         (gaps(), ("test_x failed",), "red", 0),
     ],
 )
+@pytest.mark.macos
 def test_the_test_verdict_is_computed_from_the_failures_and_the_breadth_row(
     dsn, tmp_path, answer, failures, verdict, listed
 ):
@@ -255,6 +259,7 @@ def test_the_test_verdict_is_computed_from_the_failures_and_the_breadth_row(
 
 
 @pytest.mark.usefixtures("breadth_calibrated")
+@pytest.mark.macos
 def test_breadth_left_unanswered_reruns_then_lists_breadth_not_judged(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"status": 503})
@@ -282,6 +287,7 @@ async def tasks_status(dsn, task):
         return await tasks.status(conn, task)
 
 
+@pytest.mark.macos
 def test_a_breadth_row_for_another_candidate_or_site_is_refused(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -343,6 +349,7 @@ async def review(dsn, task, verdict, ids, **kw):
         )
 
 
+@pytest.mark.macos
 def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
@@ -392,6 +399,7 @@ def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tm
     assert gate.id == git_.hunk_at(ws, older, newer, "hooks/gate.py", 1).id()
 
 
+@pytest.mark.macos
 def test_the_hunk_input_carries_its_enclosing_function_but_the_id_does_not(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
@@ -418,6 +426,7 @@ def test_the_hunk_input_carries_its_enclosing_function_but_the_id_does_not(dsn, 
     assert h.id == plain.id()
 
 
+@pytest.mark.macos
 def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
@@ -440,6 +449,7 @@ def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_pa
     assert f.state is State.MERGE and len(f.ungranted()) == 2 and f.merge_effect is None
 
 
+@pytest.mark.macos
 def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"fail_paths": ["lib/util.py", "lib/handler.py"], "probs": NO})
@@ -465,6 +475,7 @@ def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(ds
     assert "lib/handler.py" in instance["summary"] and "lib/util.py" in instance["summary"]
 
 
+@pytest.mark.macos
 def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
@@ -649,6 +660,7 @@ def test_breadth_splits_test_paths_from_the_rest():
 
 
 @pytest.mark.usefixtures("breadth_calibrated")
+@pytest.mark.macos
 def test_breadth_inputs_carry_the_tests_apart_and_too_large_is_caution_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": gaps()})
@@ -700,6 +712,7 @@ def test_a_new_candidate_gets_its_own_reruns():
         judgement_sites.breadth_outcome(got, "j3", b)
 
 
+@pytest.mark.macos
 def test_a_test_verdict_with_a_breadth_judgement_takes_no_behaviors_from_the_caller(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -742,6 +755,7 @@ def test_a_function_hunk_over_the_limit_is_sent_as_its_plain_hunk(tmp_path):
     assert len(h.text.encode()) < 2_000 and "v_1000" in h.text and "def vast" not in h.text.splitlines()[1:]
 
 
+@pytest.mark.macos
 def test_an_unchanged_hunk_whose_function_changed_keeps_its_id_and_is_asked_again(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
@@ -767,6 +781,7 @@ def test_an_unchanged_hunk_whose_function_changed_keeps_its_id_and_is_asked_agai
     assert len(unchanged) == 3  # gate, util, and the plan: same id and same input, reused
 
 
+@pytest.mark.macos
 def test_a_reviewer_naming_a_line_in_a_kernel_instance_adds_its_notes_to_it(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
@@ -784,6 +799,7 @@ def test_a_reviewer_naming_a_line_in_a_kernel_instance_adds_its_notes_to_it(dsn,
     assert instance["summary"] == "the reviewer's reading"
 
 
+@pytest.mark.macos
 def test_docs_governance_reads_the_candidate_to_docs_head_range(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"by_path": {"docs/rules.md": YES}, "probs": NO})
@@ -830,6 +846,7 @@ def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn
     assert [r["type"] for r in run(rows(dsn, task))] == ["task.started"]
 
 
+@pytest.mark.macos
 def test_governance_sends_the_plain_hunk_when_the_function_hunk_is_over_the_limit(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
@@ -848,6 +865,7 @@ def test_governance_sends_the_plain_hunk_when_the_function_hunk_is_over_the_limi
     assert len(sent["hunk"].encode()) < 2_000 and "v_1990" not in sent["hunk"]
 
 
+@pytest.mark.macos
 def test_a_test_verdict_reads_failures_given_as_a_generator_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
@@ -958,6 +976,7 @@ def test_calibrate_refuses_a_case_missing_a_question(tmp_path):
 # -- the sites read the kernel mirror (1.4b) ---------------------------------------------
 
 
+@pytest.mark.macos
 def test_breadth_and_governance_read_the_mirror_when_the_clone_lost_the_candidate(dsn, tmp_path):
     sid = UP.script(default={"probs": {**gaps(), **NO}})
 
