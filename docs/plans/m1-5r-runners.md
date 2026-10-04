@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-5r-runners
 type: bug
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 1
 ---
@@ -99,3 +99,19 @@ leg and docs through `NO RUNNER` and the verdict command.
 
 Suite: 1318 passed, 23 skipped. `ruff check` and `ruff format --check`
 clean.
+
+## Round 1 checks
+
+- test-1-5r: gaps. No test passed `--finding` to `python -m core verdict`
+  once the hand-played review verdict was removed. The lead added it at
+  merge: the docs verdict's finding parses and lands in the ledger.
+- review-1-5r: pass. Governance boolean no; no invented caps.
+- docs-1-5r: updated, 9e89a84f1.
+
+## Merged
+
+- Lead suite on 792d997f2: 1378 passed, 25 skipped; ruff clean.
+- Backup `valor_rebuild-20261004T152636Z.dump`.
+- `valor-cori-rebuild` fast-forwarded a8e7f67d0 to 792d997f2.
+- Rollout: one kernel run of pop-a, which shows a real review session's
+  spending.
