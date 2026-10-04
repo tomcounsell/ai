@@ -1,5 +1,11 @@
---- tracking: none slug: m4-1-objective-tree type: build status: built
-critique_rounds: 2 review_rounds: 2 ---
+---
+tracking: none
+slug: m4-1-objective-tree
+type: build
+status: merged
+critique_rounds: 2
+review_rounds: 2
+---
 
 # 4.1 The objective tree
 
