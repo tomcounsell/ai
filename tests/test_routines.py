@@ -15,7 +15,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import ledger, routines, serve, spending, tasks
+from core import db, ledger, routines, serve, spending, tasks
 from core.settings import settings
 from tests.test_objective_tree import call, child, run, stop_rows
 
@@ -315,3 +315,57 @@ def test_the_kernel_passes_an_objective_node_by(dsn, where):
             assert objective not in kernel.jobs
 
     run(go())
+
+
+def test_the_printed_line_counts_the_run_it_just_made(dsn, owner_dsn, where):
+    name = unique()
+    write_toml(where, name)
+
+    async def runner(ctx):
+        kid = await tasks.start_child(ctx.conn, ctx.objective, instruction="k", routine=name)
+        await charged(owner_dsn, kid, 5000, datetime.now(UTC))  # charged while the run goes
+        return routines.Ran(kid, "started", "k")
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            said = await routines.run(conn, name, {"noop": runner})
+            return said, routines.listing(await routines.report(conn, name))
+
+    said, listed = run(go())
+    assert "$0.005000 in 1 runs" in said and "$0.005000" in listed
+
+
+def test_a_paused_replay_is_resumed_by_the_next_firing_and_not_recorded_finished(
+    dsn, where, tmp_path, monkeypatch
+):
+    import json
+
+    from routines.emulator import runner
+
+    name = unique()
+    write_toml(where, name, runner="emulator")
+    demo = tmp_path / "demo"
+    (demo / "items").mkdir(parents=True)
+    (demo / "results").mkdir()
+    (demo / "items" / "it.json").write_text(json.dumps({"name": "it"}))
+    monkeypatch.setattr(runner, "settings", dataclasses.replace(settings, demo_dir=str(demo)))
+    calls = []
+
+    async def drive(item, arm, run_, nm):
+        calls.append((arm, run_))
+        paused = len(calls) <= 3  # the first firing pauses every arm; the second finishes them
+        result = {"run": nm, "outcome": None if paused else "passed", "judge": {}}
+        (demo / "results" / f"{nm}.json").write_text(json.dumps(result))
+        return 0, ""
+
+    monkeypatch.setattr(runner, "_drive", drive)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            first = await routines.run(conn, name, {"emulator": runner.run}, dsn=dsn)
+            second = await routines.run(conn, name, {"emulator": runner.run}, dsn=dsn)
+            return first, second
+
+    first, second = run(go())
+    assert "running" in first and "finished" in second
+    assert len(calls) == 6 and len({r for _, r in calls}) == 1  # the same run, resumed

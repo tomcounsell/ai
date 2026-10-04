@@ -116,7 +116,7 @@ async def run(ctx: Context) -> Ran:
         if not got[0]:
             return Ran(run_id, "running", "already running")
         report: dict = {"run": run_id, "at": ctx.now.isoformat(), "items": {}}
-        failed = 0
+        failed = paused = 0
         for item in found:
             name = json.loads(item.read_text()).get("name", item.stem)
             report["items"][name] = {"baseline": _row(_result(demo, f"{name}-bare"), 0)}
@@ -132,7 +132,11 @@ async def run(ctx: Context) -> Ran:
                         failed += 1
                         report["items"][name][arm] = {"failed": tail}
                         continue
+                if have.get("outcome") is None:
+                    paused += 1  # the driver paused; the next firing resumes it
                 report["items"][name][arm] = _row(have, await _preempted(ctx.conn, have.get("task_id")))
+        if paused:
+            return Ran(run_id, "running", f"{paused} replays paused; the next firing resumes them")
         out = demo / "sweeps" / f"{run_id}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=2) + "\n")

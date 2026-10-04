@@ -429,6 +429,7 @@ async def run(
     objective, stopped = await ensure(conn, r, restart=restart)
     if stopped:
         return f"routine {name} is stopped (task {stopped}); --restart starts it again"
+    given = now
     now = now or datetime.now(UTC)
     ran = await runs(conn, [objective])
     ctx = Context(
@@ -451,7 +452,7 @@ async def run(
         "routine.ran",
         {"run": did.run, "outcome": did.outcome, "summary": did.summary, "spent_usd_micros": spent},
     )
-    return line(name, await report(conn, name, now), did.run, did.outcome, spent)
+    return line(name, await report(conn, name, given or datetime.now(UTC)), did.run, did.outcome, spent)
 
 
 async def open_run(ctx: Context) -> str | None:
