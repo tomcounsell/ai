@@ -93,10 +93,9 @@ these bytes start), `chunk` (`n`), and `base64`, the raw bytes, at most
 where that copy ended; joining a name's documents from its last whole copy
 gives the file, whose digest `turn.ended` records.
 
-A new kind of document is a new value of `kind` and needs no migration. The
-objective tree's nodes are the next kind the design names
-(`docs/architecture.md`); the current kernel holds a single task record per
-task.
+A new kind of document is a new value of `kind` and needs no migration. A
+node of the objective tree is a task: a child's Brief holds `parent_id`, and
+a Brief without it is a root.
 
 ## Event types
 
@@ -105,12 +104,12 @@ payload carries the ids listed; a reader relies on nothing else.
 
 | Writer | Type | Payload | Serves |
 |---|---|---|---|
-| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority, metered spending |
+| `core/tasks.py` | `task.started` | `sdlc: 1` (or the marker `start_child` was given), `parent_id` for a child, instruction, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority, metered spending |
 | `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), `leg: judgement`, `judgement_id`, `answered`, `p_precise`, label, `abstained`, model, `usd_micros`, `guard_id` when thin. Rows from before the judge ran carry `leg: manual` and provenance | Mission items 3 and 6 |
 | `core/judgement.py` | `judgement.answered` | `judgement_id`, site, `task_sha256`, `calibrated_sha256`, `inputs_sha256`, `ref`, `usd_micros`, attempts (per leg: model, endpoint host, outcome, `call_id`, charge, latency, and on failure a reason, status, and fixed sentence), answers (per question: label, probabilities, `p_proceed`, decision, the provider's pick, leg, model), action, `abstained`, leg, model | Mission item 6; the routing a judgement causes is legible |
 | `core/judgement.py` | `judgement.failed` | as `judgement.answered` without answers, action, leg, or model; plus `on_failure` and `too_large` | As above |
 | `core/judgement_sites.py` | `judgement.calibrated` | on the `judgement` stream: site, `run`, `task_sha256`, both pinned models, each leg's endpoint host (`endpoints`), floors, `at`, the calibration task's id, `n`, label sources, per leg the Brier score with its n, confusion counts, abstain rate, accuracy, error rate, cost per call, `all_correct`; `entry_check`; every case | Calibration discipline (`docs/judgement-layer.md`) |
-| `core/tasks.py` | `task.stopped` | reason, by | Lossless stop |
+| `core/tasks.py` | `task.stopped` | reason, by, provenance; on a descendant stopped by its ancestor's stop, `by_stop_of` | Lossless stop |
 | `core/spending.py` | `gateway.opened` | `call_id`, `turn_id`, model, `route`, estimate (`usd_micros` worst case, estimated input, `max_tokens`). A judgement call's (written through `core/judgement.py`) has `turn_id` null and `route: judgement`, and adds `judgement_id`, site, leg. Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the folds read as this row | Metered spending: every call is on the ledger |
 | `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
 | `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |

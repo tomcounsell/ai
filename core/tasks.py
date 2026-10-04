@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from core import corrections, git, ledger, machine, persona
@@ -47,6 +48,10 @@ class Brief:
     and the merge read), `push_url` where `push_branch` goes (the task's own
     bare origin), and `project` the project spec as it was at start, with
     the task's service ports.
+
+    `parent_id` names the task this one is a child of (None for a root; a
+    document written before the tree loads as one). A Brief is written
+    once, so a node's parent and ceiling never change.
     """
 
     instruction: str
@@ -62,6 +67,7 @@ class Brief:
     mirror: str | None = None
     push_url: str | None = None
     project: dict[str, Any] | None = None
+    parent_id: str | None = None
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -120,32 +126,109 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
     return {**found, "origin_url": url, "target_branch": target}
 
 
+class CeilingRefused(ValueError):
+    """A child asked for an effect ceiling above its parent's."""
+
+
+def child_ceiling(parent_ceiling: str, requested: str | None) -> str:
+    """A child's effect ceiling: its parent's when none is asked for, the
+    one asked for when it ranks at or below the parent's. One above is
+    refused in full, never clipped to one that fits."""
+    if requested is None:
+        return parent_ceiling
+    if requested not in EFFECT_RANK:
+        raise ValueError(f"unknown effect class {requested!r}")
+    if EFFECT_RANK[requested] > EFFECT_RANK[parent_ceiling]:
+        raise CeilingRefused(
+            f"a child may not have the ceiling {requested}: its parent's ceiling is {parent_ceiling}"
+        )
+    return requested
+
+
 async def start(
     conn, brief: Brief, *, by: str = "tom", via: str = "the command line", role_played: bool = False
 ) -> str:
     """Write the task document and its first event in one transaction. The
-    task starts in `judge`; the judge runner decides it."""
+    task starts in `judge`; the judge runner decides it. A Brief naming a
+    parent starts through `start_child`, its ceiling the one asked for."""
+    if brief.parent_id is not None:
+        given = asdict(brief)
+        parent_id, ceiling = given.pop("parent_id"), given.pop("max_effect_class")
+        return await start_child(
+            conn, parent_id, ceiling=ceiling, by=by, via=via, role_played=role_played, **given
+        )
     async with conn.transaction():
-        await conn.execute(
-            "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
-            (brief.id, Jsonb(asdict(brief))),
-        )
-        await ledger.append(
-            conn,
-            brief.id,
-            "task.started",
-            {
-                "sdlc": 1,
-                "instruction": brief.instruction,
-                "max_effect_class": brief.max_effect_class,
-                "governance_grant": brief.governance_grant,
-                "target_branch": brief.target_branch,
-                "origin_url": brief.origin_url,
-                "base_sha": brief.base_sha,
-                "provenance": ledger.provenance(by, via, role_played),
-            },
-        )
+        await _write(conn, brief, {"sdlc": 1}, ledger.provenance(by, via, role_played))
     return brief.id
+
+
+async def _write(conn, brief: Brief, marker: dict[str, Any], provenance: dict[str, Any]) -> None:
+    """The task document and its `task.started`: the marker's fields, then
+    the kernel's, which a marker never overrides."""
+    await conn.execute(
+        "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
+        (brief.id, Jsonb(asdict(brief))),
+    )
+    await ledger.append(
+        conn,
+        brief.id,
+        "task.started",
+        {
+            **marker,
+            **({"parent_id": brief.parent_id} if brief.parent_id is not None else {}),
+            "instruction": brief.instruction,
+            "max_effect_class": brief.max_effect_class,
+            "governance_grant": brief.governance_grant,
+            "target_branch": brief.target_branch,
+            "origin_url": brief.origin_url,
+            "base_sha": brief.base_sha,
+            "provenance": provenance,
+        },
+    )
+
+
+async def start_child(
+    conn,
+    parent_id: str,
+    *,
+    ceiling: str | None = None,
+    marker: dict[str, Any] | None = None,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+    **brief_fields: Any,
+) -> str:
+    """Start a child of `parent_id`, in one transaction under the tree's
+    lock. Its ceiling is `child_ceiling(parent's, ceiling)`; its workspace,
+    `governance_grant`, and `harness` are what `brief_fields` give, never
+    the parent's. `marker` is laid into `task.started` (`{"sdlc": 1}` when
+    None, so a child is an SDLC task by default). Refused, with nothing
+    written: an unknown parent (`KeyError`), a calibration parent or a
+    marker carrying `calibration` (`CalibrationTask`: stop cannot walk
+    through one), a parent fenced by a stop (`TaskStopped`), and a ceiling
+    above the parent's (`CeilingRefused`)."""
+    marker = {"sdlc": 1} if marker is None else dict(marker)
+    if "calibration" in marker:
+        raise CalibrationTask("a calibration task cannot be a child; stop cannot walk through one")
+    async with conn.transaction():
+        await lock_tree(conn, parent_id)
+        parent = await brief(conn, parent_id)
+        if await is_calibration(conn, parent_id):
+            raise CalibrationTask(f"task {parent_id} is a calibration task; it cannot be a parent")
+        fence = await fenced_by(conn, parent_id)
+        if fence is not None:
+            raise TaskStopped(
+                f"task {parent_id} is stopped"
+                if fence == parent_id
+                else f"task {parent_id} is under stopped task {fence}"
+            )
+        child = Brief(
+            **brief_fields,
+            parent_id=parent_id,
+            max_effect_class=child_ceiling(parent.max_effect_class, ceiling),
+        )
+        await _write(conn, child, marker, ledger.provenance(by, via, role_played))
+    return child.id
 
 
 async def start_calibration(
@@ -253,7 +336,9 @@ async def dispatch(
     is in (`skills/sdlc/<state>.md`). A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
-    no effect and no question, and its stage's file. Returns the text, the
+    no effect and no question, and its stage's file. A working session's
+    Brief whose task has children ends with their Children section
+    (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
     offered, and the persona's digest and size. A persona that cannot be
     read (a missing persona file or identity field, or a `CLAUDE.md` that
@@ -290,6 +375,10 @@ async def dispatch(
         stage = stage_text(state)
         if stage:
             sections.append(stage)
+    if not fresh:
+        found = await reports(conn, task_id)
+        if found:
+            sections.append(children_text(found))
     text = "\n\n".join(sections)
     return {
         "text": text,
@@ -301,7 +390,8 @@ async def dispatch(
     }
 
 
-async def is_stopped(conn, task_id: str) -> bool:
+async def has_stop_row(conn, task_id: str) -> bool:
+    """Whether the task has its own `task.stopped` row."""
     row = await (
         await conn.execute(
             "SELECT 1 FROM events WHERE task_id = %s AND type = 'task.stopped'",
@@ -309,6 +399,75 @@ async def is_stopped(conn, task_id: str) -> bool:
         )
     ).fetchone()
     return row is not None
+
+
+async def ancestors(conn, task_id: str) -> list[str]:
+    """The task's parents up to the root, nearest first, read from each
+    Brief's `parent_id`; empty for a root or an unknown task."""
+    rows = await (
+        await conn.execute(
+            "WITH RECURSIVE up (id, depth) AS ("
+            "  SELECT body->>'parent_id', 1 FROM documents WHERE kind = 'task' AND id = %s"
+            "  UNION ALL"
+            "  SELECT d.body->>'parent_id', up.depth + 1 FROM documents d"
+            "  JOIN up ON d.kind = 'task' AND d.id = up.id"
+            ") SELECT id FROM up WHERE id IS NOT NULL ORDER BY depth",
+            (task_id,),
+        )
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+async def children(conn, task_id: str) -> list[str]:
+    """The task's children, in the order they started."""
+    rows = await (
+        await conn.execute(
+            "SELECT task_id FROM events WHERE type = 'task.started' AND payload @> %s ORDER BY id",
+            (Jsonb({"parent_id": task_id}),),
+        )
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+async def subtree(conn, task_id: str) -> list[str]:
+    """The task's descendants, breadth first, each node's children in start
+    order."""
+    found: list[str] = []
+    queue = [task_id]
+    while queue:
+        below = await children(conn, queue.pop(0))
+        found += below
+        queue += below
+    return found
+
+
+async def lock_tree(conn, task_id: str) -> str:
+    """The tree's advisory lock, `tree:<root id>`, taken by the writers that
+    change what a tree holds or whether a node may reopen (`start_child`,
+    `stop_tree`, `session.feedback`), before any task lock. Returns the
+    root's id."""
+    root = ([task_id, *await ancestors(conn, task_id)])[-1]
+    await ledger.lock(conn, f"tree:{root}")
+    return root
+
+
+async def fenced_by(conn, task_id: str) -> str | None:
+    """The nearest of the task and its ancestors with a `task.stopped` row,
+    or None: a stop fences the whole subtree under it."""
+    path = [task_id, *await ancestors(conn, task_id)]
+    rows = await (
+        await conn.execute(
+            "SELECT task_id FROM events WHERE type = 'task.stopped' AND task_id = ANY(%s)",
+            (path,),
+        )
+    ).fetchall()
+    stopped = {r[0] for r in rows}
+    return next((node for node in path if node in stopped), None)
+
+
+async def is_stopped(conn, task_id: str) -> bool:
+    """Whether the task is fenced: it or an ancestor is stopped."""
+    return await fenced_by(conn, task_id) is not None
 
 
 async def stop(
@@ -320,27 +479,59 @@ async def stop(
     via: str = "the command line",
     role_played: bool = False,
 ) -> bool:
-    """Fence the task and wake whichever process is running its turn.
+    """Stop the task and its subtree (`stop_tree`). Returns False when the
+    task already had its own stop row."""
+    return await stop_tree(conn, task_id, reason=reason, by=by, via=via, role_played=role_played) > 0
+
+
+async def stop_tree(
+    conn,
+    task_id: str,
+    *,
+    reason: str,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> int:
+    """Fence the task and every descendant, and wake whichever process is
+    running each one's turn. Returns how many `task.stopped` rows it wrote:
+    0 when the task already has its own.
 
     The `task.stopped` row is the fence: the gateway refuses every later
-    call and the broker every later effect by reading it, whether or not the
-    running process ever hears the notification. Returns False when the task
-    was already stopped.
-    """
+    call and the broker every later effect by reading it (on the node or an
+    ancestor, `fenced_by`), whether or not the running process ever hears
+    the notification. In one transaction, under the tree's lock and then
+    the named task's: the named task gets its row whatever its state, then
+    the walk goes down in start order. A descendant with its own row is
+    passed by with its subtree (walked when it stopped); a merged one keeps
+    `merged`, fenced by the ancestor read, and its children are walked; any
+    other gets a row carrying `by_stop_of` and its own notification."""
     async with conn.transaction():
+        await lock_tree(conn, task_id)
         await ledger.lock(conn, f"task:{task_id}")
         if await is_calibration(conn, task_id):
             raise CalibrationTask(f"task {task_id} is a calibration task; it runs no turn to stop")
-        if await is_stopped(conn, task_id):
-            return False
-        await ledger.append(
-            conn,
-            task_id,
-            "task.stopped",
-            {"reason": reason, "by": by, "provenance": ledger.provenance(by, via, role_played)},
-        )
-        await conn.execute("SELECT pg_notify(%s, %s)", (STOP_CHANNEL, task_id))
-    return True
+        if await has_stop_row(conn, task_id):
+            return 0
+        provenance = ledger.provenance(by, via, role_played)
+        row = {"reason": reason, "by": by, "provenance": provenance}
+        await _stop_row(conn, task_id, row)
+        written = 1
+        queue = await children(conn, task_id)
+        while queue:
+            node = queue.pop(0)
+            if await has_stop_row(conn, node):
+                continue
+            if machine.fold(await ledger.read(conn, node)).state is not machine.State.MERGED:
+                await _stop_row(conn, node, {**row, "by_stop_of": task_id})
+                written += 1
+            queue += await children(conn, node)
+    return written
+
+
+async def _stop_row(conn, task_id: str, payload: dict[str, Any]) -> None:
+    await ledger.append(conn, task_id, "task.stopped", payload)
+    await conn.execute("SELECT pg_notify(%s, %s)", (STOP_CHANNEL, task_id))
 
 
 # Ledgers written before 2026-10-03 open a call with this type; it folds as `gateway.opened`.
@@ -365,6 +556,90 @@ def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"spent_usd_micros": spent, "open_calls": open_calls}
 
 
+_OPENED = ("gateway.opened", LEGACY_OPENED)
+
+
+async def tree_spending(conn, task_id: str) -> dict[str, Any]:
+    """The metered spending of the task's subtree, itself included:
+    `tree_spent_usd_micros`, every charge summed; `tree_open_calls`, each
+    call opened and not yet charged, by call id, with its task id and
+    estimate; and `charges`, every `gateway.charged` row as `{task_id,
+    call_id, usd_micros, at}` in event id order. A report: nothing reads it
+    to decide anything, and a stopped node's spending counts like any
+    other."""
+    nodes = [task_id, *await subtree(conn, task_id)]
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id, task_id, type, payload, at FROM events WHERE task_id = ANY(%s) "
+            "AND type IN ('gateway.opened', 'gateway.reserved', 'gateway.charged') ORDER BY id",
+            (nodes,),
+        )
+        rows = await cur.fetchall()
+    spent = 0
+    open_calls: dict[str, dict[str, Any]] = {}
+    charges = []
+    for row in rows:
+        p = row["payload"]
+        if row["type"] in _OPENED:
+            estimate = p.get("estimate_usd_micros", p.get("usd_micros"))
+            open_calls[p["call_id"]] = {"task_id": row["task_id"], "estimate_usd_micros": estimate}
+        else:
+            open_calls.pop(p["call_id"], None)
+            spent += p["usd_micros"]
+            charges.append(
+                {
+                    "task_id": row["task_id"],
+                    "call_id": p["call_id"],
+                    "usd_micros": p["usd_micros"],
+                    "at": row["at"].isoformat(),
+                }
+            )
+    return {"tree_spent_usd_micros": spent, "tree_open_calls": open_calls, "charges": charges}
+
+
+async def child_report(conn, child_id: str) -> dict[str, Any]:
+    """A child as its parent sees it: id, instruction, state, its subtree's
+    metered spending, and its latest delivery (`summary`, `outcome`) or
+    None."""
+    f = machine.fold(await ledger.read(conn, child_id))
+    delivery = f.delivery
+    return {
+        "task_id": child_id,
+        "instruction": (await brief(conn, child_id)).instruction,
+        "state": f.state.value,
+        "tree_spent_usd_micros": (await tree_spending(conn, child_id))["tree_spent_usd_micros"],
+        "delivery": {"summary": delivery.get("summary"), "outcome": delivery.get("outcome")}
+        if delivery
+        else None,
+    }
+
+
+async def reports(conn, task_id: str) -> list[dict[str, Any]]:
+    """`child_report` for each direct child, in start order."""
+    return [await child_report(conn, c) for c in await children(conn, task_id)]
+
+
+def usd(micros: int) -> str:
+    """Micro-dollars as dollars to the micro-dollar, from integers only."""
+    return f"${micros // 1_000_000}.{micros % 1_000_000:06d}"
+
+
+def quoted(text: str | None, indent: str = "  ") -> list[str]:
+    """Each line of `text` quoted under a bullet."""
+    return [f"{indent}> {line}".rstrip() for line in (text or "").splitlines() or [""]]
+
+
+def children_text(found: list[dict[str, Any]]) -> str:
+    """The Brief's Children section: kernel facts only (id, state, subtree
+    spending, the instruction Tom or kernel code gave), never a child's own
+    words."""
+    lines = ["# Children", ""]
+    for c in found:
+        lines.append(f"- {c['task_id']} ({c['state']}, metered spending {usd(c['tree_spent_usd_micros'])})")
+        lines += quoted(c["instruction"])
+    return "\n".join(lines)
+
+
 # Every kind of attention entry, in the order `attention_counts` lists them.
 # A manual verdict is a person playing a stage no runner plays yet; a grant
 # is Tom's tap on one governance instance.
@@ -385,7 +660,11 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet
     answered is listed and not counted. `delivered` is the latest
-    delivery's summary."""
+    delivery's summary.
+
+    The tree: `parent_id`, `fenced_by` (the nearest stopped node on the
+    path to the root, or None), `children` (`reports`), and the subtree's
+    `tree_spent_usd_micros` and `tree_open_calls` beside the task's own."""
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
     turns: dict[str, str | None] = {}
@@ -463,6 +742,10 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         "attention_counts": _counts(attention),
         "delivered": (f.delivery or {}).get("summary"),
         "delivery": f.delivery,
+        "parent_id": next(iter(await ancestors(conn, task_id)), None),
+        "fenced_by": await fenced_by(conn, task_id),
+        "children": await reports(conn, task_id),
+        **{k: v for k, v in (await tree_spending(conn, task_id)).items() if k != "charges"},
     }
 
 

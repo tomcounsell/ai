@@ -60,8 +60,8 @@ ledger. Constraint: Bounded authority, metered spending.
 run is a child whose metered spending rolls up into the routine's. The
 routine's spending over its thirty-day period is reported, so a routine that
 runs more often than expected shows it; nothing stops it on money. The
-current kernel has a single task record and no objective tree, so the
-period report is design.
+kernel's objective tree rolls a child's spending into its parent's; the
+routine itself and its period report are design.
 Constraint: Bounded authority, metered spending.
 
 **Ceiling.** The ceiling is set in `routine.toml`, copied into each run's

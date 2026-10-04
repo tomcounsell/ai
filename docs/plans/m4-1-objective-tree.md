@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-1-objective-tree
 type: build
-status: planned; revised after critique round 2 (both rounds spent)
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -16,9 +16,7 @@ child's effect ceiling is never above its parent's, stopping a node fences
 its whole subtree, and a child's report reaches the parent's next turn and
 its status.
 
-Planned on the rebuild branch at 4cbc33669. Its build starts once 1.4d
-and 2.1 (the resident kernel) merge, and rebases onto them; what it uses
-of them is under "Built on 1.4d and 2.1".
+Built on the rebuild branch at fba1da1da, with 1.4d and 2.1 merged; what it uses of them is under "Built on 1.4d and 2.1", and every test in Tests is in `tests/test_objective_tree.py`.
 
 ## Goal
 
@@ -566,6 +564,9 @@ row is rewritten. A task without `parent_id` reads as a root.
   parent: no Brief to read. Nothing routes to Tom. Checked against Tom's
   rule on invented caps; nothing was dropped.
 - **The Brief lists direct children only**; the rollup is over all time.
+- **The merged base is as the plan gives it.** `Performers.offered` takes a ceiling; `tasks.stop` keeps 2.1's signature and returns `stop_tree(...) > 0`, so the bridge's stop stops the subtree too; the tree is documented in architecture.md's The objective tree (no `docs/objective-tree.md` exists); `docs/metered-spending.md` also named `tasks.money` and is fixed.
+- **Scope is "Spending is metered only (Tom, 2026-10-03)"**; the plan has no separate feedback section, and nothing in the tree caps or refuses on money.
+- **Smaller choices.** `ancestors` is one recursive query; the Brief's spending reads to the micro-dollar (`$1.500000`), the command line's to four places; the property test also draws merges, forged as `tests/test_machine.py` builds them; `stop` prints `stopped`, `stopped (and N descendants)`, or `already stopped`.
 
 ## Critique round 1 (of 2): revise
 

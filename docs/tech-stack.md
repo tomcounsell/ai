@@ -93,9 +93,11 @@ of calls, charges, and stops, every call is opened once and charged once,
 and a stopped task opens no call. Property tests state that
 directly. Status: **in use** for the state machine: every prefix of a
 generated ledger folds to exactly one state (`tests/test_machine.py`), a dev
-dependency. The ceiling property arrives with the objective tree, since
-conservation of the effect ceiling down a tree is where a sequence of
-operations can break it and one task record barely can. Serves "Bounded authority, metered spending".
+dependency, and for the objective tree: over generated sequences of starts,
+effect requests, calls, charges, stops, and merges, every child's ceiling
+ranks at or below its parent's, every effect at or below the lowest ceiling
+on its path, a fenced node opens no call, and every tree total is the sum of
+its subtree's charges (`tests/test_objective_tree.py`). Serves "Bounded authority, metered spending".
 
 **Schemas.** The kernel's records (the Brief, `TurnCommand`, the gateway
 `Grant`) are frozen dataclasses and JSON payloads. Status: **in use**.

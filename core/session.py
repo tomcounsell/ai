@@ -15,7 +15,8 @@ once a turn in the state has finished. What the turn should do with it is
 the stage file its Brief carries (`skills/sdlc/<state>.md`). An answer,
 findings, or feedback is spent only by a turn that finishes: after a turn
 that fails or is stopped, the next one opens with it again. Each prompt is
-followed by what became of the effects the previous turn requested.
+followed by what became of the effects the previous turn requested, and
+then by the latest delivery of each child that has delivered.
 
 What a turn left under `.valor/` (see `core.signals`) is one
 `turn.collected` row carrying the state it ran in and its verdict, with a
@@ -85,7 +86,7 @@ async def run(
                 turn_for(prompt, resume, b),
                 dsn=dsn,
                 state=state,
-                offered=performers.offered(),
+                offered=performers.offered(b.max_effect_class),
             )
         except tasks.TaskStopped:
             return {"status": "stopped"}
@@ -569,11 +570,15 @@ async def feedback(
 ) -> str:
     """Record Tom's feedback on the task's delivery, in `merge` or `merged`,
     which sends the work to `patch` and opens a new loop window. Refused
-    while the merge's intent has no outcome. Returns the feedback's id."""
+    while the merge's intent has no outcome, and on a task stopped or under
+    a stopped ancestor, under the tree's lock so a stop's walk sees the
+    reopened task or the feedback sees the stop. Returns the feedback's
+    id."""
     text = text.strip()
     if not text:
         raise ValueError("feedback has text")
     async with conn.transaction():
+        await tasks.lock_tree(conn, task_id)
         await ledger.lock(conn, f"task:{task_id}")
         f = machine.fold(await ledger.read(conn, task_id))
         if f.legacy:
@@ -582,6 +587,11 @@ async def feedback(
             raise LookupError(f"task {task_id} is a calibration task")
         if f.state is State.STOPPED:
             raise LookupError(f"task {task_id} is stopped; a stopped task takes no feedback")
+        fence = await tasks.fenced_by(conn, task_id)
+        if fence is not None:
+            raise LookupError(
+                f"task {task_id} is under stopped task {fence}; a stopped task takes no feedback"
+            )
         if f.state is State.WAITING:
             raise LookupError(f"task {task_id} has an open question; answer it with `answer`")
         if f.state not in (State.MERGE, State.MERGED):
@@ -643,7 +653,20 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     steering = _steering(f.steering)
     notes = _errors_report(f.last_collected)
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
-    return "\n\n".join(x for x in (prompt, steering, notes, report) if x), f.session
+    children = _children_report(await tasks.reports(conn, task_id))
+    return "\n\n".join(x for x in (prompt, steering, notes, report, children) if x), f.session
+
+
+def _children_report(found: list[dict[str, Any]]) -> str:
+    """Each child's latest delivery, in start order: the child's own words,
+    as prompt data under a label, never in the Brief. Every prompt carries
+    them, so a report is never lost to a turn that failed or was stopped."""
+    lines = []
+    for c in found:
+        if c["delivery"] is not None:
+            lines.append(f"- {c['task_id']} (delivered, {c['delivery']['outcome']}):")
+            lines += tasks.quoted(c["delivery"]["summary"])
+    return "\n".join(["# Reports from your children", "", *lines]) if lines else ""
 
 
 def _steering(steered: list[dict[str, Any]]) -> str:

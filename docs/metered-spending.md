@@ -33,7 +33,7 @@ without `max_tool_calls`, can leave a cut call short of the bill
 (`referenced`, `bounded: false`). Anthropic searches are charged per search; its code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
-(`tasks.money`) that `status` shows as `Metered spending: $X`: the sum of
+(`tasks.spending`) that `status` shows as `Metered spending: $X`: the sum of
 the task's charges, with the calls still open (`core/spending.py`).
 
 Because the harness's base URL points at the gateway, every call the turn
@@ -50,7 +50,10 @@ folds read as `gateway.opened`, and rows the folds ignore. Judgement calls
 are opened and charged the same way in the kernel process, with no HTTP
 route (judgement-layer.md).
 
-**Design.** A child's spending rolls up into its parent's reported
-spending (see The objective tree). A task that ends reports what it spent,
+A child's spending rolls up into its parent's reported spending:
+`tasks.tree_spending` sums every charge in a task's subtree, and `status`
+shows it beside the task's own (architecture.md, The objective tree).
+
+**Design.** A task that ends reports what it spent,
 what it produced, and what it asks for. A hung tool spends no money, so a
 per-task wall-clock deadline catches what metering cannot.

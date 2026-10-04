@@ -152,9 +152,16 @@ class Performers:
     def get(self, action_type: str) -> Performer | None:
         return self._by_type.get(action_type)
 
-    def offered(self) -> list[str]:
-        """The usage line of every performer a turn may request."""
-        return [p.usage for _, p in sorted(self._by_type.items()) if getattr(p, "usage", None)]
+    def offered(self, ceiling: str | None = None) -> list[str]:
+        """The usage line of every performer a turn may request: with a
+        `ceiling`, only those whose class ranks at or below it, so what a
+        turn is told matches what the broker lets it do."""
+        return [
+            p.usage
+            for _, p in sorted(self._by_type.items())
+            if getattr(p, "usage", None)
+            and (ceiling is None or EFFECT_RANK[p.effect_class] <= EFFECT_RANK[ceiling])
+        ]
 
 
 def declared(performer: Any) -> bool:

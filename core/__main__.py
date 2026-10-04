@@ -5,11 +5,15 @@ migrate [--db NAME]            create the role, the database, the schema, and
 secure-login                   the kernel databases' password file, both roles'
                                passwords, and the pg_hba.conf rules; idempotent
 settings                       every setting, as shell assignments
-start INSTRUCTION [--ceiling C] [--workspace DIR]
+start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
       [--by B] [--role-played] [--harness {claude_code,pi}]
                                start a task; prints its id. `--model` takes a
                                seat (frontier, reviewer, light) or a model id.
+                               `--parent` starts a child of that task, its
+                               ceiling the parent's unless `--ceiling` asks
+                               for one at or below it (default without a
+                               parent: propose).
                                The task starts in judge. The merge lands on
                                `--target-branch` (default: the branch origin's
                                HEAD names) at origin's URL as it is now
@@ -70,9 +74,12 @@ grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
 status TASK_ID                 the task as a fold over its ledger: its state,
                                loops, candidate, checks, metered spending, and
                                the attention log (questions, answers, feedback,
-                               approvals, manual verdicts, grants) and its counts
+                               approvals, manual verdicts, grants) and its counts;
+                               its parent, its children's reports, and the
+                               metered spending of its whole subtree
 ledger TASK_ID                 every ledger row of the task
-stop TASK_ID [--reason TEXT]   stop the task now, wherever its turn runs
+stop TASK_ID [--reason TEXT]   stop the task and every task under it now,
+                               wherever their turns run
 pending                        act-class effects held for Tom
 approve EFFECT_ID --note TEXT [--by B] [--via V] [--role-played]
                                Tom's tap on one held effect
@@ -330,6 +337,26 @@ async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None
             loop.remove_signal_handler(sig)
 
 
+# What refuses a start, each answered `start refused:` with its reason.
+START_REFUSED = (ValueError, KeyError, tasks.TaskStopped, tasks.CalibrationTask)
+
+
+def _refusal(exc: BaseException) -> str:
+    if isinstance(exc, KeyError):
+        return f"no task {exc.args[0]}"
+    return str(exc)
+
+
+async def _start_task(conn, args, **fields) -> str:
+    """Start a root, or with `--parent` a child (`tasks.start_child`)."""
+    if args.parent:
+        return await tasks.start_child(
+            conn, args.parent, ceiling=args.ceiling, by=args.by, role_played=args.role_played, **fields
+        )
+    brief = tasks.Brief(max_effect_class=args.ceiling or "propose", **fields)
+    return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
+
+
 async def _start_project(conn, args) -> str:
     """Provision the task's workspace from its project spec, then start it.
     The `workspace:ports` lock is held only while the ports are chosen and
@@ -376,19 +403,19 @@ async def _start_project(conn, args) -> str:
             said = await targets.check(conn, made.origin_url, made.target_branch)
             if said:
                 raise ValueError(said)
-            brief = tasks.Brief(
+            return await _start_task(
+                conn,
+                args,
                 id=task_id,
                 instruction=args.instruction,
-                max_effect_class=args.ceiling,
                 model=resolve_model(args.model),
                 harness_name=args.harness or resolve_seat(args.model)[0],
                 **made.brief_fields(),
             )
-            return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
         except BaseException as exc:
             await git.threaded(workspace.remove, task_id)
-            if isinstance(exc, ValueError):
-                raise SystemExit(f"start refused: {exc}") from None
+            if isinstance(exc, START_REFUSED):
+                raise SystemExit(f"start refused: {_refusal(exc)}") from None
             raise
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
@@ -534,16 +561,20 @@ async def _run(args) -> None:
                 where = tasks.resolve_workspace(workspace, args.target_branch)
             except tasks.WorkspaceRefused as exc:
                 raise SystemExit(str(exc)) from None
-            brief = tasks.Brief(
-                instruction=args.instruction,
-                max_effect_class=args.ceiling,
-                workspace=workspace,
-                model=resolve_model(args.model),
-                harness_name=args.harness or resolve_seat(args.model)[0],
-                harness=harness,
-                **where,
-            )
-            print(await tasks.start(conn, brief, by=args.by, role_played=args.role_played))
+            try:
+                started = await _start_task(
+                    conn,
+                    args,
+                    instruction=args.instruction,
+                    workspace=workspace,
+                    model=resolve_model(args.model),
+                    harness_name=args.harness or resolve_seat(args.model)[0],
+                    harness=harness,
+                    **where,
+                )
+            except START_REFUSED as exc:
+                raise SystemExit(f"start refused: {_refusal(exc)}") from None
+            print(started)
         elif args.command == "workspace":
             print(await _workspace(conn, args))
         elif args.command == "answer":
@@ -584,15 +615,19 @@ async def _run(args) -> None:
         elif args.command == "status":
             state = await tasks.status(conn, args.task_id)
             state["metered_spending"] = _usd(state["spent_usd_micros"])
+            state["tree_metered_spending"] = _usd(state["tree_spent_usd_micros"])
             print(json.dumps(state, indent=2))
         elif args.command == "ledger":
             print(ledger.render(await ledger.read(conn, args.task_id)))
         elif args.command == "stop":
             try:
-                fresh = await tasks.stop(conn, args.task_id, reason=args.reason)
+                written = await tasks.stop_tree(conn, args.task_id, reason=args.reason)
             except tasks.CalibrationTask as exc:
                 raise SystemExit(str(exc)) from None
-            print("stopped" if fresh else "already stopped")
+            if not written:
+                print("already stopped")
+            else:
+                print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
         elif args.command == "pending":
             for effect in await broker.pending(conn):
                 print(
@@ -783,7 +818,8 @@ def main() -> None:
     sub.add_parser("migrate").add_argument("--db")
     start = sub.add_parser("start")
     start.add_argument("instruction")
-    start.add_argument("--ceiling", default="propose", choices=list(tasks.EFFECT_RANK))
+    start.add_argument("--ceiling", choices=list(tasks.EFFECT_RANK))
+    start.add_argument("--parent", help="start a child of this task, at or below its ceiling")
     start.add_argument("--workspace")
     start.add_argument("--model", default="light")
     start.add_argument("--harness", choices=("claude_code", "pi"))
