@@ -400,3 +400,35 @@ round's.
 
 Suite: 1218 passed, 21 skipped (`valor_rebuild_test_2_1p7`, ports
 6430-6439). Ruff check and format check clean.
+
+## Patch round 8
+
+Scope: R1 of the review of round 7 and its recommendation on the reason,
+as the lead decided.
+
+1. R1. `_size_refusal` no longer coerces. `files` absent or None is no
+   files; otherwise it must be a list whose every entry is an object with
+   a string `path` and a string `sha256`, the port's shape and what the
+   bridge's `perform` reads. Anything else is refused, so a bare object,
+   a bare string, a list of strings, an entry without a string sha256,
+   and `0`, `""`, `{}` no longer reach Tom.
+2. A shape refusal has its own reason, "files must be a list of {path,
+   sha256} objects", and does not echo the value. A well-formed entry
+   whose path is missing, a link, or outside the workspace keeps the one
+   file answer, "not a regular file in the task's workspace". Both are
+   protocol facts; neither reads a file.
+3. Test: `test_malformed_files_refused_at_request` runs through
+   `broker.request` on the test database with round 7's five shapes, the
+   three accepted ones of R1, entries missing or mistyping `path` or
+   `sha256`, `0`, `""`, `{}`, and two well-formed lists naming an absent
+   file; each is refused with its reason and one `effect.refused` on the
+   task. `test_well_formed_files_pass_to_sizing` holds None, `[]`, and a
+   well-formed list of a workspace file for Tom. The shape cases fail
+   without the change.
+4. `docs/bridges/telegram.md` and `email.md` state the shape and its
+   refusal.
+
+Nothing new limits, waits, or guards.
+
+Suite: 1232 passed, 21 skipped (`valor_rebuild_test_2_1p8`, ports
+6460-6469). Ruff check and format check clean.

@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
 from unittest import mock
 
@@ -252,11 +253,45 @@ def test_files_refused_alike_and_never_read(dsn, op, tmp_path):
     assert nowhere.kind == "refused"
 
 
-@pytest.mark.parametrize("files", [["x"], [None], 5, {"a": 1}, [[1]]], ids=repr)
-def test_malformed_files_refused_at_request(dsn, op, tmp_path, files):
-    """A `files` that is not a list of objects is refused with the same
-    answer as any other file the kernel cannot size, and the refusal is
-    ledgered, so the turn is collected."""
+SHAPE = "files must be a list of {path, sha256} objects"
+NOT_IN_WS = "is not a regular file in the task's workspace"
+
+
+@pytest.mark.parametrize(
+    "files, said",
+    [
+        # Not the port's shape: refused for its shape, whatever it holds.
+        (["x"], SHAPE),
+        ([None], SHAPE),
+        (5, SHAPE),
+        ({"a": 1}, SHAPE),
+        ([[1]], SHAPE),
+        ({"path": "<ws>/a.txt", "sha256": "0" * 64}, SHAPE),
+        ("<ws>/a.txt", SHAPE),
+        (["<ws>/a.txt"], SHAPE),
+        ([{"path": "<ws>/a.txt"}], SHAPE),
+        ([{"path": "<ws>/a.txt", "sha256": 5}], SHAPE),
+        ([{"path": 5, "sha256": "0" * 64}], SHAPE),
+        (0, SHAPE),
+        ("", SHAPE),
+        ({}, SHAPE),
+        # The port's shape, naming a file the workspace does not hold.
+        ([{"path": "<ws>/absent.txt", "sha256": "0" * 64}], NOT_IN_WS),
+        (
+            [{"path": "<ws>/a.txt", "sha256": "0" * 64}, {"path": "<ws>/absent.txt", "sha256": "0" * 64}],
+            NOT_IN_WS,
+        ),
+    ],
+    ids=repr,
+)
+def test_malformed_files_refused_at_request(dsn, op, tmp_path, files, said):
+    """`files` absent or None is no files; otherwise it is a list of
+    objects each with a string path and sha256, or the send is refused for
+    its shape without the value echoed. A well-formed entry whose path is
+    not a regular file in the workspace gets the file answer. Either way
+    the refusal is ledgered, so the turn is collected."""
+    (tmp_path / "a.txt").write_text("a")
+    files = json.loads(json.dumps(files).replace("<ws>", str(tmp_path)))
 
     async def go():
         task = await new_task(dsn)
@@ -264,9 +299,27 @@ def test_malformed_files_refused_at_request(dsn, op, tmp_path, files):
             return task, await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
 
     task, out = run(go())
-    assert out.kind == "refused" and out.error.endswith("is not a regular file in the task's workspace"), out
+    assert out.kind == "refused" and out.error.endswith(said), out
+    if said == SHAPE:
+        assert out.error == SHAPE, out
     refused = run(of_type(dsn, "effect.refused", effect_id=out.effect_id))
     assert [r["task_id"] for r in refused] == [task], refused
+
+
+@pytest.mark.parametrize("files", [None, [], [{"path": "<ws>/a.txt", "sha256": "0" * 64}]], ids=repr)
+def test_well_formed_files_pass_to_sizing(dsn, op, tmp_path, files):
+    """No files, or a list of {path, sha256} naming a regular file in the
+    workspace, is sized and held for Tom."""
+    (tmp_path / "a.txt").write_text("a")
+    files = json.loads(json.dumps(files).replace("<ws>", str(tmp_path)))
+
+    async def go():
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            return await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
+
+    out = run(go())
+    assert out.kind == "pending", out
 
 
 def _no_read(*a, **k):

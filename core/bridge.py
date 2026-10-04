@@ -125,21 +125,32 @@ def _file_size(workspace: str, path: str) -> int | None:
     return st.st_size
 
 
+FILES_SHAPE = "files must be a list of {path, sha256} objects"
+
+
 async def _size_refusal(channel: str, action: broker.Action, workspace: str | None) -> str | None:
-    """Each file must be a regular file in the task's workspace, within the
-    channel's limit, and the whole message within its limit once the
-    channel's size function is set. The kernel never reads a file a turn
-    names: one that is missing, a link, outside the workspace, or not an
-    object with a path gets the same answer, and whether its bytes are what Tom approved is the
-    bridge's `perform`."""
+    """`files` absent or None is no files; otherwise it is the port's list
+    of {path, sha256} objects, each a string, or the send is refused for
+    its shape, since the bridge's `perform` reads each entry's path and
+    sha256. Each file must then be a regular file in the task's workspace,
+    within the channel's limit, and the whole message within its limit once
+    the channel's size function is set. The kernel never reads a file a turn
+    names: one that is missing, a link, or outside the workspace gets the
+    same answer, and whether its bytes are what Tom approved is the bridge's
+    `perform`."""
     limits = LIMITS[channel]
+    files = action.payload.get("files")
+    if files is None:
+        files = []
+    if not isinstance(files, list) or not all(
+        isinstance(f, dict) and isinstance(f.get("path"), str) and isinstance(f.get("sha256"), str)
+        for f in files
+    ):
+        return FILES_SHAPE
     sizes = []
-    files = action.payload.get("files") or []
-    for f in files if isinstance(files, list) else [files]:
-        path = f.get("path") if isinstance(f, dict) else f
-        size = None
-        if workspace and isinstance(path, str):
-            size = await asyncio.to_thread(_file_size, workspace, path)
+    for f in files:
+        path = f["path"]
+        size = await asyncio.to_thread(_file_size, workspace, path) if workspace else None
         if size is None:
             return f"file {path} is not a regular file in the task's workspace"
         if limits.max_file_bytes is not None and size > limits.max_file_bytes:
