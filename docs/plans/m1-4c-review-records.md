@@ -252,3 +252,28 @@ From review-1-4c1-p2 (`changes`) at 3ab97a19f, with the docs at
    sees it.
 
 No cap, timeout, or guard added.
+
+## Patch round 4
+
+From review-1-4c1-p3 (`changes`) at b765f0bab, with the docs at
+cf4487b4e. Base still 2418d02c8.
+
+1. F7. Every Claude Code session the harness starts, `workspace_turn`
+   (fresh and resumed) and `turn`, runs with `--setting-sources user`
+   (Claude Code 2.1.289 takes `user`, `project`, `local`). The user
+   source is the turn's own `CLAUDE_CONFIG_DIR`, so a `.claude/settings.json`
+   or `settings.local.json` in the checkout, from the tree or the setup,
+   sets no model URL, environment, model, permissions, or `apiKeyHelper`.
+   Test, both builders: a checkout settings file whose `env` names a
+   second scripted upstream as `ANTHROPIC_BASE_URL` and a marker model;
+   the second upstream gets no request, the gateway's upstream gets the
+   calls, and the model is the kernel's. Without the flag both cases
+   failed: the model call reached the second upstream.
+2. N1. workspace.md and the threat model say an error after setup is
+   treated as the candidate's. The behavior is unchanged.
+3. N2. workspace.md: the setup runs "under a profile
+   (`workspace.setup_profile`) that writes only" the checkout.
+4. harnesses.md and tech-stack.md list `--setting-sources user` with the
+   command line.
+
+No cap, timeout, or guard added.

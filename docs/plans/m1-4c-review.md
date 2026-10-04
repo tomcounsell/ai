@@ -80,7 +80,8 @@ What the kernel must never do with any of it:
   kernel looks at the checkout through a descriptor, following no link;
   a `.valor`, a `.pi`, no directory where the checkout was, or an
   error reading or writing the checkout, after the reviewer checkout's
-  setup, is the commit's own and gets the `kernel` leg `changes`. The
+  setup, is treated as the commit's own and gets the `kernel` leg
+  `changes`. The
   kernel removes nothing in the checkout.
 - Let candidate code set what the reviewer's session runs with. The
   setup's profile writes only the checkout, `cache/`, and `setup-tmp/`,
@@ -88,7 +89,10 @@ What the kernel must never do with any of it:
   checkout (any case, as written and resolved), and never the checkout
   directory itself (no rename, removal, mode, flags, or ACL). So the
   repository holds the kernel's two commits and config, and no commit
-  message, hook, or fsmonitor of the setup's reaches the session.
+  message, hook, or fsmonitor of the setup's reaches the session. Claude
+  Code starts with `--setting-sources user`, so a `.claude/settings.json`
+  or `settings.local.json` in the checkout, from the tree or the setup,
+  sets no model URL, environment, model, or permissions of the session.
 - Give the reviewer the task's live services. Its turn runs inside
   `check_services`, so its `DATABASE_URL`, `PGPASSFILE`, and `REDIS_*`
   name fresh instances; the live ones are stopped for the duration.

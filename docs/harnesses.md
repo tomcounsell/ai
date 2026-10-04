@@ -84,7 +84,7 @@ Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a t
 `harnesses/claude_code.py` builds two kinds of turn.
 
 **`turn`** is one self-contained call: no tools by default, no session
-persistence, a system prompt of the dispatched text (persona, then Brief).
+persistence, safe mode and `--setting-sources user` as below, a system prompt of the dispatched text (persona, then Brief).
 The live tests use it. It copies the kernel's environment minus Claude Code's
 own variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no sandbox profile, so it can read whatever Tom's user can, the
 kernel's password file included; it must not be given tools without one.
@@ -96,6 +96,7 @@ what a real task runs. Its arguments:
 |---|---|---|
 | `-p --output-format json` | one non-interactive turn; one JSON result on stdout | the port's `parse` |
 | `--safe-mode` | no hooks, skills, plugins, or `CLAUDE.md` from this machine | bounded authority: the prompt layer of the machine holds no authority over a turn |
+| `--setting-sources user` | settings only from the turn's own Claude Code config directory; a `.claude/settings.json` or `settings.local.json` in the working directory is never read, so it cannot set the model URL, environment, model, permissions, or an `apiKeyHelper` | metered spending: every model call goes through the gateway; a candidate's tree does not set what its reviewer runs with |
 | `--strict-mcp-config` | no MCP servers | bounded authority; least privilege [11] |
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--disallowedTools WebFetch WebSearch` | no web tools | independent checks: a replay cannot fetch its own answer (rebuild-baseline.md, Caveats); retrieved pages carry no instructions into the turn [7] |
@@ -526,4 +527,5 @@ machine (safe mode). The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
 text, so they need nothing harness-specific. A repository's own `CLAUDE.md`
 and `.claude/` stay in the clone as files the turn can read, as they did in
-the baseline (rebuild-baseline.md, Setup).
+the baseline (rebuild-baseline.md, Setup); Claude Code itself loads neither
+(safe mode, `--setting-sources user`).

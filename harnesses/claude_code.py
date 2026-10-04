@@ -11,7 +11,10 @@ carries no profile and has no tools by default; it must not be given tools
 without one.
 
 A `turn` runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
-from this machine), no session persistence, and `ANTHROPIC_BASE_URL` set to
+from this machine), only the user's settings (`--setting-sources user`: a
+`.claude/settings.json` or `settings.local.json` in the working directory,
+which can name a model URL, an environment, or a model, is never read), no
+session persistence, and `ANTHROPIC_BASE_URL` set to
 the gateway, so every model call it makes is metered against the task.
 A test `turn` sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS`; a workspace turn sets
 it only when its project names one, and otherwise Claude Code's own
@@ -81,6 +84,8 @@ def turn(
             "--model",
             model,
             "--safe-mode",
+            "--setting-sources",
+            "user",
             "--strict-mcp-config",
             "--no-session-persistence",
             "--system-prompt",
@@ -142,7 +147,10 @@ def workspace_turn(
     edits files and runs commands without asking (`bypassPermissions`): the
     kernel bounds it, not a permission prompt nobody is there to answer.
     Safe mode keeps this machine's hooks, skills, plugins, CLAUDE.md, and
-    MCP servers out; web fetch and web search are off.
+    MCP servers out; `--setting-sources user` reads settings only from the
+    turn's own Claude Code config directory, never a `.claude/` settings
+    file in `cwd`, so a checkout cannot set the session's model URL,
+    environment, model, or permissions; web fetch and web search are off.
 
     `harness` carries the task's isolation: `sandbox_profile` (required;
     without it this raises `Unsandboxed`), a sandbox-exec profile the whole
@@ -208,6 +216,8 @@ def workspace_turn(
             "--model",
             model,
             "--safe-mode",
+            "--setting-sources",
+            "user",
             "--strict-mcp-config",
             "--permission-mode",
             "bypassPermissions",
