@@ -26,10 +26,9 @@ from core import workspace as kws
 from core.__main__ import _performers
 from core.gateway import Gateway
 from core.machine import State
-from tests import bridges
-from tests import scripted
-from tests.conftest import TEST_DB
+from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows
+from tests.conftest import TEST_DB
 from tests.scripted import commit
 from tests.test_pipeline import _dangling, drive
 from tests.test_session import assert_large_turn, large_turn

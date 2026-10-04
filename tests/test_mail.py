@@ -93,3 +93,12 @@ def test_the_size_from_file_sizes_is_the_length_of_the_built_message(tmp_path, s
         date=mail._PLACEHOLDER_DATE,
     )
     assert mail.email_encoded_bytes(payload, [size], VALOR) == len(mail.serialized(built))
+
+
+def test_a_missing_mail_key_names_the_bridge_command_that_writes_it(tmp_path):
+    from core import credentials
+
+    with pytest.raises(credentials.MissingKey, match=r"run `python -m bridges\.email keys`"):
+        credentials.read_key(tmp_path / "mail-keys", "IMAP_USER", "python -m bridges.email keys")
+    with pytest.raises(credentials.MissingKey, match=r"run `python -m core openai-key`"):
+        credentials.read_key(tmp_path / "openai-key", "OPENAI_API_KEY", "openai-key")

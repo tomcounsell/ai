@@ -250,6 +250,13 @@ connection. The merge with 2.1 takes these as additions to its port.
 | The record named a test that does not exist for the stop that lands in the gap | Round 7 names the `in_the_gap` case of `test_tom_stopping_a_hung_send_after_the_stop_listener_dropped_ends_it` | |
 | The woke task was cancelled only on the path that reached the line after the wait | `until_stopped` cancels it in a `finally`. No timer is added to any email command; a stop ends a hung one | |
 
+## Patch round 9 (rebase onto the merged Telegram bridge)
+
+| Finding | Change | Test |
+|---|---|---|
+| 2.3 sat on a 2.1 without the merged 2.2 | Rebased onto the merged head. Two doc conflicts, `machine.md` and `tech-stack.md`, resolved by keeping Telegram's merged rows and layering email's. The fake bridges module is `tests/bridges.py` with `--import-mode=importlib` in `pyproject.toml`, which is how the `bridges` package is not shadowed; the 2.3 suite passes under it | the full suite |
+| `read_key` took a whole `python ...` command | Kept: the email bridge's only key command is `python -m bridges.email keys`, not a `python -m core` subcommand, and this plan (the key directory section) has `credentials.read_key` name the owning command in its errors. The email bridge is its only caller of that form | `test_a_missing_mail_key_names_the_bridge_command_that_writes_it` |
+
 ## Tech debt absorbed (moved from the plan)
 
 - #3601: the SMTP timeout bounds the whole upload on `main`, so large

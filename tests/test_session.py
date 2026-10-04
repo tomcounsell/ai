@@ -25,8 +25,7 @@ import pytest
 from core import bridge, broker, db, ledger, session, signals, spending, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
-from tests import bridges
-from tests import judgement_upstream, scripted
+from tests import bridges, judgement_upstream, scripted
 from tests.conftest import TEST_DB
 from tests.scripted import git
 from tools.push_branch import PushBranch
