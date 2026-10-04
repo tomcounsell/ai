@@ -115,3 +115,11 @@ clean.
 - `valor-cori-rebuild` fast-forwarded a8e7f67d0 to 792d997f2.
 - Rollout: one kernel run of pop-a, which shows a real review session's
   spending.
+- Rollout result (2026-10-04, task `52cc4881fed0`, pop-a): the resident
+  kernel ran the review through the registered runner. Turn
+  `5c5559db9b0e` (claude-opus-5-5, 11 calls through the gateway) ended
+  done with 0.440415 USD metered; event 1046 `review.decided` records
+  verdict `pass`, leg `session`, no governance instances. The task's
+  metered spending at the stop was 5.2005 USD. The lead stopped the task
+  after the verdict, since the run's purpose was the review's record;
+  docs stays manual by the plan.
