@@ -844,12 +844,18 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
     `changes`, the instances, and the grants (`verdicts.review_verdict`).
     At the registered seat it records `review.decided`; at any other seat
     it appends `review.compared` as information and never moves the task.
-    `model` overrides the seat's pinned model."""
+    `model` overrides the seat's pinned model. The check holds the turn
+    slot throughout, so no turn runs beside its suites; its review turn
+    takes it again as a no-op."""
 
     model_ = model
     registered = seat == SEATS["review"]
 
     async def run(ctx) -> dict[str, Any]:
+        async with slot.held(ctx.task_id, ctx.dsn):
+            return await _run(ctx)
+
+    async def _run(ctx) -> dict[str, Any]:
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
             f = machine.fold(rows)

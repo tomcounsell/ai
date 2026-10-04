@@ -511,3 +511,13 @@ follow-up. Nothing new limits, waits, or guards.
 
 Suite: 1234 passed, 21 skipped (`valor_rebuild_test_2_1p10`, ports 6470-6479).
 Ruff check and format check clean.
+
+## Rebase onto 6e123f88f (lead)
+
+Round 10 rebased onto 1.4c part one's merge. Two conflicts: `core/README.md`
+(the review runner paragraph kept, with 2.1's service and reconcile
+sentences), and `core/fresh.py`'s imports. The review runner that 1.4c part
+one added runs suites and a session, so it now holds the turn slot
+throughout, as the test and docs checks do; `test_a_check_holds_the_slot`
+covers it and fails without the change. `docs/machine.md` and
+`docs/architecture.md` name the review check.

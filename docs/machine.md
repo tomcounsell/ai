@@ -143,8 +143,9 @@ The emulator's replay driver holds a lock-file slot per run; a kernel-held
 turn slot is the session advisory lock `turn-slot:<machine>`
 (`core/slot.py`): every harness turn holds it, so a second kernel or a
 `python -m core run` beside `serve` waits for it. It is reentrant within
-the task that holds it. The test and docs checks hold it for their whole
-run, and the turn a docs check runs takes it again as a no-op.
+the task that holds it. The test, review, and docs checks hold it for their
+whole run, and the turn a review or docs check runs takes it again as a
+no-op.
 
 **What runs beside the turn.** Bridges keep receiving and delivering
 released messages while a turn runs; an incoming request becomes a queued

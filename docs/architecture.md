@@ -445,8 +445,8 @@ runs that state's runner once (`router.step`). A task steps again only
 when a row it did not write arrives, including one written while its step
 ran, so one event is one step. One
 harness turn or check runs at a time on a machine (the turn slot, a
-Postgres lock that `python -m core run` also takes; the test and docs
-checks hold it throughout); the judge and the
+Postgres lock that `python -m core run` also takes; the test, review,
+and docs checks hold it throughout); the judge and the
 merge run beside it. The rendered context is the same bytes from the same
 store in any process. The kernel holds no state of its own: on restart it
 charges calls whose holder died at their estimate, ends turns with no end

@@ -498,7 +498,7 @@ def test_slot_reentrant(fresh, op, tmp_path):
     assert ended["outcome"] == "done"
 
 
-@pytest.mark.parametrize("which", ["test", "docs"])
+@pytest.mark.parametrize("which", ["test", "review", "docs"])
 def test_a_check_holds_the_slot(fresh, op, which, monkeypatch):
     """A turn and a check do not run at once: a check waits while a turn
     holds the slot, and holds it itself while it runs."""
@@ -524,7 +524,11 @@ def test_a_check_holds_the_slot(fresh, op, which, monkeypatch):
             return await real(conn, task_id, *a, **k)
 
         monkeypatch.setattr(ledger, "read", read)
-        runner = checks.test_runner(None) if which == "test" else fresh_runs.docs_runner(None, None)
+        runner = {
+            "test": lambda: checks.test_runner(None),
+            "review": lambda: fresh_runs.review_runner(None, None),
+            "docs": lambda: fresh_runs.docs_runner(None, None),
+        }[which]()
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def turn():  # what `runs.run_turn` holds around a turn
