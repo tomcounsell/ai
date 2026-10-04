@@ -292,7 +292,7 @@ is replaced by kernel text with Postgres's reason; if that is refused too,
 `turn.collected` holds nothing the turn wrote (no signals or effects, the
 verdict `idle`, or `failed` for a turn that did not finish) and one error
 with Postgres's reason. The broker's rows for each request are judged the
-same way where they are written (`docs/data.md`). A reason, key or error
+same way where they are written (`docs/data.md`). A verdict row (critique, review, docs) jsonb refuses is a refused verdict with Postgres's reason, and a fresh check's turn then ends `failed` with that reason as its result. A reason, key or error
 the kernel writes names the field and what is wrong with it (its JSON type,
 Postgres's reason, git's answer about a path), never the turn's value. A turn whose collection
 still fails does not stop the kernel: `serve` logs it and collects the turn
