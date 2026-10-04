@@ -304,3 +304,15 @@ connection. The merge with 2.1 takes these as additions to its port.
 - Decided by default: the DMARC check stays parked (aec2bff7f); follow-up
   tests for a kernel-level stop at BODY, AUTH, DATA and TLS, and for a watch
   starting while the database is unreachable.
+- Rollout (lead, 2026-10-04): `core migrate` ran (no change). Dovecot is
+  installed. `python -m bridges.email keys` failed first:
+  `Settings.mail_keyfile` lacked `@property`, so the keys command and the
+  bridge's own key read got a method, not a path. Fixed in the code, with
+  `test_keys_copies_the_mail_logins_into_the_kernel_key_directory` (fails
+  without the fix); the email, settings and credentials tests pass (71).
+  Then all four keys were written. `VALOR_EMAIL_ADDRESS` is in the kernel's
+  job (reloaded, running) and the bridge's; `VALOR_OPERATOR_EMAIL` was
+  already set. The bridge's job is installed at
+  `~/Library/LaunchAgents/com.valor.email.plist` and disabled in launchd,
+  so a login does not load it beside `main`'s bridge. `VALOR_EMAIL_SINCE`
+  is set to the window's date when the window opens.
