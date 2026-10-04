@@ -85,3 +85,19 @@ faa972801f4b's base run at 093b4f7b63ce never ends by itself.
 ## Records
 
 - Round 1 (build): both fixes and both tests. Suite 1415 passed, 25 skipped; ruff check and format clean.
+
+## Decided by default (lead, 2026-10-05)
+
+- Kernel tasks faa972801f4b and b7adaf2a23d1 are stopped by the lead. The
+  first's base check could never end (its base lacks fix 1); the second's
+  would hang the same way. b7adaf2a23d1's candidate 5a5ae487f is carried by
+  subagent checks on branch k-b7adaf2a-n1-n3. faa972801f4b was a cosmetic
+  display fix ($1.18 spent); its work directory went with the stop, and it is
+  started again as a follow-up once valor's suite can run in a check.
+- Valor's own suite cannot run under the host check profile even with both
+  fixes: 25 modules bind loopback at import, and a sandboxed process cannot
+  start a second sandbox. The check would pass with zero coverage. The
+  answer is not to widen the host profile: valor's test check runs in the
+  container (1.4c part two), where loopback is the container's own and the
+  macOS-only tests are marked. Until 1.4c part two merges, valor tasks keep
+  running through subagents, and the lead's merge suite is the test.
