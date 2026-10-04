@@ -306,7 +306,7 @@ def _git(
 
 
 def output_dir() -> Path:
-    """Where `output_file` makes its files: `output/` in the effect lock
+    """Where `output_file` makes its files, and `dirty` its index: `output/` in the effect lock
     directory (`settings.performing_dir`), made by the kernel with mode
     0700. A file has a path there between its creation and its unlink, and
     every task profile denies this directory (`workspace.kernel_paths`),
@@ -528,7 +528,8 @@ def dirty(workspace: str | Path, path: str | None = None) -> list[str]:
     rather than matching the lines.
 
     The working tree is compared with HEAD through a fresh index the kernel
-    reads from HEAD in a directory of its own, never the turn's index: there
+    reads from HEAD in a directory of its own under `output_dir`, which no
+    task profile can reach, never the turn's index: there
     an assume-unchanged or skip-worktree bit, cached stat data that matches
     an edited file, or an untracked cache would each make `status` report
     nothing, and the turn can write all of them. The fresh index caches no
@@ -548,7 +549,7 @@ def dirty(workspace: str | Path, path: str | None = None) -> list[str]:
     the commit."""
     only = ["--", f":(literal){path}"] if path is not None else []
     commit = head(workspace)
-    with tempfile.TemporaryDirectory(prefix="valor-index-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="valor-index-", dir=output_dir()) as tmp:
         index = {"GIT_INDEX_FILE": os.path.join(tmp, "index")}
         out(workspace, "read-tree", commit or "--empty", extra_env=index)
         return out(

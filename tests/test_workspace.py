@@ -1013,6 +1013,34 @@ def test_no_turn_can_open_or_list_the_kernels_output_files_and_git_output_is_rea
     assert made and set(made) == {out}
 
 
+def test_the_index_dirty_reads_is_made_in_the_output_directory(tmp_path, monkeypatch):
+    """`dirty` reads HEAD into a fresh index of its own; that index is
+    made in `git.output_dir`, which no task profile can reach, while git
+    reads and compares it, and is gone after."""
+    repo = tmp_path / "repo"
+    kgit._git(tmp_path, "init", "-q", str(repo))
+    (repo / "a").write_text("one\n")
+    kgit._git(repo, "add", "a")
+    kgit._git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")
+    (repo / "a").write_text("two\n")
+    seen = []
+    real = kgit.out
+
+    def spy(workspace, *args, extra_env=None, **kw):
+        if extra_env and "GIT_INDEX_FILE" in extra_env:
+            index = Path(extra_env["GIT_INDEX_FILE"])
+            seen.append((index, index.parent.exists()))
+        return real(workspace, *args, extra_env=extra_env, **kw)
+
+    monkeypatch.setattr(kgit, "out", spy)
+    assert kgit.dirty(repo) == ["M a"]
+    assert len(seen) == 2
+    for index, existed in seen:
+        assert existed and index.parent.parent == kgit.output_dir()
+        assert index.parent.name.startswith("valor-index-")
+        assert not index.parent.exists()
+
+
 def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
     _, made = provision(tmp_path)
     sha = candidate(made)
