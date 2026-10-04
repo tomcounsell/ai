@@ -14,9 +14,10 @@ Found by the fourth review of [m1-4d-credential.md](m1-4d-credential.md).
 ## Defect
 
 `git.dirty()` read HEAD into a fresh index in a temporary directory
-(prefix `valor-index-`) in `$TMPDIR`. No task profile denies the temp
-directory, so a turn, setup command, or service could open, truncate, or
-replace that index while the kernel's `read-tree` and `status` used it.
+(prefix `valor-index-`) in `$TMPDIR`. Service profiles reach the shared
+temp directory (turn and fresh profiles are denied it), so a service
+could open, truncate, or replace that index while
+the kernel's `read-tree` and `status` used it.
 
 ## Fix
 
