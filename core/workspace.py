@@ -202,7 +202,12 @@ class Refused(ValueError):
 class Spec:
     """A project, read once at start and copied into the Brief, so editing
     the file never changes a running task. `suite` names the command the
-    kernel runs to decide red or pass; a candidate never chooses it."""
+    kernel runs to decide red or pass; a candidate never chooses it.
+
+    `chats` lists the chats whose messages start tasks under this project
+    (`"telegram:<chat id>"`, `"email:<sender address>"`), and `machine` the
+    machine whose bridges receive them; none means
+    `settings.default_machine`, so each chat has one owner."""
 
     name: str
     repo: str
@@ -217,6 +222,8 @@ class Spec:
     target_branch: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     max_output_tokens: int | None = None
+    chats: tuple[str, ...] = ()
+    machine: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -245,6 +252,14 @@ class Spec:
         env = raw.get("env") or {}
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise Refused("a project's env maps names to strings")
+        chats = tuple(raw.get("chats") or ())
+        for chat in chats:
+            channel, _, ident = chat.partition(":") if isinstance(chat, str) else ("", "", "")
+            if channel not in ("telegram", "email") or not ident:
+                raise Refused(f"chat {chat!r} is not telegram:<chat id> or email:<sender address>")
+        machine = raw.get("machine")
+        if machine is not None and (not isinstance(machine, str) or not machine):
+            raise Refused("machine names a machine")
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -259,7 +274,21 @@ class Spec:
             target_branch=raw.get("target_branch"),
             env=dict(env),
             max_output_tokens=cap,
+            chats=tuple(c if c.startswith("telegram:") else c.lower() for c in chats),
+            machine=machine,
         )
+
+    @classmethod
+    def all(cls) -> list[Spec]:
+        """Every project spec in `settings.projects_dir`, by name. A spec
+        that does not load is left out; `start` names its error."""
+        found = []
+        for path in sorted(Path(settings.projects_dir).glob("*.toml")):
+            try:
+                found.append(cls.load(str(path)))
+            except Refused:
+                continue
+        return found
 
     @classmethod
     def load(cls, name_or_path: str) -> Spec:
@@ -2104,7 +2133,8 @@ def remove(task_id: str, lay: Layout | None = None) -> None:
 
 async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None) -> list[dict[str, Any]]:
     """Stop the services a killed kernel left up: those of every other task
-    whose run is not live (its router lock `run:<task>` can be taken), and
+    whose run is not live and whose services no kernel keeps (its router
+    lock `run:<task>` and its `services:<task>` can both be taken), and
     those of any directory under `work` with no task row whose provisioning
     is not live (its `provision:<id>` lock can be taken), which a kernel
     killed mid-setup leaves. Takes the `workspace:ports` lock only if it is
@@ -2122,11 +2152,17 @@ async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None
     if not got[0]:
         return stopped
     try:
+        # A task started by message carries its workspace in its latest
+        # `workspace.provisioned` row, laid over the document (`tasks.brief`).
         rows = await (
             await conn.execute(
-                "SELECT d.id, d.body->>'mirror' FROM documents d WHERE d.kind = 'task' AND d.id <> %s "
-                "AND jsonb_array_length(COALESCE(d.body->'project'->'services', '[]'::jsonb)) > 0 "
-                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = d.id AND e.type = 'workspace.removed')",
+                "SELECT id, body->>'mirror' FROM (SELECT d.id, d.body || COALESCE(("
+                "  SELECT e.payload->'fields' FROM events e WHERE e.task_id = d.id "
+                "  AND e.type = 'workspace.provisioned' ORDER BY e.id DESC LIMIT 1), '{}'::jsonb) AS body "
+                "  FROM documents d WHERE d.kind = 'task' AND d.id <> %s "
+                "  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = d.id "
+                "  AND e.type = 'workspace.removed')) t "
+                "WHERE jsonb_array_length(COALESCE(body->'project'->'services', '[]'::jsonb)) > 0",
                 (task_id,),
             )
         ).fetchall()
@@ -2151,11 +2187,20 @@ async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None
             await after_scan()
         for other in marked:
             kind, lay = candidates[other]
-            key = f"{kind}:{other}"
-            got = await (
-                await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
-            ).fetchone()
-            if not got[0]:
+            # A task's services are another process's while its run is live
+            # or while a kernel keeps them up between steps.
+            keys = [f"{kind}:{other}"] + ([f"services:{other}"] if kind == "run" else [])
+            taken = []
+            for key in keys:
+                got = await (
+                    await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+                ).fetchone()
+                if not got[0]:
+                    break
+                taken.append(key)
+            if len(taken) < len(keys):
+                for key in taken:
+                    await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
                 continue
             try:
                 if (
@@ -2170,7 +2215,8 @@ async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None
                 found = await asyncio.to_thread(stop_services, other, lay)
                 stopped += [{**r, "task": other, "orphan": kind == "provision"} for r in found]
             finally:
-                await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+                for key in taken:
+                    await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
     return stopped

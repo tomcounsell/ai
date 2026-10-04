@@ -295,6 +295,40 @@ def test_screens_are_recorded_with_their_size_and_moved_aside(tmp_path):
     assert signals.collect(tmp_path, "t2").screens == []  # a later turn records none of them
 
 
+def test_recollect_reads_the_screens_a_killed_collect_had_filed(tmp_path):
+    """A kill mid-collect leaves some screens filed under `handled/` and some
+    still in `.valor/screens/`: recollecting records both, once each."""
+    screens = plant(tmp_path)
+    filed = tmp_path / ".valor" / "handled" / "t1" / "screens"
+    filed.mkdir(parents=True)
+    (filed / "a.png").write_bytes(b"png bytes")
+    (filed / "link.png").symlink_to(filed / "a.png")
+    (screens / "b.html").write_text("<p>b</p>")
+    found = signals.recollect(tmp_path, "t1")
+    assert found.screens == [
+        {"name": "a.png", "bytes": 9},
+        {"name": "b.html", "bytes": 8},
+        {"name": "link.png", "refused": "link.png is a link, not a plain file"},
+    ]
+    assert list(screens.iterdir()) == []
+    assert (filed / "b.html").read_text() == "<p>b</p>"
+    assert signals.recollect(tmp_path, "t1").screens == found.screens
+
+
+def test_recollect_reads_the_text_signal_it_keeps(tmp_path):
+    """A `done.md` both filed under `handled/` and still in `.valor/`: the
+    one filed last is read, as for screens, and it is the copy kept."""
+    valor = tmp_path / ".valor"
+    filed = valor / "handled" / "t1"
+    filed.mkdir(parents=True)
+    (filed / "done.md").write_text("old")
+    (valor / "done.md").write_text("new")
+    found = signals.recollect(tmp_path, "t1")
+    assert found.done == "new" and (filed / "done.md").read_text() == "new"
+    assert not (valor / "done.md").exists()
+    assert signals.recollect(tmp_path, "t1").done == "new"
+
+
 def test_a_screen_that_cannot_be_moved_aside_is_refused_and_removed(tmp_path):
     screens = plant(tmp_path)
     (screens / "a.png").write_bytes(b"png")

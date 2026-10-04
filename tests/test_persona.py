@@ -267,6 +267,35 @@ def test_a_persona_edit_reaches_the_next_turn_of_a_running_task(dsn, tmp_path, p
     assert "A line added between turns." in after["brief"] and "A line added" not in before["brief"]
 
 
+def test_turn_started_records_the_commit_its_persona_was_read_from(dsn, tmp_path, monkeypatch):
+    """One process, a checkout that moves between turns: each `turn.started`
+    records the HEAD its persona was read from."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    target = copy_persona(checkout)
+    scripted.git(checkout, "init", "-q")
+    scripted.git(checkout, "add", "--force", "persona")
+    scripted.git(checkout, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "persona")
+    monkeypatch.setattr(runs, "CHECKOUT", checkout)
+    monkeypatch.setattr(tasks, "settings", dataclasses.replace(settings, persona_dir=str(target)))
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
+        before = await turn(dsn, task, tmp_path)
+        first = scripted.git(checkout, "rev-parse", "HEAD")
+        second = scripted.commit(
+            checkout, "persona/voice.md", (target / "voice.md").read_text() + "\n- Moved.\n"
+        )
+        after = await turn(dsn, task, tmp_path)
+        return before, after, first, second
+
+    before, after, first, second = run(go())
+    assert before["kernel_commit"] == first and after["kernel_commit"] == second != first
+    assert before["persona_sha256"] != after["persona_sha256"]
+    assert after["persona_sha256"] == persona.digest(persona.render(target))
+
+
 def test_the_workspaces_persona_and_claude_md_are_never_read(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     (ws / "persona").mkdir()

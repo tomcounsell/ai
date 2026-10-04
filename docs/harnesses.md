@@ -261,7 +261,11 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
-it there, in a worker thread, so no signal is read twice. The turn controls
+it there, in a worker thread, so no signal is read twice. For a turn that ended and
+was never collected, `recollect` reads what is still in `.valor/` first
+(moving it aside), then what `handled/<turn_id>/` holds; a file in both
+places is read once, as the copy in `.valor/`, which replaces the filed one,
+so what is read is what is kept. The turn controls
 these files: the kernel follows no link, never blocks on a FIFO, and reads
 only a regular file with one link and no holes (a sparse file claims a size
 the turn never wrote), and only up to the size it checked, so a file that
@@ -496,8 +500,9 @@ binaries hide their environment from other processes altogether. With the sandbo
 redis test's daemon survives. `tests/test_reap.py` reaps a double-forked `setsid` daemon and a
 redis-server daemonized inside a task turn's sandbox, and leaves a bystander alive.
 
-A task's services, marked `valor.service.<task id>`, stop when its run returns. After a killed
-kernel, the next run of any task, if `workspace:ports` is free, stops those of tasks whose run is
+A task's services, marked `valor.service.<task id>`, stop when its run returns; under the
+resident kernel they stay up between steps and stop when the task waits on Tom, reaches merge, or
+is stopped. After a killed kernel, the next run of any task, if `workspace:ports` is free, stops those of tasks whose run is
 not live and of row-less task directories whose provisioning (`provision:<id>`) is not live
 (`services.reaped`). The replay judge's commands run under `turn.sb` with their own mark.
 

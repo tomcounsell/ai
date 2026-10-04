@@ -50,6 +50,7 @@ class Received:
 
 async def receive(conn, inbound: Inbound) -> Received: ...
 async def highest(conn, channel: str, chat_id: str) -> int | None: ...
+async def lowest(conn, channel: str, chat_id: str) -> int | None: ...
 async def recorded(conn, channel: str, chat_id: str, ids: list[str]) -> set[str]: ...
 async def claimed(conn, channel: str, chat_id: str) -> set[str]: ...
 def owns(channel: str, id: str) -> bool: ...
@@ -85,8 +86,12 @@ def owned(channel: str) -> list[str]: ...
   in `sent` entries alike, is a string, and a Telegram chat id is the
   marked form (`-100...` for a group), so the `sent` index matches.
 - **`highest` (D3)** is the largest `message_id` recorded for the chat,
-  compared as an integer, for channels with integer ids; a paging hint
+  compared as an integer (all-digit ids that fit a bigint), for channels
+  with integer ids; a paging hint
   only. Email has no cursor; it polls UNSEEN SINCE for owned senders.
+- **`lowest` (D32)** is the smallest integer `message_id` recorded for
+  the chat, or None: a gap fill of a chat with no seen entry stops there,
+  by membership, not at the high-water mark.
 - **`recorded` (D32)** returns which of `ids` are already received. Gap
   fill checks membership over a recent window on connect and in
   `Bridge.tick()` (D38), never a high-water mark alone (Telethon drops
@@ -108,8 +113,9 @@ def owned(channel: str) -> list[str]: ...
 class ChannelLimits:
     max_text: int | None  # per message, in text_units
     text_units: str  # "utf16" or "chars"
-    max_file_bytes: int | None  # per file, when message_bytes is None
-    message_bytes: Callable[[broker.Action], int] | None = None  # whole message
+    max_file_bytes: int | None  # per file
+    max_message_bytes: int | None = None  # the whole message, measured by message_bytes
+    message_bytes: Callable[[broker.Action], int] | None = None
 
 
 LIMITS: dict[str, ChannelLimits]  # "telegram", "email"
@@ -138,7 +144,7 @@ Each bridge's `__main__` keeps its verbs (`run`, `login`, `keys`,
    `bridge:<channel>:<settings.machine>`, blocking. No flock.
 2. Builds a `broker.Performers` of the channel's entries in `DECLARED`,
    each joined with the `(perform, lookup)` the bridge returns for that
-   type. Class, usage, refusal, and settle time are the kernel's; the
+   type. Class, usage, and refusal are the kernel's; the
    bridge supplies only how.
 3. Reconciles `broker.dangling(conn, <its types>)`.
 4. Runs `bridge.run(outbox)`, with `intake` called by the bridge as
@@ -155,13 +161,14 @@ importing a bridge, and bridges read them from there:
   upload limit, 2000 MiB (Telegram's file upload documentation: 4000
   parts of 512 KiB).
 - Email: `max_text` None. The limit is on the whole message: Gmail
-  refuses a message over 25 MB encoded, which 2.3 states as 18,000,000
-  raw bytes; `message_bytes` is 2.3's `email_encoded_bytes` once it
-  lands, and until then the raw sum of the body and every file.
+  refuses a message over 25 MB, counted as 25,000,000 bytes of the whole
+  encoded message (D15c): `max_message_bytes` 25,000,000. Its size
+  function, `message_bytes`, is 2.3's `email_encoded_bytes`; in 2.1 it is
+  unset, so 2.1 refuses no email for size at request time.
 `split_text` splits a text over `max_text`, counting in the channel's
 units, into several messages, so `sent` is a list. A send over the
 limit (a Telegram file over `max_file_bytes`, an email whose
-`message_bytes` exceeds 18,000,000) is refused at request time, with
+`message_bytes`, once set, exceeds `max_message_bytes`) is refused at request time, with
 the protocol limit as the reason, so Tom never approves an impossible
 send.
 
@@ -200,7 +207,6 @@ class Declared:
     usage: str
     owner: str  # "telegram" or "email"
     refuse: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
-    settle_after_s: float | Callable[[broker.Action], float] | None = None
 
 
 DECLARED: dict[str, Declared]  # telegram.send_message, email.send
@@ -209,11 +215,9 @@ DECLARED: dict[str, Declared]  # telegram.send_message, email.send
 def declared_performers() -> list[Declared]: ...
 ```
 
-`refuse` has 1.4d's shape, `async (conn, action)`. `settle_after_s`
-(D22, D37) is a number or a function of the action (email's settle time
-scales with its size), resolved against the intent's action before
-`broker.reconcile`. Every task's
-Performers holds `declared_performers()`, so `request` holds a send for
+`refuse` has 1.4d's shape, `async (conn, action)`. Reconcile (D22, D37)
+runs once the effect's performing lock is free, then reads the remote; it
+waits on no age. Every task's Performers holds `declared_performers()`, so `request` holds a send for
 Tom and `dispatch(offered=...)` tells the turn the send exists.
 
 - `telegram.send_message`, `act`. Target: the chat id as text. Payload

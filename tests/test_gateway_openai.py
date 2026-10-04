@@ -35,7 +35,7 @@ import pytest
 from aiohttp import web
 from yarl import URL
 
-from core import db, ledger, spending, tasks
+from core import db, ledger, serve, spending, tasks
 from core.gateway import ClaudeLogin, Gateway, OpenAIKey, openai_credentialed
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -387,6 +387,29 @@ def test_a_turn_stopped_mid_stream_charges_the_worst_case_and_closes(dsn, tmp_pa
     assert out.charged["cut"] is True and not out.state["open_calls"]
     assert out.charged["usd_micros"] == estimate(sent) * 10 + 200 * 30
     assert out.state["state"] == "stopped" and tasks.audit(out.state) == []
+
+
+def test_a_call_a_killed_kernel_left_open_is_charged_by_recover(dsn, tmp_path, monkeypatch):
+    """The kernel dies after the call is opened and before it is charged:
+    restart charges it at its estimate once `run:<task>` is free."""
+
+    async def killed(self, request, *args, **kwargs):
+        return web.Response(status=502)  # opened, never charged
+
+    monkeypatch.setattr(Gateway, "_stream", killed)
+    sent = body(stream=True)
+    out = exchange(dsn, Upstream(data=fixture("stream_text.sse"), content_type=SSE), sent, tmp_path=tmp_path)
+    assert out.opened["holder"] == f"run:{out.task}" and out.charged is None
+
+    async def restart():
+        async with await db.connect(dsn) as conn:
+            done = await serve.recover(conn)
+            return done, await tasks.status(conn, out.task)
+
+    done, state = asyncio.run(restart())
+    assert out.opened["call_id"] in done["charged"]
+    assert tasks.audit(state) == [] and not state["open_calls"]
+    assert state["spent_usd_micros"] == out.opened["estimate_usd_micros"]
 
 
 def test_the_estimate_takes_the_tables_maximum_output_when_the_body_sets_none(dsn, tmp_path):

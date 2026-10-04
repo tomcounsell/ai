@@ -76,9 +76,14 @@ stop TASK_ID [--reason TEXT]   stop the task now, wherever its turn runs
 pending                        act-class effects held for Tom
 approve EFFECT_ID --note TEXT [--by B] [--via V] [--role-played]
                                Tom's tap on one held effect
-release EFFECT_ID              perform a held effect Tom approved
+release EFFECT_ID              perform a held effect Tom approved (a send is
+                               handed to its channel's bridge)
 correct TEXT [--by] [--via]    record Tom's next correction (global, direct)
 corrections                    every correction, in force for every turn
+serve [--plist]                the resident kernel: binds Tom's messages, owes
+                               notices, and runs every task's next step as
+                               rows land, until killed; `--plist` prints its
+                               launchd job instead
 backup [--plist]               dump the kernel database to the backup disk and
                                keep the newest dumps; `--plist` prints the
                                launchd job instead
@@ -133,23 +138,26 @@ from core.settings import (
 
 
 def _performers(b: tasks.Brief) -> broker.Performers:
-    """The task's own performers, built from its Brief. push_branch goes to
-    the task's own bare origin; the merge pushes to the Brief's origin URL,
-    from the kernel mirror with the GitHub credential when the kernel
-    provisioned the task, and from the workspace with none otherwise."""
+    """The task's own performers, built from its Brief, and every channel's
+    declared send (`core/bridge.py`). push_branch goes to the task's own bare
+    origin; the merge pushes to the Brief's origin URL, from the kernel mirror
+    with the GitHub credential when the kernel provisioned the task, and from
+    the workspace with none otherwise."""
+    from core.bridge import declared_performers
     from tools.push_branch import Merge, PushBranch
 
-    if not b.workspace:
-        return broker.Performers()
-    return broker.Performers(
-        PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch),
-        Merge(
-            b.mirror or b.workspace,
-            url=b.origin_url,
-            branch=b.target_branch,
-            credential=settings.github_keyfile if b.mirror else None,
-        ),
-    )
+    kernel = []
+    if b.workspace:
+        kernel = [
+            PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch),
+            Merge(
+                b.mirror or b.workspace,
+                url=b.origin_url,
+                branch=b.target_branch,
+                credential=settings.github_keyfile if b.mirror else None,
+            ),
+        ]
+    return broker.Performers(*kernel, *declared_performers())
 
 
 def _harnesses() -> dict:
@@ -267,11 +275,21 @@ def _status_line(task_id: str, out: dict) -> str:
     return f"{status.upper()} (task {task_id}; {spent}): {detail}"
 
 
+async def _serve() -> None:
+    from core import serve
+
+    try:
+        judgement_port = port()
+    except (credentials.MissingKey, ValueError) as exc:
+        raise SystemExit(f"serve refused: {exc}") from None
+    await serve.serve(runners(judgement_port), _performers)
+
+
 async def _run_task(task_id: str) -> str:
     from core.gateway import ClaudeLogin, Gateway, OpenAIKey
 
     async with await db.connect() as conn:
-        b = await tasks.brief(conn, task_id)
+        await tasks.brief(conn, task_id)  # KeyError for an unknown task
     from harnesses import claude_code
 
     try:
@@ -281,7 +299,7 @@ async def _run_task(task_id: str) -> str:
     gateway = Gateway(credential=ClaudeLogin(), openai_credential=OpenAIKey())
     await gateway.start()
     try:
-        out = await router.run(gateway, task_id, runners(judgement_port), performers=_performers(b))
+        out = await router.run(gateway, task_id, runners(judgement_port), performers=_performers)
     except claude_code.Unsandboxed as exc:
         raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
@@ -474,6 +492,9 @@ async def _verdict(conn, args) -> str:
 async def _run(args) -> None:
     if args.command == "run":
         print(await _run_task(args.task_id))
+        return
+    if args.command == "serve":
+        await _serve()
         return
     if args.command == "calibrate":
         try:
@@ -706,6 +727,10 @@ def _sync(args) -> bool:
             f"{manifest['documents']['rows']} documents, {manifest['dump_bytes']} bytes to {path}; "
             f"pruned {len(pruned)} files"
         )
+    elif args.command == "serve" and args.plist:
+        from core import serve
+
+        print(serve.plist().decode(), end="")
     elif args.command == "restore":
         try:
             print(json.dumps(backup.restore(args.dump, keep=args.keep)))
@@ -838,6 +863,7 @@ def main() -> None:
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
+    sub.add_parser("serve").add_argument("--plist", action="store_true")
     restore = sub.add_parser("restore")
     restore.add_argument("dump")
     restore.add_argument("--keep", action="store_true")

@@ -53,11 +53,10 @@ Resident total: about 760 MB above macOS. macOS itself, with its system
 services and no user apps, is estimated at 3.5 GB on a 16 GB Air.
 
 **What exists today.** The machine cluster runs under launchd as a
-Homebrew service. The kernel has no resident process yet: the gateway lives
-inside each `python -m core run` and exits with it. A resident kernel
-process is the design, so the bridges have a live port to hand messages to
-and the gateway outlives any one run. The bridges are not in this branch
-yet.
+Homebrew service. The kernel process is `python -m core serve`, kept alive
+by its LaunchAgent (`python -m core serve --plist` prints it); the gateway
+lives in it and outlives any one task. The bridges are not in this branch
+yet; their port in `core/` is.
 
 ## What runs on demand
 
@@ -140,9 +139,11 @@ task's own Postgres and Redis and starts fresh ones on the same ports for
 itself, so a check adds no service to the memory budget; its copy of the
 package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
 
-The current kernel runs turns one after another within a task and has no
-cross-task scheduler. The emulator's replay driver holds a lock-file slot per run; a
-kernel-held turn slot in Postgres is the design.
+The emulator's replay driver holds a lock-file slot per run; a kernel-held
+turn slot is the session advisory lock `turn-slot:<machine>`
+(`core/slot.py`): every harness turn holds it, so a second kernel or a
+`python -m core run` beside `serve` waits for it. It is reentrant within
+the task that holds it, so a check that runs a turn takes it once.
 
 **What runs beside the turn.** Bridges keep receiving and delivering
 released messages while a turn runs; an incoming request becomes a queued
@@ -257,7 +258,7 @@ authority, and a turn holds none.
 | Secret | Read by | Today |
 |---|---|---|
 | The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |
-| The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run` or `calibrate` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
+| The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run`, `calibrate`, or `serve` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on the OpenAI route's listed calls (`POST v1/responses`, `GET` or `HEAD` on `v1/models` and one model by id; any other method is a 403) and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
 | Mail credentials | The email bridge | Not built |
@@ -280,6 +281,15 @@ component from a directory it owns, following no link at any step
 regular, has one link (a hard link could name a file in the kernel key
 directory), and is not sparse, and otherwise returns why. The transcript copy
 ([harnesses.md](harnesses.md)) is read this way.
+
+`serve` builds the judgement port once, when it starts, and holds the
+keys for its life, so a key rotated with `judgement-keys` reaches the
+resident kernel only when it starts again (`launchctl kickstart -k
+gui/$(id -u)/com.valor.kernel`).
+With a judgement key missing, `serve` exits with `serve refused:` and the
+key's name; launchd's `KeepAlive` starts it again, at most once every ten
+seconds (launchd's default throttle), and each start writes the same line
+to `kernel.log` until the key is installed.
 
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is

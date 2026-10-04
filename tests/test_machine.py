@@ -6,7 +6,7 @@ No database, no model call. Live spend: none.
 """
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from core import machine
@@ -156,6 +156,17 @@ def test_a_legacy_question_without_a_state_returns_to_the_state_it_was_asked_in(
     led.turn("asked")
     led.add("question.asked", {"question_id": "q", "turn_id": "t", "text": "?"})
     assert led.fold().return_to is State.BUILD
+
+
+@pytest.mark.parametrize("question_id", [None, 5, ["q"], {"q": 1}, True])
+def test_a_question_id_that_is_not_a_string_is_malformed(question_id):
+    """Its answer could never name it, so the task does not wait on it."""
+    led = Ledger().plan().critique("sound")
+    led.turn("asked")
+    led.add("question.asked", {"question_id": question_id, "turn_id": "t", "text": "?", "state": "build"})
+    f = led.fold()
+    assert f.state is State.BUILD and f.open_question is None
+    assert f.ignored[-1]["type"] == "question.asked" and "not a string" in f.ignored[-1]["why"]
 
 
 # -- the join table ----------------------------------------------------------------
@@ -511,6 +522,12 @@ def _material(f: machine.Fold) -> tuple:
 
 @settings(max_examples=500, deadline=None)
 @given(STARTS, rows_strategy)
+# A question.asked with no question_id, in a working state: ignored, it
+# changes nothing.
+@example(
+    {"sdlc": 1, "instruction": "x"},
+    [("judge.decided", {"verdict": "precise", "leg": "manual"}), ("question.asked", {})],
+)
 def test_every_prefix_folds_to_exactly_one_state(start, generated):
     rows = [_row(1, "task.started", start)]
     rows += [_row(i + 2, t, p) for i, (t, p) in enumerate(generated)]
@@ -633,3 +650,17 @@ def test_a_malformed_turn_ended_changes_nothing():
     led.add("turn.ended", {"turn_id": "t", "outcome": "done", "result": "text"})
     after = led.fold()
     assert after.session == before.session and len(after.ignored) == len(before.ignored) + 2
+
+
+def test_a_turn_that_ended_in_an_error_does_not_spend_the_steering():
+    led = Ledger()
+    state = led.state.value
+    led.add("message.steered", {"text": "use the other branch"})
+    led.add("turn.started", {"turn_id": "e", "state": state})
+    led.add(
+        "turn.ended", {"turn_id": "e", "outcome": "done", "result": {"session_id": "s", "is_error": True}}
+    )
+    kept = led.fold().steering
+    led.add("turn.started", {"turn_id": "ok", "state": state})
+    led.add("turn.ended", {"turn_id": "ok", "outcome": "done", "result": {"session_id": "s"}})
+    assert [p["text"] for p in kept] == ["use the other branch"] and led.fold().steering == []

@@ -84,3 +84,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_instance_grant
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_judgement
     ON events ((payload->>'judgement_id'))
     WHERE type IN ('judgement.answered', 'judgement.failed');
+
+-- The resident kernel and the bridge port (docs/plans/m2-1-port.md). One
+-- received row per message, one binding per received row, one notice per
+-- thing a task owes Tom word of, one sent mark per notice, one release
+-- request per effect. Sent messages are found by one index over a notice's
+-- `sent` and a send outcome's `result.sent`.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_message
+    ON events (task_id, (payload->>'chat_id'), (payload->>'message_id'))
+    WHERE type = 'message.received';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_binding
+    ON events ((payload->>'received_id')) WHERE type = 'message.bound';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice
+    ON events (task_id, (payload->>'about_key')) WHERE type = 'notice.requested';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice_sent
+    ON events ((payload->>'notice_id')) WHERE type = 'notice.sent';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_release
+    ON events ((payload->>'effect_id')) WHERE type = 'release.requested';
+CREATE INDEX IF NOT EXISTS events_sent_messages
+    ON events USING gin ((COALESCE(payload->'sent', payload->'result'->'sent')))
+    WHERE type IN ('notice.sent', 'effect.outcome');
+
+-- Every insert notifies `valor_events` at commit, which wakes the kernel
+-- and the bridges. It refuses nothing; `valor_stop` stays as it is.
+CREATE OR REPLACE FUNCTION events_notify() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('valor_events', json_build_object(
+        'id', NEW.id, 'task_id', NEW.task_id, 'type', NEW.type)::text);
+    RETURN NULL;
+END
+$$;
+DROP TRIGGER IF EXISTS events_notify ON events;
+CREATE TRIGGER events_notify AFTER INSERT ON events
+    FOR EACH ROW EXECUTE FUNCTION events_notify();

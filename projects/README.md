@@ -17,6 +17,10 @@ workspaces for (`python -m core start ... --project NAME`).
   merge lands on that URL only when Tom has granted the (URL, branch) pair
   (`python -m core merge-target add`), and never on the remote's default
   branch; `start` refuses otherwise.
+- `chats` lists the chats whose messages start tasks under the project
+  (`telegram:<chat id>`, `email:<sender address>`), and `machine` the
+  machine whose bridges receive them; none means the default machine, so
+  each chat has one owner.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

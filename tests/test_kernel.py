@@ -118,8 +118,12 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
                 conn, perf, task, broker.Action("workspace_write", "a.txt", {"text": "a"})
             )
             held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            twin = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
+            once = await broker.request(
+                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
+            )
             again = await broker.request(
-                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"})
+                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
             )
             with pytest.raises(broker.NotApproved):
                 await broker.release(conn, perf, held.effect_id)
@@ -128,11 +132,13 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
             sent = await broker.release(conn, perf, held.effect_id)
             repeat = await broker.release(conn, perf, held.effect_id)
             state = await tasks.status(conn, task)
-        return wrote, held, again, lines_before, sent, repeat, state
+        return wrote, held, twin, once, again, lines_before, sent, repeat, state
 
-    wrote, held, again, lines_before, sent, repeat, state = run(go())
+    wrote, held, twin, once, again, lines_before, sent, repeat, state = run(go())
     assert wrote.kind == "done" and (tmp_path / "a.txt").read_text() == "a"
-    assert held.kind == "pending" and again.effect_id == held.effect_id
+    # Two identical requests are two effects; one request_id is one.
+    assert held.kind == "pending" and twin.kind == "pending" and twin.effect_id != held.effect_id
+    assert again.effect_id == once.effect_id
     assert lines_before == 0
     assert sent.kind == "done" and repeat.kind == "done"
     assert _lines(tmp_path / "outbox.jsonl") == 1
@@ -608,18 +614,18 @@ def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one
 ):
     outbox = tmp_path / "outbox.jsonl"
     action = broker.Action("outbox_send", "tom", {"text": "hi"})
-    described = action.describe("act", False)
+    held, bare = ledger.new_id(), ledger.new_id()
+    described = action.describe("act", False, held)
     outbox.write_text(json.dumps({"key": described["idempotency_key"], "to": "tom", "text": "hi"}) + "\n")
     perf = broker.Performers(OutboxAppend(outbox), WorkspaceWrite(tmp_path))
 
     async def go():
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
-            held, bare = ledger.new_id(), ledger.new_id()
             await ledger.append(conn, task, "effect.held", {"effect_id": held, **described})
             for effect_id in (held, bare):
                 await ledger.append(conn, task, "effect.intent", {
-                    "effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": None,
+                    "effect_id": effect_id, "idempotency_key": action.key(effect_id), "approval_id": None,
                 })  # fmt: skip
             return (
                 await broker.reconcile(conn, perf, held),

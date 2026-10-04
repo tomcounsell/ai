@@ -6,11 +6,16 @@ conforms to the bridge port defined in [telegram.md](telegram.md#the-bridge-port
 intake, performers, and the outbox. This doc covers what is particular to
 email.
 
-**Status.** Design. The current kernel has no bridge; answers and feedback
-reach a task through `python -m core` and record `via: "the command line"`.
-The email code that exists today can be adapted to the port; the last
-sections say what a conforming implementation keeps and what it hands to
-`core/`.
+**Status.** The kernel side of the port is built (`core/bridge.py`,
+`core/intake.py`, `core/notices.py`); the email bridge process is not.
+Every email record is `verified=false`, so it binds as nothing until DMARC
+verification is built. `core/bridge.py` states Gmail's limit as 25,000,000
+bytes of the whole encoded message; its size function is the email
+bridge's, and until the bridge sets it, an email is not refused for size
+at request time. Until the bridge is built, answers and feedback reach a task
+through `python -m core` and record `via: "the command line"`. The email
+code that exists today can be adapted to the port; the last sections say
+what a conforming implementation keeps and what it hands to `core/`.
 
 ## What it serves
 
@@ -89,8 +94,8 @@ rebuild-baseline.md (popoto #191 and #188).
 
 ## Sending
 
-**The performer.** `email.send` is `act`. Its target is the first `To`
-address, and its payload is the whole message:
+**The performer.** `email.send` is `act`. Its target is the `To`
+addresses, lowercased, sorted, and comma-joined, and its payload is the whole message:
 
 | Payload field | Meaning |
 |---|---|

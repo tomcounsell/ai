@@ -203,7 +203,19 @@ async def brief(conn, task_id: str) -> Brief:
     ).fetchone()
     if row is None:
         raise KeyError(task_id)
-    return Brief.load(row[0])
+    body = row[0]
+    # A task started by message is provisioned after it starts, by a kernel
+    # job; what that made is a row, laid over the document written at start.
+    made = await (
+        await conn.execute(
+            "SELECT payload->'fields' FROM events WHERE task_id = %s AND type = 'workspace.provisioned' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        )
+    ).fetchone()
+    if made is not None:
+        body = {**body, **made[0]}
+    return Brief.load(body)
 
 
 def stage_text(state: machine.State | str) -> str | None:
@@ -242,11 +254,11 @@ async def dispatch(
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file. Returns the text, the
-    correction numbers it carries, the text's digest, and the persona's
-    digest and size. A persona that cannot be read (a missing persona file
-    or identity field, or a `CLAUDE.md` that is missing or lacks the
-    governance or tests paragraph) raises `persona.PersonaUnreadable`;
-    there is no fallback text."""
+    correction numbers it carries, the text's digest, the usage lines it
+    offered, and the persona's digest and size. A persona that cannot be
+    read (a missing persona file or identity field, or a `CLAUDE.md` that
+    is missing or lacks the governance or tests paragraph) raises
+    `persona.PersonaUnreadable`; there is no fallback text."""
 
     b = await brief(conn, task_id)
     rows = await ledger.read(conn, task_id)
@@ -266,13 +278,15 @@ async def dispatch(
     if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN) and not fresh:
         head += f"\nPlan: {f.plan['path']} at {f.plan['commit']}"
     sections = [rendered, head, corrections.render(standing)]
+    lines: list[str] = []
     if fresh:
         sections.append(verdict_text())
         stage = stage_text(fresh)
         if stage:
             sections.append(stage)
     elif b.workspace:
-        sections.append(channel_text(list(offered)))
+        lines = list(offered)
+        sections.append(channel_text(lines))
         stage = stage_text(state)
         if stage:
             sections.append(stage)
@@ -281,6 +295,7 @@ async def dispatch(
         "text": text,
         "corrections": [c["number"] for c in standing],
         "sha256": ledger.digest(text),
+        "offered": lines,
         "persona_sha256": persona.digest(rendered),
         "persona_bytes": len(rendered.encode()),
     }
@@ -296,7 +311,15 @@ async def is_stopped(conn, task_id: str) -> bool:
     return row is not None
 
 
-async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
+async def stop(
+    conn,
+    task_id: str,
+    *,
+    reason: str,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> bool:
     """Fence the task and wake whichever process is running its turn.
 
     The `task.stopped` row is the fence: the gateway refuses every later
@@ -310,7 +333,12 @@ async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
             raise CalibrationTask(f"task {task_id} is a calibration task; it runs no turn to stop")
         if await is_stopped(conn, task_id):
             return False
-        await ledger.append(conn, task_id, "task.stopped", {"reason": reason, "by": by})
+        await ledger.append(
+            conn,
+            task_id,
+            "task.stopped",
+            {"reason": reason, "by": by, "provenance": ledger.provenance(by, via, role_played)},
+        )
         await conn.execute("SELECT pg_notify(%s, %s)", (STOP_CHANNEL, task_id))
     return True
 

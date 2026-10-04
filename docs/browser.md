@@ -45,7 +45,12 @@ walk as every other signal). It adds `screens` to `turn.collected`:
 contents, so a sparse screen is sized, not refused) for a regular file with
 one link, `{name, refused}` with the reason for anything else (a link, a
 hard link, a FIFO, a directory). An entry that cannot be moved is removed
-unread and recorded as `{name, refused}`. `done.md` names a screen by its original name. The turn
+unread and recorded as `{name, refused}`. When a restarted kernel records a
+turn a kill left uncollected, it inspects the screens already filed under
+`handled/<turn_id>/screens/` the same way, in place, beside those still in
+`.valor/screens/`; a screen in both is recorded once, as the copy still in
+`.valor/screens/`, which replaces the filed one when it is moved, so the file
+recorded is the file kept. `done.md` names a screen by its original name. The turn
 quotes the checksums `look` printed in `done.md`; the kernel records no
 checksum, and a screen is as editable as `done.md`.
 Screens are evidence, never a gate: nothing requires one and no check reads

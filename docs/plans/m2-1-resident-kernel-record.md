@@ -141,3 +141,192 @@ read, marks as seen only the rows the step read, makes the id match in
 `lowest` and `highest` fit a bigint, and adds `services:<task>` to
 `docs/data.md`, each with a test; rerun the three checks; merge if they
 pass. 2.2, 2.3 and 4.1 build on this task.
+
+## Patch round 2
+
+Scope: the Delivery's recommendation (Tom's feedback of 2026-10-03).
+Rebased onto the rebuild branch at ca620a91f (3a, 3c and 4.2 merged).
+
+1. A stopped task settles. `Kernel.schedule` settles every task whose
+   services the kernel holds that is no longer active and has no job:
+   its services stop and `services:<task>` is released on the wake that
+   reads the stop. Test: `test_a_stop_between_steps_settles_the_task`
+   (a provisioned Redis, planned, then stopped between steps: the Redis
+   is gone and the lock is free).
+2. A step marks as seen only the rows it read and the rows it wrote.
+   `ledger.WRITTEN`, a contextvar the kernel sets around a step, collects
+   the ids `ledger.append` writes in it; after a step that did not move,
+   seen advances over the step's own rows and stops at the first row
+   another writer added while it ran, so that row steps the task again.
+   The gateway's rows (`gateway.opened`, `gateway.refused`,
+   `gateway.charged`) join the notice rows as rows that wake no step,
+   since the gateway writes them outside the step's context. Test:
+   `test_a_row_written_during_a_step_steps_it_again` (a gateway row
+   during a step steps nothing; a row added during the next step steps
+   the task once more, and its own rows do not).
+3. `intake.highest` and `intake.lowest` count an all-digit id only when
+   it fits a bigint, compared as numeric first, so a longer id neither
+   raises nor counts. Test:
+   `test_highest_and_lowest_skip_ids_past_a_bigint`.
+4. `docs/data.md` names `services:<task>` among the session locks;
+   `docs/harnesses.md` says the kernel keeps services up between steps
+   and stops them on waiting, merge, or a stop; `docs/architecture.md`
+   says a row written during a step steps the task again.
+5. From the rebase: `recover` sums an interrupted turn's charges with
+   3a's `spending.turn_spent` (numeric), not a bigint sum of its own;
+   `turn.started` carries 4.2's persona digest and size beside
+   `kernel_commit` and `offered`; `signals.collect` and `recollect` both
+   read 3c's screens after the signal files.
+6. Question 1 (the operator) is under "Decided by default".
+7. From 2.2's review: the fold's `question.asked` branch set
+   `return_to` before reading `question_id`, so a row without one was
+   ignored yet changed the fold. It now reads the id first. The
+   Hypothesis example (a `question.asked` with an empty payload in
+   `plan`) is an `@example` on
+   `test_every_prefix_folds_to_exactly_one_state`.
+8. A collect after a kill reads the screens 3c had already filed.
+   `signals.filed_screens` inspects `.valor/handled/<turn>/screens/` in
+   place, with the same descriptor checks as `read_screens` (both now
+   share `_open_dirs` and `_inspect`); `recollect` records those and the
+   ones still in `.valor/screens/`, once per name. `docs/browser.md`
+   says so. Test: `test_recollect_reads_the_screens_a_killed_collect_had_filed`
+   (a filed screen, a filed link refused, an unfiled one moved; a second
+   recollect gives the same list).
+
+Each new test fails on the code before this round. Suite: 763 passed,
+11 skipped (`valor_rebuild_test_21build`, ports 6440-6449). Ruff check and
+format check clean.
+
+## Patch round 3
+
+Scope: the blocking finding and the low findings of the review after
+patch round 2, and the tester's gaps, as the lead decided.
+
+1. An OpenAI-route gateway call carries `holder: run:<task>`, as the
+   Anthropic route's does, so `recover` charges one a killed kernel left
+   open. Test: `test_a_call_a_killed_kernel_left_open_is_charged_by_recover`
+   (the call opened and never charged; `recover` charges its estimate and
+   `tasks.audit` is empty).
+2. `Kernel.settle` closes `services:<task>` even when stopping the
+   services raises. Test:
+   `test_settle_releases_the_lock_when_stopping_the_services_fails`.
+3. `recollect` reads what is still in `.valor/` first, moving it aside,
+   then what `handled/<turn>/` holds: a file in both places is read as the
+   one filed last, which is the copy kept, as screens are. Test:
+   `test_recollect_reads_the_text_signal_it_keeps`.
+4. `intake.highest` and `intake.lowest` compare an id with the bigint
+   maximum as text (length, then digits) and cast only one that fits, so
+   an id of any length is skipped and never overflows the cast. The
+   comparison stays in SQL, so paging reads one aggregate, not every id
+   of the chat. Test: `test_highest_and_lowest_skip_ids_past_a_bigint`
+   with an id of 131073 digits.
+5. A `question.asked` whose `question_id` is not a string is malformed
+   and ignored, as one without an id is. Test:
+   `test_a_question_id_that_is_not_a_string_is_malformed`.
+6. Tests: `test_tick_called` waits for the bridge's tick event, not a
+   fixed sleep; `test_a_stop_between_steps_settles_the_task` takes its
+   ports from `VALOR_TEST_PORTS` when set.
+7. L2 (a row committing with an id below one already seen) is a
+   follow-up, under "Decided by default".
+
+Each new test fails on the code before this round. Suite: 771 passed,
+11 skipped (`valor_rebuild_test_21build`, ports 6440-6449). Ruff check and
+format check clean.
+
+## Patch round 4
+
+Scope: the blocking finding of the review after patch round 3, as the
+lead decided.
+
+1. `serve.serve` builds its gateway with `openai_credential=OpenAIKey()`,
+   as `core run` does, so an OpenAI-route call under the resident kernel
+   goes upstream with the installed key, not the turn's own. `token()` is
+   None when the key file is missing, so startup is unchanged without it.
+   Test: `test_the_kernel_gateway_sends_the_installed_openai_key` (runs
+   `serve.serve` with no gateway passed, a key file and a local upstream;
+   the upstream sees the installed key on `/v1/responses`).
+
+The new test fails on the code before this round (the upstream saw the
+turn's own authorization). Suite: 772 passed, 11 skipped
+(`valor_rebuild_test_21build`, ports 6440-6449). Ruff check and format
+check clean.
+
+## Patch round 5
+
+Scope: the blocking finding and two of the notes of the review after
+patch round 4, as the lead decided.
+
+1. `runs.kernel_commit()` is no longer cached: it reads the checkout's
+   HEAD (`runs.CHECKOUT`) on every turn, so under `serve`, after the
+   checkout moves, `turn.started` records the commit its persona and stage
+   files were read from. Test:
+   `test_turn_started_records_the_commit_its_persona_was_read_from` (one
+   process, a checkout committed between two turns; each row's commit is
+   the HEAD of its turn and the persona digests follow).
+2. `test_services_survive_between_steps` takes its ports from
+   `VALOR_TEST_PORTS`, through the helper `own_ports` it now shares with
+   `test_a_stop_between_steps_settles_the_task`.
+3. `docs/machine.md` says `serve` builds the judgement port at start, so
+   a rotated key takes a restart, and that with a key missing `serve`
+   exits and launchd's `KeepAlive` restarts it, writing the refusal to
+   `kernel.log` each time. `docs/data.md` says when `kernel_commit` is
+   read.
+4. L1 (the plist's overrides) and the earlier late-commit note are
+   follow-ups, under "Decided by default".
+
+The new test fails with the cache restored. Suite: 773 passed, 11
+skipped (`valor_rebuild_test_21build`, ports 6440-6449). Ruff check and
+format check clean.
+
+## Rebase onto 2418d02c8
+
+2.1 (squashed from m2-1-docs6 at 94bd1a7ac, whose checks passed) rebased
+onto the rebuild branch at 2418d02c8 (1.4b, 1.4i, 1.4s, 1.4u, 1.4v, 1.4w,
+3b, 1.4d, and 1.5 merged). The tip is the status quo; 2.1's changes sit on
+top of it, through its mechanisms.
+
+Conflicts and resolutions:
+
+1. `core/broker.py`: rebuilt from the tip (explicit `Performers` passed
+   positionally, async performers, the effect's lock file
+   `core/performing.py`), with 2.1's request id, the key ending in the
+   effect id, declared bridge performers (`release.requested`,
+   `released`), the refused release's notice, `dangling`, and `Unknown`
+   laid on it. The tip's lock file settles a dangling intent; no age is
+   read.
+2. `broker.CURRENT` is dropped. The composition root's `_performers`
+   joins the tip's (the merge with URL, branch, and GitHub credential)
+   with every declared send, and `router.run`, `router.step`,
+   `serve.recover`, and the kernel's release take the factory
+   (`router.PerformersFactory`) and build a task's Performers from its
+   Brief. `tests/scripted.route` passes the factory; `performers_of` is
+   gone. The kill test's hanging runner passes `ctx.performers`, so its
+   Brief offers what the scripted one does.
+3. `core/router.py`: the tip's interruptible `_Services.up` (no time
+   limit; a stop or a cancel interrupts it) with 2.1's `claim`, `close`,
+   and `refresh`, and `run` as `step` repeated. `refresh` reads the Brief
+   again only while the handle knows no workspace, so a handle built with
+   its layout (the tip's interrupt tests) keeps it.
+4. `core/runs.py`, `core/tasks.py`, `core/session.py`: the tip's
+   `offered` argument carries what `CURRENT` carried; the turn slot and
+   `kernel_commit` are kept.
+5. `core/signals.py`: the tip's descriptor walk. `recollect` is rebuilt
+   on it (`open_turn_dir`, `read_turn_file`, `open_plain_file`); a
+   screen that is a link reads as the tip words it.
+6. `core/settings.py`: the tip's fields (no `reconcile_after_s`,
+   `git_timeout_s`, `idle_turns`, `setup_timeout_s`) with 2.1's machine,
+   operator, inbound, and `serve_tick_s` fields.
+7. Docs: the tip's text with 2.1's additions. `docs/sandbox.md` takes the
+   tip's two wording changes to the section it holds;
+   `docs/sandbox-openings.md` points at it.
+
+Dropped, since the tip removed what they rested on: `Declared.settle_after_s`
+and `settle()`, email's settle at `reconcile_after_s`, the sentence on it in
+`docs/bridges/email.md`, and the plan's settle bullet and test. A bridge send
+whose perform ended with no outcome is read from the server on the next
+reconcile; one the server does not hold is `failed`
+(`test_a_killed_send_the_server_never_got_reconciles_failed`,
+`test_unknown_leaves_intent`). Nothing new limits, waits, or guards.
+
+Suite: 1211 passed, 21 skipped (`valor_rebuild_test_21build`, ports
+6430-6439). Ruff check and format check clean.

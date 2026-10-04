@@ -8,11 +8,16 @@ all. Readers order by `id`.
 import hashlib
 import json
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+
+# The ids of the rows appended in this context, when a caller collects them
+# (the kernel, around one step of a task).
+WRITTEN: ContextVar[set[int] | None] = ContextVar("ledger_written", default=None)
 
 
 def provenance(by: str, via: str, role_played: bool) -> dict[str, Any]:
@@ -40,7 +45,11 @@ async def append(conn, task_id: str, type: str, payload: dict[str, Any]) -> int:
         "INSERT INTO events (task_id, type, payload) VALUES (%s, %s, %s) RETURNING id",
         (task_id, type, Jsonb(payload)),
     )
-    return (await cur.fetchone())[0]
+    row_id = (await cur.fetchone())[0]
+    written = WRITTEN.get()
+    if written is not None:
+        written.add(row_id)
+    return row_id
 
 
 async def read(conn, task_id: str) -> list[dict[str, Any]]:

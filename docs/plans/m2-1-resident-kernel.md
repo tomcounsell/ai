@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-1-resident-kernel
 type: build
-status: delivered-not-passed
+status: passed
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -20,7 +20,8 @@ Built on the rebuild branch after 1.4b, 1.4d, and 1.4s merge. It takes
 1.4d's broker as given: a `broker.Performers` built per task from its
 Brief; `request(conn, performers, task_id, action)`,
 `release(conn, performers, effect_id)`, `reconcile(conn, performers,
-effect_id, settle_after_s=None)`; `perform`, `lookup`, and
+effect_id)`, which asks only once the effect's lock file
+(`core/performing.py`) is free; `perform`, `lookup`, and
 `refuse(conn, action)` async; `dispatch(..., offered=())`. Signal files
 are read through 1.4s's `read_turn_file`.
 
@@ -227,11 +228,9 @@ notification is delivered at commit. The trigger refuses nothing;
   the action from the intent, falling back to `effect.held` for rows
   written before this, so a propose-class intent (never held) reconciles
   too. 1.4d builds to this shape.
-- **Settle time.** `Declared.settle_after_s` is a number or a function of
-  the action; `bridge.serve` resolves it against the intent's action and
-  passes the number to `reconcile`. Reconcile runs once the effect's
-  performing lock is free, then reads the remote; it waits on no age.
-  2.3 sets email's settle function and size function.
+- **Settle.** Reconcile runs once the effect's performing lock is free,
+  then reads the remote; it waits on no age and takes no settle time.
+  2.3 sets email's size function.
 - **`broker.Unknown` after a failed perform** (raised by `perform`, or by
   the `lookup` the broker asks next) leaves the intent in flight with no
   outcome, for reconcile. 2.2 relies on this (port item 24).
@@ -411,7 +410,7 @@ bridge performers.
   `test_oversize_file_refused_at_request` (email sums files and body
   through the size function), `test_split_utf16`,
   `test_declared_in_every_task`, `test_tick_called`,
-  `test_settle_after_function`.
+  `test_a_killed_send_the_server_never_got_reconciles_failed`.
 
 ## Files
 
@@ -494,8 +493,9 @@ bridge performers.
 - A chat spec with no `machine` belongs to `settings.default_machine`.
 - A release refused before `release.requested` exists writes no row;
   `core release` raises with nothing written.
-- Performers reach the kernel's code through the `broker.CURRENT`
-  contextvar, beside the `performers=` keyword.
+- Performers reach the kernel's code as an argument: the composition
+  root's factory (`router.PerformersFactory`) builds them from the Brief
+  for each step, recover, and release.
 - A task started by message has `workspace=None`; its provision job
   writes `workspace.provisioned`, which `tasks.brief` lays over the
   Brief; a failure writes `workspace.failed` and a notice, retried only
@@ -505,20 +505,39 @@ bridge performers.
   same for judgement calls.
 - A declared performer is one with an `owner` and no `perform`.
 - Binding notices go by Telegram; other notices to `operator_chat`.
-- One router step per task per wake with new rows; `notice.requested`
-  and `notice.sent` rows wake no step; stopped tasks are skipped;
-  services go down in a settled state or `merge`.
+- One router step per task per wake with new rows; notice rows and the
+  gateway's rows wake no step; a row another writer adds during a step
+  steps the task again; stopped tasks are skipped, and their services go
+  down when the kernel reads the stop; services go down in a settled
+  state or `merge`.
 - Recollect covers the last non-fresh turn with a state.
 - `core run` refuses a task whose `services:<task>` another process
   holds: one holder is a scheduling fact.
 - The test helpers are `tests/bridges.py`.
+- The operator (question 1, decided by Valor as assumed, Tom's feedback
+  of 2026-10-03): Tom's Telegram user id and email addresses as `main`'s
+  bridge configuration names them; the operator chat is the new group
+  "Valor rebuild" (decision 16), not a direct chat.
+- `intake.highest` and `intake.lowest` count only all-digit ids that fit
+  a bigint; a longer one is no integer id of a chat.
+- `seen` is a high-water mark over row ids: a row committed by another
+  writer with an id below one already seen steps nothing until another
+  row arrives. A follow-up, not this task (review after patch round 2,
+  L2).
+- `recollect` reads a signal filed in both `.valor/` and `handled/` as
+  the one filed last, as screens are.
+- `serve.PLIST_ENV` carries fewer `VALOR_*` overrides than a turn reads
+  (`VALOR_BROWSER`, the upstreams, `VALOR_STAGES`, `VALOR_PERSONA`, the
+  judgement URLs), so one set
+  in Tom's shell reaches `run` and not the kernel. None is set on this
+  Mac. A follow-up, not this task (review after patch round 4, L1).
+- `turn.started` records the checkout's HEAD read as the turn starts. The
+  Python a resident kernel runs stays the commit it started at; no field
+  records that, since no doc reads it.
 
 ## Questions for Tom
 
-1. **Who is the operator.** Tom's Telegram user id and his email
-   addresses. The operator chat is the new group "Valor rebuild"
-   (decision 16), not a direct chat. Assumed: the user id and addresses
-   `main`'s bridge configuration names for Tom.
+None open.
 
 ## Record
 

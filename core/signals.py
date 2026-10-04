@@ -100,6 +100,93 @@ def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
     return signals
 
 
+def recollect(workspace_dir: str | Path, turn_id: str) -> Signals:
+    """Read again what a turn left, for a turn that ended but was never
+    collected: first whatever is still in `.valor/` (a move the kill cut
+    short), filed away and read as `collect` does, then what
+    `.valor/handled/<turn_id>/` already holds, through the same walk. A file
+    in both places is read once, as the one filed last: the copy from
+    `.valor/`, which replaced the filed one, so what is read is what is
+    kept. Screens are recorded the same way."""
+    signals = collect(workspace_dir, turn_id)
+    try:
+        root = os.open(workspace_dir, workspace.DIR_FLAGS)
+    except OSError:
+        return signals
+    try:
+        handled, why = workspace.open_turn_dir(root, f"{DIR}/handled/{turn_id}")
+    finally:
+        os.close(root)
+    if handled is None:
+        if why:
+            signals.unreadable.append(why)
+        return signals
+    try:
+        _filed(signals, handled)
+    finally:
+        os.close(handled)
+    return signals
+
+
+def _filed(signals: Signals, handled: int) -> None:
+    """Fill in from `handled/<turn_id>/` every signal `collect` did not
+    read: each read in place, through `read_turn_file`."""
+    for name in TEXT_SIGNALS:
+        if getattr(signals, name) is None:
+            body, why = workspace.read_turn_file(handled, f"{name}.md")
+            if body is not None:
+                setattr(signals, name, body.decode(errors="replace").strip() or f"(empty {name}.md)")
+            elif why:
+                signals.unreadable.append(why)
+    if signals.plan is None and signals.plan_error is None:
+        body, why = workspace.read_turn_file(handled, "plan.json")
+        if body is not None:
+            try:
+                value = json.loads(body)
+                if not isinstance(value, dict):
+                    raise TypeError("not a JSON object")
+                signals.plan = value
+            except (ValueError, TypeError) as exc:
+                signals.plan_error = f"plan.json is unreadable: {exc!r}"
+        elif why:
+            signals.plan_error = f"plan.json is unreadable: {why}"
+    seen = {e["file"] for e in signals.effects}
+    effects, why = workspace.open_turn_dir(handled, "effects")
+    if effects is not None:
+        try:
+            for name in sorted(n for n in os.listdir(effects) if n.endswith(".json") and n not in seen):
+                body, why = workspace.read_turn_file(effects, name)
+                entry: dict[str, Any] = {"file": name}
+                if body is None:
+                    entry["error"] = (
+                        f"unreadable request: {why or name + ' was listed and gone when it was read'}"
+                    )
+                    signals.effects.append(entry)
+                else:
+                    signals.effects.append(_request(entry, body))
+        finally:
+            os.close(effects)
+    elif why:
+        signals.unreadable.append(why)
+    signals.effects.sort(key=lambda e: e["file"])
+    seen = {e["name"] for e in signals.screens}
+    screens, why = workspace.open_turn_dir(handled, "screens")
+    if screens is not None:
+        try:
+            for name in sorted(n for n in os.listdir(screens) if n not in seen):
+                fd, st, why = workspace.open_plain_file(screens, name)
+                if fd is None:
+                    signals.screens.append({"name": name, "refused": why or f"{name} was listed and gone"})
+                    continue
+                os.close(fd)
+                signals.screens.append({"name": name, "bytes": st.st_size})
+        finally:
+            os.close(screens)
+    elif why:
+        signals.unreadable.append(why)
+    signals.screens.sort(key=lambda e: e["name"])
+
+
 def _effects(signals: Signals, valor: int, turn_id: str) -> None:
     effects, why = workspace.open_turn_dir(valor, "effects")
     if effects is None:
@@ -116,20 +203,24 @@ def _effects(signals: Signals, valor: int, turn_id: str) -> None:
                 )
                 signals.effects.append(entry)
                 continue
-            try:
-                request = json.loads(body)
-                if not isinstance(request, dict):
-                    raise TypeError("not a JSON object")
-                entry["request"] = {
-                    "action_type": str(request["action_type"]),
-                    "target": str(request["target"]),
-                    "payload": dict(request.get("payload") or {}),
-                }
-            except (ValueError, KeyError, TypeError) as exc:
-                entry["error"] = f"unreadable request: {exc!r}"
-            signals.effects.append(entry)
+            signals.effects.append(_request(entry, body))
     finally:
         os.close(effects)
+
+
+def _request(entry: dict[str, Any], body: bytes) -> dict[str, Any]:
+    try:
+        request = json.loads(body)
+        if not isinstance(request, dict):
+            raise TypeError("not a JSON object")
+        entry["request"] = {
+            "action_type": str(request["action_type"]),
+            "target": str(request["target"]),
+            "payload": dict(request.get("payload") or {}),
+        }
+    except (ValueError, KeyError, TypeError) as exc:
+        entry["error"] = f"unreadable request: {exc!r}"
+    return entry
 
 
 def _screens(signals: Signals, valor: int, turn_id: str) -> list[dict[str, Any]]:

@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, db, ledger, machine, spending, tasks, transcripts
+from core import binaries, db, git, ledger, machine, slot, spending, tasks, transcripts
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -101,7 +101,31 @@ async def run_turn(
     session (critique, review, docs): its Brief carries the verdict channel,
     and `turn.started` says `fresh: true`, so the fold never resumes its
     session. `offered` is the usage lines of the task's performers, which
-    the working session's Brief lists. Returns the `turn.ended` payload."""
+    the working session's Brief lists. Returns the `turn.ended` payload.
+
+    The turn holds the turn slot (`core/slot.py`) from before its Brief is
+    rendered until `turn.ended` is written."""
+    async with slot.held(task_id, dsn or gateway.dsn):
+        return await _run_turn(gateway, task_id, build, dsn, state, fresh, offered)
+
+
+# The kernel's checkout: its persona and stage files are read from it.
+CHECKOUT = Path(__file__).resolve().parent.parent
+
+
+def kernel_commit() -> str | None:
+    """The commit the kernel's checkout is at, read on every turn: a
+    resident kernel's checkout moves under it, and each turn reads the
+    persona and stage files afresh, so `turn.started` records the commit
+    those files were read from. The same store and the same commit give
+    the same Brief and prompt."""
+    try:
+        return git.head(CHECKOUT)
+    except Exception:  # noqa: BLE001  no trusted git, or not a checkout: nothing to record
+        return None
+
+
+async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict[str, Any]:
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -139,6 +163,8 @@ async def run_turn(
                         "brief": dispatched["text"],
                         "brief_sha256": dispatched["sha256"],
                         "corrections": dispatched["corrections"],
+                        "kernel_commit": kernel_commit(),
+                        "offered": dispatched["offered"],
                         "persona_sha256": dispatched["persona_sha256"],
                         "persona_bytes": dispatched["persona_bytes"],
                     },

@@ -1548,7 +1548,9 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
         return failed, got[0], none
 
     failed, lock_free, none = run(go())
-    assert failed.kind == "failed" and lock_free is True and none is None
+    # The push failed and the remote cannot be read: whether it happened is
+    # unknown, so the intent stays in flight.
+    assert failed.kind == "unknown" and lock_free is True and none is None
 
 
 def test_a_grant_is_refused_in_patch(dsn, tmp_path):

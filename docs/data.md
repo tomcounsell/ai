@@ -114,12 +114,12 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/spending.py` | `gateway.opened` | `call_id`, `turn_id`, model, `route`, estimate (`usd_micros` worst case, estimated input, `max_tokens`). A judgement call's (written through `core/judgement.py`) has `turn_id` null and `route: judgement`, and adds `judgement_id`, site, leg. Ledgers written before 2026-10-03 hold `gateway.reserved` rows, which the folds read as this row | Metered spending: every call is on the ledger |
 | `core/spending.py` | `gateway.refused` | the call's fields plus reason, only `stopped` | Lossless stop; the refusal is itself recorded |
 | `core/spending.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Metered spending |
-| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, `harness_version` (the installed release), argv, the dispatched text whole, `brief_sha256`, `persona_sha256`, `persona_bytes`, correction numbers | Corrections reach every turn; legibility |
-| `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id; for a workspace turn, the id the kernel chose), the paths of its stdout and stderr files, metered spend (the numeric sum of the turn's charges); `transcript` (per file: name, `documents`, `sha256` and `bytes` of the whole file, `offset`, `prefix_changed`; and the files skipped, with why), or `no_transcript` with the reason the copy failed | Lossless stop; legibility |
+| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, `harness_version` (the installed release), argv, the dispatched text whole, `brief_sha256`, `persona_sha256`, `persona_bytes`, correction numbers, `kernel_commit` (the checkout's HEAD, read as the turn starts, so a resident kernel records the commit its persona and stage files were read from), `offered` (the action types offered after narrowing) | Corrections reach every turn; the same store and commit give the same context |
+| `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`, or `interrupted` when a restarted kernel finds a turn with no end), return code, parsed result (including the harness session id; for a workspace turn, the id the kernel chose), the paths of its stdout and stderr files, metered spend (the numeric sum of the turn's charges); `transcript` (per file: name, `documents`, `sha256` and `bytes` of the whole file, `offset`, `prefix_changed`; and the files skipped, with why), or `no_transcript` with the reason the copy failed | Lossless stop; legibility |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
 | `core/runs.py` | `turn.started` (fresh) | as any `turn.started`, plus `fresh: true` and the stage; the fold never resumes its session | Independent checks |
 | `core/session.py` | `turn.collected` | `turn_id`, the state it ran in and its verdict, what the turn left under `.valor/` (question, no-question statement, plan signal, delivery note, effect requests), the screens `look` kept (`{name, bytes}` each, or `{name, refused}`; no digest), the candidate (head sha and turn id) when the verdict is `candidate`, and `errors`: the signals that did not count and why, those the kernel refused to read (a link, a FIFO, a hard link, a sparse file) and entries that vanished before they were read included | Legibility; the state machine |
-| `core/session.py` | `question.asked` | `question_id`, `turn_id`, text, the state the answer returns to | Mission item 6 |
+| `core/session.py` | `question.asked` | `question_id` (a string; a row whose id is not one is malformed and changes nothing), `turn_id`, text, the state the answer returns to | Mission item 6 |
 | `core/session.py` | `plan.written` | `turn_id`, path, commit, `sha256` of the file at that commit, stakes, `critique_rounds`, `review_rounds`, scope additions | Mission items 1 and 3 |
 | `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg (`session` from the fresh critique session, `kernel` when the plan's tree holds `.valor`, or `manual` in older rows), model, `usd_micros`, `turn_id` of the fresh turn (none for `kernel`), `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
 | `core/router.py` | `services.reaped` | the processes of workspace services the run stopped for other tasks, or for task directories a provisioning that died left with no task row (pid, command, task, `orphan`, and signal: `stopped` when Postgres shut down cleanly, else `SIGTERM` or `SIGKILL`) | Lossless stop; 16 GB |
@@ -139,6 +139,15 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id`, and the action: `action_type`, target, payload, `payload_sha256`, `effect_class`. Older rows hold the first three only | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
+| `core/intake.py` | `message.received` | on the stream named for the channel: `received_id`, `verified`, and the bridge's record whole (`channel`, `chat_id`, `chat_kind`, `message_id`, `sender_id`, `sender_name`, `sent_at`, `kind`, `text`, `reply_to`, `thread`, `topic_id`, `attachments`, `headers`) | Mission item 1; one row per inbound message |
+| `core/intake.py` | `message.bound` | `received_id`, `task_id`, `as` (`start`, `steer`, `answer`, `feedback`, `approve`, `stop`, `none`), `error` when binding raised | A message acts once |
+| `core/intake.py` | `message.steered` | `received_id`, channel, chat and message ids, text, attachments, provenance; the next working turn opens with it | Corrections reach every session |
+| `core/notices.py` | `notice.requested` | `notice_id`, `channel`, `chat_id`, `kind`, `about_key`, `text` (ending in the notice's id), `reply_to` | Mission item 6; what Tom is owed |
+| `core/notices.py` | `notice.undeliverable` | `notice_id`, `reason`: no operator channel or chat is set, so no bridge sends it | A notice never sent is seen |
+| `core/bridge.py` | `notice.sent` | `notice_id` and `sent`, the platform's message ids, written by the bridge | A notice is sent once |
+| `core/intake.py`, `core/broker.py` | `release.requested` | `effect_id`, `approval_id`, `owner` (the channel whose bridge performs it, or `kernel`) | An approved effect is performed by its owner |
+| `core/serve.py` | `workspace.provisioned` | `fields`, the Brief fields the provisioning made, laid over the stored Brief | A message-started task gets its workspace |
+| `core/serve.py` | `workspace.failed` | `reason`; a notice follows, and a steer tries again | A failure is the task's to report |
 
 One table holds every execution record. Gateway calls, turns, and effects
 are rows of the types above, with no separate log table for each. What a
@@ -197,6 +206,11 @@ the kernel code does.
 | `events_one_judge` | `task_id` | `judge.decided` | Two judge verdicts for one task |
 | `events_one_judgement` | `payload->>'judgement_id'` | `judgement.answered`, `judgement.failed` | Two outcomes for one judgement |
 | `events_one_turn_row` | `(type, payload->>'turn_id')` | `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` | One turn collected twice, so two candidates from one turn |
+| `events_one_message` | `(task_id, payload->>'chat_id', payload->>'message_id')` | `message.received` | One message recorded twice |
+| `events_one_binding` | `payload->>'received_id'` | `message.bound` | One message bound twice |
+| `events_one_notice` | `(task_id, payload->>'about_key')` | `notice.requested` | The same thing told to Tom twice |
+| `events_one_notice_sent` | `payload->>'notice_id'` | `notice.sent` | One notice sent twice |
+| `events_one_release` | `payload->>'effect_id'` | `release.requested` | One effect released twice |
 | `events_one_guard` | `payload->>'guard_id'` | `guard.granted` | A guard granted twice |
 | `events_one_instance_grant` | `(task_id, payload->>'instance_id')` | `guard.granted` with an instance | One governance instance granted twice on a task |
 
@@ -218,6 +232,11 @@ two charges for one call or two outcomes for one effect and has to choose.
 
 ### Advisory locks
 
+Every insert into `events` notifies the channel `valor_events` at commit
+(`events_notify`, with the row's id, task and type), which wakes the kernel
+and the bridges. The trigger refuses nothing.
+
+
 `core/ledger.py`, `lock`, takes `pg_advisory_xact_lock` on a namespaced key
 inside the caller's transaction: `task:<id>` for anything that reads a
 task's state and then appends to it (opening a call, recording a stop,
@@ -227,6 +246,14 @@ when the transaction ends, including when the process holding it is
 killed, so no unlock code has to run. An advisory lock needs no table
 privilege; a row lock would need `UPDATE`, which the kernel role does not
 have.
+
+Session locks (`pg_advisory_lock`, held on a connection until it closes or
+the process dies) name the processes that must be single:
+`kernel:<machine>` (the resident kernel), `turn-slot:<machine>` (one
+harness turn at a time), `bridge:<channel>:<machine>`, `run:<task>`,
+`services:<task>` (the task's Postgres and Redis, held by whoever started
+them until it stops them, so no sweep stops them meanwhile),
+`provision:<task>`, and `workspace:ports`.
 
 Opening a call is the case that matters. It checks that the task is not
 stopped and appends the `gateway.opened` row under the task's lock, so a

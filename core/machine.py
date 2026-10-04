@@ -229,6 +229,19 @@ class Fold:
     last_collected: dict[str, Any] | None = None
     turn_states: dict[str, str] = field(default_factory=dict)
     ignored: list[dict[str, Any]] = field(default_factory=list)
+    # Steering: `message.steered` rows by id, and the id of the
+    # `turn.started` of the last working-session turn that finished. Only
+    # such a turn renders `next_prompt`, so only it spends steering.
+    steered: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
+    steer_since: int = 0
+    turn_rows: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def steering(self) -> list[dict[str, Any]]:
+        """What Tom wrote after the start of the last working turn that
+        finished without an error, oldest first: the next working turn
+        reads it."""
+        return [p for i, p in self.steered if i > self.steer_since]
 
     @property
     def loops(self) -> Loops:
@@ -381,6 +394,10 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
     s = f.state
     if kind == "turn.started":
         f.turn_states[str(p["turn_id"])] = FRESH if p.get("fresh") else str(p.get("state"))
+        f.turn_rows[str(p["turn_id"])] = int(row.get("id") or 0)
+        return None
+    if kind == "message.steered":
+        f.steered.append((int(row.get("id") or 0), p))
         return None
     if kind == "turn.ended":
         turn_id = str(p["turn_id"])  # read before anything changes, so a malformed row changes nothing
@@ -392,6 +409,15 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         # (critique, review, docs) never does.
         if _session_id(result.get("session_id")) and f.turn_states.get(turn_id) != FRESH:
             f.session = result["session_id"]
+        # A turn that ended in an error has not acted on the steering, so it
+        # stays for the next turn.
+        if (
+            p.get("outcome") == "done"
+            and not result.get("is_error")
+            and turn_id in f.turn_states
+            and f.turn_states[turn_id] != FRESH
+        ):
+            f.steer_since = max(f.steer_since, f.turn_rows.get(turn_id, 0))
         if (
             p.get("outcome") == "done"
             and not result.get("is_error")
@@ -430,8 +456,13 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         asked_in = p.get("state", s.value)
         if s not in WORKING or asked_in != s.value:
             return f"question asked in {asked_in}, the task is in {s}"
+        # Read before anything changes, so a malformed row changes nothing.
+        question_id = p["question_id"]
+        if not isinstance(question_id, str):
+            # Its answer could never name it: an answer's id is compared as written.
+            return f"malformed: question_id {question_id!r} is not a string"
         f.return_to = s
-        f.open_question = str(p["question_id"])
+        f.open_question = question_id
         _enter(f, State.WAITING, entry)
         return None
     if kind == "question.answered":
