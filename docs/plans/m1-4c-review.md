@@ -50,7 +50,7 @@ From valor-rebuild.md, 1.4:
 | Done item | What closes it here |
 |---|---|
 | The blind verifier: Opus in a fresh session, rerunning the tests in a fresh sandboxed checkout like the test branch's; `review.decided` carries the governance boolean | `fresh.review_runner`: seat `reviewer`, the kernel's own head run in a fresh checkout under the check profile with fresh services, before a blind session in its own set-up checkout reads anything |
-| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | not closed here: review is built and registered with docs once governance passes its entry check, when `verdict` is deleted |
+| Fresh sessions for critique, review, and docs registered in `RUNNERS`; each stage removed from `verdict` as its runner lands, and the command deleted | not closed here: review is registered, and docs is registered once governance passes its entry check, when `verdict` is deleted |
 | The review and docs runners always pass `governance_from` | the runner asks governance first and passes its ids; `record_check` already refuses a session-leg review without them (1.4b) |
 
 The Done line stands as written.
@@ -265,11 +265,12 @@ a file name.
 ### Registration (`core/__main__.py`, `core/verdicts.py`)
 
 `fresh.review_runner(fresh_for, port, model=None, seat="reviewer")` is
-built and not registered. The kernel registers the review runner beside
-the docs runner once governance's judgement has a calibration record on
-the real ledger that passes its entry check (m1-4b-runners.md, Landing;
-m1-4-checks.md). Until then `python -m core verdict` records review and
-docs by hand, and the command is deleted by the task that registers them.
+registered in `runners()` as `Check.REVIEW`, asking governance through the
+judgement port. The docs runner is registered once governance's judgement
+has a calibration record on the real ledger that passes its entry check
+(m1-4b-runners.md, Landing; m1-4-checks.md). Until then `python -m core
+verdict` records docs by hand, and the command is deleted by the task that
+registers docs.
 
 `record_check` computes a review's verdict for every leg but `manual`
 (The recorded verdict); the manual leg keeps its two refusals. A
@@ -288,7 +289,7 @@ is the final message and critique's and docs' the file.
 
 - `docs/sdlc-state-machine.md`, checks.review and "What exists": the
   review runner and how the verdict is computed; `verdict` still recorded
-  by hand for review and docs until both runners are registered.
+  by hand for docs until its runner is registered.
 - `docs/architecture.md`, Verification: the verifier as built (the
   kernel's rerun on the host, then the blind session); the container is
   part two's.
@@ -401,7 +402,7 @@ Other tasks change `core/` too; these are the files this part touches.
 |---|---|
 | `core/fresh.py` | `review_runner` with `seat`, `review_inputs`, `review.compared` |
 | `core/verdicts.py` | the computed review verdict for every leg but `manual`; new payload fields; a `kernel` leg on review; docstring |
-| `core/__main__.py` | nothing: the review runner is not registered yet |
+| `core/__main__.py` | `runners()` registers the review runner |
 | `core/checks.py` | the head run's reuse key includes the role (if 1.4b lands without it); the lint run and its parser; `role="review"` |
 | `core/git.py` | `hunk_at` with `--literal-pathspecs` |
 | `core/README.md` | the runner |
@@ -508,25 +509,22 @@ top of it.
 
 | Conflict | Resolved |
 |---|---|
-| `core/__main__.py` | The tip's file whole: review and docs unregistered, `verdict` kept, `_fresh_for(..., harness_name)` |
+| `core/__main__.py` | The tip's file whole, with review registered and docs unregistered, `verdict` kept, `_fresh_for(..., harness_name)` |
 | `core/fresh.py` `FreshFor` and its callers | The tip's fifth argument, `harness_name`; `review_runner` takes `harness_name, model` from `resolve_seat(seat)` and passes it on |
 | `core/fresh.py` review checkout | A `workspace.ValorInTree` from the blind checkout records a `kernel` leg `changes` naming why, with the governance ids |
 | `core/verdicts.py` | The tip's file, with part one's `REVIEWER_VERDICTS`, `governance_instances`, `review_verdict`, the computed verdict and its fields for every leg but `manual`, and a `kernel` leg on review; `MANUAL_STAGES`, `_manual`, `manual_allowed`, and the manual refusals stay |
 | `core/fresh.py` the verdict | The reviewer's verdict is the session's final message (`final_verdict`); critique and docs read theirs with the tip's `read_verdict` |
 | `core/checks.py` imports | Both `contextlib` and `functools` |
 | `tests/scripted.py` | Part one's session-leg payload is `SESSION_LEG`, since the tip's `SESSION` is a session id; `check` asks `ensure_merge` with the tip's performers; the scripted fresh session has the tip's `big` act and part one's `review` act, with the tip's UUID session id; `make` takes `harness_name` |
-| `tests/test_pipeline.py`, `tests/test_live_session.py` | The tip's: the `verdict` command tests stay, and the live session records review and docs by hand |
+| `tests/test_pipeline.py`, `tests/test_live_session.py` | The tip's: the `verdict` command tests stay, and the live session records review on the session leg and docs by hand |
 | `tests/test_live_fresh.py` | Part one's two live reviews, through the file's own `fresh_for` |
 | `tests/test_review.py` | The two tests asserting review is registered and the manual leg refused are left out; a candidate whose tree holds `.valor` is tested to get the `kernel` leg `changes` with no reviewer run |
 | `tests/test_docs_runner.py` | The tip's test that review has no `kernel` leg becomes one that a `kernel` review names no turn |
-| Docs (`core/README.md`, `docs/data.md`, `docs/harnesses.md`, `docs/judgement-layer.md`, `docs/sdlc-state-machine.md`, this plan) | The tip's text, with the review runner described as built and registered with docs once governance passes its entry check; `docs/architecture.md`, `docs/emulator.md`, `docs/mission.md`, and `m1-4-checks.md` say the same |
+| Docs (`core/README.md`, `docs/data.md`, `docs/harnesses.md`, `docs/judgement-layer.md`, `docs/sdlc-state-machine.md`, this plan) | The tip's text, with the review runner described as registered, with docs registered once governance passes its entry check; `docs/architecture.md`, `docs/emulator.md`, `docs/mission.md`, and `m1-4-checks.md` say the same |
 
 No cap, timeout, or guard came in with the rebase. Part one's lint and
 suite runs go through the tip's `_race` with output files; its git calls
 are the tip's (`--literal-pathspecs` on the diff calls).
 
-Assumed answer, for the lead: the tip leaves docs unregistered until
-governance passes its entry check and says the review runner routes on
-the same check, so this part lands unregistered and keeps `verdict`. If
-review and docs are to be registered now, the change is `runners()`, the
-deleted command and manual leg, and the tests and docs that name them.
+The kernel leaves docs unregistered until governance passes its entry
+check, and `verdict` stays for docs.

@@ -361,7 +361,7 @@ what a thing is, nothing about what it may do. The SDLC uses three:
    asked per hunk. A yes with no grant is a refused merge. **Built:** the
    judgement, review and docs verdicts that take their instances from it,
    and the broker's refusal of a merge with an instance lacking Tom's tap.
-   **Design:** the review and docs runners that call it (1.4).
+   **Design:** the docs runner that calls it, once governance passes its entry check.
 
 ## Verification
 
@@ -494,7 +494,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
-| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the runners calling it are 1.4's) | governing constraint |
+| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review runner calls it, and the docs runner is registered once governance passes its entry check) | governing constraint |
 | A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |

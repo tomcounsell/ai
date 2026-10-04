@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4-checks
 type: build
-status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; 1.4c in two parts: part one, the review runner (m1-4c-review.md), built and merged unregistered, as docs is, until governance passes its entry check, with `verdict` kept until then; part two, the container verifier (m1-4c-verifier.md), planned
+status: 1.4a merged; popoto #191 trial done, held at the merge (not released), $8.77 metered; 1.4b in build (m1-4b-runners.md, both critique rounds done); then 1.4d; 1.4c in two parts: part one, the review runner (m1-4c-review.md), built, merged, and registered, while docs stays unregistered until governance passes its entry check, with `verdict` kept for docs until then; part two, the container verifier (m1-4c-verifier.md), planned
 critique_rounds: 2
 review_rounds: 2
 ---
