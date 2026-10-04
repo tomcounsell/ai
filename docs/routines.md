@@ -222,13 +222,13 @@ reads kernel-written rows only and proposes:
 
 An item a sweep listed is not listed again for ninety days. The sweep's one
 task has the ceiling `act` and opens one branch removing everything due.
-Opening the branch is `propose`. Merging it is `act`, and waits for Tom's tap
-like any merge. Keeping something past expiry takes a reason in the branch's
+Opening the branch is `propose`. Merging it is `act`, and the deletion is the
+default, so Tom's tap is not asked for it. Keeping something past expiry takes a reason in the branch's
 review, given by Tom; the default is the deletion (Mission item 5; the
 governance constraint).
 
 ## Gaps
 
-- Whether the expiry sweep's deletion branch should merge without a tap is
-  open. The constraint makes every merge `act`, and the kernel has no class
-  for a merge Tom has granted in advance.
+- The kernel has no class for a merge approved in advance, so the sweep's
+  deletion merge is released through the approval surface like any merge
+  until one exists.
