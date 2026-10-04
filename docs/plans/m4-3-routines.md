@@ -305,6 +305,20 @@ These changes live in `core/serve.py` (2.1's `schedule`), `core/slot.py`
   unspent. It does not count toward the idle bound or the failed-turn
   count, and the state is unchanged, so `schedule` runs the step again.
 - **No bound on the wait** while foreground steps keep coming.
+- **Lock order, the same on every path.** Session locks first, then
+  transaction locks. A foreground holder takes the shared lock
+  `turn-slot-fg:<machine>`, sends `valor_preempt`, then takes the slot
+  `turn-slot:<machine>`; a background holder takes the slot, then tries the
+  exclusive `turn-slot-fg` to find a notice sent earlier and releases it at
+  once. Inside a hold, a writer takes `tree:<root>` (`tasks.lock_tree`),
+  then `task:<id>`, in a transaction that waits for no session lock, as 4.1
+  keeps them (tree before task everywhere). No path takes the slot or the
+  shared lock while a transaction holds a tree or task lock, and
+  `slot.held` opens no transaction: its connection reads
+  `tasks.background` and takes session locks only.
+  `tests/test_slot_priority.py` runs `stop_tree`, `start_child`, a
+  foreground waiter and a background holder's tree and task writers at
+  once, five times.
 
 This is a scheduling rule, not a check on the agent
 ([machine.md](../machine.md), Concurrency). It looks only at which task a
@@ -569,6 +583,16 @@ Each is reversible; Tom can overturn any.
 - **The period is the rolling 30 days ending at the report**, by the
   charge row's time, and includes the emulator's calibration tasks for the
   routine's replays.
+- **A foreground step runs beside a background one.** `schedule` starts a
+  ready foreground step even while a background step is running, and a
+  background step only when no foreground step is ready. This changes how
+  many steps the kernel runs at once, from one to two at most: the
+  background one is only waiting for or holding the slot, and the slot
+  still lets one `claude -p` run at a time. The reason is Done item 4: a
+  kernel busy with a background step cannot otherwise start Tom's step to
+  announce itself and preempt it. The source is the slot section above and
+  [machine.md](../machine.md) (Concurrency, Tom's work first). It adds no
+  bound beyond the plan's.
 - **A background turn is preempted** when a foreground step is ready,
   since waiting for it would break the Done. Its spend is metered and lost,
   and counted in the sweep's report.
