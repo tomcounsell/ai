@@ -205,3 +205,26 @@ Scope from the lead, after review-4-3-p2 (R3) and test-4-3-p2 (gaps 1 and 2).
 - Gap 3 stays: an empty items directory gives a finished sweep with 0 items.
 - **Decided by default:** the "removed" test is by grant id, not by merge time,
   since ids are unique per row.
+
+### Patch round 4
+
+Scope from the lead, after review-4-3-p3 (R4, N8) and test-4-3-p3 (T1, T2).
+
+- **R4.** `guards.grant` on an expiry sweep's task in `merge` takes, in place of
+  an instance, a grant id the sweep's `task.started` list names. Tom's tap is
+  the same `grant` command and the same approval path; no new step. It writes
+  a new `guard.granted` row (fresh id, `kept` naming the old id, a new
+  90-day expiry, the old row's incident and mission items, and an instance id of the old
+  one plus the new guard id, since the ledger holds one grant row per task and
+  instance) on the
+  old grant's own task, so `due` still sees its project and the earlier row
+  counts as removed while the new one is live. Test goes through `grant`.
+- **N8.** routines.md says the ranges and the integer come from launchd and
+  the plist, and that "not both" is the printer writing one trigger
+  (launchd itself accepts both).
+- **T1.** `load` refuses a non-text `ceiling`, a non-table `schedule`, and a
+  `need` that is not a list of text, as `Refused`; `due` lists them under
+  `malformed`. Tested each, and through `due`.
+- **T2.** `interval` must fit a plist integer (signed 64-bit, below 2**63),
+  so `plist()` cannot overflow. `created` as a datetime is refused: the
+  documented key is "the date".

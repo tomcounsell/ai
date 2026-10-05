@@ -103,8 +103,10 @@ def load(name: str, directory: str | Path | None = None) -> Routine:
     for key in ("runner", "ceiling", "model", "mission_item", "instruction", "created"):
         if key not in found:
             raise Refused(f"{path} lacks {key!r}")
-    if found["ceiling"] not in tasks.EFFECT_RANK:
+    if not isinstance(found["ceiling"], str) or found["ceiling"] not in tasks.EFFECT_RANK:
         raise Refused(f"{path}: unknown effect class {found['ceiling']!r}")
+    if not isinstance(found.get("schedule") or {}, dict):
+        raise Refused(f"{path}: [schedule] is a table")
     schedule = dict(found.get("schedule") or {})
     interval = schedule.pop("interval", None)
     unknown = sorted(set(schedule) - set(SCHEDULE_KEYS))
@@ -116,18 +118,24 @@ def load(name: str, directory: str | Path | None = None) -> Routine:
         low, high = CALENDAR_RANGES[key]
         if type(value) is not int or not low <= value <= high:
             raise Refused(f"{path}: [schedule] {key} is a whole number from {low} to {high} (launchd)")
-    if interval is not None and (type(interval) is not int or interval < 1):
-        raise Refused(f"{path}: [schedule] interval is a whole number of seconds, 1 or more (launchd)")
+    if interval is not None and (type(interval) is not int or not 1 <= interval < 2**63):
+        raise Refused(
+            f"{path}: [schedule] interval is a whole number of seconds, 1 or more, "
+            "that a plist integer holds (a signed 64-bit value)"
+        )
     created = found["created"]
-    if not isinstance(created, date):
+    if not isinstance(created, date) or isinstance(created, datetime):
         raise Refused(f"{path}: created is a date")
+    need = found.get("need") or []
+    if not isinstance(need, list) or not all(isinstance(n, str) for n in need):
+        raise Refused(f"{path}: need is a list of text")
     return Routine(
         name=name,
         runner=found["runner"],
         ceiling=found["ceiling"],
         model=found["model"],
         mission_item=str(found["mission_item"]),
-        need=tuple(found.get("need") or ()),
+        need=tuple(need),
         created=created,
         instruction=found["instruction"],
         schedule=schedule,
