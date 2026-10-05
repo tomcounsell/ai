@@ -11,6 +11,7 @@ Live spend: none.
 """
 
 import asyncio
+import socket
 from pathlib import Path
 
 import aiohttp
@@ -543,9 +544,15 @@ def test_a_started_stream_whose_client_leaves_is_charged_once(dsn):
 
 
 def test_an_unreachable_upstream_is_a_502_naming_it(dsn):
+    # A port the system just handed out and nobody listens on refuses at once
+    # (a bound socket that never listens does not on macOS: it times out).
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
     async def go():
         task = await _new_task(dsn)
-        gateway = Gateway(dsn, upstream="http://127.0.0.1:6561")  # nothing listens here
+        gateway = Gateway(dsn, upstream=f"http://127.0.0.1:{port}")
         await gateway.start()
         base = gateway.issue(task, "turn-1")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
