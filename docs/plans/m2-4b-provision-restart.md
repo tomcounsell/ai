@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4b-provision-restart
 type: bug
-status: built
+status: merged
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
@@ -368,3 +368,23 @@ to fail with the behavior it covers taken out:
 Left untested, as the test check judged: a cancel of `git.threaded` on
 kernel close mid-provision, and the reap of a real fetch in a real kernel
 kill (covered by the unit test's stand-in `cat-file`).
+
+## Checks
+
+Round 1, on fceaae1d0:
+
+- **Test:** gaps. No regressions: the base and head fail the same tests, the mail tests because dovecot is missing and test_pi because node is missing. The kill tests passed three runs of three. The check added 8 tests (tests/test_provision_restart_gaps.py).
+- **Review:** changes, two findings: the redo's clear ran under `asyncio.to_thread`, and docs/workspace.md misstated which removals hold the lock. Governance: no.
+- **Docs:** no_change.
+
+Round 2, after patch round 1, on 8bd036cef:
+
+- **Test:** pass. One full run gave 1485 passed, 55 skipped, and the same dovecot and node failures. The second run was stopped by the lead once review's own full run agreed.
+- **Review:** pass, round 2 of 2. Governance: no. Lint was clean. Taking out each covered behavior made its test fail.
+- **Docs:** no_change.
+
+## Merged
+
+The lead's decision: merge, since every check passed. The branch was rebased onto valor-cori-rebuild (2.4a and plan records). The touched and adjacent tests ran on the rebased head: test_provision_restart_gaps, test_serve, test_workspace and test_targets gave 186 passed and 1 skipped, and ruff was clean. Then valor-cori-rebuild was fast-forwarded.
+
+Rollout: the live kernel on Tom's Mac runs from the checkout, so it picks up the fix on its next restart. No migration is needed.
