@@ -15,6 +15,8 @@ not used either. On macOS it does not refuse: the connect times out after
 about 8 seconds.
 
 Other tests with a port or "nothing listens" comment make no connection:
-`test_targets.py` and `test_credential_push.py` (URL checks only),
-`test_look.py` 6451 (the browser is missing, so nothing connects), and
-`test_workspace.py` port 9 (outside the agent range, below any block).
+`test_targets.py` and `test_credential_push.py` (URL checks only), and
+`test_look.py` 6451 (the browser is missing, so nothing connects).
+`test_workspace.py` port 9 does connect, in a fetch the test expects to
+fail; port 9 is outside the agent range and below any block, so no other
+run holds it.
