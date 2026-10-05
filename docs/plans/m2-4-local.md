@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4-local
 type: build
-status: built
+status: merged
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
