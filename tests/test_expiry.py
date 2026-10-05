@@ -237,7 +237,7 @@ def test_a_merged_sweep_keeps_another_projects_grant_listed_and_a_regrant_is_liv
 
 
 def test_a_routine_whose_toml_became_malformed_is_reported_and_the_sweep_goes_on(world):
-    dsn, owner, directory = world
+    dsn, _, directory = world
     write_toml(directory, "broken")
     write_toml(directory, "quiet")
 
