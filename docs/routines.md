@@ -225,10 +225,11 @@ reads kernel-written rows only and proposes:
   in that window led to no use.
 
 An item a sweep listed is not listed again for ninety days. An instance
-grant in this repository that a merged sweep listed is removed and never listed
-again; keeping one is a new grant row, which expires on its own date. A routine
-whose toml cannot be read is reported in the run's line and the rest go on. The sweep's one
-task has the ceiling `act` and opens one branch removing everything due.
+grant in this repository that a merged sweep listed is removed by its grant id
+and never listed again; keeping one is a new grant row, which expires on its
+own date. A merged sweep's listing of another project's grant removes nothing.
+A routine whose toml cannot be read is reported in the run's line and the rest
+go on. The sweep's one task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the
 default, so Tom's tap is not asked for it: the merge is the build lead's call
 and is released like any other merge. Keeping something past expiry takes a reason in the branch's

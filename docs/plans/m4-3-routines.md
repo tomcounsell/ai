@@ -133,7 +133,10 @@ One fold over kernel-written rows, `routines.due(conn, now)`:
   before its `expires` date.
 - **A guard a sweep listed** (an open sweep, or a merged one that kept it)
   is not due again until 90 days after that sweep listed it. An instance
-  grant a merged sweep listed is removed and never due again.
+  grant in this repository that a merged sweep listed is removed and never
+  due again, by its grant id; keeping one is a new grant row with its own id
+  and expiry. A merged sweep's listing of another project's grant removes
+  nothing.
 - **A seeded guard** absent from `guards.SEEDED` in the kernel's checkout
   is gone and never due.
 - **An instance grant** (`guards.grant`, `guard_id` `grant-<id>`) has no
@@ -165,10 +168,17 @@ need = ["Mission item 5 and the governance constraint require the deletion"]
 created = 2026-10-03
 instruction = "..."          # the run's instruction; the runner fills in what it found
 
-[schedule]                   # launchd StartCalendarInterval keys
+[schedule]                   # launchd StartCalendarInterval keys, whole numbers
+                             # in launchd's ranges: minute 0-59, hour 0-23,
+                             # day 1-31, weekday 0-7, month 1-12; or interval
+                             # (seconds, 1 or more), never both
 hour = 4
 minute = 0
 ```
+
+`routines.load` refuses a `[schedule]` value launchd would reject, and
+`interval` together with calendar keys; a range such as `hour = "1-3"` is
+not a whole number and is refused.
 
 `need` holds the two task ids (or the requirement) that show the second
 need. It is stored on the registration row and shown on the page; nothing
@@ -461,13 +471,22 @@ added for instance grants.
 - A seeded guard absent from `guards.SEEDED`: not due.
 - **Instance grants.**
   - Past its `expires`: due, and rendered with "no firing record".
-  - On another project's task: in the "outside this repository" list only.
+  - On another project's task: in the "outside this repository" list only,
+    and still listed after a merged sweep listed it.
+  - Listed by a merged sweep in this repository: removed, never due again;
+    a grant written after that merge is live and due on its own date.
 - **Routines.**
   - A routine registered 120 days ago whose runs were all `nothing_due`:
     due.
   - One with a child task delivered 30 days ago: not due.
   - The emulator sweep with replays delivering: not due.
   - The expiry routine: never listed.
+- **A malformed routine.** A routine whose toml cannot be read is returned
+  under `malformed`, the run's line says "not read, <reason>", and the other
+  routines are still read.
+- **Schedule values.** A value outside launchd's range, a non-integer, a
+  range string, a zero interval, or `interval` with calendar keys is refused
+  by `routines.load`.
 - **Nothing due.** No task, no turn, `routine.ran` with `nothing_due`, $0.
 - **Items due, with the scripted harness.**
   - One child task under the objective with `--project valor`, ceiling
