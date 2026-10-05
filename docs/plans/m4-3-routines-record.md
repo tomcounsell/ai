@@ -165,8 +165,8 @@ Review R1 and R2 and notes N1, N2, N4, N5, N6 (review-4-3).
 - **The real spec.** A test loads `projects/valor.toml` through the routine's
   path (`Spec.load`, the routine's branch) and checks the merge target:
   refused without a grant, accepted with one. No clone, no push.
-- **Decided by default:** the toml's `branch = "valor-cori-rebuild"` stays;
-  it is the granted merge target for now.
+- **Decided by default:** the toml's `branch` stays as the rebuild
+  branch; it is the granted merge target for now.
 - **Decided by default:** the hand-run replay's `machine_lock` (the
   `VALOR_DEMO_SLOTS` throttle, 3 slots) stays removed. Its count had no
   source. The kernel's turn slot now serialises the machine's turn resource,
