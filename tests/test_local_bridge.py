@@ -18,8 +18,8 @@ import pytest
 
 from bridges import local
 from bridges.local import __main__ as local_main
-from core import broker, db, intake, machine, notices, tasks
 from core import bridge as port
+from core import broker, db, intake, machine, notices, tasks
 from core.machine import State
 from core.settings import Settings
 from tests import bridges
@@ -72,7 +72,9 @@ class Page:
 
     async def post(self, text: str, reply_to: str | None = None, id: str | None = None) -> dict:
         body = {"id": id or uuid.uuid4().hex, "text": text, "reply_to": reply_to}
-        async with self.http.post(f"{self.base}/send", json=body, headers={local.TOKEN_HEADER: self.token}) as r:
+        async with self.http.post(
+            f"{self.base}/send", json=body, headers={local.TOKEN_HEADER: self.token}
+        ) as r:
             assert r.status == 200
             return await r.json()
 
@@ -129,7 +131,9 @@ async def local_received(dsn) -> list[dict]:
 async def held_send(dsn, text: str) -> tuple[str, str]:
     task = await new_task(dsn)
     async with await db.connect(dsn) as conn:
-        held = await broker.request(conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": text}))
+        held = await broker.request(
+            conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": text})
+        )
     assert held.kind == "pending", held
     return task, held.effect_id
 
@@ -226,7 +230,11 @@ def test_without_the_token_header_nothing_is_read_or_recorded(dsn, op):
             before = len(await local_received(dsn))
             body = {"id": uuid.uuid4().hex, "text": "forged", "reply_to": None}
             statuses = []
-            for headers, query in (({}, ""), ({local.TOKEN_HEADER: "wrong"}, ""), ({}, f"?token={page.token}")):
+            for headers, query in (
+                ({}, ""),
+                ({local.TOKEN_HEADER: "wrong"}, ""),
+                ({}, f"?token={page.token}"),
+            ):
                 async with page.http.get(f"{page.base}/log{query}", headers=headers) as r:
                     statuses.append(r.status)
                 async with page.http.post(f"{page.base}/send{query}", json=body, headers=headers) as r:
@@ -258,7 +266,7 @@ class Dies(local.LocalBridge):
 
 def test_killed_between_intent_and_outcome_the_restart_reconciles_done_and_shows_it_once(dsn, op):
     async def go():
-        task, effect = await held_send(dsn, "survives a crash")
+        _, effect = await held_send(dsn, "survives a crash")
         async with await db.connect(dsn) as conn:
             await broker.approve(conn, effect, note="approve")
             assert (await broker.release(conn, bridges.declared(), effect)).kind == "released"
@@ -297,7 +305,9 @@ def test_the_log_returns_a_row_whose_id_committed_after_a_later_one(dsn, op):
                 )
                 await intake.receive(early, inbound)
                 later = await page.post("committed first")
-                (later_row,) = [r for r in await local_received(dsn) if r["received_id"] == later["received_id"]]
+                (later_row,) = [
+                    r for r in await local_received(dsn) if r["received_id"] == later["received_id"]
+                ]
                 seen = [r["message_id"] for r in await page.log()]
                 assert later_row["message_id"] in seen and mid not in seen
             log = await page.log()
@@ -352,9 +362,16 @@ def test_an_email_binding_notice_goes_to_and_names_the_operator_channel(dsn, op,
         task = await new_task(dsn)
         mailed = await a_send(dsn, task, "email", "thread-local")
         bound = await say(
-            dsn, msg("Approve please", reply_to=mailed, channel="email", sender=OPERATOR_EMAIL, chat="thread-local")
+            dsn,
+            msg(
+                "Approve please", reply_to=mailed, channel="email", sender=OPERATOR_EMAIL, chat="thread-local"
+            ),
         )
-        said = [n for n in await of_type(dsn, "notice.requested") if n["about_key"] == f"reply:{bound['received_id']}"]
+        said = [
+            n
+            for n in await of_type(dsn, "notice.requested")
+            if n["about_key"] == f"reply:{bound['received_id']}"
+        ]
         return bound, said
 
     bound, said = run(go())

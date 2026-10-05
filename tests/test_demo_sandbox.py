@@ -174,8 +174,19 @@ def test_a_task_turn_reaches_its_own_services_and_clone_and_nothing_else(tmp_pat
         gateway.listen()
         port = gateway.getsockname()[1]
         assert _probe(
-            profile, port, port, 5545, 6445, 8003, settings.pgport, 6379, settings.pg_socket, 5546, 5439
-        ) == ["open", "open", "open", "open", "denied", "denied", "denied", "denied", "denied"]
+            profile,
+            port,
+            port,
+            5545,
+            6445,
+            8003,
+            settings.pgport,
+            6379,
+            settings.pg_socket,
+            5546,
+            5439,
+            settings.local_port,
+        ) == ["open", "open", "open", "open", "denied", "denied", "denied", "denied", "denied", "denied"]
     assert _probe(
         profile,
         port,

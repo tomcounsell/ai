@@ -54,7 +54,7 @@ interpretation.
 
 | Field | Meaning |
 |---|---|
-| `channel` | `telegram` or `email` |
+| `channel` | `telegram`, `email`, or `local` |
 | `chat_id` | The conversation: a Telegram chat id, or for email the thread root's Message-ID |
 | `chat_kind` | `dm`, `group`, or `email` |
 | `message_id` | The platform's id for this message, unique within `chat_id` |
@@ -98,6 +98,7 @@ whether the message with that idempotency key exists.
 |---|---|---|---|
 | `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `topic_id`, `files` (each a path and its sha256) |
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
+| `local.send_message` | `act` | `local` | `text`; see [local.md](local.md) |
 
 The payload is the message. The digest Tom approves binds the exact text, the
 reply target, and each file's bytes, so what leaves is what he saw. `text`
@@ -156,7 +157,7 @@ Evidence section counts "decisions escalated to Tom per finished task", and
 
 ```python
 class Bridge(Protocol):
-    channel: str  # "telegram" or "email"
+    channel: str  # "telegram", "email", or "local"
 
     def performers(self) -> dict[str, tuple[PerformFn, LookupFn]]: ...
     async def run(self, outbox: Outbox) -> None: ...

@@ -98,8 +98,8 @@ from Tom's address is recorded and starts nothing. The bridge never sets
 
 **Nothing binds.** Every email record is unverified, so intake binds it as
 `none`: mail from Tom is recorded in the ledger and does not start, answer,
-steer, approve, or stop anything. Approvals and stops come through Telegram
-or the command line, which an email reply could not carry reliably anyway
+steer, approve, or stop anything. Approvals and stops come through the
+operator channel (Telegram, or the local chat page) or the command line, which an email reply could not carry reliably anyway
 (quoted history and signatures surround what the person typed).
 
 ## Sending
@@ -209,7 +209,8 @@ with `refused` listing each address and its reply; reaching them is a new
 request and a new approval. The bridge keeps no retry loop, backoff
 schedule, or dead-letter queue.
 
-**Operator notices.** Notices go to Tom's operator channel, Telegram. The
+**Operator notices.** Notices go to Tom's operator channel, Telegram or the
+local chat page. The
 email bridge performs the outbox's releases and ignores its notices.
 
 ## Stop and recovery
@@ -255,7 +256,7 @@ it exits.
   a line in its log and, for a send, a failed outcome on the ledger;
   telling Tom is `core/`'s job. The one notice it writes is `send_in_doubt`
   (`EmailBridge.in_doubt`), a `notice.requested` row for a send that may or
-  may not have gone, which Telegram's outbox delivers.
+  may not have gone, which the operator channel's outbox delivers.
 
 ## The implementation
 

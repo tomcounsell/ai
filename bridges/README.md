@@ -4,14 +4,14 @@ Self-contained comms modules.
 
 ## Scope
 
-- One module per channel: `telegram/`, `email/`, and later others.
+- One module per channel: `telegram/`, `email/`, `local/`, and later others.
 - Each does I/O and the outbox only: receive, normalize, hand to `core/`; take an approved outbound message and deliver it.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
-Entry point: `python -m bridges.telegram run | login | keys | --plist`.
+Entry points: `python -m bridges.telegram run | login | keys | --plist`, `python -m bridges.email run | keys | --plist`, and `python -m bridges.local run | open | --plist`.
 
-Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, and [docs/bridges/email.md](../docs/bridges/email.md).
+Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, [docs/bridges/email.md](../docs/bridges/email.md), and [docs/bridges/local.md](../docs/bridges/local.md).
 
 ## Imports
 

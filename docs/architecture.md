@@ -459,7 +459,7 @@ by email. The kernel side of the port is built (`core/intake.py`,
 inbound message, bound by the kernel to start, steer, answer, feedback,
 approve, stop, or none; notices owed by the fold; and an outbox that hands
 each bridge its sends after Tom's approval. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
-and email in `bridges/email/` ([bridges/email.md](bridges/email.md)), each a process of its own.
+email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local chat page in `bridges/local/` ([bridges/local.md](bridges/local.md)), each a process of its own.
 
 ## How a task flows from request to merge
 
