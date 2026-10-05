@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,15 +53,26 @@ ORDER BY 1
 
 def ensure_token(path: str | Path) -> str:
     """The page's token, made (mode 600) when the file is missing; an
-    existing file is read, never rewritten."""
+    existing file is read, never rewritten. A new token is written and
+    synced to a temporary file beside it, then hard-linked to `path`, so
+    the name holds a whole token or nothing, and a link that finds the
+    name taken keeps what is there."""
     path = Path(path)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
+    if path.exists():
         return path.read_text().strip()
     token = secrets.token_urlsafe(32)
-    with os.fdopen(fd, "w") as f:
-        f.write(token + "\n")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return path.read_text().strip()
+    finally:
+        os.unlink(tmp)
     return token
 
 

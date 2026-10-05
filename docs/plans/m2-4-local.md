@@ -131,7 +131,7 @@ The record goes in this file.
   `DECLARED["local.send_message"]`: `act`, owner `local`, usage
   "target `local`, payload `{"text": "..."}`; sent once Tom approves",
   refused when the target is not an owned local chat, the text is not a
-  non-empty string, or the payload names files (the page shows text
+  string, or the payload names files (the page shows text
   only).
 - `core/settings.py`: `local_port` (`VALOR_LOCAL_PORT`, 8711), with a
   comment that it stays outside `DEV_PORTS` (8000 to 8009, which a turn
@@ -356,6 +356,41 @@ the lead decided.
 - Rollout is not performed: the backup, the rename to
   `valor_rebuild_pre24`, `migrate`, the two plists, and the manual run
   stay for Tom's Mac.
+
+## Patch round 1
+
+Review round 1 (of 2) asked for changes; the test check passed with one
+note. Each was taken:
+
+1. `_refuse_local` refused empty text with no source or function behind
+   it: the page shows an empty row. Dropped, with its test case; the
+   text must be a string.
+2. The browser profile opening was recorded only in
+   `docs/bridges/local.md`. `docs/sandbox-openings.md` now names it: turns
+   can read and write the browser profiles, cookies and logins included,
+   on every machine. `local.md` links it. No deny.
+3. `ensure_token` created the file and then wrote it, so a crash between
+   the two left an empty token that refused every request until the file
+   was deleted by hand. The token is now written and synced to a
+   temporary file beside it, then hard-linked into place, so an existing
+   token is still never rewritten and the name holds a whole token or
+   nothing. A new test crashes the link and finds no token file, then a
+   start that makes one.
+4. Test check note: the local tests fixed their ports. They now take
+   their span from `VALOR_TEST_PORTS` when set (`tests/ports.py`),
+   keeping 6530 to 6539 and 6540 to 6549 as defaults.
+
+5. A full run found the page test counting every `approve` in the
+   session's test ledger, which the bridge and edge tests also post to;
+   it now counts only the replies to its own notice.
+
+Suite (`VALOR_TEST_DB=valor_rebuild_test_24builder`,
+`VALOR_TEST_PORTS=6530-6539`): 1464 passed, 55 skipped, 3 failed, 62
+errors. The 62 errors and the mailserver failure are the mail tests
+(dovecot is not installed on this Mac), one failure is the Pi test (no
+node), and the third was the page test above; after its fix, the local,
+edge, page, sandbox, and intake tests run together: 71 passed. Both ruff
+checks pass.
 
 ## Critique rounds
 

@@ -81,8 +81,7 @@ chat.
 
 It is refused when the target is not the local chat this machine owns
 (`local`, while `operator_channel` is `local`), when the text is not a
-non-empty string, and when the payload names files: the page shows text
-only. There is no length limit.
+string, and when the payload names files: the page shows text only. There is no length limit.
 
 `perform` writes nothing outside the ledger and returns
 `{"sent": [{"channel": "local", "chat_id": "local", "message_id":
@@ -98,7 +97,9 @@ notice is marked sent with its notice id as the message id.
 - `local_port` (`VALOR_LOCAL_PORT`, 8711) sits outside `DEV_PORTS` (8000
   to 8009) and the Postgres and Redis spans, so a turn cannot connect to it.
 - `local-token` in the kernel key directory, mode 600, made by `run` when
-  it is missing and never rewritten.
+  it is missing and never rewritten. It is written to a temporary file
+  beside it and hard-linked into place, so the name holds a whole token or
+  nothing.
 
 ## Threat model
 
@@ -112,7 +113,8 @@ notice is marked sent with its notice id as the message id.
   turn. A turn can read the token there, and can leave an extension, a
   pref, or a startup page that Tom's browser loads on its next start and
   that reaches the port with the token. It can read the profiles' cookies
-  and logins too. No deny is added; Tom's answer is pending in
+  and logins too ([sandbox-openings.md](../sandbox-openings.md)). No deny
+  is added; Tom's answer is pending in
   [m2-4-local.md](../plans/m2-4-local.md), and accepting it for the proof
   of concept is assumed.
 - **Framing.** A page a turn serves on 8000 to 8009 cannot frame the chat

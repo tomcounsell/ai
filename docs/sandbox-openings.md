@@ -65,6 +65,10 @@ Stated so the boundary is drawn where it is [4]:
   cannot mount anything in the disk's place (The turn sandbox, Files, in
   [harnesses.md](harnesses.md)), so that costs the next backup its disk (the
   dump refuses a missing directory), not its contents.
+- Turns can read and write the browser profiles under
+  `~/Library/Application Support`, cookies and logins included, on every
+  machine; neither profile denies them. Tom's answer is pending in
+  [m2-4-local.md](plans/m2-4-local.md), Question 2.
 - `launchservicesd` stays reachable from a turn, since Claude Code hangs
   without it; what keeps `open` from launching anything is the denied Launch
   Services database, quarantine resolver, and Apple events, not a deny of the

@@ -4,7 +4,7 @@ real bridge server and the test database.
 The browser is `settings.browser` when it exists, else Google Chrome's
 own binary; the test skips when neither is there. The page is driven over
 the Chrome DevTools protocol (no Playwright in the venv). Ports: the
-bridge on a port of 6540 to 6549, the browser's debugging port on another."""
+bridge on a port of 6540 to 6549 (of `VALOR_TEST_PORTS` when set), the browser's debugging port on another."""
 
 import asyncio
 import json
@@ -25,12 +25,13 @@ from core import broker, db, notices
 from core.settings import settings
 from tests import bridges
 from tests.bridges import new_task, of_type
+from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_local_bridge import SEND, bind, local_received, run
 
 pytestmark = pytest.mark.spend(usd=0)
 
-PORTS = range(6540, 6550)
+PORTS = ports_span((6540, 6549))  # VALOR_TEST_PORTS when set
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
@@ -43,7 +44,7 @@ def browser() -> str | None:
 
 def free_ports(n: int) -> list[int]:
     got = []
-    for p in PORTS:
+    for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
             try:
                 s.bind(("127.0.0.1", p))
@@ -52,7 +53,7 @@ def free_ports(n: int) -> list[int]:
             got.append(p)
         if len(got) == n:
             return got
-    raise AssertionError("no free ports in 6540-6549")
+    raise AssertionError(f"no free ports in {PORTS[0]}-{PORTS[1]}")
 
 
 @pytest.fixture
@@ -215,8 +216,12 @@ def test_the_page_sends_shows_replies_and_renders_text_as_text(dsn, op):
             await tab.type_and_send("approve")
             await tab.wait("document.getElementById('reply').textContent === ''")
             await tab.wait("!document.querySelector('#log li.chosen')")
-            replied = [r for r in await local_received(dsn) if r["text"] == "approve"]
-            assert len(replied) == 1 and replied[0]["reply_to"] == nid
+            # Other tests post `approve` to the same session's ledger, so
+            # only the replies to this notice count.
+            replied = [
+                r for r in await local_received(dsn) if r["text"] == "approve" and r["reply_to"] == nid
+            ]
+            assert len(replied) == 1
             bound = await bind(dsn, {"received_id": replied[0]["received_id"]})
             assert bound["as"] == "approve"
 

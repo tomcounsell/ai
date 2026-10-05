@@ -1,7 +1,7 @@
 """The local chat bridge over its real HTTP server and the test database.
 
 Each test runs the bridge through `core.bridge.serve` on a port of
-6530 to 6539, with its token file in the test's directory, and talks to it
+6530 to 6539 (of `VALOR_TEST_PORTS` when set), with its token file in the test's directory, and talks to it
 as the page does: `/log` and `/send` with the token header. The kernel's
 binding is `intake.bind`, called after each post."""
 
@@ -12,6 +12,7 @@ import stat
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -24,13 +25,14 @@ from core.machine import State
 from core.settings import Settings
 from tests import bridges
 from tests.bridges import OPERATOR_CHAT, OPERATOR_EMAIL, new_task, of_type, rows
+from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_intake import a_send, msg, say
 
 pytestmark = pytest.mark.spend(usd=0)
 
 SEND = "local.send_message"
-PORTS = range(6530, 6540)
+PORTS = ports_span((6530, 6539))  # VALOR_TEST_PORTS when set
 
 
 def run(coro):
@@ -38,14 +40,14 @@ def run(coro):
 
 
 def free_port() -> int:
-    for p in PORTS:
+    for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
             try:
                 s.bind(("127.0.0.1", p))
             except OSError:
                 continue
             return p
-    raise AssertionError("no free port in 6530-6539")
+    raise AssertionError(f"no free port in {PORTS[0]}-{PORTS[1]}")
 
 
 @pytest.fixture
@@ -323,7 +325,6 @@ def test_the_log_returns_a_row_whose_id_committed_after_a_later_one(dsn, op):
     ("target", "payload", "said"),
     [
         ("-1001234", {"text": "hi"}, "not the local chat"),
-        ("local", {"text": "  "}, "the text is empty"),
         ("local", {"text": 7}, "must be a string"),
         ("local", {"text": "hi", "files": [{"path": "/x", "sha256": "0" * 64}]}, "text only"),
         ("local", {"text": "hi"}, None),
@@ -393,6 +394,27 @@ def test_run_makes_the_token_mode_600_and_keeps_one_that_exists(dsn, op):
     os.chmod(made, 0o600)
     made.write_text("kept\n")
     assert run(go()) == "kept" and made.read_text() == "kept\n"
+
+
+def test_a_crash_while_making_the_token_leaves_no_token_file(tmp_path, monkeypatch):
+    """The token reaches its name whole or not at all: a crash before the
+    link leaves no `local-token`, and the next start makes one."""
+    made = tmp_path / "local-token"
+
+    def crash(src, dst):
+        assert Path(src).read_text().strip()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(local.os, "link", crash)
+    with pytest.raises(KeyboardInterrupt):
+        local.ensure_token(made)
+    assert not made.exists()
+    monkeypatch.undo()
+    token = local.ensure_token(made)
+    assert len(token) >= 32 and made.read_text() == token + "\n"
+    assert stat.S_IMODE(os.stat(made).st_mode) == 0o600
+    assert local.ensure_token(made) == token
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["local-token"]
 
 
 def test_open_with_no_token_file_writes_nothing(tmp_path, capsys):

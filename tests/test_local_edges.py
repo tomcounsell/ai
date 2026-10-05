@@ -1,6 +1,7 @@
 """Behaviors of the local chat bridge the main tests leave open: what `/send`
 accepts, what `/log` leaves out, a bare `approve`, the launchd job, and the
-static routes. Real bridge server, test database; ports of 6540 to 6549."""
+static routes. Real bridge server, test database; ports of 6540 to 6549, or of
+`VALOR_TEST_PORTS` when set."""
 
 import asyncio
 import plistlib
@@ -17,23 +18,24 @@ from core import bridge as port
 from core import db, intake, notices
 from tests import bridges
 from tests.bridges import new_task, of_type
+from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_local_bridge import Page, bind, local_received, run
 
 pytestmark = pytest.mark.spend(usd=0)
 
-PORTS = range(6540, 6550)
+PORTS = ports_span((6540, 6549))  # VALOR_TEST_PORTS when set
 
 
 def free_port() -> int:
-    for p in PORTS:
+    for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
             try:
                 s.bind(("127.0.0.1", p))
             except OSError:
                 continue
             return p
-    raise AssertionError("no free port in 6540-6549")
+    raise AssertionError(f"no free port in {PORTS[0]}-{PORTS[1]}")
 
 
 @pytest.fixture

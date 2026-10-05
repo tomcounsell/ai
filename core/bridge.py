@@ -223,8 +223,6 @@ async def _refuse_local(conn, action: broker.Action) -> str | None:
         return "the target is not the local chat this machine's local bridge serves"
     if not _strings(action.payload, ("text",)):
         return TEXT_SHAPE
-    if not (action.payload.get("text") or "").strip():
-        return "the text is empty: the local chat would show nothing"
     if action.payload.get("files"):
         return "the local chat shows text only, so a send names no files"
     return None
