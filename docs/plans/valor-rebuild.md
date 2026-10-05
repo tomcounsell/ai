@@ -416,6 +416,21 @@ between SMTP and outcome does not double-send; a 9 MB attachment sends.
 items go with the dropped code); #3124 and #2160 (moot: sends are held,
 steering is in `core/`).
 
+### 2.4 A local chat bridge
+
+Stakes: sender verification and the kernel's declarations, critique 2 and
+review 2. Plan: [m2-4-local.md](m2-4-local.md).
+
+`bridges/local/` serves one chat page on `127.0.0.1` to the bridge port,
+so Tom runs Valor on his own Mac, which has no Telegram session or
+mailbox login, and talks to it there. A record is Tom's when its request
+carried the token in the kernel key directory, which no turn can read or
+reach.
+
+**Done.** On Tom's Mac: a message typed on the page starts a task, a
+notice comes back, and a held send is approved from the page by an
+`approve` reply and shown once.
+
 **Leaves out (milestone 2).** Standing grants for any chat (Tom's default:
 tap each one); other channels.
 
