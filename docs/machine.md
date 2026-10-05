@@ -59,7 +59,8 @@ lives in it and outlives any one task. The email bridge is in
 `bridges/email/`, kept alive by its own LaunchAgent
 (`python -m bridges.email --plist` prints it); the Telegram bridge is in
 `bridges/telegram/`, kept alive the same way (`python -m bridges.telegram
---plist`).
+--plist`); the local chat bridge is in
+`bridges/local/`, kept alive the same way (`python -m bridges.local --plist`).
 
 ## What runs on demand
 

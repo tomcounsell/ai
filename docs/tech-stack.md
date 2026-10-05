@@ -63,9 +63,9 @@ outside the model is AI Control [4].
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
-| Bridges | Telegram and email modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`) |
-| Scheduling | launchd: the kernel's LaunchAgent, the email bridge's, and the backup job; routines | launchd in use; routines chosen, not built |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials) in the kernel key directory, durable copy of the keys in the vault | in use |
+| Bridges | Telegram, email, and local chat modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`); local chat in use (`aiohttp`) |
+| Scheduling | launchd: the kernel's LaunchAgent, the email and local bridges', and the backup job; routines | launchd in use; routines chosen, not built |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -75,7 +75,7 @@ outside the model is AI Control [4].
 **Python 3.14**, pinned in `.python-version`; `requires-python = ">=3.14"` in
 `pyproject.toml`. **uv** builds the environment from `uv.lock`, which holds
 twenty-one packages in all. The kernel's runtime dependencies are two:
-`psycopg[binary]` for Postgres and `aiohttp` for the gateway. Everything else
+`psycopg[binary]` for Postgres and `aiohttp` for the gateway and the local chat page. Everything else
 is the standard library. Status: **in use**. Serves the selection rule: a
 two-dependency kernel is one a person can read.
 
@@ -486,15 +486,16 @@ needs a passkey signature over the exact payload, verified by the broker, is
 **open**; it matters the day an approval arrives over a channel that a
 session hijack could forge.
 
-**Bridges.** Telegram and email, each a self-contained module in `bridges/`
+**Bridges.** Telegram, email, and a local chat page, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
 as an `act` through the broker. The Telegram bridge is built in
 `bridges/telegram/` on **Telethon** (pinned in `uv.lock`), a user account
 over MTProto, with the library confined to `bridges/telegram/wire.py`.
 Email is **in use**, on the standard library's `imaplib` and `smtplib`,
-tested against Dovecot and a local SMTP server. What each bridge does
-is [bridges/telegram.md](bridges/telegram.md) and
-[bridges/email.md](bridges/email.md).
+tested against Dovecot and a local SMTP server. The local chat is **in use**,
+on `aiohttp`, serving one page on `127.0.0.1`. What each bridge does
+is [bridges/telegram.md](bridges/telegram.md),
+[bridges/email.md](bridges/email.md), and [bridges/local.md](bridges/local.md).
 
 **Dashboard.** Read-only views over `core/` read models: tasks, spend, the
 ledger, pending approvals, the attention log (`ui/README.md`). Status:
@@ -514,7 +515,7 @@ beside it, copied from the vault `.env` by `python -m core judgement-keys` and
 `python -m core openai-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. Telegram's keys and
 session sit there too (**in use**), and email's `mail-keys`, written by
-`python -m bridges.email keys` ([email.md](bridges/email.md)). Nothing secret is
+`python -m bridges.email keys` ([email.md](bridges/email.md)), and the local chat's `local-token`, made by `python -m bridges.local run` ([local.md](bridges/local.md)). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.
 

@@ -102,7 +102,7 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`core/`](core/README.md): the kernel and the control loop, including the SDLC state machine and the judgement layer's task taxonomy and router.
 - [`memory/`](memory/README.md): operator record and episodic memory, built last on popoto over Postgres; it reads the corrections and exemplar streams `core/` keeps in the ledger.
 - [`persona/`](persona/README.md): the one identity, covering voice, conduct, and what may be sent as Valor.
-- [`bridges/`](bridges/README.md): self-contained comms modules (`telegram/`, `email/`), I/O and the outbox only.
+- [`bridges/`](bridges/README.md): self-contained comms modules (`telegram/`, `email/`, `local/`), I/O and the outbox only.
 - [`harnesses/`](harnesses/README.md): wrappers for running work via a harness such as Claude Code, Codex, or Pi.
 - [`skills/`](skills/README.md): versioned skills; structure deferred until requirements are gathered.
 - [`routines/`](routines/README.md): every scheduled task and runner, each an objective with its metered spending reported, under launchd.

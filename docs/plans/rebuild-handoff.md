@@ -90,6 +90,36 @@ switch it off `main`; the rebuild is a separate checkout.
    shows the right owner role, Postgres paths, and backup folder. Drop the
    scratch database afterwards.
 
+## Running Valor on a Mac with only the local bridge
+
+A Mac with no Telegram session for Valor and no mailbox login talks to
+Valor through the local chat bridge ([docs/bridges/local.md](../bridges/local.md)).
+Finish Setup steps 1 to 9 first; the bridge needs the kernel database, the
+judgement keys, and the model credential, and nothing from Telegram or email.
+
+1. **Make the local chat the operator channel.** Export
+   `VALOR_OPERATOR_CHANNEL=local` in the shell profile. The operator chat is
+   then `local` and `VALOR_OPERATOR_CHAT` is not read. The page uses port
+   8711; `VALOR_LOCAL_PORT` changes it.
+2. **Run the kernel.** `.venv/bin/python -m core serve` (or its LaunchAgent,
+   `serve --plist`; [machine.md](../machine.md)). The kernel binds what the
+   bridge records.
+3. **Run the bridge.** `.venv/bin/python -m bridges.local run`. It makes
+   `local-token` in `~/.config/valor-kernel/` (mode 600) when it is missing.
+   To keep it running, print its launchd job with
+   `.venv/bin/python -m bridges.local --plist`, save it to
+   `~/Library/LaunchAgents/com.valor.kernel.local.plist`, and load it with
+   `launchctl`. Set `VALOR_OPERATOR_CHANNEL` in the environment that prints
+   the job, so the job carries it.
+4. **Open the page.** `.venv/bin/python -m bridges.local open` opens
+   `http://127.0.0.1:8711/` with the token in the URL fragment. Messages
+   sent there start work; Valor's notices and approvals come back on the
+   same page, and replying `approve` or `stop` to a notice binds as it does
+   in Telegram. Reopen the page with `open` whenever it asks.
+
+The local and Telegram channels cannot both be the operator channel, and an
+approved `email.send` waits for an email bridge that this Mac does not run.
+
 ## Waiting on Tom
 
 - 1.4d's ruleset is created (2026-10-02, by Tom through his `gh` login):
