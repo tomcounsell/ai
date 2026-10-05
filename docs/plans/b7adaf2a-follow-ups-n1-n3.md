@@ -85,3 +85,17 @@ Findings from the blind review and the test check of 5a5ae487f, all fixed.
 - `ruff format` and `ruff check` are clean on `core/session.py` and
   `tests/test_session.py`.
 - `docs/harnesses.md` and `docs/data.md` say the same.
+
+## Merged
+
+Started as kernel task b7adaf2a23d1 and stopped by the lead while the
+kernel's check could not run valor's suite (1.4y); its candidate was
+finished by subagents. Patch round 1 (c304a81bb) passed all three checks:
+test pass (port-race flakes pass alone; reduce probes k = 1 to 6), review
+pass (governance no, no caps), docs updated 370a85b1a. The lead folded the
+review's note into harnesses.md: a plan is an error when git itself fails
+reading the repository. Lead suite on the merge head: 1523 passed, 25
+skipped, 1 failed (the gateway test on port 6561, held by the lead's own
+port block; task 2.2g). Backup `valor_rebuild-20261005T033230Z.dump`.
+Fast-forwarded `valor-cori-rebuild` to 66ac98a48; the kernel restarted on
+the new code. No other rollout.
