@@ -20,7 +20,6 @@ exFAT's `._` AppleDouble files never match a dump's name.
 
 import contextlib
 import fcntl
-import getpass
 import hashlib
 import json
 import os
@@ -241,13 +240,14 @@ def start_cluster(
     macOS. With `tcp` it also listens on 127.0.0.1 and ::1 at `port`, a
     free one when none is given.
     Its log (`postgres.log` in `root`) prefixes each line with the
-    SQLSTATE."""
+    SQLSTATE. Its bootstrap superuser is `settings.owner_role`, the role
+    that owns the kernel databases."""
     pg_bin = Path(pg_bin or settings.pg_bin)
     scratch = Path(settings.pg_scratch)
     scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix=prefix, dir=scratch))
     data = root / "data"
-    owner = getpass.getuser()
+    owner = settings.owner_role
     try:
         subprocess.run(
             [

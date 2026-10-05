@@ -202,6 +202,9 @@ def test_a_pg_hba_that_would_not_parse_is_put_back_and_never_loaded(fresh):
     _connect(cluster, cluster.host, KERNEL_DBS[0], KERNEL, passfile="/dev/null").close()
 
 
+# Reads `pg_authid` and the hba file as the machine cluster's owner, a
+# superuser on the Mac; the VM's owner role is not one.
+@pytest.mark.macos
 def test_migrate_touches_no_credential_on_the_machine_cluster(dsn):
     """`db.migrate`, which every test session runs, leaves the machine
     cluster's role passwords, `pg_hba.conf`, and the password file as they

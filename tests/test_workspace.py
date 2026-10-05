@@ -537,8 +537,9 @@ def test_a_candidate_is_fetched_into_the_mirror_and_the_sending_side_is_sandboxe
     assert git(made.mirror, "rev-parse", "--verify", "--quiet", "refs/valor/candidates/u", check=False) == ""
 
 
-@pytest.mark.parametrize("plant", ["alternates", "http-alternates", "shallow", "config"])
-@pytest.mark.macos
+@pytest.mark.parametrize(
+    "plant", ["alternates", "http-alternates", "shallow", pytest.param("config", marks=pytest.mark.macos)]
+)
 def test_a_clone_with_alternates_a_shallow_file_or_hostile_config_is_refused(tmp_path, plant):
     _task, made = provision(tmp_path)
     sha = candidate(made)
@@ -625,13 +626,12 @@ def test_a_hard_linked_verdict_is_refused(tmp_path):
     assert verdict is None and why == "verdict.json has 2 links"
 
 
-@pytest.mark.macos
 def test_a_sparse_verdict_is_refused_unread(tmp_path):
     checks = checks_with_verdict(tmp_path)
     with open(checks / "critique-abc" / "repo" / ".valor" / "verdict.json", "r+b") as f:
-        f.truncate(1 << 50)
+        f.truncate(1 << 43)  # 8 TiB; ext4 holds up to 16 TiB
     verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict is None and why == f"verdict.json is sparse ({1 << 50} bytes claimed, 4096 on disk)"
+    assert verdict is None and why == f"verdict.json is sparse ({1 << 43} bytes claimed, 4096 on disk)"
 
 
 def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
@@ -1103,7 +1103,6 @@ def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
 
 
 @pytest.mark.parametrize("plant", ["gitfile", "commondir"])
-@pytest.mark.macos
 def test_a_clone_whose_git_directory_lives_elsewhere_is_refused(tmp_path, plant):
     _, made = provision(tmp_path)
     sha = candidate(made)

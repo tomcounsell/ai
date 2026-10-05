@@ -39,6 +39,10 @@ os.close(_fd)
 if os.environ.get("VALOR_TEST_PORTS"):
     os.environ.setdefault("VALOR_PG_PORTS", os.environ["VALOR_TEST_PORTS"])
     os.environ.setdefault("VALOR_REDIS_PORTS", os.environ["VALOR_TEST_PORTS"])
+# Scratch clusters start from `settings.pg_bin`, the Homebrew PostgreSQL 18 by
+# default; where it is absent (the verification VM), Debian's PostgreSQL 18.
+if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
+    os.environ["VALOR_PG_BIN"] = "/usr/lib/postgresql/18/bin"
 
 from core import binaries, db  # settings read VALOR_WORK on import
 from core.settings import settings

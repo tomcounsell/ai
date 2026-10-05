@@ -36,7 +36,4 @@ def test_pytest_collects_none_of_it_and_scripts_holds_none_of_it():
     assert not list((ROOT / "tests" / "emulator").glob("test_*.py"))
     gone = ("replay.py", "replay_common.py", "replay_workspace.py", "role_play_tom.py", "judge_replay.py",
             "demo_workspace.sh")  # fmt: skip
-    tracked = subprocess.run(
-        ["git", "ls-files", "scripts/"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout.split()
-    assert not [p for p in tracked if Path(p).name in gone]
+    assert not [p for p in (ROOT / "scripts").rglob("*") if p.name in gone]

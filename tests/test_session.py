@@ -281,7 +281,7 @@ def test_a_request_file_never_stops_the_turn_being_collected(dsn, tmp_path):
         )
 
     (effects / "s_deep_stored.json").write_text(nested(2000))
-    (effects / "t_deep_postgres.json").write_text(nested(100_000))
+    (effects / "t_deep_postgres.json").write_text(nested(50_000))
     requests["t_deep_postgres.json"] = ("cannot store it: StatementTooComplex (stack depth limit exceeded)",)
     (effects / "u_deep_parse.json").write_text(nested(400_000))
     requests["u_deep_parse.json"] = ("RecursionError (",)
