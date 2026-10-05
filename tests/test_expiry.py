@@ -275,7 +275,7 @@ def test_tom_keeps_a_listed_grant_through_grant_and_it_is_live_on_its_own_date(w
             await ledger.append(conn, sweep, "effect.intent", {"effect_id": effect})
             await ledger.append(conn, sweep, "effect.outcome", {"effect_id": effect, "kind": "done"})
             assert machine.fold(await ledger.read(conn, sweep)).state is State.MERGED
-        row = next(r for r in await ledger.read(conn, ours) if r["payload"].get("guard_id") == new_id)
+            row = next(r for r in await ledger.read(conn, ours) if r["payload"].get("guard_id") == new_id)
         return new_id, row, await due(dsn, datetime(2027, 1, 20, tzinfo=UTC))
 
     new_id, row, later = run(go())
