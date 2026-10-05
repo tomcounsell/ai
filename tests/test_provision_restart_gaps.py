@@ -5,9 +5,11 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import asdict, replace
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from core import db, git, ledger, runs, serve, tasks
 from core import workspace as kws
@@ -192,3 +194,103 @@ def test_a_dangling_link_at_the_task_root_is_redone(fresh, op, tmp_path):
     types = [r["type"] for r in run(rows(fresh, task))]
     assert types.count("workspace.provisioned") == 1 and "workspace.failed" not in types
     assert (work / task / "repo" / ".git").is_dir() and not (work / task).is_symlink()
+
+
+def test_workspace_remove_takes_a_merged_tasks_unfinished_provisioning(dsn, tmp_path):
+    """A merged task's leftover directory is removed as a stopped one's is."""
+    from tests.test_objective_tree import merge
+
+    work = tmp_path / "work"
+    task = ledger.new_id()
+    lay = kws.reserve(task, {}, work)
+
+    async def start():
+        async with await db.connect(dsn) as conn:
+            await tasks.start(conn, tasks.Brief(id=task, instruction="x", project={"name": "toy"}))
+            await merge(conn, task)
+
+    run(start())
+    got = _cli(tmp_path, "workspace", "remove", task)
+    assert got.returncode == 0, got.stderr
+    assert not os.path.lexists(lay.root)
+    assert [r["type"] for r in run(_rows(dsn, task))].count("workspace.removed") == 1
+
+
+@pytest.mark.parametrize("kind", ["legacy", "calibration"])
+def test_a_provisioning_job_for_a_legacy_or_calibration_task_clears_nothing(fresh, op, tmp_path, kind):
+    """The re-read refuses a legacy or a calibration task even when its
+    document names a project, as `_ready` does."""
+    src = scripted.toy_repo(tmp_path)
+    _toy_project(tmp_path, src, [])
+
+    async def start():
+        async with await db.connect(fresh) as conn:
+            if kind == "legacy":
+                b = tasks.Brief(instruction="x", project={"name": "toy"})
+                async with conn.transaction():
+                    await tasks._write(conn, b, {}, ledger.provenance("tom", "test", False))
+                return b.id
+            # `start_calibration`'s rows, its document naming a project
+            b = tasks.Brief(instruction="calibrate site", max_effect_class="read", project={"name": "toy"})
+            async with conn.transaction():
+                await conn.execute(
+                    "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)", (b.id, Jsonb(asdict(b)))
+                )
+                await ledger.append(conn, b.id, "task.started", {"calibration": "site", "instruction": "x"})
+            return b.id
+
+    task = run(start())
+    root = tmp_path / "work" / task
+    root.mkdir(parents=True)
+    (root / "sentinel").write_text("here")
+    before = run(rows(fresh, task))
+
+    async def go():
+        kernel = serve.Kernel(None, {}, None, fresh)
+        try:
+            await kernel._provision(task, "toy")
+        finally:
+            await kernel.close()
+
+    run(go())
+    assert (root / "sentinel").read_text() == "here" and run(rows(fresh, task)) == before
+
+
+def test_the_redo_frees_the_dead_attempts_ports(fresh, op, tmp_path, monkeypatch):
+    """The only Postgres port, recorded in the dead attempt's `ports.json`,
+    is chosen again by the redo."""
+    from core.settings import settings
+
+    src = scripted.toy_repo(tmp_path)
+    _toy_project(tmp_path, src, [])
+    spec = tmp_path / "projects" / "toy.toml"
+    spec.write_text(spec.read_text() + 'services = ["postgres"]\n')
+    port = int(os.environ.get("VALOR_TEST_PORTS", "6579-6579").split("-")[-1])
+    monkeypatch.setattr(serve, "settings", replace(settings, pg_ports=(port, port)))
+    chosen = []
+
+    class Made:
+        def brief_fields(self):
+            return {"workspace": str(root / "repo"), "mirror": str(root / "mirror")}
+
+    def provision(task_id, spec, ports):
+        chosen.append(ports)
+        return Made()
+
+    monkeypatch.setattr(kws, "provision", provision)
+    task = _message_task(fresh)
+    root = tmp_path / "work" / task
+    root.mkdir(parents=True)
+    (root / kws.PORTS_FILE).write_text(f'{{"postgres": {port}}}')
+
+    async def go():
+        kernel = serve.Kernel(None, {}, None, fresh)
+        try:
+            await kernel._provision(task, "toy")
+        finally:
+            await kernel.close()
+
+    run(go())
+    types = [r["type"] for r in run(rows(fresh, task))]
+    assert chosen == [{"postgres": port}]
+    assert types.count("workspace.provisioned") == 1 and "workspace.failed" not in types

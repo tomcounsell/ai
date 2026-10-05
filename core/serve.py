@@ -453,7 +453,7 @@ class Kernel:
                     return
                 try:
                     if os.path.lexists(workspace.layout(task_id).root):
-                        await asyncio.to_thread(workspace.remove, task_id)
+                        await git.threaded(workspace.remove, task_id)
                     spec = workspace.Spec.load(name or "")
                     await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
                     try:

@@ -50,8 +50,10 @@ are free to choose again. Removing a task directory (`workspace.remove`) stops t
 services, reaps the mark `provision-<task>` and the mark `setup-<task>-<n>` of each
 `setup/<n>.log`, and then clears the tree without following any link and clearing each entry's
 flags and ACL first. Only a provisioning holding `provision:<task>` starts `provision-<task>` git;
-the redo and `workspace remove` reap only while holding that lock, and the kernel lock keeps a
-second kernel from running, so what the reap finds is a dead holder's. A task carrying a
+the redo and the removal of an unfinished provisioning or an orphan reap only while holding that
+lock, and the kernel lock keeps a second kernel from running, so what the reap finds is a dead
+holder's. Removing a provisioned task's workspace takes no such lock: once its
+`workspace.provisioned` row exists no provisioning runs for that task. A task carrying a
 `workspace.failed` is provisioned again on Tom's next steer.
 
 **The mirror's fetch** treats the builder's clone as hostile: its config

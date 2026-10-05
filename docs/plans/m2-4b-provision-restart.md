@@ -331,3 +331,40 @@ Built on `m2-4b-provision-restart` (builder-2-4b-build), against
   `test_pi` (no node), which fail at base too. `uvx ruff check .` and
   `uvx ruff format --check .` are clean.
 - Docs: `docs/workspace.md`, `docs/architecture.md`, `core/README.md`.
+
+## Patch round 1
+
+Review round 1 (review-2-4b-p0) asked for changes; the test check
+(test-2-4b) found gaps. Patched by builder-2-4b-p1 against
+`VALOR_TEST_DB=valor_rebuild_test_24bbuilder`, ports 6570 to 6579.
+
+Review findings:
+
+1. `Kernel._provision` cleared the leftover with
+   `asyncio.to_thread(workspace.remove, ...)`, so a cancel (the kernel
+   closing) let the `finally` release `provision:<task>` while the remove
+   thread still reaped and cleared. Fixed: `git.threaded(workspace.remove,
+   task_id)`, as every other caller of `remove` runs it, so the lock
+   outlives the cleanup as fix 1 says.
+2. docs/workspace.md said `workspace remove` reaps only under
+   `provision:<task>`, which is false for a provisioned task's removal.
+   Fixed: the redo and the removal of an unfinished provisioning or an
+   orphan reap under that lock; a provisioned task's removal takes none,
+   since no provisioning runs for a task once its `workspace.provisioned`
+   row exists.
+
+Test gaps covered, in `tests/test_provision_restart_gaps.py`, each checked
+to fail with the behavior it covers taken out:
+
+- `workspace remove` of a merged task's unfinished provisioning removes
+  the directory and writes one `workspace.removed`.
+- `Kernel._provision` for a legacy task and for a calibration task, each
+  with a document naming a project, leaves the directory as it was and
+  writes no row.
+- The redo frees the dead attempt's ports: with one Postgres port to
+  choose from, named in the leftover `ports.json`, the redo chooses it
+  (provisioning itself stubbed, since the toy project has no services).
+
+Left untested, as the test check judged: a cancel of `git.threaded` on
+kernel close mid-provision, and the reap of a real fetch in a real kernel
+kill (covered by the unit test's stand-in `cat-file`).
