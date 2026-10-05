@@ -353,7 +353,7 @@ New, each of a removed cap's unbounded or honest behavior:
     that has started, then the client leaves; one `gateway.charged` per
     opened call, every allowed output token.
 15. `test_an_unreachable_upstream_is_a_502_naming_it`: the gateway pointed
-    at a closed port in 6561-6569; 502, the message says the provider
+    at a port the system handed out and nobody listens on; 502, the message says the provider
     could not be reached, `unsent: true`, charged 0.
 16. `test_an_upstream_that_closes_before_answering_is_a_502_naming_it`.
 17. `test_provisioning_runs_past_the_git_timeout`: with `git_timeout_s`

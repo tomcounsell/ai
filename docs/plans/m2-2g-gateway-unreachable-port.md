@@ -2,17 +2,17 @@
 
 Tracking: none. Status: built.
 
-`test_an_unreachable_upstream_is_a_502_naming_it` pointed the gateway at
-`127.0.0.1:6561`, a port inside the 6430+ blocks handed to agents. When an
-agent's service held it, the connection succeeded and the test failed.
+`test_an_unreachable_upstream_is_a_502_naming_it` points the gateway at a
+free port. It binds a socket to port 0, reads the port the system chose,
+closes the socket, and uses that port as the upstream. Ports from port 0 come
+from the ephemeral range, outside every agent block (6430 up, ten per
+agent), and nothing listens on one just closed, so the connection is refused
+at once.
 
-The test now asks the system for a free port (bind to port 0, read the
-port, close the socket) and points the gateway there. Ports from port 0 come
-from the ephemeral range, outside every agent block, and nothing listens on
-one just handed out, so the connection is refused at once.
-
-A bound socket that never listens was tried first. On macOS it does not
-refuse: the connect times out after about 8 seconds. It is not used.
+A fixed port inside an agent block is not used: an agent's service can hold
+it, and then the connection succeeds. A bound socket that never listens is
+not used either. On macOS it does not refuse: the connect times out after
+about 8 seconds.
 
 Other tests with a port or "nothing listens" comment make no connection:
 `test_targets.py` and `test_credential_push.py` (URL checks only),
