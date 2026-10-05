@@ -486,3 +486,26 @@ Rollout on Tom's Mac, decided by default:
 
 - The Mac has no external disk, so `core backup` (which needs a different device) cannot run. The rename itself keeps the old ledger intact as `valor_rebuild_pre24`, and a `pg_dump -Fc` of it goes to `~/valor-backups/`.
 - No Telegram or mailbox login is needed. The gateway uses the Keychain `claude` login (about eight hours unless Tom's own sessions refresh it).
+
+### Rollout on Tom's Mac (2026-10-06)
+
+Steps taken:
+
+1. Backed up the old ledger with `pg_dump -Fc` to `~/valor-backups/valor_rebuild_pre24-20261005T201634Z.dump` (mode 600), then renamed it to `valor_rebuild_pre24`.
+2. `core migrate` created a fresh `valor_rebuild`. `pgpass` was kept and `pg_hba.conf` was unchanged.
+3. Calibration: run 1 failed its entry check because OpenRouter rate-limited the open-weight leg twice. Run 2 passed, `entry_check` true, `task_sha256` equal to `JUDGE.calibrated`.
+4. `~/.zshrc` exports `PGPASSFILE` and `VALOR_OPERATOR_CHANNEL=local`. The bridge's job, `com.valor.kernel.local`, is loaded and serves `127.0.0.1:8711`, and `local-token` was made at mode 600.
+5. The kernel's job, `com.valor.kernel`, is written but not loaded. On this Mac, Little Snitch, with the Proton VPN split tunnel and Tailscale network extensions present, lets Apple's `/usr/bin/curl` out of a launchd job but times out the Command Line Tools git and the Homebrew Python after about 136 s. A probe job showed this. The kernel runs as `nohup .venv/bin/python -m core serve` from a login shell instead, which reaches GitHub and the model APIs. Loading the job needs a Little Snitch rule only Tom can add; see Questions for Tom.
+
+The manual run, task `3785e89a3d48`, all through the bridge's HTTP API:
+
+- A message started a task under project `valor`, and the judge returned `precise`.
+- Provisioning failed three times, each failure arriving as a notice on the page, and each "try again" reply bound as a steer:
+  - "File exists": a provisioning killed by the lead's own `launchctl unload` left its directory behind (task 2.4b).
+  - The fetch timeout under launchd described in step 5.
+  - "main is the default branch": the valor spec named no branch (task 2.4a, merged).
+- After 2.4a, the task ran plan, critique (sound), build, test, and review (pass). Its suite errored inside the workspace sandbox, which refuses binding 127.0.0.1, and did so equally at base and head. That is noted for a later task.
+- The docs check has no runner, so the lead recorded `docs no_change` by hand. Then `task.delivered` went out, and its notice reached the page with Valor's reply, "I can hear you, Tom."
+- The merge was refused, "act is above the task's ceiling propose", as a message-started task's ceiling requires. The lead stopped the task. Metered spending: $0.58.
+
+What this run did not show: an `approve` from the page releasing a held `local.send_message`. No turn requested a send. The tests show that path (tests/test_local_bridge.py, tests/test_local_page.py).
