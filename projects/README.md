@@ -17,6 +17,12 @@ workspaces for (`python -m core start ... --project NAME`).
   merge lands on that URL only when Tom has granted the (URL, branch) pair
   (`python -m core merge-target add`), and never on the remote's default
   branch; `start` refuses otherwise.
+- `branch` is the branch a task's clone, bare origin, and merge target use;
+  without it the remote's default branch is used, which a merge to a
+  remote refuses. A
+  task started by a message has no `--branch`, so a project whose messages
+  start tasks names it (`valor` names the rebuild's branch); `start
+  --branch` overrides it for one task.
 - `chats` lists the chats whose messages start tasks under the project
   (`telegram:<chat id>`, `email:<sender address>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so

@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4a-valor-branch
 type: bug
-status: planned
+status: built
 critique_rounds: 0
 review_rounds: 1
 governance_grant: none
@@ -52,4 +52,13 @@ rebuild branch.
 
 ## Build record
 
-(none yet)
+Changed: `projects/valor.toml` (branch and comment), `projects/README.md`
+(the `branch` line), `tests/test_targets.py` (two tests: provisioning from
+a spec with a branch against a remote whose default is `main` targets that
+branch and the same spec without it is refused; the real valor spec names
+the rebuild branch). The second test failed before the toml change.
+
+Suite: 1467 passed, 55 skipped, 2 failed, 62 errors. The errors are the
+email tests (dovecot is not installed on this Mac); the failures are
+`test_mailserver` (dovecot) and `test_pi` (node under the profile), none
+touching this change. Ruff check and format pass.

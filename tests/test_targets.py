@@ -6,6 +6,7 @@ Live spend: none.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import secrets
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from core import db, ledger, targets, tasks
+from core import workspace as kws
 from tests import scripted
 from tests.conftest import TEST_DB
 from tests.smart_http import Server
@@ -271,3 +273,31 @@ def test_start_workspace_with_an_unreachable_origin_is_refused(tmp_path):
         with pytest.raises(tasks.WorkspaceRefused, match=r"cannot read origin's HEAD"):
             tasks.resolve_workspace(str(ws))
     assert tasks.resolve_workspace(str(ws), "main")["origin_url"] == url  # a given branch reads nothing
+
+
+# -- a message start has no --branch ---------------------------------------------------------
+
+
+def test_provisioning_from_a_spec_with_a_branch_targets_it_and_the_default_stays_refused(tmp_path):
+    """The shape of a message-started task: `workspace.provision` from the
+    spec alone, no `--branch`, against a remote whose default is `main`."""
+    with Server(tmp_path / "remote") as server:
+        repo = name()
+        url = server.url(repo)
+        remote(server, tmp_path, repo)
+        named = kws.Spec.load(str(spec_file(tmp_path, url)))
+        made = kws.provision("a" * 32, named, {}, source=None)
+        with pytest.raises(kws.Refused, match=f"main is the default branch of {url}"):
+            kws.provision("b" * 32, dataclasses.replace(named, branch=None), {}, source=None)
+    assert made.target_branch == "rebuild"
+    assert (
+        subprocess.run(
+            ["git", "-C", made.push_url, "symbolic-ref", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        == "refs/heads/rebuild"
+    )
+
+
+def test_the_valor_spec_names_the_rebuild_branch():
+    spec = kws.Spec.load(str(ROOT / "projects" / "valor.toml"))
+    assert spec.branch == "valor-cori-rebuild" and spec.target_branch is None
