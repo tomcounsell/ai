@@ -131,12 +131,14 @@ def test_a_flood_wait_fails_the_send_and_the_next_waits_it_out(emu, dsn, tmp_pat
         async with connected(emu.url, dsn, tmp_path) as bridge:
             first = await release(dsn, send(group, "too fast"))
             emu.control(flood_send=1)
+            # The wait runs from the moment Telegram gave the flood wait, which
+            # is inside this first perform, so time it from before the call.
+            started = time.monotonic()
             out = await perform(dsn, bridge, first)
             assert out.kind == "failed" and "flood wait of 1 s" in out.error
-            started = time.monotonic()
             later = await release(dsn, send(group, "later"))
             assert (await perform(dsn, bridge, later)).kind == "done"
-            assert time.monotonic() - started >= 0.9
+            assert time.monotonic() - started >= 1.0
             assert [m["text"] for m in emu.own(int(group))] == ["later"]
 
     run(go())
@@ -274,7 +276,7 @@ def test_a_flood_wait_after_the_first_part_is_waited_out_and_the_send_finishes(e
             emu.control(flood_send=1, send_after=1)
             started = time.monotonic()
             assert (await perform(dsn, bridge, effect)).kind == "done"
-            assert time.monotonic() - started >= 0.9
+            assert time.monotonic() - started >= 1.0
             texts = [m["text"] for m in emu.own(int(group))]
             assert texts == [p.strip() for p in split_text("telegram", long)]
 
