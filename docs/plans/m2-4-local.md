@@ -291,6 +291,12 @@ already prove.
    and logins included. Accept that for the proof of concept, or deny
    them to turns? Assumed: accept for the proof of concept; no deny is
    added.
+3. Little Snitch on this Mac lets the kernel's git and Python reach the
+   network from a login shell but not from a launchd job. Allow
+   `/opt/homebrew/Cellar/python@3.14/.../Python` and
+   `/Library/Developer/CommandLineTools/usr/bin/git` (with its
+   `git-remote-https`) for launchd jobs, so the kernel survives a reboot?
+   Assumed: until then the kernel runs from a shell with `nohup`.
 
 ## Decided by default
 
