@@ -294,9 +294,14 @@ it as `spec.json` into the run's source directory and the build context.
 Its macOS-bound tests (sandbox-exec, `sandbox_check`, `/bin/ps -E`, the
 Command Line Tools' git, `security`) carry a `macos` marker, registered
 in `pyproject.toml`; `tests/conftest.py` skips the marker off Darwin. The
-VM runs the rest. The reviewer gets the VM's counts and the number of
-`macos`-skipped ids, never the test branch's results; the test branch's
-host run covers all of them.
+VM runs the rest. A test the VM cannot pass for a reason other than macOS
+is made portable, else it carries `macos`; a parametrized test carries
+the mark only on the parameters that need macOS. The VM's run of this
+repository's suite has no failed or errored test, so a regression has no
+failure at base to hide behind. The reviewer gets the VM's counts and the
+number of `macos`-skipped ids, never the test branch's results; the test
+branch's host run covers all of them. The sparse-file tests plant 8 TiB,
+which the VM's ext4 holds (its limit is 16 TiB).
 
 ### Settings (`core/settings.py`)
 
@@ -416,7 +421,7 @@ Tests that need the runtime carry a `container` marker and skip when
 - A suite that allocates past `verify_memory_mb` gives `cause: memory`,
   not a failure finding, and the reviewer's `verify.json` says so.
 - This repository's suite in the VM: every `macos` test skips, the rest
-  run, and the skipped count is on `verify.ran`.
+  run with no failure or error, and the skipped count is on `verify.ran`.
 - `peak_mb` is positive and at most `memory_mb`, or null with the cgroup
   files absent.
 
