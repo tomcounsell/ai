@@ -25,7 +25,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
 | `project`, `branch` | the project spec and branch a runner that starts a workspace task provisions | |
-| `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month`, or `interval` in seconds | launchd |
+| `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month` (whole numbers in launchd's ranges: 0-59, 0-23, 1-31, 0-7, 1-12), or `interval` in seconds, not both | launchd |
 
 The launchd job is printed and never committed, since it names the checkout
 and its interpreter, which differ per Mac:
@@ -225,7 +225,9 @@ reads kernel-written rows only and proposes:
   in that window led to no use.
 
 An item a sweep listed is not listed again for ninety days. An instance
-grant that a merged sweep listed is removed and never listed again. The sweep's one
+grant in this repository that a merged sweep listed is removed and never listed
+again; keeping one is a new grant row, which expires on its own date. A routine
+whose toml cannot be read is reported in the run's line and the rest go on. The sweep's one
 task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the
 default, so Tom's tap is not asked for it: the merge is the build lead's call

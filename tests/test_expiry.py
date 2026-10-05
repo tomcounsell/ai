@@ -68,7 +68,7 @@ SEEDED = {g["guard_id"] for g in guards.SEEDED}
 
 def test_nothing_is_due_before_the_expiry(world):
     dsn, _, _ = world
-    assert run(due(dsn, datetime(2026, 12, 29, tzinfo=UTC))) == {"items": [], "outside": []}
+    assert run(due(dsn, datetime(2026, 12, 29, tzinfo=UTC))) == {"items": [], "outside": [], "malformed": []}
 
 
 def test_an_unfired_guard_is_due_at_its_expiry(world):
@@ -192,9 +192,70 @@ def test_an_instance_grant_a_merged_sweep_listed_is_gone_and_never_due_again(wor
     assert "g-x" not in listed(after) and "g-x" not in listed(much_later)
 
 
+def test_a_merged_sweep_keeps_another_projects_grant_listed_and_a_regrant_is_live(world):
+    dsn, owner, _ = world
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            ours = await tasks.start(conn, tasks.Brief(instruction="ours", project={"name": "valor"}))
+            theirs = await tasks.start(conn, tasks.Brief(instruction="theirs", project={"name": "popoto"}))
+            sweep = await tasks.start(conn, tasks.Brief(instruction="sweep"))
+        for task, gid in ((ours, "g-ours"), (theirs, "g-theirs")):
+            await put(
+                owner,
+                task,
+                "guard.granted",
+                {"guard_id": gid, "instance_id": gid, "name": gid, "incident": "i", "mission_items": [2],
+                 "granted_at": "2026-09-01", "expires": "2026-09-30"},
+                datetime(2026, 9, 1, tzinfo=UTC),
+            )  # fmt: skip
+        listing = [{"kind": "grant", "id": "g-ours"}, {"kind": "grant", "id": "g-theirs"}]
+        await put(
+            owner, sweep, "task.started", {"due": listing, "sweep": "expiry", "sdlc": 1},
+            datetime(2026, 10, 1, tzinfo=UTC),
+        )  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            await merge(conn, sweep)
+        # Keeping g-ours is a new grant row after the merge.
+        await put(
+            owner,
+            ours,
+            "guard.granted",
+            {"guard_id": "g-ours-again", "instance_id": "g-ours-kept", "name": "g-ours", "incident": "i",
+             "mission_items": [2], "granted_at": "2027-01-05", "expires": "2027-04-05"},
+            datetime(2027, 1, 5, tzinfo=UTC),
+        )  # fmt: skip
+        return (
+            await due(dsn, datetime(2027, 1, 20, tzinfo=UTC)),
+            await due(dsn, datetime(2027, 4, 6, tzinfo=UTC)),
+        )
+
+    soon, past_new_expiry = run(go())
+    assert "g-ours" not in listed(soon) and "g-ours-again" not in listed(soon)
+    assert {i["id"] for i in soon["outside"]} == {"g-theirs"}
+    assert "g-ours" not in listed(past_new_expiry) and "g-ours-again" in listed(past_new_expiry)
+
+
+def test_a_routine_whose_toml_became_malformed_is_reported_and_the_sweep_goes_on(world):
+    dsn, owner, directory = world
+    write_toml(directory, "broken")
+    write_toml(directory, "quiet")
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            for n in ("broken", "quiet"):
+                await routines.ensure(conn, routines.load(n))
+        (directory / "broken" / "routine.toml").write_text("name = [")
+        return await due(dsn, datetime.now(UTC) + timedelta(days=100))
+
+    found = run(go())
+    assert [m.split(":")[0] for m in found["malformed"]] == ["broken"]
+    assert "quiet" in listed(found, "routine") and "broken" not in listed(found)
+
+
 def test_the_rendered_sweep_prompt_removes_only_what_the_list_names(world):
     _, _, _ = world
-    text = routines.render({"items": [], "outside": []}, routines.load("expiry"))
+    text = routines.render({"items": [], "outside": [], "malformed": []}, routines.load("expiry"))
     assert "Remove nothing the list does not name" in text
     assert "Keep nothing" not in text and "Tom" not in text
 
