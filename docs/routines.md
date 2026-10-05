@@ -229,7 +229,10 @@ grant in this repository that a merged sweep listed is removed by its grant id
 and never listed again; Tom keeps one with `grant` on the sweep's task, naming the listed grant id
 in place of an instance: a new grant row (fresh id, new expiry, the old row's
 incident and mission items) is written on the old grant's own task and
-expires on its own date. A merged sweep's listing of another project's grant removes nothing.
+expires on its own date. Keeping one takes both, before the merge: his
+feedback, so the branch leaves the grant's hunk, and his `grant` naming the
+listed id; the lead does not merge a sweep while a keep he asked for is not
+yet written. A merged sweep's listing of another project's grant removes nothing.
 A routine whose toml cannot be read is reported in the run's line and the rest
 go on. The sweep's one task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the

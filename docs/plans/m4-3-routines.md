@@ -256,7 +256,10 @@ task: the guard's code, its seed in `core/guards.py`, its tests, and the
 docs that describe it, or the routine's directory. Critique, test, review,
 and docs run on it. The deletion is the default, so its merge needs no tap
 from Tom; the merge is the build lead's call, released like any merge. To
-keep an item, Tom gives feedback on the delivery, which sends the task to patch.
+keep an item, Tom gives feedback on the delivery, which sends the task to patch
+so the branch leaves that item's hunk; keeping an instance grant also takes
+his `grant` on the sweep's task naming the listed grant id, before the merge.
+The lead does not merge a sweep while a keep Tom asked for is not yet written.
 
 The ledger keeps every `guard.granted` row. A deleted seeded guard leaves
 `guards.SEEDED`, so `migrate` does not seed it again and `due` reads it as
