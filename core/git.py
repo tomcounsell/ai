@@ -244,6 +244,22 @@ def watch() -> Interruptible | None:
     return _WATCH.get()
 
 
+_MARK: contextvars.ContextVar[str | None] = contextvars.ContextVar("git_mark", default=None)
+
+
+@contextlib.contextmanager
+def marked(mark: str):
+    """Give the block's trusted git calls the turn mark `mark`
+    (`VALOR_TURN=<mark>` in git's environment, under any explicit
+    `extra_env`), which every program git starts inherits, so `runs.reap`
+    finds them after the kernel that started them died."""
+    token = _MARK.set(mark)
+    try:
+        yield
+    finally:
+        _MARK.reset(token)
+
+
 def start(argv: list[str], **kwargs) -> subprocess.Popen:
     """A process in its own process group, recorded on the current watch
     when there is one (`interruptible()`)."""
@@ -276,9 +292,11 @@ def _git(
     process it starts inherits. Its output goes to files the kernel holds
     (`output_file`), not pipes, so the call ends when git exits, even while
     a program git started still holds them. `prefix` runs it under a
-    sandbox (`sandbox-exec ... -f <profile>`)."""
+    sandbox (`sandbox-exec ... -f <profile>`). Inside `marked(mark)` its
+    environment carries the mark."""
     git_bin = binary()
     held = _WATCH.get()
+    mark = {} if _MARK.get() is None else {"VALOR_TURN": _MARK.get()}
     lock = performing.held()
     argv = [*(prefix or []), git_bin, "-C", str(workspace), *PINNED, *args]
     with output_file() as out, output_file() as err:
@@ -286,7 +304,7 @@ def _git(
             argv,
             stdout=out,
             stderr=err,
-            env={**env(), **(extra_env or {})},
+            env={**env(), **mark, **(extra_env or {})},
             pass_fds=() if lock is None else (lock,),
         )
         try:

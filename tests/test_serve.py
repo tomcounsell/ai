@@ -1356,7 +1356,7 @@ def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
         return "turn.ended" in types or "workspace.failed" in types
 
     with (tmp_path / "kernel.log").open("w") as log:
-        kernel = kernel_child(tmp_path, fresh, "scripted", log)
+        kernel = kernel_child(tmp_path, fresh, "judged", log)
         try:
             run(until(setup_running, 60))
             sleeper = int(started.read_text())
@@ -1364,7 +1364,7 @@ def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
             kernel.wait()
             assert root.is_dir() and not gone(sleeper)
             _toy_project(tmp_path, src, ["true"])
-            kernel = kernel_child(tmp_path, fresh, "scripted", log)
+            kernel = kernel_child(tmp_path, fresh, "judged", log)
             run(until(done, 90))
             made_again = not started.exists()
         finally:
@@ -1374,8 +1374,9 @@ def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
                 os.kill(sleeper, signal.SIGKILL)
             kws.rmtree(root)
 
-    types = [r["type"] for r in run(rows(fresh, task))]
-    assert "workspace.failed" not in types, (tmp_path / "kernel.log").read_text()
+    written = run(rows(fresh, task))
+    types = [r["type"] for r in written]
+    assert "workspace.failed" not in types, typed(written, "workspace.failed")
     assert types.count("workspace.provisioned") == 1 and "turn.ended" in types
     assert gone(sleeper) and made_again
     assert (outside / "keep").read_text() == "kept"
@@ -1402,7 +1403,11 @@ def _steer(dsn, task) -> None:
             dsn,
             task,
             "message.steered",
-            {"text": "try again", "attachments": [], "provenance": ledger.provenance("tom", "telegram", False)},
+            {
+                "text": "try again",
+                "attachments": [],
+                "provenance": ledger.provenance("tom", "telegram", False),
+            },
         )
     )
 

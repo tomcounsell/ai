@@ -107,6 +107,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import os
 import resource
 import signal
 from pathlib import Path
@@ -418,12 +419,16 @@ async def _start_project(conn, args) -> str:
 async def _workspace(conn, args) -> str:
     """`workspace show TASK` prints where the kernel provisioned it;
     `workspace remove TASK` (Tom's) deletes it, only once the task is
-    stopped or merged, and frees its ports."""
+    stopped or merged, and frees its ports. It also deletes the directory
+    a provisioning that died left for a task with no workspace
+    (`_unfinished`)."""
     try:
         b = await tasks.brief(conn, args.task_id)
     except KeyError:
         return await _orphan(conn, args)
     if not b.mirror:
+        if args.workspace_command == "remove" and os.path.lexists(workspace.layout(args.task_id).root):
+            return await _unfinished(conn, args)
         raise SystemExit(f"task {args.task_id} has no workspace the kernel provisioned")
     if args.workspace_command == "show":
         keys = (
@@ -452,6 +457,34 @@ async def _workspace(conn, args) -> str:
             {"path": str(Path(b.mirror).parent), "provenance": ledger.provenance(args.by, args.via, False)},
         )
     return f"removed the workspace of task {args.task_id}"
+
+
+async def _unfinished(conn, args) -> str:
+    """The directory of a task whose provisioning died before its
+    `workspace.provisioned` row: removed once the task is stopped or
+    merged, and its provisioning is not live, with what it left running."""
+    lay = workspace.layout(args.task_id)
+    key = f"provision:{args.task_id}"
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{args.task_id}")
+        f = machine.fold(await ledger.read(conn, args.task_id))
+        if f.state not in (State.STOPPED, State.MERGED):
+            raise SystemExit(
+                f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
+            )
+        got = await (
+            await conn.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+        ).fetchone()
+        if not got[0]:
+            raise SystemExit(f"{lay.root} is being provisioned now")
+        await git.threaded(workspace.remove, args.task_id, lay)
+        await ledger.append(
+            conn,
+            args.task_id,
+            "workspace.removed",
+            {"path": str(lay.root), "provenance": ledger.provenance(args.by, args.via, False)},
+        )
+    return f"removed the unfinished workspace of task {args.task_id}"
 
 
 async def _orphan(conn, args, *, after_lock=None) -> str:

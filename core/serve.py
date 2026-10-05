@@ -54,6 +54,7 @@ from typing import Any
 from core import (
     broker,
     db,
+    git,
     intake,
     ledger,
     machine,
@@ -430,12 +431,29 @@ class Kernel:
 
     async def _provision(self, task_id: str, name: str | None) -> None:
         """Provision a task started by message, off the loop. A failure is a
-        `workspace.failed` row and a notice."""
+        `workspace.failed` row and a notice.
+
+        Under `provision:<task>`, the lock the only writer of
+        `workspace.provisioned` holds, the condition `_ready` scheduled this
+        on is read again: a job that waited on the lock does nothing once the
+        task was stopped, provisioned, or failed with no steer since. A task
+        directory found then is a provisioning that died (a killed kernel):
+        it is removed, with what it left running, and made again; its ports
+        are free to choose again."""
         async with await db.connect(self.dsn) as conn:
             lock = f"provision:{task_id}"
             await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
             try:
+                rows = await ledger.read(conn, task_id)
+                f = machine.fold(rows)
+                if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
+                    return
+                b = await tasks.brief(conn, task_id)
+                if not b.project or b.workspace or not _provision_due(rows):
+                    return
                 try:
+                    if os.path.lexists(workspace.layout(task_id).root):
+                        await asyncio.to_thread(workspace.remove, task_id)
                     spec = workspace.Spec.load(name or "")
                     await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
                     try:
@@ -448,7 +466,9 @@ class Kernel:
                         workspace.reserve(task_id, ports)
                     finally:
                         await _unlock(conn, "workspace:ports")
-                    made = await asyncio.to_thread(workspace.provision, task_id, spec, ports)
+                    # A cancel (the kernel closing) stops its git and setup
+                    # commands and waits for its cleanup before the lock goes.
+                    made = await git.threaded(workspace.provision, task_id, spec, ports)
                 except Exception as exc:  # noqa: BLE001  any failure is the task's to report, not the kernel's
                     async with conn.transaction():
                         await ledger.lock(conn, f"task:{task_id}")

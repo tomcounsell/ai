@@ -873,7 +873,11 @@ def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | No
     if not lay.root.exists():
         reserve(task_id, ports, work)
     try:
-        return _provision(lay, task_id, spec, ports, base=base, source=source)
+        # Its git calls carry the mark `provision-<task>` (`git.marked`), set
+        # in the thread `provision` runs in: a kernel killed mid-provision
+        # leaves git running in its own session, and `remove` reaps it.
+        with git.marked(f"provision-{task_id}"):
+            return _provision(lay, task_id, spec, ports, base=base, source=source)
     except BaseException as exc:
         stop_services(task_id, lay)
         shutil.rmtree(lay.root, ignore_errors=True)
@@ -2132,10 +2136,23 @@ def _empty_dir(root: int) -> None:
 
 
 def remove(task_id: str, lay: Layout | None = None) -> None:
+    """Remove the task's directory: a stopped or merged task's workspace, an
+    orphan's, or one a provisioning that died left. What could still write
+    into it or the shared cache is stopped first, since each runs in a
+    session of its own and outlives a killed kernel: its services, its
+    provisioning's git (the mark `provision-<task>`), and what its setup
+    commands left (the mark `setup-<task>-<n>` of each `<n>.log` under
+    `setup/`, opened before command `n` starts). The tree is cleared with
+    `rmtree`, which follows no link and stops at no flag or ACL; a missing
+    root is nothing to clear, a dangling link at the root is cleared."""
     lay = lay or layout(task_id)
     stop_services(task_id, lay)
-    if lay.root.exists():
-        shutil.rmtree(lay.root)
+    runs.reap(f"provision-{task_id}")
+    if lay.setup.is_dir():
+        for log in lay.setup.iterdir():
+            if log.suffix == ".log" and log.stem.isdigit():
+                runs.reap(f"setup-{task_id}-{log.stem}")
+    rmtree(lay.root)
 
 
 # -- other tasks' services --------------------------------------------------------------------
