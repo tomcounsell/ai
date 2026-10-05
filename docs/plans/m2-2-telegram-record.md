@@ -167,9 +167,40 @@ The port doc's paragraph on the Telegram lookup, which 2.2 added, stays.
   reconnected afterwards with no auth key error.
 - Step 6: `com.valor.kernel.telegram` bootstrapped from
   `~/src/valor-build-notes/plists/`; it connected.
-- Step 7: open. It needs Tom's messages in the group, in a window.
+- Step 7 (window 2026-10-05, driven by Valor): see "Window of 2026-10-05" below.
 - Step 8: `tests/test_live_telegram_window.py` passed: one real send, the
   child killed after Telegram accepted it, the lookup found exactly one.
 - Step 9: the bridge job booted out; the running system enabled and
   started (bridge, worker, email).
 - Step 10: open, with step 7.
+
+## Window of 2026-10-05
+
+Tom: "I can't be your test monkey, you need to be able to emulate or do
+this yourself." The lead ran the window with a stand-in for Tom: a bot,
+@valor_window_standin_bot (user id 8833713379), made through @BotFather
+from Valor's own session while the bridge job was booted out, added to the
+group, and named `VALOR_OPERATOR_TELEGRAM_ID` in the kernel and bridge jobs
+for the window only. The bot posted and replied through the Bot API. Event
+ids are in the ledger `valor_rebuild`.
+
+- A stand-in message started task c5632154b04d (1485 to 1487); `status`
+  showed its metered spending, $0.97. Pass.
+- Its question reached the stand-in (1560, notice 1562) and the stand-in's
+  reply bound as the answer (1564, 1565). Pass.
+- `approve` in reply to the delivered notice bound as feedback (2054,
+  2055). Pass.
+- Step 8 again: `tests/test_live_telegram_window.py` 1 passed in 22.3 s.
+- `approve` in reply to a push's effect notice: not shown. The task's
+  merge effect was refused, "act is above the task's ceiling propose"
+  (1786): `intake` starts every task from a message at the Brief's default
+  ceiling, `propose`, and a merge is act-class. No task started from a
+  message can hold a push. Open, with the ceiling question to Tom.
+- Tom wrote twice in the group (1793, 1805); both bound none, since the
+  operator id was the stand-in's. 1805: "Governance grant. However only the
+  top agent Valor should be messaging here." The bot left the group at the
+  window's close. The next window uses a separate group holding only Valor
+  and the bot.
+- Close: the operator id restored, the bridge job booted out, the running
+  system enabled and started (bridge, worker, email).
+- Step 10 (RSS after a day): open.

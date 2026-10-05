@@ -316,3 +316,40 @@ connection. The merge with 2.1 takes these as additions to its port.
   `~/Library/LaunchAgents/com.valor.email.plist` and disabled in launchd,
   so a login does not load it beside `main`'s bridge. `VALOR_EMAIL_SINCE`
   is set to the window's date when the window opens.
+
+## Window of 2026-10-05
+
+Driven by Valor with stand-ins (Tom: "you need to be able to emulate or do
+this yourself"). Gmail's SMTP rewrites a plus-address From to
+valor@yuda.me, so the stand-in mails were placed in Valor's INBOX over IMAP
+APPEND: From valor+op@yuda.me (the window's `VALOR_OPERATOR_EMAIL`), Cc
+valor+cc@yuda.me; and one From valor+other@yuda.me.
+
+- Step 2: the stand-in operator's mail was received unverified (1604,
+  received_id 061fe7855662) and bound none; no task. Pass.
+- Step 3: the other address's mail was not received and stayed unseen.
+  Pass.
+- A task started from a Telegram message could not ask for the reply:
+  `email.send` is act-class and the task's ceiling is `propose` (1736,
+  1751). The lead started task bb5928344d4c from the command line with
+  `--ceiling act` for step 4.
+- Step 4: the reply-all was held (1818) with To valor+op and Cc valor+cc,
+  released by one stand-in `approve` (1829, 1830), intent 1832. The
+  release backend (pid 24494, the newer `valor-email-perform`) was
+  terminated by pid as the SMTP session opened. The bridge logged the
+  failed outcome write and kept running; the next wake settled the effect
+  `done` from Sent Mail (1947, reconciled). One copy in the mailbox; the
+  9 000 000-byte attachment arrived with the approved sha256. Pass.
+- The task then ran idle build turns, never writing done.md; the lead
+  stopped it (2071).
+- Measurements: upload 0.19 to 0.20 MB/s (12.2 MB message in 62 s); Gmail
+  files the message in Sent Mail about 2 s after the 250; both
+  `X-GM-RAW "rfc822msgid:<id>"` (with or without angle brackets) and
+  `SINCE ... HEADER Message-ID` find it; bridge RSS 30 to 39 MB.
+- The watch logged three `TimeoutError` (errno 60) reconnects in two
+  hours, each inside IDLE: the IMAP socket has no keepalive and no read
+  timeout, so a silently dropped idle connection surfaces only at the
+  29-minute reissue. Mail can wait that long. Follow-up.
+- Close: the bridge job booted out and disabled; `VALOR_EMAIL_SINCE` and
+  the window's projects directory removed; the running system's email
+  bridge started.
