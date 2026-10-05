@@ -4,7 +4,7 @@ slug: m2-4c-workspace-suite
 type: bug
 status: planned
 critique_rounds: 1
-review_rounds: 1
+review_rounds: 2
 governance_grant: none
 ---
 
@@ -87,7 +87,10 @@ The lint in events 178 and 179 exited 2 as well;
    tests (6530 to 6549 by default), and the mail servers
    (`mailserver.Ports`) into one span. `projects/valor.toml`'s `[env]` sets
    no `VALOR_TEST_PORTS`, so in a workspace even those use their defaults,
-   none of which the profile allows.
+   none of which the profile allows. Two test servers bind fixed ports and
+   never read it: `tests/smart_http.py` (6481 to 6489, for
+   `test_credential_push` and `test_targets`) and `tests/test_look.py`
+   (6451 to 6459).
 4. **Lint has no binary.** `lint = "uv run ruff check ."`, but `ruff` is in
    no dependency group of `pyproject.toml`, so `uv run` in the check's
    environment has nothing to spawn. On the host the suite's own docs say
@@ -161,17 +164,32 @@ item (1, "testing actual use"), and Tom's grant. This plan carries
    span both the check and turn profiles allow on loopback for bind and
    connect. The turn slot holds one turn or check per machine
    (`core/slot.py`), so nothing else uses those ports while the suite runs.
-2. `tests/ports.py`: `listen()`, the port a test server binds: 0 (the OS
-   chooses) when `VALOR_TEST_PORTS` is unset, else the first port of the
-   span that a bind on `127.0.0.1` accepts, skipping any `listen()`
-   returned whose server still holds it. `span` keeps its meaning.
-   `mailserver.Ports` uses it in place of its own copy.
+2. `tests/ports.py`: `listen(taken=())`, the port a test server binds: 0
+   (the OS chooses) when `VALOR_TEST_PORTS` is unset; else the first port
+   after the one it last returned, wrapping around the span, that is not
+   in `taken` and that a `SO_REUSEADDR` bind on `127.0.0.1` accepts (the
+   way the servers bind, so a port in TIME_WAIT is free and a live
+   listener is not). It raises naming the span when none is left. The
+   rotating cursor keeps back-to-back calls distinct while the
+   subprocesses they name start, and leaves just-released ports for last.
+   `span` keeps its meaning. `mailserver.Ports` uses it in place of its
+   own copy, and the tests' service ports (`scripted.provisioned`,
+   `test_workspace`) come from it when the span is set, in place of
+   `kws.choose_port`, so `core/workspace.py` is unchanged.
+   The budget, with the span at the ten dev ports: the shared judgement
+   upstream holds 1 for the session, the `mail` session fixture 4 once
+   Dovecot is present, a `telegram_emulator` module fixture 1, and
+   `test_credentials`' TCP cluster 1 for its module, which leaves at least
+   three for any one test's gateway, upstream, and task services. A test
+   that needs more than the span holds fails with `listen()`'s error
+   naming the span.
 3. Every test server listed in Cause 2 binds `ports.listen()`:
    `judgement_upstream.Upstream` (default), `ScriptedUpstream.start`
    (default), `Gateway.start(port=ports.listen())` at each test call,
    `kernel_child`'s silent upstream and gateway, `telegram_emulator.main`
    (it inherits the environment), and the test-local servers and probe
-   sockets. `test_demo_sandbox` draws its gateway ports and its task's
+   sockets, `tests/smart_http.py`, and `tests/test_look.py`.
+   `test_demo_sandbox` draws its gateway ports and its task's
    service ports from the span when it is set, and keeps its denied probes
    (machine Postgres, 6379, the local bridge port) as they are.
    `Gateway.start` already takes a port, and `serve` takes the test's
@@ -180,11 +198,23 @@ item (1, "testing actual use"), and Tom's grant. This plan carries
    optional `port` for the TCP case, `_free_port()` when absent, so
    `test_credentials` passes `ports.listen()`. Every kernel caller keeps
    the default; this is the one line of kernel code the fix touches.
-5. `pyproject.toml` dev group gains `ruff`, pinned to the version the
-   repository is checked with, and `uv.lock` is regenerated, so
+5. `pyproject.toml` dev group gains `ruff==0.16.10` (what `uvx ruff`
+   resolves on this Mac), and `uv.lock` is regenerated, so
    `uv run ruff` runs in a workspace.
 6. `tests/README.md`: `VALOR_TEST_PORTS` moves every server the tests
    start, and `projects/valor.toml` sets it to the dev ports.
+7. `tests/test_intake.py::test_steer_mid_turn` (its wait for
+   `turn.started`) and the same wait in `tests/test_objective_tree.py`
+   look at the `driving` task on each pass and re-raise its exception when
+   it has failed, so a drive that fails before `turn.started` fails the
+   test instead of spinning forever. No timeout is added; the suite has
+   no time limit.
+8. Whatever else the run under the real check profile shows the suite's
+   own configuration can fix: the spec's `[env]` (`VALOR_PG_SCRATCH`, now
+   `/tmp`, which the profile denies, moves to a path inside the workspace
+   the profile allows, within the socket path limit) and test-side paths.
+   No sandbox profile changes; that is a security change outside this
+   task. The build record names each one.
 
 ## Done, as evidence
 
@@ -194,13 +224,15 @@ real Postgres and real `sandbox-exec`:
 - The valor suite, collected under the real check profile
   (`workspace.check_profile` for a layout in the test's directory) with
   `VALOR_TEST_PORTS=8000-8009`, collects every module with no error.
-- A real `checks.suite` run of the valor project at the fix's commit, in a
-  provisioned workspace with the check's own Postgres, exits with per-test
-  results whose `passed` is the host's set at the same commit, and whose
-  `failed` and `errored` hold only the host's own environmental ones
-  (Dovecot not installed on this Mac: the 62 email errors and
-  `test_mailserver`'s kill test; `test_pi`'s loader test). With Dovecot
-  installed it is green: `failed` and `errored` empty. Its lint exits 0.
+- The valor suite collects and runs inside the real check profile, in a
+  workspace the build makes for the measurement (never `~/valor-tasks`,
+  never the live kernel), with the spec's `[env]`: every test either
+  passes, or skips with a reason naming the sandbox denial it met, or
+  fails as it fails on the host at the same commit (Dovecot and node are
+  not installed on this Mac). A skip names a denial the run actually
+  met, never an invented one. The measured counts, and the list of
+  skipped tests by denial, go under Left out. `uv run ruff check .` exits
+  0 in that workspace.
 - The suite on the host, with `VALOR_TEST_PORTS` unset and with it set to
   a ten-port span, gives the same results as before the change, and both
   ruff checks are green.
@@ -211,18 +243,24 @@ rows show passed tests at base and head.
 ## Tests
 
 - `tests/test_checks.py::test_the_valor_suite_collects_under_the_check_profile`:
-  renders `check_profile` for a layout under `tmp_path`, runs
-  `pytest --collect-only -q tests` under it with the valor spec's
-  environment, and asserts exit 0 and no `ERROR collecting`. On the code
-  as it is it fails with the incident's `PermissionError`.
+  renders `check_profile` for a layout under `tmp_path`, appends
+  `(allow file-read* (subpath <repo>))` and the same for the interpreter's
+  own prefix (the profile denies `~/src`, so neither the repository nor its
+  `.venv` is readable otherwise; the later rule wins, and the network
+  rules under test stay as rendered), and runs
+  `<repo>/.venv/bin/python -m pytest --collect-only -q tests` with `cwd`
+  the repository, the valor spec's `[env]` with `VALOR_TEST_PORTS` at the
+  dev ports, and `TMPDIR` under the check's directory. It asserts exit 0
+  and no `ERROR collecting`. On the code as it is it fails with the
+  incident's `PermissionError`.
 - `tests/test_ports.py::test_listen_draws_from_the_span`: unset, `listen()`
   is 0; set to a span with its first port held by a listener, it returns
-  the second, and a server bound there is reachable under a profile that
-  allows only the span.
-- The Done item's workspace run is a test in `tests/test_checks.py`
-  marked by its duration, as the live suite runs are: it provisions the
-  valor spec from the test's own mirror of this repository and runs
-  `checks.suite` at `HEAD`.
+  the second, a port in `taken` is passed over, a span port in TIME_WAIT
+  is returned, a used-up span raises naming it, and a server bound on a
+  returned port is reachable under a profile that allows only the span.
+- The workspace run of the Done item is recorded evidence (one run, its
+  counts in the plan), not a test: a test that runs the whole suite would
+  run itself.
 
 ## Left out
 
@@ -234,9 +272,10 @@ rows show passed tests at base and head.
   widens what turn-written code can bind, and the dev ports already serve.
 - Installing Dovecot on this Mac: a machine change; the email tests name
   it as missing.
-- Bounding the tests' unbounded waits (`test_steer_mid_turn` waiting for a
-  row): with the gateway on an allowed port the wait ends, and a suite with
-  no time limit is the documented rule.
+- A time limit on the tests' waits: fix 7 makes a failed drive fail its
+  test, and a suite with no time limit is the documented rule.
+- Any sandbox profile change, including one that would let a skipped test
+  run in a check: a security change outside this task.
 
 ## Questions for Tom
 
@@ -250,10 +289,31 @@ rows show passed tests at base and head.
   no profile change, and the turn slot keeps them free during a check.
 - `tests/ports.py` returns port 0 when `VALOR_TEST_PORTS` is unset, so a
   host run keeps OS-chosen ports.
-- Stakes 1 and 1: no profile, check, or stored data changes, and the one
-  kernel line (`backup`'s optional port) keeps every kernel caller's
-  behavior; the rest is the tests' port choice, a project spec line, and a
-  dev dependency, all reversible, with the host suite and the workspace
-  run as evidence. Review's focus is `test_demo_sandbox`, whose probes
-  change ports under the span. If the lead counts `backup.py` as the
-  kernel, it is 2 and 2.
+- Stakes: critique 1, review 2 (the lead's call). No profile, check, or
+  stored data changes, and the one kernel line (`backup`'s optional port)
+  keeps every kernel caller's behavior; review covers it. The rest is the
+  tests' port choice, project spec lines, and a dev dependency, all
+  reversible, with the host suite and the workspace run as evidence.
+  Review's focus is `test_demo_sandbox`, whose probes change ports under
+  the span, and `backup.py`.
+
+## Critique rounds
+
+Round 1 (critic-2-4c-r1, verdict revise; the one round the stakes allow,
+so its findings ride into the build). Lead's decisions:
+
+1. and 2. Taken. `listen()` probes with `SO_REUSEADDR`, rotates a cursor
+   over the span, and hands out the service and mail ports too; the port
+   budget is stated (fix 2).
+3. Taken. `tests/smart_http.py` and `tests/test_look.py` move onto the
+   helper (Cause 3, fix 3).
+4. Taken. The build measures under the real check profile, not only its
+   loopback rules, and fixes what the suite's own configuration can: the
+   spec's env (`VALOR_PG_SCRATCH` inside the workspace) and test-side
+   paths (fix 8). No sandbox profile changes. The Done item is rewritten
+   to be reachable; the measured list goes under Left out.
+5. Taken. The third test is cut; the workspace run is recorded evidence.
+6. Taken. The collection test says how it reaches pytest.
+7. Taken. Both unbounded waits check the driving task and fail when it
+   fails, with no timeout (fix 7).
+8. Taken (the critique's 8 to 10). `ruff==0.16.10`; `review_rounds` is 2.
