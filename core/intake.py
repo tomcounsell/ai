@@ -7,13 +7,17 @@ approval, a stop, a steer of a running task, or a new task. A bridge holds
 no binding logic.
 
 `verified` is set here, not by the bridge: every Telegram record is
-verified (MTProto authenticates the sender); an email record is not.
-Whether the sender is the operator is decided at bind.
+verified (MTProto authenticates the sender); a local record is verified
+(the local bridge writes one only for a request carrying its token, and
+the local chat has one member, Tom); an email record is not. Whether the
+sender is the operator is decided at bind.
 
 Ownership: this machine's bridges receive the operator's own chat and
 addresses, and the chats a project spec lists (`chats`) whose `machine`
 is this one; a spec naming no machine belongs to
-`settings.default_machine`.
+`settings.default_machine`. The operator chat is the bridge's whose
+channel is `settings.operator_channel`: the Telegram operator chat, or the
+one local chat, `local`.
 
 The binding table, first match wins:
 
@@ -21,10 +25,10 @@ The binding table, first match wins:
 | --- | --- |
 | Not verified, or not from the operator | `none` |
 | A reply to a merged or stopped task | `none`, with a notice |
-| A Telegram reply to a task's notice or send, exactly `stop` | `stop` |
+| A Telegram or local reply to a task's notice or send, exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
 | A reply to the delivered notice, task in `merge` | `feedback` |
-| A Telegram reply to an effect notice, exactly `approve` | `approve` |
+| A Telegram or local reply to an effect notice, exactly `approve` | `approve` |
 | The same, the effect already released or done | `none`, with a notice |
 | Any other reply to a task's notice or send | `steer` |
 | Not a reply, with text or files | `start` |
@@ -32,7 +36,9 @@ The binding table, first match wins:
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
 and owes a notice; by email, `approve` and `stop` always steer, and the
-notice says they come by Telegram. A binding that raises is rolled back
+notice says they come by reply on the operator channel. A binding notice
+goes back in reply in the message's own chat on Telegram and the local
+chat; about an email, it goes to the operator channel and chat. A binding that raises is rolled back
 and bound `none` with the error, owing a notice; later messages never wait
 behind it. `message.bound` is the first row a binding writes, so a
 second binder of the same message stops there and writes nothing.
@@ -52,7 +58,7 @@ from core.settings import resolve_model, settings
 
 @dataclass(frozen=True)
 class Inbound:
-    channel: str  # "telegram" or "email"
+    channel: str  # "telegram", "email", or "local"
     chat_id: str  # Telegram: marked peer id as text (-100... for groups); email: the thread root
     chat_kind: str  # "dm", "group", or "email"
     message_id: str  # Telegram: message id as text; email: Message-ID
@@ -82,7 +88,24 @@ def _verified_email(inbound: Inbound) -> bool:
     return False
 
 
-VERIFY = {"telegram": _verified_telegram, "email": _verified_email}
+def _verified_local(inbound: Inbound) -> bool:
+    return True
+
+
+VERIFY = {"telegram": _verified_telegram, "email": _verified_email, "local": _verified_local}
+
+# The channels where Tom replies to a message, so `approve` and `stop`
+# bind and a binding notice goes back in reply.
+REPLIES = ("telegram", "local")
+# The local chat page's one chat.
+LOCAL_CHAT = "local"
+# Where Tom replies, as the near miss notice for an email names it.
+_WHERE = {"telegram": "in Telegram", "local": "on the local chat page"}
+
+
+def _where() -> str:
+    channel = settings.operator_channel
+    return _WHERE.get(channel, f"on {channel}")
 
 
 async def receive(conn, inbound: Inbound) -> Received:
@@ -187,8 +210,10 @@ def _project_chats(channel: str) -> list[tuple[str, workspace.Spec]]:
 def owned(channel: str) -> list[str]:
     """Every id this machine's bridge on `channel` receives."""
     ids: list[str] = []
-    if channel == "telegram" and settings.operator_chat:
+    if channel == "telegram" and settings.operator_channel == "telegram" and settings.operator_chat:
         ids.append(settings.operator_chat)
+    if channel == "local" and settings.operator_channel == "local":
+        ids.append(LOCAL_CHAT)
     if channel == "email":
         ids.extend(settings.operator_email)
     for ident, _ in _project_chats(channel):
@@ -208,7 +233,7 @@ def _from_operator(p: dict[str, Any]) -> bool:
         return settings.operator_telegram_id is not None and p["sender_id"] == settings.operator_telegram_id
     if p["channel"] == "email":
         return p["sender_id"].lower() in settings.operator_email
-    return False
+    return p["channel"] == "local"
 
 
 def _bare(text: str) -> str:
@@ -310,17 +335,18 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
 
 
 async def _notice(conn, task_id: str, p: dict[str, Any], text: str, suffix: str = "") -> None:
+    replies = p["channel"] in REPLIES
     await notices.request(
         conn,
         task_id,
         kind="binding",
         about_key=f"reply:{p['received_id']}{suffix}",
         text=text,
-        reply_to=p["message_id"] if p["channel"] == "telegram" else None,
-        # Notices go by Telegram: one in reply in the chat the message came
-        # from, one about an email to the operator chat.
-        chat_id=p["chat_id"] if p["channel"] == "telegram" else None,
-        channel="telegram",
+        # One in reply in the chat the message came from; one about an
+        # email to the operator channel and chat.
+        reply_to=p["message_id"] if replies else None,
+        chat_id=p["chat_id"] if replies else None,
+        channel=p["channel"] if replies else None,
     )
 
 
@@ -342,12 +368,12 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         return as_
     text = (p.get("text") or "").strip()
     exact = text.casefold()
-    telegram = p["channel"] == "telegram"
+    replies = p["channel"] in REPLIES
     via = p["channel"]
     notice = (replied.get("notice") or {}) if "notice" in replied else {}
     kind, about = notice.get("kind"), notice.get("about_key") or ""
 
-    if telegram and exact == "stop":
+    if replies and exact == "stop":
         as_ = await _bound(conn, p, task_id, "stop")
         await tasks.stop(conn, task_id, reason=f"Tom replied stop ({p['message_id']})", by="tom", via=via)
         return as_
@@ -359,7 +385,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         as_ = await _bound(conn, p, task_id, "feedback")
         await session.feedback(conn, task_id, text, by="tom", via=via)
         return as_
-    if telegram and exact == "approve" and kind == "effect":
+    if replies and exact == "approve" and kind == "effect":
         return await _approve(conn, p, task_id, about.removeprefix("effect:"))
 
     as_ = await _bound(conn, p, task_id, "steer")
@@ -382,8 +408,8 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             said = (
                 f"Not {'an approval' if word == 'approve' else 'a stop'}; reply `{word}`. "
                 "Your message steers the task."
-                if telegram
-                else "Approvals and stops come by Telegram; your email steers the task."
+                if replies
+                else f"Approvals and stops come by reply {_where()}; your email steers the task."
             )
             await _notice(conn, task_id, p, said)
             break

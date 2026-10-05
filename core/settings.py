@@ -50,6 +50,14 @@ def _addresses(raw: str) -> tuple[str, ...]:
     return tuple(a.strip().lower() for a in raw.split(",") if a.strip())
 
 
+def _operator_chat() -> str | None:
+    """The operator chat: `local` whenever the operator channel is the local
+    chat page, which has one chat, so the chat has one name."""
+    if _env("VALOR_OPERATOR_CHANNEL", "telegram") == "local":
+        return "local"
+    return _env("VALOR_OPERATOR_CHAT", "") or None
+
+
 def _pi() -> str:
     # Homebrew's prefix, which every turn profile denies writing: a PATH
     # lookup could land on a directory a turn can write.
@@ -365,9 +373,10 @@ class Settings:
         default_factory=lambda: _addresses(_env("VALOR_OPERATOR_EMAIL", ""))
     )
     # Where operator notices go: the channel, and the chat on it (the
-    # Telegram group "Valor rebuild", by its -100... id).
+    # Telegram group "Valor rebuild", by its -100... id; `local` for the
+    # local chat page).
     operator_channel: str = field(default_factory=lambda: _env("VALOR_OPERATOR_CHANNEL", "telegram"))
-    operator_chat: str | None = field(default_factory=lambda: _env("VALOR_OPERATOR_CHAT", "") or None)
+    operator_chat: str | None = field(default_factory=_operator_chat)
     # Where the bridges write inbound files, by channel, named by sha256.
     inbound_dir: str = field(
         default_factory=lambda: _env("VALOR_INBOUND", str(Path.home() / "valor-inbound"))
@@ -387,6 +396,12 @@ class Settings:
     smtp_port: int = field(default_factory=lambda: int(_env("VALOR_SMTP_PORT", "587")))
     # A CA file for the mail servers' certificates; unset, the system's.
     mail_cafile: str = field(default_factory=lambda: _env("VALOR_MAIL_CAFILE", ""))
+
+    # -- the local chat bridge (bridges/local): one page on 127.0.0.1 ------
+    # Outside DEV_PORTS (8000 to 8009, which a turn reaches,
+    # core/workspace.py) and the Postgres and Redis spans above, so no turn
+    # can connect to it.
+    local_port: int = field(default_factory=lambda: int(_env("VALOR_LOCAL_PORT", "8711")))
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a
@@ -432,6 +447,13 @@ class Settings:
         directory, which the gateway sends upstream on the OpenAI route.
         Absent, the route forwards the turn's own key."""
         return str(Path(self.pg_passfile).parent / "openai-key")
+
+    @property
+    def local_tokenfile(self) -> str:
+        """The local chat page's token, in the kernel key directory, made
+        by the local bridge when it starts. Derived from `pg_passfile` as
+        the other keys are."""
+        return str(Path(self.pg_passfile).parent / "local-token")
 
     @property
     def pg_socket(self) -> str:

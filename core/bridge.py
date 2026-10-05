@@ -34,6 +34,7 @@ impossible send at request time without importing a bridge:
   size 25 MB), counted as 25,000,000 bytes of the whole encoded message.
   `message_bytes` measures it with `core.mail`, the builder the email
   bridge's performer sends from, so the size refused is the size sent.
+- Local: none. The local chat page shows any text and no files.
 """
 
 import asyncio
@@ -79,6 +80,7 @@ LIMITS: dict[str, ChannelLimits] = {
         max_message_bytes=25_000_000,
         message_bytes=_email_message_bytes,
     ),
+    "local": ChannelLimits(max_text=None, text_units="chars", max_file_bytes=None),
 }
 
 
@@ -214,6 +216,20 @@ async def _refuse_email(conn, action: broker.Action) -> str | None:
     return None
 
 
+async def _refuse_local(conn, action: broker.Action) -> str | None:
+    from core import intake
+
+    if not intake.owns("local", action.target):
+        return "the target is not the local chat this machine's local bridge serves"
+    if not _strings(action.payload, ("text",)):
+        return TEXT_SHAPE
+    if not (action.payload.get("text") or "").strip():
+        return "the text is empty: the local chat would show nothing"
+    if action.payload.get("files"):
+        return "the local chat shows text only, so a send names no files"
+    return None
+
+
 @dataclass(frozen=True)
 class Declared:
     """A channel's send type as a task's Performers holds it. `refuse`
@@ -224,7 +240,7 @@ class Declared:
     action_type: str
     effect_class: str
     usage: str
-    owner: str  # "telegram" or "email"
+    owner: str  # "telegram", "email", or "local"
     check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
     workspace: str | None = None
 
@@ -258,6 +274,16 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="email",
         check=_refuse_email,
+    ),
+    "local.send_message": Declared(
+        action_type="local.send_message",
+        effect_class="act",
+        usage=(
+            '`local.send_message`: target `local`, payload `{"text": "..."}`; shown on Tom\'s local chat page '
+            "once Tom approves."
+        ),
+        owner="local",
+        check=_refuse_local,
     ),
 }
 
