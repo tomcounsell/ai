@@ -94,6 +94,53 @@ def test_a_schedule_launchd_would_reject_is_refused_when_the_routine_is_read(whe
         routines.load(name)
 
 
+def toml_with(where, head: str = "", tail: str = "[schedule]\nhour = 3\n") -> str:
+    name = unique()
+    (where / name).mkdir()
+    (where / name / "routine.toml").write_text(
+        f'name = "{name}"\nrunner = "noop"\nceiling = "propose"\nmodel = "frontier"\n'
+        f'mission_item = 5\ncreated = 2026-10-04\ninstruction = "x"\n{head}{tail}'
+    )
+    return name
+
+
+@pytest.mark.parametrize(
+    ("head", "tail"),
+    [
+        ('ceiling = ["a"]\n', ""),
+        ("need = 5\n", ""),
+        ("need = [5]\n", ""),
+        ("schedule = 5\n", ""),
+        ('schedule = "x"\n', ""),
+        ("", "[schedule]\ninterval = 99999999999999999999\n"),
+        ("", "[schedule]\ninterval = 9223372036854775808\n"),
+    ],
+)
+def test_a_wrong_typed_value_is_refused_not_raised(where, head, tail):
+    name = unique()
+    (where / name).mkdir()
+    base = f'name = "{name}"\nrunner = "noop"\nmodel = "frontier"\nmission_item = 5\n'
+    if not head.startswith("ceiling"):
+        base += 'ceiling = "propose"\n'
+    base += f'created = 2026-10-04\ninstruction = "x"\n{head}{tail or "[schedule]\nhour = 3\n"}'
+    (where / name / "routine.toml").write_text(base)
+    with pytest.raises(routines.Refused):
+        routines.load(name)
+
+
+def test_the_largest_interval_a_plist_holds_prints(where):
+    name = toml_with(where, tail="[schedule]\ninterval = 9223372036854775807\n")
+    assert plistlib.loads(routines.plist(routines.load(name)))["StartInterval"] == 2**63 - 1
+
+
+def test_created_is_a_date_not_a_time(where):
+    name = toml_with(where)
+    path = where / name / "routine.toml"
+    path.write_text(path.read_text().replace("created = 2026-10-04", "created = 2026-10-04T05:00:00"))
+    with pytest.raises(routines.Refused, match="created is a date"):
+        routines.load(name)
+
+
 def test_the_kernels_own_routines_load():
     assert set(routines.names(ROOT / "routines")) >= {"expiry", "emulator"}
     for n in routines.names(ROOT / "routines"):

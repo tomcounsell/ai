@@ -21,7 +21,7 @@ from core.settings import settings
 from tests import scripted
 from tests.conftest import TEST_DB
 from tests.test_docs_runner import docs_runners
-from tests.test_objective_tree import merge, run
+from tests.test_objective_tree import _append, _delivered, merge, run
 from tests.test_routines import write_toml
 from tests.test_workspace import _spec_file
 
@@ -236,6 +236,56 @@ def test_a_merged_sweep_keeps_another_projects_grant_listed_and_a_regrant_is_liv
     assert "g-ours" not in listed(past_new_expiry) and "g-ours-again" in listed(past_new_expiry)
 
 
+def test_tom_keeps_a_listed_grant_through_grant_and_it_is_live_on_its_own_date(world):
+    dsn, owner, _ = world
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            ours = await tasks.start(conn, tasks.Brief(instruction="ours", project={"name": "valor"}))
+            sweep = await tasks.start(conn, tasks.Brief(instruction="sweep"))
+        await put(
+            owner,
+            ours,
+            "guard.granted",
+            {"guard_id": "g-ours", "instance_id": "i-ours", "name": "g", "incident": "i", "mission_items": [2],
+             "granted_at": "2026-09-01", "expires": "2026-09-30"},
+            datetime(2026, 9, 1, tzinfo=UTC),
+        )  # fmt: skip
+        await put(
+            owner, sweep, "task.started",
+            {"due": [{"kind": "grant", "id": "g-ours"}], "sweep": "expiry", "sdlc": 1},
+            datetime(2026, 10, 1, tzinfo=UTC),
+        )  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            led = _delivered(None)
+            effect = ledger.new_id()
+            led.add(
+                "effect.held",
+                {
+                    "effect_id": effect,
+                    "action_type": "merge",
+                    "payload": {"candidate": led.candidate},
+                },
+            )
+            await _append(conn, sweep, led)
+            assert machine.fold(await ledger.read(conn, sweep)).state is State.MERGE
+            with pytest.raises(guards.GrantRefused, match="no governance instance"):
+                await guards.grant(conn, sweep, "g-other", note="keep")
+            new_id = await guards.grant(conn, sweep, "g-ours", note="still needed")
+            await ledger.append(conn, sweep, "effect.intent", {"effect_id": effect})
+            await ledger.append(conn, sweep, "effect.outcome", {"effect_id": effect, "kind": "done"})
+            assert machine.fold(await ledger.read(conn, sweep)).state is State.MERGED
+        row = next(r for r in await ledger.read(conn, ours) if r["payload"].get("guard_id") == new_id)
+        return new_id, row, await due(dsn, datetime(2027, 1, 20, tzinfo=UTC))
+
+    new_id, row, later = run(go())
+    p = row["payload"]
+    assert p["incident"] == "i" and p["mission_items"] == [2] and p["kept"] == "g-ours"
+    assert p["instance_id"].startswith("i-ours+") and p["provenance"]["by"] == "tom"
+    assert p["expires"] > p["granted_at"] and new_id != "g-ours"
+    assert "g-ours" not in listed(later) and new_id in listed(later)
+
+
 def test_a_routine_whose_toml_became_malformed_is_reported_and_the_sweep_goes_on(world):
     dsn, _, directory = world
     write_toml(directory, "broken")
@@ -258,6 +308,28 @@ def test_the_rendered_sweep_prompt_removes_only_what_the_list_names(world):
     text = routines.render({"items": [], "outside": [], "malformed": []}, routines.load("expiry"))
     assert "Remove nothing the list does not name" in text
     assert "Keep nothing" not in text and "Tom" not in text
+
+
+def test_a_wrong_typed_routine_is_listed_as_malformed_and_the_sweep_goes_on(world):
+    dsn, _, directory = world
+    bad = {"c": ('ceiling = "propose"', 'ceiling = ["a"]'), "n": ("hour = 3", "hour = 3\nneed = 5")}
+    for n in (*bad, "s", "quiet"):
+        write_toml(directory, n)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            for n in (*bad, "s", "quiet"):
+                await routines.ensure(conn, routines.load(n))
+        for n, (old, new) in bad.items():
+            path = directory / n / "routine.toml"
+            path.write_text(path.read_text().replace(old, new))
+        path = directory / "s" / "routine.toml"
+        path.write_text(path.read_text().replace("[schedule]\nhour = 3\nminute = 5\n", "schedule = 5\n"))
+        return await due(dsn, datetime.now(UTC) + timedelta(days=100))
+
+    found = run(go())
+    assert sorted(m.split(":")[0] for m in found["malformed"]) == ["c", "n", "s"]
+    assert "quiet" in listed(found, "routine")
 
 
 def test_a_seeded_guard_the_checkout_no_longer_holds_is_not_due(world):

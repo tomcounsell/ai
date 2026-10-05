@@ -25,7 +25,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
 | `project`, `branch` | the project spec and branch a runner that starts a workspace task provisions | |
-| `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month` (whole numbers in launchd's ranges: 0-59, 0-23, 1-31, 0-7, 1-12), or `interval` in seconds, not both | launchd |
+| `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month` (whole numbers in launchd's ranges: 0-59, 0-23, 1-31, 0-7, 1-12), or `interval` in seconds, a whole number that fits a plist integer (signed 64-bit); calendar keys and `interval` are not given together, since the printer writes one trigger | launchd for the ranges; the printer for "not both" |
 
 The launchd job is printed and never committed, since it names the checkout
 and its interpreter, which differ per Mac:
@@ -226,8 +226,10 @@ reads kernel-written rows only and proposes:
 
 An item a sweep listed is not listed again for ninety days. An instance
 grant in this repository that a merged sweep listed is removed by its grant id
-and never listed again; keeping one is a new grant row, which expires on its
-own date. A merged sweep's listing of another project's grant removes nothing.
+and never listed again; Tom keeps one with `grant` on the sweep's task, naming the listed grant id
+in place of an instance: a new grant row (fresh id, new expiry, the old row's
+incident and mission items) is written on the old grant's own task and
+expires on its own date. A merged sweep's listing of another project's grant removes nothing.
 A routine whose toml cannot be read is reported in the run's line and the rest
 go on. The sweep's one task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the
