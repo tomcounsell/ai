@@ -29,15 +29,15 @@ makes the next message a reply to it, which is how Telegram binds replies.
 `critique_rounds: 2`, `review_rounds: 2`. The task adds a channel to
 `core/intake.py`'s sender verification (who counts as Tom) and to the
 kernel's declarations (`DECLARED`, `LIMITS`, `owned`), so a mistake lets
-something other than Tom start work or approve a send. The token and the
-`Host` test below are this channel's authentication, the part MTProto
-plays for Telegram; they add no check, gate, or review step to the
-pipeline, so no governance grant is asked.
+something other than Tom start work or approve a send. The token below is
+this channel's authentication, the part MTProto plays for Telegram; it
+adds no check, gate, or review step to the pipeline, so no governance
+grant is asked.
 
 ## Done, as evidence
 
 Against the test database and real local services (`VALOR_TEST_DB=
-valor_rebuild_test_24builder`, ports 6430 to 6439):
+valor_rebuild_test_24builder`, ports 6530 to 6539):
 
 - A message posted to the running bridge's HTTP server with the token
   records one `message.received` on the `local` stream, `verified: true`,
@@ -50,37 +50,43 @@ valor_rebuild_test_24builder`, ports 6430 to 6439):
 - A reply `stop` to any notice of a task stops it; a near miss (`Approve!`)
   steers and owes a notice that comes back to the local chat.
 - Under the real `sandbox-exec` turn profile, a connect to the bridge's
-  port on `127.0.0.1` is refused and the token file cannot be read.
+  port on `127.0.0.1` is denied (the existing probe, with `local_port`
+  added).
 - The suite and both ruff checks are green.
 
 On this Mac, by Tom, once merged (the manual run): the kernel and the
-bridge run under launchd on the real ledger; Tom types a request on the
-page, a task starts, a notice comes back; a task's held
-`local.send_message` is approved from the page and its text appears. The
-record goes in this file.
+bridge run under launchd on a fresh ledger database, `valor_local`; Tom
+types a request on the page, a task starts, a notice comes back; a task's
+held `local.send_message` is approved from the page and its text appears.
+The record goes in this file.
 
 ## Threat model
 
 - **The turn** runs as Tom's user under the turn profile. On loopback it
   reaches only the gateway, its own services, and 8000 to 8009
   ([harnesses.md](../harnesses.md), Loopback connects), so it cannot reach
-  the bridge's port; the kernel key directory, where the token lives, is
-  denied entirely. The turn controls the text and target of a send it
-  requests and nothing on the page: the page renders that text with
-  `textContent` under a `script-src 'self'` policy, so a send's text never
-  runs. The kernel never reads anything a turn owns here.
+  the bridge's port. That deny alone is what keeps a turn off this
+  channel. The token does not: the kernel key directory is denied to
+  every turn, but the token is also in the browser's history (the URL
+  fragment), and the browser's profile under `~/Library` is not in
+  `HOME_DENIED` (`core/workspace.py`), so a turn may read it. Holding the
+  token gets a turn nothing while the port is out of reach. The turn
+  controls the text and target of a send it requests and nothing else on
+  the page; the page renders that text with `textContent`, so a send's
+  text never runs. The kernel never reads anything a turn owns here.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
   (`/dev/ttys*` are his, mode 620, and no profile denies them), so a
   terminal approval surface can be overprinted with a forged notice. A
   page in the browser cannot be written by a turn.
-- **Other local processes.** Another macOS user reaches `127.0.0.1` but
-  not the token. A web page Tom visits can send requests to `127.0.0.1`
-  but cannot send the `X-Valor-Token` header without a CORS preflight
-  the bridge never answers, and a DNS-rebound name fails the `Host`
-  test (`127.0.0.1:<port>` or `localhost:<port>` only). A process of
-  Tom's own user outside the sandbox can read the key directory, as it
-  can read the Telegram session and `pgpass`: the accepted opening of
-  one macOS user (Tom, 2026-10-01, sandbox-openings.md).
+- **Other local processes and web pages.** This is what the token is for.
+  Another macOS user reaches `127.0.0.1` but reads neither the key
+  directory nor Tom's browser history. A web page Tom visits can send
+  requests to `127.0.0.1` but cannot send the `X-Valor-Token` header
+  without a CORS preflight the bridge never answers; a DNS-rebound name
+  is the same case, since its requests carry no token either. A process
+  of Tom's own user outside the sandbox can read the key directory, as it
+  can read the Telegram session and `pgpass`: the accepted opening of one
+  macOS user (Tom, 2026-10-01, sandbox-openings.md).
 - **What verifies Tom.** A record on the `local` stream is written only by
   the bridge, after the request's token matched (`secrets.compare_digest`)
   the mode-600 file `local-token` in the kernel key directory, and only a
@@ -92,49 +98,72 @@ record goes in this file.
 
 ### `core/` (the port's side)
 
-- `core/intake.py`: `VERIFY["local"]` true; `_from_operator` is the
-  `verified` flag for `local`; `owned("local")` is `["local"]` when
-  `operator_channel` is `local`, and `owned("telegram")` lists
-  `operator_chat` only when `operator_channel` is `telegram`. The exact
-  words `approve` and `stop` bind on `telegram` and `local` replies. A
-  binding notice goes back to the message's own chat on `telegram` and
-  `local`, and to the operator's channel and chat for email (today it
-  names `telegram` outright).
+- `core/intake.py`:
+  - `VERIFY["local"]` true; `_from_operator` is the `verified` flag for
+    `local`.
+  - `owned("local")` is `["local"]` when `operator_channel` is `local`,
+    and `owned("telegram")` lists `operator_chat` only when
+    `operator_channel` is `telegram`.
+  - One flag in `_bind` and `_notice`, `replies = channel in ("telegram",
+    "local")`, the channels where Tom replies to a message. On those, the
+    exact words `approve` and `stop` bind, and a binding notice goes back
+    in reply (`reply_to` the message's id) in the message's own channel
+    and chat. On email, a binding notice goes to the operator's channel
+    and chat (today `_notice` names `telegram` outright), and the near
+    miss text names the operator channel instead of Telegram.
 - `core/bridge.py`: `LIMITS["local"]` with no text or file limit, and
   `DECLARED["local.send_message"]`: `act`, owner `local`, usage
   "target `local`, payload `{"text": "..."}`; sent once Tom approves",
   refused when the target is not an owned local chat, the text is not a
   non-empty string, or the payload names files (the page shows text
   only).
-- `core/settings.py`: `local_port` (`VALOR_LOCAL_PORT`, 8711, outside the
-  dev ports and the Postgres and Redis spans) and `local_tokenfile`,
-  derived from `pg_passfile` beside the other keys.
+- `core/settings.py`: `local_port` (`VALOR_LOCAL_PORT`, 8711), with a
+  comment that it stays outside `DEV_PORTS` (8000 to 8009, which a turn
+  reaches) and the Postgres and Redis spans; `local_tokenfile`, derived
+  from `pg_passfile` beside the other keys; and `operator_chat` is
+  `local` whenever `operator_channel` is `local` (`VALOR_OPERATOR_CHAT`
+  is read only for other channels), so the chat has one name.
 
 ### `bridges/local/`
 
-- `__init__.py`, the `Bridge`: `channel = "local"`. `run` starts an
-  `aiohttp.web` server on `127.0.0.1:local_port` and consumes the outbox.
-  A `NoticeDue` is marked sent with `message_id` = its `notice_id`; a
-  `Release` is performed through `Outbox.perform`, and `perform` returns
-  `sent` with `message_id` = the effect id. Being shown on the page is
-  having a `notice.sent` or `effect.outcome` row, so both are ledger
-  writes only. `lookup` returns None: a dangling intent was never shown,
-  so the broker records it `failed` and nothing shows twice. `tick` does
-  nothing.
-- Routes: `GET /` and `GET /chat.js` (static, no secret); `GET /log?after=N`
-  (the chat's rows after event id N: local `message.received`, and
-  `notice.sent` and `effect.outcome` rows sent on `local`, with their
-  text from `notice.requested` and `effect.held`); `POST /send`
-  (`{id, text, reply_to}`; `id` is the page's own random id, so a retried
-  post records once). Every route checks `Host`; `/log` and `/send` check
-  the token header; nothing answers `OPTIONS`.
-- `__main__.py`: `run`, `open` (makes the token file, mode 600, when
-  missing, then opens `http://127.0.0.1:<port>/#<token>` with
-  `/usr/bin/open`; the fragment never reaches the server or its log), and
-  `--plist` (label `com.valor.kernel.local`, `KeepAlive`, the PG settings,
-  `VALOR_MACHINE`, `VALOR_OPERATOR_CHANNEL`, `VALOR_LOCAL_PORT`).
+- `__init__.py`, the `Bridge`: `channel = "local"`. `run` makes the token
+  file (mode 600) when it is missing, starts an `aiohttp.web` server on
+  `127.0.0.1:local_port`, and consumes the outbox. A `NoticeDue` is
+  marked sent with `message_id` = its `notice_id`; a `Release` is
+  performed through `Outbox.perform`, and `perform` returns
+  `{"sent": [{"channel": "local", "chat_id": "local", "message_id":
+  <effect_id>}]}`. Being shown on the page is having a `notice.sent` or
+  `effect.outcome` row, so both are ledger writes only. The ledger is the
+  platform, so `lookup` returns the same `sent` as `perform`: a crash
+  between intent and outcome reconciles `done`, and the approved text is
+  shown once. `tick` does nothing.
+- Each HTTP request opens its own database connection and closes it (as
+  `conn()` in `bridges/telegram/kernel.py`); no handler touches the
+  outbox's connections.
+- Routes: `GET /` and `GET /chat.js` (static, no secret); `GET /log`
+  (the whole local chat each poll, oldest first, each row with its event
+  id: local `message.received`, and `notice.sent` and `effect.outcome`
+  rows sent on `local`, with their text from `notice.requested` and
+  `effect.held`); `POST /send` (`{id, text, reply_to}`). `/log` and
+  `/send` check the token header; nothing answers `OPTIONS`.
+- A posted message becomes an `Inbound` with `channel` `local`, `chat_id`
+  `local`, `chat_kind` `dm`, `message_id` the page's own random `id` (so
+  a retried post records once), `sender_id` `local`, `sender_name` `Tom`,
+  `sent_at` from the server's clock in UTC, and `reply_to` as posted.
+- `__main__.py`: `run`; `open` (reads the token file and opens
+  `http://127.0.0.1:<port>/#<token>` with `/usr/bin/open`; the fragment
+  never reaches the server or its log; with no token file it says to
+  start the bridge first); and `--plist`, the Telegram bridge's `plist()`
+  pattern (label `com.valor.kernel.local`, `KeepAlive`, `RunAtLoad`, log
+  in `log_dir`) with `PLIST_ENV` `VALOR_PGHOST`, `VALOR_PGPORT`,
+  `VALOR_DB`, `VALOR_PG_PASSFILE`, `VALOR_MACHINE`,
+  `VALOR_DEFAULT_MACHINE`, `VALOR_PROJECTS`, `VALOR_OPERATOR_CHANNEL`,
+  `VALOR_LOCAL_PORT`, `VALOR_SERVE_TICK_S`.
 - `chat.html` and `chat.js`: a list and a text box; polls `/log` every
-  two seconds; renders with `textContent` only.
+  two seconds and adds rows whose event id it has not shown; renders with
+  `textContent` only. A send keeps its text in the box and retries with
+  the same `id` until the bridge answers 200. Opened without a token in
+  the fragment, the page says to run `python -m bridges.local open`.
 
 ### Docs
 
@@ -147,82 +176,142 @@ table gain `local`), the binding table in `core/intake.py`'s docstring.
 
 What the plan found missing, and the order of the manual run:
 
-1. The kernel database is migrated here (1.1 rollout), and `pgpass` and
-   `judgement-keys` are in `~/.config/valor-kernel`; no `claude-token`,
-   so the gateway uses the `claude` login from the Keychain.
-2. Shell settings: `VALOR_OPERATOR_CHANNEL=local`, `VALOR_OPERATOR_CHAT=local`
-   beside `PGPASSFILE`.
-3. `python -m core serve --plist` and `python -m bridges.local --plist`,
-   each loaded with `launchctl`; no kernel job is loaded here today.
-4. `python -m bridges.local open`.
+1. `pgpass` and `judgement-keys` are in `~/.config/valor-kernel`; no
+   `claude-token`, so the gateway uses the `claude` login from the
+   Keychain.
+2. Shell settings beside `PGPASSFILE`: `VALOR_DB=valor_local`,
+   `VALOR_OPERATOR_CHANNEL=local`.
+3. `python -m core migrate` with those settings creates `valor_local`
+   fresh (the rollout step), so the kernel resumes nothing from this
+   Mac's older ledger.
+4. `python -m core serve --plist` and `python -m bridges.local --plist`,
+   each loaded with `launchctl`; no kernel job is loaded here today. The
+   bridge makes its token on start.
+5. `python -m bridges.local open`.
 
 ## Tech debt absorbed
 
 - `owned("telegram")` lists the operator chat whatever the operator
   channel is.
 - A binding notice for an email names `telegram`, so on a machine whose
-  operator channel is another it goes nowhere.
+  operator channel is another it goes nowhere; the near miss notice for
+  an email says approvals come by Telegram on every machine.
 - `bridges/README.md` lists only the Telegram entry point.
 
 ## Left out
 
 Files in either direction; more than one local chat; reaching the page
-from the phone or the LAN; browser notifications; paging long history;
-markdown rendering; merges released from this Mac (no GitHub credential
-here; a merge approved on the page fails with the credential named);
-running the local and Telegram channels as operator channel at once.
+from the phone or the LAN; browser notifications; paging long history
+(the whole chat is sent each poll); markdown rendering; merges released
+from this Mac (no GitHub credential here; a merge approved on the page
+fails with the credential named); running the local and Telegram channels
+as operator channel at once.
 
 ## Tests
 
 `tests/test_local_bridge.py`, over the real bridge server on a port of
-6430 to 6439 and the test database:
+6530 to 6539 and the test database:
 
-- Posted message to task, end to end through `intake.bind`.
+- Posted message to task, end to end through `intake.bind`, with the
+  `Inbound` fields above.
 - The held send: notice shown, `approve` reply, release, outcome, shown
   once in `/log`.
-- `stop` reply stops; `Approve!` steers and its notice is on `local`.
+- `stop` reply stops; `Approve!` steers and its notice is on `local`, in
+  reply to the message.
 - No token, a wrong token, and a token in a query string instead of the
-  header: 401, nothing recorded. A right token with `Host: evil.test`:
-  403. `OPTIONS /send` carries no `Access-Control-Allow-*`.
+  header: 401, nothing recorded. `OPTIONS /send` carries no
+  `Access-Control-Allow-*`.
 - The same page `id` posted twice records once.
 - A forced crash between intent and outcome: on restart the reconcile
-  writes `failed`, and `/log` never shows the text.
+  writes `done` with the same `sent`, and `/log` shows the text once.
+- `/log` returns rows whose event ids commit out of order: every row is
+  there.
 - `local.send_message` refused for target `telegram-chat`, empty text,
   a non-string text, and any `files`.
 - A send whose text is `<img src=x onerror=...>` comes back from `/log`
-  as the same string; the page's script holds no `innerHTML`, and `/`
-  carries the `Content-Security-Policy` header.
-- `owned`: with operator channel `local`, `owns("local", "local")` and
-  not `owns("telegram", <operator_chat>)`; with `telegram`, the reverse.
-- An email binding notice goes to the operator channel.
-- `open` makes the token file mode 600 and never rewrites one that exists.
-- Under real `sandbox-exec` with an expanded turn profile (as
-  `tests/test_demo_sandbox.py` does): a connect to the bridge port is
-  refused and a read of the token file fails.
+  as the same string.
+- `owned`: with operator channel `local`, `owns("local", "local")`,
+  `operator_chat` is `local`, and not `owns("telegram", <operator_chat>)`;
+  with `telegram`, the reverse.
+- An email binding notice and its near miss text go to and name the
+  operator channel.
+- `run` makes the token file mode 600 and never rewrites one that exists;
+  `open` with no token file writes nothing.
+
+The sandbox side reuses `tests/test_demo_sandbox.py`:
+`test_a_task_turn_reaches_its_own_services_and_clone_and_nothing_else`
+gains `settings.local_port` in its port probe, expected `denied`; the
+token file sits in the kernel key directory, whose deny
+`test_a_task_turn_cannot_reach_the_kernels_credential_data_or_dumps` and
+`test_by_default_a_task_profile_denies_the_kernel_paths_its_settings_name`
+already prove.
 
 ## Questions for Tom
 
-1. A page on `127.0.0.1` rather than a terminal chat? Assumed: the page,
-   for the reason in the threat model.
-2. Run the kernel and the bridge under launchd on this Mac's real ledger,
-   or only by hand during the manual run? Assumed: launchd, both jobs,
-   unloaded again after the run if you prefer.
-3. Should this Mac hold the GitHub push credential so merges work from
+1. Should this Mac hold the GitHub push credential so merges work from
    here? Assumed: no, not for this proof of concept.
 
 ## Decided by default
 
 - The page over a terminal: a turn can write Tom's terminals and cannot
   reach a loopback port outside its allowlist.
+- The kernel and the bridge run under launchd for the manual run, and may
+  be unloaded after it.
+- The proof of concept runs on a fresh ledger database, `valor_local`,
+  made by `migrate` with `VALOR_DB=valor_local` during rollout, so the
+  older demo and replay tasks on this Mac stay out of the resident
+  kernel.
 - One local chat with the fixed id `local`, which the usage line names, so
-  a turn knows the target without seeing settings.
+  a turn knows the target without seeing settings; the operator chat is
+  derived from it, never set apart.
 - Outbound message ids are notice and effect ids, so a reply binds by
   structure and a replayed `sent` is idempotent; Tom never types an id.
 - `approve` and `stop` bind on local replies exactly as on Telegram; a
   bare `approve` that replies to nothing starts a task, as on Telegram.
-- `lookup` returns None (a send not recorded was never shown), so a crash
-  in that window ends `failed`, never shown twice.
+- `lookup` returns what `perform` returns, since the ledger is the
+  platform: an approved send survives a crash and is shown once.
+- `/log` sends the whole chat each poll: event ids commit out of order,
+  so a cursor would skip rows.
 - The token is passed in the URL fragment, so it is in the browser's
-  history: readable only by Tom's user, which already reads the key
-  directory.
+  history; a turn may read it there and still cannot reach the port.
 - Port 8711, a setting.
+
+## Critique rounds
+
+### Round 1 (of 2): revise
+
+Findings, in brief, and what changed:
+
+1. `lookup` returning None lost an approved send on a crash
+   (`core/broker.py` writes `failed` when lookup finds nothing).
+   `lookup` returns the same `sent` as `perform`; crash test expects
+   `done`, shown once.
+2. A `/log?after=N` cursor skips rows, since identity ids commit out of
+   order. `/log` returns the whole chat; the page dedupes by event id; a
+   test covers it.
+3. The HTTP handlers' connection was unnamed. One connection per request,
+   as in `bridges/telegram/kernel.py`.
+4. This Mac's ledger holds older demo and replay tasks a resident kernel
+   would resume. The run uses a fresh `valor_local`.
+5. The threat model claimed the token stops turns; a turn may read it in
+   browser history. The model says the loopback deny alone stops turns
+   and the token stops other users and web pages. No new deny.
+6. The `Host` check and the page source test had no incident behind them.
+   Both cut, with the `Content-Security-Policy` header; the `textContent`
+   round trip stays.
+7. The new sandbox test duplicated `tests/test_demo_sandbox.py`. Its
+   existing probe gains `local_port`; the key directory tests are cited;
+   a settings comment keeps the port outside `DEV_PORTS`.
+8. The token was made by `open`, after the bridge started. `run` makes
+   it; `open` only reads it.
+9. Intake was underspecified for local notices and the near miss text.
+   One `replies` flag covers both.
+10. The local message fields were unspecified. Listed, with the page's
+    retry of unsent text under the same id.
+11. The chat had two names. `operator_chat` derives from
+    `operator_channel` `local`.
+12. Two questions were implementation calls. Moved to Decided by default.
+13. `--plist` kept as the Telegram pattern, with its environment listed
+    (`VALOR_OPERATOR_CHAT` is not needed, per 11).
+
+Test ports moved to 6530 to 6539, outside the Redis span.
