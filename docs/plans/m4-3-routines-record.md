@@ -182,3 +182,26 @@ Review R1 and R2 and notes N1, N2, N4, N5, N6 (review-4-3).
 - **A kept guard returns every 90 days.** A seeded guard a merged sweep kept
   is listed again 90 days later. That is the governance paragraph's expiry
   working: a guard is reviewed again at each expiry.
+
+### Patch round 3
+
+Scope from the lead, after review-4-3-p2 (R3) and test-4-3-p2 (gaps 1 and 2).
+
+- **R3.** In `routines.due` a merged sweep's listed grant counts as removed
+  only when the grant is in this repository (its task's project is `valor`).
+  Another project's grant stays listed under `outside`. Each grant row has its
+  own id and an instance is granted once per task, so keeping a grant is a new
+  grant row with its own id and expiry: the earlier row counts as removed, the
+  new one is live and falls due 90 days after it was given. Two tests:
+  another project's grant stays listed after the merge; a grant written after
+  the merge is live and due on its own date.
+- **Gap 1.** `routines.load` refuses a `[schedule]` value launchd would reject
+  (not a whole number, or outside minute 0-59, hour 0-23, day 1-31, weekday
+  0-7, month 1-12; `interval` not a whole number of seconds of 1 or more) and
+  refuses `interval` together with calendar keys. Parametrized test.
+- **Gap 2.** `due` reads each registered routine inside a `Refused` catch. A
+  routine whose toml is malformed is returned under `malformed` and the
+  sweep's run line says "not read, <reason>"; the rest go on. Test.
+- Gap 3 stays: an empty items directory gives a finished sweep with 0 items.
+- **Decided by default:** the "removed" test is by grant id, not by merge time,
+  since ids are unique per row.

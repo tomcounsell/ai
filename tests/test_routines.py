@@ -78,6 +78,22 @@ def test_the_toml_loads_from_the_kernels_checkout_and_a_workspace_toml_is_never_
     assert routines.names() == [name]
 
 
+@pytest.mark.parametrize(
+    "schedule",
+    ["hour = 99", 'hour = "x"', "minute = 60", "day = 0", "weekday = 8", "month = 13", "hour = true",
+     "interval = 0", 'interval = "5"', "hour = 3\ninterval = 600"],
+)  # fmt: skip
+def test_a_schedule_launchd_would_reject_is_refused_when_the_routine_is_read(where, schedule):
+    name = unique()
+    (where / name).mkdir()
+    (where / name / "routine.toml").write_text(
+        f'name = "{name}"\nrunner = "noop"\nceiling = "propose"\nmodel = "frontier"\n'
+        f'mission_item = 5\ncreated = 2026-10-04\ninstruction = "x"\n[schedule]\n{schedule}\n'
+    )
+    with pytest.raises(routines.Refused, match="launchd|not both"):
+        routines.load(name)
+
+
 def test_the_kernels_own_routines_load():
     assert set(routines.names(ROOT / "routines")) >= {"expiry", "emulator"}
     for n in routines.names(ROOT / "routines"):

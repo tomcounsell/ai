@@ -41,6 +41,8 @@ USE_DAYS = 90  # the governance paragraph and Mission item 5: ninety days
 EXPIRY_RUNNER = "expiry"
 OUTCOMES = ("started", "continued", "nothing_due", "finished", "failed", "running")
 SCHEDULE_KEYS = {"minute": "Minute", "hour": "Hour", "day": "Day", "weekday": "Weekday", "month": "Month"}
+# launchd.plist(5), StartCalendarInterval: Weekday 0 and 7 are both Sunday.
+CALENDAR_RANGES = {"minute": (0, 59), "hour": (0, 23), "day": (1, 31), "weekday": (0, 7), "month": (1, 12)}
 
 # The names a launchd job carries: the settings that reach Postgres (the
 # names `backup.PLIST_ENV` lists for it) and the replay directory.
@@ -108,6 +110,14 @@ def load(name: str, directory: str | Path | None = None) -> Routine:
     unknown = sorted(set(schedule) - set(SCHEDULE_KEYS))
     if unknown or not (schedule or interval):
         raise Refused(f"{path}: [schedule] takes {', '.join([*SCHEDULE_KEYS, 'interval'])}")
+    if schedule and interval is not None:
+        raise Refused(f"{path}: [schedule] takes calendar keys or interval, not both")
+    for key, value in schedule.items():
+        low, high = CALENDAR_RANGES[key]
+        if type(value) is not int or not low <= value <= high:
+            raise Refused(f"{path}: [schedule] {key} is a whole number from {low} to {high} (launchd)")
+    if interval is not None and (type(interval) is not int or interval < 1):
+        raise Refused(f"{path}: [schedule] interval is a whole number of seconds, 1 or more (launchd)")
     created = found["created"]
     if not isinstance(created, date):
         raise Refused(f"{path}: created is a date")
@@ -491,7 +501,7 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
     project, listed and not removed. One fold over kernel-written rows."""
     today = _day(now)
     listed: dict[tuple[str, str], date] = {}
-    removed: set[str] = set()  # instance grants a merged sweep listed
+    removed: set[str] = set()  # grants a merged sweep listed; only those in this repository count
     for sweep in await _sweeps(conn):
         merged = await state_of(conn, sweep["task_id"]) == "merged"
         for item in sweep["payload"]["due"]:
@@ -532,8 +542,15 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
         kind = "grant" if instance else "guard"
         if not instance and guard_id not in seeded:
             continue  # a seeded guard the checkout no longer holds is gone
-        if instance and guard_id in removed:
-            continue  # a grant has no code left to check: the merged sweep removed it
+        in_repo = True
+        if instance:
+            try:
+                project = (await tasks.brief(conn, row["task_id"])).project
+            except KeyError:
+                project = None
+            in_repo = (project or {}).get("name") == "valor"
+        if instance and in_repo and guard_id in removed:
+            continue  # the merged sweep removed it; keeping one is a new grant row
         fired = firings.get(guard_id)
         if instance or fired is None:
             is_due = today > expires
@@ -552,14 +569,9 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
             "last_firing": fired.isoformat() if fired else None,
             "firing_record": not instance,
         }
-        if instance:
-            try:
-                project = (await tasks.brief(conn, row["task_id"])).project
-            except KeyError:
-                project = None
-            if (project or {}).get("name") != "valor":
-                outside.append(item)
-                continue
+        if not in_repo:
+            outside.append(item)
+            continue
         items.append(item)
 
     expiry_names = set()
@@ -570,6 +582,7 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
         except Refused:
             continue
     cutoff = now - timedelta(days=USE_DAYS)
+    malformed: list[str] = []
     for name in names():
         if name in expiry_names or listed_recently(("routine", name)):
             continue
@@ -578,7 +591,11 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
             continue
         if await _used(conn, [r["objective"] for r in registered], cutoff):
             continue
-        r = load(name)
+        try:
+            r = load(name)
+        except Refused as exc:
+            malformed.append(f"{name}: {exc}")
+            continue
         items.append(
             {
                 "kind": "routine",
@@ -592,7 +609,7 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
                 "firing_record": True,
             }
         )
-    return {"items": items, "outside": outside}
+    return {"items": items, "outside": outside, "malformed": malformed}
 
 
 async def _used(conn, objectives: list[str], cutoff: datetime) -> bool:
@@ -646,8 +663,9 @@ async def expiry_runner(ctx: Context) -> Ran:
     if open_:
         return Ran(open_, "continued", f"sweep {open_} is open")
     found = await due(ctx.conn, ctx.now)
+    unread = "".join(f"; not read, {m}" for m in found["malformed"])
     if not found["items"]:
-        return Ran(None, "nothing_due", "nothing due")
+        return Ran(None, "nothing_due", f"nothing due{unread}")
     if ctx.start_project is None or not ctx.routine.project:
         raise Refused(f"routine {ctx.routine.name} starts a project task; none is given")
     listed = [{"kind": i["kind"], "id": i["id"]} for i in [*found["items"], *found["outside"]]]
@@ -662,4 +680,4 @@ async def expiry_runner(ctx: Context) -> Ran:
         branch=ctx.routine.branch,
         marker={"sdlc": 1, "sweep": EXPIRY_RUNNER, "due": listed},
     )
-    return Ran(run_id, "started", f"{len(found['items'])} due, {len(found['outside'])} outside")
+    return Ran(run_id, "started", f"{len(found['items'])} due, {len(found['outside'])} outside{unread}")
