@@ -427,7 +427,7 @@ symlink as the session file, as `projects/<dir>`, and as the root `claude`
 stores nothing with a reason; in each case the secret's bytes are in no
 row and no decoded document; a FIFO or a directory named `agent-x.jsonl`
 is skipped with a reason and does not block; a sparse `agent-*.jsonl`
-(1 PiB apparent size) is skipped as sparse; every read runs off the event
+(8 TiB apparent size) is skipped as sparse; every read runs off the event
 loop; a stopped turn's transcript
 is copied; `workspace_turn` passes `--session-id` on a new session and
 `--resume` on a resumed one. Live (`VALOR_LIVE=1`, metered, expected about

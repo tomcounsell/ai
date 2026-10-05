@@ -261,9 +261,10 @@ Elsewhere:
     with no `.git` still looks up the four names in the workspace;
     `git.is_repo` is false on a linked workspace; a sparse `verdict.json`
     is refused unread.
-11a. `tests/test_signals.py`: a `question.md` truncated to 1 PiB is
-    refused as sparse; a 3 MB `done.md` written plainly and an effect file
-    cloned with `cp -c` are read.
+11a. `tests/test_signals.py`: a `question.md` truncated to 8 TiB is
+    refused as sparse and a 3 MB `done.md` written plainly is read; an
+    effect file cloned with `cp -c` is read (a `macos` test, for the APFS
+    clone).
 12. `tests/test_fresh.py`: the `big` case and its act in
     `tests/scripted.py` are deleted (a big verdict is read whole); the
     other cases' reasons match the helpers' wording.

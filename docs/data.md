@@ -443,7 +443,7 @@ REFERENCES.md sense.
 | Role | Login | Privileges | Used by |
 |---|---|---|---|
 | `valor_kernel` | yes, with its password on the kernel databases | `SELECT, INSERT` on `events` and `documents`; nothing else | Every kernel process: the CLI, the gateway, the runner |
-| Owner | Tom's macOS user by default (`VALOR_PG_OWNER`), with its password on the kernel databases | Owns the database and the schema | `python -m core migrate`, `backup`, and the test fixtures, nothing else |
+| Owner | Tom's macOS user by default (`VALOR_PG_OWNER`; `settings.owner_role`, which is also the bootstrap superuser of every scratch cluster), with its password on the kernel databases | Owns the database and the schema | `python -m core migrate`, `backup`, and the test fixtures, nothing else |
 
 `python -m core migrate` (`core/db.py`, `migrate`) connects as the owner,
 creates `valor_kernel` if missing, creates the database if missing,
