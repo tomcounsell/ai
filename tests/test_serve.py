@@ -1304,3 +1304,173 @@ def test_migrate_twice():
             return (await (await conn.execute(sql)).fetchone())[0]
 
     assert run(recorded()) == 1
+
+
+# -- a provisioning the kernel did not finish -----------------------------------------------
+
+
+def _toy_project(tmp_path, src: Path, setup: list[str]) -> None:
+    """The toy project, started by a message in chat -100555."""
+    lines = [
+        'name = "toy"',
+        f"repo = {json.dumps(str(src))}",
+        'kind = "plain"',
+        'suite = "true"',
+        'chats = ["telegram:-100555"]',
+        f"setup = {json.dumps(setup)}",
+    ]
+    (tmp_path / "projects" / "toy.toml").write_text("\n".join(lines) + "\n")
+
+
+def _message_task(dsn) -> str:
+    from tests.test_intake import msg, say
+
+    return run(say(dsn, msg("Write Tom a greeting.", chat="-100555")))["task_id"]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM], ids=["SIGKILL", "SIGTERM"])
+def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
+    """A kernel killed while a message-started task's setup command runs
+    leaves the task's directory and the command; the next kernel reaps the
+    command, clears the directory (following no link the command planted,
+    stopped by no flag it set) and provisions the task again."""
+    src = scripted.toy_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("kept")
+    plant = (
+        f"ln -s {outside / 'keep'} out && echo x > flagged && chflags uchg flagged "
+        "&& echo $$ > started && exec sleep 600"
+    )
+    _toy_project(tmp_path, src, [plant])
+    task = _message_task(fresh)
+    root = tmp_path / "work" / task
+    started = root / "repo" / "started"
+    sleeper = None
+
+    async def setup_running():
+        return started.exists() and started.read_text().strip().isdigit()
+
+    async def done():
+        types = [r["type"] for r in await rows(fresh, task)]
+        return "turn.ended" in types or "workspace.failed" in types
+
+    with (tmp_path / "kernel.log").open("w") as log:
+        kernel = kernel_child(tmp_path, fresh, "scripted", log)
+        try:
+            run(until(setup_running, 60))
+            sleeper = int(started.read_text())
+            os.kill(kernel.pid, sig)
+            kernel.wait()
+            assert root.is_dir() and not gone(sleeper)
+            _toy_project(tmp_path, src, ["true"])
+            kernel = kernel_child(tmp_path, fresh, "scripted", log)
+            run(until(done, 90))
+            made_again = not started.exists()
+        finally:
+            kernel.kill()
+            kernel.wait()
+            if sleeper is not None and not gone(sleeper):
+                os.kill(sleeper, signal.SIGKILL)
+            kws.rmtree(root)
+
+    types = [r["type"] for r in run(rows(fresh, task))]
+    assert "workspace.failed" not in types, (tmp_path / "kernel.log").read_text()
+    assert types.count("workspace.provisioned") == 1 and "turn.ended" in types
+    assert gone(sleeper) and made_again
+    assert (outside / "keep").read_text() == "kept"
+
+
+def _cache_of(src: Path, work: Path) -> Path:
+    """Where provisioning keeps its bare clone of the local repository `src`."""
+    import hashlib
+    import re
+
+    url = str(src.resolve())
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", url.rstrip("/").rsplit("/", 1)[-1])[:40]
+    return work / "cache" / f"{stem}-{hashlib.sha256(url.encode()).hexdigest()[:12]}.git"
+
+
+async def _append(dsn, task, type_, payload) -> None:
+    async with await db.connect(dsn) as conn:
+        await ledger.append(conn, task, type_, payload)
+
+
+def _steer(dsn, task) -> None:
+    run(
+        _append(
+            dsn,
+            task,
+            "message.steered",
+            {"text": "try again", "attachments": [], "provenance": ledger.provenance("tom", "telegram", False)},
+        )
+    )
+
+
+def test_the_incident_state_is_provisioned_after_a_steer(fresh, op, tmp_path):
+    """The state the incident left: the task's directory holding only
+    `ports.json`, a cache whose fetch was killed (a `tmp_pack_*` file, no
+    refs), and a `workspace.failed` reading `File exists`. Tom's steer has
+    it provisioned on the kernel's next pass."""
+    src = scripted.toy_repo(tmp_path)
+    _toy_project(tmp_path, src, [])
+    task = _message_task(fresh)
+    work = tmp_path / "work"
+    kws.reserve(task, {}, work)
+    cache = _cache_of(src, work)
+    cache.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(cache)], check=True)
+    (cache / "objects" / "pack" / "tmp_pack_Ab12Cd").write_bytes(b"PACK\x00\x00\x00\x02")
+    run(_append(fresh, task, "workspace.failed", {"reason": f"[Errno 17] File exists: '{work / task}'"}))
+    _steer(fresh, task)
+
+    async def go():
+        kernel = only(serve.Kernel(None, {}, None, fresh), task)
+        try:
+            async with await db.connect(fresh) as conn:
+                await kernel.schedule(conn)
+            await settled(kernel)
+        finally:
+            await kernel.close()
+
+    run(go())
+    types = [r["type"] for r in run(rows(fresh, task))]
+    assert types.count("workspace.provisioned") == 1 and types.count("workspace.failed") == 1
+    assert (work / task / "repo" / ".git").is_dir()
+
+
+@pytest.mark.parametrize("why", ["provisioned", "stopped", "failed, not steered"])
+def test_a_stale_provisioning_job_clears_nothing(fresh, op, tmp_path, why):
+    """A provisioning job whose task no longer needs one by the time it
+    holds `provision:<task>` leaves the task's directory as it was and
+    writes no row."""
+    src = scripted.toy_repo(tmp_path)
+    _toy_project(tmp_path, src, [])
+    task = _message_task(fresh)
+    root = tmp_path / "work" / task
+    root.mkdir(parents=True)
+    (root / "sentinel").write_text("here")
+    if why == "provisioned":
+        fields = {"workspace": str(root / "repo"), "mirror": str(root / "mirror")}
+        run(_append(fresh, task, "workspace.provisioned", {"fields": fields}))
+    elif why == "stopped":
+
+        async def stop():
+            async with await db.connect(fresh) as conn:
+                await tasks.stop(conn, task, reason="test")
+
+        run(stop())
+    else:
+        run(_append(fresh, task, "workspace.failed", {"reason": "no"}))
+    before = run(rows(fresh, task))
+
+    async def go():
+        kernel = serve.Kernel(None, {}, None, fresh)
+        try:
+            await kernel._provision(task, "toy")
+        finally:
+            await kernel.close()
+
+    run(go())
+    assert (root / "sentinel").read_text() == "here"
+    assert run(rows(fresh, task)) == before

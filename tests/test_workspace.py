@@ -1904,3 +1904,90 @@ def test_a_64_character_role_is_refused():
                 "roles": ["r" * 64],
             }
         )
+
+
+# -- an unfinished provisioning ------------------------------------------------------------
+
+
+def test_provisioning_git_is_marked_and_reaped(tmp_path, monkeypatch):
+    """Every git call provisioning makes carries the mark `provision-<task>`,
+    which `remove` reaps: the git a killed kernel's provisioning left
+    running stops before its directory is cleared."""
+    from core import git
+
+    task = ledger.new_id()
+    envs: list[dict[str, str]] = []
+    real = git.start
+
+    def recording(argv, **kwargs):
+        envs.append(dict(kwargs.get("env") or {}))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(git, "start", recording)
+    provision(tmp_path, task_id=task)
+    monkeypatch.setattr(git, "start", real)
+    assert len(envs) > 10 and all(e.get(runs.TURN_ENV) == f"provision-{task}" for e in envs)
+
+    left = subprocess.Popen(
+        [git.binary(), "-C", str(tmp_path / "src" / "toy"), "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        env={**os.environ, runs.TURN_ENV: f"provision-{task}"},
+        start_new_session=True,
+    )
+    try:
+        time.sleep(0.5)
+        assert left.poll() is None
+        kws.remove(task, kws.Layout(tmp_path / "work" / task))
+        assert left.wait(10) is not None
+        assert not (tmp_path / "work" / task).exists()
+    finally:
+        left.kill()
+        left.wait()
+        left.stdin.close()
+
+
+def test_workspace_remove_takes_an_unfinished_provisioning_once_stopped(dsn, tmp_path):
+    """A task started by message whose provisioning died leaves its
+    directory; once the task is stopped, `workspace remove` clears it
+    without following a link or stopping at a flag, records where it went,
+    and frees the ports its `ports.json` held."""
+    work = tmp_path / "work"
+    task = ledger.new_id()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("kept")
+    port = kws.choose_port(ports_span((5540, 5579)), set())
+    lay = kws.reserve(task, {"postgres": port}, work)
+    (lay.repo).mkdir(parents=True)
+    (lay.repo / "out").symlink_to(outside / "keep")
+    (lay.repo / "flagged").write_text("x")
+    subprocess.run(["chflags", "uchg", str(lay.repo / "flagged")], check=True)
+
+    async def start():
+        async with await db.connect(dsn) as conn:
+            await tasks.start(conn, tasks.Brief(id=task, instruction="x", project={"name": "toy"}))
+
+    async def stop():
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, task, reason="test")
+
+    async def taken():
+        async with await db.connect(dsn) as conn:
+            return await kws.taken_ports(conn, work)
+
+    try:
+        run(start())
+        refused = _cli(tmp_path, "workspace", "remove", task)
+        assert refused.returncode == 1 and "only a stopped or merged" in refused.stderr
+        assert lay.root.exists() and port in run(taken())
+        run(stop())
+        removed = _cli(tmp_path, "workspace", "remove", task)
+        assert removed.returncode == 0, removed.stderr
+        assert not os.path.lexists(lay.root)
+        (row,) = [r["payload"] for r in run(_rows(dsn, task)) if r["type"] == "workspace.removed"]
+        assert row["path"] == str(lay.root) and row["provenance"]["by"] == "tom"
+        assert port not in run(taken())
+        assert (outside / "keep").read_text() == "kept"
+    finally:
+        kws.rmtree(lay.root)
