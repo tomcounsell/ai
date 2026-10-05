@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4-local
 type: build
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
@@ -317,6 +317,45 @@ already prove.
   history; a turn may read it there, and reaches the port with it only
   through the browser profile (Question 2).
 - Port 8711, a setting.
+
+## Build record
+
+Built on `m2-4-local` from `d0e9d7e9c`, with round 2's findings taken as
+the lead decided.
+
+- `core/settings.py`: `local_port` (8711), `local_tokenfile` (a property
+  beside the other keys), and `operator_chat` a field whose default
+  factory returns `local` when `VALOR_OPERATOR_CHANNEL` is `local`.
+- `core/intake.py`: `VERIFY["local"]`, `REPLIES = ("telegram", "local")`
+  in `_bind` and `_notice`, `owned` keyed on `operator_channel`, the near
+  miss for an email naming "by reply in Telegram" or "by reply on the
+  local chat page", and the docstring's binding table.
+- `core/bridge.py`: `LIMITS["local"]` (none) and
+  `DECLARED["local.send_message"]` with `_refuse_local`.
+- `bridges/local/`: `LocalBridge` (perform and lookup return the same
+  `sent`; notices marked sent with their notice id), an `aiohttp` server
+  on `127.0.0.1` with one connection per request, `/log` rows carrying
+  `event_id`, `message_id`, `from`, `text`, `reply_to`; `GET /` with
+  `frame-ancestors 'none'`; `run`, `open`, `--plist`; `chat.html` and
+  `chat.js` (no JavaScript runtime on this Mac, so the script was not
+  run; no test runs it, as planned).
+- Docs: `docs/bridges/local.md` (new, with the browser profile opening),
+  `docs/bridges/telegram.md` and `docs/bridges/email.md` (the operator
+  channel is Telegram or the local page), `docs/architecture.md`,
+  `bridges/README.md`.
+- Tests: `tests/test_local_bridge.py`, 18 tests, every one the plan
+  names, each over the bridge run through `serve` on a port of 6530 to
+  6539; `reply_to` comes from `/log`. The sandbox probe in
+  `tests/test_demo_sandbox.py` gains `settings.local_port`, `denied`.
+- Suite (`VALOR_TEST_DB=valor_rebuild_test_24builder`,
+  `VALOR_TEST_PORTS=6530-6539`): 1448 passed, 55 skipped, 2 failed, 62
+  errors. The 62 errors and one failure are the mail tests (dovecot is
+  not installed on this Mac); the other failure is the Pi test (no
+  `/opt/homebrew/bin/node`). All three fail the same way at `d0e9d7e9c`.
+  Both ruff checks pass.
+- Rollout is not performed: the backup, the rename to
+  `valor_rebuild_pre24`, `migrate`, the two plists, and the manual run
+  stay for Tom's Mac.
 
 ## Critique rounds
 
