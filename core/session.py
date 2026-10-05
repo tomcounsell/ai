@@ -169,8 +169,6 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
     }, None
 
 
-
-
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
     try:
         if not git.is_repo(workspace):
@@ -289,7 +287,7 @@ def _size(value: Any) -> float:
     deep to serialize sorts first."""
     try:
         return len(json.dumps(value, ensure_ascii=False))
-    except (RecursionError, ValueError, TypeError):
+    except RecursionError, ValueError, TypeError:
         return float("inf")
 
 
@@ -431,8 +429,10 @@ async def record(
     `question.asked` or `plan.written` beside it, are judged where they are
     written (`_written`): when Postgres refuses them, each error and effect
     entry it refuses alone is answered (`_answered`) and the rows are
-    written again, and when it still refuses, one `turn.collected` holding
-    nothing the turn wrote is (`_bare`). Returns the verdict recorded. For a task with a kernel
+    written again; when it still refuses, the largest part left is
+    answered and the row written again, alone, until it is stored
+    (`_reduce`), and failing that, one `turn.collected` holding nothing the
+    turn wrote is (`_bare`). Returns the verdict recorded. For a task with a kernel
     mirror, a plan commit or a candidate counts only once it is fetched
     into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
@@ -483,13 +483,12 @@ async def record(
             collected = await _answered(conn, collected, why)
             why = await _written(conn, task_id, collected, follow)
         if why is not None:
-            reduced = await _reduce(conn, state, collected, why)
-            if reduced is not None:
-                collected = reduced
-                await ledger.append(conn, task_id, "turn.collected", collected)
-            else:
+            reduced = await _reduce(conn, task_id, collected, finished, why)
+            if reduced is None:
                 collected = _bare(turn_id, state, finished, why)
                 await ledger.append(conn, task_id, "turn.collected", collected)
+            else:
+                collected = reduced
     return collected["verdict"]
 
 
@@ -538,50 +537,59 @@ async def _answered(conn, collected: dict[str, Any], why: str) -> dict[str, Any]
     return {**collected, "errors": errors, "effects": effects}
 
 
-async def _reduce(conn, state: State, collected: dict[str, Any], why: str) -> dict[str, Any] | None:
-    """Reduce `collected` by dropping the largest part until the row fits.
-    Each dropped part is answered with Postgres's reason. Returns the reduced
-    row if it fits, or None to fall back to a fully bare row."""
-    parts: list[tuple[float, str, int | None]] = []
-
-    for i, e in enumerate(collected["errors"]):
-        parts.append((_size(e), "error", i))
-    for i, e in enumerate(collected["effects"]):
-        parts.append((_size(e), "effect", i))
-    for name in ("question", "no_question", "done", "plan"):
-        if collected.get(name) is not None:
-            parts.append((_size(collected[name]), name, None))
-    if collected.get("screens"):
-        parts.append((_size(collected["screens"]), "screens", None))
-    if collected.get("candidate") is not None:
-        parts.append((_size(collected["candidate"]), "candidate", None))
-
-    parts.sort(key=lambda p: p[0], reverse=True)
-    for size, part_name, index in parts:
-        reduced = {**collected}
-        if part_name == "error":
-            reduced["errors"] = [e for i, e in enumerate(collected["errors"]) if i != index]
-            reduced["errors"].append(
-                f"an error is unrecorded: {UNSTORABLE} beside the turn's other parts: {why}"
-            )
-        elif part_name == "effect":
-            entry = collected["effects"][index]
-            reduced["effects"] = [
-                e if i != index else {
-                    **{k: entry[k] for k in ("effect_id", "kind") if k in entry},
-                    "file": entry["file"],
-                    "error": f"unrecorded request: {UNSTORABLE} beside the turn's other parts: {why}",
-                } for i, e in enumerate(collected["effects"])
-            ]
+async def _reduce(
+    conn, task_id: str, collected: dict[str, Any], finished: bool, why: str
+) -> dict[str, Any] | None:
+    """Write `turn.collected` with the parts Postgres stores together: the
+    largest part left is answered with Postgres's reason, and the row is
+    written again (`_written`), until it is stored. The parts are each
+    error, each effect entry, the text signals, the plan, and the screens.
+    An effect entry keeps its `effect_id`, `kind`, and `file`, so the
+    broker's rows still match it. The row counts as finished with nothing
+    (or failed), with no candidate and no row beside it, and one error
+    names what was dropped. The row written, or None when no reduction is
+    stored."""
+    kept = {
+        **collected,
+        "verdict": "idle" if finished else "failed",
+        "candidate": None,
+        "errors": list(collected["errors"]),
+        "effects": list(collected["effects"]),
+    }
+    parts = [(_size(e), "error", i) for i, e in enumerate(kept["errors"])]
+    parts += [(_size(e), "effect", i) for i, e in enumerate(kept["effects"])]
+    parts += [
+        (_size(kept[name]), name, None) for name in (*signals.TEXT_SIGNALS, "plan") if kept[name] is not None
+    ]
+    if kept["screens"]:
+        parts.append((_size(kept["screens"]), "screens", None))
+    dropped = []
+    for _, name, i in sorted(parts, key=lambda part: part[0], reverse=True):
+        reason = f"{UNSTORABLE} beside the turn's other parts: {why}"
+        if name == "error":
+            kept["errors"][i] = f"an error is unrecorded: {reason}"
+            dropped.append("an error")
+        elif name == "effect":
+            entry = kept["effects"][i]
+            kept["effects"][i] = {
+                **{k: entry[k] for k in ("effect_id", "kind") if k in entry},
+                "file": entry["file"],
+                "error": f"unrecorded request: {reason}",
+            }
+            dropped.append(entry["file"])
         else:
-            reduced[part_name] = None
-
-        test_why = await ledger.unstorable(conn, reduced)
-        if test_why is None:
-            reduced["candidate"] = None
-            reduced["errors"].append(f"dropped {part_name}: {UNSTORABLE} beside the turn's other parts: {why}")
-            return reduced
-
+            kept[name] = [] if name == "screens" else None
+            dropped.append({"plan": "plan.json", "screens": "the screens"}.get(name, f"{name}.md"))
+        row = {
+            **kept,
+            "errors": [
+                *kept["errors"],
+                f"the turn's signals: {', '.join(dropped)} dropped to record the rest: {reason}",
+            ],
+        }
+        why = await _written(conn, task_id, row, None)
+        if why is None:
+            return row
     return None
 
 

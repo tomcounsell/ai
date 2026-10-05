@@ -257,7 +257,7 @@ workspace, which the kernel reads when the turn ends:
 |---|---|---|
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
-| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan is an error and not acted on if: the file lacks `path` or `critique_rounds` or `review_rounds`; `path` is not a string; `critique_rounds` or `review_rounds` is not an integer (booleans are not accepted), or is out of range (each must be 0, 1, or 2); `stakes` (if present) is not a string; `scope` (if present) is not a list; the plan is not committed, changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD and made in the kernel's `output/` directory, which no task profile reaches, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's). |
+| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan is an error, with no `plan.written`, if: the file lacks `path` or `critique_rounds` or `review_rounds`; `path` is not a string; `critique_rounds` or `review_rounds` is not an integer (booleans are not accepted), or is out of range (each must be 0, 1, or 2); `stakes` (if present) is not a string; `scope` (if present) is not a list; the workspace is not a git repository, the path cannot be passed to git, or the plan is not committed at HEAD or is changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD and made in the kernel's `output/` directory, which no task profile reaches, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's). |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one the `turn.collected` row cannot hold (below), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
 
@@ -291,12 +291,16 @@ where it is written: `turn.collected` and the row that goes with it
 when jsonb refuses them, each error and each effect entry it refuses alone
 is replaced by kernel text with Postgres's reason; if that is refused too,
 the largest part left (an error, an effect entry, the question, the
-no-question statement, the plan, the delivery note, the screens, or the
-candidate) is dropped and the row asked again, until it is stored. A dropped
-effect entry keeps its `effect_id`, `kind` and `file` with an error holding
-Postgres's reason, so the effect rows the broker wrote still match it; any
-other dropped part is null and one error names it and gives the reason. The
-candidate is null in a reduced row. If no reduction is stored,
+no-question statement, the plan, the delivery note, or the screens) is
+dropped and `turn.collected` written again alone, dropping the next largest
+each time, until it is stored. A dropped effect entry keeps its
+`effect_id`, `kind` and `file` with an error holding Postgres's reason, so
+the effect rows the broker wrote still match it; a dropped error is
+replaced by kernel text with the reason; any other dropped part is null.
+A reduced row's verdict is `idle` (or `failed` for a turn that did not
+finish), its candidate is null, no `question.asked` or `plan.written` is
+written beside it, and one error names the parts dropped and gives the
+reason. If no reduction is stored,
 `turn.collected` holds nothing the turn wrote (no signals or effects, the
 verdict `idle`, or `failed` for a turn that did not finish) and one error
 with Postgres's reason. The broker's rows for each request are judged the

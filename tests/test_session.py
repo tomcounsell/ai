@@ -930,29 +930,114 @@ def test_a_refusal_the_ledger_cannot_store_is_refused_in_kernel_words(dsn, tmp_p
     assert by_file["ok.json"]["kind"] == "pending" and verdict == "idle"
 
 
+def _reduced(collected: dict) -> tuple[list[dict], list[dict]]:
+    """The effect entries of a reduced `turn.collected`, kept and dropped;
+    every one keeps the `effect_id` and `kind` the broker's rows carry."""
+    entries = [e for e in collected["effects"] if e["file"] != "ok.json"]
+    assert all("effect_id" in e and "kind" in e for e in collected["effects"])
+    dropped = [e for e in entries if "request" not in e]
+    for e in dropped:
+        assert e["error"].startswith(
+            f"unrecorded request: {session.UNSTORABLE} beside the turn's other parts: "
+        )
+    return [e for e in entries if "request" in e], dropped
+
+
 def test_a_turn_collected_row_past_what_jsonb_holds_is_written_reduced(dsn, tmp_path):
-    """Two large effect entries each stored on their own are together more
-    than one jsonb value holds: `turn.collected` is reduced by dropping the
-    largest, with it answered with Postgres's reason but keeping effect_id,
-    kind, file, and candidate is None."""
+    """Two refusals each stored on their own are together more than one
+    jsonb value holds: one is kept whole, the other answered with
+    Postgres's reason, every effect keeps its `effect_id` and `kind`, and
+    one error names what was dropped."""
     ws, _ = scripted.workspace(tmp_path)
-    performers = _refusing_turn(ws, {"ok.json": b"", "a.json": BIG, "b.json": BIG})
+    performers = _refusing_turn(ws, {"a.json": BIG, "b.json": BIG})
     with bridges.operator(tmp_path):
         verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     by_file = {e["file"]: e for e in collected["effects"]}
     assert verdict == "idle" and collected["candidate"] is None
-    assert by_file["ok.json"]["kind"] == "pending" and "effect_id" in by_file["ok.json"]
-    a_entry, b_entry = by_file["a.json"], by_file["b.json"]
-    if "error" in a_entry:
-        full, dropped = b_entry, a_entry
-    else:
-        full, dropped = a_entry, b_entry
-    assert "request" in full or ("effect_id" in full and "kind" in full and "error" not in full)
-    assert "effect_id" in dropped and "kind" in dropped and "file" in dropped and "error" in dropped
-    assert dropped["error"].startswith("unrecorded request: ") and "beside the turn's other parts" in dropped["error"]
+    assert by_file["ok.json"]["kind"] == "pending" and "request" in by_file["ok.json"]
+    [kept], [dropped] = _reduced(collected)
+    assert kept["kind"] == "refused" and kept["error"] == "r" * BIG
+    [why] = collected["errors"]
+    assert why.startswith(
+        f"the turn's signals: {dropped['file']} dropped to record the rest: {session.UNSTORABLE}"
+    )
     assert len([r for r in rows if r["type"] == "effect.refused"]) == 2
     assert len([r for r in rows if r["type"] == "effect.held"]) == 1
+
+
+def test_drops_are_cumulative_until_the_row_is_stored(dsn, tmp_path):
+    """Three refusals, two of which must go: both are answered, the third
+    kept whole, and the clean send keeps its `effect_id` and `kind`."""
+    ws, _ = scripted.workspace(tmp_path)
+    performers = _refusing_turn(ws, {"a.json": BIG, "b.json": BIG, "c.json": BIG})
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert verdict == "idle" and by_file["ok.json"]["kind"] == "pending"
+    [kept], dropped = _reduced(collected)
+    assert kept["kind"] == "refused" and len(dropped) == 2
+    [why] = collected["errors"]
+    head = why.split(" dropped to record the rest")[0]
+    assert head.startswith("the turn's signals: ") and all(e["file"] in head for e in dropped)
+    assert len([r for r in rows if r["type"] == "effect.refused"]) == 3
+
+
+def test_a_reduced_question_turn_asks_nothing_and_folds(dsn, tmp_path):
+    """A question beside two refusals that do not fit together: the row is
+    idle with the question kept as text, no `question.asked` is written,
+    and the fold reads the row."""
+    ws, _ = scripted.workspace(tmp_path)
+    performers = _refusing_turn(ws, {"a.json": BIG, "b.json": BIG})
+    (ws / ".valor" / "question.md").write_text("which one?")
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    assert verdict == "idle" and collected["question"] == "which one?"
+    assert not [r for r in rows if r["type"] == "question.asked"]
+    folded = tasks.machine.fold(rows)
+    assert folded.state is tasks.machine.State.PLAN and folded.ignored == []
+
+
+@pytest.mark.parametrize("part", ["question", "plan", "screens", "error"])
+def test_the_largest_part_is_dropped_first(dsn, tmp_path, monkeypatch, part):
+    """A part of the turn larger than a refusal beside it, storable on its
+    own and not with the refusal: that part is dropped, the refusal kept
+    whole."""
+    big = "x" * (BIG + 4096)
+    collect = signals.collect
+
+    def with_big(ws, turn):
+        found = collect(ws, turn)
+        if part == "question":
+            found.question = big
+        elif part == "plan":
+            found.plan = {"path": "p.md", "critique_rounds": 0, "review_rounds": 0, "note": big}
+        elif part == "screens":
+            found.screens = [{"name": "s.png", "note": big}]
+        else:
+            found.unreadable.append(big)
+        return found
+
+    monkeypatch.setattr(signals, "collect", with_big)
+    ws, _ = scripted.workspace(tmp_path)
+    performers = _refusing_turn(ws, {"a.json": BIG})
+    with bridges.operator(tmp_path):
+        verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
+    [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    [kept], [] = _reduced(collected)
+    assert verdict == "idle" and kept["kind"] == "refused"
+    label = {"plan": "plan.json", "screens": "the screens", "error": "an error"}.get(part, f"{part}.md")
+    assert collected["errors"][-1].startswith(f"the turn's signals: {label} dropped to record the rest")
+    if part == "error":
+        assert big not in collected["errors"]
+        assert any(
+            e.startswith(f"an error is unrecorded: {session.UNSTORABLE} beside") for e in collected["errors"]
+        )
+    else:
+        assert collected[part] in (None, [])
+    assert not [r for r in rows if r["type"] in ("question.asked", "plan.written")]
 
 
 def test_an_error_the_ledger_cannot_store_is_answered_in_its_place(dsn, tmp_path, monkeypatch):
