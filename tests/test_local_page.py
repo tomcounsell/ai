@@ -1,0 +1,326 @@
+"""The local chat page, run: `chat.js` in a real headless Chromium against the
+real bridge server and the test database.
+
+The browser is `settings.browser` when it exists, else Google Chrome's
+own binary; the test skips when neither is there. The page is driven over
+the Chrome DevTools protocol (no Playwright in the venv). Ports: the
+bridge on a port of 6540 to 6549, the browser's debugging port on another."""
+
+import asyncio
+import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import uuid
+from contextlib import asynccontextmanager
+
+import aiohttp
+import pytest
+
+from bridges import local
+from core import bridge as port
+from core import broker, db, notices
+from core.settings import settings
+from tests import bridges
+from tests.bridges import new_task, of_type
+from tests.telegram_port import until
+from tests.test_local_bridge import SEND, bind, local_received, run
+
+pytestmark = pytest.mark.spend(usd=0)
+
+PORTS = range(6540, 6550)
+CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def browser() -> str | None:
+    for path in (settings.browser, CHROME):
+        if path and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def free_ports(n: int) -> list[int]:
+    got = []
+    for p in PORTS:
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", p))
+            except OSError:
+                continue
+            got.append(p)
+        if len(got) == n:
+            return got
+    raise AssertionError("no free ports in 6540-6549")
+
+
+@pytest.fixture
+def op(tmp_path):
+    with bridges.operator(tmp_path), bridges.configure(operator_channel="local", operator_chat="local"):
+        (tmp_path / "projects" / "valor.toml").write_text(
+            'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+        )
+        yield tmp_path
+
+
+class Tab:
+    """One page over the DevTools protocol."""
+
+    def __init__(self, ws: aiohttp.ClientWebSocketResponse):
+        self.ws, self.n = ws, 0
+
+    async def call(self, method: str, **params):
+        self.n += 1
+        want = self.n
+        await self.ws.send_json({"id": want, "method": method, "params": params})
+        while True:
+            msg = await asyncio.wait_for(self.ws.receive_json(), 15)
+            if msg.get("id") == want:
+                assert "error" not in msg, msg
+                return msg["result"]
+
+    async def js(self, expression: str):
+        got = await self.call(
+            "Runtime.evaluate", expression=expression, awaitPromise=True, returnByValue=True
+        )
+        assert "exceptionDetails" not in got, got
+        return got["result"].get("value")
+
+    async def goto(self, url: str) -> None:
+        await self.call("Page.navigate", url=url)
+        await until(lambda: self.js("document.readyState === 'complete'"), timeout=10)
+
+    async def wait(self, expression: str, timeout: float = 8.0) -> None:
+        await until(lambda: self.js(expression), timeout=timeout)
+
+    async def type_and_send(self, text: str) -> None:
+        await self.js(f"document.getElementById('text').value = {json.dumps(text)}")
+        await self.js("document.querySelector('button[type=submit]').click()")
+
+
+@asynccontextmanager
+async def page_up(dsn, tmp_path, *, hold_bridge=None):
+    """The bridge run through `serve`, and a headless browser with one tab."""
+    exe = browser()
+    if exe is None:
+        pytest.skip("no headless Chromium: neither settings.browser nor Google Chrome is installed")
+    bridge_port, debug_port = free_ports(2)
+    tokenfile = tmp_path / "local-token"
+    bridge = local.LocalBridge(dsn, bridge_port, str(tokenfile))
+    if hold_bridge is not None:
+        hold_bridge.append(bridge)
+    served = asyncio.create_task(port.serve(bridge, dsn))
+    profile = tempfile.mkdtemp(prefix="valor-test-chrome-")
+    chrome = None
+    try:
+
+        async def up():
+            assert not served.done(), served
+            try:
+                _, w = await asyncio.open_connection("127.0.0.1", bridge_port)
+            except OSError:
+                return False
+            w.close()
+            return True
+
+        await until(up, timeout=15)
+        chrome = subprocess.Popen(  # noqa: ASYNC220
+            [
+                exe,
+                "--headless=new" if exe == CHROME else "--headless",
+                f"--remote-debugging-port={debug_port}",
+                f"--user-data-dir={profile}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        async with aiohttp.ClientSession() as http:
+            ws_url = None
+
+            async def listening():
+                nonlocal ws_url
+                try:
+                    async with http.get(f"http://127.0.0.1:{debug_port}/json/list") as r:
+                        tabs = [t for t in await r.json() if t.get("type") == "page"]
+                except aiohttp.ClientError, OSError:
+                    return False
+                if tabs:
+                    ws_url = tabs[0]["webSocketDebuggerUrl"]
+                return bool(tabs)
+
+            await until(listening, timeout=20)
+            async with http.ws_connect(ws_url) as ws:
+                tab = Tab(ws)
+                await tab.call("Page.enable")
+                await tab.call("Runtime.enable")
+                yield tab, f"http://127.0.0.1:{bridge_port}", tokenfile.read_text().strip(), http
+    finally:
+        if chrome is not None:
+            chrome.terminate()
+            try:
+                chrome.wait(10)
+            except subprocess.TimeoutExpired:
+                chrome.kill()
+        shutil.rmtree(profile, ignore_errors=True)
+        served.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await served
+
+
+def test_the_page_sends_shows_replies_and_renders_text_as_text(dsn, op):
+    words = "<img src=x onerror=window.pwned=1>"
+
+    async def go():
+        async with page_up(dsn, op) as (tab, base, token, _):
+            await tab.goto(f"{base}/#{token}")
+            assert await tab.js("document.title") == "Valor, local"
+
+            # Send: the row appears, the box clears, the bridge recorded it once and verified.
+            before = len(await local_received(dsn))
+            await tab.type_and_send("hello from the page")
+            await tab.wait(
+                "[...document.querySelectorAll('#log li.tom')].some(l => l.textContent === 'hello from the page')"
+            )
+            await tab.wait(
+                "document.getElementById('text').value === '' && !document.getElementById('text').disabled"
+            )
+            got = [r for r in await local_received(dsn) if r["text"] == "hello from the page"]
+            assert len(got) == 1 and got[0]["verified"] is True and got[0]["reply_to"] is None
+            assert len(await local_received(dsn)) == before + 1
+
+            # Valor's notice arrives by the poll, and its text is not run.
+            task = await new_task(dsn)
+            async with await db.connect(dsn) as conn:
+                held = await broker.request(
+                    conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": words})
+                )
+                (nid,) = await notices.owe(conn, task)
+            await tab.wait("!!document.querySelector('#log li[data-event-id].valor')", timeout=10)
+            mine = (
+                "[...document.querySelectorAll('#log li.valor')].filter(l => l.textContent.includes("
+                + json.dumps(held.effect_id)
+                + "))[0]"
+            )
+            await tab.wait(f"!!{mine}", timeout=10)
+            assert await tab.js("document.querySelectorAll('#log img').length") == 0
+
+            # Click it: the next send is a reply to it, and only that one.
+            await tab.js(f"{mine}.click()")
+            assert await tab.js(f"{mine}.classList.contains('chosen')")
+            assert "Replying to:" in await tab.js("document.getElementById('reply').textContent")
+            await tab.type_and_send("approve")
+            await tab.wait("document.getElementById('reply').textContent === ''")
+            await tab.wait("!document.querySelector('#log li.chosen')")
+            replied = [r for r in await local_received(dsn) if r["text"] == "approve"]
+            assert len(replied) == 1 and replied[0]["reply_to"] == nid
+            bound = await bind(dsn, {"received_id": replied[0]["received_id"]})
+            assert bound["as"] == "approve"
+
+            # The approved text is shown, once, as text.
+            await until(
+                lambda: of_type(dsn, "effect.outcome", effect_id=held.effect_id),
+                timeout=10,
+            )
+            await tab.wait(
+                f"[...document.querySelectorAll('#log li.valor')].filter(l => l.textContent === {json.dumps(words)}).length === 1",
+                timeout=10,
+            )
+            assert await tab.js("window.pwned === undefined")
+            assert await tab.js("document.querySelectorAll('#log img').length") == 0
+
+            # The next send is not a reply.
+            await tab.type_and_send("and another")
+            await tab.wait(
+                "[...document.querySelectorAll('#log li.tom')].some(l => l.textContent === 'and another')"
+            )
+            (again,) = [r for r in await local_received(dsn) if r["text"] == "and another"]
+            assert again["reply_to"] is None
+
+            # Rows stay oldest first.
+            ids = await tab.js(
+                "[...document.querySelectorAll('#log li')].map(l => Number(l.dataset.eventId))"
+            )
+            assert ids == sorted(ids) and len(ids) == len(set(ids))
+
+    run(go())
+
+
+def test_a_401_stops_the_polling_and_the_sending(dsn, op):
+    async def go():
+        held: list = []
+        async with page_up(dsn, op, hold_bridge=held) as (tab, base, token, _):
+            await tab.goto(f"{base}/#{token}")
+            await tab.type_and_send("before")
+            await tab.wait(
+                "[...document.querySelectorAll('#log li.tom')].some(l => l.textContent === 'before')"
+            )
+            assert await tab.js("document.getElementById('status').textContent") == ""
+
+            # The bridge's token changes under the open page.
+            held[0].token = "rotated-" + uuid.uuid4().hex
+            await tab.wait(
+                "document.getElementById('status').textContent.includes('python -m bridges.local open')",
+                timeout=8,
+            )
+            assert await tab.js("document.getElementById('text').disabled")
+
+            # No more polling: a new notice never shows, and a send is not made.
+            sent_before = len(await local_received(dsn))
+            task = await new_task(dsn)
+            async with await db.connect(dsn) as conn:
+                await notices.request(conn, task, kind="test", about_key=f"t:{task}", text="after the 401")
+            await asyncio.sleep(5)
+            assert not await tab.js(
+                "[...document.querySelectorAll('#log li')].some(l => l.textContent === 'after the 401')"
+            )
+            await tab.js("document.getElementById('text').value = 'ignored'")
+            await tab.js("document.getElementById('form').requestSubmit()")
+            await asyncio.sleep(1)
+            assert len(await local_received(dsn)) == sent_before
+
+    run(go())
+
+
+def test_a_page_opened_without_or_with_a_wrong_token_says_to_reopen(dsn, op):
+    async def go():
+        async with page_up(dsn, op) as (tab, base, _token, _):
+            await tab.goto(f"{base}/")
+            await tab.wait(
+                "document.getElementById('status').textContent.includes('python -m bridges.local open')"
+            )
+            assert await tab.js("document.getElementById('text').disabled")
+            await tab.goto(f"{base}/#wrong")
+            await tab.wait(
+                "document.getElementById('status').textContent.includes('python -m bridges.local open')",
+                timeout=8,
+            )
+            assert not [r for r in await local_received(dsn) if r["text"] == "ignored"]
+
+    run(go())
+
+
+def test_a_send_while_the_bridge_is_down_is_retried_with_the_same_id_and_records_once(dsn, op):
+    async def go():
+        held: list = []
+        async with page_up(dsn, op, hold_bridge=held) as (tab, base, token, _):
+            await tab.goto(f"{base}/#{token}")
+            bridge = held[0]
+            await bridge.close()
+            await tab.type_and_send("sent into the dark")
+            await asyncio.sleep(1)
+            assert await tab.js("document.getElementById('text').value") == "sent into the dark"
+            assert not [r for r in await local_received(dsn) if r["text"] == "sent into the dark"]
+            await bridge.start()
+            await tab.wait("document.getElementById('text').value === ''", timeout=10)
+            got = [r for r in await local_received(dsn) if r["text"] == "sent into the dark"]
+            assert len(got) == 1
+            await tab.wait(
+                "[...document.querySelectorAll('#log li.tom')].some(l => l.textContent === 'sent into the dark')",
+                timeout=6,
+            )
+
+    run(go())
