@@ -55,7 +55,8 @@ valor_rebuild_test_24builder`, ports 6530 to 6539):
 - The suite and both ruff checks are green.
 
 On this Mac, by Tom, once merged (the manual run): the kernel and the
-bridge run under launchd on a fresh ledger database, `valor_local`; Tom
+bridge run under launchd on a fresh `valor_rebuild` (the older ledger
+backed up and renamed `valor_rebuild_pre24`); Tom
 types a request on the page, a task starts, a notice comes back; a task's
 held `local.send_message` is approved from the page and its text appears.
 The record goes in this file.
@@ -68,16 +69,30 @@ The record goes in this file.
   the bridge's port. That deny alone is what keeps a turn off this
   channel. The token does not: the kernel key directory is denied to
   every turn, but the token is also in the browser's history (the URL
-  fragment), and the browser's profile under `~/Library` is not in
-  `HOME_DENIED` (`core/workspace.py`), so a turn may read it. Holding the
-  token gets a turn nothing while the port is out of reach. The turn
-  controls the text and target of a send it requests and nothing else on
-  the page; the page renders that text with `textContent`, so a send's
-  text never runs. The kernel never reads anything a turn owns here.
+  fragment), and the browser profiles under `~/Library/Application
+  Support` are neither read- nor write-denied (`core/workspace.py`), so a
+  turn may read the token there. Directly, holding it gets a turn nothing
+  while the port is out of reach. The turn controls the text and target
+  of a send it requests and nothing else on the page; the page renders
+  that text with `textContent`, so a send's text never runs. The kernel
+  never reads anything a turn owns here.
+- **The browser profiles.** A turn can also write a profile: leave an
+  extension, a pref, or a startup page that Tom's unsandboxed browser
+  loads on its next start, and from there reach the port with the token
+  it read. It can read the profiles' cookies and logins too. This Mac is
+  Tom's own, so that is his browsing data, not Valor's. The plan adds no
+  deny for it; it is an opening of this Mac, recorded in
+  `docs/bridges/local.md`, and Question 2 asks Tom.
+- **Framing.** A page a turn serves on 8000 to 8009, which Tom opens to
+  see its work, could frame the chat page with its token. `GET /` sends
+  `Content-Security-Policy: frame-ancestors 'none'`, so the browser never
+  renders the chat page inside another page.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
   (`/dev/ttys*` are his, mode 620, and no profile denies them), so a
-  terminal approval surface can be overprinted with a forged notice. A
-  page in the browser cannot be written by a turn.
+  terminal approval surface can be overprinted with a forged notice at
+  once, needing nothing loaded later. The browser route above needs a
+  browser restart and has to get past the browser's own protections, so
+  the page is still the better surface.
 - **Other local processes and web pages.** This is what the token is for.
   Another macOS user reaches `127.0.0.1` but reads neither the key
   directory nor Tom's browser history. A web page Tom visits can send
@@ -101,16 +116,17 @@ The record goes in this file.
 - `core/intake.py`:
   - `VERIFY["local"]` true; `_from_operator` is the `verified` flag for
     `local`.
-  - `owned("local")` is `["local"]` when `operator_channel` is `local`,
-    and `owned("telegram")` lists `operator_chat` only when
-    `operator_channel` is `telegram`.
+  - `owned("local")` is `["local"]` when `operator_channel` is `local`
+    (keyed on the channel, not the chat), and `owned("telegram")` lists
+    `operator_chat` only when `operator_channel` is `telegram`.
   - One flag in `_bind` and `_notice`, `replies = channel in ("telegram",
     "local")`, the channels where Tom replies to a message. On those, the
     exact words `approve` and `stop` bind, and a binding notice goes back
     in reply (`reply_to` the message's id) in the message's own channel
     and chat. On email, a binding notice goes to the operator's channel
     and chat (today `_notice` names `telegram` outright), and the near
-    miss text names the operator channel instead of Telegram.
+    miss text names the operator channel as Tom sees it: "by reply in
+    Telegram" or "by reply on the local chat page".
 - `core/bridge.py`: `LIMITS["local"]` with no text or file limit, and
   `DECLARED["local.send_message"]`: `act`, owner `local`, usage
   "target `local`, payload `{"text": "..."}`; sent once Tom approves",
@@ -120,9 +136,12 @@ The record goes in this file.
 - `core/settings.py`: `local_port` (`VALOR_LOCAL_PORT`, 8711), with a
   comment that it stays outside `DEV_PORTS` (8000 to 8009, which a turn
   reaches) and the Postgres and Redis spans; `local_tokenfile`, derived
-  from `pg_passfile` beside the other keys; and `operator_chat` is
-  `local` whenever `operator_channel` is `local` (`VALOR_OPERATOR_CHAT`
-  is read only for other channels), so the chat has one name.
+  from `pg_passfile` beside the other keys; and `operator_chat` stays a
+  field whose default factory returns `local` when
+  `VALOR_OPERATOR_CHANNEL` is `local`, and otherwise `VALOR_OPERATOR_CHAT`
+  or None, so the chat has one name. Tests that set fields with
+  `configure` set both: `configure(operator_channel="local",
+  operator_chat="local")`.
 
 ### `bridges/local/`
 
@@ -140,12 +159,16 @@ The record goes in this file.
 - Each HTTP request opens its own database connection and closes it (as
   `conn()` in `bridges/telegram/kernel.py`); no handler touches the
   outbox's connections.
-- Routes: `GET /` and `GET /chat.js` (static, no secret); `GET /log`
-  (the whole local chat each poll, oldest first, each row with its event
-  id: local `message.received`, and `notice.sent` and `effect.outcome`
-  rows sent on `local`, with their text from `notice.requested` and
-  `effect.held`); `POST /send` (`{id, text, reply_to}`). `/log` and
-  `/send` check the token header; nothing answers `OPTIONS`.
+- Routes: `GET /` (static, no secret, with `Content-Security-Policy:
+  frame-ancestors 'none'`) and `GET /chat.js`; `GET /log` (the whole
+  local chat each poll, oldest first: local `message.received`, and
+  `notice.sent` and `effect.outcome` rows sent on `local`, with their
+  text from `notice.requested` and `effect.held`); `POST /send` (`{id,
+  text, reply_to}`). Each `/log` row carries `event_id` (for
+  deduplication), `message_id` (the page's id for Tom's messages, the
+  `notice_id` or the `effect_id` for Valor's), `from` (`tom` or
+  `valor`), `text`, and `reply_to`. `/log` and `/send` check the token
+  header; nothing answers `OPTIONS`.
 - A posted message becomes an `Inbound` with `channel` `local`, `chat_id`
   `local`, `chat_kind` `dm`, `message_id` the page's own random `id` (so
   a retried post records once), `sender_id` `local`, `sender_name` `Tom`,
@@ -161,14 +184,18 @@ The record goes in this file.
   `VALOR_LOCAL_PORT`, `VALOR_SERVE_TICK_S`.
 - `chat.html` and `chat.js`: a list and a text box; polls `/log` every
   two seconds and adds rows whose event id it has not shown; renders with
-  `textContent` only. A send keeps its text in the box and retries with
-  the same `id` until the bridge answers 200. Opened without a token in
-  the fragment, the page says to run `python -m bridges.local open`.
+  `textContent` only. Clicking a row of Valor's posts that row's
+  `message_id` as the next send's `reply_to`. A send keeps its text in
+  the box and retries with the same `id` until the bridge answers. On a
+  401 the page stops polling and sending and says to reopen it with
+  `python -m bridges.local open`; opened without a token in the
+  fragment, it says the same.
 
 ### Docs
 
 `docs/bridges/local.md` (status quo, the port as this bridge uses it,
-the threat model above), `bridges/README.md` (entry points, `local/`),
+the threat model above, the browser profiles as an opening of this
+Mac), `bridges/README.md` (entry points, `local/`),
 `docs/bridges/telegram.md` (the port's `channel` field and declared-type
 table gain `local`), the binding table in `core/intake.py`'s docstring.
 
@@ -179,11 +206,16 @@ What the plan found missing, and the order of the manual run:
 1. `pgpass` and `judgement-keys` are in `~/.config/valor-kernel`; no
    `claude-token`, so the gateway uses the `claude` login from the
    Keychain.
-2. Shell settings beside `PGPASSFILE`: `VALOR_DB=valor_local`,
-   `VALOR_OPERATOR_CHANNEL=local`.
-3. `python -m core migrate` with those settings creates `valor_local`
-   fresh (the rollout step), so the kernel resumes nothing from this
-   Mac's older ledger.
+2. Shell settings beside `PGPASSFILE`: `VALOR_OPERATOR_CHANNEL=local`;
+   `VALOR_DB` unset.
+3. The rollout step, so the kernel resumes nothing from this Mac's older
+   ledger: `python -m core backup`; then, as the owner with nothing
+   connected, `ALTER DATABASE valor_rebuild RENAME TO
+   valor_rebuild_pre24` (kept, since the ledger is never emptied); then
+   `python -m core migrate`, which creates a fresh `valor_rebuild` under
+   the existing `pgpass` lines and scram rules. The renamed ledger falls
+   under the cluster's `trust` rules, which on this one-user Mac matches
+   the accepted opening of one macOS user.
 4. `python -m core serve --plist` and `python -m bridges.local --plist`,
    each loaded with `launchctl`; no kernel job is loaded here today. The
    bridge makes its token on start.
@@ -204,7 +236,9 @@ Files in either direction; more than one local chat; reaching the page
 from the phone or the LAN; browser notifications; paging long history
 (the whole chat is sent each poll); markdown rendering; merges released
 from this Mac (no GitHub credential here; a merge approved on the page
-fails with the credential named); running the local and Telegram channels
+fails with the credential named); an approved `email.send`, which waits
+for an email bridge this Mac does not run, so nothing is sent and the
+page shows no outcome; running the local and Telegram channels
 as operator channel at once.
 
 ## Tests
@@ -215,12 +249,13 @@ as operator channel at once.
 - Posted message to task, end to end through `intake.bind`, with the
   `Inbound` fields above.
 - The held send: notice shown, `approve` reply, release, outcome, shown
-  once in `/log`.
+  once in `/log`. The `reply_to` posted is taken from the notice's
+  `/log` row (`message_id`), not from the ledger.
 - `stop` reply stops; `Approve!` steers and its notice is on `local`, in
-  reply to the message.
+  reply to the message. `reply_to` again comes from `/log`.
 - No token, a wrong token, and a token in a query string instead of the
   header: 401, nothing recorded. `OPTIONS /send` carries no
-  `Access-Control-Allow-*`.
+  `Access-Control-Allow-*`; `GET /` carries `frame-ancestors 'none'`.
 - The same page `id` posted twice records once.
 - A forced crash between intent and outcome: on restart the reconcile
   writes `done` with the same `sent`, and `/log` shows the text once.
@@ -232,7 +267,9 @@ as operator channel at once.
   as the same string.
 - `owned`: with operator channel `local`, `owns("local", "local")`,
   `operator_chat` is `local`, and not `owns("telegram", <operator_chat>)`;
-  with `telegram`, the reverse.
+  with `telegram`, the reverse. The `operator_chat` derivation is tested
+  by building `Settings()` under a monkeypatched environment, as
+  `tests/test_settings.py` does.
 - An email binding notice and its near miss text go to and name the
   operator channel.
 - `run` makes the token file mode 600 and never rewrites one that exists;
@@ -250,6 +287,10 @@ already prove.
 
 1. Should this Mac hold the GitHub push credential so merges work from
    here? Assumed: no, not for this proof of concept.
+2. On this Mac a turn can read and write your browser profiles, cookies
+   and logins included. Accept that for the proof of concept, or deny
+   them to turns? Assumed: accept for the proof of concept; no deny is
+   added.
 
 ## Decided by default
 
@@ -257,10 +298,10 @@ already prove.
   reach a loopback port outside its allowlist.
 - The kernel and the bridge run under launchd for the manual run, and may
   be unloaded after it.
-- The proof of concept runs on a fresh ledger database, `valor_local`,
-  made by `migrate` with `VALOR_DB=valor_local` during rollout, so the
-  older demo and replay tasks on this Mac stay out of the resident
-  kernel.
+- The proof of concept runs on a fresh `valor_rebuild`: during rollout
+  the older ledger is backed up, renamed `valor_rebuild_pre24`, and
+  `migrate` makes a new one under the existing credentials, so the older
+  demo and replay tasks on this Mac stay out of the resident kernel.
 - One local chat with the fixed id `local`, which the usage line names, so
   a turn knows the target without seeing settings; the operator chat is
   derived from it, never set apart.
@@ -273,7 +314,8 @@ already prove.
 - `/log` sends the whole chat each poll: event ids commit out of order,
   so a cursor would skip rows.
 - The token is passed in the URL fragment, so it is in the browser's
-  history; a turn may read it there and still cannot reach the port.
+  history; a turn may read it there, and reaches the port with it only
+  through the browser profile (Question 2).
 - Port 8711, a setting.
 
 ## Critique rounds
@@ -292,7 +334,7 @@ Findings, in brief, and what changed:
 3. The HTTP handlers' connection was unnamed. One connection per request,
    as in `bridges/telegram/kernel.py`.
 4. This Mac's ledger holds older demo and replay tasks a resident kernel
-   would resume. The run uses a fresh `valor_local`.
+   would resume. The run uses a fresh ledger (named in round 2).
 5. The threat model claimed the token stops turns; a turn may read it in
    browser history. The model says the loopback deny alone stops turns
    and the token stops other users and web pages. No new deny.
@@ -315,3 +357,33 @@ Findings, in brief, and what changed:
     (`VALOR_OPERATOR_CHAT` is not needed, per 11).
 
 Test ports moved to 6530 to 6539, outside the Redis span.
+
+### Round 2 (of 2): revise
+
+Both rounds are spent, so these findings ride into the build, as the
+lead decided:
+
+1. A fresh ledger under a new name has no `pgpass` line and no scram
+   rule, so `migrate` fails at secure-login and the database sits on
+   `trust`.
+   Taken: rollout runs `python -m core backup`, renames the old ledger
+   `valor_rebuild_pre24`, and migrates a fresh `valor_rebuild` with
+   `VALOR_DB` unset, under the existing credentials. The builder does
+   not perform the rollout.
+2. `/log` did not name the id a reply carries. Taken: each row carries
+   `message_id`, the page replies with it, and the held-send and `stop`
+   tests take `reply_to` from `/log`.
+3. How `operator_chat` derives was left open. Taken: the default factory
+   derives it and it stays a field; tests set both fields.
+4. "A page cannot be written by a turn" was false: the browser profiles
+   are open to turns. Taken: the threat model says so, the opening is
+   recorded in `docs/bridges/local.md`, and Question 2 asks Tom, with
+   "accept for the proof of concept" assumed. No deny.
+5. A turn's page on 8000 to 8009 could frame the chat page. Taken: `GET /`
+   sends `Content-Security-Policy: frame-ancestors 'none'`, a property of
+   the page, asserted beside the `OPTIONS` test.
+6. An approved `email.send` goes nowhere on this Mac. Taken: one line
+   under Left out.
+7. Nits: the email near miss names the channel as Tom sees it; on a 401
+   the page stops polling and says to reopen it with
+   `python -m bridges.local open`.
