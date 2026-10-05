@@ -786,8 +786,10 @@ def test_a_stage_with_a_runner_takes_no_manual_verdict():
         verdicts.manual_allowed(State.CRITIQUE, {State.CRITIQUE: object()})
 
 
-@pytest.mark.parametrize("where", ["judge", "plan", "critique", "checks", "merge"])
-@pytest.mark.macos
+@pytest.mark.parametrize(
+    "where",
+    ["judge", "plan", *(pytest.param(w, marks=pytest.mark.macos) for w in ("critique", "checks", "merge"))],
+)
 def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
     ws, _ = scripted.workspace(tmp_path)
 

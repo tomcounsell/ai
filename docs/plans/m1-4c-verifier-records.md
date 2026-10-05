@@ -182,11 +182,45 @@ the host and in the VM, and the repository-suite test asserts that both
 pass in the VM. `docs/machine.md` gives the Django suite's 2 GB peak as
 1,855 MB, as this record does.
 
+**Patch round 8** (test check on 7743b80d8: pass with two gaps). The
+lead's calls, which replace item 2 below: a test the VM cannot pass is
+fixed to run there when its behavior is portable, else carries `macos`
+with its reason in a comment, so the VM's run has no failure at base for
+a regression to hide behind (the repository's own test check runs in the
+VM, `docs/plans/m1-4y-check-hang.md`); a parametrized test carries
+`macos` only on the parameters that need macOS. What changed:
+- The two other sparse tests plant 8 TiB. `tests/test_workspace.py`'s
+  sparse verdict runs in the VM; `tests/test_signals.py`'s splits into a
+  sparse and written file test, which runs in the VM, and a cloned
+  request test, which keeps `macos` for `cp -c`, an APFS clone.
+- A scratch cluster's bootstrap superuser is `settings.owner_role`, the
+  role the kernel databases' code connects as, where it was the login
+  user; on the Mac they are the same name. The test session sets
+  `VALOR_PG_BIN` to Debian's PostgreSQL 18 where the Homebrew one is
+  absent. `tests/test_credentials.py` runs in the VM, but for
+  `test_migrate_touches_no_credential_on_the_machine_cluster`, which
+  reads `pg_authid` as the machine cluster's superuser owner and keeps
+  `macos`.
+- `tests/test_judgement.py`'s two CLI runs log in through a link, beside
+  no key, to the database's own password file, where they relied on the
+  host's cluster.
+- `tests/test_emulator_package.py` lists `scripts/` on disk, not with
+  `git ls-files`.
+- `tests/test_session.py`'s request too deep for Postgres nests 50,000
+  deep, which Python parses on the VM's 8 MB stack and Postgres still
+  refuses.
+- Per-parameter marks: `test_a_stopped_task_takes_nothing_more_in_any_state`
+  runs `judge` and `plan` in the VM; `test_a_clone_with_alternates_a_shallow_file_or_hostile_config_is_refused`
+  all but `config`; `test_a_clone_whose_git_directory_lives_elsewhere_is_refused`
+  carries no mark.
+- The repository-suite test asserts the VM's run has no failed or
+  errored test.
+
 **Decided by default** (the lead's calls on patch round 5):
 1. A test that needs macOS itself carries the `macos` mark, merged tests
    included, so the repository suite ends in the VM.
-2. A test that fails in the VM for a reason other than macOS keeps no
-   mark: `tests/test_emulator_package.py` (no git checkout in the VM)
+2. (Replaced in patch round 8.) A test that fails in the VM for a
+   reason other than macOS keeps no mark: `tests/test_emulator_package.py` (no git checkout in the VM)
    and the deep request file in `tests/test_session.py` (the VM's
    stack). It fails at base and head alike.
 
@@ -200,14 +234,9 @@ pass in the VM. `docs/machine.md` gives the Django suite's 2 GB peak as
 - A `.command` opens with `open -g -j`.
 - `ruff` is a dev dependency, so the VM lints with the pinned version.
 - `read_result` adds lint locations only for `python-uv`.
-- In the VM this repository's suite passes 990, skips 457 (331 of them
-  `macos` tests) and has 6 failures and 14 errors in 367 s, none new at
-  head. Patch round 5 named the failing tests: 18 in
-  `tests/test_credentials.py` and `tests/test_judgement.py`, which assume
-  the host's local Postgres roles; `tests/test_emulator_package.py`,
-  which runs `git ls-files` in a source tree that is not a checkout; and
-  the deep request file in `tests/test_session.py`, which overflows the
-  VM's 8 MB stack.
+- In the VM this repository's suite passes 1,018 and skips 450 (324 of
+  them `macos` tests) with no failure or error, in 220 s, peaking at
+  2,063 MB (patch round 8).
 
 **Tests:** the host suite (`-m "not container"`) passes 1,398 and skips 23
 (live spend, live Telegram, a measurement, Pi with no subagents, git that

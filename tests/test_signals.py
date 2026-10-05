@@ -195,22 +195,30 @@ def test_plain_files_are_collected_and_moved(ws):
     assert collect(ws, "turn-2") == signals.Signals()
 
 
-@pytest.mark.macos
-def test_a_sparse_file_is_refused_and_written_or_cloned_files_are_read(ws):
+def test_a_sparse_file_is_refused_and_a_written_file_is_read(ws):
     v = ws / ".valor"
     with open(v / "question.md", "wb") as f:
-        f.truncate(1 << 50)  # claims 1 PiB, uses no disk
+        f.truncate(1 << 43)  # claims 8 TiB, uses no disk; ext4 holds up to 16 TiB
     body = "x" * 3_000_000
     (v / "done.md").write_text(body)
+    found = collect(ws)
+    assert found.question is None
+    assert found.unreadable == [f"question.md is sparse ({1 << 43} bytes claimed, 0 on disk)"]
+    assert found.done == body
+
+
+# `cp -c` makes an APFS clone.
+@pytest.mark.macos
+def test_a_written_or_cloned_request_is_read(ws):
+    v = ws / ".valor"
+    body = "x" * 3_000_000
     (v / "effects").mkdir()
     (v / "effects" / "a.json").write_text(
         json.dumps({"action_type": "send", "target": "tom", "payload": {"t": body}})
     )
     subprocess.run(["cp", "-c", str(v / "effects" / "a.json"), str(v / "effects" / "b.json")], check=True)
     found = collect(ws)
-    assert found.question is None
-    assert found.unreadable == [f"question.md is sparse ({1 << 50} bytes claimed, 0 on disk)"]
-    assert found.done == body
+    assert found.unreadable == []
     assert [e["request"]["payload"]["t"] == body for e in found.effects] == [True, True]
 
 

@@ -861,3 +861,6 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
         "tests.test_look::test_a_sparse_screen_is_sized_without_being_read",
         "tests.test_transcripts::test_a_sparse_file_is_skipped_without_reading_its_holes",
     } <= passed, v["base_run"]["tests"]["failed"]
+    # A test the VM cannot pass carries the `macos` mark, so no failure at
+    # base hides a regression.
+    assert v["base_run"]["tests"]["failed"] == v["base_run"]["tests"]["errored"] == [], v["base_run"]["tests"]

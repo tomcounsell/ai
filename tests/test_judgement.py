@@ -462,10 +462,19 @@ def _cli(*args, env=None) -> subprocess.CompletedProcess:
     )
 
 
+def _beside_no_keys(tmp_path: Path) -> str:
+    """A password file path in `tmp_path`, so the key directory beside it
+    holds no key: a link to the database's own password file, so the CLI
+    still logs in where the cluster asks for a password."""
+    link = tmp_path / "pgpass"
+    link.symlink_to(config.pg_passfile)
+    return str(link)
+
+
 def test_run_and_calibrate_refuse_to_start_without_a_key_for_a_default_endpoint(dsn, tmp_path):
     task = run(new_task(dsn))
     env = {
-        "VALOR_PG_PASSFILE": str(tmp_path / "pgpass"),
+        "VALOR_PG_PASSFILE": _beside_no_keys(tmp_path),
         "VALOR_JEV_URL": JEV_URL,
         "VALOR_OPEN_WEIGHT_URL": OPEN_WEIGHT_URL,
     }
@@ -485,7 +494,7 @@ def test_with_no_key_file_a_run_against_loopback_endpoints_judges(dsn, tmp_path)
         "run",
         task,
         env={
-            "VALOR_PG_PASSFILE": str(tmp_path / "pgpass"),
+            "VALOR_PG_PASSFILE": _beside_no_keys(tmp_path),
             "VALOR_JEV_URL": jev,
             "VALOR_OPEN_WEIGHT_URL": ow,
         },

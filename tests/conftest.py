@@ -31,6 +31,10 @@ os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
+# Scratch clusters start from `settings.pg_bin`, the Homebrew PostgreSQL 18 by
+# default; where it is absent (the verification VM), Debian's PostgreSQL 18.
+if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
+    os.environ["VALOR_PG_BIN"] = "/usr/lib/postgresql/18/bin"
 
 from core import binaries, db  # settings read VALOR_WORK on import
 from core.settings import settings
