@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4y-check-hang
 type: bugfix
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -101,3 +101,14 @@ faa972801f4b's base run at 093b4f7b63ce never ends by itself.
   container (1.4c part two), where loopback is the container's own and the
   macOS-only tests are marked. Until 1.4c part two merges, valor tasks keep
   running through subagents, and the lead's merge suite is the test.
+
+## Merged
+
+- Checks on 8d7d49784: test-1-4y pass (profile probes: only stat and lstat
+  of the check's own `<check_dir>.<step>.out`; the flood-wait timing flake
+  passed alone), review-1-4y pass (governance no, no caps; note:
+  `setup_profile` lacks the same opening), docs-1-4y updated 341f5ea03.
+- Rebased onto 489991ad7; lead suite 1517 passed, 25 skipped; ruff clean.
+  Backup `valor_rebuild-20261005T010112Z.dump`. Fast-forwarded to 4d6ed8bdd.
+  The resident kernel restarts on this code when the 2026-10-05 test window
+  closes.
