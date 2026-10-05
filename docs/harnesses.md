@@ -296,7 +296,7 @@ dropped and `turn.collected` written again alone, dropping the next largest
 each time, until it is stored. A dropped effect entry keeps its
 `effect_id`, `kind` and `file` with an error holding Postgres's reason, so
 the effect rows the broker wrote still match it; a dropped error is
-replaced by kernel text with the reason; any other dropped part is null.
+replaced by kernel text with the reason; any other dropped part is null (the screens, an empty list).
 A reduced row's verdict is `idle` (or `failed` for a turn that did not
 finish), its candidate is null, no `question.asked` or `plan.written` is
 written beside it, and one error names the parts dropped and gives the
