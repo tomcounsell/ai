@@ -76,6 +76,7 @@ async def search(query: str, **kwargs) -> SearchResult | None:
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
+                    "X-Pplx-Integration": "valor",
                 },
                 json={
                     "model": DEFAULT_MODEL,
