@@ -461,3 +461,28 @@ lead decided:
 7. Nits: the email near miss names the channel as Tom sees it; on a 401
    the page stops polling and says to reopen it with
    `python -m bridges.local open`.
+
+## Checks
+
+Round 1, on 55d9937f8:
+
+- **Test:** pass. The base (d0e9d7e9c) and the head fail the same tests: 2 failures and 62 errors, all because dovecot or node is not installed on this Mac. The head adds 18 passes. The check added 17 tests (c23afcad5): the page driven in headless Chrome over the DevTools protocol, the `/send` 400s, the `/log` filter, the plist, and the loopback binding.
+- **Review:** changes, three findings: an invented empty-text refusal, the browser-profile opening missing from sandbox-openings.md, and a token write that was not atomic. Governance: no.
+- **Docs:** updated (6855fab0a).
+
+Round 2, after patch round 1, on db14d203d:
+
+- **Test:** pass. Two full runs gave the same result: 1465 passed, 55 skipped, and the same dovecot and node failures. All 35 local tests pass.
+- **Review:** pass, round 2 of 2. Governance: no. It noted one wording point, left as is: a send with no `text` field shows as an empty row.
+- **Docs:** no_change.
+
+The lead checked the governance paragraph against CLAUDE.md byte for byte in bridges/README.md and core/README.md. The diff adds no "cori" and no em or en dashes.
+
+## Merged
+
+The lead's decision: merge. Every check passed on db14d203d. Valor-cori-rebuild was fast-forwarded to it.
+
+Rollout on Tom's Mac, decided by default:
+
+- The Mac has no external disk, so `core backup` (which needs a different device) cannot run. The rename itself keeps the old ledger intact as `valor_rebuild_pre24`, and a `pg_dump -Fc` of it goes to `~/valor-backups/`.
+- No Telegram or mailbox login is needed. The gateway uses the Keychain `claude` login (about eight hours unless Tom's own sessions refresh it).
