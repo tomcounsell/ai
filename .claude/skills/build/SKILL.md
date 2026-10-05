@@ -11,6 +11,24 @@ another task. Work in `~/src/valor-rebuild`
 on branch `valor-cori-rebuild`. Never switch `~/src/ai` off `main`: the live
 old system runs from it.
 
+**Tom pushes here too** (Tom, 2026-10-05). Tom runs this system on his
+own Mac, set up from `docs/plans/rebuild-handoff.md` "Setup", and pushes
+his commits to `valor-cori-rebuild` from there. So `origin` is the
+branch's truth, not this checkout:
+
+- `git fetch` and fast-forward `valor-cori-rebuild` to `origin` before
+  orienting, before cutting any worktree, and before every merge; rebase a
+  merge branch onto the fetched tip, and when that brings in Tom's
+  commits, run the lead suite again on the result.
+- Never force-push and never rewrite a commit Tom pushed. When a push is
+  refused because origin moved, fetch, rebase, run the suite, push again.
+- Tom's commits are work like any other: read what they change, and when
+  one changes a plan file, a task's stage, or code a task in flight
+  touches, the affected task rebases and its checks run again.
+- Each Mac keeps its own ledger, backups, keys, and kernel; only the
+  repository is shared. Never copy one machine's ledger, keys, or settings
+  into the repository.
+
 ## 1. Orient
 
 Read, in order: `CLAUDE.md` (the governance paragraph and the tests line
