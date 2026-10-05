@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4b-provision-restart
 type: bug
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
@@ -97,6 +97,10 @@ clone.
   task has no `workspace.provisioned` row, read under `provision:<task>`,
   the lock the only writer of that row holds. A directory the ledger says
   is provisioned is never cleared by provisioning.
+- Only a provisioning holding `provision:<task>` starts `provision-<task>`
+  git (serve and `core start --project`); fix 1 and fix 4 reap only while
+  holding that lock, and `kernel_key` keeps a second kernel from running,
+  so what the reap finds is a dead holder's.
 
 ## Fix
 
@@ -112,15 +116,20 @@ clone.
    kernel's own unfinished provisioning: `workspace.remove(task_id)` in a
    thread, before the `workspace:ports` lock is taken, so the ports the
    dead attempt recorded are free to choose again. Then reserve and
-   provision as written.
+   provision, with `workspace.provision` run under `git.threaded` (as CLI
+   `_provision` runs it) in place of `asyncio.to_thread`: a cancel of the
+   job (the kernel closing) interrupts its git and setup commands and waits
+   for its cleanup before the `finally` releases `provision:<task>`, so no
+   `provision-<task>` process outlives the lock's holder unless that
+   holder's process died.
 2. `core/git.py` and `core/workspace.py`: provisioning's trusted git calls
    carry the mark `VALOR_TURN=provision-<task>`, the environment mark
    `runs.reap` finds with `ps -E` (as it finds a turn's processes and,
    with the sandbox mark, a setup command's). `git.marked(mark)` sets a
    contextvar that `_git` adds to git's environment, under any explicit
    `extra_env`; `provision` runs `_provision` inside
-   `git.marked(f"provision-{task_id}")`, which `asyncio.to_thread`
-   carries into its thread. Every program git starts inherits the mark.
+   `git.marked(f"provision-{task_id}")`, which sets the mark in the thread
+   `provision` runs in. Every program git starts inherits the mark.
    Checked on this Mac: the trusted git (Command Line Tools) shows its
    environment to `ps -E`, and `runs.reap("provision-<x>")` stopped a
    marked fetch whose kernel `launchctl remove` had ended. A platform
@@ -281,3 +290,44 @@ Round 1 (critic-2-4b-r1), lead's decisions:
    unfinished provisioning keeps running.
 6. Taken. docs/architecture.md gets the restart clause.
 7. Not a finding; nothing added.
+
+Round 2 (critic-2-4b-r2): sound. Lead's decisions on its three minor
+findings:
+
+1. Taken. Serve's `_provision` runs `workspace.provision` under
+   `git.threaded` (fix 1).
+2. Taken. The Threat model states the invariant the reap's safety rests on.
+3. Taken. Fix 2 says the mark is set in the thread `provision` runs in.
+
+## Build record
+
+Built on `m2-4b-provision-restart` (builder-2-4b-build), against
+`VALOR_TEST_DB=valor_rebuild_test_24bbuilder`, ports 6570 to 6579.
+
+- Fix 1: `Kernel._provision` re-reads `_ready`'s condition under
+  `provision:<task>`, removes a directory found then (`lexists`) with
+  `workspace.remove` in a thread before `workspace:ports`, and runs
+  `workspace.provision` under `git.threaded`.
+- Fix 2: `git.marked(mark)`; `_git` puts `VALOR_TURN=<mark>` in git's
+  environment under `extra_env`; `provision` runs `_provision` inside
+  `git.marked(f"provision-{task_id}")`.
+- Fix 3: `workspace.remove` stops services, reaps `provision-<task>` and
+  each `setup-<task>-<n>` of `setup/<n>.log`, then `rmtree(lay.root)`.
+- Fix 4: `workspace remove` on a task with no `workspace.provisioned`
+  row whose directory exists (`_unfinished` in `core/__main__.py`): the
+  stopped-or-merged rule under the `task:<id>` lock, `provision:<task>`
+  try-locked for the transaction, `workspace.remove`, `workspace.removed`.
+- `tests/kernel_child.py` takes `KERNEL_RUNNERS=judged` (every scripted
+  runner, judge included): a task started by message is judged first, so
+  the kill test needs the judge to reach its first turn.
+- Every test under Tests was written first and failed on the code as it
+  was: the kill test with `workspace.failed` (`File exists`), the incident
+  test with no `workspace.provisioned`, the stale test with a new
+  `workspace.failed` row, the mark test with unmarked git calls, the
+  `workspace remove` test with "has no workspace the kernel provisioned".
+  All pass now.
+- Full suite: 1473 passed, 55 skipped, 2 failed, 62 errors. The failures
+  and errors are the mail tests (no dovecot on this Mac) and
+  `test_pi` (no node), which fail at base too. `uvx ruff check .` and
+  `uvx ruff format --check .` are clean.
+- Docs: `docs/workspace.md`, `docs/architecture.md`, `core/README.md`.

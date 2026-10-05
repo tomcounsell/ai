@@ -34,7 +34,25 @@ program's, goes to a file the kernel holds, not a pipe, so a call ends when git 
 process groups get TERM, then KILL after `reap_grace_s`, the clone's temporary ref is removed, and
 provisioning is refused as interrupted. Nothing reaches GitHub, and the clone has no PR, issue, or
 later commit to read. A second signal during that cleanup does not end it: provisioning waits until the
-cleanup is done, so `provision:<task>` is held until then.
+cleanup is done, so `provision:<task>` is held until then. The resident kernel provisions the
+same way: closing it interrupts a provisioning it runs and waits for that cleanup before the lock
+is released.
+
+**A provisioning that died.** Provisioning's git calls carry the mark `VALOR_TURN=provision-<task>`
+in their environment, which every program git starts inherits. A kernel killed mid-provision
+(SIGKILL, SIGTERM, a crash) leaves the task's directory, and its git, a setup command, or the
+task's Postgres may run on, each in a session of its own. Recovery does not touch it; provisioning
+redoes it. The kernel schedules provisioning for a task with a project and no workspace, and
+under `provision:<task>` reads again whether the task still needs one: not stopped or merged, no
+`workspace.provisioned` row, and no `workspace.failed` without a later steer. If it does and the
+directory is there, the kernel removes it and makes it again, and the ports its `ports.json` held
+are free to choose again. Removing a task directory (`workspace.remove`) stops the task's
+services, reaps the mark `provision-<task>` and the mark `setup-<task>-<n>` of each
+`setup/<n>.log`, and then clears the tree without following any link and clearing each entry's
+flags and ACL first. Only a provisioning holding `provision:<task>` starts `provision-<task>` git;
+the redo and `workspace remove` reap only while holding that lock, and the kernel lock keeps a
+second kernel from running, so what the reap finds is a dead holder's. A task carrying a
+`workspace.failed` is provisioned again on Tom's next steer.
 
 **The mirror's fetch** treats the builder's clone as hostile: its config
 checked first; a gitfile, `commondir`, alternates, and shallow clones refused;
@@ -54,6 +72,13 @@ The binaries are Homebrew's, in a prefix a turn can write, so each runs under
 task and no task directory's `ports.json` names, chosen under the
 `workspace:ports` lock. `python -m core workspace remove TASK` (stopped or
 merged only) stops the services, deletes the directory, and frees the ports.
+It also takes the directory a provisioning that died left for a task with no
+workspace, once the task is stopped or merged and its provisioning is not
+live (otherwise "being provisioned now"), and records `workspace.removed`.
+For such a stopped task it is what stops whatever that provisioning left
+running (its Postgres or Redis, a setup command, its git) and frees its
+ports: the sweep never sees them, since the task has a row and no record
+names its services.
 
 A service program (`initdb`, `pg_ctl`, `redis-server`) runs to its own end,
 with no time limit of Valor's; `pg_ctl` waits up to its own default of 60
