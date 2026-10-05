@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4a-valor-branch
 type: bug
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 1
 governance_grant: none
@@ -62,3 +62,15 @@ Suite: 1467 passed, 55 skipped, 2 failed, 62 errors. The errors are the
 email tests (dovecot is not installed on this Mac); the failures are
 `test_mailserver` (dovecot) and `test_pi` (node under the profile), none
 touching this change. Ruff check and format pass.
+
+## Checks
+
+All three checks ran on 82d824059.
+
+- **Test:** pass. The head shows the same failures as the base: the email tests and test_mailserver because dovecot is missing, and test_pi, which also fails alone at 36bb6d146. Two gaps are left open: no end-to-end intake test runs with the real valor spec, and no test covers a `--branch` override of a spec branch.
+- **Review:** pass, governance no. Message-started valor tasks (local and Telegram) now clone and target `valor-cori-rebuild`. The default-branch refusal and the merge grant at release are unchanged.
+- **Docs:** no_change.
+
+## Merged
+
+The lead's decision: merge, since every check passed. The branch was rebased onto valor-cori-rebuild (plan-file commits only) and fast-forwarded. No rollout is needed beyond the kernel reading the spec at the next message start.
