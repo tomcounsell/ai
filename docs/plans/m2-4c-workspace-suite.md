@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4c-workspace-suite
 type: bug
-status: planned
+status: built
 critique_rounds: 1
 review_rounds: 2
 governance_grant: none
@@ -317,3 +317,111 @@ so its findings ride into the build). Lead's decisions:
 7. Taken. Both unbounded waits check the driving task and fail when it
    fails, with no timeout (fix 7).
 8. Taken (the critique's 8 to 10). `ruff==0.16.10`; `review_rounds` is 2.
+
+## Build record
+
+Built on `m2-4c-workspace-suite` in one commit over the plan at
+`88949b680`. Fixes 1 to 7 as written. What differs from the plan, or
+the run under the real check profile added:
+
+- **Denials are skips that name them.** `tests/denials.py` and a report
+  hook in `tests/conftest.py`: a failure is reported skipped, with a
+  reason naming a denial of the sandbox the suite runs under, only when
+  its traceback or captured stderr shows that denial's own error and
+  trying the same operation in that run is denied too. The denials met:
+  running `/bin/ps` (setuid), listening on a port the OS chooses, the
+  shared `/private/tmp`, applying a sandbox inside the sandbox, and
+  DiskArbitration. On the host nothing is denied, so nothing is skipped
+  this way. `tests/test_denials.py` holds the rule.
+- **Failures show their cause.** Waits on a task the test started
+  (`test_steer_mid_turn`, `test_objective_tree`, the `serve` gateway test,
+  the session record test) re-raise that task's error instead of spinning
+  or timing out; two `test_targets` assertions, one `test_intake`
+  assertion, and the assertions in `test_judgement_sites`, `test_pi`,
+  `test_objective_tree` and `test_workspace` carry the stderr or rows that
+  show why.
+- **A second kernel line.** `core/serve.py` logs a failed step as the
+  exception's text (`PermissionError: [Errno 1] Operation not permitted:
+  '/bin/ps'`), not its `repr`, which drops the file name. Without it a
+  kernel step failing on a denial shows nothing a reader or the hook can
+  name. The first kernel line is `backup`'s optional port, as planned.
+- **The page tests' browser.** `tests/test_local_page.py` runs Chrome
+  with `--no-sandbox` (as `look` does) and `MAC_CHROMIUM_TMPDIR` at the
+  suite's temp directory: in a check it could neither apply its own
+  sandbox nor make its socket directory in the user temp directory, both
+  denied. With these the four page tests pass inside the check. When the
+  browser exits, the wait fails with its stderr.
+- **Task Redis ports.** `tests/conftest.py` sets `VALOR_PG_PORTS` and
+  `VALOR_REDIS_PORTS` to the span when it is set, so the ports the kernel
+  chooses for a task the tests provision lie inside the span too.
+- **`VALOR_PG_SCRATCH` stays `/tmp`.** Fix 8 cannot be done in the spec.
+  The spec's `[env]` knows only `{port}` and `{passfile}`. Every path the
+  check profile lets a check write is under its check directory, and a
+  scratch cluster's socket there
+  (`~/valor-tasks/<id>/checks/test-head-<sha12>/tmp/vk-XXXXXXXX/.s.PGSQL.5432`)
+  is 103 bytes or more, past macOS's limit once a test adds its own
+  prefix. The turn profile allows `/tmp`, which is why the spec sets it.
+  In a check the scratch cluster tests skip on the `/private/tmp` denial.
+
+### Measured inside the check profile
+
+At the built tree, in a workspace provisioned from the valor spec under
+the build's scratch directory (task port 6629), through `checks.suite`
+with `lint=True`: **1064 passed, 2 failed, 527 skipped, 0 errors**
+(exit 1). `uv run ruff check --output-format concise .` exited 0 in that
+checkout. Before this build (incident): 0 passed, 29 errors in
+collection.
+
+Skipped, by reason:
+
+| reason | tests | modules (count) |
+|---|---|---|
+| running `/bin/ps`, a setuid program | 334 | test_workspace 47, test_pipeline 55, test_docs_runner 28, test_fresh 26, test_judgement_sites 26, test_review 26, test_credential_push 25, test_checks 23, test_harness_contract 20, test_pi 9, test_serve 9, test_kernel 7, test_session 6, test_intake 5, test_targets 4, test_look 3, test_persona 3, test_reap 3, test_objective_tree 2, test_telegram_pipeline 2, and one each in test_corrections, test_emulator_metering, test_gateway_openai, test_replay, test_transcripts |
+| the shared temp directory `/private/tmp` | 82 | test_email_kernel 38, test_email_smtp 17, test_credentials 15, test_email_imap 6, and one each in test_checks, test_demo_sandbox, test_email_bridge, test_mailserver, test_pipeline, test_workspace |
+| applying a sandbox inside the sandbox | 35 | test_workspace 19, test_demo_sandbox 10, test_harness_contract 2, test_pi 2, test_ports 1, test_reap 1 |
+| DiskArbitration, so no disk image attaches | 16 | test_backup 15, test_workspace 1 |
+| listening on a port the OS chooses | 4 | one each in test_demo_sandbox, test_judgement, test_judgement_sites, test_session |
+| the suite's own skips, as on the host | 56 | live tests (no `VALOR_LIVE`) 19, Pi not installed or not the pinned release 21, no Playwright shell 9, no node 2, and five single gated tests |
+
+The `/bin/ps` skips met the denial in the kernel's own process reads
+(for example `runs` listing a turn's processes after it ends); the port-0 skips are the kernel's
+own gateway in `python -m core run` and `serve`, which binds a port the
+OS chooses. The email tests skip on `/private/tmp` because the mail
+servers' run directory is there; on the host they error because Dovecot
+is not installed.
+
+The two failures pass on the host and are not sandbox denials: the
+workspace's Postgres gives the tests the `app` role, which is not a
+superuser, so `test_backup::test_a_backup_directory_on_the_clusters_own_disk_is_refused`
+cannot read `data_directory` and
+`test_credentials::test_migrate_touches_no_credential_on_the_machine_cluster`
+cannot read `pg_authid`. Neither the spec nor the tests can change that
+without granting the task's role more, which is a provisioning change
+outside this task. Named under Left out.
+
+### On the host
+
+`VALOR_TEST_DB=valor_rebuild_test_24cbuilder`:
+
+- head, `VALOR_TEST_PORTS=6620-6629`: 1474 passed, 55 skipped, 2 failed,
+  62 errors.
+- head, `VALOR_TEST_PORTS` unset: 1474 passed, 55 skipped, 2 failed,
+  62 errors.
+- base `88949b680`, unset: 1467 passed, 55 skipped, 2 failed, 62 errors.
+  Per test, both head runs match base exactly; the seven more passed are
+  the new tests.
+
+The 62 errors are the email tests (Dovecot is not installed on this Mac);
+the two failures are `test_mailserver` (Dovecot) and `test_pi`'s node
+loader test, as before the change. `uvx ruff check .` and
+`uvx ruff format --check .` pass.
+
+### Left out, measured
+
+- The two workspace failures above: the task Postgres's `app` role is no
+  superuser.
+- Every skip in the table above: each is a denial of the check profile,
+  and changing the profile is a security change outside this task. The
+  biggest is `/bin/ps` (334): the kernel reads processes with a setuid
+  program the check profile cannot run.
+- `VALOR_PG_SCRATCH` inside the check directory: the socket path limit.
