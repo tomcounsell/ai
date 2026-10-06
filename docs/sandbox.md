@@ -50,5 +50,6 @@ Serves Mission item 1 and bounded authority.
 sandbox. Turns, checks, and services run under sandbox-exec on the host.
 The review's rerun runs in Apple `container` VMs started fresh from
 kernel-built images with no network, because its value is an environment
-the executor never touched (`core/container.py`). The runtime is in
+the executor never touched (`core/container.py`). Valor's Mac has `container`
+installed; Tom's Mac does not. The runtime is in
 [tech-stack.md](tech-stack.md), its memory cost in [machine.md](machine.md).

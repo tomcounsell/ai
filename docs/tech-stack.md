@@ -412,7 +412,8 @@ reaches the Mac and nothing else, `kill` confirmed by a probe from outside
 the VM, and the bind-mounted disk retained after a kill in 40 of 40 trials.
 Building images needs Rosetta even for arm64. Status: **in use** for the
 review's rerun (`core/container.py`), release 1.5.0 from Apple's signed
-package, started for each verification and stopped after it.
+package, started for each verification and stopped after it. Valor's
+Mac has it installed; Tom's Mac does not, so a review runs only on Valor's Mac.
 
 What containers give that `sandbox-exec` does not: a separate user and filesystem, so a Keychain
 read is impossible rather than unfenced; a network whose shape is set from outside; a fresh VM per
