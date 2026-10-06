@@ -243,3 +243,57 @@ VM, `docs/plans/m1-4y-check-hang.md`); a parametrized test carries
 does not trust a planted commit-graph); the `container` tests pass 44 and
 skip 2 (live spend), the repository-suite test among them. `ruff check`
 passes; `ruff format --check` passes.
+
+## Rebase onto 777d894d1
+
+The merge candidate holding 1.4c part two and 4.3 (`m4-3-merge` at
+eeb6b858e, on 66ac98a48) was rebased onto the rebuild branch at
+777d894d1 (2.4, 2.4a, 2.4b, 2.4c) as branch `m4-3-rebase`. Conflicts and
+how each was resolved, keeping both sides' documented behavior:
+
+- `pyproject.toml` dev group: both sides pin the same three; the tip's
+  one-line form kept. `uv.lock` regenerated with `uv lock`; it equals the
+  tip's.
+- `tests/README.md`: the tip's `VALOR_TEST_PORTS` and denials bullets kept
+  above the candidate's markers bullet (its fuller patch round 8 text).
+- `core/README.md`: the tip's paragraph (2.4b's redo of an unfinished
+  provisioning and `workspace remove` of its directory) with the
+  candidate's clauses added: the review's rerun in `container` VMs,
+  `containers.reaped`, and `grant` taking a listed grant id on a sweep
+  task; the tip's bridge-port bullet (local chat) with the candidate's
+  routines bullet after it.
+- `docs/tech-stack.md`: the tip's Bridges and Secrets rows (local chat);
+  the candidate's Scheduling row (`in use`, naming the local bridge's job
+  too) and Dashboard row.
+- `tests/test_kernel.py`, the revoke test: the candidate's local server
+  that accepts and never answers, with it and the gateway binding
+  `ports.listen()` as 2.4c has every test server do.
+- `tests/test_workspace.py`: both sides' tests kept (2.4b's unfinished
+  provisioning tests, the candidate's container-profile tests); the tip's
+  denials skip on the disk-image test and its `monkeypatch` signature on
+  the scratch-cluster test, each with the candidate's `macos` mark.
+- `tests/test_judgement.py`: both sides wrote a password-file helper for
+  the no-key CLI tests; the tip's `_passfile` (a copy, when the file
+  exists) kept in place of the candidate's link, since a copy also logs in
+  where the cluster asks for a password.
+- `tests/conftest.py`: both kept (the tip's reserved-ports file and task
+  port spans, the candidate's `VALOR_PG_BIN` fallback for the VM).
+- `.claude/skills/build/SKILL.md`: the tip's text, with the 1.4c part two
+  row saying `container` is installed on Valor's machine and not on Tom's
+  Mac.
+
+Adapted to the tip's interface: the gateways in `tests/test_expiry.py`
+and `tests/test_slot_priority.py` start on `ports.listen()`, and
+`tests/test_ui.py`'s `TestServer` binds `ports.listen()`, as 2.4c has
+every test server do.
+
+**Tests** (Tom's Mac, `VALOR_TEST_PORTS=6430-6439`, `-m "not container"`;
+this Mac has no `container` binary, so the `container` tests were not
+run): 1,551 passed, 3 failed, 54 skipped, 62 errors. The 62 errors and
+`test_mailserver`'s failure are Dovecot, not installed here; `test_pi`'s
+command test needs node, not installed here; both fail the same way at
+777d894d1. `test_emulator_metering`'s
+`test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict`
+fails because the review's rerun needs `container`; it passes at
+777d894d1, where the rerun is on the host, and carries no `container`
+mark. `ruff check` and `ruff format --check` pass.
