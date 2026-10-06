@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from core import db, git, ledger, runs, serve, tasks
 from core import workspace as kws
 from tests import scripted
+from tests.ports import service as ports_service
 from tests.test_serve import _message_task, _toy_project, only, rows, run, settled
 from tests.test_serve import fresh as _fresh
 from tests.test_serve import op as _op
@@ -265,7 +266,7 @@ def test_the_redo_frees_the_dead_attempts_ports(fresh, op, tmp_path, monkeypatch
     _toy_project(tmp_path, src, [])
     spec = tmp_path / "projects" / "toy.toml"
     spec.write_text(spec.read_text() + 'services = ["postgres"]\n')
-    port = int(os.environ.get("VALOR_TEST_PORTS", "6579-6579").split("-")[-1])
+    port = ports_service((6579, 6579))
     monkeypatch.setattr(serve, "settings", replace(settings, pg_ports=(port, port)))
     chosen = []
 

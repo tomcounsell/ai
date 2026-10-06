@@ -1969,7 +1969,7 @@ def test_workspace_remove_takes_an_unfinished_provisioning_once_stopped(dsn, tmp
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep").write_text("kept")
-    port = kws.choose_port(ports_span((5540, 5579)), set())
+    port = ports_service((5540, 5579), set())
     lay = kws.reserve(task, {"postgres": port}, work)
     (lay.repo).mkdir(parents=True)
     (lay.repo / "out").symlink_to(outside / "keep")
