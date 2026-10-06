@@ -491,3 +491,49 @@ in the first run and 5 of 5 alone in the profile.
 The failures (`test_mailserver`, `test_pi`'s node loader test) and the
 errors (Dovecot) are those at base. `uvx ruff check .` and
 `uvx ruff format --check .` pass.
+
+## Repair round (after rebase onto 2.4b)
+
+The branch was rebased onto 2.4b, which brought tests that took ports
+and read failures the old way. Repaired by builder-2-4c-p2 against
+`VALOR_TEST_DB=valor_rebuild_test_24cbuilder`, ports 6620 to 6629.
+
+1. **A 2.4b test's Postgres port comes from `service()`.**
+   `test_workspace_remove_takes_an_unfinished_provisioning_once_stopped`
+   called `ports_span`, which this task had removed from
+   `tests/test_workspace.py` (ruff F821, the test failed). It takes
+   `ports_service((5540, 5579), set())`, as the other workspace tests do.
+   `test_the_redo_frees_the_dead_attempts_ports` read the top of
+   `VALOR_TEST_PORTS` by hand; it takes `ports_service((6579, 6579))`, so
+   no test server takes the port first.
+2. **A 2.4b test that fails on `workspace.failed` carries its reason.**
+   Inside the check profile, removing a task's directory reaps what it
+   left running through `/bin/ps`, which the profile denies; the kernel
+   records that as `workspace.failed`, and four 2.4b tests failed without
+   the error in the failure, so the denial hook could not read it. The
+   two in `tests/test_provision_restart_gaps.py` and
+   `test_the_incident_state_is_provisioned_after_a_steer` put the failed
+   rows' reasons in the assertion message;
+   `test_a_kill_mid_provision_is_redone_on_restart` fails as soon as a
+   `workspace.failed` row appears, with its reason, where it waited 60
+   seconds for a setup that never ran.
+
+No other 2.4b test binds a port or names a span.
+
+### Measured
+
+- Inside the check profile, provisioned from the valor spec under the
+  worktree's `w/` (task port 6629), through `checks.suite` with
+  `lint=True`, over `tests/test_provision_restart_gaps.py`,
+  `tests/test_workspace.py` and `tests/test_serve.py`: 64 passed,
+  0 failed, 89 skipped, lint exit 0. Every 2.4b test skipped there names
+  the `/bin/ps` denial.
+- Host, `VALOR_TEST_PORTS=6620-6629`, full suite: 1496 passed,
+  55 skipped, 2 failed (`test_mailserver`, `test_pi`'s node loader test),
+  62 errors (Dovecot), as at base. It ran after fix 1; fix 2 changes
+  only the three files below.
+- Host, the three files 2.4b's tests sit in, at the final tree:
+  152 passed, 1 skipped (no node), three runs of three with the span;
+  `test_provision_restart_gaps.py` and `test_workspace.py` unset,
+  115 passed, 1 skipped. `uvx ruff check .` and
+  `uvx ruff format --check .` pass.
