@@ -15,6 +15,7 @@ from core.gateway import Gateway
 from core.machine import State
 from tests import scripted
 from tests.bridges import rows
+from tests.ports import listen
 from tests.test_checks import _marked, _wait, drive, runners, to_candidate
 from tests.test_checks import rows as check_rows
 from tests.test_objective_tree import root, run
@@ -138,7 +139,7 @@ def test_a_background_critique_preempted_for_tom_reruns_with_no_verdict(dsn, tmp
         async with await db.connect(dsn) as conn:
             fg = await root(conn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             running = asyncio.create_task(scripted.route(gateway, task, scripted.fresh_runners(ws), dsn=dsn))
 
@@ -177,7 +178,7 @@ def test_a_background_critique_preempted_for_tom_reruns_with_no_verdict(dsn, tmp
 
 async def _drive(dsn, task, runners_):
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, runners_, dsn=dsn)
     finally:

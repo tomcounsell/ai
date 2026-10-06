@@ -13,6 +13,7 @@ import ui.__main__ as ui_main
 import ui.app as ui_app
 from core import ledger, routines, spending, tasks, workspace
 from core.settings import settings
+from tests.ports import listen
 from tests.test_objective_tree import call, run
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -21,7 +22,7 @@ HOSTILE = "<script>alert(1)</script>"
 
 
 async def fetch(dsn: str, path: str, method: str = "GET"):
-    async with TestClient(TestServer(ui_app.make_app(dsn))) as client:
+    async with TestClient(TestServer(ui_app.make_app(dsn), port=listen())) as client:
         resp = await client.request(method, path)
         return resp.status, await resp.text()
 

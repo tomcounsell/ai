@@ -2050,6 +2050,8 @@ def test_workspace_remove_takes_an_unfinished_provisioning_once_stopped(dsn, tmp
         assert (outside / "keep").read_text() == "kept"
     finally:
         kws.rmtree(lay.root)
+
+
 # -- Apple's container under every profile --------------------------------------------------
 
 

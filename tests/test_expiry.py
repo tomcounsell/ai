@@ -20,6 +20,7 @@ from core.machine import State
 from core.settings import settings
 from tests import scripted
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tests.test_docs_runner import docs_runners
 from tests.test_objective_tree import _append, _delivered, merge, run
 from tests.test_routines import write_toml
@@ -577,7 +578,7 @@ async def scripted_drive(dsn, task, runners_):
     from core.gateway import Gateway
 
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, runners_, dsn=dsn)
     finally:
