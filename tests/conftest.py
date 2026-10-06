@@ -24,6 +24,9 @@ os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
+# The ports reserved for the task services a test provisions (`tests/ports.py`).
+_fd, os.environ["VALOR_TEST_RESERVED_PORTS"] = tempfile.mkstemp(prefix="valor-test-reserved-ports-")
+os.close(_fd)
 # The task Postgres and Redis ports the kernel chooses, in the tests' own span when it
 # is set, so a kernel the tests start listens where the tests' servers do.
 if os.environ.get("VALOR_TEST_PORTS"):
@@ -32,6 +35,9 @@ if os.environ.get("VALOR_TEST_PORTS"):
 
 from core import db  # settings read VALOR_WORK on import
 from core.settings import settings
+from tests import ports
+
+atexit.register(ports.release)
 
 TEST_DB = settings.test_database
 
@@ -51,9 +57,10 @@ def release_ports(request):
     """After a test that used the ledger, stop the services of every task
     whose workspace still holds ports and record `workspace.removed`, so a
     narrow `VALOR_TEST_PORTS` span is not used up by earlier tests in the
-    same session."""
+    same session; then release the ports reserved for them."""
     yield
     if "dsn" not in request.fixturenames:
+        ports.release()
         return
     from pathlib import Path
 
@@ -75,6 +82,7 @@ def release_ports(request):
                 "INSERT INTO events (task_id, type, payload) VALUES (%s, 'workspace.removed', %s)",
                 (task_id, Jsonb({"path": mirror, "by": "tests"})),
             )
+    ports.release()
 
 
 @pytest.fixture(scope="session")
@@ -101,15 +109,20 @@ def mailbox(mail):
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item, call):
     """A failure that met a denial of the sandbox the suite runs under, in
-    its traceback or in what it wrote to stderr (a kernel step logs its
-    failure there), is reported skipped, naming the denial
-    (`tests/denials.py`)."""
+    its traceback, in the output of the command whose failure it raised, or
+    in what it wrote to stderr (a kernel step logs its failure there), is
+    reported skipped, naming the denial (`tests/denials.py`)."""
     report = yield
     if report.failed and call.excinfo is not None:
         from tests import denials
 
+        said = [getattr(call.excinfo.value, a, None) for a in ("stderr", "stdout")]
         text = "\n".join(
-            [str(report.longrepr), *(body for title, body in report.sections if "stderr" in title)]
+            [
+                str(report.longrepr),
+                *(o.decode(errors="replace") if isinstance(o, bytes) else str(o) for o in said if o),
+                *(body for title, body in report.sections if "stderr" in title),
+            ]
         )
         why = denials.reason(text)
         if why is not None:

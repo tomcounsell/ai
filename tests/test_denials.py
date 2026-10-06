@@ -13,7 +13,7 @@ pytestmark = pytest.mark.spend(usd=0)
     ("sandbox-exec: sandbox_apply: Operation not permitted", denials._nested),
     ("error while attempting to bind on address ('127.0.0.1', 0): [errno 1]", denials._port_zero),
     ("FileExistsError: [Errno 17] File exists: '/tmp'", denials._shared_tmp),
-    ("Command '['diskutil', 'image', 'attach']' returned non-zero exit status 1.", denials._disks),
+    ("Unable to run because unable to use the DiskManagement framework.", denials._disks),
 ])  # fmt: skip
 def test_a_failure_is_a_denial_only_where_the_denial_is_met(failure, probe):
     why = denials.reason(failure)
@@ -29,8 +29,32 @@ denials._met = lambda probe: True  # every denial is met, as in the check sandbo
 """
 
 INNER = """
+import subprocess
+
+
 def test_names_a_denial():
     raise PermissionError(1, "Operation not permitted: '/bin/ps'")
+
+
+def test_a_command_whose_stderr_names_a_denial():
+    raise subprocess.CalledProcessError(
+        1, ["diskutil", "image", "attach"], stderr="Unable to run because unable to use the DiskManagement framework."
+    )
+
+
+def test_a_source_line_names_sandbox_exec():
+    argv = ["/usr/bin/sandbox-exec", "-f", "p.sb", "/usr/bin/true"]
+    assert argv[0] == "/usr/bin/env"
+
+
+def test_a_source_line_names_hdiutil_and_diskutil():
+    cmd = "hdiutil attach"
+    assert cmd.startswith("diskutil")
+
+
+def test_a_source_line_names_tmp_and_the_error_another_path():
+    scratch = '/tmp/x'
+    raise FileExistsError(17, "File exists", "/home/me/x")
 
 
 def test_fails_for_another_reason():
@@ -50,11 +74,12 @@ def test_with_every_denial_met_only_a_failure_naming_one_is_skipped(tmp_path):
     root = Path(__file__).resolve().parent.parent
     (tmp_path / "conftest.py").write_text(CONFTEST)
     (tmp_path / "test_inner.py").write_text(INNER)
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
     report = tmp_path / "r.xml"
-    subprocess.run(
+    ran = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(tmp_path),
-         "-c", "/dev/null", f"--junitxml={report}", str(tmp_path / "test_inner.py")],
-        cwd=root, env={**__import__("os").environ, "PYTHONPATH": str(root)}, capture_output=True, check=False,
+         "-c", str(tmp_path / "pytest.ini"), f"--junitxml={report}", "test_inner.py"],
+        cwd=tmp_path, env={**__import__("os").environ, "PYTHONPATH": str(root)}, capture_output=True, text=True, check=False,
     )  # fmt: skip
     import xml.etree.ElementTree as ET
 
@@ -64,6 +89,10 @@ def test_with_every_denial_met_only_a_failure_naming_one_is_skipped(tmp_path):
         outcome[case.get("name")] = kind[0] if kind else "passed"
     assert outcome == {
         "test_names_a_denial": "skipped",
+        "test_a_command_whose_stderr_names_a_denial": "skipped",
+        "test_a_source_line_names_sandbox_exec": "failure",
+        "test_a_source_line_names_hdiutil_and_diskutil": "failure",
+        "test_a_source_line_names_tmp_and_the_error_another_path": "failure",
         "test_fails_for_another_reason": "failure",
         "test_fails_on_a_path_that_only_looks_alike": "failure",
-    }
+    }, ran.stdout + ran.stderr

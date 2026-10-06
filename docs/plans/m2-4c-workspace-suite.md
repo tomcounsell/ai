@@ -425,3 +425,69 @@ loader test, as before the change. `uvx ruff check .` and
   biggest is `/bin/ps` (334): the kernel reads processes with a setuid
   program the check profile cannot run.
 - `VALOR_PG_SCRATCH` inside the check directory: the socket path limit.
+
+## Patch round 1
+
+Review round 1 (review-2-4c-p0) asked for changes; the test check
+(test-2-4c) was red. Patched by builder-2-4c-p1 against
+`VALOR_TEST_DB=valor_rebuild_test_24cbuilder`, ports 6620 to 6629.
+
+1. **A port given to a task's service is no server's.** With the span
+   set, `test_checks::test_a_kernel_killed_mid_suite_leaves_nothing_on_the_tasks_port`
+   failed every time: the test provisions a task whose Redis port comes
+   from the span, Redis starts later inside a kernel process of its own,
+   and that process's `listen()` starts at the span's low end and gave
+   the gateway the Redis port first. Fixed in `tests/ports.py`: a port
+   `service()` gives is written to the file `VALOR_TEST_RESERVED_PORTS`
+   names (a session file `tests/conftest.py` makes, so every process the
+   tests start reads it), `listen()` passes over it, and the
+   `release_ports` fixture releases it when the test ends, after the
+   task's services stop. `tests/test_ports.py` holds it, with a fresh
+   process's `listen()`. The test passed 5 of 5 alone and in both host
+   runs.
+2. **A denial is read only from its own error.** The nested sandbox and
+   DiskArbitration matchers took the bare words `sandbox-exec`,
+   `diskutil` and `hdiutil`, which a traceback's source lines carry, so a
+   plain assertion failure in a test naming them was reported skipped.
+   Now every matcher is a pattern over the denial's error:
+   `sandbox_apply: Operation not permitted`, `unable to use the
+   DiskManagement framework`, and for the shared temp directory one
+   `(Operation not permitted|File exists): '/(private/)?tmp` message. The
+   hook also reads the output a failed command carried
+   (`CalledProcessError.stderr` and `stdout`), where `diskutil` prints its
+   error. Where the error was not in the failure, the test now puts it
+   there: the two `test_harness_contract` Pi credential tests and
+   `test_workspace`'s fstat test carry the command's stderr. The one test
+   whose command prints no error naming the denial
+   (`test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox`,
+   where `hdiutil create` fails bare) skips up front on the disks probe.
+   `tests/test_denials.py` runs the hook with every denial met: failures
+   naming `sandbox-exec`, `hdiutil` or `/tmp` only in their source stay
+   failed, and a command whose stderr names a denial is skipped. Its
+   inner pytest now runs from its own directory with its own ini file;
+   with `-c /dev/null` it walked the home directory, denied in a check.
+
+### Measured inside the check profile, after the patch
+
+At the patched tree, provisioned from the valor spec under the
+worktree's `w/` (task port 6629), through `checks.suite` with
+`lint=True`: **1066 passed, 2 failed, 527 skipped, 0 errors** (exit 1),
+lint exit 0. The two failures are the `app` role ones under Left out,
+measured. Skips by reason, identical in tests and counts to the build's
+table: `/bin/ps` 334, `/private/tmp` 82, nested sandbox 35,
+DiskArbitration 16 (15 `test_backup` matched on `diskutil`'s own error,
+1 the up-front skip), port 0 4, the suite's own 56. A second run with
+`-rs` gave the same skips and one more failure,
+`test_local_page::test_the_page_sends_shows_replies_and_renders_text_as_text`
+(a 10 second browser wait, the host suite running beside it); it passed
+in the first run and 5 of 5 alone in the profile.
+
+### On the host, after the patch
+
+- `VALOR_TEST_PORTS=6620-6628`: 1476 passed, 55 skipped, 2 failed,
+  62 errors.
+- unset: 1476 passed, 55 skipped, 2 failed, 62 errors.
+
+The failures (`test_mailserver`, `test_pi`'s node loader test) and the
+errors (Dovecot) are those at base. `uvx ruff check .` and
+`uvx ruff format --check .` pass.

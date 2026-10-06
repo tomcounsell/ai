@@ -62,30 +62,36 @@ def _disks() -> bool:
     return "unable to use the DiskManagement framework" in out.stdout + out.stderr
 
 
-def _tmp_signature(text: str) -> bool:
-    return re.search(r"\\?'/tmp(/|\\?')|/private/tmp", text) is not None
-
-
 NESTED = "the sandbox the suite runs under denies applying a sandbox inside it"
+DISKS = "the sandbox the suite runs under denies DiskArbitration, so no disk image attaches"
 
-# (signature in the failure, probe, reason)
+
+def _shows(pattern: str):
+    return lambda text: re.search(pattern, text) is not None
+
+
+# (the denial's own error in the failure, probe, reason)
 DENIALS = (
-    (lambda t: re.search(r"Operation not permitted: \\?'/bin/ps", t) is not None, _ps,
+    (_shows(r"Operation not permitted: \\?'/bin/ps"), _ps,
      "the sandbox the suite runs under denies running /bin/ps, a setuid program"),
-    # Every sandbox-exec fails here, so a failure that ran one met it.
-    (lambda t: "sandbox_apply: Operation not permitted" in t or "sandbox-exec" in t, _nested, NESTED),
-    (lambda t: re.search(r"bind on address \(\\?'127\.0\.0\.1\\?', 0\)", t) is not None, _port_zero,
+    (_shows(r"sandbox_apply: Operation not permitted"), _nested, NESTED),
+    (_shows(r"bind on address \(\\?'127\.0\.0\.1\\?', 0\)"), _port_zero,
      "the sandbox the suite runs under denies listening on a port the OS chooses"),
-    (lambda t: _tmp_signature(t) and ("Operation not permitted" in t or "File exists" in t), _shared_tmp,
+    (_shows(r"(Operation not permitted|File exists): \\?'/(private/)?tmp(/|\\?')"), _shared_tmp,
      "the sandbox the suite runs under denies the shared temp directory /private/tmp"),
-    (lambda t: "diskutil" in t or "hdiutil" in t, _disks,
-     "the sandbox the suite runs under denies DiskArbitration, so no disk image attaches"),
+    (_shows(r"unable to use the DiskManagement framework"), _disks, DISKS),
 )  # fmt: skip
 
 
 @functools.cache
 def _met(probe) -> bool:
     return probe()
+
+
+def met(probe) -> bool:
+    """Whether trying the operation here meets the denial: for a test whose
+    failure under it carries no error of its own, skipped up front."""
+    return _met(probe)
 
 
 def reason(failure: str) -> str | None:

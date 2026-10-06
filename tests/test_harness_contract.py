@@ -263,7 +263,7 @@ def test_the_machine_users_pi_credentials_are_unreadable_inside_a_turn(dsn, tmp_
     control = subprocess.run(
         [*sandbox, "/bin/cat", str(tmp_path / "work" / "ok")], capture_output=True, text=True, check=False
     )
-    assert control.stdout == "readable"  # the profile runs; only the denial refuses below
+    assert control.stdout == "readable", control.stderr  # the profile runs; only the denial refuses below
     out = subprocess.run(
         [*sandbox, "/bin/cat", str(home / ".pi" / "agent" / "auth.json")],
         capture_output=True,

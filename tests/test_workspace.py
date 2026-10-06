@@ -29,7 +29,7 @@ from core import git as kgit
 from core import workspace as kws
 from core.gateway import Gateway
 from core.settings import settings
-from tests import scripted
+from tests import denials, scripted
 from tests.ports import listen
 from tests.ports import service as ports_service
 
@@ -318,7 +318,7 @@ def test_a_check_step_can_fstat_the_output_file_the_kernel_opened_for_it(tmp_pat
                  PYTHON, "-I", "-S", "-c", "import os; os.fstat(1); print('seen')"],
                 stdout=f, stderr=subprocess.PIPE, text=True, check=False, env={"PATH": "/usr/bin:/bin"},
             )  # fmt: skip
-        assert (done.returncode, done.stderr, out.read_text()) == (0, "", "seen\n")
+        assert (done.returncode, done.stderr, out.read_text()) == (0, "", "seen\n"), done.stderr
 
 
 def test_the_working_session_cannot_write_where_a_later_process_of_the_user_runs_things(tmp_path):
@@ -429,6 +429,8 @@ def test_no_directory_above_a_denied_path_can_be_moved_and_nothing_mounts(tmp_pa
             subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mountpoint)], check=False)
 
 
+# Under the denial `hdiutil create` fails with no error naming it.
+@pytest.mark.skipif(denials.met(denials._disks), reason=denials.DISKS)
 def test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox(tmp_path):
     """A disk image mounted at its own `/Volumes/<label>` can stand in for the
     backup disk, and `open` hands an image, or an app the turn wrote, to a

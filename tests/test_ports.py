@@ -98,3 +98,27 @@ def test_listen_draws_from_the_span(monkeypatch, tmp_path):
     assert out.returncode == 0, out.stderr
     port, said = out.stdout.split()
     assert low <= int(port) <= high and said == "ok"
+
+
+def test_a_port_reserved_for_a_task_service_is_never_a_servers(monkeypatch, tmp_path):
+    """A task's service starts after the test provisions it, often in a
+    process of its own whose `listen()` starts at the span's low end; the
+    reservation keeps every server off the port until the test ends."""
+    low = next(p for p in range(LOW, HIGH - 2) if all(ports._bindable(q) for q in range(p, p + 4)))
+    monkeypatch.setenv("VALOR_TEST_PORTS", f"{low}-{low + 3}")
+    monkeypatch.setenv("VALOR_TEST_RESERVED_PORTS", str(tmp_path / "reserved"))
+    monkeypatch.setattr(ports, "_last", None)
+    reserved = ports.service((0, 0))
+    assert reserved == low
+
+    def fresh_listen() -> int:
+        out = subprocess.run(
+            [sys.executable, "-c", "from tests import ports; print(ports.listen())"],
+            capture_output=True, text=True, check=True,
+        )  # fmt: skip
+        return int(out.stdout)
+
+    assert fresh_listen() == low + 1
+    assert ports.listen() == low + 1  # and in this process, wrapping round
+    ports.release()
+    assert fresh_listen() == low
