@@ -12,6 +12,7 @@ Live spend: none.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import os
 import shutil
@@ -1071,11 +1072,13 @@ def _pid_alive(pid: int) -> bool:
 REPO = Path(__file__).resolve().parent.parent
 
 
-def test_the_valor_suite_collects_under_the_check_profile(tmp_path):
-    """The valor suite, collected under the check profile with the valor
-    spec's environment, collects every module: every server it starts at
-    import listens where the profile lets it. A scratch cluster stands in
-    for the check's own Postgres, which a module reads at import."""
+@contextlib.contextmanager
+def _under_check_profile(tmp_path):
+    """This repository's interpreter run under the check profile with the
+    valor spec's environment, as the kernel runs the valor suite in a task's
+    workspace: yields a function that runs it with the given arguments. A
+    scratch cluster stands in for the check's own Postgres, which a module
+    reads at import."""
     lay = kws.Layout(tmp_path / "work" / "t")
     check_dir = lay.checks / "test-head-collect"
     (check_dir / "tmp").mkdir(parents=True)
@@ -1097,9 +1100,39 @@ def test_the_valor_suite_collects_under_the_check_profile(tmp_path):
         }
         env.update(PATH="/usr/bin:/bin", HOME=str(Path.home()), TMPDIR=str(check_dir / "tmp"),
                    VALOR_PG_OWNER=cluster.owner)  # fmt: skip
-        argv = kws.sandboxed(profile, "collect", str(REPO / ".venv" / "bin" / "python"), "-m", "pytest",
-                             "--collect-only", "-q", "-p", "no:cacheprovider", "tests")  # fmt: skip
-        out = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, check=False)
+
+        def run(*args: str) -> subprocess.CompletedProcess:
+            argv = kws.sandboxed(profile, "collect", str(REPO / ".venv" / "bin" / "python"), *args)
+            return subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, check=False)
+
+        yield run
+
+
+@pytest.mark.macos
+def test_the_valor_suite_collects_under_the_check_profile(tmp_path):
+    """The valor suite, collected under the check profile, collects every
+    module: every server it starts at import listens where the profile lets
+    it."""
+    with _under_check_profile(tmp_path) as run:
+        out = run("-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "tests")
     assert out.returncode == 0 and "ERROR collecting" not in out.stdout, (
         out.stdout[-3000:] + out.stderr[-2000:]
+    )
+
+
+@pytest.mark.macos
+def test_under_the_check_profile_the_runtime_is_absent_and_the_machine_lock_untouched(tmp_path):
+    """The check profile denies Apple's `container` and the machine lock's
+    directory. Under it the runtime reads as absent wherever it is installed:
+    a `container` test skips, and the sweep reaps nothing without trying the
+    lock. A test of the lock takes the session's own and passes."""
+    with _under_check_profile(tmp_path) as run:
+        probe = run("-c", "from core import container; print(container.denied(), container.present(), "
+                    "container.reap('dbname=none'))")  # fmt: skip
+        tests = run("-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
+                    "tests/test_container.py::test_a_stop_while_waiting_on_the_lock_returns_without_taking_it",
+                    "tests/test_container.py::test_the_installed_runtime_passes_and_its_facts_hold")  # fmt: skip
+    assert probe.stdout.split() == ["True", "False", "[]"], probe.stdout + probe.stderr[-2000:]
+    assert "1 passed, 1 skipped" in tests.stdout and "needs Apple's container" in tests.stdout, (
+        tests.stdout[-3000:] + tests.stderr[-2000:]
     )

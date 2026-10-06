@@ -1339,6 +1339,7 @@ def _message_task(dsn) -> str:
     return run(say(dsn, msg("Write Tom a greeting.", chat="-100555")))["task_id"]
 
 
+@pytest.mark.macos
 @pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM], ids=["SIGKILL", "SIGTERM"])
 def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
     """A kernel killed while a message-started task's setup command runs

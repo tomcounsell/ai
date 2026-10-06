@@ -132,6 +132,20 @@ def require() -> str:
     return binaries.require(binaries.CONTAINER)
 
 
+def denied() -> bool:
+    """Whether a sandbox this process runs under denies the runtime: every
+    profile denies its mach services with its CLI, helpers, data directory,
+    and the machine lock's directory (`core/workspace.py`)."""
+    denies = runs._sandbox_check()
+    return bool(denies) and denies(os.getpid(), MACH_NAMES[0])
+
+
+def present() -> bool:
+    """Whether the runtime can be run here: its CLI installed, and not
+    denied by a sandbox this process runs under, where it reads as absent."""
+    return Path(binaries.CONTAINER).exists() and not denied()
+
+
 def call(*args: str) -> tuple[int, str]:
     """One short CLI call, its output to a temporary file, waited on by its
     exit. Returns (exit code, output)."""
@@ -791,7 +805,7 @@ def reap(dsn: str) -> list[str]:
     live on the machine (the lock is free): its labelled containers killed
     and deleted, its builder deleted. The system is stopped only when no
     container and no builder remains. Returns what was removed."""
-    if not Path(binaries.CONTAINER).exists():
+    if not present():
         return []
     fd = try_lock()
     if fd is None:

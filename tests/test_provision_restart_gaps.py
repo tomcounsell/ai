@@ -65,6 +65,7 @@ def test_remove_of_a_missing_root_is_nothing_to_clear(tmp_path):
     kws.remove(task, kws.layout(task, tmp_path / "work"))
 
 
+@pytest.mark.macos
 def test_remove_reaps_what_a_setup_command_left(tmp_path):
     """The process marked `setup-<task>-<n>` for each `<n>.log` under
     `setup/` is stopped; one marked for a log that is absent is not."""
@@ -172,6 +173,7 @@ def test_a_provisioning_job_for_a_task_with_no_project_clears_nothing(fresh, op,
     assert (root / "sentinel").read_text() == "here" and run(rows(fresh, task)) == before
 
 
+@pytest.mark.macos
 def test_a_dangling_link_at_the_task_root_is_redone(fresh, op, tmp_path):
     """A link where the directory should be (seen by `lexists`) is cleared
     and the task provisioned."""
@@ -200,6 +202,7 @@ def test_a_dangling_link_at_the_task_root_is_redone(fresh, op, tmp_path):
     assert (work / task / "repo" / ".git").is_dir() and not (work / task).is_symlink()
 
 
+@pytest.mark.macos
 def test_workspace_remove_takes_a_merged_tasks_unfinished_provisioning(dsn, tmp_path):
     """A merged task's leftover directory is removed as a stopped one's is."""
     from tests.test_objective_tree import merge
@@ -260,6 +263,7 @@ def test_a_provisioning_job_for_a_legacy_or_calibration_task_clears_nothing(fres
     assert (root / "sentinel").read_text() == "here" and run(rows(fresh, task)) == before
 
 
+@pytest.mark.macos
 def test_the_redo_frees_the_dead_attempts_ports(fresh, op, tmp_path, monkeypatch):
     """The only Postgres port, recorded in the dead attempt's `ports.json`,
     is chosen again by the redo."""

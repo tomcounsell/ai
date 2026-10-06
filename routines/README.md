@@ -13,7 +13,7 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 ## Imports
 
 - May import: `core/`.
-- Imported by: nothing. launchd starts routines; `tests/` exercises them.
+- Imported by: `core/__main__.py`, the composition root, which runs a routine's runner module. launchd starts routines; `tests/` exercises them.
 
 ## Effect classes
 

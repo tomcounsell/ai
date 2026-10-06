@@ -1968,6 +1968,7 @@ def test_a_64_character_role_is_refused():
 # -- an unfinished provisioning ------------------------------------------------------------
 
 
+@pytest.mark.macos
 def test_provisioning_git_is_marked_and_reaped(tmp_path, monkeypatch):
     """Every git call provisioning makes carries the mark `provision-<task>`,
     which `remove` reaps: the git a killed kernel's provisioning left
@@ -2006,6 +2007,7 @@ def test_provisioning_git_is_marked_and_reaped(tmp_path, monkeypatch):
         left.stdin.close()
 
 
+@pytest.mark.macos
 def test_workspace_remove_takes_an_unfinished_provisioning_once_stopped(dsn, tmp_path):
     """A task started by message whose provisioning died leaves its
     directory; once the task is stopped, `workspace remove` clears it

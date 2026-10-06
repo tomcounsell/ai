@@ -12,7 +12,8 @@ pytestmark = pytest.mark.spend(usd=0)
     ("PermissionError: [Errno 1] Operation not permitted: '/bin/ps'", denials._ps),
     ("sandbox-exec: sandbox_apply: Operation not permitted", denials._nested),
     ("error while attempting to bind on address ('127.0.0.1', 0): [errno 1]", denials._port_zero),
-    ("FileExistsError: [Errno 17] File exists: '/tmp'", denials._shared_tmp),
+    pytest.param("FileExistsError: [Errno 17] File exists: '/tmp'", denials._shared_tmp,
+                 marks=pytest.mark.macos),  # /private/tmp is macOS's
     ("Unable to run because unable to use the DiskManagement framework.", denials._disks),
 ])  # fmt: skip
 def test_a_failure_is_a_denial_only_where_the_denial_is_met(failure, probe):

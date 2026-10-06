@@ -297,3 +297,100 @@ command test needs node, not installed here; both fail the same way at
 fails because the review's rerun needs `container`; it passes at
 777d894d1, where the rerun is on the host, and carries no `container`
 mark. `ruff check` and `ruff format --check` pass.
+
+## Patch round 5 (lead's scope after checks on 928e07889)
+
+**Checks' verdicts.** Test: red (one regression, the missing `container`
+mark on the emulator's review test). Review: changes (B1, the machine lock
+under 2.4c's check profile; B2, the same test). Docs: updated at 234296f30.
+
+**The lead's decision.** Rounds are spent. The two blocking findings are
+small, and left in they would hide regressions on Valor's machine, where
+`container` is installed and much of the suite would fail at base and head
+alike under the check profile. So one round to this scope, and the rest as
+follow-ups.
+
+**Changed.**
+
+- **P1 (review B1).** `core/container.py` gains `denied()`, whether a
+  sandbox this process runs under denies the runtime (read with
+  `sandbox_check` on the runtime's first mach name, which every profile
+  denies with its CLI, helpers, data directory and the lock's directory),
+  and `present()`, the CLI installed and not denied. `reap` returns nothing
+  unless `present()`, so a router's sweep under the profile never tries the
+  lock. `tests/conftest.py` skips `container` tests unless `present()`, and
+  an autouse fixture points `container.LOCK`, `BUILDER_OWNER` and `IMAGES`
+  at a directory of the session's own for every test not marked
+  `container`. A `container` test keeps the machine's lock, since it runs a
+  real runtime beside the kernel's verifications and must wait for them.
+  New test `test_checks::test_under_the_check_profile_the_runtime_is_absent_and_the_machine_lock_untouched`
+  runs this repository's interpreter under the real check profile
+  (`sandbox-exec`, the valor spec's environment): `denied()` is true,
+  `present()` false, `reap` returns nothing; and pytest there passes
+  `test_a_stop_while_waiting_on_the_lock_returns_without_taking_it` (the
+  test that failed at `core/container.py:274`) and skips a `container`
+  test. It shares the profile setup with the collect test, moved into one
+  helper. Before the fix it failed on `denied` missing, then on the lock
+  test's `PermissionError` at `LOCK.parent.mkdir`.
+- **P2 (review B2).** `test_emulator_metering`'s
+  `test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict`
+  carries `container` and builds its candidate with `test_checks.VM_SUITE`,
+  as its sibling review tests do.
+- **P3 (test check section 3).** `macos` on:
+  `test_serve::test_a_kill_mid_provision_is_redone_on_restart` and
+  `test_workspace::test_workspace_remove_takes_an_unfinished_provisioning_once_stopped`
+  (chflags);
+  `test_workspace::test_provisioning_git_is_marked_and_reaped` and
+  `test_provision_restart_gaps::test_remove_reaps_what_a_setup_command_left`
+  (`ps -E`); `test_checks::test_the_valor_suite_collects_under_the_check_profile`
+  (sandbox-exec); `test_denials`' `/private/tmp` parameter alone.
+  Of the four suspects in `test_provision_restart_gaps.py`, three are
+  marked: `test_a_dangling_link_at_the_task_root_is_redone` and
+  `test_the_redo_frees_the_dead_attempts_ports` (a task directory exists,
+  so `_provision` calls `workspace.remove`) and
+  `test_workspace_remove_takes_a_merged_tasks_unfinished_provisioning`
+  (the `workspace remove` command). `workspace.remove` always calls
+  `runs.reap`, which lists processes with `ps -A -E`, and clears the tree
+  with `setattrlistat`, both macOS's. Not marked:
+  `test_a_provisioning_job_for_a_legacy_or_calibration_task_clears_nothing`,
+  since `_provision` returns on a legacy or calibration fold before
+  reaching `workspace.remove`.
+- **P4 (review N6).** `docs/routines.md` names `VALOR_MACHINE`,
+  `VALOR_WORK` and `VALOR_PROJECTS` among the plist's settings, and why.
+  `routines/README.md` says `core/__main__.py` imports it.
+- `tests/README.md`'s markers bullet says a `container` test skips where
+  the runtime cannot be run (absent, or denied by the sandbox the suite
+  runs under) and that every other test's machine lock is the session's.
+
+**Follow-ups, not done here.**
+
+- Review N3: Done 4's evidence (`tasks.audit` empty, the preempted turn's
+  calls charged, its process group gone, the resumed step on the same
+  session with no answer spent, `schedule`'s foreground-first order) as
+  asserts in `tests/test_slot_priority.py`.
+- Review N4: two expiry firings at once can each start a sweep; hold
+  `routine:NAME` across the runner.
+- Review N5: a grant on a valor task started without `--project` is listed
+  as outside the repository and never removed.
+- Review N7: a background turn started while a preemption is pending
+  writes a `turn.started` and `turn.ended preempted` pair; a refused
+  expiry start writes no `routine.ran failed`.
+- The test check's breadth list (section 2): the emulator runner's failure
+  branch, report content, `_drive` and `start --replay`, a stop mid-sweep,
+  the status page's `/pending` and `/attention` with held effects and
+  answers, the routines run table, `tasks.index` labels, `python -m ui` on
+  8790, the `core routines` and `core routine NAME` CLI, `--restart`,
+  `VALOR_ROUTINE_PERIOD_DAYS`, a plist linted with `plutil`.
+- Seen while marking, outside this round's list:
+  `test_provision_restart_gaps::test_remove_clears_a_dangling_link_at_the_root`
+  and `test_remove_of_a_missing_root_is_nothing_to_clear` call
+  `workspace.remove`, so they reach `ps -E` and want `macos` too; and
+  `test_denials`' `/bin/ps` parameter errors on an image without `/bin/ps`.
+
+**Tests** (Tom's Mac, `VALOR_TEST_PORTS=6430-6439`, `-m "not container"`;
+no `container` binary here): 1,561 passed, 2 failed, 45 skipped, 62
+errors. The failures (`test_mailserver`, Dovecot; `test_pi`, node) and the
+62 errors (Dovecot) are the same as at 777d894d1. The emulator's review
+test is now deselected with the other `container` tests. The run created
+no `~/Library/Application Support/valor`. `ruff check` and
+`ruff format --check` pass.

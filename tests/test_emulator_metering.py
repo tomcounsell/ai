@@ -637,6 +637,7 @@ def test_every_stage_the_state_machine_schedules_has_a_runner_but_docs():
 
 
 @pytest.mark.macos
+@pytest.mark.container
 def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict(
     monkeypatch, dsn, tmp_path
 ):
@@ -649,7 +650,9 @@ def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_
     from tests import judgement_upstream, test_checks
 
     async def at_critique():
-        task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes={"greeting.txt": "hi\n"})
+        task, _b, ws = await test_checks.to_candidate(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, suite=test_checks.VM_SUITE
+        )
         scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review"])
         return task, ws
 

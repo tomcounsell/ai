@@ -15,7 +15,11 @@ kernel key directory.
 A test marked `macos` needs macOS itself (`sandbox-exec`, `sandbox_check`,
 `/bin/ps -E`, the Command Line Tools' git, `security`) and is skipped off
 Darwin, so the verification VM runs the rest. A test marked `container`
-needs Apple's `container` and is skipped where it is not installed.
+needs Apple's `container` and is skipped where it cannot be run: not
+installed, or denied by the sandbox the suite runs under (the check profile
+denies it). Every other test takes the machine lock and the image records
+in a directory of the session's own, never the machine's, which the check
+profile denies too.
 """
 
 import atexit
@@ -44,7 +48,7 @@ if os.environ.get("VALOR_TEST_PORTS"):
 if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
     os.environ["VALOR_PG_BIN"] = "/usr/lib/postgresql/18/bin"
 
-from core import binaries, db  # settings read VALOR_WORK on import
+from core import binaries, container, db  # settings read VALOR_WORK on import
 from core.settings import settings
 from tests import ports
 
@@ -57,12 +61,26 @@ MACOS_ONLY = "macOS only"
 
 def pytest_collection_modifyitems(config, items):
     darwin = sys.platform == "darwin"
-    runtime = Path(binaries.CONTAINER).exists()
+    runtime = container.present()
     for item in items:
         if not darwin and item.get_closest_marker("macos"):
             item.add_marker(pytest.mark.skip(reason=f"{MACOS_ONLY}: needs macOS itself"))
         if not runtime and item.get_closest_marker("container"):
             item.add_marker(pytest.mark.skip(reason=f"needs Apple's container at {binaries.CONTAINER}"))
+
+
+_STATE = Path(tempfile.mkdtemp(prefix="valor-test-container-"))
+atexit.register(shutil.rmtree, _STATE, True)
+
+
+@pytest.fixture(autouse=True)
+def session_machine_lock(request, monkeypatch):
+    """Outside a `container` test, the machine lock and the kernel's image
+    records are the session's own."""
+    if request.node.get_closest_marker("container") is None:
+        monkeypatch.setattr(container, "LOCK", _STATE / "container.lock")
+        monkeypatch.setattr(container, "BUILDER_OWNER", _STATE / "builder.owner")
+        monkeypatch.setattr(container, "IMAGES", _STATE / "images.json")
 
 
 TEST_DB = settings.test_database

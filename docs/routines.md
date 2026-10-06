@@ -31,9 +31,11 @@ The launchd job is printed and never committed, since it names the checkout
 and its interpreter, which differ per Mac:
 `python -m core routine NAME --plist` prints a plist whose one program is
 `python -m core routine NAME` run by the kernel's own interpreter, with the
-schedule from the toml and the Postgres and replay settings that were set
-when it was printed (`VALOR_PG*`, `VALOR_DB*`, `VALOR_DEMO`). It names no
-script and carries no secret. launchd starts a job missed during sleep once
+schedule from the toml and the settings that were set when it was printed:
+Postgres and replay (`VALOR_PG*`, `VALOR_DB*`, `VALOR_DEMO`), and the three
+that must match the kernel's so a routine's turns share Tom's turn slot and
+resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`). It
+names no script and carries no secret. launchd starts a job missed during sleep once
 on wake and coalesces several missed intervals into one run, so a laptop
 that sleeps through a schedule gets one late run, never a burst.
 
