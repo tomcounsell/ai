@@ -379,3 +379,17 @@ errors. The failures (`test_mailserver`, Dovecot; `test_pi`, node) and the
 test is now deselected with the other `container` tests. The run created
 no `~/Library/Application Support/valor`. `ruff check` and
 `ruff format --check` pass.
+
+## Checks after patch round 5 (a75126eb7)
+
+- test: pass. With `-m "not container"`: 1561 passed, 2 failed, 45 skipped, 62 errors at head, against 1496 passed, 2 failed, 55 skipped, 62 errors at 777d894d1. The failures and errors are Dovecot and node missing on Tom's Mac, the same at base. No regression. The suite under the check profile leaves `~/Library/Application Support/valor` untouched.
+- review: pass. B1 and B2 are fixed. `present()` cannot route a review around the VM, because `container.verify` requires the runtime and fails with a `kernel` cause when it is missing. Governance boolean: no. Not blocking: two `workspace.remove` tests in tests/test_provision_restart_gaps.py (lines 50 and 63) want a `macos` mark. They fail at base and head alike in a VM run.
+- docs: updated, 3610cce32 (data.md, sandbox.md, the m1-4c-verifier.md Tests section).
+
+## Merged
+
+The lead merged on 2026-10-06, fast-forwarding `valor-cori-rebuild` to 3610cce32 with no tap (Tom, 2026-10-03). All three checks passed after patch round 5.
+
+**Rollout held on Tom's Mac (Decided by default).** Tom's Mac runs the kernel and has no `container`. Restarting its kernel onto this code would make every review fail with a `kernel` cause until the runtime is installed, and installing it takes Tom's admin password. So nothing on that Mac moves until Tom installs `container` (m1-4c-verifier.md, Rollout prerequisite): no kernel restart, no `migrate`, no routine plists. After he installs it, the lead runs both plans' Rollout steps in order: backup, restart, migrate, the two routine plists, a kickstart of the expiry routine. The lead records them here. Valor's Mac has `container`, and its kernel takes this code on its next pull and restart.
+
+**Follow-ups, not planned:** review N3 (tests for Done 4's evidence), N4 (two expiry firings at once can each start a sweep), N5 (a grant on a valor task started without `--project`), N7 (a preempt race leaves a row pair; a refused expiry start writes no `routine.ran failed`), the test check's breadth list, and the two unmarked `workspace.remove` tests.

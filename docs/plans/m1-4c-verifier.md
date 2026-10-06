@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: built (record in m1-4c-verifier-records.md)
+status: merged (record in m1-4c-verifier-records.md, Merged; rollout held until Tom installs container on his Mac)
 critique_rounds: 2
 review_rounds: 2
 ---
