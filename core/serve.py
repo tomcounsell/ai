@@ -47,6 +47,7 @@ import os
 import plistlib
 import sys
 import time
+import traceback
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -509,7 +510,7 @@ class Kernel:
                 self.gateway, task_id, self.runners, self.dsn, self.performers, services, sweep=first
             )
         except Exception as exc:  # noqa: BLE001  a step's failure is the task's; the kernel goes on
-            _log(f"task {task_id}: step failed: {exc!r}")
+            _log(f"task {task_id}: step failed: {''.join(traceback.format_exception_only(exc)).strip()}")
             out = {"status": "failed"}
         finally:
             ledger.WRITTEN.reset(collecting)

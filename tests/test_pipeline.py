@@ -39,6 +39,7 @@ from core.machine import Check, State
 from core.settings import settings
 from tests import scripted
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tests.scripted import commit, git
 from tools.push_branch import PushBranch
 
@@ -64,7 +65,7 @@ def cli(*args) -> subprocess.CompletedProcess:
 
 async def drive(dsn, task, runners=None) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
     finally:

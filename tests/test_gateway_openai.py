@@ -37,6 +37,7 @@ from yarl import URL
 
 from core import db, ledger, serve, spending, tasks
 from core.gateway import ClaudeLogin, Gateway, OpenAIKey, openai_credentialed
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -119,7 +120,7 @@ class Upstream:
         app.router.add_route("*", "/{tail:.*}", self.handle)
         self.runner = web.AppRunner(app, handler_cancellation=True)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        site = web.TCPSite(self.runner, "127.0.0.1", listen())
         await site.start()
         return f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
@@ -157,7 +158,7 @@ def exchange(
         gateway = Gateway(
             dsn, upstream=url, openai_upstream=url, credential=claude, openai_credential=credential
         )
-        await gateway.start()
+        await gateway.start(port=listen())
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="openai route"))
         base = gateway.issue(task, "turn-1")
@@ -848,7 +849,7 @@ def test_live_one_streamed_reply_through_the_kernel_key(dsn):
 
     async def go():
         gateway = Gateway(dsn, openai_credential=OpenAIKey())
-        await gateway.start()
+        await gateway.start(port=listen())
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="live openai"))
         base = gateway.issue(task, "turn-live")

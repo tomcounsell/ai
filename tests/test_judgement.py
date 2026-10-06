@@ -14,6 +14,7 @@ import dataclasses
 import json
 import math
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -34,6 +35,7 @@ from core.settings import settings as config
 from harnesses import claude_code
 from tests import judgement_upstream
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tools import jev as jev_leg
 from tools import open_weight as ow_leg
 
@@ -94,7 +96,8 @@ def ask(dsn, *replies, task_kind=JUDGE, inputs=REQUEST, default=None, port=None)
 
 def test_an_upstream_that_cannot_listen_raises_instead_of_waiting_for_ever():
     with socket.socket() as held:
-        held.bind(("127.0.0.1", 0))
+        held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        held.bind(("127.0.0.1", listen()))
         held.listen()
         with pytest.raises(OSError):
             judgement_upstream.Upstream(held.getsockname()[1])
@@ -215,7 +218,8 @@ async def _status(dsn, task):
 
 def _closed_port() -> int:
     s = socket.socket()
-    s.bind(("127.0.0.1", 0))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", listen()))
     port = s.getsockname()[1]
     s.close()
     return port
@@ -462,10 +466,19 @@ def _cli(*args, env=None) -> subprocess.CompletedProcess:
     )
 
 
+def _passfile(tmp_path) -> str:
+    """The test cluster's password file, copied into a directory that holds
+    no judgement keys."""
+    copy = tmp_path / "pgpass"
+    if Path(config.pg_passfile).exists():
+        shutil.copy(config.pg_passfile, copy)
+    return str(copy)
+
+
 def test_run_and_calibrate_refuse_to_start_without_a_key_for_a_default_endpoint(dsn, tmp_path):
     task = run(new_task(dsn))
     env = {
-        "VALOR_PG_PASSFILE": str(tmp_path / "pgpass"),
+        "VALOR_PG_PASSFILE": _passfile(tmp_path),
         "VALOR_JEV_URL": JEV_URL,
         "VALOR_OPEN_WEIGHT_URL": OPEN_WEIGHT_URL,
     }
@@ -485,7 +498,7 @@ def test_with_no_key_file_a_run_against_loopback_endpoints_judges(dsn, tmp_path)
         "run",
         task,
         env={
-            "VALOR_PG_PASSFILE": str(tmp_path / "pgpass"),
+            "VALOR_PG_PASSFILE": _passfile(tmp_path),
             "VALOR_JEV_URL": jev,
             "VALOR_OPEN_WEIGHT_URL": ow,
         },

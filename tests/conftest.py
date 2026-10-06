@@ -24,6 +24,11 @@ os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
+# The task Postgres and Redis ports the kernel chooses, in the tests' own span when it
+# is set, so a kernel the tests start listens where the tests' servers do.
+if os.environ.get("VALOR_TEST_PORTS"):
+    os.environ.setdefault("VALOR_PG_PORTS", os.environ["VALOR_TEST_PORTS"])
+    os.environ.setdefault("VALOR_REDIS_PORTS", os.environ["VALOR_TEST_PORTS"])
 
 from core import db  # settings read VALOR_WORK on import
 from core.settings import settings
@@ -91,3 +96,23 @@ def mailbox(mail):
     """The servers with empty folders and default behavior."""
     mail.reset()
     return mail
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A failure that met a denial of the sandbox the suite runs under, in
+    its traceback or in what it wrote to stderr (a kernel step logs its
+    failure there), is reported skipped, naming the denial
+    (`tests/denials.py`)."""
+    report = yield
+    if report.failed and call.excinfo is not None:
+        from tests import denials
+
+        text = "\n".join(
+            [str(report.longrepr), *(body for title, body in report.sections if "stderr" in title)]
+        )
+        why = denials.reason(text)
+        if why is not None:
+            report.outcome = "skipped"
+            report.longrepr = (str(item.path), item.location[1] or 0, f"Skipped: {why}")
+    return report

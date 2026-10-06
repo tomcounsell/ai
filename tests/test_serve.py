@@ -29,6 +29,7 @@ from core.machine import State
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tests.scripted import commit
 from tests.test_pipeline import _dangling, drive
 from tests.test_session import assert_large_turn, large_turn
@@ -98,7 +99,7 @@ async def settled(kernel: serve.Kernel) -> None:
 
 async def gateway_for(dsn) -> Gateway:
     g = Gateway(dsn)
-    await g.start()
+    await g.start(port=listen())
     return g
 
 
@@ -1226,6 +1227,8 @@ def test_the_kernel_gateway_sends_the_installed_openai_key(fresh, tmp_path, monk
             try:
 
                 async def started():
+                    if kernel.done():
+                        kernel.result()  # its exception fails the test
                     return built
 
                 (gateway,) = await until(started, 30)

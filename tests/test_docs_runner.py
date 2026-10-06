@@ -20,6 +20,7 @@ from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check, State
 from tests import judgement_upstream, scripted, test_checks
+from tests.ports import listen
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -37,7 +38,7 @@ async def rows(dsn, task) -> list[dict]:
 
 async def drive(dsn, task, runners) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await router.run(gateway, task, runners, dsn=dsn)
     finally:

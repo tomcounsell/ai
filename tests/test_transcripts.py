@@ -19,6 +19,7 @@ import pytest
 from core import db, ledger, runs, tasks, transcripts
 from core.gateway import Gateway
 from harnesses import claude_code
+from tests.ports import listen
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -382,7 +383,7 @@ def test_a_stopped_turn_s_transcript_is_copied(dsn, tmp_path):
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[sys.executable, "-c", script],
             env={},

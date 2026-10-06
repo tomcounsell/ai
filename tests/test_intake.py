@@ -11,6 +11,7 @@ from core import broker, db, intake, ledger, machine, notices, serve, tasks
 from core.machine import State
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
+from tests.ports import listen
 from tests.test_pipeline import drive, to_checks
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -348,6 +349,9 @@ def test_steer_mid_turn(dsn, op, tmp_path):
         target = await a_notice(dsn, task)
         driving = asyncio.create_task(drive(dsn, task))
         while not [r for r in await rows(dsn, task) if r["type"] == "turn.started"]:
+            if driving.done():
+                driving.result()  # a drive that failed fails the test with its own error
+                raise AssertionError("the drive ended before a turn started")
             await asyncio.sleep(0.05)
         bound = await say(dsn, msg("use a haiku", reply_to=target))
         await driving
@@ -418,7 +422,7 @@ def test_start_provisions(dsn, op, tmp_path):
             b = await tasks.brief(conn, task)
         assert b.project == {"name": "toy"} and b.workspace is None
         gateway = scripted_gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         kernel = only(serve.Kernel(gateway, scripted.RUNNERS, None, dsn), task)
         try:
             async with await db.connect(dsn) as conn:
@@ -434,7 +438,7 @@ def test_start_provisions(dsn, op, tmp_path):
             return task, await tasks.brief(conn, task), await ledger.read(conn, task)
 
     _task, b, written = run(go())
-    assert b.workspace
+    assert b.workspace, [r["payload"] for r in written if r["type"] == "workspace.failed"]
     types = [r["type"] for r in written]
     assert "workspace.provisioned" in types and "turn.ended" in types
 

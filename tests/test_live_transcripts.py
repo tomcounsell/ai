@@ -17,6 +17,7 @@ from core import db, runs, transcripts
 from core.gateway import ClaudeLogin, Gateway
 from harnesses import claude_code
 from tests import scripted
+from tests.ports import listen
 
 pytestmark = [
     pytest.mark.spend(usd=0.60),
@@ -35,7 +36,7 @@ def test_a_subagent_s_file_is_copied_and_a_resumed_session_is_stored_as_a_delta(
         task, b = await scripted.provisioned(dsn, tmp_path)
         harness = {**b.harness, "max_output_tokens": 2048}
         gateway = Gateway(dsn, credential=ClaudeLogin())
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             first = await runs.run_turn(
                 gateway, task, claude_code.workspace_turn(FIRST, cwd=b.workspace, harness=harness), dsn=dsn

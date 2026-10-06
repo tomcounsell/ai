@@ -14,6 +14,7 @@ import pytest
 from core import broker, db, ledger, runs, spending, tasks
 from core.gateway import Gateway
 from tests.performers import OutboxAppend, WorkspaceWrite
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -61,7 +62,7 @@ def test_a_stopped_tasks_call_is_refused_with_a_ledger_row_before_any_provider_c
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         body = {
             "model": "claude-haiku-4-5",
@@ -191,7 +192,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         # A real subprocess that would run for a minute, with a child of its own.
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[
@@ -232,7 +233,7 @@ def test_a_turns_whole_output_is_in_files_no_turn_can_write_and_its_row_names_th
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[
                 sys.executable,
@@ -264,7 +265,7 @@ def _pipe_turn(dsn, tmp_path, argv, stdin=None):
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=argv, env={}, cwd=str(tmp_path), harness="claude_code", stdin=stdin
         )
@@ -327,7 +328,7 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn, upstream="http://10.255.255.1")  # a route that never answers
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         body = {
             "model": "claude-haiku-4-5",
@@ -394,10 +395,10 @@ def test_a_turn_that_exits_cuts_its_silent_calls(dsn, tmp_path):
                 pass
             writer.close()
 
-        server = await asyncio.start_server(on, "127.0.0.1", 0)
+        server = await asyncio.start_server(on, "127.0.0.1", listen())
         task = await new_task(dsn)
         gateway = Gateway(dsn, upstream=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}")
-        await gateway.start()
+        await gateway.start(port=listen())
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[sys.executable, "-c", turn], env={"ANTHROPIC_BASE_URL": url}, cwd=str(tmp_path), harness="t"
         )
@@ -684,7 +685,7 @@ def test_a_turn_result_the_ledger_cannot_store_ends_the_turn_without_it(dsn, tmp
     async def go():
         task = await new_task(dsn)
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         build = lambda url, brief, turn_id: runs.TurnCommand(
             argv=[sys.executable, "-c", f"print({json.dumps(json.dumps(said))})"],
             env={},

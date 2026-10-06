@@ -29,7 +29,7 @@ billed tokens (counted as below) are over the pinned endpoint's context with
 the `404` OpenRouter sends, naming the endpoint among those its "Filter by
 Context Length" removed, and no usage.
 
-    python -m tests.judgement_upstream --answer thin [--port 0]
+    python -m tests.judgement_upstream --answer thin [--port N]
 
 prints the two leg URLs, for `VALOR_JEV_URL` and `VALOR_OPEN_WEIGHT_URL`,
 and serves until killed.
@@ -54,6 +54,7 @@ from core.settings import (
     OPEN_WEIGHT_PROVIDER,
     OPEN_WEIGHT_PROVIDER_NAME,
 )
+from tests import ports
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIXED = {"precise": "precise", "thin": "one_line_ask", "true": "true", "false": "false"}
@@ -124,13 +125,13 @@ def fixed_probs(answer: str, labels: list[str]) -> dict[str, float]:
 
 
 class Upstream:
-    def __init__(self, port: int = 0):
+    def __init__(self, port: int | None = None):
         self.requests: list[dict[str, Any]] = []
         self.scripts: dict[str, list[dict]] = {}
         self.defaults: dict[str, dict] = {}
         self._ids = itertools.count(1)
         self._ready = threading.Event()
-        self._port = port
+        self._port = ports.listen() if port is None else port
         self.loop = asyncio.new_event_loop()
         self._failed: BaseException | None = None
         threading.Thread(target=self._serve, daemon=True).start()
@@ -289,7 +290,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--answer", required=True, choices=["precise", "thin", "true", "false"])
-    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
     up = Upstream(args.port)
     jev, ow = up.urls(fixed=args.answer)

@@ -29,6 +29,7 @@ from core.machine import Check
 from tests import scripted
 from tests.conftest import TEST_DB
 from tests.emulator import common, judge, replay, stand_in
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -82,7 +83,7 @@ async def _upstream(*, hold: float = 0.0):
     app.router.add_post("/v1/messages", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
+    site = web.TCPSite(runner, "127.0.0.1", listen())
     await site.start()
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
@@ -243,7 +244,7 @@ def test_the_emulator_task_is_a_calibration_task_every_writer_refuses(dsn, tmp_p
             with pytest.raises(verdicts.VerdictRefused, match="calibration"):
                 await verdicts.record_check(conn, task, Check.REVIEW, "pass", governance_from=[])
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             with pytest.raises(tasks.CalibrationTask):
                 await runs.run_turn(
@@ -492,7 +493,7 @@ def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
 
     async def route():
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             return await router.run(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
         finally:

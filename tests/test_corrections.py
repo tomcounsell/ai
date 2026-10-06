@@ -20,6 +20,7 @@ from core.gateway import Gateway
 from core.settings import settings
 from harnesses import claude_code
 from tests.conftest import TEST_DB
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -132,7 +133,7 @@ def test_every_turn_renders_the_corrections_in_force_when_it_starts(dsn, first, 
             task = await tasks.start(conn, tasks.Brief(instruction="test"))
             later = await corrections.record(conn, "Prefer the smaller diff.", by="tom", via="test")
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         ended = await runs.run_turn(gateway, task, build, dsn=dsn)
         await gateway.close()
         async with await db.connect(dsn) as conn:

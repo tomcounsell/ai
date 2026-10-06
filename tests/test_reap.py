@@ -26,6 +26,7 @@ import pytest
 from core import db, ledger, runs, tasks
 from core import workspace as kws
 from core.gateway import Gateway
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -79,7 +80,7 @@ def _turn(dsn, build) -> tuple[dict, list[dict]]:
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="test"))
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             ended = await runs.run_turn(gateway, task, build, dsn=dsn)
         finally:

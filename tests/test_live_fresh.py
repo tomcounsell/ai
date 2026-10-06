@@ -34,6 +34,7 @@ from core.machine import Check, State
 from core.settings import resolve_model
 from harnesses import claude_code
 from tests import scripted, test_checks
+from tests.ports import listen
 
 pytestmark = [
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
@@ -54,7 +55,7 @@ def test_a_real_fresh_critique_session_leaves_a_verdict_through_the_gateway(dsn,
         task, b = await scripted.provisioned(dsn, tmp_path)
         ws = Path(b.workspace)
         gateway = Gateway(dsn, credential=ClaudeLogin())
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             planned = await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
             assert planned["missing"] == ["critique"], planned
@@ -88,7 +89,7 @@ async def _review(dsn, tmp_path, writes):
     task, _b, ws = await test_checks.to_candidate(dsn, tmp_path, writes=writes)
     await scripted.check(dsn, task, "test", "pass")
     gateway = Gateway(dsn, credential=ClaudeLogin())
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         runners = {**scripted.fresh_runners(ws), Check.REVIEW: fresh.review_runner(fresh_for, port())}
         first = await router.run(gateway, task, runners, dsn=dsn)

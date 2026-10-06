@@ -22,6 +22,7 @@ from core.gateway import ClaudeLogin, Gateway, OpenAIKey
 from core.settings import SEATS
 from harnesses import claude_code, pi
 from tests import scripted
+from tests.ports import listen
 
 pytestmark = [
     pytest.mark.spend(usd=10.0),
@@ -59,7 +60,7 @@ async def _measure(dsn, tmp_path, build_for, gateway, window: int, model: str, p
     # Enough text to carry the context past the window, whatever its tokenizer: one token per two bytes at worst.
     pieces = int(window * 2.4 // piece) + 2
     _write_big(f"{b.workspace}/big.txt", pieces, piece)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         ended = await runs.run_turn(
             gateway, task, build_for(b, PROMPT.format(pieces=pieces, piece=piece)), dsn=dsn
@@ -104,7 +105,7 @@ def test_pi_compacts_a_long_session_and_survives(dsn, tmp_path):
     async def go():
         gateway = Gateway(dsn, openai_credential=OpenAIKey(str(keyfile)))
         task, b = await scripted.provisioned(dsn, tmp_path)
-        await gateway.start()
+        await gateway.start(port=listen())
         harness = {**b.harness, "max_output_tokens": 4096}
 
         async def turn(prompt, resume=None):

@@ -24,6 +24,7 @@ from core.machine import State
 from core.settings import SEATS, settings
 from harnesses import pi
 from tests import scripted
+from tests.ports import listen
 
 pytestmark = [
     pytest.mark.spend(usd=0.30),
@@ -53,7 +54,7 @@ def test_a_live_pi_turn_is_metered_and_records_what_ran(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
         gateway = _gateway(dsn, tmp_path)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             build = pi.workspace_turn(
                 "Reply with exactly one word: ready", cwd=b.workspace, model=MODEL,
@@ -85,7 +86,7 @@ def test_a_live_compaction_is_survived(dsn, tmp_path, monkeypatch):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
         gateway = _gateway(dsn, tmp_path)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             harness = {**b.harness, "max_output_tokens": 1024}
             one = await runs.run_turn(
@@ -122,7 +123,7 @@ def test_a_live_critique_at_the_openai_seat_leaves_a_verdict(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path)
         gateway = _gateway(dsn, tmp_path)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             planned = await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
             assert planned["missing"] == ["critique"], planned

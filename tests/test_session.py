@@ -27,6 +27,7 @@ from core.gateway import Gateway
 from harnesses import claude_code
 from tests import bridges, judgement_upstream, scripted
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tests.scripted import git
 from tools.push_branch import PushBranch
 
@@ -41,7 +42,7 @@ def run(coro):
 
 async def drive(dsn, task) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
     finally:
@@ -869,7 +870,9 @@ def test_a_stopped_turn_record_kills_the_mirror_fetch_and_the_loop_runs_meanwhil
             while (
                 not pidfile.exists() or not pidfile.read_text().strip()
             ):  # the loop runs while the fetch does
-                assert not recording.done(), recording
+                if recording.done():
+                    recording.result()  # its exception fails the test
+                    raise AssertionError("the record ended while the fetch ran")
                 await asyncio.sleep(0.05)
             recording.cancel()
             with pytest.raises(asyncio.CancelledError):

@@ -31,6 +31,7 @@ from core import git as kgit
 from core.gateway import TURN_TOKEN, ClaudeLogin, Gateway
 from core.settings import settings
 from harnesses.claude_code import DROP_ENV
+from tests.ports import listen
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 DEMO = Path(settings.demo_dir).resolve()
@@ -121,7 +122,7 @@ class Meter:
 
     def __enter__(self) -> Self:
         self.thread.start()
-        self._await(self.gateway.start())
+        self._await(self.gateway.start(port=listen()))
         return self
 
     def __exit__(self, *exc) -> None:

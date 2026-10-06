@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 
 from aiohttp import web
 
+from tests import ports
+
 
 @dataclass
 class Say:
@@ -111,8 +113,8 @@ class ScriptedUpstream:
     _runner: web.AppRunner | None = None
     _ids: int = 0
 
-    async def start(self, port: int = 0) -> ScriptedUpstream:
-        """Listen on loopback at `port` (any free one by default)."""
+    async def start(self, port: int | None = None) -> ScriptedUpstream:
+        """Listen on loopback at `port` (`ports.listen()` by default)."""
         app = web.Application(client_max_size=64 * 1024 * 1024)
         for prefix in ("", "/openai"):
             app.router.add_post(f"{prefix}/v1/messages", self._messages)
@@ -120,7 +122,7 @@ class ScriptedUpstream:
         app.router.add_post("/v1/messages/count_tokens", self._count)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "127.0.0.1", port)
+        site = web.TCPSite(self._runner, "127.0.0.1", ports.listen() if port is None else port)
         await site.start()
         self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
         return self

@@ -21,6 +21,7 @@ import pytest
 from core import backup, credentials, db
 from core.settings import settings
 from harnesses import claude_code
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -77,7 +78,7 @@ def _hba(cluster: backup.Cluster) -> Path:
 @pytest.fixture(scope="module")
 def secured(tmp_path_factory):
     passfile = tmp_path_factory.mktemp("kernel") / "valor-kernel" / "pgpass"
-    with backup.scratch_cluster(tcp=True) as cluster:
+    with backup.scratch_cluster(tcp=True, port=listen()) as cluster:
         _migrate(cluster, passfile)
         first = _secure(cluster, passfile)
         yield cluster, passfile, first

@@ -25,6 +25,7 @@ from core.machine import State
 from core.settings import Settings
 from tests import bridges
 from tests.bridges import OPERATOR_CHAT, OPERATOR_EMAIL, new_task, of_type, rows
+from tests.ports import listen
 from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_intake import a_send, msg, say
@@ -40,6 +41,8 @@ def run(coro):
 
 
 def free_port() -> int:
+    if os.environ.get("VALOR_TEST_PORTS"):
+        return listen()
     for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
             try:

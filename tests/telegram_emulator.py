@@ -45,6 +45,7 @@ from bridges.telegram.wire import (
     NotConnected,
     Refused,
 )
+from tests.ports import listen
 
 ME = 1000
 
@@ -508,7 +509,8 @@ class Emulator:
 
 def main() -> None:
     sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", listen()))
     print(sock.getsockname()[1], flush=True)
     web.run_app(make_app(), sock=sock, print=None, shutdown_timeout=1)
 

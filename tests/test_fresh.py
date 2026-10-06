@@ -23,6 +23,7 @@ from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import State
 from tests import scripted
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -33,7 +34,7 @@ def run(coro):
 
 async def drive(dsn, task, runners) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, runners, dsn=dsn)
     finally:
@@ -201,7 +202,7 @@ def test_a_critique_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
 
     async def go():
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             running = asyncio.create_task(scripted.route(gateway, task, scripted.fresh_runners(ws), dsn=dsn))
             for _ in range(200):

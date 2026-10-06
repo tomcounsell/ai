@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -25,6 +26,7 @@ from core import broker, db, notices
 from core.settings import settings
 from tests import bridges
 from tests.bridges import new_task, of_type
+from tests.ports import listen
 from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_local_bridge import SEND, bind, local_received, run
@@ -43,6 +45,8 @@ def browser() -> str | None:
 
 
 def free_ports(n: int) -> list[int]:
+    if os.environ.get("VALOR_TEST_PORTS"):
+        return [listen() for _ in range(n)]
     got = []
     for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
@@ -126,24 +130,35 @@ async def page_up(dsn, tmp_path, *, hold_bridge=None):
             return True
 
         await until(up, timeout=15)
-        chrome = subprocess.Popen(  # noqa: ASYNC220
-            [
-                exe,
-                "--headless=new" if exe == CHROME else "--headless",
-                f"--remote-debugging-port={debug_port}",
-                f"--user-data-dir={profile}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        errors = Path(f"{profile}.err")
+        with errors.open("w") as err:  # noqa: ASYNC230
+            # The browser is the test's client for the page, not under test:
+            # its own sandbox is off, as `look` runs it, since the sandbox a
+            # check runs the suite under denies applying another, and its
+            # socket directory is the suite's temp directory, since that
+            # sandbox denies the user temp directory it uses by default.
+            chrome = subprocess.Popen(  # noqa: ASYNC220
+                [
+                    exe,
+                    "--headless=new" if exe == CHROME else "--headless",
+                    "--no-sandbox",
+                    f"--remote-debugging-port={debug_port}",
+                    f"--user-data-dir={profile}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                env={**os.environ, "MAC_CHROMIUM_TMPDIR": tempfile.gettempdir()},
+            )
         async with aiohttp.ClientSession() as http:
             ws_url = None
 
             async def listening():
                 nonlocal ws_url
+                if chrome.poll() is not None:
+                    raise AssertionError(f"the browser exited {chrome.returncode}: {errors.read_text()}")
                 try:
                     async with http.get(f"http://127.0.0.1:{debug_port}/json/list") as r:
                         tabs = [t for t in await r.json() if t.get("type") == "page"]
@@ -167,6 +182,7 @@ async def page_up(dsn, tmp_path, *, hold_bridge=None):
             except subprocess.TimeoutExpired:
                 chrome.kill()
         shutil.rmtree(profile, ignore_errors=True)
+        Path(f"{profile}.err").unlink(missing_ok=True)
         served.cancel()
         with pytest.raises(asyncio.CancelledError):
             await served

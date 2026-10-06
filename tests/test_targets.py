@@ -244,7 +244,7 @@ def test_start_project_refuses_the_remote_s_default_branch_and_removes_the_works
         run(grant(dsn, url, "rebuild"))
         out = cli(tmp_path, "start", "go", "--project", str(spec_file(tmp_path, url)))
     assert out.returncode == 1 and f"rebuild is the default branch of {url}" in out.stderr
-    assert task_dirs(tmp_path) == []
+    assert task_dirs(tmp_path) == [], out.stderr
 
 
 def test_start_project_refuses_an_unreadable_remote_and_an_unborn_head(dsn, tmp_path):
@@ -259,7 +259,7 @@ def test_start_project_refuses_an_unreadable_remote_and_an_unborn_head(dsn, tmp_
         empty = cli(tmp_path, "start", "go", "--project", str(spec_file(tmp_path, unborn)))
     assert unreadable.returncode == 1 and "cannot read the remote's HEAD" in unreadable.stderr
     assert empty.returncode == 1 and "the remote's HEAD names no branch" in empty.stderr
-    assert task_dirs(tmp_path) == []
+    assert task_dirs(tmp_path) == [], unreadable.stderr + empty.stderr
 
 
 # -- start --workspace -----------------------------------------------------------------------

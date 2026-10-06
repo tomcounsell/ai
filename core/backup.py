@@ -228,7 +228,9 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-") -> Cluster:
+def start_cluster(
+    pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-", port: int | None = None
+) -> Cluster:
     """`initdb` and start a throwaway cluster that trusts local logins, the
     way the machine cluster does. Its directory is
     `<pg_scratch>/<prefix><random>`, so a caller can find its own; the
@@ -236,7 +238,8 @@ def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False, prefix
     sandbox profile can read or write, since `initdb`, `pg_ctl` and the
     server run here outside any sandbox. Its socket sits in that directory,
     a short path, since a socket path past 103 bytes does not bind on
-    macOS. With `tcp` it also listens on 127.0.0.1 and ::1 at a free port.
+    macOS. With `tcp` it also listens on 127.0.0.1 and ::1 at `port`, a
+    free one when none is given.
     Its log (`postgres.log` in `root`) prefixes each line with the
     SQLSTATE."""
     pg_bin = Path(pg_bin or settings.pg_bin)
@@ -262,7 +265,7 @@ def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False, prefix
             text=True,
             check=True,
         )
-        port = _free_port() if tcp else 5432
+        port = (port or _free_port()) if tcp else 5432
         with open(data / "postgresql.conf", "a") as conf:
             conf.write(
                 f"\nlisten_addresses = '{'127.0.0.1,::1' if tcp else ''}'\n"
@@ -293,9 +296,9 @@ def stop_cluster(cluster: Cluster, pg_bin: str | Path | None = None) -> None:
 
 @contextlib.contextmanager
 def scratch_cluster(
-    pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-"
+    pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-", port: int | None = None
 ) -> Iterator[Cluster]:
-    cluster = start_cluster(pg_bin, tcp=tcp, prefix=prefix)
+    cluster = start_cluster(pg_bin, tcp=tcp, prefix=prefix, port=port)
     try:
         yield cluster
     finally:

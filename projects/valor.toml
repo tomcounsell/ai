@@ -26,3 +26,6 @@ VALOR_PG_OWNER = "app"
 VALOR_PG_PASSFILE = "{passfile}"
 VALOR_PG_SCRATCH = "/tmp"
 VALOR_TEST_DB = "app_test"
+# The dev ports: the only ones the check and turn profiles let the suite
+# listen on and reach.
+VALOR_TEST_PORTS = "8000-8009"

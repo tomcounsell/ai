@@ -20,6 +20,7 @@ from core.gateway import Gateway
 from core.machine import State
 from harnesses import claude_code
 from tests import scripted
+from tests.ports import listen
 
 HANG = r"""
 import json, pathlib, subprocess, sys, urllib.request
@@ -56,14 +57,14 @@ async def silent_upstream() -> str:
     async def hold(reader, writer):
         await reader.read()  # until the peer goes away; never a reply
 
-    server = await asyncio.start_server(hold, "127.0.0.1", 0)
+    server = await asyncio.start_server(hold, "127.0.0.1", listen())
     return f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
 
 
 async def main() -> None:
     dsn = os.environ["KERNEL_DSN"]
     gateway = Gateway(dsn, upstream=await silent_upstream())
-    await gateway.start()
+    await gateway.start(port=listen())
     if os.environ.get("KERNEL_RUNNERS") == "hang":
         runners = {State.PLAN: hanging}
     elif os.environ.get("KERNEL_RUNNERS") == "judged":

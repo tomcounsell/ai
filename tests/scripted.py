@@ -26,7 +26,7 @@ from core.__main__ import _performers
 from core.machine import Check, State
 from harnesses import claude_code
 from tests import judgement_upstream
-from tests.ports import span as ports_span
+from tests.ports import service as ports_service
 
 SCRIPT = r"""
 import json, pathlib, re, subprocess, sys
@@ -500,9 +500,9 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
     async with await db.connect(dsn) as conn:
         taken = await kws.taken_ports(conn)
     if "postgres" in services:
-        ports["postgres"] = kws.choose_port(ports_span((5560, 5599)), taken)
+        ports["postgres"] = ports_service((5560, 5599), taken)
     if "redis" in services:
-        ports["redis"] = kws.choose_port(ports_span((6460, 6499)), taken | set(ports.values()))
+        ports["redis"] = ports_service((6460, 6499), taken | set(ports.values()))
     made = kws.provision(task_id, spec, ports, work=tmp_path / "work")
     b = tasks.Brief(
         id=task_id, instruction="Write Tom a greeting.", max_effect_class="act",

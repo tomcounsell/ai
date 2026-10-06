@@ -19,6 +19,7 @@ from aiohttp import web
 
 from core import db, ledger, spending, tasks
 from core.gateway import Gateway
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -51,7 +52,7 @@ async def _upstream(body: bytes, *, status: int = 200, content_type: str, chunk:
     app.router.add_post("/v1/messages", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
+    site = web.TCPSite(runner, "127.0.0.1", listen())
     await site.start()
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
@@ -62,7 +63,7 @@ def _call(dsn, body: bytes, *, status: int = 200, content_type: str, chunk: int 
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="meter"))
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
             got = (r.status, await r.read())
@@ -115,7 +116,7 @@ def test_a_call_on_a_task_with_any_spend_is_never_refused_for_money(dsn):
             )
             await spending.charge(conn, task, f"{task}-earlier", 10**9, {})
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         body = {**BODY, "max_tokens": 10**8}  # a worst case of $500
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=body) as r:
@@ -175,7 +176,7 @@ async def _recording_upstream(seen: list, status: int = 200):
     app.router.add_post("/v1/messages", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
+    site = web.TCPSite(runner, "127.0.0.1", listen())
     await site.start()
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
@@ -187,7 +188,7 @@ def _credentialed_call(dsn, credential, *, status=200, headers=None, path="/v1/m
         seen: list = []
         runner, url = await _recording_upstream(seen, status)
         gateway = Gateway(dsn, upstream=url, credential=credential)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             async with await db.connect(dsn) as conn:
                 task = await tasks.start(conn, tasks.Brief(instruction="x"))
@@ -329,11 +330,11 @@ def _raw_calls(dsn, credential, paths):
         app.router.add_route("*", "/{tail:.*}", handle)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
+        site = web.TCPSite(runner, "127.0.0.1", listen())
         await site.start()
         url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
         gateway = Gateway(dsn, upstream=url, credential=credential)
-        await gateway.start()
+        await gateway.start(port=listen())
         out = {}
         try:
             async with await db.connect(dsn) as conn:
@@ -426,7 +427,7 @@ async def _raw_upstream(*, answer: bytes | None = None, hang_up: bool = False, s
         closed.set()
         writer.close()
 
-    server = await asyncio.start_server(on, "127.0.0.1", 0)
+    server = await asyncio.start_server(on, "127.0.0.1", listen())
     return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}", seen, closed
 
 
@@ -443,7 +444,7 @@ async def _new_task(dsn) -> str:
 def test_the_gateway_sets_no_upstream_timeout_of_its_own(dsn):
     async def go():
         gateway = Gateway(dsn, upstream="http://127.0.0.1:9")
-        await gateway.start()
+        await gateway.start(port=listen())
         timeout = gateway._session.timeout
         await gateway.close()
         return timeout
@@ -458,7 +459,7 @@ def test_a_client_that_disconnects_cuts_its_call(dsn):
         server, url, seen, closed = await _raw_upstream()
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
 
         async def client():
@@ -494,7 +495,7 @@ def test_a_401_whose_client_leaves_at_once_still_rereads_the_credential(dsn, tmp
         server, url, _, closed = await _raw_upstream(answer=started, status="401 Unauthorized")
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url, credential=login)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
 
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
@@ -515,7 +516,7 @@ def test_a_started_stream_whose_client_leaves_is_charged_once(dsn):
         server, url, _, closed = await _raw_upstream(answer=started)
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         first = asyncio.Event()
 
@@ -546,7 +547,7 @@ def test_an_unreachable_upstream_is_a_502_naming_it(dsn):
     async def go():
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream="http://127.0.0.1:6561")  # nothing listens here
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
             got = r.status, await r.json()
@@ -564,7 +565,7 @@ def test_an_upstream_that_closes_before_answering_is_a_502_naming_it(dsn):
         server, url, _, _ = await _raw_upstream(hang_up=True)
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
             got = r.status, await r.json()
@@ -595,7 +596,7 @@ def _held_open(dsn, monkeypatch, leave):
         server, url, seen, _ = await _raw_upstream()
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
 
         async def client():
@@ -659,7 +660,7 @@ def test_a_revoke_while_a_call_is_being_charged_leaves_one_charge(dsn, monkeypat
         runner, url = await _upstream(WHOLE, content_type="application/json")
         task = await _new_task(dsn)
         gateway = Gateway(dsn, upstream=url)
-        await gateway.start()
+        await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
 
         async def client():

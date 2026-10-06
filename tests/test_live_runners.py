@@ -24,6 +24,7 @@ from core.machine import Check
 from core.settings import resolve_model
 from harnesses import claude_code
 from tests import scripted, test_checks
+from tests.ports import listen
 
 pytestmark = [
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
@@ -71,7 +72,7 @@ def test_a_real_docs_turn_is_kept_by_the_kernel_and_metered(dsn, tmp_path):
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "review", "pass")
         gateway = Gateway(dsn, credential=ClaudeLogin())
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             runners = {
                 **scripted.fresh_runners(ws),

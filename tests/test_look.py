@@ -24,6 +24,7 @@ from core import db, ledger, signals
 from core import workspace as kws
 from core.settings import settings
 from tests import scripted
+from tests.ports import listen
 from tests.test_pipeline import drive
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -37,6 +38,12 @@ LATE = (
     b"<script>setTimeout(function(){document.getElementById('late').textContent='arrived late'},1000)"
     b"</script></body></html>"
 )
+
+
+def _ports():
+    """6451 to 6459, or `ports.listen()` when `VALOR_TEST_PORTS` is set."""
+    return [listen()] if os.environ.get("VALOR_TEST_PORTS") else PORTS
+
 
 needs_browser = pytest.mark.skipif(
     not Path(settings.browser).exists(), reason="the Playwright headless shell is not installed"
@@ -59,7 +66,7 @@ class Server:
             def log_message(self, *args):
                 pass
 
-        for port in PORTS:
+        for port in _ports():
             try:
                 self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
                 break
@@ -80,6 +87,8 @@ class Server:
 
 
 def free_port() -> int:
+    if os.environ.get("VALOR_TEST_PORTS"):
+        return listen()
     for port in PORTS:
         with socket.socket() as s:
             try:

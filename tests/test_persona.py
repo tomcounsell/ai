@@ -20,6 +20,7 @@ from core.machine import State
 from core.settings import settings
 from harnesses import claude_code
 from tests import scripted
+from tests.ports import listen
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -68,7 +69,7 @@ def builder(tmp_path):
 
 async def turn(dsn, task, tmp_path, **kw) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         await runs.run_turn(gateway, task, builder(tmp_path), dsn=dsn, **kw)
     finally:
@@ -329,7 +330,7 @@ def test_an_unreadable_persona_starts_no_turn_and_retires_the_grant(dsn, tmp_pat
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="test"))
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             with pytest.raises(persona.PersonaUnreadable, match="conduct.md"):
                 await runs.run_turn(gateway, task, build, dsn=dsn)

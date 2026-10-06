@@ -377,7 +377,7 @@ def test_a_turn_cannot_rename_an_ancestor_of_the_install_and_put_its_own_tree_th
         f"touch {tmp_path}/work/ok && touch {tmp_path}/cache/sibling && mv {tmp_path}/cache {tmp_path}/old",
     )
     assert out.returncode != 0 and "Operation not permitted" in out.stderr
-    assert (tmp_path / "work" / "ok").exists() and (tmp_path / "cache" / "sibling").exists()
+    assert (tmp_path / "work" / "ok").exists() and (tmp_path / "cache" / "sibling").exists(), out.stderr
     assert link.is_symlink() and not (tmp_path / "old").exists()
     for inside in (tmp_path / "cache" / "valor-pi-x", tmp_path / "cache" / "valor-pi-x" / "node_modules"):
         assert _under_profile(tmp_path, f"mv {inside} {inside}.old").returncode != 0

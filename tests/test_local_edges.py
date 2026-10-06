@@ -4,6 +4,7 @@ static routes. Real bridge server, test database; ports of 6540 to 6549, or of
 `VALOR_TEST_PORTS` when set."""
 
 import asyncio
+import os
 import plistlib
 import socket
 import uuid
@@ -18,6 +19,7 @@ from core import bridge as port
 from core import db, intake, notices
 from tests import bridges
 from tests.bridges import new_task, of_type
+from tests.ports import listen
 from tests.ports import span as ports_span
 from tests.telegram_port import until
 from tests.test_local_bridge import Page, bind, local_received, run
@@ -28,6 +30,8 @@ PORTS = ports_span((6540, 6549))  # VALOR_TEST_PORTS when set
 
 
 def free_port() -> int:
+    if os.environ.get("VALOR_TEST_PORTS"):
+        return listen()
     for p in range(PORTS[0], PORTS[1] + 1):
         with socket.socket() as s:
             try:

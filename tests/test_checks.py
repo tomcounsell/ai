@@ -25,12 +25,13 @@ from pathlib import Path
 
 import pytest
 
-from core import checks, db, judgement_sites, judgement_tasks, ledger, machine, router, runs, tasks
+from core import backup, checks, db, judgement_sites, judgement_tasks, ledger, machine, router, runs, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check
 from core.settings import settings
 from tests import judgement_upstream, scripted
+from tests.ports import listen
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -103,7 +104,7 @@ async def rows(dsn, task, kind=None) -> list[dict]:
 
 async def drive(dsn, task, runners) -> dict:
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await router.run(gateway, task, runners, dsn=dsn)
     finally:
@@ -825,7 +826,7 @@ out.append(f"builder={r.recv(100)!r}")
 r.sendall(b"*3\r\n$3\r\nSET\r\n$5\r\nsuite\r\n$1\r\n1\r\n")
 r.recv(100)
 q = subprocess.run([sys.argv[1], "-tAc", "select to_regclass('public.builder_table')"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, check=False)
 out.append(f"table={q.stdout.strip()!r} {q.returncode}")
 for k in ("VIRTUAL_ENV", "PGPASSFILE", "PATH"):
     out.append(f"{k}={os.environ.get(k)}")
@@ -970,10 +971,11 @@ import asyncio, sys
 from core import checks, router
 from core.gateway import Gateway
 from core.machine import Check
+from tests.ports import listen
 
 async def main(dsn, task):
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     await router.run(gateway, task, {Check.TEST: checks.test_runner(None)}, dsn=dsn)
 
 asyncio.run(main(sys.argv[1], sys.argv[2]))
@@ -1040,3 +1042,40 @@ def _pid_alive(pid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def test_the_valor_suite_collects_under_the_check_profile(tmp_path):
+    """The valor suite, collected under the check profile with the valor
+    spec's environment, collects every module: every server it starts at
+    import listens where the profile lets it. A scratch cluster stands in
+    for the check's own Postgres, which a module reads at import."""
+    lay = kws.Layout(tmp_path / "work" / "t")
+    check_dir = lay.checks / "test-head-collect"
+    (check_dir / "tmp").mkdir(parents=True)
+    lay.profiles.mkdir(parents=True)
+    spec = kws.Spec.load(str(REPO / "projects" / "valor.toml"))
+    with backup.scratch_cluster(tcp=True, port=listen()) as cluster:
+        # The profile denies `~/src`; the repository and its interpreter are
+        # read back after it, and the network rules stay as rendered.
+        readable = sorted({str(REPO), os.path.realpath(sys.base_prefix)})
+        text = kws.check_profile(lay, check_dir, [cluster.port])
+        above = sorted({str(a) for p in readable for a in Path(p).parents})
+        text += "(allow file-read*\n" + "".join(f'    (subpath "{p}")\n' for p in readable) + ")\n"
+        text += "(allow file-read-metadata\n" + "".join(f'    (literal "{p}")\n' for p in above) + ")\n"
+        profile = lay.profiles / "collect.sb"
+        profile.write_text(text)
+        env = {
+            k: v.replace("{port}", str(cluster.port)).replace("{passfile}", str(check_dir / "tmp" / "pgpass"))
+            for k, v in spec.env.items()
+        }
+        env.update(PATH="/usr/bin:/bin", HOME=str(Path.home()), TMPDIR=str(check_dir / "tmp"),
+                   VALOR_PG_OWNER=cluster.owner)  # fmt: skip
+        argv = kws.sandboxed(profile, "collect", str(REPO / ".venv" / "bin" / "python"), "-m", "pytest",
+                             "--collect-only", "-q", "-p", "no:cacheprovider", "tests")  # fmt: skip
+        out = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, check=False)
+    assert out.returncode == 0 and "ERROR collecting" not in out.stdout, (
+        out.stdout[-3000:] + out.stderr[-2000:]
+    )

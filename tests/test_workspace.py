@@ -30,7 +30,8 @@ from core import workspace as kws
 from core.gateway import Gateway
 from core.settings import settings
 from tests import scripted
-from tests.ports import span as ports_span
+from tests.ports import listen
+from tests.ports import service as ports_service
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -106,9 +107,9 @@ def provision(tmp_path: Path, services=(), task_id=None, base=None, **kw) -> tup
     task_id = task_id or ledger.new_id()
     ports = {}
     if "postgres" in services:
-        ports["postgres"] = kws.choose_port(ports_span((5540, 5579)), set())
+        ports["postgres"] = ports_service((5540, 5579), set())
     if "redis" in services:
-        ports["redis"] = kws.choose_port(ports_span((6440, 6459)), set(ports.values()))
+        ports["redis"] = ports_service((6440, 6459), set(ports.values()))
     made = kws.provision(
         task_id, spec(src, services=list(services), **kw), ports, base=base, work=tmp_path / "work"
     )
@@ -224,7 +225,7 @@ def test_two_tasks_get_their_own_ports_and_neither_turn_reaches_the_other(tmp_pa
     _a, made_a = provision(tmp_path, services=["postgres"])
     taken = {made_a.project["ports"]["postgres"]}
     src = tmp_path / "src" / "toy"
-    port_b = kws.choose_port(ports_span((5540, 5579)), taken)
+    port_b = ports_service((5540, 5579), taken)
     b = ledger.new_id()
     made_b = kws.provision(b, spec(src, services=["postgres"]), {"postgres": port_b}, work=tmp_path / "work")
     assert port_b != made_a.project["ports"]["postgres"]
@@ -477,14 +478,16 @@ def test_a_turn_mounts_nothing_and_opens_nothing_outside_its_sandbox(tmp_path):
             subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(volume)], check=False)
 
 
-def test_a_turn_can_neither_read_nor_write_a_scratch_cluster(tmp_path):
+def test_a_turn_can_neither_read_nor_write_a_scratch_cluster(tmp_path, monkeypatch):
     """`initdb`, `pg_ctl` and the server run on a scratch cluster outside any
-    sandbox, so its directory is inside the kernel key directory, which every
-    profile denies."""
+    sandbox, so its directory is by default inside the kernel key directory,
+    which every profile denies."""
     from core import backup
-    from core.settings import settings
+    from core.settings import Settings, settings
 
-    assert Path(settings.pg_scratch).parent == Path(settings.pg_passfile).parent
+    monkeypatch.delenv("VALOR_PG_SCRATCH", raising=False)
+    default = Settings()
+    assert Path(default.pg_scratch).parent == Path(default.pg_passfile).parent
     profile = tmp_path / "turn.sb"
     profile.write_text(kws.turn_profile(kws.Layout(tmp_path / "work" / "abc123"), [], home=tmp_path / "home"))
     with backup.scratch_cluster(prefix=f"vk-{uuid.uuid4().hex[:6]}-") as cluster:
@@ -802,7 +805,7 @@ def test_a_run_stops_services_a_killed_kernel_left_up_unless_their_run_is_live(d
             if hold_a:
                 await holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"run:{a}",))
             gateway = Gateway(dsn)
-            await gateway.start()
+            await gateway.start(port=listen())
             try:
                 return await scripted.route(gateway, b, scripted.RUNNERS, dsn=dsn)
             finally:
@@ -907,6 +910,9 @@ def test_a_stopped_caller_kills_the_command_and_its_group(tmp_path):
                                               max_footprint=1024**3))
         )  # fmt: skip
         while not pidfile.exists() or not pidfile.read_text().strip():
+            if t.done():
+                t.result()  # a call that failed fails the test with its own error
+                raise AssertionError("the call ended before its command started")
             await asyncio.sleep(0.05)
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -972,6 +978,9 @@ def test_a_stopped_git_call_returns_though_a_program_git_started_in_its_own_sess
     async def go():
         t = asyncio.create_task(kgit.threaded(kgit._git, tmp_path, "version"))
         while not (tmp_path / "git.pid").exists() or not (tmp_path / "git.pid").read_text().strip():
+            if t.done():
+                t.result()  # a call that failed fails the test with its own error
+                raise AssertionError("the call ended before its command started")
             await asyncio.sleep(0.05)
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1110,7 +1119,8 @@ def test_a_cluster_that_will_not_start_leaves_no_directory_and_no_services(tmp_p
     import socket
 
     holder = socket.socket()
-    holder.bind(("127.0.0.1", 0))
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", listen()))
     holder.listen()
     port = holder.getsockname()[1]
     src = scripted.toy_repo(tmp_path)
@@ -1128,7 +1138,7 @@ def test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_l
     other = ledger.new_id()
     work = tmp_path / "work"
     src = scripted.toy_repo(tmp_path)
-    port = kws.choose_port(ports_span((5540, 5579)), set())
+    port = ports_service((5540, 5579), set())
     kws.provision(other, spec(src, services=["postgres"]), {"postgres": port}, work=work)
     lay = kws.Layout(work / other)
     kws.start_services(other, lay, ["postgres"], {"postgres": port})  # as a kernel killed mid-setup left it
@@ -1172,7 +1182,7 @@ def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_s
 
     async def go():
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
@@ -1190,7 +1200,7 @@ def test_the_tasks_postgres_is_up_while_a_runners_turn_runs_and_down_after(dsn, 
 
     async def go():
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             return await scripted.route(gateway, task, scripted.RUNNERS, dsn=dsn)
         finally:
@@ -1347,7 +1357,7 @@ def _orphan_with_services(tmp_path):
     work = tmp_path / "work"
     orphan = ledger.new_id()
     src = scripted.toy_repo(tmp_path)
-    port = kws.choose_port(ports_span((5540, 5579)), set())
+    port = ports_service((5540, 5579), set())
     kws.provision(orphan, spec(src, services=["postgres"]), {"postgres": port}, work=work)
     lay = kws.Layout(work / orphan)
     kws.start_services(orphan, lay, ["postgres"], {"postgres": port})

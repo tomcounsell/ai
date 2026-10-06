@@ -1,6 +1,7 @@
 """A loopback git smart-HTTP server for the credential tests: the trusted
 git's `git http-backend` run as CGI over the bare repositories under one
-root, on a port in 6481-6489.
+root, on a port in 6481-6489, or from `ports.listen()` when
+`VALOR_TEST_PORTS` is set.
 
 Reads are anonymous, as a public GitHub repository's are, unless
 `auth_reads`; a push needs `Authorization: Basic base64(x-access-token:
@@ -11,6 +12,7 @@ with a redirect to another server; `hold_push` makes a push wait, after
 """
 
 import base64
+import os
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +21,7 @@ from typing import Self
 from urllib.parse import urlsplit
 
 from core import git
+from tests.ports import listen
 
 PORTS = range(6481, 6490)
 
@@ -143,7 +146,7 @@ class Server:
                 self.end_headers()
                 self.wfile.write(rest)
 
-        for port in PORTS:
+        for port in [listen()] if os.environ.get("VALOR_TEST_PORTS") else PORTS:
             try:
                 self._httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
                 break

@@ -914,6 +914,9 @@ def test_a_live_stop_of_the_root_ends_a_scripted_grandchilds_turn(dsn, tmp_path)
         driving = asyncio.create_task(drive(dsn, g))
         async with await db.connect(dsn) as conn:
             while not [x for x in await ledger.read(conn, g) if x["type"] == "turn.started"]:
+                if driving.done():
+                    driving.result()  # a drive that failed fails the test with its own error
+                    raise AssertionError("the drive ended before a turn started")
                 await asyncio.sleep(0.05)
             await tasks.stop(conn, r, reason="test")
         out = await asyncio.wait_for(driving, 60)

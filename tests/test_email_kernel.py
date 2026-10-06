@@ -26,6 +26,7 @@ from bridges.email.stop import Ends
 from core import bridge, broker, db, intake, ledger, mail, session, signals, tasks
 from tests import scripted
 from tests.bridges import OPERATOR_EMAIL, configure, declared, new_task, of_type, operator, outbox
+from tests.ports import listen
 from tests.test_email_parse import message
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -559,7 +560,7 @@ def test_a_send_killed_before_its_greeting_stays_in_flight(dsn, op, mailbox, tmp
 def silent_smtp(mailbox):
     """The SMTP port is a server that takes the connection and never
     greets."""
-    with socket.create_server(("127.0.0.1", 0)) as silent:
+    with socket.create_server(("127.0.0.1", listen())) as silent:
         held = []
         connected = threading.Event()
 

@@ -26,41 +26,24 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tests.ports import listen
+
 ADDRESS = "valor@test.local"
 PASSWORD = "test-mailbox-password"
 MAX_SIZE = 35_882_577  # what Gmail's EHLO advertises
 
 
 class Ports:
-    """Free local ports, from `VALOR_TEST_PORTS` when set."""
-
-    def __init__(self):
-        spec = os.environ.get("VALOR_TEST_PORTS", "")
-        if spec:
-            first, _, last = spec.partition("-")
-            self.pool = list(range(int(first), int(last or first) + 1))
-        else:
-            self.pool = None
-
-    @staticmethod
-    def _free(port: int) -> bool:
-        with socket.socket() as s:
-            try:
-                s.bind(("127.0.0.1", port))
-            except OSError:
-                return False
-        return True
+    """Free local ports: `ports.listen()` when `VALOR_TEST_PORTS` is set,
+    else one the OS chooses."""
 
     def take(self) -> int:
-        if self.pool is None:
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                return s.getsockname()[1]
-        while self.pool:
-            port = self.pool.pop(0)
-            if self._free(port):
-                return port
-        raise RuntimeError("VALOR_TEST_PORTS has no free port left")
+        port = listen()
+        if port:
+            return port
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
 
 
 def _openssl(*args: str, cwd: Path) -> None:

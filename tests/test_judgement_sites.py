@@ -35,6 +35,7 @@ from core.judgement_tasks import GOVERNANCE, JUDGE
 from core.machine import Check, State
 from tests import judgement_upstream, scripted
 from tests.conftest import TEST_DB
+from tests.ports import listen
 from tests.scripted import commit, git
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -64,7 +65,7 @@ async def drive(dsn, task, judge_port=None) -> dict:
     if judge_port is not None:
         runners[State.JUDGE] = judgement_sites.judge_runner(judge_port)
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await scripted.route(gateway, task, runners, dsn=dsn)
     finally:
@@ -594,7 +595,7 @@ def test_a_forced_arm_judges_through_a_local_upstream_and_its_rows_say_so(dsn, t
                 return await tasks.start(conn, tasks.Brief(instruction="x"))
 
         task = run(start())
-        subprocess.run(
+        out = subprocess.run(
             [sys.executable, "-m", "core", "run", task],
             cwd=ROOT,
             capture_output=True,
@@ -605,7 +606,9 @@ def test_a_forced_arm_judges_through_a_local_upstream_and_its_rows_say_so(dsn, t
     finally:
         proc.terminate()
         proc.wait(timeout=10)
-    decided = run(rows(dsn, task, "judge.decided"))[0]["payload"]
+    judged = run(rows(dsn, task, "judge.decided"))
+    assert judged, out.stderr
+    decided = judged[0]["payload"]
     answered = run(rows(dsn, task, "judgement.answered"))[0]["payload"]
     assert decided["verdict"] == "thin"
     assert answered["attempts"][0]["endpoint"] == "127.0.0.1"
@@ -807,7 +810,7 @@ def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn
         async with await db.connect(dsn) as conn:
             task = await tasks.start_calibration(conn, "intake.underspecified")
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
         try:
             with pytest.raises(tasks.CalibrationTask):
                 await runs.run_turn(

@@ -25,6 +25,7 @@ kernel reaps whatever a turn leaves running (tests/test_reap.py).
 Live spend: none.
 """
 
+import os
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,7 @@ pytestmark = [
 
 from core import workspace as kws
 from core.settings import settings
+from tests.ports import listen
 
 PROBE = """
 import os, socket, sys
@@ -168,17 +170,21 @@ def test_a_task_turn_reaches_its_own_services_and_clone_and_nothing_else(tmp_pat
     }
     for f in files.values():
         f.write_text("x")
-    profile = _turn_profile(tmp_path, lay, [5545, 6445])
+    # The task's own ports: 5545 and 6445, or from the span when it is set,
+    # since the profile this suite runs under may reach no others.
+    pg, redis = (listen(), listen()) if os.environ.get("VALOR_TEST_PORTS") else (5545, 6445)
+    profile = _turn_profile(tmp_path, lay, [pg, redis])
     with socket.socket() as gateway:
-        gateway.bind(("127.0.0.1", 0))
+        gateway.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        gateway.bind(("127.0.0.1", listen()))
         gateway.listen()
         port = gateway.getsockname()[1]
         assert _probe(
             profile,
             port,
             port,
-            5545,
-            6445,
+            pg,
+            redis,
             8003,
             settings.pgport,
             6379,
@@ -213,6 +219,11 @@ def test_a_task_turn_reaches_its_own_services_and_clone_and_nothing_else(tmp_pat
 
 
 def test_a_task_turn_reaches_the_gateway_at_any_port(tmp_path):
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", 0))
+        except PermissionError:
+            pytest.skip("the sandbox the suite runs under denies listening on a port the OS chooses")
     profile = _turn_profile(tmp_path, _task(tmp_path), [5545])
     listeners = []
     for _ in range(24):

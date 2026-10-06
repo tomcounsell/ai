@@ -23,6 +23,7 @@ from core.gateway import Gateway
 from core.machine import Check, State
 from core.settings import resolve_seat, settings
 from tests import judgement_upstream, scripted, test_checks
+from tests.ports import listen
 from tests.test_machine import Ledger
 
 pytestmark = [pytest.mark.spend(usd=0)]
@@ -478,7 +479,7 @@ def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tm
         asked = len(UP.seen(sid))
         other = review_runner(ws, UP.port(script=sid), model="scripted-other", seat="reviewer_openai")
         gateway = Gateway(dsn)
-        await gateway.start()
+        await gateway.start(port=listen())
 
         async def alive():
             return True
@@ -553,7 +554,7 @@ async def _run_review(dsn, task, ws, alive):
     """The review runner called once outside the router, with `alive` as the
     run's lock check."""
     gateway = Gateway(dsn)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         return await review_runner(ws)(router.Context(gateway, task, dsn, alive, Check.REVIEW))
     finally:

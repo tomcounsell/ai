@@ -28,6 +28,7 @@ from core.gateway import TURN_TOKEN, Gateway
 from core.settings import settings
 from harnesses import claude_code, pi
 from tests import scripted
+from tests.ports import listen
 from tests.scripted_upstream import Hang, Run, Say, ScriptedUpstream, Task
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -103,7 +104,7 @@ async def world(h: Harness, dsn, tmp_path, script):
     else:
         upstream = await ScriptedUpstream(script).start()
         gateway = Gateway(dsn, openai_upstream=upstream.url)
-    await gateway.start()
+    await gateway.start(port=listen())
     try:
         yield World(h, dsn, task_id, brief, gateway, upstream)
     finally:
