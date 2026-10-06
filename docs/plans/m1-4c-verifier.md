@@ -352,7 +352,9 @@ them.
 ## Tests
 
 Tests that need the runtime carry a `container` marker and skip when
-`/usr/local/bin/container` is absent, with the reason.
+`/usr/local/bin/container` is absent or the sandbox the suite runs under denies
+it (`container.present()`), with the reason; every other test takes a machine
+lock and image records of the session's own.
 
 **Runtime and reaping.**
 
