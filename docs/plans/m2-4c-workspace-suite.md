@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-4c-workspace-suite
 type: bug
-status: built
+status: merged
 critique_rounds: 1
 review_rounds: 2
 governance_grant: none
@@ -537,3 +537,30 @@ No other 2.4b test binds a port or names a span.
   `test_provision_restart_gaps.py` and `test_workspace.py` unset,
   115 passed, 1 skipped. `uvx ruff check .` and
   `uvx ruff format --check .` pass.
+
+## Checks
+
+Round 1, on 0beee2bcc:
+
+- **Test:** red. With VALOR_TEST_PORTS set, `test_checks::test_a_kernel_killed_mid_suite_leaves_nothing_on_the_tasks_port` failed 7 of 7: the kernel subprocess's fresh `listen()` cursor took the task's redis port. The check added a skip-hook test (f472ddbc3).
+- **Review:** changes. The nested-sandbox and disk matchers matched source lines and hid real failures; the `/tmp` matcher's two halves were independent. Governance: no.
+- **Docs:** updated, ruff in tech-stack.md (579fdee9d).
+
+Round 2, after patch round 1, on cabe4d9dc:
+
+- **Test:** pass. Host 1476 passed in three runs, test by test the same with and without the span; the kill test passed 5 of 5. Two suites sharing one span can race on test_ports; distinct spans avoid it, as each check already has one.
+- **Review:** pass, round 2 of 2. Governance: no. Profile run reproduced: 1066 passed, 2 failed (the recorded `app` role cases), 527 skipped, 0 errors, lint 0. One gap left, not a finding: a plain bug still skips if the full denial error text is a literal in the test's own source, which only tests/denials.py and tests/test_denials.py hold today.
+- **Docs:** no_change.
+
+## Merged
+
+The lead's decision: merge. Rebasing onto 2.4b broke 2.4b's new `ports_span` test (F821). A repair round (74867d28e) moved 2.4b's tests onto `ports.service()` and put `workspace.failed` reasons in their failures, so they skip on the `/bin/ps` denial in the profile. After the repair:
+
+- Host full suite: 1496 passed, with the known dovecot and node failures.
+- The three 2.4b files: 152 passed, 1 skipped, in three runs.
+- Profile run of those files: 64 passed, 89 skipped, 0 failed.
+- Ruff: clean.
+
+valor-cori-rebuild was fast-forwarded.
+
+Rollout: none beyond the merge. The kernel reads projects/valor.toml at each provisioning, so new valor tasks get `VALOR_TEST_PORTS=8000-8009`.
