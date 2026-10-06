@@ -74,13 +74,14 @@ outside the model is AI Control [4].
 
 **Python 3.14**, pinned in `.python-version`; `requires-python = ">=3.14"` in
 `pyproject.toml`. **uv** builds the environment from `uv.lock`, which holds
-twenty-one packages in all. The kernel's runtime dependencies are two:
+twenty-five packages in all besides the project itself. The kernel's runtime dependencies are two:
 `psycopg[binary]` for Postgres and `aiohttp` for the gateway and the local chat page. Everything else
 is the standard library. Status: **in use**. Serves the selection rule: a
 two-dependency kernel is one a person can read.
 
-`ruff` is configured for a 110-character line. pytest and Hypothesis are the dev
-dependencies. Status: **in use**.
+`ruff` is configured for a 110-character line. pytest, Hypothesis, and `ruff`
+(pinned to one version) are the dev dependencies, so `uv run ruff` works in a
+task's check environment. Status: **in use**.
 
 **Tests.** pytest against real Postgres, real `claude -p` turns, and real
 sandbox profiles, with no mocks (`tests/README.md`). Every live test declares
