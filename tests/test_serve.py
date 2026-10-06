@@ -1352,6 +1352,9 @@ def test_a_kill_mid_provision_is_redone_on_restart(fresh, op, tmp_path, sig):
     sleeper = None
 
     async def setup_running():
+        # A provisioning that failed first carries its reason into the failure.
+        failed = typed(await rows(fresh, task), "workspace.failed")
+        assert not failed, failed
         return started.exists() and started.read_text().strip().isdigit()
 
     async def done():
@@ -1442,8 +1445,11 @@ def test_the_incident_state_is_provisioned_after_a_steer(fresh, op, tmp_path):
             await kernel.close()
 
     run(go())
-    types = [r["type"] for r in run(rows(fresh, task))]
-    assert types.count("workspace.provisioned") == 1 and types.count("workspace.failed") == 1
+    written = run(rows(fresh, task))
+    types = [r["type"] for r in written]
+    assert types.count("workspace.provisioned") == 1 and types.count("workspace.failed") == 1, typed(
+        written, "workspace.failed"
+    )
     assert (work / task / "repo" / ".git").is_dir()
 
 
