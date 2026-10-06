@@ -15,7 +15,7 @@ from core import db, git, ledger, runs, serve, tasks
 from core import workspace as kws
 from tests import scripted
 from tests.ports import service as ports_service
-from tests.test_serve import _message_task, _toy_project, only, rows, run, settled
+from tests.test_serve import _message_task, _toy_project, only, rows, run, settled, typed
 from tests.test_serve import fresh as _fresh
 from tests.test_serve import op as _op
 from tests.test_workspace import _cli, _rows
@@ -192,8 +192,11 @@ def test_a_dangling_link_at_the_task_root_is_redone(fresh, op, tmp_path):
             await kernel.close()
 
     run(go())
-    types = [r["type"] for r in run(rows(fresh, task))]
-    assert types.count("workspace.provisioned") == 1 and "workspace.failed" not in types
+    written = run(rows(fresh, task))
+    types = [r["type"] for r in written]
+    assert types.count("workspace.provisioned") == 1 and "workspace.failed" not in types, typed(
+        written, "workspace.failed"
+    )
     assert (work / task / "repo" / ".git").is_dir() and not (work / task).is_symlink()
 
 
@@ -292,6 +295,7 @@ def test_the_redo_frees_the_dead_attempts_ports(fresh, op, tmp_path, monkeypatch
             await kernel.close()
 
     run(go())
-    types = [r["type"] for r in run(rows(fresh, task))]
-    assert chosen == [{"postgres": port}]
+    written = run(rows(fresh, task))
+    types = [r["type"] for r in written]
+    assert chosen == [{"postgres": port}], typed(written, "workspace.failed")
     assert types.count("workspace.provisioned") == 1 and "workspace.failed" not in types
