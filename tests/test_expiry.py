@@ -3,6 +3,7 @@ kernel wrote, and the sweep task the routine starts when something is due.
 Each test has a database of its own, since `due` reads every row. Old rows
 are inserted with an explicit `at`. No model call."""
 
+import asyncio
 import dataclasses
 import os
 import shutil
@@ -583,3 +584,106 @@ async def scripted_drive(dsn, task, runners_):
         return await scripted.route(gateway, task, runners_, dsn=dsn)
     finally:
         await gateway.close()
+
+
+def _fake_start(entered: asyncio.Event, calls: list[str]):
+    """A `start_project` that says when it is entered, waits so a second
+    firing overlaps it, and starts the sweep task on the firing's own
+    connection, as `_start_project` does."""
+
+    async def fake(conn, *, parent, instruction, routine, ceiling, model, project, branch, marker):
+        calls.append(parent)
+        entered.set()
+        await asyncio.sleep(0.5)
+        return await tasks.start_child(
+            conn,
+            parent,
+            ceiling=ceiling,
+            marker=marker,
+            by="routine",
+            instruction=instruction,
+            routine=routine,
+        )
+
+    return fake
+
+
+def test_two_overlapping_expiry_firings_start_one_sweep(world):
+    dsn, _, _ = world
+
+    async def go():
+        entered, calls = asyncio.Event(), []
+        fake = _fake_start(entered, calls)
+
+        async def fire():
+            async with await db.connect(dsn) as conn:
+                return await routines.run(
+                    conn, "expiry", {"expiry": routines.expiry_runner}, now=NOW, start_project=fake
+                )
+
+        first = asyncio.create_task(fire())
+        await asyncio.wait_for(entered.wait(), 30)  # the second firing starts inside the first's start
+        second = await asyncio.wait_for(fire(), 30)
+        first = await first
+        async with await db.connect(dsn) as conn:
+            (reg,) = await routines.registrations(conn, "expiry")
+            kids = await tasks.children(conn, reg["objective"])
+            ran = await routines.runs(conn, [reg["objective"]])
+        return first, second, calls, kids, ran
+
+    first, second, calls, kids, ran = run(go())
+    assert len(calls) == 1 and len(kids) == 1
+    assert "started" in first and "continued" in second
+    assert [(r["outcome"], r["run"]) for r in ran] == [("started", kids[0]), ("continued", kids[0])]
+
+
+def test_an_expiry_runner_that_raises_releases_the_lock(world):
+    dsn, _, _ = world
+
+    async def go():
+        async with await db.connect(dsn) as a:
+            with pytest.raises(routines.Refused):
+                await routines.run(
+                    a, "expiry", {"expiry": routines.expiry_runner}, now=NOW, start_project=None
+                )
+            assert (await (await a.execute("SELECT 1")).fetchone())[0] == 1
+            (reg,) = await routines.registrations(a, "expiry")
+            assert await routines.runs(a, [reg["objective"]]) == []  # N7: a refused start writes no row
+            calls: list[str] = []
+            async with await db.connect(dsn) as b:
+                line = await asyncio.wait_for(
+                    routines.run(
+                        b, "expiry", {"expiry": routines.expiry_runner}, now=NOW,
+                        start_project=_fake_start(asyncio.Event(), calls),
+                    ),
+                    30,
+                )  # fmt: skip
+            return line, calls
+
+    line, calls = run(go())
+    assert "started" in line and len(calls) == 1
+
+
+def test_a_routine_other_than_expiry_runs_two_firings_side_by_side(world):
+    dsn, _, where = world
+    name = "sidebyside"
+    write_toml(where, name, runner="both")
+    inside = [asyncio.Event(), asyncio.Event()]
+
+    def runner(mine: int):
+        async def both(ctx: routines.Context) -> routines.Ran:
+            inside[mine].set()
+            await asyncio.wait_for(inside[1 - mine].wait(), 10)  # the other firing is in its runner too
+            return routines.Ran(None, "nothing_due", "met")
+
+        return both
+
+    async def go():
+        async def fire(mine: int):
+            async with await db.connect(dsn) as conn:
+                return await routines.run(conn, name, {"both": runner(mine)}, now=NOW)
+
+        return await asyncio.gather(fire(0), fire(1))
+
+    lines = run(go())
+    assert all("nothing_due" in ln for ln in lines)
