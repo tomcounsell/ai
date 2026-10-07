@@ -9,6 +9,7 @@ import plistlib
 import socket
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -110,11 +111,34 @@ def test_the_page_and_its_script_are_served_without_the_token(dsn, op):
                 html = (r.status, r.content_type, await r.text())
             async with page.http.get(f"{page.base}/chat.js") as r:
                 js = (r.status, r.content_type, await r.text())
-            return html, js
+            vendored = {}
+            for name in local.VENDORED:
+                async with page.http.get(f"{page.base}/vendor/{name}") as r:
+                    vendored[name] = (r.status, r.content_type, await r.read())
+            missing = []
+            for path in (
+                "/vendor/other.js",
+                "/vendor/../__init__.py",
+                "/vendor/%2e%2e/__init__.py",
+                "/vendor/",
+            ):
+                async with page.http.get(f"{page.base}{path}") as r:
+                    missing.append(r.status)
+            return html, js, vendored, missing
 
-    (hs, ht, html), (js_s, js_t, js) = run(go())
+    (hs, ht, html), (js_s, js_t, js), vendored, missing = run(go())
     assert (hs, ht, js_s) == (200, "text/html", 200) and "javascript" in js_t
-    assert '<script src="/chat.js">' in html and "X-Valor-Token" in js
+    assert "X-Valor-Token" in js
+    tags = [
+        html.index(f'<script src="{src}">')
+        for src in ("/vendor/marked.umd.js", "/vendor/purify.min.js", "/chat.js")
+    ]
+    assert tags == sorted(tags)
+    assert set(vendored) == {"marked.umd.js", "purify.min.js"}
+    for name, (status, kind, body) in vendored.items():
+        assert (status, kind) == (200, "text/javascript")
+        assert body == (Path(local.__file__).parent / "vendor" / name).read_bytes()
+    assert missing == [404] * 4
 
 
 def test_the_log_shows_only_what_was_sent_on_the_local_chat(dsn, op):

@@ -28,9 +28,25 @@ nothing and says to start the bridge first.
 
 The page shows Tom's messages, Valor's notices, and released sends, oldest
 first. It polls `GET /log` every two seconds and adds each row whose
-`event_id` it has not shown, in event id order. It renders every text with
-`textContent`, so a send's text never runs. Clicking one of Valor's rows
-makes the next message a reply to it: the page posts that row's
+`event_id` it has not shown, in event id order. It renders every text,
+Tom's and Valor's, as Markdown (GitHub-flavored, a single newline kept as
+a line break) and never lets it run:
+
+- [marked](#vendored-code) turns the text into HTML, with HTML typed in the
+  text escaped, so it shows as typed and only Markdown becomes markup.
+- [DOMPurify](#vendored-code) sanitizes that HTML with its HTML-only
+  profile, so no script, handler attribute, `javascript:` link, SVG, or
+  MathML survives; images, styles, and form controls are dropped too,
+  since the page shows text only and an image would be a fetch made by
+  reading.
+- The sanitized tree is appended as nodes, never assigned through
+  `innerHTML`, so it is not parsed again.
+- Links open in a new tab with `rel="noopener noreferrer"`.
+- The page's `script-src 'self'` refuses any inline script or handler that
+  got past both.
+
+Headings, lists, code, tables, and quotes are styled plainly. Clicking one of Valor's rows
+(outside a link) makes the next message a reply to it: the page posts that row's
 `message_id` as `reply_to`. A send keeps its text in the box and retries
 with the same `id` until the bridge answers. On a `401`, or opened with no
 token, the page stops and says to reopen it with
@@ -40,8 +56,9 @@ token, the page stops and says to reopen it with
 
 | Route | What it does |
 |---|---|
-| `GET /` | The page, with `Content-Security-Policy: frame-ancestors 'none'`, so no other page can frame it |
+| `GET /` | The page, with `Content-Security-Policy: frame-ancestors 'none'; script-src 'self'`, so no other page can frame it and it runs only the scripts the bridge serves |
 | `GET /chat.js` | The page's script |
+| `GET /vendor/marked.umd.js`, `GET /vendor/purify.min.js` | The [vendored](#vendored-code) renderer and sanitizer; two fixed routes, no directory is served |
 | `GET /log` | The whole local chat, oldest first |
 | `POST /send` | One message from Tom: `{id, text, reply_to}` |
 
@@ -117,6 +134,11 @@ notice is marked sent with its notice id as the message id.
   is added; Tom's answer is pending in
   [m2-4-local.md](../plans/m2-4-local.md), and accepting it for the proof
   of concept is assumed.
+- **A message's text.** A notice or an approved send is text a turn wrote,
+  shown on the page that holds the token and takes approvals, so it must
+  never run. It is rendered as [above](#the-page): HTML in it escaped,
+  the Markdown output sanitized, and inline script refused by the page's
+  CSP as a second layer.
 - **Framing.** A page a turn serves on 8000 to 8009 cannot frame the chat
   page: `GET /` sends `frame-ancestors 'none'`.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
@@ -135,7 +157,7 @@ notice is marked sent with its notice id as the message id.
 
 - Files in either direction; more than one local chat; reaching the page
   from another device; browser notifications; paging long history;
-  markdown rendering.
+  images in a text; syntax highlighting.
 - A merge approved on the page fails with the GitHub credential named when
   this Mac holds none.
 - An approved `email.send` waits for an email bridge this Mac does not
@@ -149,3 +171,21 @@ notice is marked sent with its notice id as the message id.
 | `__init__.py` | `LocalBridge`: perform, lookup, the outbox loop, the HTTP server, the token |
 | `__main__.py` | `run`, `open`, `--plist` |
 | `chat.html`, `chat.js` | The page |
+| `vendor/` | marked and DOMPurify, unmodified, with their licenses |
+
+### Vendored code
+
+The page's renderer and sanitizer are copied from npm, unmodified, and
+served by the bridge; nothing is loaded from a CDN.
+
+| Package | Version | License | File | Tarball `dist.integrity` | File sha256 |
+|---|---|---|---|---|---|
+| `marked` | 18.1.0 | MIT (`marked.LICENSE`) | `lib/marked.umd.js` as `marked.umd.js` | `sha512-PamYXWWWg2nboG3oX5Ffzpy3EFZROqZJK9hSlMmUnekp7TxPs5DcT95vwd46m73/exfKCRVMtgXoPMI4FEJL6w==` | `f424dcb508fdf93e0137a970cfce8f3207ea2e3f37eca5f7556a52875683632a` |
+| `dompurify` | 3.4.16 | Apache-2.0 or MPL-2.0 (`dompurify.LICENSE`, `dompurify.LICENSE-MPL`) | `dist/purify.min.js` | `sha512-sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ==` | `2c90a9b46d6463f26038a29b686e82bc91de01fdac9d5229e7cfe3b360134ea2` |
+
+To update one: in a new empty directory outside the repository, fetch
+`https://registry.npmjs.org/<package>/-/<package>-<version>.tgz` (or
+`npm pack <package>@<version>`), check its sha512 against the
+registry's `dist.integrity` for that version, unpack it, copy the file and
+the license files into `bridges/local/vendor/`, and change this table in
+the same commit.

@@ -24,8 +24,9 @@ must never let a row's text run.
 ## What is built
 
 1. **Vendored renderer and sanitizer**, in `bridges/local/vendor/`:
-   - `marked.umd.js` from `marked` (MIT), the latest 16.x at build time,
-     pinned to that exact version;
+   - `marked.umd.js` from `marked` (MIT), the latest release at build time,
+     pinned to that exact version (built on 18.1.0; 16.x was named here
+     before the registry showed 18 as latest);
    - `purify.min.js` from `dompurify` (Apache-2.0 OR MPL-2.0), the latest
      3.x at build time, pinned to that exact version;
    - each package's license file beside it (`marked.LICENSE`,
