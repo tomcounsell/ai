@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: merged and rolled out on Tom's Mac (record in m1-4c-verifier-records.md, Merged); verify.ran of the first real task still to read
+status: merged and rolled out on Tom's Mac (record in m1-4c-verifier-records.md, Merged; step 5 read 2026-10-07)
 critique_rounds: 2
 review_rounds: 2
 ---

@@ -423,3 +423,19 @@ The lead merged on 2026-10-06, fast-forwarding `valor-cori-rebuild` to 3610cce32
 - Started the status page with `python -m ui` (pid 65224). It answers 200 at http://127.0.0.1:8790/.
 
 The bridge job `com.valor.kernel.local` still listens on 8711. Still to come is 1.4c part two Rollout step 5: the first real task after this rollout runs its review rerun in a VM, and the lead reads its `verify.ran` by hand once. The docs no longer say that Tom's Mac lacks `container`, and rebuild-handoff.md Setup names the Little Snitch rule and the kernel archive fetch.
+
+**1.4c part two Rollout step 5 (2026-10-07), read by hand by the lead.** The first real task after the rollout was 6fd4e0439ac1, Tom's critique, which shaped issues #3609 to #3612. Its review rerun ran in VMs on Tom's Mac (`verify.ran`, ledger event 842):
+- `where` vm, `release` 1.5.0;
+- base 5c11e496d and the candidate, each in its own VM;
+- 129.9 s, peak 2,004 MB, `system_start_s` 0.8;
+- lint exit 0;
+- `failures` empty, so no regression; the review then decided `pass`.
+
+At base, the VM ran 949 passed, 7 failed, 63 errored, 378 skipped (248 of them macos). The 63 errors are the email tests (no Dovecot in the image). The 7 failures:
+- the three `test_provision_restart_gaps` `workspace.remove` tests the review named;
+- `test_ports::test_listen_draws_from_the_span`;
+- `test_expiry::test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge`;
+- `test_objective_tree::test_start_parent_from_the_command_line_on_both_paths`;
+- `test_mailserver`'s Dovecot test.
+
+The record that the VM run has no failure at base is no longer true on the merged tip. Kernel task b4288894e613 makes the suite clean in the VM.
