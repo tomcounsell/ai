@@ -32,7 +32,7 @@ bookworm arm64, `run.sh`'s environment, the source from `git archive`, no
    - `tests/mailserver.py` writes a 2.4 config, the version Homebrew installs on both Macs.
    - So the image builds Dovecot 2.4.5 from source, pinned by checksum like uv and Node:
      - Source: `https://dovecot.org/releases/2.4/dovecot-2.4.5.tar.gz`
-     - sha256: `868c2686a61b5f8e00a3e4721789b1ab46e6528fd773a5fbed07a6ecba7731e6`, computed from the download on 2026-10-07. Dovecot publishes no `.sha256`. If the builder can get Dovecot's signing key, they also check the `.sig`, and the Containerfile comment says which was done.
+     - sha256: `868c2686a61b5f8e00a3e4721789b1ab46e6528fd773a5fbed07a6ecba7731e6`, computed from the download on 2026-10-07, recomputed from a second download at build and equal to the sha256 Homebrew's formula pins. Dovecot publishes no `.sha256`. If the builder can get Dovecot's signing key, they also check the `.sig`, and the Containerfile comment says which was done.
    - Build dependencies come from the signed bookworm repository: `libssl-dev` (2.4 requires OpenSSL) and `zlib1g-dev`.
    - Build: `--prefix=/usr/local`, with docs and optional backends off. Source and build tree are removed in the same layer.
    - `dovecot` installs to `/usr/local/sbin`, which `VM_PATH` lacks. It is linked into `/usr/local/bin`, the same way git's exec path is linked now, so `core/container.py` is unchanged.
@@ -77,7 +77,7 @@ Critique may send the plan back once. The diagnosis is from reading, and the ima
   - `runs.reap` of a mark finds and kills a process that carries `VALOR_TURN=<id>` in its environment, in a process group of its own. It leaves alone a sibling whose mark is `VALOR_TURN=<id>x` (a longer id with the same prefix) and one with no mark. Both platforms run it, through `-E` on Darwin and `/proc` elsewhere.
   - `workspace.rmtree` clears a tree holding a 0o000 directory, a read-only file, and a dangling link, and leaves the link's target outside the tree untouched. If an existing test already covers this unmarked, it is reused rather than duplicated.
 - **In the VM (the review's own `verify.ran` on this branch).**
-  - The head run should pass the six provision, objective-tree, ports, and expiry tests: six portable and passing, one skipped as `macos`.
+  - Of the seven failures, the head run should pass five (the three `provision_restart_gaps` tests, the objective-tree CLI test, and the span half of `test_ports`) and skip two as `macos` (the expiry test and the new sandbox-probe test). The Dovecot kill test and the 63 email tests still error, as they do at base, until the kernel builds the new base image.
   - It runs on the kernel's own base image. `core/container.py` builds from the kernel's `core/images/base/`, never the candidate's. So the email tests and the Dovecot kill test still error at head, and they show as `failing_at_base`.
 - **Not verifiable in this job.**
   - The new base image, and the 63 email tests plus the kill test passing in it. The check profile denies `container`, and the review runs on the kernel's image.

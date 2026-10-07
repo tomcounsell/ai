@@ -8,7 +8,7 @@ The rule: integration first, no mocks.
 
 - Real Postgres.
 - Real containers.
-- Real bridges against test accounts. Email's run against Dovecot, started as the test's user behind a TLS terminator signed by a test CA, and a local SMTP server that files what it accepts in Dovecot's `\Sent` folder (`tests/mailserver.py`; ports from `VALOR_TEST_PORTS` when set). The kill tests run the bridge as a process of its own (`tests/email_child.py`) and kill it by its PID.
+- Real bridges against test accounts. Email's run against Dovecot (Homebrew's on the Macs, built into the verification VM's base image), started as the test's user behind a TLS terminator signed by a test CA, and a local SMTP server that files what it accepts in Dovecot's `\Sent` folder (`tests/mailserver.py`; ports from `VALOR_TEST_PORTS` when set). The kill tests run the bridge as a process of its own (`tests/email_child.py`) and kill it by its PID.
 - No mocks, fakes, or patched clients. A model provider is a real local HTTP upstream speaking its wire format, its bodies shaped by responses recorded live (`tests/judgement_upstream.py`, `tests/fixtures/record_judgement.py`).
 - The kernel's bridge-port tests use `tests/bridges.py` (`configure`, which sets the operator's settings for one test, and `FakeBridge`, a bridge with no platform).
 - Local performers the tests register live here (`tests/performers.py`: `workspace_write`, `outbox_send`), never in `tools/`.
