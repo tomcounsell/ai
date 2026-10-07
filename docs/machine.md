@@ -222,7 +222,7 @@ Two isolation mechanisms exist on macOS, and they cost memory differently.
   allowed gateway ports at random (rebuild-demonstration.md, Kernel
   findings 3).
 - **Apple containers** run as lightweight Linux VMs, each with its own
-  memory allocation; the kernel uses them for the review's rerun, which only Valor's Mac can run: it has `container` installed and Tom's Mac does not. The network mode is set on the host and cannot be
+  memory allocation; the kernel uses them for the review's rerun, which runs on any Mac with `container` installed: Valor's Mac and Tom's Mac both have it. The network mode is set on the host and cannot be
   changed from inside: a host-only network reaches exactly one host, the
   Mac, where the gateway runs. Reaching a package registry from a
   host-only network needs a proxy on the Mac beside the gateway. The

@@ -97,7 +97,7 @@ Building waits only on what the task's code needs:
 | 1.4c part one: review runner, host rerun | now | on 1.4b's docs tip; rebases when 1.4b is patched | 1.4b and 1.4s, before the 1.5 gate runs |
 | 1.4u invented caps out of the merged code (cap-audit-code) | now | now | 1.4b and 1.4s; later of 1.4u, 3a, 3b rebases |
 | 1.4v programs by fixed path, denied paths' ancestors denied (bug fix) | now | now | 1.4b; 3b's patch follows it |
-| 1.4c part two: the rerun in a container | now | now on Valor's machine, where `container` is installed; not on Tom's Mac, which has none | 1.5 |
+| 1.4c part two: the rerun in a container | now | now (`container` is installed on Valor's Mac and Tom's Mac) | 1.5 |
 | 2.1 resident kernel, bridge port | now | now, on current code; rebases onto 1.4b, 1.4d, 1.4s | 1.5 |
 | 2.2 Telegram | now | 2.1's critique rounds are done (it builds to the port the plan names) | 2.1 |
 | 2.3 email | now | 2.1's critique rounds are done | 2.1 |

@@ -22,8 +22,8 @@ vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
 (a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
 Postgres). The popoto #191 trial run (task `75c0902b6e25`) is done and held at
 its merge, not released (m1-4-checks.md). Next is 1.4b, then 1.4d. The review's
-rerun (1.4c) needs Apple's `container`, which Valor's Mac has and Tom's Mac
-does not. On this Mac a non-interactive shell finds
+rerun (1.4c) needs Apple's `container`, which Valor's Mac and Tom's Mac
+both have. On this Mac a non-interactive shell finds
 Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
 `PGPASSFILE`, so commands run with `postgresql@18/bin` first,
 `VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
@@ -49,6 +49,14 @@ switch it off `main`; the rebuild is a separate checkout.
    accepting its default Linux kernel, and `container system stop`.
    Rosetta, which its image builder needs, where `arch -x86_64
    /usr/bin/true` fails: `softwareupdate --install-rosetta --agree-to-license`.
+   On a Mac with Little Snitch, the runtime's launchd services reach the
+   network only with an allow rule for `/usr/local/bin/container-apiserver`
+   and `/usr/local/libexec/container/`; without one, the kernel download
+   and every image pull time out (`HTTPClientError.connectTimeout`). The
+   kernel archive can instead be fetched with `curl` from the `url` that
+   `container system property list` shows, its sha256 checked against
+   `digest`, and installed with `container system kernel set --tar FILE
+   --binary PATH`, `PATH` being the `binaryPath` there.
 2. **Checkout.**
    `git clone -b valor-cori-rebuild https://github.com/tomcounsell/ai.git ~/src/valor-rebuild`
    (Valor's Macs reach GitHub over HTTPS through `gh`, not SSH),

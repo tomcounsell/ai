@@ -50,8 +50,8 @@ Serves Mission item 1 and bounded authority.
 sandbox. Turns, checks, and services run under sandbox-exec on the host.
 The review's rerun runs in Apple `container` VMs started fresh from
 kernel-built images with no network, because its value is an environment
-the executor never touched (`core/container.py`). Valor's Mac has `container`
-installed; Tom's Mac does not. A process under a sandbox profile reads the
+the executor never touched (`core/container.py`). Valor's Mac and Tom's Mac have `container`
+installed. A process under a sandbox profile reads the
 runtime as absent, since every profile denies it (`container.present()`), so a
 router's sweep run there leaves containers alone. The runtime is in
 [tech-stack.md](tech-stack.md), its memory cost in [machine.md](machine.md).

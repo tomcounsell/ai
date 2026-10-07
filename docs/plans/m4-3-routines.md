@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-3-routines
 type: plan
-status: merged (record in m4-3-routines-record.md, Merged; rollout held until Tom installs container on his Mac)
+status: merged and rolled out on Tom's Mac (record in m4-3-routines-record.md, Merged)
 critique_rounds: 1
 review_rounds: 1
 ---

@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: merged (record in m1-4c-verifier-records.md, Merged; rollout held until Tom installs container on his Mac)
+status: merged and rolled out on Tom's Mac (record in m1-4c-verifier-records.md, Merged); verify.ran of the first real task still to read
 critique_rounds: 2
 review_rounds: 2
 ---

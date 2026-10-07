@@ -408,3 +408,18 @@ The lead merged on 2026-10-06, fast-forwarding `valor-cori-rebuild` to 3610cce32
 **Rollout held on Tom's Mac (Decided by default).** Tom's Mac runs the kernel and has no `container`. Restarting its kernel onto this code would make every review fail with a `kernel` cause until the runtime is installed, and installing it takes Tom's admin password. So nothing on that Mac moves until Tom installs `container` (m1-4c-verifier.md, Rollout prerequisite): no kernel restart, no `migrate`, no routine plists. After he installs it, the lead runs both plans' Rollout steps in order: backup, restart, migrate, the two routine plists, a kickstart of the expiry routine. The lead records them here. Valor's Mac has `container`, and its kernel takes this code on its next pull and restart.
 
 **Follow-ups, not planned:** review N3 (tests for Done 4's evidence), N4 (two expiry firings at once can each start a sweep), N5 (a grant on a valor task started without `--project`), N7 (a preempt race leaves a row pair; a refused expiry start writes no `routine.ran failed`), the test check's breadth list, and the two unmarked `workspace.remove` tests.
+
+**Rollout on Tom's Mac (2026-10-07).** Tom installed `container` 1.5.0. The lead did the following:
+- Installed Rosetta, which was missing.
+- Ran `container system start`. The runtime's launchd services could not reach the network through Little Snitch, so the default kernel download and image pulls timed out. Tom added an allow rule for the runtime's services. The lead fetched the kernel archive with `curl`, checked its sha256 against the runtime's `digest`, and installed it with `container system kernel set --tar`. A test VM (alpine) then pulled and ran.
+- Backed up first: 196 events to `/Volumes//valor_temp/valor_rebuild-20261007T100257Z.dump`.
+- Ran `uv sync`.
+- Stopped the idle kernel by PID (55238; no turns running, nothing pending).
+- Ran `migrate`. The password file was kept and `pg_hba.conf` was unchanged.
+- Restarted `core serve` with the same environment and log (pid 62856).
+- Wrote both routine plists. `plutil -lint` reported them OK, then they were bootstrapped.
+- Kickstarted the expiry routine. It ran under launchd and reported `nothing_due` at $0.
+- `core routines` lists both routines.
+- Started the status page with `python -m ui` (pid 65224). It answers 200 at http://127.0.0.1:8790/.
+
+The bridge job `com.valor.kernel.local` still listens on 8711. Still to come is 1.4c part two Rollout step 5: the first real task after this rollout runs its review rerun in a VM, and the lead reads its `verify.ran` by hand once. The docs no longer say that Tom's Mac lacks `container`, and rebuild-handoff.md Setup names the Little Snitch rule and the kernel archive fetch.

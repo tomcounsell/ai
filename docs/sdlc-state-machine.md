@@ -367,7 +367,7 @@ asked, correctly, and adds no ungranted governance.
 `fresh.review_runner`, the blind verifier
 ([architecture.md](architecture.md)). The kernel first asks the governance
 boolean per hunk (use shape 6), then runs the suite and the lint itself at
-base and candidate, each in a fresh `container` VM with no network (`verify.ran`, on Valor's Mac, the one with `container`), then sets up a checkout of the candidate
+base and candidate, each in a fresh `container` VM with no network (`verify.ran`, on a Mac with `container` installed), then sets up a checkout of the candidate
 with fresh services and runs one fresh session there: the builder's Opus
 model, or an Opus-class model from another vendor through another harness,
 never a cheaper class. It reads the request, Tom's answers and feedback,
