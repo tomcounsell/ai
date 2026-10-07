@@ -97,7 +97,7 @@ another run's database" opening.
   `DROP DATABASE ... WITH (FORCE)` ends backends of roles it cannot
   otherwise signal: autovacuum's, one it created) and
   `pg_read_all_settings` (`SHOW data_directory`), and of no other
-  predefined role (task 234852e586f4, after 2026-10-07's red check).
+  predefined role.
 - **Ports.** Postgres from 5440 to 5599, Redis from 6400 to 6499: the
   lowest port not named by any task document whose task has no
   `workspace.removed` row, and not bound now, chosen under the
