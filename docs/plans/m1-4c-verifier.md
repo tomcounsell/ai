@@ -426,9 +426,6 @@ lock and image records of the session's own.
   not a failure finding, and the reviewer's `verify.json` says so.
 - This repository's suite in the VM: every `macos` test skips, the rest
   run with no failure or error, and the skipped count is on `verify.ran`.
-  On 2026-10-07 it did not: task 6fd4e0439ac1's `verify.ran` (ledger
-  event 842) had the base 5c11e496d failing 7 and erroring 63 in the VM.
-  `docs/plans/m1-4c-vm-suite.md` records each one's cause and fix.
 - `peak_mb` is positive and at most `memory_mb`, or null with the cgroup
   files absent.
 

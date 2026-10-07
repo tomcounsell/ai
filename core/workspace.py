@@ -62,7 +62,6 @@ import socket
 import stat
 import struct
 import subprocess
-import sys
 import threading
 import time
 import tomllib
@@ -2103,10 +2102,7 @@ def _cleared(name: str, dir_fd: int) -> os.stat_result:
     """Clear every user flag and remove the ACL of the entry `name` under
     `dir_fd` in one write that reads neither (the owner may always write
     both, and an ACL may deny reading them), never following a link; then
-    its `lstat`. Off macOS the owner has no such flag or ACL to clear, so it
-    is the `lstat` alone."""
-    if sys.platform != "darwin":
-        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    its `lstat`."""
     if _setattrlistat()(dir_fd, os.fsencode(name), _ATTRS, _CLEARED, len(_CLEARED), 1) != 0:
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err), name)

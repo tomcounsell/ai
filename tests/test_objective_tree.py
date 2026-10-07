@@ -416,7 +416,10 @@ def cli(tmp_path, *args) -> subprocess.CompletedProcess:
     )  # fmt: skip
 
 
-def test_start_parent_from_the_command_line_on_both_paths(dsn, tmp_path):
+# A refused `start --project` removes the workspace it provisioned, which
+# reaps with `ps -E` and clears with `setattrlistat`: macOS itself.
+@pytest.mark.parametrize("path", ["plain", pytest.param("project", marks=pytest.mark.macos)])
+def test_start_parent_from_the_command_line_on_both_paths(dsn, tmp_path, path):
     from tests.test_workspace import _spec_file
 
     parent = cli(tmp_path, "start", "a parent", "--ceiling", "read")
@@ -443,12 +446,14 @@ def test_start_parent_from_the_command_line_on_both_paths(dsn, tmp_path):
         "stopped": (["--parent", stopped], stopped),
         "calibration": (["--parent", cal], "calibration"),
     }
-    spec = _spec_file(tmp_path)
     for name, (flags, said) in refusals.items():
-        out = cli(tmp_path, "start", "a child", *flags)
-        assert out.returncode == 1 and out.stderr.startswith("start refused:") and said in out.stderr, name
-        assert "Traceback" not in out.stderr
-        made = cli(tmp_path, "start", "a child", "--project", str(spec), *flags)
+        if path == "plain":
+            out = cli(tmp_path, "start", "a child", *flags)
+            assert out.returncode == 1 and out.stderr.startswith("start refused:"), name
+            assert said in out.stderr, name
+            assert "Traceback" not in out.stderr
+            continue
+        made = cli(tmp_path, "start", "a child", "--project", str(_spec_file(tmp_path)), *flags)
         assert made.returncode == 1 and "start refused:" in made.stderr and said in made.stderr, name
         assert "Traceback" not in made.stderr
         work = tmp_path / "work"

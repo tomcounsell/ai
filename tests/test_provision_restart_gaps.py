@@ -2,6 +2,7 @@
 redone) that the 2.4b tests leave unexercised."""
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ def test_the_mark_ends_with_the_block_and_yields_to_extra_env(tmp_path):
     assert seen == ["provision-x", "explicit", os.environ.get(runs.TURN_ENV)]
 
 
+@pytest.mark.macos  # remove reaps with ps -E and clears with setattrlistat
 def test_remove_clears_a_dangling_link_at_the_root(tmp_path):
     """A link at the task's root pointing nowhere is cleared, and what it
     pointed at is not made."""
@@ -60,6 +62,7 @@ def test_remove_clears_a_dangling_link_at_the_root(tmp_path):
     assert not os.path.lexists(lay.root) and not (tmp_path / "nowhere").exists()
 
 
+@pytest.mark.macos  # remove reaps with ps -E and clears with setattrlistat
 def test_remove_of_a_missing_root_is_nothing_to_clear(tmp_path):
     task = ledger.new_id()
     kws.remove(task, kws.layout(task, tmp_path / "work"))
@@ -101,37 +104,6 @@ def test_remove_reaps_what_a_setup_command_left(tmp_path):
             p.wait()
 
 
-def test_reap_stops_the_process_whose_environment_carries_the_mark():
-    """Read with `ps -E` on macOS and from `/proc` elsewhere: a mark whose
-    id merely starts with the turn's, or no mark, is left running; a
-    process gone since, or another user's, carries none."""
-    turn = f"reap-{ledger.new_id()}"
-    env = {k: v for k, v in os.environ.items() if k != runs.TURN_ENV}
-
-    def sleeper(mark):
-        return subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(600)"],
-            env={**env, runs.TURN_ENV: mark} if mark else env,
-            start_new_session=True,
-        )
-
-    marked, longer, unmarked = sleeper(turn), sleeper(f"{turn}x"), sleeper(None)
-    gone = sleeper(turn)
-    gone.kill()
-    gone.wait()
-    try:
-        time.sleep(0.5)
-        assert [r["pid"] for r in runs.reap(turn)] == [marked.pid]
-        assert marked.wait(10) is not None
-        assert longer.poll() is None and unmarked.poll() is None
-        assert not runs._environ_marked(gone.pid, f"{runs.TURN_ENV}={turn}")
-        assert not runs._environ_marked(1, f"{runs.TURN_ENV}={turn}")
-    finally:
-        for p in (marked, longer, unmarked):
-            p.kill()
-            p.wait()
-
-
 async def _stop(dsn, task):
     async with await db.connect(dsn) as conn:
         await tasks.stop(conn, task, reason="test")
@@ -159,7 +131,7 @@ def test_workspace_remove_refuses_while_the_task_is_being_provisioned(dsn, tmp_p
         assert not [r for r in run(_rows(dsn, task)) if r["type"] == "workspace.removed"]
     finally:
         holder.close()
-        kws.rmtree(lay.root)
+        shutil.rmtree(lay.root)  # a tree of plain modes, written here
 
 
 def test_workspace_remove_of_a_task_with_no_directory_is_still_refused(dsn, tmp_path):

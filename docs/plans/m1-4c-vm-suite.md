@@ -18,10 +18,10 @@ bookworm arm64, `run.sh`'s environment, the source from `git archive`, no
 |---|---|---|
 | `test_email_*` (63 errors) | Dovecot isn't in the base image, so the `mail` fixture raises (`tests/mailserver.py:161`) | **Dovecot in the base image.** The email tests are plain IMAP/SMTP over loopback and need nothing of macOS, so they belong in the VM |
 | `test_mailserver::test_dovecot_does_not_outlive_a_pytest_process_that_was_killed` | Same cause. The child's `Dovecot.start()` raises, the child prints no pid, and `int(b"")` fails the test (`tests/test_mailserver.py:40`) | **Dovecot in the base image** |
-| `test_provision_restart_gaps::test_remove_of_a_missing_root_is_nothing_to_clear` | `workspace.remove` → `runs.reap` → `_turn_processes` runs `ps -A -E` (`core/runs.py:380`). `-E` (show environment) is BSD's; procps refuses it, and `check=True` raises | **Portable**: `_turn_processes` |
-| `test_provision_restart_gaps::test_remove_clears_a_dangling_link_at_the_root` | The `ps -E` cause above, then `rmtree` → `_cleared` calls `setattrlistat` through ctypes (`core/workspace.py:2104`), which glibc lacks | **Portable**: `_turn_processes` and `_cleared` |
-| `test_provision_restart_gaps::test_workspace_remove_refuses_while_the_task_is_being_provisioned` | Its `finally` calls `rmtree` (`tests/test_provision_restart_gaps.py:127`) → `setattrlistat` | **Portable**: `_cleared` |
-| `test_objective_tree::test_start_parent_from_the_command_line_on_both_paths` | A refused `start --project` calls `workspace.remove` (`core/__main__.py:428`), which hits both causes above. The CLI then prints a traceback, not `start refused:`, and leaves the task directory behind | **Portable**: `_turn_processes` and `_cleared` |
+| `test_provision_restart_gaps::test_remove_of_a_missing_root_is_nothing_to_clear` | `workspace.remove` → `runs.reap` → `_turn_processes` runs `ps -A -E` (`core/runs.py:380`). `-E` (show environment) is BSD's; procps refuses it, and `check=True` raises | **`macos`** (patch 1; see below) |
+| `test_provision_restart_gaps::test_remove_clears_a_dangling_link_at_the_root` | The `ps -E` cause above, then `rmtree` → `_cleared` calls `setattrlistat` through ctypes (`core/workspace.py:2104`), which glibc lacks | **`macos`** (patch 1) |
+| `test_provision_restart_gaps::test_workspace_remove_refuses_while_the_task_is_being_provisioned` | Its `finally` calls `rmtree` (`tests/test_provision_restart_gaps.py:127`) → `setattrlistat` | **Portable**: the test clears its plain tree with `shutil.rmtree` (patch 1) |
+| `test_objective_tree::test_start_parent_from_the_command_line_on_both_paths` | A refused `start --project` calls `workspace.remove` (`core/__main__.py:428`), which hits both causes above. The CLI then prints a traceback, not `start refused:`, and leaves the task directory behind | **Parametrized** (patch 1): the plain path runs everywhere, the `--project` path carries `macos` |
 | `test_ports::test_listen_draws_from_the_span` | The test's last part runs a probe under `sandbox-exec` (`tests/test_ports.py:91`). Everything before it is portable socket logic | **Split.** The span logic stays an unmarked test, and the sandbox probe moves to a test of its own marked `macos`, as the README asks for a parametrized test |
 | `test_expiry::test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge` | It drives the fresh and docs runners, and their `workspace.fetch_into_mirror` requires `sandbox-exec` (`core/workspace.py:1387`, from `core/fresh.py:575`). Every other test that drives those runners already carries `macos` (`tests/test_fresh.py`, `tests/test_docs_runner.py`) | **`macos`**: the fresh runner's sandbox is macOS itself |
 
@@ -37,14 +37,8 @@ bookworm arm64, `run.sh`'s environment, the source from `git archive`, no
    - Build: `--prefix=/usr/local`, with docs and optional backends off. Source and build tree are removed in the same layer.
    - `dovecot` installs to `/usr/local/sbin`, which `VM_PATH` lacks. It is linked into `/usr/local/bin`, the same way git's exec path is linked now, so `core/container.py` is unchanged.
    - The Containerfile's header comment names Dovecot and why it is built from source.
-2. **`core/runs.py::_turn_processes`, portable.**
-   - On Darwin, unchanged.
-   - Elsewhere: `ps -A -ww -o pid=,pgid=,uid=,command=` with no `-E`. A pid carries the mark when `/proc/<pid>/environ`, split on NUL, holds the entry `VALOR_TURN=<id>` exactly. An unreadable or vanished entry is skipped.
-   - `_sandbox_marked` already returns False off Darwin.
-3. **`core/workspace.py::_cleared`, portable.**
-   - On Darwin, unchanged.
-   - Elsewhere it returns the `lstat`. User flags and ACLs of that kind don't exist on Linux to clear, and `chattr +i` can't be cleared by the owner anyway.
-   - Its docstring says so.
+2. **`core/runs.py` and `core/workspace.py` unchanged** (patch 1). The build first made `_turn_processes` read `/proc/<pid>/environ` and `_cleared` plain `lstat` off Darwin. The review's VM run of that candidate was killed for memory: 4096 MB, peak 3810 MB at 263 s, against the base's 2013 MB in 130 s on the same image. No cause was found by reading, and no Linux was reachable to bisect. Those calls are `ps -E` and `setattrlistat`, which `tests/conftest.py` already counts as macOS itself, and the kernel runs only on the Macs. So the core change was dropped, and the tests that reach them carry `macos` (or are parametrized) instead.
+3. (dropped with 2)
 4. **Tests.** Split `test_listen_draws_from_the_span` and add `macos` to the expiry test, each with a one-line comment naming what needs macOS.
 5. **Docs.**
    - `tests/README.md`: the email tests run in the VM against the base image's Dovecot, and Dovecot comes from Homebrew on the Macs.
@@ -73,11 +67,8 @@ Critique may send the plan back once. The diagnosis is from reading, and the ima
   - The Darwin branches must leave every existing `runs`, `workspace`, `provision_restart_gaps`, and `objective_tree` test passing.
   - `test_ports`: the span test and the new `macos` sandbox-probe test both pass on the Mac.
   - Lint.
-- **New portable tests** (no `macos` mark), so the VM exercises the Linux branches:
-  - `runs.reap` of a mark finds and kills a process that carries `VALOR_TURN=<id>` in its environment, in a process group of its own. It leaves alone a sibling whose mark is `VALOR_TURN=<id>x` (a longer id with the same prefix) and one with no mark. Both platforms run it, through `-E` on Darwin and `/proc` elsewhere.
-  - `workspace.rmtree` clears a tree holding a 0o000 directory, a read-only file, and a dangling link, and leaves the link's target outside the tree untouched. If an existing test already covers this unmarked, it is reused rather than duplicated.
 - **In the VM (the review's own `verify.ran` on this branch).**
-  - Of the seven failures, the head run should pass five (the three `provision_restart_gaps` tests, the objective-tree CLI test, and the span half of `test_ports`) and skip two as `macos` (the expiry test and the new sandbox-probe test). The Dovecot kill test and the 63 email tests still error, as they do at base, until the kernel builds the new base image.
+  - Of the seven failures, the head run should pass three (`test_workspace_remove_refuses_while_the_task_is_being_provisioned`, the objective-tree test's `plain` parameter, and the span half of `test_ports`). It should skip as `macos` the two `remove` tests, the objective-tree `project` parameter, the expiry test, and the sandbox-probe test. The Dovecot kill test and the 63 email tests still error, as at base, until the kernel builds the new base image. If the head run is still killed for memory, the cause is not this diff, which then changes nothing that runs in the VM except those marks.
   - It runs on the kernel's own base image. `core/container.py` builds from the kernel's `core/images/base/`, never the candidate's. So the email tests and the Dovecot kill test still error at head, and they show as `failing_at_base`.
 - **Not verifiable in this job.**
   - The new base image, and the 63 email tests plus the kill test passing in it. The check profile denies `container`, and the review runs on the kernel's image.
