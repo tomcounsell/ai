@@ -1,6 +1,7 @@
 """`tests/denials.py`: a failure is put down to a denial only when it shows
 the denial's error and the denial is met here."""
 
+import psycopg
 import pytest
 
 from tests import denials
@@ -20,6 +21,47 @@ def test_a_failure_is_a_denial_only_where_the_denial_is_met(failure, probe):
     why = denials.reason(failure)
     assert (why is not None) == probe()
     assert denials.reason("AssertionError: assert 1 == 2") is None
+
+
+class _Cluster:
+    """A connection whose `SHOW data_directory` names `data`, or raises."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query):
+        if isinstance(self.data, Exception):
+            raise self.data
+        return self
+
+    def fetchone(self):
+        return (self.data,)
+
+
+@pytest.mark.parametrize(("data", "stat", "met"), [
+    ("/x/pg/data", PermissionError(1, "Operation not permitted"), True),
+    ("/x/pg/data", FileNotFoundError(2, "No such file or directory"), False),
+    ("/x/pg/data", None, False),
+    (psycopg.errors.InsufficientPrivilege('permission denied to examine "data_directory"'), None, False),
+])  # fmt: skip
+def test_the_cluster_data_denial_is_met_only_when_the_directory_itself_is_denied(
+    monkeypatch, data, stat, met
+):
+    """A role refused `data_directory` is the suite's own failure, never a skip."""
+
+    def fake_stat(path):
+        if stat is not None:
+            raise stat
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: _Cluster(data))
+    monkeypatch.setattr(denials.os, "stat", fake_stat)
+    assert denials._cluster_data() is met
 
 
 CONFTEST = """

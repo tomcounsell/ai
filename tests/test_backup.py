@@ -29,6 +29,7 @@ import pytest
 
 from core import backup, db, ledger, tasks
 from core.settings import settings
+from tests import denials
 from tests.conftest import TEST_DB
 
 pytestmark = [
@@ -234,6 +235,8 @@ def test_a_missing_backup_directory_fails_naming_it_and_writes_nothing(populated
 
 def test_a_backup_directory_on_the_clusters_own_disk_is_refused(populated, tmp_path):
     """`tmp_path` and the machine cluster's data share the boot disk."""
+    if denials.met(denials._cluster_data):
+        pytest.skip(denials.CLUSTER_DATA)
     with pytest.raises(backup.BackupError, match="same disk"):
         _dump(tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == [f".{TEST_DB}.lock"]

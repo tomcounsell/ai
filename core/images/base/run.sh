@@ -81,6 +81,7 @@ if jq -e '.services | index("postgres")' "$SPEC" >/dev/null; then
     create=""
     [ -n "$roles" ] && create=" CREATEROLE"
     echo "CREATE ROLE app LOGIN CREATEDB$create PASSWORD '$app_password';"
+    echo "GRANT pg_signal_backend, pg_read_all_settings TO app;"
     echo "CREATE DATABASE app OWNER app;"
     for r in $roles; do
       pw=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')

@@ -62,8 +62,30 @@ def _disks() -> bool:
     return "unable to use the DiskManagement framework" in out.stdout + out.stderr
 
 
+def _cluster_data() -> bool:
+    """Only a `PermissionError` on the data directory itself is met: a role
+    refused `data_directory`, or no server, is the suite's own failure."""
+    import psycopg
+
+    from core.settings import settings
+
+    try:
+        with psycopg.connect(settings.dsn(owner=True, database="postgres")) as conn:
+            data = conn.execute("SHOW data_directory").fetchone()[0]
+    except psycopg.Error:
+        return False
+    try:
+        os.stat(data)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 NESTED = "the sandbox the suite runs under denies applying a sandbox inside it"
 DISKS = "the sandbox the suite runs under denies DiskArbitration, so no disk image attaches"
+CLUSTER_DATA = "the sandbox the suite runs under denies the cluster's data directory"
 
 
 def _shows(pattern: str):
