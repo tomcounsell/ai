@@ -475,6 +475,85 @@ def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(ds
     assert "lib/handler.py" in instance["summary"] and "lib/util.py" in instance["summary"]
 
 
+def reworded(task=GOVERNANCE):
+    (q,) = task.questions
+    return dataclasses.replace(
+        task, questions=(dataclasses.replace(q, text=q.text + " Judge the hunk alone."),)
+    )
+
+
+def requests_for(sid, path) -> int:
+    def sent(r):
+        return r["body"]["state"] if r["leg"] == "jev" else json.loads(r["body"]["messages"][1]["content"])
+
+    return sum(1 for r in UP.seen(sid) if sent(r).get("path") == path)
+
+
+@pytest.mark.macos
+def test_a_reworded_governance_question_is_asked_fresh_then_reused(dsn, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        p = UP.port(script=sid)
+        old = await judgement_sites.governance(p, dsn, task, older, newer)
+        asked = len(UP.seen(sid))
+        monkeypatch.setattr(judgement_sites, "GOVERNANCE", reworded())
+        new = await judgement_sites.governance(p, dsn, task, older, newer)
+        asked_new = len(UP.seen(sid))
+        again = await judgement_sites.governance(p, dsn, task, older, newer)
+        answered = await rows(dsn, task, "judgement.answered")
+        return old, new, again, asked, asked_new, answered, p
+
+    old, new, again, asked, asked_new, answered, p = run(go())
+    assert len(new) == len(old) >= 3 and not set(new) & set(old)
+    assert asked_new - asked >= len(new)  # every hunk was sent again
+    assert again == new and len(UP.seen(sid)) == asked_new  # one question, reused with no call
+    digest = judgement.task_sha256(reworded(), p.signature())
+    by_id = {r["payload"]["judgement_id"]: r["payload"] for r in answered}
+    assert {by_id[j]["task_sha256"] for j in new} == {digest}
+    assert digest not in {by_id[j]["task_sha256"] for j in old}
+
+
+@pytest.mark.macos
+def test_reruns_spent_under_one_question_are_not_spent_under_a_reworded_one(dsn, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"fail_paths": ["lib/util.py"], "probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        p = UP.port(script=sid)
+        await judgement_sites.governance(p, dsn, task, older, newer)
+        spent = await judgement_sites.governance(p, dsn, task, older, newer)
+        before = requests_for(sid, "lib/util.py")
+        assert await judgement_sites.governance(p, dsn, task, older, newer) == spent
+        assert requests_for(sid, "lib/util.py") == before  # spent under the old question
+        monkeypatch.setattr(judgement_sites, "GOVERNANCE", reworded())
+        fresh = await judgement_sites.governance(p, dsn, task, older, newer)
+        assert requests_for(sid, "lib/util.py") > before
+        # One failure under the new question leaves a rerun, as for any question.
+        with pytest.raises(verdicts.VerdictRefused, match="governance unanswered"):
+            await review(dsn, task, "pass", fresh)
+        last = await judgement_sites.governance(p, dsn, task, older, newer)
+        await review(dsn, task, "pass", last)
+        util = next(h.id for h in judgement_sites.diff_hunks(ws, older, newer) if h.path == "lib/util.py")
+        return spent, fresh, util, (await rows(dsn, task, "review.decided"))[0]["payload"]
+
+    spent, fresh, util, decided = run(go())
+    assert not set(fresh) & set(spent)
+    assert decided["governance"]["unjudged_hunks"] == [util]
+
+
+def test_the_governance_question_excludes_correctness_code_and_descriptive_prose():
+    (q,) = GOVERNANCE.questions
+    for words in ("makes the work itself correct", "only describes what code does"):
+        assert words in q.text and words in q.labels["false"]
+    assert "judges work, a request, or an action" in q.text
+
+
 @pytest.mark.macos
 def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)

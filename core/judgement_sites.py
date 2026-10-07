@@ -275,8 +275,10 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
     """One governance judgement per hunk with added lines between `older`
     and `newer` (review: the base to the candidate; docs: the candidate to
     the docs head), all at once, writing through one shared connection. A
-    hunk with an answered row for the same id and the same input reuses
-    it; a hunk whose reruns are spent reuses its last failure. Every hunk
+    hunk with an answered row for the same id and the same input under the
+    same question (its `task_sha256`) reuses it; a hunk whose reruns under
+    that question are spent reuses its last failure. A reworded question is
+    asked fresh. Every hunk
     finishes, and its calls are charged, before a stop or other failure is
     raised. Returns the ids, one per hunk."""
 
@@ -290,6 +292,7 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
             and r["payload"].get("site") == GOVERNANCE.site
             and (r["payload"].get("ref") or {}).get("hunk", {}).get("id") == h.id
             and r["payload"].get("inputs_sha256") == digest
+            and r["payload"].get("task_sha256") == question
         ]
         settled = [r for r in mine if r["type"] == "judgement.answered" or r["payload"].get("too_large")]
         if settled:
@@ -300,6 +303,7 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
         j = await port.judge(GOVERNANCE, inputs, task_id=task_id, ref=ref, shared=shared)
         return j.judgement_id
 
+    question = judgement.task_sha256(GOVERNANCE, port.signature())
     async with await db.connect(dsn) as conn:
         rows = await ledger.read(conn, task_id)
         b = await tasks.brief(conn, task_id)
@@ -353,7 +357,13 @@ def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) 
             instances.append(h)
         else:
             spent = judgement.unanswered_count(
-                rows, GOVERNANCE.site, {"hunk": p["ref"]["hunk"], "inputs_sha256": p["inputs_sha256"]}
+                rows,
+                GOVERNANCE.site,
+                {
+                    "hunk": p["ref"]["hunk"],
+                    "inputs_sha256": p["inputs_sha256"],
+                    "task_sha256": p["task_sha256"],
+                },
             )
             if spent < UNANSWERED_RUNS:
                 raise Unanswered(

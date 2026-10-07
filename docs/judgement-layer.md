@@ -390,7 +390,9 @@ Notes per shape:
    provider calls overlap and the task's advisory lock already orders the
    rows), with the hunk's enclosing function as input. Each hunk at
    caution is an instance; a reviewer can add instances and cannot remove
-   one. A `true` with no grant is a refused merge: the broker refuses a flagged
+   one. A reviewer's note that contests an instance is an incident against
+   `governance.adds`, answered by a change to the classifier, never by a
+   grant. A `true` with no grant is a refused merge: the broker refuses a flagged
    action without a grant, and this judgement sets the flag from the diff.
    Its guard is the governance paragraph itself, so it carries no expiry.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task

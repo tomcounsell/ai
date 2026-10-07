@@ -580,14 +580,16 @@ def find(rows: list[dict], judgement_id: str) -> dict | None:
 
 def unanswered_count(rows: list[dict], site: str, key: Mapping[str, Any]) -> int:
     """How many failed judgements of `site` on these rows match `key` on
-    their `ref` and inputs (the reruns a site has already spent)."""
+    their `ref`, and on `inputs_sha256` and `task_sha256` where the key
+    names them (the reruns a site has already spent)."""
+    own = ("inputs_sha256", "task_sha256")
     n = 0
     for r in rows:
         if r["type"] != "judgement.failed" or r["payload"].get("site") != site:
             continue
         p = r["payload"]
-        if all((p.get("ref") or {}).get(k) == v for k, v in key.items() if k != "inputs_sha256") and (
-            "inputs_sha256" not in key or p.get("inputs_sha256") == key["inputs_sha256"]
+        if all((p.get("ref") or {}).get(k) == v for k, v in key.items() if k not in own) and all(
+            p.get(k) == key[k] for k in own if k in key
         ):
             n += 1
     return n

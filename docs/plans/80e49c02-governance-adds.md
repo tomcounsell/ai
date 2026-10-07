@@ -62,12 +62,13 @@ fixes stall behind one.
    (or a changed leg prompt or model, which the digest also covers) is asked
    fresh with its own reruns. The docstring's "the same input" becomes "the
    same input under the same question".
-   Left as is: `governance_outcome` counts spent reruns by hunk and inputs
-   only (`judgement.unanswered_count`). After a question change, old
-   failures count toward the new one's limit, so a hunk that failed twice
-   under the old question and once under the new becomes unjudged one run
-   early. It errs toward an instance, never past one; the builder confirms
-   this reading and names it in the delivery rather than widening the key.
+   `governance_outcome` counts spent reruns with `judgement.unanswered_count`,
+   which keyed on hunk and inputs only, so old failures counted toward a new
+   question's limit and a hunk became unjudged, a needless tap, one run
+   early. Built after critique: `unanswered_count` also matches
+   `task_sha256` when the key names it, beside `inputs_sha256`, and
+   `governance_outcome` passes the row's own. The breadth site's call does
+   not name it and is unchanged.
 
 4. **Note 6** (`docs/judgement-layer.md`, "The ten use shapes", item 6)
    gains one sentence after "a reviewer can add instances and cannot remove
@@ -89,7 +90,8 @@ In `tests/test_judgement_sites.py`, beside the existing governance tests:
   reuse still holds under one question).
 - **Spent reruns are per question.** A hunk that failed `UNANSWERED_RUNS`
   times under the old question is asked again under the new one, not
-  returned as its last failure.
+  returned as its last failure; one failure under the new question leaves
+  a rerun, and the second makes it unjudged.
 - **The wording.** One test asserts the question names what it excludes:
   the text contains "makes the work itself correct" and "only describes what
   code does", and the `false` label names both. This pins documented
@@ -131,4 +133,3 @@ base commit.
   extra work.
 - `CLAUDE.md`, the persona, and the README governance paragraphs are
   unchanged; the ruling refines the classifier's reading, not the rule.
-- Widening `unanswered_count` to key on the task digest.
