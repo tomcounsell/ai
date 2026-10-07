@@ -507,8 +507,10 @@ bridge performers.
 - A task started by message has `workspace=None`; its provision job
   writes `workspace.provisioned`, which `tasks.brief` lays over the
   Brief; a failure writes `workspace.failed` and a notice, retried only
-  on a later `message.steered`. It runs at ceiling `propose` on
-  `resolve_model("light")`.
+  on a later `message.steered`. It runs at ceiling `propose` on the
+  `frontier` seat, `resolve_seat("frontier")` (amended 2026-10-07, task
+  fc598a81afd9: it was `resolve_model("light")`, and task 814d4aa2403e,
+  on that seat, could not hold the SDLC).
 - The gateway's call holder is `run:<task>`; `spending.HOLDER` holds the
   same for judgement calls.
 - A declared performer is one with an `owner` and no `perform`.

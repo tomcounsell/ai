@@ -9,6 +9,7 @@ import pytest
 
 from core import broker, db, intake, ledger, machine, notices, serve, tasks
 from core.machine import State
+from core.settings import resolve_model, resolve_seat
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
 from tests.ports import listen
@@ -497,19 +498,26 @@ def test_start_rule(dsn, op, tmp_path, monkeypatch):
         monkeypatch.setitem(intake.VERIFY, "email", lambda inbound: True)
         with bridges.configure(operator_email=(OPERATOR_EMAIL, "boss@example.com")):
             mailed = await say(dsn, msg("by mail", channel="email", sender="boss@example.com", chat="t2"))
-        out = {}
+        out, seats = {}, {}
         async with await db.connect(dsn) as conn:
             for name, bound in (("project", project), ("elsewhere", elsewhere), ("mailed", mailed),
                                 ("unknown_reply", unknown_reply)):  # fmt: skip
-                out[name] = (bound["as"], (await tasks.brief(conn, bound["task_id"])).project)
-        return out, empty
+                brief = await tasks.brief(conn, bound["task_id"])
+                out[name] = (bound["as"], brief.project)
+                seats[name] = (brief.harness_name, brief.model)
+        return out, seats, empty
 
-    out, empty = run(go())
+    out, seats, empty = run(go())
     assert out["project"] == ("start", {"name": "toy"})
     assert out["mailed"] == ("start", {"name": "toy"})
     assert out["elsewhere"] == ("start", None)  # no valor spec in this projects directory
     assert out["unknown_reply"][0] == "start"
     assert empty["as"] == "none"
+    # Every start runs on the frontier seat, never the light one (task 814d4aa2403e, 2026-10-07).
+    for seat in seats.values():
+        assert seat == resolve_seat("frontier")
+        assert seat[1] != resolve_model("light")
+    assert len(seats) == 4
 
 
 def test_owns(op, tmp_path):
@@ -605,6 +613,7 @@ def test_files_alone_start_a_task(dsn, op, tmp_path):
     bound, brief = run(go())
     assert bound["as"] == "start"
     assert str(shot) in brief.instruction and "not downloaded: too large" in brief.instruction
+    assert (brief.harness_name, brief.model) == resolve_seat("frontier")
 
 
 def test_recorded_is_scoped_by_channel_and_chat(dsn, op):

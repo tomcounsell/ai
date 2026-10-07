@@ -262,7 +262,14 @@ model ids with their prices and the seats they fill (`core/settings.py`,
 `--harness` overrides the harness; the Brief records both. Status: **in use** for frontier, reviewer, light, and
 reviewer_openai; the judgement legs are pinned beside the seats.
 
-- **Frontier**: the newest model, for turns.
+- **Frontier**: the newest model, for turns. A task Tom starts from a
+  message runs on it (`core/intake.py`), the same seat a kernel task's
+  build lead runs on.
+- **Light**: Haiku, the default of `python -m core start --model`. Not
+  for a task that runs the SDLC from a message: on 2026-10-07 task
+  814d4aa2403e, started on it, wrote its plan under `.valor/`, which git
+  ignores, built during the plan stage, and looped on idle turns until it
+  was stopped.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
   frontier model itself in a fresh blind session, or an Opus-class model
   from another vendor through another harness. What a weaker judge loses is

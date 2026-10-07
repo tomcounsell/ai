@@ -53,7 +53,7 @@ from psycopg.types.json import Jsonb
 
 from core import ledger, machine, notices, session, tasks, workspace
 from core.machine import State
-from core.settings import resolve_model, settings
+from core.settings import resolve_seat, settings
 
 
 @dataclass(frozen=True)
@@ -487,9 +487,11 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
     if not text:
         return await _bound(conn, p, None, "none")
     spec = _project_for(p)
+    harness_name, model = resolve_seat("frontier")
     brief = tasks.Brief(
         instruction=text,
-        model=resolve_model("light"),
+        model=model,
+        harness_name=harness_name,
         project={"name": spec.name} if spec else None,
     )
     as_ = await _bound(conn, p, brief.id, "start")

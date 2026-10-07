@@ -314,7 +314,8 @@ floor is set from the calibration record and the attention log, not once.
 A task started from a message takes its effect ceiling
 from settings, never from the message text, which would let a classifier
 set authority, with every push or send still waiting for Tom's tap (Tom,
-2026-10-01).
+2026-10-01). It runs on the `frontier` seat, like any task that goes
+through the SDLC (`core/intake.py`, `_start`).
 
 A correction or exemplar is content, rendered into turns. It never widens a
 ceiling or grants governance. Those change only through
