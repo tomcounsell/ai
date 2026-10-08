@@ -15,6 +15,7 @@ import os
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -208,6 +209,17 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
             conn.execute("DROP DATABASE app_test")
             conn.execute("CREATE ROLE helper LOGIN")
             conn.execute("DROP ROLE helper")
+            # What the kernel's suite needs, and none of the roles that
+            # reach the server's files or run its programs. (`app` is also
+            # `pg_database_owner` here, implicitly, as the database's owner.)
+            assert conn.execute("SHOW data_directory").fetchone()[0] == str(lay.pg / "data")
+            wanted = ["pg_signal_backend", "pg_read_all_settings"]
+            server = ["pg_read_server_files", "pg_write_server_files", "pg_execute_server_program"]
+            held = conn.execute(
+                "SELECT r, pg_has_role('app', r, 'MEMBER') FROM unnest(%s::text[]) AS r",
+                ([*wanted, *server],),
+            ).fetchall()
+            assert dict(held) == {**dict.fromkeys(wanted, True), **dict.fromkeys(server, False)}
         with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user="valor_kernel",
                              password=passwords["valor_kernel"]) as conn:  # fmt: skip
             assert conn.execute("SELECT current_user").fetchone()[0] == "valor_kernel"
@@ -221,6 +233,80 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
         p["signal"] == "stopped" for p in stopped
     )  # Postgres stopped cleanly; nothing reaped
     assert postmaster in {p["pid"] for p in stopped}
+
+
+HOLDER = """
+import sys, psycopg
+conn = psycopg.connect(sys.argv[1], autocommit=True)
+print("held", flush=True)
+sys.stdin.readline()
+try:
+    conn.execute("SELECT 1")
+    print("alive")
+except psycopg.OperationalError:
+    print("ended")
+"""
+
+
+@pytest.mark.macos
+def test_the_app_role_force_drops_a_test_database_another_process_holds(tmp_path):
+    """The 2026-10-07 incident: a fixture's `DROP DATABASE ... WITH (FORCE)`
+    as `app` while another process holds a connection to the database as a
+    role `app` created, which `app` cannot signal without
+    `pg_signal_backend`. (An autovacuum worker, the other backend that comes
+    and goes, has no role; the same membership covers it.)"""
+    task, made = provision(tmp_path, services=["postgres"], roles=["valor_kernel"])
+    lay = kws.Layout(Path(made.mirror).parent)
+    port = made.project["ports"]["postgres"]
+    app_pw = next(
+        line.split(":")[4]
+        for line in (lay.home / "pgpass").read_text().splitlines()
+        if line.split(":")[3] == "app"
+    )
+    kws.start_services(task, lay, ["postgres"], {"postgres": port})
+    try:
+        with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user="app", password=app_pw,
+                             autocommit=True) as conn:  # fmt: skip
+            conn.execute("CREATE DATABASE app_test")
+            conn.execute("CREATE ROLE holder LOGIN PASSWORD 'held'")
+            holder = subprocess.Popen(
+                [sys.executable, "-c", HOLDER,
+                 f"host=127.0.0.1 port={port} dbname=app_test user=holder password=held"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            )  # fmt: skip
+            try:
+                assert holder.stdout.readline().strip() == "held"
+                conn.execute("DROP DATABASE IF EXISTS app_test WITH (FORCE)")
+                holder.stdin.write("\n")
+                holder.stdin.flush()
+                assert holder.stdout.readline().strip() == "ended"
+            finally:
+                holder.kill()
+                holder.wait()
+            assert conn.execute("SELECT 1 FROM pg_database WHERE datname = 'app_test'").fetchone() is None
+            conn.execute("DROP ROLE holder")
+    finally:
+        kws.stop_services(task, lay)
+
+
+@pytest.mark.macos
+def test_the_app_role_holds_the_grants_without_the_specs_roles(tmp_path):
+    """No `roles`, so no `CREATEROLE`: the grants are not the roles branch's."""
+    task, made = provision(tmp_path, services=["postgres"])
+    lay = kws.Layout(Path(made.mirror).parent)
+    port = made.project["ports"]["postgres"]
+    app_pw = (lay.home / "pgpass").read_text().split(":")[4].strip()
+    kws.start_services(task, lay, ["postgres"], {"postgres": port})
+    try:
+        with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user="app", password=app_pw) as conn:
+            got = conn.execute(
+                "SELECT pg_has_role('app', 'pg_signal_backend', 'USAGE'), "
+                "pg_has_role('app', 'pg_read_all_settings', 'USAGE'), rolcreaterole FROM pg_roles "
+                "WHERE rolname = 'app'"
+            ).fetchone()
+        assert got == (True, True, False)
+    finally:
+        kws.stop_services(task, lay)
 
 
 @pytest.mark.macos

@@ -203,12 +203,16 @@ def test_a_pg_hba_that_would_not_parse_is_put_back_and_never_loaded(fresh):
 
 
 # Reads `pg_authid` and the hba file as the machine cluster's owner, a
-# superuser on the Mac; the VM's owner role is not one.
+# superuser on the Mac; the VM's owner role is not one, nor is a task
+# workspace's `app`.
 @pytest.mark.macos
 def test_migrate_touches_no_credential_on_the_machine_cluster(dsn):
     """`db.migrate`, which every test session runs, leaves the machine
     cluster's role passwords, `pg_hba.conf`, and the password file as they
     were."""
+    with psycopg.connect(settings.dsn(owner=True, database="postgres")) as conn:
+        if not conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]:
+            pytest.skip("the cluster's owner role is not a superuser, so it cannot read pg_authid")
 
     def snapshot():
         with psycopg.connect(settings.dsn(owner=True, database="postgres"), autocommit=True) as conn:

@@ -1119,7 +1119,9 @@ def _service_run(lay: Layout, task_id: str, *argv: str) -> subprocess.CompletedP
 def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str, str]:
     """A cluster of the task's own with password auth on every login. The
     superuser password lives in a file only until the roles exist, then is
-    removed from the role and the file deleted."""
+    removed from the role and the file deleted. `app` is `CREATEDB` (and
+    `CREATEROLE` with the spec's roles) and a member of `pg_signal_backend`
+    and `pg_read_all_settings`, nothing more."""
     data = lay.pg / "data"
     lay.pg.mkdir(parents=True, exist_ok=True)
     super_pw = secrets.token_urlsafe(24)
@@ -1156,6 +1158,11 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
                     extra, sql.Literal(passwords["app"])
                 )
             )
+            # A test fixture's `DROP DATABASE ... WITH (FORCE)` ends the
+            # other backends on it (autovacuum's, a role `app` created), and
+            # the kernel's suite reads `data_directory`. Never the
+            # server-file or program roles: each reaches the server's files.
+            conn.execute("GRANT pg_signal_backend, pg_read_all_settings TO app")
             conn.execute("CREATE DATABASE app OWNER app")
             for r in spec.roles:
                 conn.execute(

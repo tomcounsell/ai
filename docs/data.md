@@ -487,7 +487,10 @@ different clusters, and a turn cannot reach the kernel's.
 - A workspace that needs Postgres gets a cluster of its own on another
   port, with password authentication on every login, a superuser password
   generated and discarded once the app's role exists, and an app role with
-  only what the app's tests need (`CREATEDB` for Django's test runner).
+  only what the app's tests need: `CREATEDB` for Django's test runner,
+  `pg_signal_backend` for a fixture's `DROP DATABASE ... WITH (FORCE)`,
+  and `pg_read_all_settings` for `SHOW data_directory`. Never the roles
+  that reach the server's files or run its programs.
   Each task the kernel provisions gets one of its own on a port from 5440
   to 5599 (replays included); the demonstration's ran on `127.0.0.1:5439`.
 - The turn's sandbox denies port 5432 and the machine socket, the password

@@ -93,6 +93,11 @@ another run's database" opening.
   `<task>/home/pgpass` (mode 600), the one credential the app is meant to
   have. When the spec lists roles, `app` also gets `CREATEROLE`, which on
   Postgres 18 manages only roles it created and grants no superuser.
+  `app` is also a member of `pg_signal_backend` (a test fixture's
+  `DROP DATABASE ... WITH (FORCE)` ends backends of roles it cannot
+  otherwise signal: autovacuum's, one it created) and
+  `pg_read_all_settings` (`SHOW data_directory`), and of no other
+  predefined role.
 - **Ports.** Postgres from 5440 to 5599, Redis from 6400 to 6499: the
   lowest port not named by any task document whose task has no
   `workspace.removed` row, and not bound now, chosen under the
