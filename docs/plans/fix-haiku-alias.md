@@ -50,7 +50,7 @@ which the gateway replaces with the kernel's credential.
 `tests/test_harness_contract.py`, `tests/test_emulator_metering.py`, and
 every test file touching `core/tasks.py` defaults or `claude_code.turn`
 (`test_session`, `test_credentials`, `test_judgement`, `test_persona`,
-`test_corrections`, `test_tasks`, `test_live_turn` skipped without
+`test_corrections`, `test_live_turn` skipped without
 `VALOR_LIVE`). A test asserts both builders default to the light seat's id
 and that `turn` carries the placeholder credential.
 
@@ -64,7 +64,7 @@ and that `turn` carries the placeholder credential.
 
 ## Build record
 
-- Branch `fix-haiku-alias`, fix commit on the plan commit `a59298a1b`.
+- Branch `fix-haiku-alias`, fix commit on the plan commit `8d3df77bf`.
   CLI on the machine: 2.1.294.
 - Cause of the `[turn]` failure: the CLI's result was "Failed to
   authenticate: OAuth session expired and could not be refreshed", before
