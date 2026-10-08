@@ -565,6 +565,8 @@ Suite, without `tests/test_container.py` and
 with 267 errors, all in thirteen files that ran while the disk was full
 ("No space left", `initdb`); those thirteen files run again alone: 370
 passed, 1 skipped. `tests/test_harness_contract.py`: the pi variants pass;
-the claude_code turns end `failed` on this Mac at base 0027e237f as at the
-head, and its stop test hangs, so it was run apart.
+the claude_code turns end `failed` at base 0027e237f as at the head, the
+known alias fault (the CLI maps `haiku` to `claude-haiku-5-5`, which has
+no price; fixed on `fix-haiku-alias`), and its stop test hangs, so it was
+run apart.
 Ruff: `ruff check .` and `ruff format --check .` pass.
