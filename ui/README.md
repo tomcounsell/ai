@@ -6,7 +6,8 @@ The read-only dashboard.
 
 - Views over `core/` read models: tasks, metered spending, the ledger, pending approvals, the attention log, and each routine with its last run and period spending.
 - What came after a task's merges: the index's counts (merges, feedback after, used, reworked by), and on the task page an After merge table (head, time, feedback, used marks, paths, later merges sharing code or only docs, revert and on-branch) and a Used list of deliveries marked with no merge.
-- `/audit`: the audit list and the verifier's calibration (`core/audit_sample.py`). The list is blind: no verdict, finding, forecast, or merge state, and no link to the task page, which shows the verdict. The scores measure the verifier's judgement of work quality; no figure there comes from governance instances, grants, or guards.
+- `/audit`: the audit list (`core/audit_sample.py`), as `python -m core audit` prints it, and nothing else. The list is blind: no verdict, finding, forecast, merge state, or score, and no link to the task page, which shows the verdict.
+- `/audit/scores`: the verifier's calibration, as `python -m core audit scores` prints it. It is its own page because a stratum's counts beside the list show how many listed candidates hold each verdict, and with one listed candidate, which verdict it holds. The scores measure the verifier's judgement of work quality; no figure there comes from governance instances, grants, or guards.
 - `python -m ui` serves `127.0.0.1:8790` (`VALOR_UI_PORT`), aiohttp, GET only; `ui/app.py` holds the pages.
 - Read-only. Approvals are given on the approval surface, not here.
 

@@ -183,8 +183,10 @@ def test_a_task_with_no_merge_and_no_mark_shows_none(dsn):
     assert "merges " not in row
 
 
-def test_the_audit_page_is_blind_escaped_get_only_and_shows_the_scores_audit_scores_prints(dsn):
+def test_the_audit_page_is_the_blind_list_only_and_the_scores_page_shows_audit_scores_escaped(dsn):
     from core import audit_sample
+
+    model = "<b>ui-audit-fixture</b>"
 
     async def go():
         async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
@@ -199,22 +201,28 @@ def test_the_audit_page_is_blind_escaped_get_only_and_shows_the_scores_audit_sco
                     "reviewer_verdict": "pass",
                     "predicted_failure": 0.37,
                     "findings": [{"kind": "review", "text": "AUDIT-PAGE-FINDING"}],
-                    "model": "ui-audit-fixture",
+                    "model": model,
                     "leg": "session",
                 },
             )
             before = await count(dsn)
             posted = await fetch(dsn, "/audit", "POST")
+            posted_scores = await fetch(dsn, "/audit/scores", "POST")
             after = await count(dsn)
             got = await fetch(dsn, "/audit")
+            got_scores = await fetch(dsn, "/audit/scores")
             scores = audit_sample.render_scores(await audit_sample.scores(conn))
-        return t, posted, before, after, got, scores
+        return t, posted, posted_scores, before, after, got, got_scores, scores
 
-    t, posted, before, after, (status, text), scores = run(go())
-    assert posted[0] == 405 and before == after
+    t, posted, posted_scores, before, after, (status, text), (s_status, s_text), scores = run(go())
+    assert posted[0] == posted_scores[0] == 405 and before == after
     assert status == 200 and HOSTILE not in text and "&lt;script&gt;" in text
     assert t in text and f"/task/{t}" not in text and "c" * 40 in text
-    assert "AUDIT-PAGE-FINDING" not in text.split("<h2>Scores</h2>")[0]
-    assert "0.37" not in text
-    assert ui_app.esc(scores) in text
-    assert '<a href="/audit">audit</a>' in text
+    assert "AUDIT-PAGE-FINDING" not in text and "0.37" not in text
+    # The list page carries no scores: no stratum counts, no model, no verdict.
+    assert "Strata" not in text and " N 1 n " not in text and "ui-audit-fixture" not in text
+    assert "pass" not in text.replace("pass|changes", "")
+    assert '<a href="/audit/scores">' in text
+    assert s_status == 200 and model not in s_text and "&lt;b&gt;ui-audit-fixture&lt;/b&gt;" in s_text
+    assert "Strata (verdict, w)" in scores and ui_app.esc(scores) in s_text
+    assert '<a href="/audit">audit</a>' in text and '<a href="/audit">audit</a>' in s_text

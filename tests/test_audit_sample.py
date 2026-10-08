@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -733,7 +734,13 @@ def test_labels_change_no_task_row_merge_effect_notice_or_review_brief(dsn, tmp_
     done_a, done_b = run(finish(a)), run(finish(b))
     rows_a, rows_b = run(read(a)), run(read(b))
     assert done_a.kind == done_b.kind == "done"
-    assert [r["type"] for r in rows_a] == [r["type"] for r in rows_b]
+    # The scripted governance judgements fan out at once, one per hunk, so
+    # their charge and answer rows interleave in any order: the rows match as
+    # a multiset, and in order once those two concurrent types are set aside.
+    concurrent = {"gateway.charged", "judgement.answered"}
+    types_a, types_b = [r["type"] for r in rows_a], [r["type"] for r in rows_b]
+    assert Counter(types_a) == Counter(types_b)
+    assert [x for x in types_a if x not in concurrent] == [x for x in types_b if x not in concurrent]
     fa, fb = machine.fold(rows_a), machine.fold(rows_b)
     assert fa.state is fb.state is State.MERGED
     assert fa.merge_effect["state"] == fb.merge_effect["state"] == "done"

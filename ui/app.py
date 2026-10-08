@@ -11,8 +11,9 @@ write a row.
     /pending           the effects held for Tom
     /attention         the attention log across tasks
     /routines          each routine: period spending, last run, runs
-    /audit             the audit list (blind: no verdict, no link to the
-                       task page, which shows it) and the verifier's scores
+    /audit             the audit list (blind: no verdict, no count by
+                       verdict, no link to the task page, which shows it)
+    /audit/scores      the verifier's scores
 """
 
 import html
@@ -262,9 +263,11 @@ async def routines_page(conn) -> web.Response:
 
 
 async def audit_page(conn) -> web.Response:
-    """The list as `python -m core audit` gives it, and the scores as
-    `audit scores` prints them. A task id here is text, not a link: the task
-    page shows the verdict."""
+    """The list as `python -m core audit` gives it, and nothing else. A task
+    id here is text, not a link: the task page shows the verdict. The scores
+    are on their own page, as `audit scores` is its own command: a stratum's
+    counts beside the list can show how many listed candidates hold each
+    verdict, and with one listed candidate, which verdict it holds."""
     found = await audit_sample.sample(conn)
     listing = (
         table(
@@ -283,12 +286,18 @@ async def audit_page(conn) -> web.Response:
         if found
         else f"<p>{esc(audit_sample.render_list(found))}</p>"
     )
-    scored = audit_sample.render_scores(await audit_sample.scores(conn))
     body = (
-        "<p>Label with <code>python -m core audit label TASK SHA pass|changes</code>.</p>"
-        f"{listing}<h2>Scores</h2><pre>{esc(scored)}</pre>"
+        "<p>Label with <code>python -m core audit label TASK SHA pass|changes</code>. "
+        'The verifier\'s scores are on <a href="/audit/scores">their own page</a>.</p>'
+        f"{listing}"
     )
     return layout("Audit", body)
+
+
+async def audit_scores_page(conn) -> web.Response:
+    """The scores as `python -m core audit scores` prints them."""
+    scored = audit_sample.render_scores(await audit_sample.scores(conn))
+    return layout("Audit scores", f"<pre>{esc(scored)}</pre>")
 
 
 def make_app(dsn: str | None = None) -> web.Application:
@@ -312,6 +321,7 @@ def make_app(dsn: str | None = None) -> web.Application:
         ("/attention", attention_page),
         ("/routines", routines_page),
         ("/audit", audit_page),
+        ("/audit/scores", audit_scores_page),
     ):
         app.router.add_get(path, view(page), allow_head=False)
     return app

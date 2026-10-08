@@ -187,11 +187,15 @@ Each item is a test on real Postgres in the default suite.
    computed verdict (a `governance_refused` from a reviewer's `pass` scores
    as `pass`). Labels from the merge outcomes (below) are scored apart under
    their own source and never pooled with human labels.
-6. **The status page.** `GET /audit` shows the list (as in 4, blind) and the
-   scores (as in 5), from the same functions the command line calls. The nav
-   gains "audit". Rows on the list do not link to `/task/ID`, which shows
-   the verdict. GET only, escaped, read-only session, like every page. The
-   page and the scores carry no figure from `governance.adds`, instances,
+6. **The status pages.** `GET /audit` shows the list (as in 4, blind) and
+   nothing else; `GET /audit/scores` shows the scores (as in 5), the same
+   split as `audit` and `audit scores` on the command line, from the same
+   functions. The scores sit apart because a stratum's `N` and `n` beside
+   the list show how many listed candidates hold each verdict, and with one
+   listed candidate, which verdict it holds. The nav gains "audit", and the
+   list links to the scores. Rows on the list do not link to `/task/ID`,
+   which shows the verdict. GET only, escaped, read-only session, like
+   every page. The pages carry no figure from `governance.adds`, instances,
    grants, or guards (see Governance).
 7. **Nothing holds or sends.** No path reads the scores or labels to hold,
    refuse, redirect, or reorder work, and nothing sends the list to Tom.
@@ -208,7 +212,7 @@ The module is `core/audit_sample.py` (not `audit`, which is the stop
 invariant's name, `core/tasks.py:830`): `record`, `labels`, `sample`,
 `scores`, and `render`. `core/__main__.py` gains the `audit` subcommand
 group in the shape of `merge-target` (`core/__main__.py:994-1006`).
-`ui/app.py` gains `audit_page`.
+`ui/app.py` gains `audit_page` and `audit_scores_page`.
 
 ## Threat model
 
@@ -370,7 +374,7 @@ it:
   None or empty, or `on_branch` false alone yields no label: no revert seen is not a `pass`.
 - `scores` computes every figure per source; `revert` figures print under
   their own heading with their own `n`, as `docs/judgement-layer.md:293-294`
-  counts a record's labels by origin. Only `scores` and `/audit` call it,
+  counts a record's labels by origin. Only `scores` and `/audit/scores` call it,
   so the git reads run only when asked.
 
 **Order.** Build starts now; item 8 and its tests are built on a rebase
@@ -455,7 +459,8 @@ which ask the scripted governance judgements one per hunk and pass
   task rows (ids aside), the same merge effect, and no notice for the audit
   stream.
 - `/audit` renders, escapes a hostile instruction, refuses POST with 405,
-  and its figures equal `audit scores`.
+  and carries no score or stratum count; `/audit/scores` refuses POST,
+  escapes a hostile model name, and its figures equal `audit scores`.
 
 Suites: `tests/test_audit_sample.py`, `tests/test_ui.py`,
 `tests/test_review.py`, `tests/test_corrections.py`, then the full suite;
@@ -557,9 +562,9 @@ What was built:
   value is an argparse choice; an unknown task and a candidate with no
   session review are refused in the command path before `record`, writing
   nothing.
-- `ui/app.py`: `GET /audit` and the nav entry; the scores block is
-  `render_scores`' text, so the page and `audit scores` print the same
-  figures. `ui/README.md` Scope and `core/README.md` carry the lines.
+- `ui/app.py`: `GET /audit` (the list only), `GET /audit/scores`, and
+  the nav entry; the scores page is `render_scores`' text, so it and
+  `audit scores` print the same figures. `ui/README.md` Scope and `core/README.md` carry the lines.
 - Tests: `tests/test_audit_sample.py` (24 tests, every case the Tests
   section names for items 1 to 7) and one page test in `tests/test_ui.py`.
 
@@ -647,3 +652,23 @@ other suites ran; the file passes alone. `tests/test_audit_sample.py`,
 `tests/test_ui.py`, `tests/test_outcomes.py`, and `tests/test_broker.py`:
 74 passed. Ruff check and format pass.
 
+### Patch round 1
+
+From the blind review (`review-3611`), both accepted by the lead:
+
+- The scores moved off `/audit` to `GET /audit/scores`. On one page with
+  the list, each `(verdict, w)` stratum's `N` and `n` showed how many
+  unlabelled candidates of a weight class hold each verdict, so with one
+  listed candidate (or a class all of one verdict) a verdict was readable
+  before Tom labelled it, which item 4 avoids. `/audit` is the list only and
+  links to the scores, as `audit` and `audit scores` split on the command
+  line. Item 6, the Tests section, `ui/README.md`, and the `ui/app.py`
+  docstring say so. The test in `tests/test_ui.py` asserts `/audit` has no
+  stratum count, model, or verdict, and `/audit/scores` escapes a hostile
+  model name and equals `render_scores`.
+- Item 7's end-to-end test compared the two runs' row types in order. The
+  scripted governance judgements fan out at once, so `gateway.charged` and
+  `judgement.answered` rows interleave differently from run to run (2 of 6
+  runs failed). It now compares the row types as a multiset and in order
+  with those two types set aside; the checks on state, the merge effect,
+  and the audit stream are unchanged. It passed 10 of 10 runs alone.
