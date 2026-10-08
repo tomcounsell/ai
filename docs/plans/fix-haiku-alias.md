@@ -2,7 +2,7 @@
 tracking: none
 slug: fix-haiku-alias
 type: build
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 1
 ---
@@ -81,3 +81,16 @@ and that `turn` carries the placeholder credential.
 - `tests/test_live_turn.py` with `VALOR_LIVE=1`: 3 passed through the
   gateway with `ClaudeLogin()` (about $0.04 real spend).
 - `ruff check` and `ruff format --check` on the changed Python files: clean.
+
+## Merged
+
+- Checks on `1ba5e411f`: test `pass` (head 1701 passed, 26 skipped, 2
+  failed: the known VM base failure in `tests/test_container.py` and a
+  busy-port flake in `test_provision_restart_gaps` that passes alone; base
+  fails 18 harness-contract tests and hangs on the stop-mid-call test),
+  review `pass` (governance no, no caps), docs `updated` (`a048ccb30`,
+  `docs/architecture.md`). Review notes folded in `01974a9f2`.
+- Rebased onto `327167d5e`; harness contract, emulator metering, and local
+  bridge tests 85 passed, 1 skipped on the rebased tip. Ruff clean.
+- Backup `valor_rebuild-20261008T100643Z.dump` before the merge; the kernel
+  restarted on the merged tip.
