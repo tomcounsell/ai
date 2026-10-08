@@ -1575,9 +1575,10 @@ def test_rmtree_removes_entries_of_any_mode_and_leaves_what_a_link_names(tmp_pat
     (tree / "out").symlink_to(outside)
     tree.chmod(0o500)
     kws.rmtree(tree)
-    assert not os.path.lexists(tree) and not (tmp_path / "nowhere").exists()
-    assert (outside / "f").read_text() == "kept" and outside.stat().st_mode & 0o777 == 0o500
+    mode = outside.stat().st_mode & 0o777
     outside.chmod(0o700)
+    assert not os.path.lexists(tree) and not (tmp_path / "nowhere").exists()
+    assert (outside / "f").read_text() == "kept" and mode == 0o500
 
 
 def _locked_by_a_turn(tmp_path: Path, script: str) -> Path:
