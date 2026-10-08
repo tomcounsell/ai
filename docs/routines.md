@@ -78,7 +78,10 @@ The two routines the kernel holds:
 - **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
   and, when something is due, starts one task on the `valor` project with
   the due list on its `task.started`. Nothing due starts no task and runs no
-  turn.
+  turn. An expiry firing holds the session lock `routine:expiry` from
+  before it registers or finds the objective until it has recorded
+  `routine.ran`, so a firing at the same moment waits, with no transaction
+  open, and then continues the open sweep.
 - **emulator** (Sunday 01:00, ceiling `act`): replays every item in
   `$VALOR_DEMO/items` in the `bare`, `clarify` and `routed` arms, each a
   child of the run, judged, and writes `$VALOR_DEMO/sweeps/<run>.json` with

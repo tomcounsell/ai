@@ -438,12 +438,39 @@ async def run(
     """`python -m core routine NAME`: load the toml, register the objective on
     the first run, and stop at once, writing nothing, when Tom stopped it
     (`restart` begins a fresh one). Otherwise the routine's runner starts or
-    continues the run, and `routine.ran` and the printed line record it."""
+    continues the run, and `routine.ran` and the printed line record it. An
+    expiry firing holds the session lock `routine:expiry` throughout, so two
+    firings at once start one sweep; the emulator's runner holds `run:<run>`
+    for its hours-long sweep instead, and a second firing says `already
+    running`."""
     r = load(name, directory)
     if r.runner not in runners:
         raise Refused(
             f"routine {name} names runner {r.runner!r}; the kernel has {', '.join(sorted(runners))}"
         )
+    if r.runner != EXPIRY_RUNNER:
+        return await _fire(conn, r, runners, restart=restart, now=now, start_project=start_project, dsn=dsn)
+    # A second expiry firing waits here, outside any transaction, until the
+    # first has recorded `routine.ran`, and then continues its open sweep.
+    key = f"routine:{r.name}"
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+    try:
+        return await _fire(conn, r, runners, restart=restart, now=now, start_project=start_project, dsn=dsn)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+
+async def _fire(
+    conn,
+    r: Routine,
+    runners: dict[str, Runner],
+    *,
+    restart: bool,
+    now: datetime | None,
+    start_project: Callable[..., Awaitable[str]] | None,
+    dsn: str | None,
+) -> str:
+    name = r.name
     objective, stopped = await ensure(conn, r, restart=restart)
     if stopped:
         return f"routine {name} is stopped (task {stopped}); --restart starts it again"
