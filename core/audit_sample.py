@@ -14,6 +14,13 @@ is real when its `role_played` is false, whatever `by` names; a stand-in's
 label is only counted. The latest real label on a candidate is the one in
 force; every row stays in the ledger.
 
+A merge that a later commit on its target reverts (`outcomes.revert`) labels
+the candidate it carried `changes`, under source `revert`. Those labels are
+read from git when the scores are asked for, never stored, and are scored
+apart from Tom's, never pooled: a builder can write a revert line, so they
+are their own evidence. No revert seen is not a `pass`, so a merge yields no
+other label.
+
 The verdicts scored are the session `review.decided` rows, the ones with a
 `reviewer_verdict` (a `kernel` or hand-recorded review has none). The
 reviewer's own answer is scored, never the verdict the kernel computed from
@@ -43,12 +50,13 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-from core import ledger, tasks
+from core import git, ledger, outcomes, tasks
 
 STREAM = "audit"
 LABELS = ("pass", "changes")
 WEIGHTS = {"merged": 4, "latest review pass": 2, "otherwise": 1}
 REAL = "tom"  # the source of every real label, whoever `by` names
+REVERT = "revert"  # a merge a later commit on its target reverted
 ASSUMPTION = (
     "The figures estimate every verdict in the ledger when the candidates are labelled in list "
     "order; skipping candidates by choice is a selection the weights cannot undo. The rates and "
@@ -99,10 +107,10 @@ async def record(
     return {"event_id": event_id, **payload}
 
 
-async def labels(conn) -> list[dict[str, Any]]:
-    """Every label, oldest first: `{task_id, candidate_sha, label, source,
-    provenance, event_id}`. `source` is `tom` for a real label and `stand-in`
-    for a role-played one."""
+async def recorded(conn) -> list[dict[str, Any]]:
+    """Every `audit.labelled` row, oldest first: `{task_id, candidate_sha,
+    label, source, provenance, event_id}`. `source` is `tom` for a real
+    label and `stand-in` for a role-played one."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, payload FROM events WHERE task_id = %s AND type = 'audit.labelled' ORDER BY id",
@@ -124,6 +132,61 @@ async def labels(conn) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+async def _merge_candidates(conn) -> dict[tuple[str, str], str]:
+    """The candidate each merge carried, by task and effect id: the held
+    row's `payload.candidate.sha`, not the merge head, which is the docs
+    head when docs committed."""
+    rows = await (
+        await conn.execute(
+            "SELECT task_id, payload->>'effect_id', payload->'payload'->'candidate'->>'sha' FROM events "
+            "WHERE type = 'effect.held' AND payload->>'action_type' = 'merge'"
+        )
+    ).fetchall()
+    return {(r[0], r[1]): r[2] for r in rows if r[2]}
+
+
+async def reverted(conn) -> list[dict[str, Any]]:
+    """A `changes` label, source `revert`, on the candidate of each done
+    merge whose `outcomes.revert` reading names a reverting commit. A merge
+    with no reading, a `reverted_by` None or empty, or off its branch alone
+    yields none. `event_id` is the merge's outcome row."""
+    candidates = await _merge_candidates(conn)
+    briefs: dict[str, tasks.Brief] = {}
+    out = []
+    for m in await outcomes.done_merges(conn):
+        sha = candidates.get((m["task_id"], m["effect_id"]))
+        if sha is None:
+            continue
+        if m["task_id"] not in briefs:
+            briefs[m["task_id"]] = await tasks.brief(conn, m["task_id"])
+        reading, _why = await git.threaded(outcomes.revert, briefs[m["task_id"]], m)
+        if not reading or not reading["reverted_by"]:
+            continue
+        first = reading["reverted_by"][0]
+        out.append(
+            {
+                "task_id": m["task_id"],
+                "candidate_sha": sha,
+                "label": "changes",
+                "source": REVERT,
+                "provenance": {
+                    "by": "git",
+                    "via": f"revert of {first['reverts'][0]}",
+                    "at": reading["as_of"],
+                    "role_played": False,
+                },
+                "event_id": m["event_id"],
+            }
+        )
+    return out
+
+
+async def labels(conn) -> list[dict[str, Any]]:
+    """Every label: the recorded rows (`recorded`), then the revert labels
+    (`reverted`), which read git."""
+    return await recorded(conn) + await reverted(conn)
 
 
 def in_force(found: list[dict[str, Any]], source: str = REAL) -> dict[tuple[str, str], dict[str, Any]]:
@@ -200,7 +263,7 @@ async def sample(conn) -> list[dict[str, Any]]:
     command that shows the work: no verdict, finding, forecast, or merge
     state."""
     candidates = _candidates(await _verdicts(conn), await _merged(conn))
-    done = in_force(await labels(conn))
+    done = in_force(await recorded(conn))
     ordered = sorted(
         (k for k in candidates if k not in done),
         key=lambda k: key(k[0], candidates[k]["first"], candidates[k]["w"]),
@@ -313,13 +376,14 @@ def figures(
 
 
 async def scores(conn) -> dict[str, Any]:
-    """The verifier's calibration per source and per model, with the list
-    weights, the count of stand-in labels, and the real labels in force per
+    """The verifier's calibration per source (`tom`, then `revert`) and
+    per model, with the list weights, the count of stand-in labels, and the real labels in force per
     `by`."""
     verdicts = await _verdicts(conn)
     candidates = _candidates(verdicts, await _merged(conn))
     found = await labels(conn)
     real = in_force(found)
+    revert = in_force(found, REVERT)
     by_model: dict[str, list] = defaultdict(list)
     for v in verdicts:
         by_model[v["model"]].append(v)
@@ -328,7 +392,10 @@ async def scores(conn) -> dict[str, Any]:
         "assumption": ASSUMPTION,
         "stand_in_labels": sum(1 for lab in found if lab["source"] == "stand-in"),
         "labels_by": dict(Counter(lab["provenance"].get("by") for lab in real.values())),
-        "sources": {REAL: {m: figures(vs, candidates, real) for m, vs in sorted(by_model.items())}},
+        "sources": {
+            source: {m: figures(vs, candidates, held) for m, vs in sorted(by_model.items())}
+            for source, held in ((REAL, real), (REVERT, revert))
+        },
     }
 
 

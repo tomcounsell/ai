@@ -543,13 +543,8 @@ a figure" is withdrawn.
 Built by `builder-3611` on branch `i3611-audit-sample`, from `i3611-plan`
 at 1cf124090, items 1 to 7 and their tests.
 
-**Item 8 is not built.** The outcome join with #3612 is built after a
-rebase onto #3612's merge, by the rule in "What this plan needs from
-#3612": its merged names are mapped to the per-merge revert reading, and
-with no such reading item 8 is dropped. `scores` already keys its figures
-by source (`sources["tom"]`), so revert labels land beside Tom's as a
-second source; `labels` gains the outcome rows then, and
-`tests/test_outcomes.py` is run on that rebase.
+Item 8 was built by `builder-3611b` after a rebase onto #3612's merge
+(7f1d2c300); see "Item 8" below.
 
 What was built:
 
@@ -598,3 +593,57 @@ and `test_ui`. `test_review` had 4 timeouts when rerun with them
 `tests/test_harness_contract.py`'s `claude_code` cases end `failed` and
 the stop case hangs; the same cases fail the same way at 1cf124090, and
 this diff touches no harness. Ruff check and format are clean.
+
+### Item 8
+
+Built by `builder-3611b` on the rebase onto 7f1d2c300. The `ui/app.py`
+conflict kept both: #3612's After merge table and index column, and
+`GET /audit`; `core/README.md`, `ui/README.md`, and `tests/test_ui.py` keep
+both sides too.
+
+The mapping. #3612 merged a per-merge revert reading:
+`outcomes.revert(brief, merge)` returns `on_branch`, `reverted_by` (each
+commit on the target after the head whose body says it reverts one of the
+merge's `landed.commits`; None when those are None), `as_of`, and `source`,
+or None with why. `outcomes.done_merges(conn)` gives every done merge with
+its `landed`. So item 8 is built as "The hand-off with #3612" says:
+
+- `audit_sample.reverted(conn)` reads `done_merges` once, the candidate of
+  each from its `effect.held` row (`payload.candidate.sha`, not the docs
+  head), each task's Brief once, and each merge's `revert` reading in a
+  worker thread (`git.threaded`). A merge whose `reverted_by` is not empty
+  gives label `changes`, source `revert`, provenance `{by: "git", via:
+  "revert of <the first reverted commit>", at: <the cache's as_of>,
+  role_played: false}`, ordered by the merge's outcome row id. Nothing is
+  stored.
+- `labels(conn)` is the recorded rows (`recorded`, the former `labels`)
+  then the revert labels. The list (`sample`) reads `recorded` only: it is
+  the list of candidates without Tom's label, and the `audit` command runs
+  no git.
+- `scores` has `sources["tom"]` and `sources["revert"]`, each per model;
+  `render_scores` prints a `## <model>, labels from revert` block apart.
+  A revert label lands on a merged candidate, so its figures sit in the
+  `w` 4 strata and the others print "not estimable" until labelled.
+  `labels_by` and the stand-in count stay Tom's.
+- Docs: `core/outcomes.py`'s docstring and `core/README.md` name the audit
+  scores as the third reader of revert readings;
+  `docs/sdlc-state-machine.md`'s "After a merge" says the same.
+
+Tests in `tests/test_audit_sample.py` (2 new; they reuse
+`tests/test_outcomes.py`'s `World` on real git): a reverted merge labels
+its candidate (not the docs head) `changes` under `revert`, scored apart
+(Tom's source has no verdict), printed apart, and the candidate stays on
+the list; a private target (`revert` None), no revert (`reverted_by`
+empty), unrecorded commits (`reverted_by` None), and a branch moved off
+the head (`on_branch` false) give no label. The governance-key test now
+walks every source.
+
+Suite at this head, without `tests/test_container.py` and
+`tests/test_harness_contract.py`: 1702 passed, 25 skipped, 5 failed. Three
+fail at base as the #3612 merge record lists (the fresh-session test in
+`tests/test_workspace.py`, two `tests/test_pi.py` cases). The two
+`tests/test_ports.py` failures found no four free ports in a row while
+other suites ran; the file passes alone. `tests/test_audit_sample.py`,
+`tests/test_ui.py`, `tests/test_outcomes.py`, and `tests/test_broker.py`:
+74 passed. Ruff check and format pass.
+

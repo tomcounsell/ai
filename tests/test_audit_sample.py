@@ -1,7 +1,8 @@
 """The audit sample on real Postgres: Tom's labels as rows on their own
 stream, what may be labelled, the blind weighted list, the stratified
-scores with their coverage, and that nothing holds, sends, or briefs a
-turn with any of it.
+scores with their coverage, the labels a reverted merge gives (on real git
+repositories laid out as `tests/test_outcomes.py` lays them), and that
+nothing holds, sends, or briefs a turn with any of it.
 
 The scoring fixtures write session `review.decided` rows (and a merge's
 held and done rows) straight into the ledger, since the scores read rows
@@ -23,9 +24,10 @@ from pathlib import Path
 
 import pytest
 
-from core import audit_sample, broker, db, ledger, machine, tasks
+from core import audit_sample, broker, db, ledger, machine, outcomes, tasks
 from core.machine import State
 from tests import scripted
+from tests import test_outcomes as to
 from tests.conftest import TEST_DB
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -557,12 +559,126 @@ def test_the_scores_carry_no_governance_figure(dsn):
                 yield from keys(v)
 
     found = {k for k in keys({k: v for k, v in s.items() if k != "sources"})} | {
-        k for f in s["sources"]["tom"].values() for k in keys(f)
+        k for models in s["sources"].values() for f in models.values() for k in keys(f)
     }
     text = audit_sample.render_scores(s).lower()
     for word in ("governance", "instance", "grant", "guard"):
         assert not any(word in k for k in found), word
         assert word not in text, word
+
+
+# -- merge outcomes as labels ---------------------------------------------------------------
+
+
+async def released(conn, w, b, candidate: str, head: str, *, landed: dict | None = None) -> str:
+    """A done merge of `candidate` landing `head` (a docs commit on top of
+    it), as the broker records one, with `landed` read from the mirror
+    unless given."""
+    w.land(b, head)
+    payload = {
+        "url": b.origin_url,
+        "target_branch": b.target_branch,
+        "head_sha": head,
+        "candidate": {"sha": candidate, "turn_id": "fixture-turn"},
+    }
+    if landed is None:
+        landed = await outcomes.landed(conn, b, await ledger.read(conn, b.id), payload)
+    effect_id = ledger.new_id()
+    await ledger.append(
+        conn, b.id, "effect.held", {"effect_id": effect_id, "action_type": "merge", "payload": payload}
+    )
+    await ledger.append(
+        conn, b.id, "effect.intent", {"effect_id": effect_id, "action_type": "merge", "landed": landed}
+    )
+    await ledger.append(conn, b.id, "effect.outcome", {"effect_id": effect_id, "kind": "done"})
+    return effect_id
+
+
+def reviewed_and_merged(dsn, w, b, m, **kw) -> tuple[str, str]:
+    """B's candidate reviewed `pass` by model `m` and merged with a docs
+    commit on top; returns the candidate and the head."""
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await tasks.start(conn, b)
+            w.branch("main")
+            candidate = to.commit(w.ws, "a.py", "a = 1\n")
+            head = to.commit(w.ws, "docs/a.md", "a\n")
+            await review(conn, b.id, candidate, "pass", m, pf=0.3)
+            await released(conn, w, b, candidate, head, **kw)
+            return candidate, head
+
+    return run(go())
+
+
+def scores_and_labels(dsn) -> tuple[dict, list]:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return await audit_sample.scores(conn), await audit_sample.labels(conn)
+
+    return run(go())
+
+
+def test_a_reverted_merge_labels_its_candidate_changes_under_source_revert(dsn, tmp_path):
+    w, m = to.World(tmp_path), model_name()
+    b = w.brief()
+    candidate, head = reviewed_and_merged(dsn, w, b, m)
+    r = to.on_target(w, f"Revert a\n\nThis reverts commit {candidate}.\n")
+    s, found = scores_and_labels(dsn)
+    (lab,) = [x for x in found if x["task_id"] == b.id]
+    assert lab["candidate_sha"] == candidate != head
+    assert lab["label"] == "changes" and lab["source"] == audit_sample.REVERT
+    assert lab["provenance"]["by"] == "git" and lab["provenance"]["role_played"] is False
+    assert lab["provenance"]["via"] == f"revert of {candidate}" and r != candidate
+    f = s["sources"]["revert"][m]
+    assert f["verdicts"] == 1 and f["confusion"]["pass/changes"] == 1
+    assert f["false_accept"]["value"] == 1.0 and f["false_accept"]["n"] == 1
+    assert s["sources"]["tom"][m]["verdicts"] == 0 and m not in str(s["labels_by"])
+    assert f"## {m}, labels from revert" in audit_sample.render_scores(s)
+    # the list is Tom's: a revert label leaves the candidate on it
+    listed = run(_listed(dsn))
+    assert (b.id, candidate) in listed
+
+
+async def _listed(dsn) -> set:
+    async with await db.connect(dsn) as conn:
+        return {(c["task_id"], c["sha"]) for c in await audit_sample.sample(conn)}
+
+
+def test_no_revert_seen_gives_no_label(dsn, tmp_path):
+    """No reading (a task on its own origin), a `reverted_by` that is empty
+    (no revert on the target), one that is None (no recorded commits), and
+    a branch moved off the head with no revert each yield no label."""
+    w = to.World(tmp_path)
+    private, plain, unrecorded, moved = (
+        w.brief(private=True), w.brief(), w.brief(), w.brief()
+    )  # fmt: skip
+    m = model_name()
+    for b in (private, plain):
+        reviewed_and_merged(dsn, w, b, m)
+    reviewed_and_merged(
+        dsn, w, unrecorded, m, landed={"before": w.base, "commits": None, "paths": None, "why": "GitError"}
+    )
+    reviewed_and_merged(dsn, w, moved, m)
+    w.fetch()
+    to.sh(w.ws, "push", "-q", "-f", str(w.up), f"{w.base}:refs/heads/main")
+    w.fetch()
+
+    async def readings():
+        async with await db.connect(dsn) as conn:
+            out = {}
+            for b in (private, plain, unrecorded, moved):
+                (mm,) = outcomes.merges(await ledger.read(conn, b.id))
+                out[b.id] = outcomes.revert(b, mm)
+            return out
+
+    got = run(readings())
+    assert got[private.id] == (None, outcomes.PRIVATE_TARGET)
+    assert got[unrecorded.id][0]["reverted_by"] is None
+    assert got[moved.id][0]["on_branch"] is False and got[moved.id][0]["reverted_by"] == []
+    s, found = scores_and_labels(dsn)
+    assert not [x for x in found if x["task_id"] in {private.id, plain.id, unrecorded.id, moved.id}]
+    assert s["sources"]["revert"][m]["verdicts"] == 0
 
 
 # -- nothing holds, sends, or briefs ---------------------------------------------------------

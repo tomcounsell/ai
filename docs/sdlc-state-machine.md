@@ -563,8 +563,9 @@ After a merge, `python -m core status` reads what came after it
 delivery, the `delivery.used` marks, the later merges of other tasks to the
 same url and branch that changed the same paths, and whether the head is
 still on its branch and which later commits revert it, read from the
-kernel's cache of the target as last fetched. None of it moves the fold or
-decides anything.
+kernel's cache of the target as last fetched. The audit scores read a
+revert as a `changes` label on the merged candidate. None of it moves the
+fold or decides anything.
 
 **Why.** Mission items 1 and 6; `act` needs Tom per action [11]. Delivery
 1 of the demonstration left out the decision that mattered most
