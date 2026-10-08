@@ -25,7 +25,9 @@ since it does not keep a session; the kernel connects directly.
 task settles. Each step builds the task's performers from its Brief, with
 the factory the composition root passes in (a task started by message is
 provisioned after it starts, so its Brief grows); every runner gets them in
-its `Context`, and the merge and its reconcile use them.
+its `Context`, and the merge and its reconcile use them. A step whose
+runner returns `failed`, or raises, writes `step.failed` before it returns
+or the error goes on, so a stalled task's record says why.
 
 A task's services (its Postgres, its Redis) are held under the session lock
 `services:<task>` while up, on the services handle's own connection. `run`
@@ -34,6 +36,8 @@ never stops services the kernel keeps between steps.
 """
 
 import asyncio
+import sys
+import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,8 +137,25 @@ async def step(
             async with await db.connect(dsn) as conn:
                 built = performers(await tasks.brief(conn, task_id))
         held = spending.HOLDER.set(key)
+        ran: dict[str, Any] = {}
         try:
-            return await _once(gateway, task_id, runners, dsn, alive, services, built)
+            try:
+                out = await _once(gateway, task_id, runners, dsn, alive, services, built, ran)
+            except Exception as exc:
+                reason = "".join(traceback.format_exception_only(exc)).strip()
+                try:
+                    await _failed(dsn, task_id, alive, ran, reason, None)
+                except Exception as written:  # noqa: BLE001  the step's own failure is the one raised
+                    _log(f"task {task_id}: step.failed not written: {written!r}")
+                raise
+            if out.get("status") != "failed":
+                return out
+            turn = out.get("turn") or {}
+            got = await _failed(dsn, task_id, alive, ran, _reason(turn), turn.get("turn_id"))
+            if got is not None:
+                return {"status": got} if got == "lock lost" else out
+            async with await db.connect(dsn) as conn:
+                return {**out, "state": await tasks.status(conn, task_id)}
         finally:
             spending.HOLDER.reset(held)
             if own:
@@ -142,6 +163,40 @@ async def step(
                 await services.close()
     finally:
         await holder.close()
+
+
+def _log(text: str) -> None:
+    print(text, file=sys.stderr, flush=True)
+
+
+def _reason(turn: dict[str, Any]) -> str:
+    """A failed step's reason as text: the runner's own, or, for a turn that
+    did not finish, its outcome and what the harness said."""
+    result = turn.get("result")
+    if isinstance(result, str):
+        return result
+    said = (result or {}).get("text") or (result or {}).get("error")
+    return f"the turn ended {turn.get('outcome')}" + (f": {said}" if said else "")
+
+
+async def _failed(
+    dsn: str, task_id: str, alive, ran: dict[str, Any], reason: str, turn_id: str | None
+) -> str | None:
+    """Write `step.failed`, as a runner writes its rows: only while the run
+    holds its lock, and never beside a stop. Returns `lock lost` or
+    `stopped` when it wrote nothing, else None."""
+    if not await alive():
+        return "lock lost"
+    payload = {"state": ran.get("state"), "check": ran.get("check"), "reason": reason, "turn_id": turn_id}
+    async with await db.connect(dsn) as conn, conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        if await tasks.is_stopped(conn, task_id):
+            return "stopped"
+        why = await ledger.unstorable(conn, payload)
+        if why is not None:
+            payload["reason"] = f"the reason: {ledger.UNSTORABLE}: {why}"
+        await ledger.append(conn, task_id, "step.failed", payload)
+    return None
 
 
 class _Services:
@@ -278,8 +333,16 @@ class _Services:
 
 
 async def _once(
-    gateway, task_id, runners, dsn, alive, services: _Services, performers: broker.Performers
+    gateway,
+    task_id,
+    runners,
+    dsn,
+    alive,
+    services: _Services,
+    performers: broker.Performers,
+    ran: dict[str, Any],
 ) -> dict[str, Any]:
+    """`ran` gets the state stepped and the check run, for `step.failed`."""
     if not await alive():
         return {"status": "lock lost"}
     async with await db.connect(dsn) as conn:
@@ -297,6 +360,7 @@ async def _once(
                 return {"status": "moved"}
             await verdicts.ensure_merge(conn, performers, task_id)
             return {"status": "delivered", "state": await tasks.status(conn, task_id)}
+    ran["state"] = f.state.value
     ctx = Context(gateway, task_id, dsn, alive, performers=performers)
     if runners.get(f.state) is not None or (
         f.state is State.CHECKS and any(c in runners for c in Check if c not in f.checks)
@@ -312,6 +376,7 @@ async def _once(
         missing = [c for c in Check if c not in f.checks]
         for check in missing:
             if check in runners:
+                ran["check"] = check.value
                 return await runners[check](Context(gateway, task_id, dsn, alive, check, performers))
         async with await db.connect(dsn) as conn:
             return {

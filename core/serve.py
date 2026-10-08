@@ -74,15 +74,7 @@ from core.settings import settings
 
 HARNESS = {State.CLARIFY, State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 AT_ONCE = {State.JUDGE, State.MERGE}
-# Rows the kernel writes beside a task without anything having happened to it.
-QUIET = (
-    "notice.requested",
-    "notice.sent",
-    "notice.undeliverable",
-    "gateway.opened",
-    "gateway.refused",
-    "gateway.charged",
-)
+QUIET = ledger.QUIET
 LABEL = "com.valor.kernel"
 ROOT = Path(__file__).resolve().parent.parent
 

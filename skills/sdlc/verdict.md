@@ -8,7 +8,7 @@ question here.
 
 Your verdict is one JSON object. Critique and docs end the turn by writing
 it to one file, `.valor/verdict.json`; review ends the turn with the object
-as its final message and nothing else (`review.md`). The object holds:
+at the end of its final message, bare or in a fenced block (`review.md`). The object holds:
 
 - `verdict`: one of the verdicts your stage names below;
 - `findings`: a list of `{"kind": "...", "text": "..."}`, every finding

@@ -321,7 +321,9 @@ Effects beyond the workspace are requests to the broker.
   and what made any signal not count. The run ends only when a turn leaves
   the state, fails, the task is stopped, or the run loses its lock.
 - `failed`: the harness reported an error or the turn did not finish. The
-  run returns; the next run retries from the ledger.
+  step writes `step.failed` (the state, the check, the reason, the turn)
+  and the run returns; the task waits for a row it did not write (a steer,
+  an answer) or the next run, which retries from the ledger.
 
 **Ledgered.** `turn.started`, every gateway opening and charge,
 `turn.ended` (with the harness session id), `turn.collected`, effect rows.
@@ -337,7 +339,8 @@ None reads another's output, so none waits on another and the order they
 finish in changes nothing. Each ends with one verdict row keyed by the
 candidate: `test.decided`, `review.decided`, `docs.decided`. A branch whose
 turn fails or is stopped leaves no verdict, and the next run starts that
-branch again, and only that one.
+branch again, and only that one; a failure also leaves `step.failed`
+naming the branch and why.
 
 **Stale verdicts.** A branch's verdict is its latest row keyed by the
 current candidate, the one on the latest `candidate` verdict. A row keyed by
@@ -373,8 +376,9 @@ model, or an Opus-class model from another vendor through another harness,
 never a cheaper class. It reads the request, Tom's answers and feedback,
 the plan, the diff, the kernel's run, and the instances, never the
 executor's narration, reruns any test itself, and answers `pass` or
-`changes` as its final message, which the kernel reads from the turn's
-result, not from a file in the checkout; it adds instances, never removes one, and a line it names in a
+`changes` as its final message (the object bare, or the fenced block that
+ends the message, prose before it ignored), which the kernel reads from
+the turn's result, not from a file in the checkout; it adds instances, never removes one, and a line it names in a
 flagged hunk merges into it. Both legs failing leaves no verdict; after two
 such runs the unjudged hunks become one instance. The kernel computes the
 recorded verdict: a `pass` with an ungranted instance is

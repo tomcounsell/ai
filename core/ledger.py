@@ -41,6 +41,16 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+# Rows the kernel writes beside a task without anything having happened to it.
+QUIET = (
+    "notice.requested",
+    "notice.sent",
+    "notice.undeliverable",
+    "gateway.opened",
+    "gateway.refused",
+    "gateway.charged",
+)
+
 DATA_REFUSED = ("22", "54")  # SQLSTATE classes: data exception, program limit exceeded
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store it"
 

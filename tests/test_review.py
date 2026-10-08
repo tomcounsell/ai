@@ -394,12 +394,19 @@ def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can
         ),
         ('```python``` is what I ran.\n\n```json\n{"verdict": "pass"}\n```', {"verdict": "pass"}),
         ("Ran it.\n\n```sh\npytest -q\n```", None),
+        (
+            'It quotes code.\n```json\n{"verdict": "changes", "findings": [{"text": "```py\\nx = 1\\n``` is dead"}]}\n```',
+            {"verdict": "changes", "findings": [{"text": "```py\nx = 1\n``` is dead"}]},
+        ),
         ("All good, passing it.", None),
         ('["pass"]', None),
         (None, None),
     ],
 )
 def test_the_final_message_is_the_verdict_object(text, verdict):
+    """Bare, or the fenced block that ends the message, prose before it
+    ignored; fences are lines, so a ``` quoted inside a JSON string does not
+    end the block; only the last block is read."""
     data, why = fresh.final_verdict(text)
     assert data == verdict and (why is None) == (verdict is not None)
 
@@ -408,6 +415,57 @@ def test_a_real_final_message_of_prose_then_a_fenced_verdict_is_read():
     text = (Path(__file__).parent / "fixtures" / "review_final_message.txt").read_text()
     data, why = fresh.final_verdict(text)
     assert why is None and data["verdict"] == "changes" and len(data["findings"]) == 6
+
+
+async def _review_step(dsn, tmp_path, **cfg):
+    sid = UP.script(default={"probs": NO})
+    task, _b, ws = await at_review(dsn, tmp_path, writes={"lib/a.py": "A = 1\n"})
+    steer(ws, **cfg)
+    gateway = Gateway(dsn)
+    await gateway.start(port=listen())
+    try:
+        out = await router.step(gateway, task, {Check.REVIEW: review_runner(ws, UP.port(script=sid))}, dsn)
+    finally:
+        await gateway.close()
+    async with await db.connect(dsn) as conn:
+        state = await tasks.status(conn, task)
+    return task, out, state, await rows(dsn, task)
+
+
+@pytest.mark.macos
+@pytest.mark.container
+def test_a_fenced_verdict_after_prose_is_recorded(dsn, tmp_path):
+    text = 'I reran the tests; the change is right.\n\n```json\n{"verdict": "pass", "findings": []}\n```'
+    _task, _out, state, got = run(_review_step(dsn, tmp_path, review_text=text))
+    (decided,) = reviews(got)
+    assert decided["reviewer_verdict"] == "pass"
+    assert state["failed_step"] is None and not [r for r in got if r["type"] == "step.failed"]
+
+
+@pytest.mark.macos
+@pytest.mark.container
+@pytest.mark.parametrize(
+    ("cfg", "reason"),
+    [
+        ({"review_text": "Looked it over; it passes."}, "no verdict: the final message is not a JSON object"),
+        ({"review_error": True}, "the turn ended done"),
+    ],
+)
+def test_a_review_with_no_verdict_writes_step_failed_and_the_status_shows_it(dsn, tmp_path, cfg, reason):
+    """Incident (a): a review turn whose final message is no verdict, or
+    whose harness reports an error, writes `step.failed` naming the check,
+    the reason as text, and the turn, and the task's status shows it."""
+    _task, out, state, got = run(_review_step(dsn, tmp_path, **cfg))
+    (turn,) = review_turns(got)
+    (row,) = [r["payload"] for r in got if r["type"] == "step.failed"]
+    assert out["status"] == "failed" and reviews(got) == []
+    assert row["state"] == "checks" and row["check"] == "review"
+    assert isinstance(row["reason"], str) and row["reason"].startswith(reason)
+    assert row["turn_id"] == turn["payload"]["turn_id"]
+    assert (
+        state["failed_step"]["reason"] == row["reason"]
+        and out["state"]["failed_step"] == state["failed_step"]
+    )
 
 
 @pytest.mark.macos

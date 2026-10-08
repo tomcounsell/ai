@@ -290,7 +290,12 @@ def _status_line(task_id: str, out: dict) -> str:
         "already running": "another run of this task is in progress",
         "lock lost": "the run's lock connection died; run again",
         "failed": f"the turn failed: {turn.get('result')}"
-        + (f"; its stderr is in {turn['stderr']}" if turn.get("stderr") else ""),
+        + (f"; its stderr is in {turn['stderr']}" if turn.get("stderr") else "")
+        + (
+            f"; recorded as step.failed, row {state['failed_step']['row']}"
+            if state.get("failed_step")
+            else ""
+        ),
     }[status]
     return f"{status.upper()} (task {task_id}; {spent}): {detail}"
 

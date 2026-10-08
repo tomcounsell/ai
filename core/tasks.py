@@ -695,8 +695,9 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     provenance it was recorded with (see `provenance`). `attention_counts`
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet
-    answered is listed and not counted. `delivered` is the latest
-    delivery's summary.
+    answered is listed and not counted. `failed_step` is the `step.failed`
+    the task waits on, or None. `delivered` is the latest delivery's
+    summary.
 
     The tree: `parent_id`, `fenced_by` (the nearest stopped node on the
     path to the root, or None), `children` (`reports`), and the subtree's
@@ -712,6 +713,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         "effects": effects,
         "attention": attention,
         "attention_counts": _counts(attention),
+        "failed_step": failed_step(rows),
         "delivered": (f.delivery or {}).get("summary"),
         "delivery": f.delivery,
         "parent_id": next(iter(await ancestors(conn, task_id)), None),
@@ -719,6 +721,15 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         "children": await reports(conn, task_id),
         **{k: v for k, v in (await tree_spending(conn, task_id)).items() if k != "charges"},
     }
+
+
+def failed_step(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The `step.failed` the task waits on: its payload, row id and time,
+    while it is the latest row but for notices and gateway rows; else None."""
+    last = next((r for r in reversed(rows) if r["type"] not in ledger.QUIET), None)
+    if last is None or last["type"] != "step.failed":
+        return None
+    return {**last["payload"], "row": last["id"], "at": str(last.get("at"))}
 
 
 def _digest(rows: list[dict[str, Any]]) -> tuple[dict[str, str | None], dict[str, str], list[dict[str, Any]]]:

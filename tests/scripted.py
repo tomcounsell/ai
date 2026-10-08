@@ -438,9 +438,11 @@ elif act == "review":
         import time
         while not (v / "verdict.json").exists():
             time.sleep(0.01)
-    # The reviewer's verdict is its final message.
-    result = json.dumps(cfg.get("review_verdict") or {"verdict": "pass", "findings": []})
-print(json.dumps({"result": result, "session_id": "00000000-0000-4000-8000-0000000000f1", "is_error": False}))
+    # The reviewer's verdict is its final message; `review_text` is the
+    # message as written, and `review_error` a harness that reports an error.
+    result = cfg.get("review_text") or json.dumps(cfg.get("review_verdict") or {"verdict": "pass", "findings": []})
+print(json.dumps({"result": result, "session_id": "00000000-0000-4000-8000-0000000000f1",
+                  "is_error": bool(act == "review" and cfg.get("review_error"))}))
 """
 
 

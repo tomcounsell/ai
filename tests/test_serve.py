@@ -1155,6 +1155,35 @@ def test_a_row_written_during_a_step_steps_it_again(fresh, op):
     assert run(go()) == (1, 2, 3)
 
 
+def test_a_failed_step_waits_for_a_row_it_did_not_write(fresh, op):
+    """A failed step writes `step.failed`, its own row: the next ticks, a
+    `serve_tick_s` wake among them, do not step the task; a steer does."""
+    calls = []
+
+    async def failing(ctx):
+        calls.append(ctx.task_id)
+        return {"status": "failed", "turn": {"result": "no verdict: x"}}
+
+    async def go():
+        task = await new_task(fresh)
+        kernel = only(serve.Kernel(None, {State.JUDGE: failing}, None, fresh), task)
+        try:
+            for _ in range(3):
+                kernel.parked_at -= 3600
+                await tick(kernel, fresh)
+                await settled(kernel)
+            waited = len(calls)
+            async with await db.connect(fresh) as conn:
+                await ledger.append(conn, task, "message.steered", {"text": "go on"})
+            await tick(kernel, fresh)
+            await settled(kernel)
+        finally:
+            await kernel.close()
+        return waited, len(calls), len(typed(await rows(fresh, task), "step.failed"))
+
+    assert run(go()) == (1, 2, 2)
+
+
 def test_missed_notification(fresh, op):
     calls = []
 

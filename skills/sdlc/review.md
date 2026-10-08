@@ -21,8 +21,8 @@ add a check, gate, hook, round, or review step?
   hunk left unjudged;
 - `effects.md`, the task's held, released, and refused effects.
 
-**Exit evidence.** Your final message, the verdict object alone (bare or
-in one fenced block). The kernel reads it from your session's result, which
+**Exit evidence.** Your final message ends with the verdict object, bare
+or in a fenced json block; prose before it is read past. The kernel reads it from your session's result, which
 nothing the checks you run can write; a file in the checkout can be
 rewritten by the candidate's code to the end of your turn, so the kernel
 reads no verdict file here. The object:

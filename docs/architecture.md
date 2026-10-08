@@ -428,7 +428,12 @@ task. It wakes on each ledger row (a notification) and every
 advances each task one step: it folds the task's state from the store and
 runs that state's runner once (`router.step`). A task steps again only
 when a row it did not write arrives, including one written while its step
-ran, so one event is one step. One
+ran, so one event is one step. A step that fails or raises writes
+`step.failed` (the state, the check, the reason, the turn), which the
+task's status shows, and like any row the step writes it steps nothing:
+the task waits for Tom's steer or answer, not the next tick, since a
+retry each tick would rerun a deterministic failure with nothing to bound
+its spend. One
 harness turn or check runs at a time on a machine (the turn slot, a
 Postgres lock that `python -m core run` also takes; the test, review,
 and docs checks hold it throughout); the judge and the
