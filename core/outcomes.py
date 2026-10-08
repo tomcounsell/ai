@@ -233,9 +233,10 @@ def own_changes(
     read in the kernel mirror with the target cache's objects borrowed:
     from `before` to `head`, leaving out every earlier done merge head and
     the cache's tip of `branch`, so other tasks' work and hand-landed
-    commits the candidate took in are not its own. A head the repository
-    lacks is skipped (`--ignore-missing`): it is not reachable from this
-    one. Both paths of a rename are listed. Names are read as bytes and
+    commits the candidate took in are not its own. A `before` or `head`
+    the repository lacks raises `GitError`, so the merge records nulls
+    rather than an empty list; an excluded head it lacks is skipped
+    (`--ignore-missing`), as nothing reachable here can be under it. Both paths of a rename are listed. Names are read as bytes and
     decoded with `errors="replace"`."""
     borrow: dict[str, str] = {}
     tip: list[str] = []
@@ -243,6 +244,9 @@ def own_changes(
         borrow = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(cache / "objects")}
         if git.has_commit(cache, f"refs/heads/{branch}"):
             tip = [git.trusted(cache, "rev-parse", f"refs/heads/{branch}^{{commit}}")]
+    for rev in (before, head):
+        if rev:
+            git.trusted(mirror, "cat-file", "-e", f"{rev}^{{commit}}", extra_env=borrow)
     out = git.trusted(
         mirror,
         "log", "--no-merges", "--ignore-missing", "-z", "--format=%x00%H", "--name-only", "--no-renames",

@@ -270,6 +270,21 @@ def test_a_hand_commit_on_the_target_is_not_the_merges(dsn, tmp_path):
     assert m["landed"]["paths"] == ["b.py"] and hand not in m["landed"]["commits"]
 
 
+def test_a_head_the_mirror_lacks_records_nulls_not_an_empty_landing(dsn, tmp_path):
+    w = World(tmp_path)
+    b = w.brief()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await start(conn, b)
+            await merge(conn, b, "f" * 40)
+            return await after(conn, b)
+
+    (m,) = run(go())["after_merge"]
+    assert m["landed"]["commits"] is None and m["landed"]["paths"] is None
+    assert m["landed"]["why"] == "GitError"
+
+
 def test_a_workspace_merge_records_no_paths_and_runs_no_git(dsn, tmp_path, monkeypatch):
     w = World(tmp_path)
     b = w.brief(mirror=False)

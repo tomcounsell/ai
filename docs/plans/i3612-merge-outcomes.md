@@ -148,7 +148,7 @@ either.
 For each merge, from the rows:
 
 - **`feedback`**: every `feedback.given` row after this merge's outcome row
-  and before the task's next merge, with its text and provenance. Feedback
+  and before the task's next delivery, with its text and provenance. Feedback
   given while the task was in `merge` belongs to no merge.
 - **`used`**: every `delivery.used` row whose `effect_id` is this merge's.
 
