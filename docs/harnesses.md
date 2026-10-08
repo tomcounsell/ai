@@ -531,7 +531,7 @@ When a turn ends, by exit or by stop, `core.runs.reap` finds every process
 of this user that matches any of three marks:
 
 1. in the turn's process group;
-2. `VALOR_TURN=<turn id>` in its environment (read with `ps -E`);
+2. `VALOR_TURN=<turn id>` in its environment (read with `ps -E` on macOS, from `/proc/<pid>/environ` elsewhere);
 3. running under a sandbox that denies the mach name `valor.turn.<turn id>`
    and not `valor.turn.none` (an App Sandbox denies every such name, so the
    second check keeps unrelated apps out). The check is libsandbox's

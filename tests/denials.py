@@ -51,6 +51,8 @@ def _shared_tmp() -> bool:
         os.listdir("/private/tmp")
     except PermissionError:
         return True
+    except FileNotFoundError:  # off macOS
+        pass
     return False
 
 

@@ -155,6 +155,8 @@ in `core/images/base/`, never from a candidate:
   `binaries.require_git` accepts `/usr/bin/git` through `VALOR_GIT`;
 - uv with the Pythons the projects pin; Node LTS from a pinned tarball
   with its checksum; PostgreSQL 18 and redis-server by pinned version;
+- Dovecot 2.4.5 built from its release tarball by checksum, for the
+  email tests (`docs/plans/m1-4c-vm-suite.md`);
 - an unprivileged user `valor`;
 - the entrypoint `/valor/run.sh`.
 

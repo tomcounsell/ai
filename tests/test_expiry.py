@@ -480,6 +480,7 @@ def cli(tmp_path: Path, name: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.macos  # the fresh and docs runners fetch under sandbox-exec
 def test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge(tmp_path):
     name = f"{TEST_DB}_expiry"
     dsn = db.migrate(name, fresh=True)

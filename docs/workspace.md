@@ -108,9 +108,9 @@ returns. A program's output goes to a file in that same `output/` directory. A p
 instances on the task's own ports (`workspace.check_services`): the task's
 own are stopped first, the check's cluster gets the project's roles with new
 passwords, its Redis starts empty, and on exit the check's instances are
-stopped and removed (the removal clears every user flag, such as `uchg`,
-and the ACL of each entry the suite wrote, before reading it, so none blocks
-it) and the task's
+stopped and removed (on macOS the removal clears every user flag, such as
+`uchg`, and the ACL of each entry the suite wrote, before reading it, so none
+blocks it) and the task's
 own started again, even when the stop or the removal fails. No run sees what
 another run, or the working session, wrote.
 

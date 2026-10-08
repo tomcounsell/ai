@@ -33,14 +33,18 @@ def _span_profile(low: int, high: int) -> str:
     )
 
 
-def test_listen_draws_from_the_span(monkeypatch, tmp_path):
+def _four_free() -> tuple[int, int]:
+    """Four free ports in a row: in a workspace the span is the dev ports,
+    and the shared judgement upstream holds one of them."""
+    low = next(p for p in range(LOW, HIGH - 2) if all(ports._bindable(q) for q in range(p, p + 4)))
+    return low, low + 3
+
+
+def test_listen_draws_from_the_span(monkeypatch):
     monkeypatch.delenv("VALOR_TEST_PORTS", raising=False)
     assert ports.listen() == 0
 
-    # Four free ports in a row: in a workspace the span is the dev ports,
-    # and the shared judgement upstream holds one of them.
-    low = next(p for p in range(LOW, HIGH - 2) if all(ports._bindable(q) for q in range(p, p + 4)))
-    high = low + 3
+    low, high = _four_free()
     monkeypatch.setenv("VALOR_TEST_PORTS", f"{low}-{high}")
     monkeypatch.setattr(ports, "_last", None)
     held = socket.create_server(("127.0.0.1", low))
@@ -74,8 +78,10 @@ def test_listen_draws_from_the_span(monkeypatch, tmp_path):
     finally:
         held.close()
 
-    # A server on a returned port is reachable under a profile that allows
-    # only the span.
+
+@pytest.mark.macos  # sandbox-exec
+def test_a_server_on_a_returned_port_is_reachable_under_a_profile_of_the_span(tmp_path):
+    low, high = _four_free()
     profile = tmp_path / "span.sb"
     profile.write_text(_span_profile(low, high))
     probe = (

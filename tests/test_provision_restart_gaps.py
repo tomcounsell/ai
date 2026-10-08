@@ -101,6 +101,37 @@ def test_remove_reaps_what_a_setup_command_left(tmp_path):
             p.wait()
 
 
+def test_reap_stops_the_process_whose_environment_carries_the_mark():
+    """Read with `ps -E` on macOS and from `/proc` elsewhere: a mark whose
+    id merely starts with the turn's, or no mark, is left running; a
+    process gone since, or another user's, carries none."""
+    turn = f"reap-{ledger.new_id()}"
+    env = {k: v for k, v in os.environ.items() if k != runs.TURN_ENV}
+
+    def sleeper(mark):
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            env={**env, runs.TURN_ENV: mark} if mark else env,
+            start_new_session=True,
+        )
+
+    marked, longer, unmarked = sleeper(turn), sleeper(f"{turn}x"), sleeper(None)
+    gone = sleeper(turn)
+    gone.kill()
+    gone.wait()
+    try:
+        time.sleep(0.5)
+        assert [r["pid"] for r in runs.reap(turn)] == [marked.pid]
+        assert marked.wait(10) is not None
+        assert longer.poll() is None and unmarked.poll() is None
+        assert not runs._environ_marked(gone.pid, f"{runs.TURN_ENV}={turn}")
+        assert not runs._environ_marked(1, f"{runs.TURN_ENV}={turn}")
+    finally:
+        for p in (marked, longer, unmarked):
+            p.kill()
+            p.wait()
+
+
 async def _stop(dsn, task):
     async with await db.connect(dsn) as conn:
         await tasks.stop(conn, task, reason="test")

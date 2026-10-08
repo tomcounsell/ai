@@ -128,6 +128,7 @@ def test_a_foreground_hold_announces_itself(dsn):
     assert run(go()) == slot.PREEMPT_CHANNEL
 
 
+@pytest.mark.macos  # the fresh critique runner, as every other test that drives it
 def test_a_background_critique_preempted_for_tom_reruns_with_no_verdict(dsn, tmp_path):
     async def go():
         task, b = await scripted.provisioned(dsn, tmp_path, brief_kw={"routine": "r"})
@@ -185,6 +186,7 @@ async def _drive(dsn, task, runners_):
         await gateway.close()
 
 
+@pytest.mark.macos  # the test runner runs the suite under sandbox-exec
 def test_a_background_check_preempted_for_tom_is_cancelled_with_no_verdict_and_runs_again(dsn, tmp_path):
     files = {"suite.sh": "exit 0\n"}
 

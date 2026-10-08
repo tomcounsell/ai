@@ -375,9 +375,14 @@ def _stop(pids: list[int]) -> list[dict[str, Any]]:
 
 
 def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
+    """This user's processes in `pgid`, or carrying the turn's mark in their
+    initial environment: read with `ps -E` on macOS, from
+    `/proc/<pid>/environ` elsewhere (procps has no `-E`)."""
     mark = f"{TURN_ENV}={turn_id}"
+    darwin = sys.platform == "darwin"
+    show_env = ["-E"] if darwin else []
     listing = subprocess.run(
-        [binaries.require(binaries.PS), "-A", "-E", "-ww", "-o", "pid=,pgid=,uid=,command="],
+        [binaries.require(binaries.PS), "-A", *show_env, "-ww", "-o", "pid=,pgid=,uid=,command="],
         capture_output=True,
         text=True,
         check=True,
@@ -388,9 +393,20 @@ def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
         if len(fields) < 3 or int(fields[2]) != os.getuid() or int(fields[0]) == os.getpid():
             continue
         pid = int(fields[0])
-        if int(fields[1]) == pgid or mark in fields[3:] or _sandbox_marked(pid, turn_id):
+        marked = mark in fields[3:] if darwin else _environ_marked(pid, mark)
+        if int(fields[1]) == pgid or marked or _sandbox_marked(pid, turn_id):
             found.append(pid)
     return found
+
+
+def _environ_marked(pid: int, mark: str) -> bool:
+    """Whether the entry `mark` is in the process's initial environment; a
+    process gone or unreadable since the listing carries none."""
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return mark.encode() in environ.split(b"\0")
 
 
 def _commands(pids: list[int]) -> dict[int, str]:

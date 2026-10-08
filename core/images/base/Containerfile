@@ -1,8 +1,8 @@
 # The base image every verification runs in (core/container.py). The kernel
 # builds it from the files in this directory only, never from a candidate,
 # and names it by the digest of these files. Every download is pinned: the
-# Debian base by digest, uv and Node by checksum, PostgreSQL and Redis by
-# package version from signed apt repositories. A C toolchain and libpq's
+# Debian base by digest, uv, Node, and Dovecot by checksum, PostgreSQL and
+# Redis by package version from signed apt repositories. A C toolchain and libpq's
 # headers are here for the dependencies that build from source. Git's exec
 # path is linked at /usr/libexec/git-core, where `core/binaries.py` looks
 # beside /usr/bin/git.
@@ -40,6 +40,26 @@ RUN curl -fsSL -o /tmp/node.txz https://nodejs.org/dist/v24.21.0/node-v24.21.0-l
  && echo "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2  /tmp/node.txz" | sha256sum -c - \
  && tar -xJf /tmp/node.txz -C /usr/local --strip-components=1 --exclude=CHANGELOG.md --exclude=README.md --exclude=LICENSE \
  && rm /tmp/node.txz
+
+# Dovecot 2.4.5, for the email tests (`tests/mailserver.py` writes a 2.4
+# config and runs it as the test's user). Bookworm ships 2.3 and Dovecot's
+# own 2.4 repository has no arm64, so it is built from the release tarball,
+# by checksum only (the same sha256 Homebrew's formula pins; the release's
+# .sig is not checked). It needs OpenSSL's and zlib's headers and nothing
+# optional. `dovecot` installs to /usr/local/sbin and is linked into
+# /usr/local/bin, which the VM's PATH holds.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl-dev zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL -o /tmp/dovecot.tgz https://dovecot.org/releases/2.4/dovecot-2.4.5.tar.gz \
+ && echo "868c2686a61b5f8e00a3e4721789b1ab46e6528fd773a5fbed07a6ecba7731e6  /tmp/dovecot.tgz" | sha256sum -c - \
+ && mkdir /tmp/dovecot && tar -xzf /tmp/dovecot.tgz -C /tmp/dovecot --strip-components=1 \
+ && cd /tmp/dovecot \
+ && ./configure --prefix=/usr/local --localstatedir=/var --without-pam --without-ldap --without-lua \
+      --without-sqlite --without-pgsql --without-mysql --without-systemd --without-libunwind \
+ && make -j"$(nproc)" && make install \
+ && cd / && rm -rf /tmp/dovecot /tmp/dovecot.tgz \
+ && ln -s /usr/local/sbin/dovecot /usr/local/bin/dovecot
 
 # The unprivileged user every candidate command runs as, its uv state and
 # work directory its own; the Pythons the projects pin, installed by uv.
