@@ -385,15 +385,13 @@ Notes per shape:
 5. Labels for the attention ledger after the fact, which the demonstration
    record filled by hand (rebuild-demonstration.md, "Attention log"). Its
    labels are also the live labels for shape 1. Measurement, no gate.
-6. The blind verifier's one boolean, asked once per hunk (every hunk at
-   once, on one database connection the steps take turns on, so the
-   provider calls overlap and the task's advisory lock already orders the
-   rows), with the hunk's enclosing function as input. Each hunk at
-   caution is an instance; a reviewer can add instances and cannot remove
-   one. A reviewer's note that contests an instance is an incident against
-   `governance.adds`, answered by a change to the classifier, never by a
-   grant. A `true` with no grant is a refused merge: the broker refuses a flagged
-   action without a grant, and this judgement sets the flag from the diff.
+6. The blind verifier's one boolean per hunk (all hunks at once on one shared
+   database connection, so provider calls overlap and the task's advisory
+   lock orders the rows), with the hunk's enclosing function as input. Each
+   hunk at caution is an instance; a reviewer can add one, not remove one,
+   and a note contesting one is an incident against `governance.adds`,
+   answered by a classifier change, never a grant. An ungranted `true` is a
+   refused merge: it flags the action from the diff, and the broker refuses it.
    Its guard is the governance paragraph itself, so it carries no expiry.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
