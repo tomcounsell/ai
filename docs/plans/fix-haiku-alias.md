@@ -75,7 +75,7 @@ and that `turn` carries the placeholder credential.
   settings file and not the CLI honoring it: the decoy upstream got no
   request.
 - `tests/test_harness_contract.py` and `tests/test_emulator_metering.py`:
-  68 passed, 1 skipped (pi), 250 s; the stop-mid-call test no longer hangs.
+  68 passed, 1 skipped, 250 s; the stop-mid-call test no longer hangs.
 - The 37 other test files that build a Brief or a Claude Code turn
   (`tests/test_container.py` excluded): 1009 passed, 17 skipped, 706 s.
 - `tests/test_live_turn.py` with `VALOR_LIVE=1`: 3 passed through the
