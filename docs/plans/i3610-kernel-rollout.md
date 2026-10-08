@@ -50,11 +50,11 @@ step after the merge.
   "kernel restarted" (`core/serve.py:227-240`), and the scheduler starts
   it again (`tests/test_serve.py:160-173`). There is no drain to wait on
   (`docs/plans/critique-issues-out.md`, R4).
-- The kernel's launchd job cannot back up today: `PLIST_ENV`
-  (`core/serve.py:640-661`) carries no `VALOR_BACKUP_DIR`, and the default
-  (`core/settings.py:317`) names a volume called U+F028, which is not
-  mounted on this Mac. The installed `com.valor.backup.plist` names
-  `/Volumes/PINK/valor_temp`.
+- The kernel process runs no Homebrew program today. `settings.pg_bin`
+  (`/opt/homebrew/opt/postgresql@18/bin`, `core/settings.py:256`) is used
+  only by `core/backup.py`, which only the command line and the backup job
+  import; that prefix is user-writable, which `core/binaries.py:1-11`
+  names as replaceable by a turn. So the kernel takes no backup.
 - Every program the kernel runs outside the sandbox is root-owned
   (`core/binaries.py:1-11`); `/opt/homebrew/bin/uv` is not, so the kernel
   runs no `uv`. The project has three dependencies
@@ -66,8 +66,10 @@ step after the merge.
 - The gateway runs inside the kernel process (`core/serve.py:603-604`),
   and live turns' API calls go through it, so nothing slow may run on the
   loop.
-- `db.migrate` and `backup.dump` default to `settings.database`
-  (`core/db.py:45`, `core/backup.py:134-136`).
+- `db.migrate` defaults to `settings.database` (`core/db.py:45`).
+  `python -m core migrate` also runs `secure-login`
+  (`core/__main__.py:815-817`), which sets role passwords and rewrites
+  `pg_hba.conf`.
 - Rollout rows need no schema change: the fold ignores a row type it does
   not know (`core/machine.py:561-563`, falling through to `return None`),
   and `events.type` is free text (`core/schema.sql:19`).
@@ -75,120 +77,142 @@ step after the merge.
 ## Design
 
 One new module, `core/rollout.py`, called from the resident kernel's wake.
-Every git call, the backup and the migrate run off the loop, through
-`git.threaded` (`core/git.py:366`), so a slow step never stalls the
-in-process gateway, and cancelling the loop kills what the step started.
+Every git call and the migrate run off the loop, through `git.threaded`
+(`core/git.py:366`), so a slow step never stalls the in-process gateway.
+Git and the migrate start through the watch (`git.start`), so cancelling
+the loop kills what they started. The kernel runs no backup.
 
 **Which merges.** A merge is the kernel's own when its `effect.outcome`
 (kind `done`, action type `merge`) names a `remote` equal, as a string, to
 the push URL of the kernel's checkout (`git.push_url(checkout)`,
 `core/git.py:590`), and a `branch` equal to the checkout's branch
-(`git.branch`). Both are read from the checkout once per wake. The facts
-come from the outcome the kernel wrote and from the checkout's own config,
-never from the task's workspace or anything a turn wrote.
-`projects/valor.toml` is not consulted: the checkout is the thing being
-rolled, so its own remote and branch are the definition. A merge to
-another remote or branch is not the kernel's and writes nothing.
+(`git.branch`). The facts come from the outcome the kernel wrote and from
+the checkout's own config, never from the task's workspace or anything a
+turn wrote. `projects/valor.toml` is not consulted: the checkout is the
+thing being rolled, so its own remote and branch are the definition. A
+merge to another remote or branch is not the kernel's and writes nothing.
 
 **Which one is due.** `started` is the commit the process started from,
-`git.head(checkout)` read once in `serve` before `recover`. The due merge
-is the newest of the kernel's own merges that has no `rollout.ended` row
-and whose `sha` is not an ancestor of, or equal to, `started`. The kernel
-keeps an in-memory set of effect ids it has judged contained in
-`started`, filled as it judges them, so each historic merge costs one
-`is_ancestor` per process, not one per wake. Merges made before this
-lands are contained and write nothing. Only the newest due merge is
-rolled: one restart covers every older one.
+`git.head(checkout)` read once in `serve` before `recover`. Each wake
+first reads the merge outcomes with no `rollout.ended` (SQL), then drops
+the effect ids this process has already judged: contained in `started`,
+or to another remote or branch. The checkout's facts (push URL, branch)
+and the ancestry of a new merge are read only when something is left, so
+a wake with nothing new runs no git, and each historic merge costs one
+`is_ancestor` per process. Merges made before this lands are contained
+and write nothing.
 
-**What a rollout does.** Two phases. Prepare runs while the kernel goes
-on scheduling; apply runs once the jobs have ended.
+What is left are the due merges. A due merge that failed since the last
+`serve_tick_s` wake is not tried on a wake from a ledger row; one that
+failed at dependencies, schema or migrate is not tried again by this
+process.
 
-Prepare:
+**Prepare.** Run while the kernel goes on scheduling:
 
 1. **fetch**: `git fetch --no-tags --no-recurse-submodules
    --no-write-fetch-head <remote> +refs/heads/<branch>:refs/valor-kernel/rollout`
-   in the checkout, through `git.run` with the merge performer's
-   credential for a non-local remote (the same `_with_credential` the merge
-   used, `tools/push_branch.py:159-165`). The `sha` must be an ancestor of,
-   or equal to, that ref (`git.is_ancestor`), as `git.holds` does
-   (`core/git.py:667-697`). An older due merge whose `sha` is not on the
-   ref (the branch was rewritten) gets `rollout.ended superseded`.
+   in the checkout, through `git.run`, with the merge performer's
+   credential for a non-local remote (a header file for that URL, as
+   `Merge._with_credential` makes, `tools/push_branch.py:159-165`). Every
+   due merge whose `sha` is not an ancestor of, or equal to, that ref (the
+   branch was rewritten) gets `rollout.ended superseded`, the newest
+   included. Of the rest, the one rolled is the one whose `sha` descends
+   from every other's; when none does (diverged shas), the latest by row.
+   The others it contains are covered by it.
 2. **restart class**: the paths changed between `started` and `sha`
    (`git.diff_paths`, `core/git.py:537`). The kernel restarts unless every
    path is under `persona/`, `skills/` (read per turn), `docs/` or `tests/`
-   (never read by the kernel), or is a top-level `*.md`. Everything else may
-   be read at import or at start, so it restarts.
+   (never read by the kernel), or is a top-level `*.md`. Everything else
+   may be read at import or at start, so it restarts.
 3. **dependencies** (restart class only): a changed `uv.lock` or
    `pyproject.toml` ends the rollout here, before the checkout moves, with
    a notice naming the merge. The kernel runs no `uv`; the lead's hand
    steps (`uv sync`, then the rollout) take it from there, and the restart
    they end in puts the merge in `started`.
+4. **schema** (restart class only): a changed `core/schema.sql` ends the
+   rollout the same way. The lead backs up, migrates and restarts by hand.
+5. **fast-forward check**: the checkout's head must equal `sha`, descend
+   from it (the lead moved past it), or be its ancestor with no
+   uncommitted or untracked path (`git.dirty`) among the paths the merge
+   changes from that head. Otherwise the rollout fails at `fast-forward`
+   here, before any hold, so a checkout that keeps refusing never holds
+   scheduling and never moves.
 
-A rollout that is not restart class then fast-forwards (step 5 below) at
-once and writes `rollout.ended {effect_id, outcome: done, head, steps}`:
-the persona and stage files are read when a turn renders, so no job needs
-to end first.
+A rollout that is not restart class then fast-forwards at once and writes
+`rollout.ended {effect_id, outcome: done, head, steps}`, and `rollout.ended
+done` with `rolled_by` for each merge it covers: the persona and stage
+files are read when a turn renders, so no job needs to end first.
 
 A restart-class rollout sets `Kernel.restart_due`. From then on `schedule`
-starts no new job. `intake.bind` and `notices.owe` go on. When every job
-has ended except the background turn's (a background turn is preempted by
-a restart, as today), the kernel runs prepare again, so a merge that
-landed during the wait is the one rolled, and then apply:
+starts no new job. `intake.bind` and `notices.owe` go on. Once every job
+but the background turn's has ended, the kernel runs prepare again, and
+its result replaces `restart_due` outright: a failure or nothing due
+clears it; a rollout that is not restart class relative to `started` (a
+revert can remove `core/` paths) fast-forwards at once and clears it; a
+restart-class one, possibly a newer merge that landed during the wait, is
+applied. A prepare that finds no job running applies in the same wake.
 
-4. **backup**: `backup.dump(database=<the kernel's database>)`, before the
-   checkout moves. Source for backup first: `SKILL.md:226-227`.
-5. **fast-forward**: `git merge --ff-only <sha>` in the checkout. Never a
-   force: a checkout that diverged or holds a local change the merge would
-   overwrite is git's refusal, recorded as the step's failure. A local
-   change the merge does not touch stays. A checkout the lead already
-   moved past `sha` makes this a no-op.
-6. **migrate**: the injected `migrate(database)`, by default
-   `<checkout>/.venv/bin/python -m core migrate --db <database>` as a
-   subprocess, so the merged schema and the merged `machine.VERDICTS` are
-   applied by the merged code. That interpreter is the one the kernel's own
-   job runs (`core/serve.py:678`), so it carries no trust the kernel lacks.
+**Apply.**
+
+1. **cancel the background turn**, as `close()` does, and wait for it to
+   end, before anything moves.
+2. **fast-forward**: `git merge --ff-only <sha>` in the checkout. Never a
+   force. A local change the merge does not touch stays. A checkout the
+   lead already moved past `sha` makes this a no-op.
+3. **migrate**: the injected `migrate(database)`, by default
+   `<checkout>/.venv/bin/python -c "import sys; from core import db;
+   db.migrate(sys.argv[1])" <database>`, started through the watch with
+   `cwd=<checkout>`, so the merged `machine.VERDICTS` constraint and the
+   merged seeds are applied by the merged code. `core/schema.sql` is
+   unchanged here (step 4), and `db.migrate` is idempotent. It calls
+   `db.migrate` alone, not `python -m core migrate`, which also runs
+   `secure-login`. That interpreter is the one the kernel's own job runs
+   (`core/serve.py:678`), so it carries no trust the kernel lacks.
    `<database>` is the database named by the kernel's own `dsn`, never
-   `settings.database`, so a test kernel migrates and backs up its test
-   database. `db.migrate` is idempotent (`core/schema.sql` uses
-   `IF NOT EXISTS`, and `DROP ... IF EXISTS` before each trigger).
-7. **restart**: append `rollout.restarting {effect_id, sha, from: started,
-   steps}`, then raise `rollout.Restart` out of `tick`. `serve`'s loop lets
-   it through (its `except Exception` re-raises it), its `finally` cancels
-   the background turn, settles services and closes the gateway, and
-   `python -m core serve` prints `kernel restarting for <sha>` and exits
-   with status 1. launchd starts the job again (`KeepAlive`). No
+   `settings.database`, so a test kernel migrates its test database.
+4. **restart**: append `rollout.restarting {effect_id, sha, from: started,
+   steps, covers}`, `covers` naming each covered merge's effect, task and
+   sha, then raise `rollout.Restart` out of `tick`. `serve`'s loop gains
+   `except rollout.Restart: raise` ahead of its `except Exception`
+   (`core/serve.py:613`), its `finally` settles services and closes the
+   gateway, and `python -m core serve` exits with `kernel restarting for
+   <sha>` and status 1. launchd starts the job again (`KeepAlive`). No
    `launchctl`, no label, no uid.
 
 **Records.** Rows go on the merged task. `rollout.ended` (outcome `done`
-or `superseded`) is the only terminal row. A merge contained in the rolled
-`sha` that was older than the due one gets `rollout.ended done` with
-`rolled_by: <effect_id>`. A failed step writes `rollout.failed {effect_id,
-sha, step, reason, steps}` when its step or reason differs from the
-latest `rollout.failed` for that effect (a read of rows the kernel wrote),
-so a retry that fails the same way writes nothing. The first failure
-requests one notice (`notices.request`, kind `rollout`, about key
-`rollout:<effect_id>`, `core/notices.py:41`), which the about key keeps to
-one per effect. The notice is information; nothing waits on it. While the
-bridges are off (4.3), the rows and `kernel.log` are where a failure
-shows.
+or `superseded`) is the only terminal row. A failed step writes
+`rollout.failed {effect_id, sha, step, reason, steps}` when its step or
+reason differs from the latest `rollout.failed` for that effect (a read of
+rows the kernel wrote), so a retry that fails the same way writes nothing.
+The first failure requests one notice (`notices.request`, kind `rollout`,
+about key `rollout:<effect_id>`, `core/notices.py:41`). A migrate failure
+that leaves the checkout moved also requests one under
+`rollout:<effect_id>:mixed`. A notice is information; nothing waits on
+it. While the bridges are off (4.3), the rows and `kernel.log` are where a
+failure shows.
 
-**Retries.** A failure is not final. A failed step clears
-`restart_due`, so scheduling resumes on the old code, and the merge stays
-due. The kernel tries it again on the next `serve_tick_s` wake, the same
-wake on which parked tasks are tried again (`core/serve.py:313-316`); a
-wake from a ledger row before then does not retry it. This covers the
-lead's `index.lock`, the lead's unpushed plan commits making the checkout
-diverge until the lead rebases and pushes, the backup disk not mounted,
-and a network failure on the fetch. Two failures repeat the same way on
-every try, so the process does not retry them: a dependency change (step
-3), and a migrate failure (step 6). Each is held in memory for that `sha`
-until the process restarts; a newer kernel merge is a new due merge and is
-tried.
+**Retries.** A failure is not final. A failed step clears `restart_due`,
+so scheduling resumes on the old code, and the merge stays due. It is
+tried again on the next `serve_tick_s` wake, on the same `parked_at` reset
+on which parked tasks are tried again (`core/serve.py:312-315`); a wake
+from a ledger row before then does not retry it. This covers the lead's
+`index.lock`, the lead's unpushed plan commits making the checkout diverge
+until the lead rebases and pushes, a dirty file the merge changes, and a
+network failure on the fetch. Three failures repeat the same way on every
+try, so the process does not retry them: dependencies, schema and
+migrate. Each is held in memory for that merge until the process
+restarts; a newer kernel merge is a new due merge and is tried.
 
-**After the restart.** `recover` gains one pass: each `rollout.restarting`
-with no `rollout.ended` for its effect gets `rollout.ended done` with the
-running commit when that commit is the restarting row's `sha` or descends
-from it. Otherwise it writes nothing, and the merge is due again.
+**After the restart.** `recover` gains one pass. Every kernel merge with a
+`rollout.restarting` or `rollout.failed` row, or named in a restarting
+row's `covers`, that has no `rollout.ended` and whose `sha` the running
+commit contains gets `rollout.ended done` with `head: <running commit>`,
+and with `rolled_by: <effect>` when another merge's restarting row covers
+it, or `by: started` when no restarting row names it (the lead rolled it
+by hand, or a later restart carried it). A restarting row whose `sha` the
+running commit does not contain writes nothing, and its merge is due
+again. A merge contained in `started` that never had a rollout row and
+was never covered gets no row.
 
 **Where it runs.** `Kernel.tick` (`core/serve.py:309-322`) runs the due
 rollout after `notices.owe` and before `schedule`, one at a time, so two
@@ -196,49 +220,56 @@ rollouts never move the checkout at once. The kernel's advisory lock
 (`core/serve.py:597`) already makes this the only kernel on the machine. A
 merge released by the command line (`core/__main__.py:755`) or a bridge is
 rolled out by the resident kernel on its next wake, since the outcome row
-notifies (`core/schema.sql:125`).
+notifies (`core/schema.sql:125`). Any other failure inside the rollout is
+logged and the wake goes on to `schedule`.
 
-**Wiring.** `Kernel` and `serve` take `checkout: Path = ROOT` and
-`migrate: Callable[[str], None]` (default the subprocess above), so tests
-pass a temporary checkout and a stand-in migrate and never touch the real
-ledger. `PLIST_ENV` gains `VALOR_BACKUP_DIR` and `VALOR_BACKUP_KEEP`
-(passthrough, as in `backup.PLIST_ENV`).
+**Wiring.** `serve` takes `checkout: Path = ROOT`, `migrate` (default the
+subprocess above) and `credential` (default `settings.github_keyfile`).
+`Kernel` takes the same plus `started`; a `Kernel` built with no checkout
+rolls nothing, so the existing tests that build one never touch a real
+checkout. Tests pass a temporary checkout and a stand-in migrate and never
+touch the real ledger.
 
 **What a failure leaves.**
 
-- Before step 5: the checkout where it was, the old process on old code.
-- Steps 5 to 7 are the only window in which the old process runs from a
-  moved checkout, and by then every job but the background turn has
-  ended. A lazy import in the old process in that window (for example
-  `core.gateway` in `serve`) loads the merged module, and
-  `runs.kernel_commit()` records the merged commit on any turn that
-  renders.
-- A migrate failure: the kernel runs `git reset --keep <the head before
-  step 5>`, which moves the checkout back and refuses to touch a local
-  change it would overwrite, so it is never a forced reset of the lead's
-  work. The old process then runs old code again. If git refuses, the
-  checkout stays on the merged commit, the kernel runs mixed code, and the
-  failure row and the notice say so.
-- A merged commit that fails at import: launchd starts the job about every
-  ten seconds, `recover` never runs, and no `rollout.ended` row or notice
-  is written. The signal is the 4.3 status page (the kernel is down) and
-  `~/Library/Logs/valor/kernel.log`. No watcher is added (R3, dropped in
-  `docs/plans/critique-issues-out.md`); the lead fixes it by hand.
+- Before apply step 2: the checkout where it was, the old process on old
+  code.
+- Apply steps 2 to 4 are the only window in which the old process runs
+  from a moved checkout, and by then every job has ended, the background
+  turn cancelled first. A lazy import in the old process in that window
+  (for example `core.gateway` in `serve`) loads the merged module.
+- A migrate failure: the kernel reads the head again. Only when it is
+  still `sha` and the fast-forward moved it does the kernel run `git reset
+  --keep <the head before the fast-forward>`, which refuses to touch a
+  local change it would overwrite. `--keep` also unstages the lead's
+  staged changes in files the merge does not touch (git's own table for
+  `--keep`); their content stays in the working tree. If the head moved
+  (the lead committed meanwhile) or git refuses, the checkout stays where
+  it is, the kernel runs mixed code, and the failure row (`mixed: true`)
+  and the `:mixed` notice say so.
+- A merged commit that fails at import: launchd starts the job again at
+  once, then about every ten seconds, `recover` never runs, and no
+  `rollout.ended` row or notice is written. The signal is the 4.3 status
+  page (the kernel is down) and `~/Library/Logs/valor/kernel.log`. No
+  watcher is added (R3, dropped in `docs/plans/critique-issues-out.md`);
+  the lead fixes it by hand.
 
 ## Governance
 
 Nothing here judges work or can stop it. The merge has landed before any
-step runs, and no step refuses, delays or sends back a task: the rollout
-is the tail of an effect that already exists, as #3610 proposes. The
-kernel-project match and the restart class choose which effect steps
-apply; a failed step ends the attempt, never the work. Holding new jobs
-until the running ones end is the ordering of a restart, not a judgement
-of any task: it reads nothing a task produced, and every task's next step
-starts in the restarted process. The notice and the `rollout.*` rows are
-records. So the plan asks for no grant. If review answers the governance
-boolean yes on a hunk, the incident is commit `2d6ed8a8e` (a merged kernel
-change reached the running kernel only by a hand rollout), the mission
-item is 1, and the hunk waits for Tom's tap.
+step runs, and no step refuses or sends back a task. The hold delays a
+task's next job only as the ordering of a restart, never by reading what
+a task produced. The rollout is the tail of an effect that already exists,
+as #3610 proposes. The kernel-project match and the restart class choose
+which effect steps apply; the `dependencies` and `schema` stops end a
+rollout, never a task; a failed step ends the attempt, never the work.
+The hold has no timeout, retries reuse `serve_tick_s`, and the
+per-process no-retry for dependencies, schema and migrate is a loop guard
+on the rollout's own steps, not a limit on work. The notice and the
+`rollout.*` rows are records. So the plan asks for no grant. If review
+answers the governance boolean yes on a hunk, the incident is commit
+`2d6ed8a8e` (a merged kernel change reached the running kernel only by a
+hand rollout), the mission item is 1, and the hunk waits for Tom's tap.
 
 ## Threat model
 
@@ -249,9 +280,10 @@ roll out a commit other than the `sha` its own `effect.outcome` recorded,
 or before that outcome is `done`; decide whether or where to roll out from
 anything in the task's workspace or a turn's files (only the outcome row,
 the checkout's own config and the diff between two commits it names); run
-a program a turn can replace (no `uv`; the migrate interpreter is the
-kernel's own); move the checkout by anything but a fast-forward, or a
-`reset --keep` back to where its own fast-forward started; run git in the
+a program a turn can replace (no `uv`, no `pg_dump`; the migrate
+interpreter is the kernel's own); move the checkout by anything but a
+fast-forward, or a `reset --keep` back to where its own fast-forward
+started while the head is still the commit it moved to; run git in the
 checkout outside `git.run`, which refuses a hostile config
 (`core/git.py:427-454`); or carry the GitHub credential into any call
 other than the fetch from the merge's own remote.
@@ -260,14 +292,13 @@ other than the fetch from the merge's own remote.
 
 1. A test kernel with a temporary checkout cloned from a local bare
    remote, a merge task whose outcome lands a commit touching `core/`:
-   `rollout.restarting` with steps fetch, restart class, backup,
-   fast-forward, migrate in that order, written before `tick` raises
-   `Restart`; the checkout's head is the merged sha; the stand-in migrate
-   and the backup were called with the test database; no job started on
-   that wake.
+   `rollout.restarting` with steps fetch, restart class, fast-forward,
+   migrate in that order, written before `tick` raises `Restart`; the
+   checkout's head is the merged sha; the stand-in migrate was called with
+   the test database; no job started on that wake.
 2. The same with a commit touching only `skills/` and `docs/`: fetch and
-   fast-forward only, `rollout.ended done`, no backup, no migrate, no
-   `Restart`, scheduling never held.
+   fast-forward only, `rollout.ended done`, no migrate, no `Restart`,
+   scheduling never held.
 3. `recover` after (1): `rollout.ended done` with the running commit.
 4. A live run on the build Mac after this merges: the next kernel merge of
    a `core/` change is followed by `rollout.ended done` and a kernel whose
@@ -282,40 +313,44 @@ other than the fetch from the merge's own remote.
 - Merge to another remote, or to another branch of the same remote: no
   row, checkout unmoved.
 - A merge whose sha is an ancestor of `started`: no row, and a second
-  wake runs no `is_ancestor` for it (the in-memory set). A checkout the
-  lead already fast-forwarded past `started`: fast-forward is a no-op, the
-  restart class is computed from `started`, so it still restarts.
+  wake runs no git for it. A checkout the lead already fast-forwarded
+  past `started`: fast-forward is a no-op, the restart class is computed
+  from `started`, so it still restarts.
 - Two merges landed before a wake: one rollout to the newer sha, one
-  `Restart`; after `recover` both have `rollout.ended done`, the older with
-  `rolled_by`. An older merge whose sha is not on the fetched branch:
-  `rollout.ended superseded`.
+  `Restart`, the older in `covers`; after `recover` both have
+  `rollout.ended done`, the older with `rolled_by`. A due merge whose sha
+  is not on the fetched branch, the newest included:
+  `rollout.ended superseded`. Of two due merges recorded newer sha first,
+  the descendant is the one rolled.
+- A merge with only a `rollout.failed` row whose sha the running commit
+  contains (the lead rolled it by hand): `recover` writes
+  `rollout.ended done` with `by: started`.
 - A restart-class rollout with a harness job running: no new job starts,
-  no backup, no fast-forward, no `Restart` until that job ends; then all
-  of apply runs on the next wake. With only a background turn running,
-  apply runs at once and the turn is cancelled by `serve`'s `finally`.
+  no fast-forward, no `Restart` until that job ends; then all of apply
+  runs on the next wake. With a background turn running, apply cancels
+  it before the fast-forward.
 - A merge landed during the wait: the rollout that applies is to the
-  newer sha.
+  newer sha. A re-prepare at the end of the wait that finds nothing due,
+  or a newer merge that is not restart class, lifts the hold.
 - A diff touching `uv.lock` or `pyproject.toml`: `rollout.failed` at
   dependencies, a notice, checkout unmoved, scheduling not held, and no
   retry on the next `serve_tick_s` wake. A diff touching neither runs no
-  dependency step.
+  dependency step. A diff touching `core/schema.sql`: the same at schema.
 - Checkout diverged (a local commit not on the target): `rollout.failed`
-  at fast-forward, a notice, no migrate, scheduling resumed. On the next
-  `serve_tick_s` wake it is tried again and writes no second failure row;
-  after the local commit is rebased onto the merge, the retry restarts.
-  A dirty file the merge changes: refused the same way. A dirty file it
-  does not change: rolled, the file kept.
-- Backup fails (the backup directory missing): `failed` at backup,
-  checkout unmoved; the next tick's wake from a ledger row does not retry,
-  the next `serve_tick_s` wake does; mounting the directory then rolls it.
+  at fast-forward, a notice, scheduling never held, no migrate. Across
+  three `serve_tick_s` wakes it is tried each time, never holds, and
+  writes no second failure row; a wake from a ledger row in between
+  fetches nothing. After the local commit is rebased onto the merge, the
+  retry restarts. A dirty file the merge changes: refused the same way.
+  A dirty file it does not change: rolled, the file kept.
 - Migrate fails (the stand-in raises): `failed` at migrate, the checkout
-  back at the head before the fast-forward (`reset --keep`), no
-  `Restart`, no retry by this process. With a local change in a file the
-  merge touched, `reset --keep` refuses: head stays on the merged sha and
-  the failure row says the kernel runs mixed code.
-- The default migrate's argv is `<checkout>/.venv/bin/python -m core
-  migrate --db <test database>` (asserted on the argv built, never run),
-  and the backup is asked for the test database.
+  back at the head before the fast-forward, no `Restart`, no retry by
+  this process. With a local change in a file the merge touched, `reset
+  --keep` refuses: head stays on the merged sha, the row says mixed, and
+  a `:mixed` notice is requested even after an earlier failure's notice.
+  With a commit made after the fast-forward: no reset, a mixed row.
+- The default migrate's argv and cwd (asserted on a stand-in start, never
+  run against a real database).
 - `serve` with a stand-in kernel whose `tick` raises `Restart`: the loop
   ends, `kernel.close()` and the gateway close run, and the exception
   leaves `serve`. A plain exception from `tick` is still logged and the
@@ -332,11 +367,11 @@ other than the fetch from the merge's own remote.
   `rerere.enabled`.)
 - The fetch carries the credential only for a non-local remote (header
   file used once, for that URL).
-- `plist` carries `VALOR_BACKUP_DIR` and `VALOR_BACKUP_KEEP` when set.
+- `python -m core serve` exits with status 1 and the restart line on
+  `Restart`.
 
 ## Absorbs
 
-- The kernel's launchd job could not run `backup`: `PLIST_ENV`.
 - `docs/plans/valor-rebuild.md:98-101` says "a separate checkout" and
   "the same tapped effect"; neither is true (the checkout is the lead's;
   merges are Valor's call, `docs/plans/valor-rebuild-feedback.md:33`).
@@ -346,6 +381,9 @@ other than the fetch from the merge's own remote.
 - A merge that changes `uv.lock` or `pyproject.toml`: the kernel stops
   before the fast-forward and the lead runs `uv sync` and the rollout by
   hand. The kernel runs no `uv` (`core/binaries.py:1-11`).
+- A merge that changes `core/schema.sql`: the kernel stops before the
+  fast-forward and the lead backs up, migrates and restarts by hand. The
+  kernel runs no `pg_dump` (the same rule).
 - The bridges' and routines' launchd jobs (`bridges/telegram/__main__.py:13`,
   `bridges/email/__main__.py:15`, `bridges/local/__main__.py:14`,
   `core/routines.py:38`). They run from the same checkout, but each is
@@ -375,13 +413,13 @@ other than the fetch from the merge's own remote.
 ## Files it changes
 
 `core/rollout.py` (new), `core/serve.py` (`Kernel`, `tick`, `schedule`,
-`recover`, `serve`, `PLIST_ENV`), `core/__main__.py` (`serve` exits with
-status 1 on `Restart`), `tests/test_rollout.py` (new),
-`tests/test_serve.py` (the loop and `Restart`), `core/README.md`,
-`docs/architecture.md` (restart and rollout), `docs/data.md` (the
-`rollout.*` rows), `docs/plans/valor-rebuild.md:98-101`,
-`.claude/skills/build/SKILL.md` (the merge bullet: a kernel-released merge
-rolls itself out, except a dependency change).
+`recover`, `serve`), `core/__main__.py` (`serve` exits with status 1 on
+`Restart`), `tests/test_rollout.py` (new), `tests/test_serve.py` (the loop
+and `Restart`), `core/README.md`, `docs/architecture.md` (restart and
+rollout), `docs/data.md` (the `rollout.*` rows),
+`docs/plans/valor-rebuild.md:98-101`, `.claude/skills/build/SKILL.md` (the
+merge bullet: a kernel-released merge rolls itself out, except a
+dependency or schema change).
 
 ## Rollout (the last one by hand)
 
@@ -391,17 +429,8 @@ fast-forwarded:
 1. `.venv/bin/python -m core backup`.
 2. No dependency or schema change, so neither `uv sync` nor `migrate` is
    needed.
-3. Regenerate the kernel plist with the live environment kept: export
-   `VALOR_EMAIL_ADDRESS`, `VALOR_OPERATOR_CHAT`, `VALOR_OPERATOR_EMAIL` and
-   `VALOR_OPERATOR_TELEGRAM_ID` from the installed
-   `~/Library/LaunchAgents/com.valor.kernel.plist`, and `VALOR_BACKUP_DIR`
-   (`/Volumes/PINK/valor_temp`) from the installed
-   `com.valor.backup.plist` (read each with `plutil -extract
-   EnvironmentVariables.<name> raw`), then write
-   `python -m core serve --plist` to a scratch file, `diff` it against the
-   installed plist (the only change is the added `VALOR_BACKUP_DIR`), copy
-   it into place, and `launchctl bootout` and `bootstrap` the job, since
-   its environment changed.
+3. Restart the kernel so it runs the merged code (`launchctl kickstart -k
+   gui/$(id -u)/com.valor.kernel`). The plist is unchanged.
 4. Check `kernel recovered` in `~/Library/Logs/valor/kernel.log`.
 5. Done 4 waits on the next kernel merge; record it under "Merged".
 
@@ -420,14 +449,14 @@ decided below.
 - **A restart waits for the running jobs.** A restart-class rollout holds
   new jobs and restarts once every job but the background turn has ended,
   so a foreground turn is never paid for twice. The wait is at most the
-  running jobs, with no timeout. A background turn is preempted, as any
-  restart does today. This is not the drain R4 dropped
+  running jobs, with no timeout. The background turn is cancelled at the
+  start of apply, as a foreground step preempts it today. This is not the drain R4 dropped
   (`docs/plans/critique-issues-out.md:289`): it reads no status field,
   only the kernel's own `jobs`, and a restart that cuts a job off is
   still safe through `recover`.
 - **Bridges and routines are not rolled by the kernel.** They stay the
   lead's steps (Leaves out).
-- **A dependency change is the lead's.** The kernel runs no `uv`.
+- **A dependency or schema change is the lead's.** The kernel runs no `uv` and no `pg_dump`.
 
 ### Critique round 1 (`critic-3610-r1`, verdict revise)
 
@@ -440,6 +469,9 @@ decided below.
    kernel's own `dsn`, and a test asserts the database argument.
 3. A blocking step would stall the gateway. Resolved: every step runs
    through `git.threaded`; a test proves the loop keeps running.
+   (Corrected in round 2: this first said cancelling kills what every
+   step started, which held only for git; the backup is gone and the
+   migrate now starts through the watch.)
 4. Restart by exiting. Resolved: `tick` raises `Restart` after
    `rollout.restarting`, `serve`'s `finally` runs, `python -m core serve`
    exits 1, `KeepAlive` restarts it. No `launchctl`. Tests cover a
@@ -449,7 +481,9 @@ decided below.
    backup, fast-forward and migrate only after the jobs end, rather than
    migrating first and then waiting. Reason: the old process then never
    runs against a migrated schema or a moved checkout while turns are
-   live, which also shrinks finding 8's window. It waits for every job but
+   live, which also shrinks finding 8's window. (Corrected in round 2:
+   this first said so of every turn, but the background turn ran through
+   apply until round 2's finding 3 cancelled it at apply's start.) It waits for every job but
    the background turn, not only the harness slot: kernel-owned steps and
    performs are short, nothing new starts, and a merge perform cut off
    mid-push would only add a `reconcile`. Q1 and Q2 deleted and recorded
@@ -480,3 +514,60 @@ decided below.
     `git.hostile` on `~/src/valor-rebuild` returns nothing today; noted in
     the test. (c) Restart class kept as is. (d) The `tasks.status` change
     is dropped and listed under Leaves out.
+
+### Critique round 2 (`critic-3610-r2`, verdict revise)
+
+Both critique rounds are spent. The lead accepted all twelve findings,
+folded as the report's fixes describe, and sent the plan to build with no
+third critique. Reason: each fix is concrete and local, the critic said so
+("concrete enough to apply without a third round"), and the five that
+must be fixed narrow the kernel's reach (no backup, no hold on a
+refusing checkout, no reset over the lead's commit) rather than add any.
+
+1. The in-kernel backup ran Homebrew's `pg_dump`, a program a turn can
+   replace. Resolved as recommended: no backup in the kernel. A diff
+   touching `core/schema.sql` stops at a `schema` step and goes to the
+   lead; listed under Leaves out. `PLIST_ENV` is unchanged, and the hand
+   rollout no longer regenerates or reloads the plist.
+2. A refusing fast-forward repeated the hold and a full dump every
+   minute. Resolved: prepare checks that the fast-forward can succeed
+   (ancestry, and no dirty path among those the merge changes) before it
+   holds; a failure there is `fast-forward` and never holds. Test: three
+   tick wakes on a diverged checkout, no hold, one failure row.
+3. The background turn ran through apply. Resolved: apply cancels it and
+   waits for it to end before the fast-forward; the test asserts the
+   order.
+4. `reset --keep` could drop the lead's commit and unstages the lead's
+   index. Resolved: reset only when HEAD is still the merged sha and the
+   fast-forward moved it; otherwise a mixed row. The unstaging is stated
+   in "What a failure leaves". Test with a commit after the fast-forward.
+5. Who closes older merges was undefined. Resolved: one pass in `recover`
+   closes every kernel merge with a rollout row, or named in a restarting
+   row's `covers`, that the running commit contains: `rolled_by` when a
+   restarting row covers it, else `by: started`. The restarting row's
+   `covers` is the builder's addition: without it an older merge with no
+   rollout row of its own is never closed, which Done's two-merges test
+   requires. Merges contained in `started` with no row and no cover get
+   none. Both cases tested.
+6. A due merge that falls off the branch, and "newest". Resolved: any due
+   merge not on the fetched ref is superseded; the one rolled descends
+   from every other due sha, else the latest by row.
+7. The re-prepare at the end of the wait. Resolved: its result replaces
+   `restart_due` outright; nothing due or not restart class lifts the
+   hold. Tested.
+8. `serve` swallows every `Exception`. Resolved: `except rollout.Restart:
+   raise` ahead of `except Exception`.
+9. Cancelling kills only git. Resolved: the default migrate starts through
+   the watch with `cwd=<checkout>`; argv and cwd asserted.
+10. Git on every wake. Resolved: merge outcomes are read by SQL first,
+    judged effect ids (contained, or another remote or branch) are
+    dropped, and the checkout's facts are read only when something is
+    left.
+11. The mixed-code notice could be deduped away. Resolved: about key
+    `rollout:<effect_id>:mixed`.
+12. Governance wording. Resolved: "delays a task's next job only as the
+    ordering of a restart, never by reading what a task produced", with
+    the rest of the critic's substance.
+
+The two overstated round 1 claims (#3, #5) are corrected in place above.
+
