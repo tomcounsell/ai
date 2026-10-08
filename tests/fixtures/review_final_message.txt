@@ -1,0 +1,36 @@
+I've reviewed the candidate and the verdict is changes. The fix itself is right, but one test assertion it adds will fail on the Mac host.
+
+- **The fix holds.** Both setup paths now grant `pg_signal_backend` and `pg_read_all_settings` to `app` right after creating it: `_init_postgres` on the host and `run.sh` in the VM. I reproduced the incident in this check's own cluster, which predates the change. `app` creates a login role, another process holds a connection as that role, and `DROP DATABASE ... WITH (FORCE)` fails with "permission denied to terminate process". Postgres's own error detail names `pg_signal_backend` as the fix. I could not start a fresh cluster with the grant in this sandbox: it refuses to bind a port.
+- **The broken assertion.** The line added to the existing escape test expects `app`'s predefined roles to be exactly `pg_read_all_settings` and `pg_signal_backend`. That query runs in database `app`, which `app` owns, and there Postgres also counts it as a member of `pg_database_owner`. Running the same query in this cluster's `app` database returns `pg_database_owner` even with no grants. So with the grants the list has three roles and the test fails.
+- **Why nobody caught it.** Every new or edited workspace test is Mac-only. The kernel's VM run skips them, and here they skip because this sandbox denies `/bin/ps`. The incident test has never run anywhere, and neither has the VM-path grant.
+
+Other results:
+- The new denial-probe unit tests pass.
+- `test_backup`'s data-directory test still fails here, because this check's role predates the grant (the plan expects this). It was red at base too.
+- Lint passes, and the kernel's run shows no new failures compared with base.
+- Nothing in the diff adds a check or gate. The skips are test conditions.
+
+```json
+{
+  "verdict": "changes",
+  "findings": [
+    {"kind": "bug", "text": "tests/test_workspace.py, the assertion added to test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape: the query `SELECT r.rolname FROM pg_roles r WHERE r.rolname LIKE 'pg\\_%' AND pg_has_role('app', r.oid, 'MEMBER')` runs on a connection to database `app`, which `app` owns, so pg_has_role also reports pg_database_owner. Reproduced in this check's cluster: as app in database `app` with no grants the query returns [('pg_database_owner',)]. With the candidate's grants it returns three roles, and `== ['pg_read_all_settings', 'pg_signal_backend']` fails on the Mac host. Fix: exclude pg_database_owner, or read direct memberships from pg_auth_members. Example: `SELECT b.rolname FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = 'app'::regrole AND b.rolname LIKE 'pg\\_%'`."},
+    {"kind": "unverified", "text": "None of the new or edited workspace tests has run anywhere: the incident test (test_the_app_role_force_drops_a_test_database_another_process_holds), the no-roles grant test, and the extended escape test are all marked macos. The kernel's VM run skips macos tests, and this review sandbox skips them because /bin/ps is denied. The delivery has to show them passing on the Mac host, and failing at base for the incident test."},
+    {"kind": "verified", "text": "The mechanism is confirmed in this check's cluster, whose app role predates the grant: app creates a login role, a second connection holds a database as that role, and `DROP DATABASE ... WITH (FORCE)` as app raises InsufficientPrivilege 'permission denied to terminate process'. Postgres's own detail names pg_signal_backend as the remedy. The grant sits right after CREATE ROLE app in both _init_postgres and run.sh. No server-file or program roles are granted."},
+    {"kind": "unverified", "text": "The VM path (run.sh GRANT) is not covered by any test. The plan said this would be named unverified in the delivery."},
+    {"kind": "note", "text": "test_credentials skips on `rolsuper` of the owner role rather than through the denials probe the plan named. This is reasonable: the test's premise is a superuser owner, and it still runs on the Mac host."},
+    {"kind": "note", "text": "In this review checkout test_backup::test_a_backup_directory_on_the_clusters_own_disk_is_refused fails with InsufficientPrivilege on data_directory, because this check's cluster was provisioned without the grant. That is expected until the change merges, and it was red at base too."}
+  ],
+  "governance": [],
+  "notes": {},
+  "predicted_failure": 0.6,
+  "requirements": [
+    {"requirement": "Grant the workspace app role pg_signal_backend at provisioning (host and VM paths)", "met": true},
+    {"requirement": "Find and grant the other privileges the valor suite needs (pg_read_all_settings for data_directory/hba_file), without widening to server-file or program roles", "met": true},
+    {"requirement": "Handle the backup and credentials tests that fail at base on privileges so they are not red for reasons outside the candidate", "met": true},
+    {"requirement": "Add a test that a provisioned workspace's app role can terminate a connection another process holds on a test database", "met": true},
+    {"requirement": "Tests added or changed pass where they run (the Mac host)", "met": false},
+    {"requirement": "Add no new check or gate", "met": true}
+  ]
+}
+```

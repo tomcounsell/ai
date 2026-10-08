@@ -47,6 +47,7 @@ run starts the stage again.
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -701,21 +702,31 @@ def review_inputs(
     }
 
 
-def final_verdict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
-    """The reviewer's verdict: its final message, the one JSON object, bare
-    or in one fenced block. The kernel reads it from the turn's result on
-    the harness's stdout, which no process the session starts can write; a
-    file in the checkout can be rewritten by the candidate's code the
-    reviewer runs, to the end of the turn. Returns (verdict, why not)."""
-    body = (text or "").strip()
-    if body.startswith("```") and body.endswith("```"):
-        body = body.split("\n", 1)[1] if "\n" in body else ""
-        body = body[: body.rfind("```")].strip()
+_FENCED = re.compile(r"^```[^\n]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
+
+
+def _object(body: str) -> dict[str, Any] | None:
     try:
         data = json.loads(body)
     except ValueError:
-        return None, "the final message is not a JSON object"
-    if not isinstance(data, dict):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def final_verdict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """The reviewer's verdict: its final message when that is a bare JSON
+    object, else the last fenced block in it whose body is a JSON object,
+    so prose may come before the verdict. The kernel reads it from the
+    turn's result on the harness's stdout, which no process the session
+    starts can write; a file in the checkout can be rewritten by the
+    candidate's code the reviewer runs, to the end of the turn. Returns
+    (verdict, why not)."""
+    body = (text or "").strip()
+    data = _object(body)
+    if data is None:
+        fenced = (_object(m.group(1)) for m in reversed(list(_FENCED.finditer(body))))
+        data = next((d for d in fenced if d is not None), None)
+    if data is None:
         return None, "the final message is not a JSON object"
     return data, None
 

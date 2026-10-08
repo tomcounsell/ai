@@ -381,6 +381,13 @@ def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can
     [
         ('{"verdict": "pass"}', {"verdict": "pass"}),
         ('```json\n{"verdict": "changes"}\n```', {"verdict": "changes"}),
+        ('Checked it.\n\n```json\n{"verdict": "pass"}\n```', {"verdict": "pass"}),
+        (
+            'Ran it.\n\n```sh\npytest -q\n```\n\nSo:\n\n```json\n{"verdict": "changes"}\n```',
+            {"verdict": "changes"},
+        ),
+        ('Prose.\n\n```json\n{"verdict": "pass"}\n```\n\n```\nnot json\n```', {"verdict": "pass"}),
+        ("Ran it.\n\n```sh\npytest -q\n```", None),
         ("All good, passing it.", None),
         ('["pass"]', None),
         (None, None),
@@ -389,6 +396,12 @@ def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can
 def test_the_final_message_is_the_verdict_object(text, verdict):
     data, why = fresh.final_verdict(text)
     assert data == verdict and (why is None) == (verdict is not None)
+
+
+def test_a_real_final_message_of_prose_then_a_fenced_verdict_is_read():
+    text = (Path(__file__).parent / "fixtures" / "review_final_message.txt").read_text()
+    data, why = fresh.final_verdict(text)
+    assert why is None and data["verdict"] == "changes" and len(data["findings"]) == 6
 
 
 @pytest.mark.macos
