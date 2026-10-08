@@ -657,9 +657,11 @@ def test_no_revert_seen_gives_no_label(dsn, tmp_path):
     m = model_name()
     for b in (private, plain):
         reviewed_and_merged(dsn, w, b, m)
+        w.fetch()  # each merge force-pushes main; fetch so its head reaches the cache before the next
     reviewed_and_merged(
         dsn, w, unrecorded, m, landed={"before": w.base, "commits": None, "paths": None, "why": "GitError"}
     )
+    w.fetch()
     reviewed_and_merged(dsn, w, moved, m)
     w.fetch()
     to.sh(w.ws, "push", "-q", "-f", str(w.up), f"{w.base}:refs/heads/main")
