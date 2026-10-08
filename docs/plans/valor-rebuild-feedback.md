@@ -7,7 +7,7 @@ status: draft
 
 # Valor rebuild: Tom's feedback
 
-Tom's ruling of 2026-10-03 on [the rebuild plan](valor-rebuild.md), and what it changes.
+Tom's rulings on [the rebuild plan](valor-rebuild.md) (2026-10-03) and on the governance classifier (2026-10-07), and what each changes.
 
 ## Tom's feedback (2026-10-03)
 
@@ -50,3 +50,29 @@ deliveries merge (3a, 3c, 4.2, 1.4d, 1.4c part one); one more patch round
 for 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, and 1.5, in that order; no
 timers on email commands, a stop ends a hung one; open question 17's DMARC
 check parked; `idle_turns` removed.
+
+## Tom's ruling on governance.adds (2026-10-07)
+
+Count as a new checkpoint only a step that looks at work and can stop it or
+send it back. An ordinary fix that makes code correct, like a lock that
+makes two runs take turns, is no checkpoint, the way tests already are.
+
+The incident: review row 1436 on task 09975a1c2e52, the expiry-lock fix for
+review N4. `governance.adds` answered true on two hunks, the advisory lock
+in `core/routines.py` and the `docs/routines.md` sentence describing it. The
+Opus reviewer wrote "This is not governance", and since a reviewer cannot
+remove an instance, a confirmed fix waited on a tap.
+
+What this changes ([the plan](80e49c02-governance-adds.md)):
+
+- The question's gloss names a step that judges work, a request, or an
+  action and holds, redirects, or refuses it on that judgement, or a step
+  someone must pass; code that makes the work itself correct and prose that
+  only describes what code does are none of these, beside tests.
+- A settled governance row is reused, and a failed one counts as a spent
+  rerun, only under the question that answered it, so a reworded question
+  is asked fresh.
+- A reviewer's note that contests an instance is an incident against
+  `governance.adds`, answered by a classifier change, never by a grant
+  (`docs/judgement-layer.md`, note 6).
+- Unchanged: the governance paragraph in `CLAUDE.md`.
