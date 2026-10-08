@@ -121,6 +121,16 @@ base commit.
    The other two are as the advisor's file names them; I could not read
    that file from this workspace (the sandbox refuses paths outside it), so
    the rollout reads them there.
+1a. **Merge the recalibration cases.** `docs/plans/80e49c02-calibration-cases.json`
+   holds eight more cases in `governance.adds.json`'s own shape (`id`,
+   `inputs` with `path`, `hunk`, and `paths`, `label`, `source`, `evidence`),
+   each with a `note` naming its task, ledger row, and Tom's ruling, and an
+   `exact` flag. Append its `cases` to `governance.adds.json` (six are
+   rebuilt from the kernel's own inputs and match the ledger's
+   `inputs_sha256`; two are rebuilt from commit history and carry
+   `exact: false`), record the new file's SHA-256 digest, then run
+   calibration run 4 below. The `note` and `exact` keys are for the reader;
+   `case_shape` ignores them.
 2. **Calibration run 4** (section 4, step 3). Run the governance
    calibration on the updated case file against the merged question. If the
    entry check passes, land `GOVERNANCE.calibrated` on the record's
