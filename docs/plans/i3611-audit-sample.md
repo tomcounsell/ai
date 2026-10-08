@@ -2,7 +2,7 @@
 tracking: none
 slug: i3611-audit-sample
 type: plan
-status: planned
+status: merged
 issue: tomcounsell/ai#3611
 critique_rounds: 2
 review_rounds: 2
@@ -672,3 +672,16 @@ From the blind review (`review-3611`), both accepted by the lead:
   runs failed). It now compares the row types as a multiset and in order
   with those two types set aside; the checks on state, the merge effect,
   and the audit stream are unchanged. It passed 10 of 10 runs alone.
+
+## Merged
+
+- Checks on `c0816b2c2`, based on `7f1d2c300`:
+  - **Test: `red`.** It found two flaky tests and no product fault. The full suite, without `tests/test_container.py` and `tests/test_harness_contract.py`, showed only the base failures: the workspace fresh-session test and two `tests/test_pi.py` cases.
+  - **Review: `changes`.** It found two things: item 7's end-to-end test ordered concurrent rows, and the scores beside the list showed verdicts by stratum. Governance: no.
+  - **Docs: `updated`.** `d3c98d5a7`: data, architecture, mission and judgement-layer. The replay baseline moved to `docs/judgement-baseline.md`.
+- Patch round 1, `60b078164`:
+  - `/audit` shows the list only, and the scores are on `/audit/scores`.
+  - Item 7's test compares the concurrent rows as a multiset.
+  - Review of the patch: `pass`. Governance: no.
+- Patch `5784185a0`: `test_no_revert_seen_gives_no_label` fetches after each merge, so each head reaches the cache before the next force push. It passed 12 of 12 runs alone. `tests/test_audit_sample.py`, `tests/test_ui.py` and `tests/test_outcomes.py`: 69 passed.
+- Backup `valor_rebuild-20261008T124449Z.dump`, taken before the merge.
