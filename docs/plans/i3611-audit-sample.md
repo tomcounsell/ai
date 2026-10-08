@@ -45,6 +45,8 @@ The issue cites 5c11e496d. Re-read at 2d6ed8a8e:
   writes it into the `review.decided` payload only for a review recorded by
   a session (`leg` not `manual` or `kernel`). Nothing in `core/` reads it
   back: `grep -rn predicted_failure core` finds only those writes.
+- `grep -rn predicted_failure core` also finds `core/fresh.py:1105`, the
+  review runner's return value; it is a write, not a reader.
 - `docs/mission.md:396`: unchanged, "no audit sample exists".
 - `docs/plans/valor-rebuild-feedback.md:33`: unchanged, "Merges are
   Valor's call".
@@ -56,7 +58,7 @@ judging with a model's answer in view is worse calibrated than either
 alone), and that labels come from humans, not from agreement with a model
 (`docs/judgement-layer.md:280-283`). So Tom labels the work, `pass` or
 `changes`, without seeing the verdict; right or wrong is computed by the
-fold. This is question 2 below.
+fold. The design settles this, so it is not put to Tom.
 
 ## What it builds on
 
@@ -97,54 +99,92 @@ Each item is a test on real Postgres in the default suite.
    the task's stream, so the task's fold, its state, and the kernel's
    scheduling of it are unchanged, and no notice is requested.
 2. **What may be labelled.** A label names a candidate that has at least one
-   `review.decided` row with a `reviewer_verdict` in that task's ledger; any
-   other task, sha, or label value is refused with the reason, and nothing is
-   written. (Input validation of Tom's own command: there is nothing else to
-   label.) A calibration task or a legacy task has no such row and so is
-   refused by the same rule.
+   `review.decided` row with a `reviewer_verdict` in that task's ledger. Any
+   other task, sha, or label value is a lookup that finds nothing, and the
+   command exits with the reason and writes nothing, the way the command
+   line treats an unknown task now (`core/__main__.py:312`, "KeyError for
+   an unknown task"). It lives in the `__main__` command path, before
+   `record`. It judges no work and holds no task, request, or effect: there
+   is nothing else to label. A calibration task or a legacy task has no
+   such row and so finds nothing.
 3. **Relabelling.** A second label on the same candidate is a new row; the
-   fold reads the latest by row id and the old one stays in the ledger.
-4. **The list.** `python -m core audit` prints the candidates not yet
-   labelled by Tom himself, in this order:
-   1. candidates a done merge carried (they left the workspace through an
-      `act`), newest merge first;
-   2. other candidates whose latest session review's `reviewer_verdict` is
-      `pass`, newest first;
-   3. candidates every session review sent back (`changes` only), newest
-      first: the smaller share of failures.
-   Each line shows the task id, the instruction, the base and candidate
-   sha, whether it merged, and the mirror's `git diff BASE SHA` command to
-   read the work. It shows no verdict, finding, `predicted_failure`, or
-   requirement result. A candidate labelled only by a stand-in
-   (`role_played`) stays on Tom's list.
+   fold reads the latest real label by row id and the old one stays in the
+   ledger. A later stand-in label never replaces a real one: stand-in
+   labels are folded apart and only counted.
+4. **The list.** `python -m core audit` prints one list of the candidates
+   with no real label yet (a label counts as real when its `role_played` is
+   false, whatever `--by` names; a stand-in's label leaves the candidate on
+   the list). There are no group headings and no merged column. Each line
+   shows the task id, the instruction, the base and candidate sha, and the
+   mirror's `git diff BASE SHA` command to read the work, and nothing else:
+   no verdict, finding, `predicted_failure`, requirement result, or merge
+   state. The order is a weighted random order (Efraimidis and Spirakis):
+   each candidate's key is `u^(1/w)`, sorted high first, where `u` is the
+   first 64 bits of `sha256(task_id + ":" + sha)` over 2^64, so the order is
+   the same on every run and a new candidate takes its key's place. `w` is
+   4 for a candidate a done merge carried (it left the workspace through an
+   `act`), 2 for another candidate whose latest session review's
+   `reviewer_verdict` is `pass`, and 1 for one every session review sent
+   back. The weights are Valor's reading of `docs/architecture.md:402`
+   ("weighted toward work that left the workspace and every `act`, with a
+   smaller share of failures"); `audit scores` prints them. They change only
+   the order: the scores in item 5 weight each label by its stratum's
+   population, so no choice of weights biases a figure. A line's place says
+   only that its candidate is somewhat more likely to be in a heavier
+   stratum; `pass` and `changes` candidates interleave. A merged candidate's
+   verdict can be read off the repository (it merged, so its verifier
+   passed); for merged work, blindness covers the findings and
+   `predicted_failure` only.
 5. **The scores.** `python -m core audit scores` prints, per verifier
-   `model`, over Tom's own latest labels (no `role_played` label enters a
-   figure):
-   - the confusion counts, verifier `pass` or `changes` against label `pass`
-     or `changes`, every cell shown;
-   - false accepts (verifier `pass`, label `changes`) over labelled
-     `changes`, and false rejects (verifier `changes`, label `pass`) over
-     labelled `pass`, each as a count and its denominator;
-   - the Brier score, the mean of `(predicted_failure - y)^2` with `y` 1 for
-     `changes`, over the verdicts that carry `predicted_failure`, with that
-     `n`;
-   - `n` labelled candidates, how many merged, and, beside the figures, the
-     count of stand-in labels left out.
-   Each session `review.decided` row on a labelled candidate is one scored
-   verdict (a candidate reviewed twice is two verdicts against one label).
+   `model` (a review row with no `model` is grouped under `unknown`), over
+   the latest real label per candidate:
+   - **Units.** Each session `review.decided` row with a `reviewer_verdict`
+     on a labelled candidate is one scored verdict; a candidate reviewed
+     twice (a grant drops the review and re-enters checks,
+     `core/machine.py:550-558`) is two verdicts against one label. Every
+     `n` below counts verdicts, and the line also prints the number of
+     labelled candidates.
+   - **Strata.** A verdict's stratum is its `reviewer_verdict` and whether
+     its candidate merged. For each stratum `s` the scores print `N_s`, the
+     session verdicts in the ledger, and `n_s`, the labelled ones. Each
+     labelled verdict weighs `N_s / n_s`, so each figure estimates the
+     whole population of verdicts, not the list's order. A stratum with
+     `N_s` above 0 and `n_s` 0 enters no figure, and its `N_s` is printed
+     as not covered.
+   - the raw confusion counts, verifier `pass` or `changes` against label
+     `pass` or `changes`, every cell shown;
+   - conditioned on the verdict: of verifier `pass`, the weighted share
+     labelled `changes`, and of verifier `changes`, the weighted share
+     labelled `pass`, each with its `n`;
+   - false accepts (verifier `pass`, label `changes`) over label `changes`,
+     and false rejects (verifier `changes`, label `pass`) over label
+     `pass`, both weighted, each with its `n`;
+   - the Brier score, the weighted mean of `(predicted_failure - y)^2` with
+     `y` 1 for `changes`, over verdicts whose `predicted_failure` is a
+     number (not a bool) in 0 to 1, with that `n`; any other value is
+     skipped and counted as skipped;
+   - the list weights, and, beside the figures, the count of stand-in
+     labels left out and the count of real labels per `by`.
    The verifier's own answer is scored: `reviewer_verdict`, not the
    computed verdict (a `governance_refused` from a reviewer's `pass` scores
-   as `pass`).
+   as `pass`). Labels from the merge outcomes (below) are scored apart under
+   their own source and never pooled with human labels.
 6. **The status page.** `GET /audit` shows the list (as in 4, blind) and the
    scores (as in 5), from the same functions the command line calls. The nav
    gains "audit". Rows on the list do not link to `/task/ID`, which shows
-   the verdict. GET only, escaped, read-only session, like every page.
+   the verdict. GET only, escaped, read-only session, like every page. The
+   page and the scores carry no figure from `governance.adds`, instances,
+   grants, or guards (see Governance).
 7. **Nothing holds or sends.** No path reads the scores or labels to hold,
    refuse, redirect, or reorder work, and nothing sends the list to Tom.
    A test runs a task through merge with labels recorded on its candidates
    (including a `changes` label against a `pass`) and asserts the task's
    rows, the merge effect, and the notices are identical to a run without
-   them.
+   them; another asserts a review turn's dispatched text is the same with
+   and without labels.
+8. **Merge outcomes as labels.** Built on `core/outcomes.py` from #3612
+   (see "The hand-off with #3612"): a merge `git revert` undid reads as a
+   `changes` label with source `revert` on the candidate it carried.
 
 The module is `core/audit_sample.py` (not `audit`, which is the stop
 invariant's name, `core/tasks.py:830`): `record`, `labels`, `sample`,
@@ -164,8 +204,12 @@ bridge, or performer does); let a label or a score hold, refuse, reorder, or
 redirect any task or effect; send the list or a score to Tom as a question
 or notice; render labels or scores into any turn's Brief (the verifier
 never sees its own calibration); or put a turn-written value on the page
-unescaped. The fold reads `predicted_failure` only as a number in 0 to 1 and
-skips any other value in the Brier term rather than trusting it.
+unescaped. The fold reads `predicted_failure` only as a number (not a bool)
+in 0 to 1 and skips any other value in the Brier term rather than trusting
+it; an older or hand-written row may hold anything. The turn also controls
+commit messages, so a builder can write a false "This reverts commit" line:
+revert labels are scored only under their own source, never pooled with
+human labels, and nothing acts on either.
 
 ## Governance
 
@@ -181,14 +225,27 @@ labels (for the ledger, for measurement) adds no governance"
   no merge depends on it, and nothing sends it;
 - the scores are measurement with no threshold and no action.
 
+**Not a governance dashboard.** The page measures the verifier's judgement
+of work quality, the evidence "Independent checks" names
+(`docs/mission.md:171-173`) and the audit sample `docs/architecture.md:509`
+places in the design; it does not show guards, restraint, or governance.
+The code matches: no figure on the page or in `audit scores` comes from
+`governance.adds`, instances, grants, or guards, and a test asserts it. A
+reviewer `pass` the kernel recorded as `governance_refused` scores as the
+reviewer's `pass`, so the governance outcome never enters a figure. The
+`ui/README.md` Scope line this task adds ("the audit list and the
+verifier's calibration") states the same point beside its Not-here line.
+
 If Tom, reading a merged candidate, finds a defect, he gives feedback
 through `python -m core feedback`, which exists; this plan adds no path from
 a label to `patch`.
 
-If the blind verifier's `governance.adds` flags a hunk of this diff (the
-refusal in item 2 is the likeliest), that is an incident against the
-classifier, answered by a classifier change, never by a grant
-(`docs/judgement-layer.md`, note 6, as amended by task 80e49c02).
+The refusal in item 2 is the command line's existing input handling, built
+the same way (`core/__main__.py:312`). If the blind verifier's
+`governance.adds` still flags a hunk of this diff, that is an incident
+against the classifier, answered by a classifier change, never by a grant
+(`docs/judgement-layer.md`, note 6, as amended by task 80e49c02). This
+task's merge then waits on that classifier change, not on Tom.
 
 **The half not built, and what its grant would cover.** Lowering the
 highest class Valor commits without Tom on a degrading series
@@ -220,36 +277,77 @@ Kernel code and a new stored row type: `critique_rounds: 2`,
   gains its reader.
 - `ui/README.md` Scope lists the audit view; `core/README.md` lists the
   module.
+- `docs/judgement-layer.md` "Where labels come from" gains the audit
+  labels and reverted merges as label sources for the blind verifier.
 
 None found in code.
 
 ## Left out
 
 - **Lowering the highest class** (Governance above).
-- **Labelling from the local page.** The status page is read-only by design
-  (`ui/README.md:9`, `ui/app.py:1-5`); the local chat page posts messages,
-  not other rows (`bridges/local/__init__.py:1-11`). A label form there is a
-  new write surface with its own token threat model; it waits for Tom to
-  want it (question 1).
-- **Issue #3612's outcomes as labels.** Not built yet. `labels(conn)`
-  returns `{task_id, candidate_sha, label, source, provenance}`; this task
-  writes `source: "tom"`. Whichever of the two tasks lands second adds the
-  outcome source there (a reverted merge reads as `changes`), and `scores`
-  reports each source's count apart, as `docs/judgement-layer.md:293-294`
-  does for a record.
-- **A random draw or a fixed share.** No source gives a fraction; the order
-  in item 4 is the weighting, and Tom's labels are the sample.
+- **Labelling from the local page.** Cut, as Valor's decision. The issue
+  asks for labels "recorded from the command line and the local page"; the
+  command line is built. The status page is read-only by design
+  (`ui/README.md:9`, `ui/app.py:1-5`), and the local chat page posts
+  messages, not other rows (`bridges/local/__init__.py:1-11`), so a label
+  form there is a new write surface with its own token threat model. It is
+  a follow-up task, not a question.
+- **A fixed share or a quota.** No source gives a fraction; the weighted
+  order in item 4 is the sampling, and the labels Tom chooses to give are
+  the sample.
 - **Scoring `requirements`** per requirement, `review.compared` rows at
   other seats, and the emulator judge's calibration (`docs/emulator.md:500-507`).
+- **`merge.used` as a label.** A use mark says someone used a merge, not
+  that the candidate was right, and its absence says nothing; it is not
+  scored.
 - **Counting labels in the attention log.** A label is attention Tom chose
   to spend, not a decision escalated to him (`docs/mission.md:139-142`).
+
+## The hand-off with #3612
+
+#3612's plan (`docs/plans/i3612-merge-outcomes.md`, commit `0f2787f5a`)
+builds `core/outcomes.py`: `after_merge(conn, task_id)` returns one entry
+per merge with `effect_id`, `head_sha`, and `revert`, which is None when no
+repository can tell, or holds `on_branch`, `reverted_by` (each commit whose
+message names a commit in the merge's range, with its sha), `source`, and
+`as_of`. It also adds `merge.used` rows. It does not name the candidate:
+a merge's `head_sha` is the docs head when docs committed
+(`core/verdicts.py:519`), so the candidate is read from the task's
+`effect.held` row with the same `effect_id`, `payload.candidate.sha`
+(`core/verdicts.py:520`).
+
+This task owns the join, so nothing depends on #3612's builder knowing of
+it:
+
+- `audit_sample.labels(conn)` returns rows
+  `{task_id, candidate_sha, label, source, provenance, event_id}`.
+  `audit.labelled` rows give `source: "tom"` (a real label, whoever `by`
+  names) or are counted apart when role-played.
+- For every task with a done merge, `labels` calls
+  `outcomes.after_merge` and, for each merge whose `revert.reverted_by` is
+  not empty, yields label `changes`, source `revert`, provenance
+  `{by: "git", via: "revert of <sha>", role_played: false}` on the merge's
+  candidate. A merge with `revert` None, an empty `reverted_by`, or
+  `on_branch` false alone yields no label: no revert seen is not a `pass`.
+- `scores` computes every figure per source; `revert` figures print under
+  their own heading with their own `n`, as `docs/judgement-layer.md:293-294`
+  counts a record's labels by origin. Only `scores` and `/audit` call it,
+  so the git reads run only when asked.
+
+**Order.** Build starts now; item 8 and its tests are built on a rebase
+onto #3612's merge, and this task merges after #3612. If the lead stops
+#3612, item 8 is dropped and the docs say no outcome source exists. The
+docs pass adds one line to `docs/judgement-layer.md` "Where labels come
+from": Tom's audit labels and reverted merges label the blind verifier's
+verdicts, scored apart by source.
 
 ## Tests
 
 New `tests/test_audit_sample.py` (real Postgres, `VALOR_TEST_DB`), and one
-page test in `tests/test_ui.py`. Fixtures write `review.decided` rows
-through `verdicts.record_check` with `leg="session"` on tasks driven to the
-needed state, as `tests/test_review.py:252-286` does.
+page test in `tests/test_ui.py`. Fixtures write session `review.decided`
+rows through `scripted.check` and `scripted.checks` (`tests/scripted.py:289-308`),
+which ask the scripted governance judgements one per hunk and pass
+`predicted_failure` and `model` through `**kw`.
 
 - Label row shape and provenance; `--role-played` sets it.
 - Refusals: unknown task; a sha with no review; a candidate with only a
@@ -257,22 +355,49 @@ needed state, as `tests/test_review.py:252-286` does.
 - The task's stream is untouched by a label: `ledger.read(task)` before and
   after are equal, and `machine.fold` gives the same state.
 - Relabel: latest wins in `scores`; both rows remain.
-- Order: a merged candidate above a newer unmerged `pass` above a newer
-  `changes`-only candidate; a held or refused merge does not count as
-  merged; a candidate whose task was patched (an older candidate) is listed
-  on its own line.
+- Order: the key is `u^(1/w)` from the candidate's hash, stable across two
+  runs; a new candidate does not reorder the others; a held or refused
+  merge weighs as unmerged; a candidate whose task was patched (an older
+  candidate) is listed on its own line.
 - Blindness: the list's text and the page's list contain no
-  `reviewer_verdict`, finding text, `predicted_failure` value, or
-  `/task/` link (fixture findings use a marker string).
-- A stand-in label leaves the candidate on Tom's list and out of every
-  figure, and is counted apart.
-- Scores, exact on a fixture: verdicts (`pass`, 0.2, label `pass`),
-  (`pass`, 0.6, label `changes`), (`changes`, absent, label `pass`) give
-  confusion pass/pass 1, pass/changes 1, changes/pass 1, changes/changes 0;
-  false accepts 1 of 1; false rejects 1 of 2; Brier 0.1 with n 2.
+  `reviewer_verdict`, finding text, `predicted_failure` value, merge state,
+  or `/task/` link (fixture findings use a marker string); on a fixture of
+  unmerged `pass` and `changes` candidates with fixed shas, the two kinds
+  interleave in the printed order, and the columns are the same for both.
+- A stand-in label leaves the candidate on the list and out of every
+  figure, and is counted apart. A label with `--by alice` and no
+  `--role-played` is real and counted under `alice`.
+- A later stand-in label does not override a real one: Tom labels `pass`,
+  then a role-played `changes`; `pass` is scored.
+- Scores, exact on a fixture for one model. Verdicts: V1 `pass`, merged,
+  0.2, label `pass`; V2 `pass`, unmerged, 0.6, label `changes`; V3
+  `changes`, unmerged, absent, label `pass`; V4 `pass`, merged, unlabelled;
+  V5 `changes`, unmerged, unlabelled. Weights: V1 2, V2 1, V3 2. Raw
+  confusion pass/pass 1, pass/changes 1, changes/pass 1, changes/changes 0.
+  Of verifier `pass`, labelled `changes` 1/3 (n 2); of verifier `changes`,
+  labelled `pass` 1 (n 1); false accepts 1 (n 1); false rejects 0.5 (n 2);
+  Brier 0.08 (n 2; unweighted it would be 0.1). Strata printed with `N_s`
+  and `n_s`; a stratum (`changes`, merged) with N 0 prints 0.
+- Two reviews of one candidate by the same model (a grant re-enters checks)
+  are two verdicts against one label: `n` 2, labelled candidates 1.
+- A `predicted_failure` that is a string, 1.5, -0.1, or `true` (rows written
+  straight to the ledger) is skipped in the Brier term, `n` excludes it, and
+  the skipped count shows it.
+- A session review row with no `model` is scored under `unknown`.
+- Revert labels (on #3612's merge): a merge whose `reverted_by` is not
+  empty labels its candidate `changes` under source `revert`, scored apart
+  from Tom's; `revert` None, empty `reverted_by`, and `on_branch` false
+  alone give no label; the candidate is the held payload's, not the docs
+  head.
 - Two models on one candidate are scored apart.
 - A reviewer `pass` recorded as `governance_refused` scores as `pass`.
 - `review.compared` rows are not scored.
+- The scores and the page carry no `governance.adds`, instance, grant, or
+  guard field (keys of `scores`' result and the page's text).
+- A review turn's Brief has no audit content: `tasks.dispatch(conn, task,
+  fresh="review")` returns the same text before and after labels are
+  recorded (`turn.started` stores that text, `core/runs.py:155-167`, so this
+  covers what a turn is given).
 - Item 7's end-to-end: a merge run with and without labels yields the same
   task rows (ids aside), the same merge effect, and no notice for the audit
   stream.
@@ -280,14 +405,43 @@ needed state, as `tests/test_review.py:252-286` does.
   and its figures equal `audit scores`.
 
 Suites: `tests/test_audit_sample.py`, `tests/test_ui.py`,
-`tests/test_review.py`, `tests/test_corrections.py`, then the full suite.
+`tests/test_review.py`, `tests/test_corrections.py`, `tests/test_outcomes.py`,
+then the full suite.
 
-## Questions for Tom
+## Critique round 1
 
-1. **Where do you want to label?** The terminal now (`python -m core audit
-   label ...`), or on the local chat page as well? Assumed: the terminal
-   for now; the page when you ask for it.
-2. **Blind or confirm?** Labelling blind (you judge the work without seeing
-   what the verifier said) costs more of your time per label but gives a
-   true measure; confirming a shown verdict is quicker and biased toward
-   agreeing. Assumed: blind, as the design says.
+Critic `critic-3611-r1`, verdict `revise`; the lead accepted all eight
+findings. Each is addressed; none was refused.
+
+1. **The order showed the verdict.** One list, no groups, no merged column;
+   a stable weighted random order (`u^(1/w)` from the candidate hash,
+   weights 4, 2, 1, printed with the scores); merged work's verdict is
+   inferable from the repository, stated in item 4; the blindness test
+   asserts `pass` and `changes` interleave and share columns.
+2. **The figures were biased by the sampling.** Every figure is now a
+   stratified estimate: strata are verdict by merged, each labelled verdict
+   weighs `N_s / n_s`, the verdict-conditioned rates are reported, the
+   label-conditioned false accept and false reject are reweighted, and the
+   population counts print beside them. Strata include merge state, not
+   verdict alone, because the list weights depend on it. The fixture test
+   is rewritten (Brier 0.08 weighted against 0.1 raw).
+3. **The questions were answered.** The Questions section is removed; the
+   local-page cut is under Left out as Valor's decision and a follow-up.
+4. **The page and "no governance dashboard".** A Governance paragraph says
+   what the page measures; no governance figure enters the code; a test
+   asserts it; the `ui/README.md` Scope line carries it.
+5. **Missing tests.** Added: two reviews of one candidate (denominators
+   count verdicts; labelled candidates printed too); a later stand-in label
+   does not override (and "real" is `role_played` false, whatever `by`
+   says); bad `predicted_failure` values; a row with no `model` under
+   `unknown`; the Brief has no audit content, through `tasks.dispatch`.
+6. **The refusal.** Built as the command line's lookup failure, in the
+   `__main__` path, citing `core/__main__.py:312`; the forecast is
+   replaced by the case where it is flagged, and that the merge then waits
+   on the classifier change, not Tom.
+7. **The fixture citation.** Now `tests/scripted.py:289-308`.
+8. **The #3612 hand-off.** "The hand-off with #3612" writes the join
+   against what that plan builds (`after_merge`'s `revert`, the held
+   effect's candidate, `merge.used` not a label). This task owns the join
+   and merges after #3612, so nothing rests on #3612's builder; the docs
+   pass adds the line to "Where labels come from".
