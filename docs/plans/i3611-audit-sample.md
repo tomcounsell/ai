@@ -584,3 +584,17 @@ Departures from the plan's wording, none in behavior:
 Docs left for the docs check: `docs/data.md` (the row and stream),
 `docs/architecture.md:509` and `:402-409`, `docs/mission.md:171` and
 `:396`, and `docs/judgement-layer.md` "Where labels come from".
+
+Suite, without `tests/test_container.py` (run concurrently by other
+agents) and `tests/test_harness_contract.py`: 1614 passed, 25 skipped, 7
+failed, 42 errors, on a disk at 100% with other suites running. The 42
+errors are `initdb` and pytest temp folder failures from the full disk.
+Every failing and erroring file, rerun alone, passes:
+`test_credentials`, `test_telegram_gap`, `test_telegram_inbound`,
+`test_telegram_outbox`, `test_telegram_pipeline`,
+`test_provision_restart_gaps`, `test_transcripts`, `test_audit_sample`,
+and `test_ui`. `test_review` had 4 timeouts when rerun with them
+("the turn never started"), and all 11 of its failing cases pass alone.
+`tests/test_harness_contract.py`'s `claude_code` cases end `failed` and
+the stop case hangs; the same cases fail the same way at 1cf124090, and
+this diff touches no harness. Ruff check and format are clean.
