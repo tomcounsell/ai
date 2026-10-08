@@ -2,7 +2,7 @@
 tracking: none
 slug: i3612-merge-outcomes
 type: plan
-status: planned
+status: merged
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -570,3 +570,18 @@ known alias fault (the CLI maps `haiku` to `claude-haiku-5-5`, which has
 no price; fixed on `fix-haiku-alias`), and its stop test hangs, so it was
 run apart.
 Ruff: `ruff check .` and `ruff format --check .` pass.
+
+## Merged
+
+- Checks on `6d8376bc3`, rebased onto `cd6e94aad`:
+  - **Test: `gaps`.** No regressions. The head suite, without `tests/test_container.py` and `tests/test_harness_contract.py`, gave 1677 passed, 25 skipped, 3 failed. All three also fail at base: the fresh-session test in `tests/test_workspace.py`, and two `tests/test_pi.py` cases. The harness contract's claude_code cases: 16 passed, 1 skipped.
+  - **Review: `pass`.** It adds no check, gate or review step, and no invented caps.
+  - **Docs: `updated`.** `f2f48e950`, `core/README.md`, the `--via` option.
+- Patch `c3504be59`, for the gaps both checks named:
+  - a `before` or `head` the mirror lacks records null `landed` with why `GitError`, not an empty one, with a test;
+  - the plan's feedback window reads "next delivery", as built.
+  - `tests/test_outcomes.py` and `tests/test_broker.py` pass at the patch: 36 tests.
+- Known limits, not changed:
+  - a hand commit the candidate took in counts as the merge's own when the target cache was last fetched before it;
+  - a revert of the merge's revert still lists the first revert under `reverted_by`.
+- Backup `valor_rebuild-20261008T111835Z.dump` was taken before the merge.
