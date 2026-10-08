@@ -691,6 +691,17 @@ def choose_port(span: tuple[int, int], taken: set[int]) -> int:
 # -- provisioning -----------------------------------------------------------------------
 
 
+def cache_path(origin: str, work: Path) -> Path:
+    """Where the kernel's bare clone of `origin` (a local path or a URL)
+    lives under `work`: `cache/<name>-<digest>.git`, keyed by the URL's
+    digest so two repositories with one basename never share a cache."""
+    local = Path(origin).expanduser()
+    url = str(local.resolve()) if local.exists() else origin
+    stem = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:40] + "-" + hashlib.sha256(url.encode()).hexdigest()[:12]
+    return work / "cache" / f"{name}.git"
+
+
 def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     """The kernel's bare clone of the repository, fetched by its trusted git:
     a local path, or a public HTTPS URL fetched anonymously. A repository
@@ -698,11 +709,7 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     origin = source or spec.repo
     local = Path(origin).expanduser()
     url = str(local.resolve()) if local.exists() else origin
-    stem = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-    # Keyed by the URL's digest: two repositories with one basename never
-    # share a cache.
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:40] + "-" + hashlib.sha256(url.encode()).hexdigest()[:12]
-    cache = work / "cache" / f"{name}.git"
+    cache = cache_path(origin, work)
     if not local.exists() and not url.startswith("https://"):
         raise Refused(f"{origin} is neither a local repository nor an https URL")
     if not cache.exists():

@@ -83,7 +83,18 @@ status TASK_ID                 the task as a fold over its ledger: its state,
                                the attention log (questions, answers, feedback,
                                approvals, manual verdicts, grants) and its counts;
                                its parent, its children's reports, and the
-                               metered spending of its whole subtree
+                               metered spending of its whole subtree; and
+                               what came after each merge (feedback after it,
+                               its paths, later merges sharing them, whether
+                               it was reverted or is still on its branch,
+                               used marks) and the used marks of deliveries
+used TASK_ID --by B [--delivery EVENT_ID] [--note TEXT] [--via V] [--role-played]
+                               record that someone used the task's work:
+                               `--by` names who used it; the mark names the
+                               delivery its latest merge carried (or the
+                               latest delivery, with no merge, or
+                               `--delivery`); a role-played mark is listed
+                               and not counted as use
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task and every task under it now,
                                wherever their turns run
@@ -133,6 +144,7 @@ from core import (
     judgement_sites,
     ledger,
     machine,
+    outcomes,
     router,
     routines,
     session,
@@ -717,7 +729,26 @@ async def _run(args) -> None:
             state = await tasks.status(conn, args.task_id)
             state["metered_spending"] = _usd(state["spent_usd_micros"])
             state["tree_metered_spending"] = _usd(state["tree_spent_usd_micros"])
+            try:
+                b = await tasks.brief(conn, args.task_id)
+            except KeyError:
+                raise SystemExit(f"no task {args.task_id}") from None
+            state.update(await outcomes.after_merge(conn, b, await ledger.read(conn, args.task_id)))
             print(json.dumps(state, indent=2))
+        elif args.command == "used":
+            try:
+                used_id = await outcomes.mark_used(
+                    conn,
+                    args.task_id,
+                    by=args.by,
+                    via=args.via,
+                    role_played=args.role_played,
+                    note=args.note,
+                    delivery=args.delivery,
+                )
+            except LookupError as exc:
+                raise SystemExit(str(exc.args[0])) from None
+            print(f"used {used_id} recorded on task {args.task_id}")
         elif args.command == "ledger":
             print(ledger.render(await ledger.read(conn, args.task_id)))
         elif args.command == "stop":
@@ -974,6 +1005,13 @@ def main() -> None:
     remove.add_argument("--by", default="tom")
     remove.add_argument("--via", default="the command line")
     sub.add_parser("status").add_argument("task_id")
+    used = sub.add_parser("used")
+    used.add_argument("task_id")
+    used.add_argument("--by", required=True, help="who used the work")
+    used.add_argument("--delivery", type=int, help="the task.delivered row's event id")
+    used.add_argument("--note")
+    used.add_argument("--via", default="the command line")
+    used.add_argument("--role-played", action="store_true")
     sub.add_parser("ledger").add_argument("task_id")
     stop = sub.add_parser("stop")
     stop.add_argument("task_id")

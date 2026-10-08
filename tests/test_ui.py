@@ -11,7 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import ui.__main__ as ui_main
 import ui.app as ui_app
-from core import ledger, routines, spending, tasks, workspace
+from core import ledger, outcomes, routines, spending, tasks, workspace
 from core.settings import settings
 from tests.ports import listen
 from tests.test_objective_tree import call, run
@@ -112,3 +112,72 @@ def test_the_routine_pages_thirty_day_figure_is_the_command_lines(dsn, monkeypat
     assert tasks.usd(rep["period_spent_usd_micros"]) in line
     assert rep["period_spent_usd_micros"] >= 2_000_000
     assert ui_app.esc(line) in text
+
+
+# -- what came after a merge -----------------------------------------------------------
+
+
+async def _merged(conn, path: str) -> str:
+    """A task with one merge whose recorded paths include `path`, written
+    as the broker writes it, on a target no other test merges to."""
+    url = f"/toy/{ledger.new_id()}.git"
+    t = await tasks.start(conn, tasks.Brief(instruction="merged", origin_url=url, target_branch="main"))
+    await ledger.append(
+        conn, t, "task.delivered", {"candidate": "a" * 40, "outcome": "merged", "summary": "s"}
+    )
+    effect = ledger.new_id()
+    payload = {"url": url, "target_branch": "main", "head_sha": "a" * 40, "candidate": "a" * 40}
+    await ledger.append(
+        conn, t, "effect.held", {"effect_id": effect, "action_type": "merge", "payload": payload}
+    )
+    landed = {"before": None, "commits": ["a" * 40], "paths": [path, "b.py"], "why": None}
+    await ledger.append(
+        conn, t, "effect.intent", {"effect_id": effect, "action_type": "merge", "landed": landed}
+    )
+    await ledger.append(conn, t, "effect.outcome", {"effect_id": effect, "kind": "done"})
+    return t
+
+
+def test_a_merged_tasks_page_shows_what_came_after_and_escapes_its_paths(dsn):
+    async def go():
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            t = await _merged(conn, HOSTILE)
+            await ledger.append(
+                conn, t, "feedback.given",
+                {"feedback_id": ledger.new_id(), "on_delivery": "s", "candidate": None, "text": HOSTILE, "provenance": ledger.provenance("tom", "test", False)},
+            )  # fmt: skip
+        return t, await fetch(dsn, f"/task/{t}"), await fetch(dsn, "/")
+
+    _t, (status, page), (_, index) = run(go())
+    assert status == 200 and HOSTILE not in page
+    assert "<h2>After merge</h2>" in page and "&lt;script&gt;alert(1)&lt;/script&gt;, b.py" in page
+    assert "tom: &lt;script&gt;" in page and "no kernel copy of the target" in page
+    assert "merges 1, feedback after 1, used 0, reworked by 0" in index
+
+
+def test_a_delivered_task_with_a_mark_and_no_merge_shows_the_used_list(dsn):
+    async def go():
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            t = await tasks.start(conn, tasks.Brief(instruction="delivered"))
+            await ledger.append(
+                conn, t, "task.delivered", {"candidate": None, "outcome": "answered", "summary": "s"}
+            )
+            await outcomes.mark_used(conn, t, by="tom", note=HOSTILE)
+        return await fetch(dsn, f"/task/{t}")
+
+    status, page = run(go())
+    assert status == 200 and HOSTILE not in page
+    assert "<h2>Used</h2>" in page and "used 1" in page and "tom: &lt;script&gt;" in page
+    assert "<h2>After merge</h2>" not in page
+
+
+def test_a_task_with_no_merge_and_no_mark_shows_none(dsn):
+    async def go():
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            t = await tasks.start(conn, tasks.Brief(instruction="plain task, nothing after"))
+        return t, await fetch(dsn, f"/task/{t}"), await fetch(dsn, "/")
+
+    t, (_, page), (_, index) = run(go())
+    assert "<h2>After merge</h2>" not in page and "<h2>Used</h2>" not in page
+    row = next(r for r in index.split("<tr>") if t in r)
+    assert "merges " not in row

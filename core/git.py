@@ -530,6 +530,22 @@ def is_ancestor(workspace: str | Path, older: str, newer: str) -> bool:
     return run(workspace, "merge-base", "--is-ancestor", older, newer).returncode == 0
 
 
+def has_commit(repo: str | Path, sha: str) -> bool:
+    """Whether a repository only the kernel writes holds `sha` as a commit."""
+    return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
+def ancestry(repo: str | Path, older: str, newer: str) -> tuple[bool | None, str | None]:
+    """Whether `older` is an ancestor of `newer` in a repository only the
+    kernel writes: True, False, or None with git's message when git could
+    not say (`merge-base --is-ancestor` exits 1 for "not an ancestor" and
+    anything else for an error)."""
+    done = _git(repo, "merge-base", "--is-ancestor", older, newer)
+    if done.returncode in (0, 1):
+        return done.returncode == 0, None
+    return None, _text(done.stderr).strip()
+
+
 def merges_between(workspace: str | Path, older: str, newer: str) -> list[str]:
     return out(workspace, "rev-list", "--merges", f"{older}..{newer}").split()
 

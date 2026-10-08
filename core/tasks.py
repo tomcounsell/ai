@@ -15,7 +15,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from core import corrections, git, ledger, machine, persona
+from core import corrections, git, ledger, machine, outcomes, persona
 from core.settings import resolve_model, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
@@ -857,8 +857,11 @@ def audit(state: dict[str, Any]) -> list[str]:
 
 async def index(conn) -> list[dict[str, Any]]:
     """Every task, newest first: its id, instruction, state, parent, metered
-    spending, attention counts, and the time of its last row. The status
-    page's task list."""
+    spending, attention counts, what came after its merges
+    (`outcomes.summary`: `merges`, `feedback_after`, `used`, `reworked`),
+    and the time of its last row. The status page's task list; it runs no
+    git."""
+    done = await outcomes.done_merges(conn)
     ids = await (
         await conn.execute(
             "SELECT id, body->>'instruction', body->>'parent_id' FROM documents WHERE kind = 'task'"
@@ -886,6 +889,7 @@ async def index(conn) -> list[dict[str, Any]]:
                 "state": state,
                 "spent_usd_micros": spending(rows)["spent_usd_micros"],
                 "attention_counts": _counts(attention),
+                **outcomes.summary(rows, done),
                 "last_at": max((r["at"] for r in rows if r.get("at")), default=None),
             }
         )

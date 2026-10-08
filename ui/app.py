@@ -4,8 +4,10 @@ a 405). Every value that came from the ledger is escaped. The database
 session is read-only (`default_transaction_read_only`), so nothing here can
 write a row.
 
-    /                  every task: state, metered spending, attention counts
-    /task/ID           one task: its status and its ledger
+    /                  every task: state, metered spending, attention counts,
+                       and what came after its merges
+    /task/ID           one task: what came after each merge, its status,
+                       and its ledger
     /pending           the effects held for Tom
     /attention         the attention log across tasks
     /routines          each routine: period spending, last run, runs
@@ -20,7 +22,7 @@ from typing import Any
 import psycopg
 from aiohttp import web
 
-from core import broker, ledger, routines, tasks
+from core import broker, ledger, outcomes, routines, tasks
 from core.settings import settings
 
 STYLE = (
@@ -77,7 +79,7 @@ async def tasks_page(conn) -> web.Response:
     return layout(
         "Tasks",
         table(
-            ["task", "instruction", "state", "metered spending", "attention", "last row"],
+            ["task", "instruction", "state", "metered spending", "attention", "after merge", "last row"],
             [
                 [
                     link(t["task_id"]),
@@ -85,6 +87,7 @@ async def tasks_page(conn) -> web.Response:
                     esc(t["state"]),
                     usd(t["spent_usd_micros"]),
                     esc(t["attention_counts"]),
+                    after_counts(t),
                     esc(t["last_at"]),
                 ]
                 for t in found
@@ -93,15 +96,94 @@ async def tasks_page(conn) -> web.Response:
     )
 
 
+def after_counts(t: dict[str, Any]) -> str:
+    """A task's after-merge counts in the index, empty with no merge."""
+    if not t["merges"] and not t["used"]:
+        return ""
+    return esc(
+        f"merges {t['merges']}, feedback after {t['feedback_after']}, used {t['used']}, "
+        f"reworked by {t['reworked']}"
+    )
+
+
+def _people(entries: list[dict[str, Any]], text: str) -> str:
+    return "<br>".join(
+        esc(
+            f"{e['provenance']['by']}{' (role-played)' if e['provenance']['role_played'] else ''}: {e[text] or ''}"
+        )
+        for e in entries
+    )
+
+
+def _later(entries: list[dict[str, Any]] | None, key: str) -> str:
+    if entries is None:
+        return ""
+    return "<br>".join(
+        esc(f"{e['task_id']} after {e['days_after']} days: {', '.join(e[key])}") for e in entries
+    )
+
+
+def _later_cell(m: dict[str, Any]) -> str:
+    cell = esc(m["rework_why"]) if m["later"] is None else _later(m["later"], "shared_code")
+    if m["later_unknown"]:
+        cell += ("<br>" if cell else "") + esc(f"paths not recorded: {', '.join(m['later_unknown'])}")
+    return cell
+
+
+def _revert(m: dict[str, Any]) -> str:
+    r = m["revert"]
+    if r is None:
+        return esc(m["revert_why"])
+    by = r["reverted_by"]
+    reverted = "not read" if by is None else ", ".join(e["sha"] for e in by) or "no"
+    return esc(f"on branch: {r['on_branch']}; reverted by: {reverted}; cache as of {r['as_of']}")
+
+
+def after_merge_html(after: dict[str, Any]) -> str:
+    """The After merge table, one row per merge, and the Used list of
+    deliveries marked with no merge; every value escaped."""
+    body = ""
+    if after["after_merge"]:
+        body += "<h2>After merge</h2>" + table(
+            ["head", "merged at", "feedback", "used", "paths", "later, shared code", "later, docs only",
+             "revert"],
+            [
+                [
+                    esc(m["head_sha"]),
+                    esc(m["merged_at"]),
+                    esc(len(m["feedback"])) + ("<br>" if m["feedback"] else "") + _people(m["feedback"], "text"),
+                    esc(m["used_count"]) + ("<br>" if m["used"] else "") + _people(m["used"], "note"),
+                    esc(m["rework_why"] if m["paths"] is None else ", ".join(m["paths"])),
+                    _later_cell(m),
+                    "" if m["later_docs"] is None else _later(m["later_docs"], "shared_docs"),
+                    _revert(m),
+                ]
+                for m in after["after_merge"]
+            ],
+        )  # fmt: skip
+    if after["deliveries_used"]:
+        body += (
+            "<h2>Used</h2><ul>"
+            + "".join(
+                f"<li>{esc(f'delivery {d["event_id"]} ({d["delivered_at"]}), used {d["used_count"]}')}"
+                f"<br>{_people(d['used'], 'note')}</li>"
+                for d in after["deliveries_used"]
+            )
+            + "</ul>"
+        )
+    return body
+
+
 async def task_page(conn, task_id: str) -> web.Response:
     try:
-        await tasks.brief(conn, task_id)
+        b = await tasks.brief(conn, task_id)
         state = await tasks.status(conn, task_id)
     except KeyError:
         raise web.HTTPNotFound(text=f"no task {task_id}") from None
     rows = await ledger.read(conn, task_id)
     body = (
-        f"<pre>{esc(json.dumps(state, indent=2, default=str, sort_keys=True))}</pre><h2>Ledger</h2>"
+        after_merge_html(await outcomes.after_merge(conn, b, rows))
+        + f"<pre>{esc(json.dumps(state, indent=2, default=str, sort_keys=True))}</pre><h2>Ledger</h2>"
         + table(
             ["id", "at", "type", "payload"],
             [

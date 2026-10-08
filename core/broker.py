@@ -61,7 +61,7 @@ from typing import Any, Protocol
 
 import psycopg
 
-from core import git, ledger, machine, performing, tasks
+from core import git, ledger, machine, outcomes, performing, tasks
 from core.tasks import EFFECT_RANK
 
 
@@ -506,8 +506,10 @@ async def _release(conn, performers: Performers, effect_id: str) -> Outcome:
         refuse = getattr(performer, "refuse", None)
         if refuse is not None and (said := await refuse(conn, action)):
             raise Refused(said)
+        landed = None
         if described["action_type"] == "merge":
-            f = machine.fold(await ledger.read(conn, task_id))
+            task_rows = await ledger.read(conn, task_id)
+            f = machine.fold(task_rows)
             b = await tasks.brief(conn, task_id)
             # A task the kernel provisioned reads its git facts from the
             # kernel mirror, which no turn writes.
@@ -534,7 +536,10 @@ async def _release(conn, performers: Performers, effect_id: str) -> Outcome:
                     {"effect_id": effect_id, "approval_id": row[0], "owner": performer.owner},
                 )
             return Outcome(effect_id, "released")
-        await _intent(conn, task_id, effect_id, described, approval_id=row[0])
+        if described["action_type"] == "merge":
+            # What the merge lands, recorded with its intent; never stops it.
+            landed = await outcomes.landed(conn, b, task_rows, described["payload"])
+        await _intent(conn, task_id, effect_id, described, approval_id=row[0], landed=landed)
     return await _perform(conn, performers, task_id, effect_id, action, described)
 
 
@@ -572,11 +577,24 @@ async def pending(conn) -> list[dict[str, Any]]:
 INTENT_FIELDS = ("action_type", "target", "payload", "payload_sha256", "effect_class")
 
 
-async def _intent(conn, task_id, effect_id, described, *, approval_id) -> None:
-    """The intent row, inside the caller's transaction."""
-    await ledger.append(
-        conn, task_id, "effect.intent", _intent_row(effect_id, described, approval_id=approval_id)
-    )
+async def _intent(conn, task_id, effect_id, described, *, approval_id, landed=None) -> None:
+    """The intent row, inside the caller's transaction. A merge's carries
+    `landed` (`outcomes.landed`); when Postgres jsonb refuses it, the row is
+    written with `landed` cut to `before` and the reason, so what was
+    recorded never refuses the merge."""
+    row = _intent_row(effect_id, described, approval_id=approval_id)
+    if landed is None:
+        await ledger.append(conn, task_id, "effect.intent", row)
+        return
+    written, why = await ledger.try_append(conn, task_id, "effect.intent", {**row, "landed": landed})
+    if written is None:
+        cut = {
+            "before": landed.get("before"),
+            "commits": None,
+            "paths": None,
+            "why": f"{ledger.UNSTORABLE}: {why}",
+        }
+        await ledger.append(conn, task_id, "effect.intent", {**row, "landed": cut})
 
 
 def _intent_row(effect_id: str, described: dict[str, Any], *, approval_id: str | None) -> dict[str, Any]:

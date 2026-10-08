@@ -145,9 +145,14 @@ What counts as knowing the mission is being met:
 
 **Working results in real use.** Read per delivery: did it run, did someone
 use it, and was each defect found in use resolved without Tom coordinating.
-A replay of a shipped feature is not real use; it is an emulator case. No
-delivery so far has been used (rebuild-demonstration.md, "What was
-delivered"), so this evidence is empty.
+A replay of a shipped feature is not real use; it is an emulator case.
+`python -m core used TASK --by B` records that someone used a delivery
+(`delivery.used`); a role-played mark is listed and not counted. `status`
+shows, per merge, the feedback given after it, its used marks, other
+tasks' later merges that changed the same paths (rework), and whether it
+was reverted or is still on its branch; the status page shows the same.
+Work landed by hand has no merge row, so its paths, rework, and revert are
+not read. No delivery is marked used yet, so this evidence is empty.
 
 **Corrections and exemplars.** Both are rows in one store, told apart by
 source class: `direct` for a correction Tom gave, `exemplar` for work he

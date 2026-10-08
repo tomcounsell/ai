@@ -392,7 +392,7 @@ suite; failures also checked at base.
 `core/git.py` (`has_commit`, `ancestry`), `core/tasks.py` (`index` fields),
 `core/__main__.py` (`used`, `status`, the docstring), `core/workspace.py`
 (`cache_path`), `ui/app.py`, `tests/test_outcomes.py` (new),
-`tests/test_broker.py`, `tests/test_tasks.py`, `tests/test_ui.py`. Docs,
+`tests/test_broker.py` (new), `tests/test_tasks.py` (new), `tests/test_ui.py`. Docs,
 for the docs check: `docs/data.md` (the `delivery.used` row and `landed` on
 `effect.intent`), `docs/mission.md` (how real use is read; work landed by
 hand has no merge row, so its paths, rework, and revert are not read; no
@@ -531,3 +531,40 @@ governance is clean once finding 3 is fixed.
 7. **`--by` had no default stated.** `--by` is required for `used`, a
    usage fix, not a check; the help and `docs/data.md` say it names who
    used the work. Test added.
+
+## Build record
+
+Branch `i3612-merge-outcomes`, built to the plan with critique round 2
+folded. Built as designed, with these points the plan left open:
+
+- Names #3611 joins against: `delivery.used` carries `used_id`,
+  `delivery_event_id`, `candidate`, `effect_id`, `head_sha`, `note`, and
+  `provenance`. The merge's `effect.intent` carries `landed`: `before`,
+  `commits`, `paths`, and `why` (null when read). `outcomes.done_merges`
+  returns `task_id`, `effect_id`, `head_sha`, `url`, `target_branch`,
+  `merged_at`, `event_id` (the outcome row), and `landed`. Each
+  `after_merge` entry adds `delivery_event_id`, `paths`, `feedback`, `used`,
+  `used_count`, `later`, `later_docs`, `later_unknown`, `rework_why`,
+  `revert` (`on_branch`, `reverted_by`, `as_of`, `source`), and
+  `revert_why`.
+- Feedback after a merge is every `feedback.given` after its outcome and
+  before the task's next `task.delivered`, so feedback given in `merge`
+  belongs to no merge.
+- `python -m core status` on an unknown task exits "no task X", since it
+  now loads the Brief.
+- `workspace.cache_path` holds the cache's naming `_cache` used, so the
+  status reads the same directory provisioning fetched into.
+- Feedback rows written by hand in tests carry `on_delivery` and the
+  candidate, as `core/session.py` writes them; `tasks._digest` reads both.
+
+Tests: `tests/test_outcomes.py` (30), `tests/test_broker.py` (5),
+`tests/test_tasks.py` (1), and four in `tests/test_ui.py`. Mutation check:
+dropping the cache tip from the log's `--not` fails the hand-commit test.
+Suite, without `tests/test_container.py` and
+`tests/test_harness_contract.py`: 1496 passed, 25 skipped, and 8 failed
+with 267 errors, all in thirteen files that ran while the disk was full
+("No space left", `initdb`); those thirteen files run again alone: 370
+passed, 1 skipped. `tests/test_harness_contract.py`: the pi variants pass;
+the claude_code turns end `failed` on this Mac at base 0027e237f as at the
+head, and its stop test hangs, so it was run apart.
+Ruff: `ruff check .` and `ruff format --check .` pass.
