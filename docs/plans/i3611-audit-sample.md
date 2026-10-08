@@ -685,3 +685,7 @@ From the blind review (`review-3611`), both accepted by the lead:
   - Review of the patch: `pass`. Governance: no.
 - Patch `5784185a0`: `test_no_revert_seen_gives_no_label` fetches after each merge, so each head reaches the cache before the next force push. It passed 12 of 12 runs alone. `tests/test_audit_sample.py`, `tests/test_ui.py` and `tests/test_outcomes.py`: 69 passed.
 - Backup `valor_rebuild-20261008T124449Z.dump`, taken before the merge.
+- Rolled out on Valor's Mac:
+  - the kernel restarted on the merged tip;
+  - the status page restarted by its PID, and `/`, `/audit` and `/audit/scores` return 200;
+  - `python -m core audit` lists the ledger's reviewed candidates, with no verdicts.
