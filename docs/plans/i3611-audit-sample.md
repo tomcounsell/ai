@@ -322,7 +322,7 @@ None found in code.
   the sample.
 - **Scoring `requirements`** per requirement, `review.compared` rows at
   other seats, and the emulator judge's calibration (`docs/emulator.md:500-507`).
-- **`merge.used` as a label.** A use mark says someone used a merge, not
+- **`delivery.used` as a label.** A use mark says someone used a merge, not
   that the candidate was right, and its absence says nothing; it is not
   scored.
 - **Counting labels in the attention log.** A label is attention Tom chose
@@ -337,13 +337,19 @@ rebase, the names #3612 merged are mapped to that statement. If #3612
 merges without a per-merge revert reading, item 8 is dropped as if #3612
 were stopped.
 
-The names below are those of #3612's plan as it stood; they are what the
-mapping starts from, not a contract. #3612's plan (`docs/plans/i3612-merge-outcomes.md`, commit `0f2787f5a`)
-builds `core/outcomes.py`: `after_merge(conn, task_id)` returns one entry
-per merge with `effect_id`, `head_sha`, and `revert`, which is None when no
-repository can tell, or holds `on_branch`, `reverted_by` (each commit whose
-message names a commit in the merge's range, with its sha), `source`, and
-`as_of`. It also adds `merge.used` rows. It does not name the candidate:
+The names below are those of #3612's plan as it stands; they are what the
+mapping starts from, not a contract. #3612's plan (`docs/plans/i3612-merge-outcomes.md`, commit `0027e237f`)
+builds `core/outcomes.py`. `outcomes.done_merges(conn, url=None,
+branch=None)` is the cross-task query of done merges: task id, `effect_id`,
+head, url, branch, outcome time, and `landed` (`{before, commits, paths}`
+from the merge's `effect.intent`, the task's own commits only, None for
+older merges or when unreadable). `outcomes.revert(brief, merge)` gives
+`revert`, None when no repository can tell, or `on_branch`, `reverted_by`
+(each commit whose body says it reverts a commit in `landed.commits`, with
+its sha; None when `commits` is None), `source`, and `as_of`.
+`after_merge(conn, brief, rows)` assembles them per task. It also adds
+`delivery.used` rows (`delivery_event_id`, `candidate`, `effect_id`,
+`head_sha`, `note`, provenance). A merge does not name the candidate:
 a merge's `head_sha` is the docs head when docs committed
 (`core/verdicts.py:519`), so the candidate is read from the task's
 `effect.held` row with the same `effect_id`, `payload.candidate.sha`
@@ -356,12 +362,12 @@ it:
   `{task_id, candidate_sha, label, source, provenance, event_id}`.
   `audit.labelled` rows give `source: "tom"` (a real label, whoever `by`
   names) or are counted apart when role-played.
-- For every task with a done merge, `labels` calls
-  `outcomes.after_merge` and, for each merge whose `revert.reverted_by` is
+- `labels` reads `outcomes.done_merges(conn)` once and, per task, the
+  merges' `revert` readings; for each merge whose `revert.reverted_by` is
   not empty, yields label `changes`, source `revert`, provenance
   `{by: "git", via: "revert of <sha>", role_played: false}` on the merge's
-  candidate. A merge with `revert` None, an empty `reverted_by`, or
-  `on_branch` false alone yields no label: no revert seen is not a `pass`.
+  candidate. A merge with `revert` None, a `reverted_by` that is
+  None or empty, or `on_branch` false alone yields no label: no revert seen is not a `pass`.
 - `scores` computes every figure per source; `revert` figures print under
   their own heading with their own `n`, as `docs/judgement-layer.md:293-294`
   counts a record's labels by origin. Only `scores` and `/audit` call it,
@@ -371,9 +377,9 @@ it:
 onto #3612's merge, and this task merges after #3612. That keeps items 1
 to 7 waiting on a plan still in revision; it is Valor's call, made by the
 lead: keep the order. The other choice, merging 1 to 7 first and adding
-item 8 in a later task, stays open to the lead. #3612's plan says only its
-two surfaces call `after_merge`; `labels` here is a third, so the docs
-pass corrects that sentence wherever it lands. If the lead stops
+item 8 in a later task, stays open to the lead. `labels` reads #3612's
+outcomes from a third place beside its two status surfaces; the docs pass
+names it wherever #3612's docs list the callers. If the lead stops
 #3612, item 8 is dropped and the docs say no outcome source exists. The
 docs pass adds one line to `docs/judgement-layer.md` "Where labels come
 from": Tom's audit labels and reverted merges label the blind verifier's
@@ -433,8 +439,8 @@ which ask the scripted governance judgements one per hunk and pass
 - A session review row with no `model` is scored under `unknown`.
 - Revert labels (on #3612's merge): a merge whose `reverted_by` is not
   empty labels its candidate `changes` under source `revert`, scored apart
-  from Tom's; `revert` None, empty `reverted_by`, and `on_branch` false
-  alone give no label; the candidate is the held payload's, not the docs
+  from Tom's; `revert` None, a `reverted_by` that is None or empty, and
+  `on_branch` false alone give no label; the candidate is the held payload's, not the docs
   head.
 - Two models on one candidate are scored apart.
 - A reviewer `pass` recorded as `governance_refused` scores as `pass`.
