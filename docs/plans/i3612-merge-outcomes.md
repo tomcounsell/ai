@@ -585,3 +585,7 @@ Ruff: `ruff check .` and `ruff format --check .` pass.
   - a hand commit the candidate took in counts as the merge's own when the target cache was last fetched before it;
   - a revert of the merge's revert still lists the first revert under `reverted_by`.
 - Backup `valor_rebuild-20261008T111835Z.dump` was taken before the merge.
+- Rolled out on Valor's Mac:
+  - The kernel restarted on the merged tip.
+  - The status page was restarted by its PID; `/` returns 200 and shows the "after merge" column.
+  - This ledger has no released merge. Its only merge, `75c0902b6e25`, is held in `merge`. `status` on that task gives `after_merge: []` and `deliveries_used: []`.
