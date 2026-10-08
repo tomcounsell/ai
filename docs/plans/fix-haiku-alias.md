@@ -2,7 +2,7 @@
 tracking: none
 slug: fix-haiku-alias
 type: build
-status: planned
+status: built
 critique_rounds: 0
 review_rounds: 1
 ---
@@ -61,3 +61,23 @@ and that `turn` carries the placeholder credential.
 - Historical plan files that mention the alias stay as written.
 - Pinning or disabling the CLI's auto-update on the Mac.
 - `tests/test_container.py` (owned by the lead).
+
+## Build record
+
+- Branch `fix-haiku-alias`, fix commit on the plan commit `a59298a1b`.
+  CLI on the machine: 2.1.294.
+- Cause of the `[turn]` failure: the CLI's result was "Failed to
+  authenticate: OAuth session expired and could not be refreshed", before
+  any model call, with or without the checkout's settings file (reproduced
+  by running the builder's argv directly in an empty directory). The
+  machine user's own login in `~/.claude` has expired; `claude auth status`
+  with Claude Code's variables unset reports `loggedIn: false`. Not the
+  settings file and not the CLI honoring it: the decoy upstream got no
+  request.
+- `tests/test_harness_contract.py` and `tests/test_emulator_metering.py`:
+  68 passed, 1 skipped (pi), 250 s; the stop-mid-call test no longer hangs.
+- The 37 other test files that build a Brief or a Claude Code turn
+  (`tests/test_container.py` excluded): 1009 passed, 17 skipped, 706 s.
+- `tests/test_live_turn.py` with `VALOR_LIVE=1`: 3 passed through the
+  gateway with `ClaudeLogin()` (about $0.04 real spend).
+- `ruff check` and `ruff format --check` on the changed Python files: clean.
