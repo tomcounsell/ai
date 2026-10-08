@@ -1,7 +1,8 @@
 """The local chat bridge: one page on 127.0.0.1 for chatting with Valor on
 a Mac with no Telegram session and no mailbox login.
 
-The page (`chat.html`, `chat.js`) polls `GET /log` and posts Tom's
+The page (`chat.html`, `chat.js`, and the vendored renderer and
+sanitizer in `vendor/`) polls `GET /log` and posts Tom's
 messages to `POST /send`; both carry the token from the mode-600 file
 `settings.local_tokenfile` in the `X-Valor-Token` header. The ledger is
 the platform: a notice or an approved `local.send_message` is shown once it
@@ -31,6 +32,8 @@ CHANNEL = "local"
 CHAT = intake.LOCAL_CHAT
 HERE = Path(__file__).resolve().parent
 TOKEN_HEADER = "X-Valor-Token"
+# The page's Markdown renderer and sanitizer, pinned in docs/bridges/local.md.
+VENDORED = ("marked.umd.js", "purify.min.js")
 
 # The whole local chat, oldest first: Tom's messages, and the notices and
 # sends shown on the page, with their text.
@@ -130,6 +133,8 @@ class LocalBridge:
         app = web.Application()
         app.router.add_get("/", self.page)
         app.router.add_get("/chat.js", self.script)
+        for name in VENDORED:
+            app.router.add_get(f"/vendor/{name}", self.vendored)
         app.router.add_get("/log", self.log)
         app.router.add_post("/send", self.send)
         self.runner = web.AppRunner(app, access_log=None)
@@ -150,11 +155,15 @@ class LocalBridge:
         return web.Response(
             body=(HERE / "chat.html").read_bytes(),
             content_type="text/html",
-            headers={"Content-Security-Policy": "frame-ancestors 'none'"},
+            headers={"Content-Security-Policy": "frame-ancestors 'none'; script-src 'self'"},
         )
 
     async def script(self, request: web.Request) -> web.Response:
         return web.Response(body=(HERE / "chat.js").read_bytes(), content_type="text/javascript")
+
+    async def vendored(self, request: web.Request) -> web.Response:
+        name = request.path.removeprefix("/vendor/")
+        return web.Response(body=(HERE / "vendor" / name).read_bytes(), content_type="text/javascript")
 
     async def log(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

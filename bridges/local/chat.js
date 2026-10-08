@@ -1,4 +1,5 @@
-// The local chat page: polls /log, posts to /send, renders with textContent only.
+// The local chat page: polls /log, posts to /send, renders each text as
+// Markdown (marked) sanitized by DOMPurify, with HTML in a text shown as text.
 "use strict";
 const token = location.hash.slice(1);
 const list = document.getElementById("log");
@@ -11,6 +12,30 @@ const shown = new Set();
 let replyTo = null;
 let chosen = null;
 let stopped = false;
+
+const escapeHtml = (s) =>
+  s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]);
+const md = new marked.Marked({
+  gfm: true,
+  breaks: true,
+  async: false,
+  renderer: { html: (token) => escapeHtml(token.text) },
+});
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A") {
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noopener noreferrer");
+  }
+});
+
+function render(text) {
+  return DOMPurify.sanitize(md.parse(text).trim(), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["img", "style", "form", "input", "button", "textarea", "select"],
+    FORBID_ATTR: ["style"],
+    RETURN_DOM_FRAGMENT: true,
+  });
+}
 
 function stop() {
   stopped = true;
@@ -37,8 +62,11 @@ function add(row) {
   const li = document.createElement("li");
   li.className = row.from;
   li.dataset.eventId = row.event_id;
-  li.textContent = row.text;
-  if (row.from === "valor") li.addEventListener("click", () => choose(li, row));
+  li.append(render(row.text));
+  if (row.from === "valor")
+    li.addEventListener("click", (event) => {
+      if (!event.target.closest("a")) choose(li, row);
+    });
   const after = [...list.children].find((c) => Number(c.dataset.eventId) > row.event_id);
   const atEnd = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
   list.insertBefore(li, after || null);

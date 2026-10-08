@@ -257,7 +257,7 @@ def test_without_the_token_header_nothing_is_read_or_recorded(dsn, op):
     statuses, before, after, preflight, framing = run(go())
     assert statuses == [401] * 6 and before == after
     assert not [h for h in preflight if h.lower().startswith("access-control-allow-")]
-    assert framing == "frame-ancestors 'none'"
+    assert framing == "frame-ancestors 'none'; script-src 'self'"
 
 
 class Killed(BaseException):

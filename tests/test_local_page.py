@@ -345,3 +345,134 @@ def test_a_send_while_the_bridge_is_down_is_retried_with_the_same_id_and_records
             )
 
     run(go())
+
+
+async def notice_rows(dsn, tab, base, token, http, texts: list[str]) -> list[str]:
+    """One of Valor's notices on the local chat per text; a JS expression
+    for each one's row, once the page shows them all."""
+    task = await new_task(dsn)
+    async with await db.connect(dsn) as conn:
+        nids = [
+            await notices.request(conn, task, kind="test", about_key=f"t:{task}:{i}", text=t, channel="local")
+            for i, t in enumerate(texts)
+        ]
+    event_ids: dict = {}
+
+    async def logged():
+        async with http.get(f"{base}/log", headers={local.TOKEN_HEADER: token}) as r:
+            rows = (await r.json())["rows"]
+        event_ids.update({row["message_id"]: row["event_id"] for row in rows if row["message_id"] in nids})
+        return len(event_ids) == len(nids)
+
+    await until(logged, timeout=10)
+    rows = [f"document.querySelector('#log > li[data-event-id=\"{event_ids[n]}\"]')" for n in nids]
+    await tab.wait(" && ".join(f"!!{r}" for r in rows), timeout=10)
+    return rows
+
+
+# Each would set window.pwned if it ever ran.
+HOSTILE = [
+    "<script>window.pwned=1</script>",
+    '<img src=x onerror="window.pwned=1">',
+    "[click me](javascript:window.pwned=1)",
+    '<a href="javascript:window.pwned=1">raw</a>',
+    '<svg onload="window.pwned=1"></svg>',
+    '![x](x" onerror="window.pwned=1)',
+    "[spaced]( JaVaScRiPt:window.pwned=1)",
+]
+
+
+def test_a_hostile_row_renders_with_nothing_live(dsn, op):
+    async def go():
+        async with page_up(dsn, op) as (tab, base, token, http):
+            await tab.goto(f"{base}/#{token}")
+            rows = await notice_rows(dsn, tab, base, token, http, HOSTILE)
+            live = "#log script, #log img, #log svg, #log iframe, #log math"
+            assert await tab.js(f"document.querySelectorAll('{live}').length") == 0
+            handlers = await tab.js(
+                "[...document.querySelectorAll('#log *')].flatMap(e => [...e.attributes]"
+                ".map(a => a.name)).filter(n => n.toLowerCase().startsWith('on'))"
+            )
+            assert handlers == []
+            hrefs = await tab.js(
+                "[...document.querySelectorAll('#log a[href]')].map(a => a.getAttribute('href'))"
+            )
+            assert not [h for h in hrefs if h.strip().lower().startswith("javascript:")], hrefs
+            # HTML typed in a text shows as typed (a notice ends with its id).
+            for text, row in zip(HOSTILE, rows, strict=True):
+                if text.startswith("<"):
+                    assert (await tab.js(f"{row}.textContent")).startswith(text)
+            # The Markdown link, clicked, runs nothing; a deferred handler
+            # would have fired by the second look.
+            link = f"{rows[2]}.querySelector('a')"
+            assert await tab.js(f"{link}.textContent") == "click me"
+            await tab.js(
+                f"{link}.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true}}))"
+            )
+            assert await tab.js("window.pwned === undefined")
+            await asyncio.sleep(1)
+            assert await tab.js("window.pwned === undefined")
+
+    run(go())
+
+
+MARKDOWN = """# A heading
+
+- one
+- two
+
+1. first
+2. second
+
+Some **bold** and `inline` and a [link](https://example.com/).
+
+```
+line one
+line two
+```
+
+| Name | Value |
+|---|---|
+| a | 1 |
+"""
+
+
+def test_markdown_renders(dsn, op):
+    async def go():
+        async with page_up(dsn, op) as (tab, base, token, http):
+            await tab.goto(f"{base}/#{token}")
+            (row,) = await notice_rows(dsn, tab, base, token, http, [MARKDOWN])
+            assert await tab.js(f"{row}.querySelector('h1').textContent") == "A heading"
+            items = "[...{}.querySelectorAll('{} > li')].map(l => l.textContent)"
+            assert await tab.js(items.format(row, "ul")) == ["one", "two"]
+            assert await tab.js(items.format(row, "ol")) == ["first", "second"]
+            assert await tab.js(f"{row}.querySelector('strong').textContent") == "bold"
+            assert await tab.js(f"{row}.querySelector(':not(pre) > code').textContent") == "inline"
+            assert await tab.js(f"{row}.querySelector('pre > code').textContent") == "line one\nline two\n"
+            assert await tab.js(f"[...{row}.querySelectorAll('table th')].map(t => t.textContent)") == [
+                "Name",
+                "Value",
+            ]
+            link = f"{row}.querySelector('a')"
+            assert await tab.js(f"{link}.getAttribute('href')") == "https://example.com/"
+            assert await tab.js(f"{link}.target") == "_blank"
+            assert "noopener" in await tab.js(f"{link}.rel")
+
+            # A click on the link does not choose the row. The test cancels
+            # the click so no new tab opens; the row's handler still sees it.
+            await tab.js(
+                "document.getElementById('log').addEventListener('click', e => e.preventDefault(), true)"
+            )
+            await tab.js(f"{link}.click()")
+            assert await tab.js("!document.querySelector('#log li.chosen')")
+            await tab.js(f"{row}.querySelector('h1').click()")
+            assert await tab.js(f"{row}.classList.contains('chosen')")
+
+            # Tom's rows render too.
+            await tab.type_and_send("**from tom**")
+            await tab.wait(
+                "[...document.querySelectorAll('#log > li.tom')]"
+                ".some(l => l.querySelector('strong')?.textContent === 'from tom')"
+            )
+
+    run(go())
