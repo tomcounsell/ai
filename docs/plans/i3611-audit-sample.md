@@ -116,20 +116,27 @@ Each item is a test on real Postgres in the default suite.
    false, whatever `--by` names; a stand-in's label leaves the candidate on
    the list). There are no group headings and no merged column. Each line
    shows the task id, the instruction, the base and candidate sha, and the
-   mirror's `git diff BASE SHA` command to read the work, and nothing else:
+   mirror's `git diff BASE SHA` command to read the work (BASE is the task's
+   `Brief.base_sha`, `core/checks.py:697`; the candidate holds only `sha`
+   and `turn_id`, `core/machine.py:156-158`), and nothing else:
    no verdict, finding, `predicted_failure`, requirement result, or merge
    state. The order is a weighted random order (Efraimidis and Spirakis):
    each candidate's key is `u^(1/w)`, sorted high first, where `u` is the
-   first 64 bits of `sha256(task_id + ":" + sha)` over 2^64, so the order is
-   the same on every run and a new candidate takes its key's place. `w` is
-   4 for a candidate a done merge carried (it left the workspace through an
-   `act`), 2 for another candidate whose latest session review's
-   `reviewer_verdict` is `pass`, and 1 for one every session review sent
-   back. The weights are Valor's reading of `docs/architecture.md:402`
-   ("weighted toward work that left the workspace and every `act`, with a
-   smaller share of failures"); `audit scores` prints them. They change only
-   the order: the scores in item 5 weight each label by its stratum's
-   population, so no choice of weights biases a figure. A line's place says
+   first 64 bits of `sha256(task_id + ":" + str(event_id))` over 2^64, and
+   `event_id` is the kernel-assigned ledger id of the candidate's first
+   session `review.decided` row. The turn authors the candidate's sha but
+   not that id, so it cannot steer its candidate down the list. The order
+   is the same on every run and a new candidate takes its key's place. `w`
+   is 4 if a done merge carried the candidate (it left the workspace
+   through an `act`), else 2 if its latest session review's
+   `reviewer_verdict` is `pass`, else 1. The weights are Valor's reading of
+   `docs/architecture.md:402` ("weighted toward work that left the
+   workspace and every `act`, with a smaller share of failures"); `audit
+   scores` prints them. They set the order; the scores in item 5 weight
+   each label by its stratum's population, and the strata are the weights'
+   own classes. That holds when Tom labels in list order: skipping
+   candidates by choice is a selection the weights cannot undo, and the
+   page and `audit scores` say so. A line's place says
    only that its candidate is somewhat more likely to be in a heavier
    stratum; `pass` and `changes` candidates interleave. A merged candidate's
    verdict can be read off the repository (it merged, so its verifier
@@ -144,13 +151,24 @@ Each item is a test on real Postgres in the default suite.
      `core/machine.py:550-558`) is two verdicts against one label. Every
      `n` below counts verdicts, and the line also prints the number of
      labelled candidates.
-   - **Strata.** A verdict's stratum is its `reviewer_verdict` and whether
-     its candidate merged. For each stratum `s` the scores print `N_s`, the
-     session verdicts in the ledger, and `n_s`, the labelled ones. Each
-     labelled verdict weighs `N_s / n_s`, so each figure estimates the
-     whole population of verdicts, not the list's order. A stratum with
-     `N_s` above 0 and `n_s` 0 enters no figure, and its `N_s` is printed
-     as not covered.
+   - **Strata.** A verdict's stratum is its `reviewer_verdict` and its
+     candidate's list weight `w` (item 4), so every verdict in a stratum
+     had the same chance of being labelled. For each stratum `s` the
+     scores print `N_s`, the session verdicts in the ledger, and `n_s`, the
+     labelled ones. Each labelled verdict weighs `N_s / n_s`, so each
+     figure estimates the whole population of verdicts, not the list's
+     order. The rates and the Brier score are ratio estimates: consistent,
+     not exactly unbiased at small `n`.
+   - **Coverage.** A figure is printed only when every stratum it sums
+     over has `n_s` at least 1; otherwise it prints "not estimable" and
+     names the uncovered strata. Of verifier `pass`, labelled `changes`,
+     sums over the `pass` strata; of verifier `changes`, labelled `pass`,
+     over the `changes` strata; false accept, false reject, and Brier over
+     every stratum with `N_s` above 0. This is output formatting: nothing
+     reads it.
+   - **A known limit.** A candidate labelled while unmerged and merged
+     afterwards moves to the `w` 4 stratum; its label then counts there,
+     though it was drawn at weight 2 or 1. Not built for.
    - the raw confusion counts, verifier `pass` or `changes` against label
      `pass` or `changes`, every cell shown;
    - conditioned on the verdict: of verifier `pass`, the weighted share
@@ -204,7 +222,12 @@ bridge, or performer does); let a label or a score hold, refuse, reorder, or
 redirect any task or effect; send the list or a score to Tom as a question
 or notice; render labels or scores into any turn's Brief (the verifier
 never sees its own calibration); or put a turn-written value on the page
-unescaped. The fold reads `predicted_failure` only as a number (not a bool)
+unescaped. The list's order key is hashed from a ledger id the kernel
+assigns, not from the candidate's sha, so a turn cannot move its own
+candidate out of the sample by varying its commit. The `audit` command
+carries the same shell trust as every `--by` command: whoever runs it is
+trusted to name themselves, and anyone but Tom, Valor's sessions
+included, labels with `--role-played`. The fold reads `predicted_failure` only as a number (not a bool)
 in 0 to 1 and skips any other value in the Brier term rather than trusting
 it; an older or hand-written row may hold anything. The turn also controls
 commit messages, so a builder can write a false "This reverts commit" line:
@@ -278,7 +301,9 @@ Kernel code and a new stored row type: `critique_rounds: 2`,
 - `ui/README.md` Scope lists the audit view; `core/README.md` lists the
   module.
 - `docs/judgement-layer.md` "Where labels come from" gains the audit
-  labels and reverted merges as label sources for the blind verifier.
+  labels and reverted merges as label sources for the blind verifier, and
+  says that anyone but Tom, Valor's sessions included, labels with
+  `--role-played`.
 
 None found in code.
 
@@ -305,7 +330,15 @@ None found in code.
 
 ## The hand-off with #3612
 
-#3612's plan (`docs/plans/i3612-merge-outcomes.md`, commit `0f2787f5a`)
+**What this plan needs from #3612.** For each done merge of a task, keyed
+by its `effect_id`: whether a commit on the target branch reverts a commit
+that merge brought in, or unknown when no repository can tell. At the
+rebase, the names #3612 merged are mapped to that statement. If #3612
+merges without a per-merge revert reading, item 8 is dropped as if #3612
+were stopped.
+
+The names below are those of #3612's plan as it stood; they are what the
+mapping starts from, not a contract. #3612's plan (`docs/plans/i3612-merge-outcomes.md`, commit `0f2787f5a`)
 builds `core/outcomes.py`: `after_merge(conn, task_id)` returns one entry
 per merge with `effect_id`, `head_sha`, and `revert`, which is None when no
 repository can tell, or holds `on_branch`, `reverted_by` (each commit whose
@@ -335,7 +368,12 @@ it:
   so the git reads run only when asked.
 
 **Order.** Build starts now; item 8 and its tests are built on a rebase
-onto #3612's merge, and this task merges after #3612. If the lead stops
+onto #3612's merge, and this task merges after #3612. That keeps items 1
+to 7 waiting on a plan still in revision; it is Valor's call, made by the
+lead: keep the order. The other choice, merging 1 to 7 first and adding
+item 8 in a later task, stays open to the lead. #3612's plan says only its
+two surfaces call `after_merge`; `labels` here is a third, so the docs
+pass corrects that sentence wherever it lands. If the lead stops
 #3612, item 8 is dropped and the docs say no outcome source exists. The
 docs pass adds one line to `docs/judgement-layer.md` "Where labels come
 from": Tom's audit labels and reverted merges label the blind verifier's
@@ -366,18 +404,27 @@ which ask the scripted governance judgements one per hunk and pass
   interleave in the printed order, and the columns are the same for both.
 - A stand-in label leaves the candidate on the list and out of every
   figure, and is counted apart. A label with `--by alice` and no
-  `--role-played` is real and counted under `alice`.
+  `--role-played` is, by `ledger.provenance`'s definition, Tom's own: it
+  is scored under source `tom` and printed under the `by` it names.
 - A later stand-in label does not override a real one: Tom labels `pass`,
   then a role-played `changes`; `pass` is scored.
 - Scores, exact on a fixture for one model. Verdicts: V1 `pass`, merged,
   0.2, label `pass`; V2 `pass`, unmerged, 0.6, label `changes`; V3
   `changes`, unmerged, absent, label `pass`; V4 `pass`, merged, unlabelled;
-  V5 `changes`, unmerged, unlabelled. Weights: V1 2, V2 1, V3 2. Raw
+  V5 `changes`, unmerged, unlabelled. Strata (verdict, `w`): (`pass`, 4)
+  N 2 n 1, (`pass`, 2) N 1 n 1, (`changes`, 1) N 2 n 1. Weights: V1 2,
+  V2 1, V3 2. Raw
   confusion pass/pass 1, pass/changes 1, changes/pass 1, changes/changes 0.
   Of verifier `pass`, labelled `changes` 1/3 (n 2); of verifier `changes`,
   labelled `pass` 1 (n 1); false accepts 1 (n 1); false rejects 0.5 (n 2);
   Brier 0.08 (n 2; unweighted it would be 0.1). Strata printed with `N_s`
-  and `n_s`; a stratum (`changes`, merged) with N 0 prints 0.
+  and `n_s`; a stratum (`changes`, 4) with N 0 prints 0.
+- Coverage: a fixture where (`changes`, 1) has N 2 and n 0 prints the
+  `pass`-conditioned rate and prints "not estimable" for false accept,
+  false reject, and Brier, naming (`changes`, 1).
+- The order key: a candidate's key is the same whatever its sha, given the
+  same first review row id; a candidate reviewed `pass` after an earlier
+  `changes`, unmerged, weighs 2.
 - Two reviews of one candidate by the same model (a grant re-enters checks)
   are two verdicts against one label: `n` 2, labelled candidates 1.
 - A `predicted_failure` that is a string, 1.5, -0.1, or `true` (rows written
@@ -405,8 +452,8 @@ which ask the scripted governance judgements one per hunk and pass
   and its figures equal `audit scores`.
 
 Suites: `tests/test_audit_sample.py`, `tests/test_ui.py`,
-`tests/test_review.py`, `tests/test_corrections.py`, `tests/test_outcomes.py`,
-then the full suite.
+`tests/test_review.py`, `tests/test_corrections.py`, then the full suite;
+`tests/test_outcomes.py` exists only after #3612 and is run on the rebase.
 
 ## Critique round 1
 
@@ -445,3 +492,42 @@ findings. Each is addressed; none was refused.
    effect's candidate, `merge.used` not a label). This task owns the join
    and merges after #3612, so nothing rests on #3612's builder; the docs
    pass adds the line to "Where labels come from".
+
+## Critique round 2
+
+Critic `critic-3611-r2`, verdict `revise`. The lead accepted all six
+findings, folded here as written, and sent the plan to build with no third
+critique: both critique rounds are spent, the findings are concrete, and
+none touches governance. Round 1's claim that "no choice of weights biases
+a figure" is withdrawn.
+
+1. **Strata with no labels skewed the figures.** Item 5's Coverage rule:
+   a figure prints only when every stratum it sums over has `n_s` at least
+   1, else "not estimable" with the uncovered strata named; the strata each
+   figure needs are listed. A test covers (`changes`, 1) with N 2, n 0.
+2. **Strata did not match the design, and one weight was undefined.** `w`
+   is now 4 if a done merge carried the candidate, else 2 if its latest
+   session review is `pass`, else 1, so every candidate has one. The
+   stratum is (`reviewer_verdict`, `w`). The fixture's figures are
+   unchanged. The assumption (labels taken in list order), the ratio
+   estimates' small-`n` bias, and the known limit (a candidate merged after
+   its label changes stratum) are written into items 4 and 5 and printed
+   on the page and by `audit scores`.
+3. **A turn could steer the order key.** `u` is hashed from the task id
+   and the ledger id of the candidate's first session `review.decided`
+   row, which the kernel assigns. Chosen over a seed in kernel config: it
+   needs no new setting and the turn cannot choose it. The threat model
+   says so; a test asserts the key does not depend on the sha.
+4. **Who counts as the labeller.** Wording only, no check added. The
+   `alice` test now reads a non-`tom` `by` without `--role-played` as Tom's
+   own by provenance's definition, printed under that `by`. The docs line
+   says anyone but Tom, Valor's sessions included, labels with
+   `--role-played`; the threat model states the shell trust.
+5. **The #3612 hand-off named identifiers.** "What this plan needs from
+   #3612" states the dependency as what it means; the names are mapped at
+   the rebase; with no per-merge revert reading, item 8 is dropped. The
+   docs pass corrects #3612's "only the two surfaces" sentence. The order
+   (items 1 to 7 wait for #3612's merge) is kept as the lead's call; the
+   other choice is named.
+6. **Small points.** `tests/test_outcomes.py` is run on the rebase. The
+   diff's BASE is `Brief.base_sha`, cited in item 4.
