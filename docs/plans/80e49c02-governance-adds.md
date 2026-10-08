@@ -107,6 +107,11 @@ base commit.
 `governance.adds.json` lives only on Valor's Mac, under
 `~/src/valor-demo/items/judgement/`. These are section 4's steps 2 and 3.
 
+0. **The two rerun tests.** Run
+   `test_a_reworded_governance_question_is_asked_fresh_then_reused` and
+   `test_reruns_spent_under_one_question_are_not_spent_under_a_reworded_one`
+   in `tests/test_judgement_sites.py`; both are `macos` and were skipped in
+   the sandbox and the kernel's VM.
 1. **Labelled cases** (section 4, step 2). Add the four cases section 4 of
    `~/src/valor-build-notes/philosophy-governance.md` names to
    `governance.adds.json`, each with its hunk text, path, paths, and Tom's
