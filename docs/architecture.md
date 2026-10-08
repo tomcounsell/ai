@@ -65,7 +65,7 @@ the task starts:
 | `max_effect_class` | `read`, `propose`, or `act`; no effect under the task may exceed it |
 | `governance_grant` | Tom's grant for this task to add governance; default none |
 | `workspace` | the directory the task's turns work in |
-| `model`, `harness_name` | the model its turns run, and the harness (`claude_code` or `pi`) that runs it |
+| `model`, `harness_name` | the model its turns run (the light seat's pinned id unless given), and the harness (`claude_code` or `pi`) that runs it |
 | `harness` | the harness's settings for the task, its isolation included |
 | `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
