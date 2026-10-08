@@ -210,12 +210,16 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
             conn.execute("CREATE ROLE helper LOGIN")
             conn.execute("DROP ROLE helper")
             # What the kernel's suite needs, and none of the roles that
-            # reach the server's files or run its programs.
+            # reach the server's files or run its programs. (`app` is also
+            # `pg_database_owner` here, implicitly, as the database's owner.)
             assert conn.execute("SHOW data_directory").fetchone()[0] == str(lay.pg / "data")
+            wanted = ["pg_signal_backend", "pg_read_all_settings"]
+            server = ["pg_read_server_files", "pg_write_server_files", "pg_execute_server_program"]
             held = conn.execute(
-                "SELECT r.rolname FROM pg_roles r WHERE r.rolname LIKE 'pg\\_%%' AND pg_has_role('app', r.oid, 'MEMBER')"
+                "SELECT r, pg_has_role('app', r, 'MEMBER') FROM unnest(%s::text[]) AS r",
+                ([*wanted, *server],),
             ).fetchall()
-            assert sorted(r for (r,) in held) == ["pg_read_all_settings", "pg_signal_backend"]
+            assert dict(held) == {**dict.fromkeys(wanted, True), **dict.fromkeys(server, False)}
         with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user="valor_kernel",
                              password=passwords["valor_kernel"]) as conn:  # fmt: skip
             assert conn.execute("SELECT current_user").fetchone()[0] == "valor_kernel"
