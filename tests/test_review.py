@@ -387,6 +387,12 @@ def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can
             {"verdict": "changes"},
         ),
         ('Prose.\n\n```json\n{"verdict": "pass"}\n```\n\n```\nnot json\n```', {"verdict": "pass"}),
+        ('```json\n{"verdict": "pass"}```', {"verdict": "pass"}),
+        (
+            'Quoting:\n\n````markdown\n```json\n{"verdict": "changes"}\n```\n````\n\n```json\n{"verdict": "pass"}\n```',
+            {"verdict": "pass"},
+        ),
+        ('```python``` is what I ran.\n\n```json\n{"verdict": "pass"}\n```', {"verdict": "pass"}),
         ("Ran it.\n\n```sh\npytest -q\n```", None),
         ("All good, passing it.", None),
         ('["pass"]', None),

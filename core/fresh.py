@@ -47,7 +47,6 @@ run starts the stage again.
 
 import asyncio
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -702,9 +701,6 @@ def review_inputs(
     }
 
 
-_FENCED = re.compile(r"^```[^\n]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
-
-
 def _object(body: str) -> dict[str, Any] | None:
     try:
         data = json.loads(body)
@@ -713,18 +709,42 @@ def _object(body: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _fenced_bodies(text: str) -> list[str]:
+    """The bodies of the complete backtick fenced blocks in `text`, paired
+    as CommonMark pairs them: an opening line starts with three or more
+    backticks and has no backtick after them; the closing line is only
+    backticks, at least as many as the opening, on its own line."""
+    bodies: list[str] = []
+    lines: list[str] = []
+    fence = 0
+    for line in text.splitlines():
+        run = len(line) - len(line.lstrip("`"))
+        rest = line[run:]
+        if fence and run >= fence and not rest.strip(" \t"):
+            bodies.append("\n".join(lines))
+            fence = 0
+        elif fence:
+            lines.append(line)
+        elif run >= 3 and "`" not in rest:
+            fence, lines = run, []
+    return bodies
+
+
 def final_verdict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
     """The reviewer's verdict: its final message when that is a bare JSON
-    object, else the last fenced block in it whose body is a JSON object,
-    so prose may come before the verdict. The kernel reads it from the
-    turn's result on the harness's stdout, which no process the session
-    starts can write; a file in the checkout can be rewritten by the
-    candidate's code the reviewer runs, to the end of the turn. Returns
-    (verdict, why not)."""
+    object or one fenced block of one, else the last complete fenced block
+    in it whose body is a JSON object, so prose may come before the
+    verdict. The kernel reads it from the turn's result on the harness's
+    stdout, which no process the session starts can write; a file in the
+    checkout can be rewritten by the candidate's code the reviewer runs, to
+    the end of the turn. Returns (verdict, why not)."""
     body = (text or "").strip()
     data = _object(body)
+    if data is None and body.startswith("```") and body.endswith("```"):
+        whole = body.split("\n", 1)[1] if "\n" in body else ""
+        data = _object(whole[: whole.rfind("```")])
     if data is None:
-        fenced = (_object(m.group(1)) for m in reversed(list(_FENCED.finditer(body))))
+        fenced = (_object(b) for b in reversed(_fenced_bodies(body)))
         data = next((d for d in fenced if d is not None), None)
     if data is None:
         return None, "the final message is not a JSON object"
