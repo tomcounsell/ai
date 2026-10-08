@@ -369,7 +369,7 @@ follow-ups.
   session with no answer spent, `schedule`'s foreground-first order) as
   asserts in `tests/test_slot_priority.py`.
 - Review N4: two expiry firings at once can each start a sweep; hold
-  `routine:NAME` across the runner.
+  `routine:NAME` across the runner. Fixed: `m4-3n4-expiry-lock.md`.
 - Review N5: a grant on a valor task started without `--project` is listed
   as outside the repository and never removed.
 - Review N7: a background turn started while a preemption is pending
@@ -407,7 +407,7 @@ The lead merged on 2026-10-06, fast-forwarding `valor-cori-rebuild` to 3610cce32
 
 **Rollout held on Tom's Mac (Decided by default).** Tom's Mac runs the kernel and has no `container`. Restarting its kernel onto this code would make every review fail with a `kernel` cause until the runtime is installed, and installing it takes Tom's admin password. So nothing on that Mac moves until Tom installs `container` (m1-4c-verifier.md, Rollout prerequisite): no kernel restart, no `migrate`, no routine plists. After he installs it, the lead runs both plans' Rollout steps in order: backup, restart, migrate, the two routine plists, a kickstart of the expiry routine. The lead records them here. Valor's Mac has `container`, and its kernel takes this code on its next pull and restart.
 
-**Follow-ups, not planned:** review N3 (tests for Done 4's evidence), N4 (two expiry firings at once can each start a sweep), N5 (a grant on a valor task started without `--project`), N7 (a preempt race leaves a row pair; a refused expiry start writes no `routine.ran failed`), the test check's breadth list, and the two unmarked `workspace.remove` tests.
+**Follow-ups, not planned:** review N3 (tests for Done 4's evidence), N4 (two expiry firings at once can each start a sweep; since fixed, `m4-3n4-expiry-lock.md`), N5 (a grant on a valor task started without `--project`), N7 (a preempt race leaves a row pair; a refused expiry start writes no `routine.ran failed`), the test check's breadth list, and the two unmarked `workspace.remove` tests.
 
 **Rollout on Tom's Mac (2026-10-07).** Tom installed `container` 1.5.0. The lead did the following:
 - Installed Rosetta, which was missing.
