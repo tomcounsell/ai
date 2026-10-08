@@ -175,7 +175,8 @@ ledgers count as evidence of.
   and the baseline below are its first cases.
 - The audit sample is Tom reading a fraction of verified work himself, the
   only check on the cheaper checks [4, 17]. Verifier calibration is scored
-  against it as a Brier score with its sample size [12].
+  against it as a Brier score with its sample size [12]
+  (`python -m core audit`, `audit label`, `audit scores`).
 
 A judge's score is a proxy, and an optimized proxy drifts from what it
 stands for [14]. No score is reported alone: a fidelity number comes with the
@@ -398,5 +399,5 @@ one-point judge difference is noise. The stand-in was lenient: every run
 ended accepted, including #191 bare at fidelity 1. Half the answer keys are
 inferred from merged code. No run looked at its result in a browser, so
 "testing actual use" in Mission item 1 is unmeasured. No delivery was used,
-no exemplar was recorded, and no audit sample exists. Of the four kinds of
+no exemplar was recorded, and no audit label is among the numbers. Of the four kinds of
 evidence, only attention spent and the emulator's first cases have numbers.

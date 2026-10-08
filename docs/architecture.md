@@ -401,7 +401,13 @@ metered through the gateway. The verifier:
 
 **Calibration and autonomy.** A human audit sample of verdicts, weighted
 toward work that left the workspace and every `act`, with a smaller share of
-failures, is the ground truth [4, 17]. Calibration is false accept, false
+failures, is the ground truth [4, 17]. The sample is built (`core/audit_sample.py`):
+`python -m core audit` lists reviewed candidates without a label from Tom in a
+weighted random order and never shows the verdict, `audit label` records his
+label, and `audit scores` prints the verifier's stratified false accept, false
+reject, and Brier score with each `n`, Tom's labels and, apart, labels read
+from reverted merges. Nothing reads a label or a score to hold or send
+anything; lowering the autonomy class on a degrading series is design. Calibration is false accept, false
 reject, and Brier score [12] with sample size; raw pass rate is never
 reported alone [14]. A degrading series lowers the highest class the system
 may commit without Tom; raising it is only Tom's decision, recorded as a
@@ -511,7 +517,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
-| Verifier too lenient | Opus-class blind reviewer, never cheaper (built); human audit sample (design) | Evidence |
+| Verifier too lenient | Opus-class blind reviewer, never cheaper (built); human audit sample (built: `python -m core audit`, `/audit`); the autonomy lowering it would drive (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
 
 ## Limits
