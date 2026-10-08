@@ -94,22 +94,30 @@ transaction:
 - **`before`**: the task's previous `done` merge's `head_sha`, or
   `Brief.base_sha` for its first.
 - **`commits`** and **`paths`**: the merge's own commits and the paths they
-  change, from
-  `git log --no-merges --format=%x00%H --name-only --no-renames before..head_sha --not <earlier>`,
+  change, from one `git.trusted` call in the kernel mirror with the target's
+  cache objects borrowed (`GIT_ALTERNATE_OBJECT_DIRECTORIES=<cache>/objects`,
+  as `blind_checkout` borrows):
+  `git log --no-merges --ignore-missing -z --format=%x00%H --name-only --no-renames before..head_sha --not <earlier> <tip>`,
   where `<earlier>` is every `head_sha` of a `done` merge by any task to the
-  same `url` and `target_branch`, kept to those the repository holds
-  (`cat-file -e`). A head the repository lacks is not reachable from this
-  head, so dropping it changes nothing. This leaves out other tasks' work
-  the candidate took in (finding 3). `--no-renames` lists both paths of a
-  rename.
+  same `url` and `target_branch`, and `<tip>` is the cache's
+  `refs/heads/<target_branch>`, the target as the kernel last fetched it.
+  `--ignore-missing` skips a head the repository lacks; such a head is not
+  reachable from this one, so dropping it changes nothing. This leaves out
+  other tasks' work and hand-landed commits the candidate took in.
+  `--no-renames` lists both paths of a rename. The output is read as bytes
+  and each path decoded with `errors="replace"`, so a non-UTF-8 name is a
+  reading, not an error.
 
-The read is the repository `_git_facts` already reads: the mirror through
-`git.trusted`, or a `--workspace` task's workspace through a new `git.run`
-helper `git.own_changes(repo, before, head, earlier)`, so its hostile check
-applies. A `GitError` records `landed: {"before": ..., "commits": null,
-"paths": null}` and the release goes on; the merge's own facts already
-passed. `<earlier>` comes from `outcomes.done_merges(conn, url, branch)`
-(below).
+Only the mirror is read: a `--workspace` task records
+`landed: {"before": ..., "commits": null, "paths": null, "why": "no kernel copy"}`
+and no git runs on its workspace for `landed`. The whole computation,
+`<earlier>` from `outcomes.done_merges(conn, url, branch)` (below) and the
+git read in one `git.threaded` call, sits in an `except Exception`: any
+failure records null `commits` and `paths` with the exception's type under
+`why`, and the release goes on. The intent is written with
+`ledger.try_append`; when Postgres refuses it, it is written again with
+`landed` cut to `before`, null `commits` and `paths`, and `why` naming the
+refusal. Recording `landed` never stops or fails a merge.
 
 It sits on the intent because the intent is the one row both paths share:
 the perform writes the outcome from the push and `reconcile` writes it from
@@ -187,11 +195,14 @@ git reads on the status surfaces. `revert(brief, merge)`:
 - Otherwise the repository is `workspace.cache_path(origin_url, work)` with
   `work = Path(brief.mirror).parent.parent` (finding 6). With no cache
   there, `revert: None`, "no cache of the target".
-- From the cache: `on_branch`, `git.trusted(cache, "merge-base",
-  "--is-ancestor", head_sha, f"refs/heads/{branch}")`; `reverted_by`, from
+- When the cache does not hold the head (`cat-file -e <head>^{commit}`),
+  `on_branch: None`, `revert: None`, "cache not fetched since the merge".
+- From the cache: `on_branch`, from `merge-base --is-ancestor head_sha
+  refs/heads/<branch>` through `git.ancestry`, exit 0 true, 1 false, any
+  other None with git's message; `reverted_by`, from
   `git.trusted(cache, "log", "--format=%H%x00%B%x1e",
-  f"{head_sha}..refs/heads/{branch}")` (finding 7), each commit whose body
-  holds `This reverts commit <40 hex>` naming a sha in the merge's recorded
+  f"{head_sha}..refs/heads/{branch}", text=False)` decoded with
+  `errors="replace"`, each commit whose body holds `This reverts commit <40 hex>` naming a sha in the merge's recorded
   `commits`, with the reverting commit's sha. GitHub's revert button writes
   the same line in the body under a "Reverts owner/repo#N" title, so both
   are read. A merge with `commits: None` has `reverted_by: None`. `as_of`
@@ -213,14 +224,18 @@ them reads outcomes.
 
 ### The `used` mark
 
-`python -m core used TASK_ID [--note TEXT] [--by B] [--via V] [--role-played]`
+`python -m core used TASK_ID --by B [--delivery EVENT_ID] [--note TEXT] [--via V] [--role-played]`
 appends one `delivery.used` row on the task, under the task's lock, and
-prints its id. The row names the task's latest `task.delivered` row
-(`delivery_event_id`, `candidate`), plus `effect_id` and `head_sha` of the
-task's latest `done` merge when it has one, else both null; then `note` and
-the provenance fields (`ledger.provenance`, `core/ledger.py:24-28`). A task
-with no delivery gets "task X has no delivery to mark used"; an unknown
-task "no task X". These say what the row names, not whether the work is
+prints its id. `--by` is required and names who used the work. The row
+names a delivery (`delivery_event_id`, `candidate`): `--delivery` when
+given; else, when the task has a `done` merge, the delivery its latest
+merge carried (the latest `task.delivered` before that merge's
+`effect.held`); else the task's latest delivery. `effect_id` and
+`head_sha` are those of the `done` merge that carried the named delivery,
+else both null; then `note` and the provenance fields
+(`ledger.provenance`, `core/ledger.py:24-28`). A task with no delivery gets
+"task X has no delivery to mark used"; a `--delivery` that is not one of
+the task's "task X has no delivery N"; an unknown task "no task X". These say what the row names, not whether the work is
 good. A stopped task is marked like any other. `machine.fold` ignores the
 row type, so the state does not move.
 
@@ -314,13 +329,20 @@ the test database:
 - **Unrecorded paths.** A merge with no `landed` gives `paths: None`,
   `later: None`; a later merge with no `landed` appears in A's
   `later_unknown`, never as no overlap.
-- **A hostile `--workspace` config.** `git.own_changes` on a workspace
-  whose config `run` refuses records `paths: None` and raises nothing.
+- **A hand commit on the target.** A commit to `a.py` landed on the
+  target outside any merge row, in the cache, and taken in by B, is absent
+  from B's `landed.paths`.
+- **A `--workspace` merge.** `landed` has null paths with "no kernel copy",
+  and no git runs on the workspace for it.
+- **Turn-authored bytes.** A revert body holding byte 0xff gives a reading,
+  not an error; a non-ASCII `.md` path lands in `shared_docs`.
 - **Revert.** In the cache, a commit after the head whose body reverts one
   of the merge's commits gives `reverted_by` with its sha; a GitHub-style
   revert ("Reverts owner/repo#N" title, "This reverts commit X." body) is
   detected; one naming a commit outside `commits`, or an abbreviated sha,
-  is not; a branch moved off the head gives `on_branch: false`.
+  is not; a head on the branch gives `on_branch: true`, a branch moved off
+  the head `on_branch: false`, and a head the cache lacks `on_branch: None`
+  with "cache not fetched since the merge".
 - **Where revert reads.** A task on its own `origin.git` gives `revert`,
   `later`, and `later_docs` None with "private target"; a `--workspace`
   task gives `revert: None`; a spec whose `repo` differs from its
@@ -334,7 +356,10 @@ the test database:
   second merge it names the second; on a stopped merged task it records
   and the merges are still shown; no delivery and an unknown task exit
   with the named messages; a role-played mark is listed and not in
-  `used_count`; the fold's state never moves.
+  `used_count`; the fold's state never moves. Merge, feedback, patch, and
+  back in `merge` with a new delivery: the mark names the merged delivery,
+  not the new one; `--delivery` names another. `used` without `--by` exits
+  with the argparse error.
 - **Legacy and calibration tasks** give empty lists and no error.
 - **`tasks.status` has no `after_merge`**, and runs no git (a stand-in
   `git.trusted` that raises is never reached), so router steps are
@@ -344,8 +369,9 @@ the test database:
 - **`cache_path`** names the directory `_cache` creates.
 
 `tests/test_broker.py`: a released merge's intent carries `landed`; a
-`GitError` in the read records null paths and the merge still lands; a
-reconciled merge keeps the intent's `landed`.
+`GitError`, and a `ValueError`, in the read record null paths and the merge
+still lands; an unstorable `paths` still writes the intent and the merge
+lands; a reconciled merge keeps the intent's `landed`.
 
 `tests/test_tasks.py`: `index` returns `merges`, `feedback_after`, `used`,
 and `reworked`.
@@ -363,7 +389,7 @@ suite; failures also checked at base.
 ## Files it changes
 
 `core/outcomes.py` (new), `core/broker.py` (`landed` on the merge intent),
-`core/git.py` (`own_changes`), `core/tasks.py` (`index` fields),
+`core/git.py` (`has_commit`, `ancestry`), `core/tasks.py` (`index` fields),
 `core/__main__.py` (`used`, `status`, the docstring), `core/workspace.py`
 (`cache_path`), `ui/app.py`, `tests/test_outcomes.py` (new),
 `tests/test_broker.py`, `tests/test_tasks.py`, `tests/test_ui.py`. Docs,
@@ -412,8 +438,12 @@ None.
 - Marking a delivery used is not attention: it is evidence offered, not a
   decision put to Tom (`docs/mission.md:43-47`), so it is listed under the
   merge or delivery and left out of `attention_counts`.
-- Anyone may be named with `--by`; a role-played mark is shown and not
-  counted as real use.
+- `--by` is required and names whoever used the work; a role-played mark
+  is shown and not counted as real use.
+- What `landed` cannot exclude, stated: hand commits landed on the target
+  after the cache was last fetched, and a merge commit's own conflict
+  resolution (`--no-merges`). The cache is fetched at every provisioning,
+  so the first is the gap since the last task started.
 
 ## Decisions the lead may change
 
@@ -468,3 +498,36 @@ Critique `critic-3612-r1`, verdict `revise`; all ten findings accepted.
    it reads and `done_merges` once; listed in files, with tests.
 10. **Questions for Tom were technical.** Both moved to "Decided by
     default"; the section is empty.
+
+## Critique round 2
+
+Critique `critic-3612-r2`, verdict `revise`; all seven findings accepted.
+The lead's decision: fold every finding as the report's fixes describe and
+go to build with no third critique, since the findings are concrete and
+governance is clean once finding 3 is fixed.
+
+1. **`landed` read a turn-owned workspace.** The read is removed: a
+   `--workspace` task records null `commits` and `paths` with "no kernel
+   copy", and `git.own_changes` is dropped. Nothing the kernel records
+   comes from a turn-owned workspace. The hostile-config test is replaced
+   by one showing no git runs on the workspace for `landed`.
+2. **Hand-landed commits credited to the merge.** The mirror's log borrows
+   the target cache's objects and also excludes the cache's tip of the
+   target branch. The remainder (hand commits fetched after the cache was,
+   merge-commit resolutions) is under Decided by default. Test added.
+3. **Recording `landed` could stop the merge.** One `git.threaded` call
+   with `--ignore-missing` replaces the per-head `cat-file`; the whole
+   computation is wrapped in `except Exception` and records nulls with the
+   exception's type; the intent is written with `try_append` and, when
+   refused, again with `landed` cut to `before` and the reason. Recording
+   `landed` never stops or fails a merge. Tests added.
+4. **`on_branch` could not be false; a stale cache read as an error.** A
+   head the cache lacks reads `on_branch: None`, "cache not fetched since
+   the merge"; `git.ancestry` maps exit 0, 1, and other. Tests added.
+5. **Turn-authored bytes.** Paths are read with `-z` and bodies as bytes,
+   both decoded with `errors="replace"`. Tests added.
+6. **A mark joined two deliveries.** With a `done` merge, the mark names
+   the delivery that merge carried; `--delivery` names another. Test added.
+7. **`--by` had no default stated.** `--by` is required for `used`, a
+   usage fix, not a check; the help and `docs/data.md` say it names who
+   used the work. Test added.
