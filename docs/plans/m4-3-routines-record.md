@@ -408,3 +408,12 @@ The lead merged on 2026-10-06, fast-forwarding `valor-cori-rebuild` to 3610cce32
 - Started the status page with `python -m ui` (pid 65224). It answers 200 at http://127.0.0.1:8790/.
 
 The bridge job `com.valor.kernel.local` still listens on 8711. Still to come is 1.4c part two Rollout step 5: the first real task after this rollout runs its review rerun in a VM, and the lead reads its `verify.ran` by hand once. The docs no longer say that Tom's Mac lacks `container`, and rebuild-handoff.md Setup names the Little Snitch rule and the kernel archive fetch.
+
+**Rollout on Valor's Mac (2026-10-08).** The kernel there had run code from 2026-10-05 and had no routine jobs. The lead did the following:
+- Backed up first: 2163 events to `/Volumes/PINK/valor_temp/valor_rebuild-20261008T030556Z.dump`.
+- Ran `uv sync` and `migrate`. The password file was kept and `pg_hba.conf` was unchanged.
+- Restarted the kernel with `launchctl kickstart -k`. Its printed job matched the installed one. It was restarted again on 74489521a, Tom's message-seat change.
+- Wrote both routine plists. `plutil -lint` reported them OK, then they were bootstrapped. The expiry routine was kickstarted, ran under launchd, and reported `nothing_due` at $0.
+- Started the status page with `python -m ui`. It answers 200 at http://127.0.0.1:8790/.
+- Checked the runtime with `container` 1.5.0 and Rosetta: a throwaway alpine VM ran. Ran the judgement calibration again: `task_sha256` equals `JUDGE.calibrated`, and `entry_check` is true. The long-lived Claude token answered a one-word call.
+- The data volume was 99% full (2.7 GB free), which made container builds fail with `No space left on device`. Clearing test temp directories, uv's and Homebrew's caches, and the test container images left 16 GB free. With that space, `tests/test_container.py` passes except the repository suite's VM run, the base failure kernel task b4288894e613 clears.

@@ -27,7 +27,17 @@ both have. On this Mac a non-interactive shell finds
 Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
 `PGPASSFILE`, so commands run with `postgresql@18/bin` first,
 `VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
-`PGPASSFILE=~/.config/valor-kernel/pgpass` set. Each milestone's plan file in
+`PGPASSFILE=~/.config/valor-kernel/pgpass` set. On 2026-10-08 Valor's Mac
+took milestones 1 to 4 as merged: the kernel on the branch tip, both routine
+jobs loaded, the status page up (m4-3-routines-record.md). The new Telegram
+(`com.valor.kernel.telegram`) and email (`com.valor.email`) bridge jobs are
+in `~/Library/LaunchAgents` but `launchctl disable`d, since the old bridge
+still owns Valor's Telegram account on that Mac; a test window or cutover
+enables them (`launchctl enable`, then `bootstrap`) after the old bridge,
+email bridge, and worker are disabled. The email job carries
+`VALOR_EMAIL_SINCE`, which is set to the window's first day when it is
+printed again. Its data volume runs near full; container builds need
+several GB free. Each milestone's plan file in
 `docs/plans/m*.md` carries its status and its records.
 
 ## Setup
