@@ -14,12 +14,14 @@ GitHub issue #3612 (`tomcounsell/ai`), issue 4 of
 `valor-cori-rebuild` at 2d6ed8a8e, re-read for this plan; the issue cited
 5c11e496d.
 
-**Goal.** For each merge a task made, `python -m core status` and the
-status page show what came after it: Tom's feedback after it, later merges
-that touched the same paths, whether it was reverted, and whether someone
-used it. All of it is read from the ledger and the kernel's own git
-repositories when asked, beside spending and attention. Nothing reads it to
-decide anything.
+**Goal.** For each delivery a task made, and each merge it made,
+`python -m core status` and the status page show what came after it: Tom's
+feedback after the merge, later merges that touched the same paths,
+whether it was reverted, and whether someone used it. A merge's paths are
+recorded in the ledger when the merge is released, so rework is a ledger
+fold; git is read only for whether the merge is still on its branch and
+whether it was reverted. All of it is shown beside spending and attention.
+Nothing reads it to decide anything.
 
 **Serves.** Evidence "Working results in real use" (`docs/mission.md:130-131`,
 read per delivery at `docs/mission.md:146-150`: "did it run, did someone use
@@ -36,130 +38,209 @@ Mission item 1, "testing actual use ... and resolving discovered defects"
   (`core/machine.py:586-588`). `merged` takes only `feedback`, which goes to
   `patch` (`docs/sdlc-state-machine.md:61`, `core/machine.py:59,81`), so one
   task can merge more than once.
-- The merge is a fast-forward push of `head_sha` onto the target branch,
-  never a merge commit (`tools/push_branch.py:167-189`; the predicate's term
-  4 refuses merge commits, `core/machine.py:700-712`). Its payload carries
-  `url`, `target_branch`, `head_sha`, and the candidate
-  (`core/verdicts.py:509-522`). The Brief carries `base_sha`, `mirror`,
-  `origin_url`, `target_branch`, and, for a provisioned task, `project`
-  with its `repo` (`core/tasks.py:27-79`, `core/workspace.py:973-996`).
-- Feedback after a merge is a `feedback.given` row with provenance
-  (`core/session.py:652-706`), folded into the attention log
-  (`core/tasks.py:753-762`). Nothing folds it as an outcome of the merge it
-  followed.
+- The merge is a push without force of `head_sha` onto the target branch,
+  never a merge commit (`tools/push_branch.py:167-189`, `core/git.py:621-641`;
+  the predicate's term 4 refuses merge commits, `core/machine.py:700-712`).
+  Other tasks merge to the same branch (`projects/valor.toml` `merge_url`),
+  so a candidate provisioned before another task's merge lands only after
+  taking that merge in. Its payload carries `url`, `target_branch`,
+  `head_sha`, and the candidate (`core/verdicts.py:509-522`). The Brief
+  carries `base_sha`, `mirror`, `origin_url`, `target_branch`, and, for a
+  provisioned task, `project` (`core/tasks.py:27-79`,
+  `core/workspace.py:973-996`).
+- `broker._release` evaluates the merge predicate inside the transaction
+  that writes the effect's `effect.intent`, reading git facts from the
+  mirror (or a `--workspace` task's workspace, through `git.run`'s hostile
+  check) in `_git_facts` (`core/broker.py:509-557`). The intent row carries
+  the action whole so `reconcile` can settle a killed perform from it
+  (`core/broker.py:410-479,582-591`); both the perform and the reconcile
+  path then write `effect.outcome`.
+- A delivery is a `task.delivered` row with the candidate and the join's
+  outcome (`docs/data.md:132`), written whether or not a merge follows.
+  Work can reach use with no kernel merge: task 6fd4e0439ac1's issues were
+  posted as #3609 to #3612, and task 80e49c02eac7 landed through a hand
+  merge commit, 6afd8706f.
+- Feedback after a merge is a `feedback.given` row with `on_delivery` and
+  provenance (`core/session.py:652-706`, `docs/data.md:131`), folded into
+  the attention log (`core/tasks.py:753-762`). Nothing folds it as an
+  outcome of the merge it followed.
 - `tasks.status` (`core/tasks.py:685-721`) reports the delivery and its
-  `outcome` (`passed`, `gaps`, `did_not_pass`, `governance_refused`;
-  `docs/data.md:132`), which is the join's verdict before the merge, not
-  what happened after it. The issue's `core/tasks.py:638-647` is
-  `child_report`, a parent's view of a child, which reports the same field.
+  `outcome`, the join's verdict before the merge. The issue's
+  `core/tasks.py:638-647` is `child_report`, which reports the same field.
+  `tasks.index` (`core/tasks.py:846-884`) reads every task's rows and
+  returns state, spending, and attention, not the rows.
 - The kernel's git: the per-task mirror `<work>/<task>/kernel.git`, which
-  only the kernel writes and which holds the base and every candidate and
-  docs head (`core/workspace.py:12-13,938-941`); the task's bare origin
-  `origin.git`, the merge's target when the spec has no `merge_url`
-  (`core/workspace.py:9-11,991-993`); and the shared cache
-  `<work>/cache/<name>-<digest>.git`, a bare clone of the spec's `repo`
-  fetching `+refs/heads/*` on every provisioning (`core/workspace.py:693-730`).
-  `python -m core workspace remove` deletes a merged task's directory,
-  mirror included, and writes `workspace.removed` (`core/__main__.py:495-509`).
-- The status page is read-only (`ui/app.py:1-11`, `default_transaction_read_only`
-  at `ui/app.py:186-189`); its task page prints `tasks.status` as JSON
-  (`ui/app.py:97-115`) and its index lists state, spending, and attention
-  (`ui/app.py:75-94`).
+  only the kernel writes (`core/workspace.py:12-13,938-941`); the task's
+  bare `origin.git`, the merge's target when the spec has no `merge_url`
+  (`core/workspace.py:9-11,991-993`), which only this task's merges reach;
+  and the shared cache `<work>/cache/<name>-<digest>.git`, a bare clone
+  fetching `+refs/heads/*` on every provisioning, named inside `_cache`
+  (`core/workspace.py:693-730`).
+- `machine.is_doc_path` (`core/machine.py:647-658`) says whether a path is
+  a Markdown file a docs commit may touch; instruction files are not.
+- The status page is read-only (`ui/app.py:1-11,186-189`); its task page
+  prints `tasks.status` as JSON (`ui/app.py:97-115`) and its index lists
+  state, spending, and attention (`ui/app.py:75-94`).
 - No row records a use. `docs/data.md` is the row registry.
 
 ## Design
 
-### The merges of a task (`core/outcomes.py`, new)
+### What a merge landed, recorded at release (`core/broker.py`)
 
-`merges(brief, rows)` is a pure fold over one task's rows. Each
-`effect.outcome` with `kind: done` whose effect is the task's merge effect
-(the `effect.held` with `action_type: merge`, matched by `effect_id`) is one
-merge: `effect_id`, `head_sha`, `url`, `target_branch` (from the held
-payload), `at` (the outcome row's time), `event_id`, and `before`: the
-previous merge's `head_sha` on this task, or `Brief.base_sha` for the first.
-A legacy or calibration task has none.
+When `_release` has found the merge predicate holds, it computes `landed`
+and writes it into the merge's `effect.intent` payload, in the same
+transaction:
 
-For each merge, ledger only:
+- **`before`**: the task's previous `done` merge's `head_sha`, or
+  `Brief.base_sha` for its first.
+- **`commits`** and **`paths`**: the merge's own commits and the paths they
+  change, from
+  `git log --no-merges --format=%x00%H --name-only --no-renames before..head_sha --not <earlier>`,
+  where `<earlier>` is every `head_sha` of a `done` merge by any task to the
+  same `url` and `target_branch`, kept to those the repository holds
+  (`cat-file -e`). A head the repository lacks is not reachable from this
+  head, so dropping it changes nothing. This leaves out other tasks' work
+  the candidate took in (finding 3). `--no-renames` lists both paths of a
+  rename.
+
+The read is the repository `_git_facts` already reads: the mirror through
+`git.trusted`, or a `--workspace` task's workspace through a new `git.run`
+helper `git.own_changes(repo, before, head, earlier)`, so its hostile check
+applies. A `GitError` records `landed: {"before": ..., "commits": null,
+"paths": null}` and the release goes on; the merge's own facts already
+passed. `<earlier>` comes from `outcomes.done_merges(conn, url, branch)`
+(below).
+
+It sits on the intent because the intent is the one row both paths share:
+the perform writes the outcome from the push and `reconcile` writes it from
+the target's `lookup`, which has no mirror history to compute from. The
+commits are fixed before the push, and a merge counts only once its
+outcome is `done`, so the paths are those of what landed. The push is
+without force, so a concurrent merge by another task can only have landed
+first if this head contains it; that merge's outcome row is then written
+unless it is still in flight, in which case its paths may appear in this
+one's too.
+
+### The merges and deliveries of a task (`core/outcomes.py`, new)
+
+`outcomes` imports `ledger`, `machine`, and `git`, never `tasks` or
+`broker`, so both can import it.
+
+`merges(rows)` is a pure fold over one task's rows. Each `effect.outcome`
+with `kind: done` whose effect is an `effect.held` with `action_type:
+merge` is one merge: `effect_id`, `head_sha`, `url`, `target_branch` (from
+the held payload), `at` and `event_id` (the outcome row), and `landed`
+(from the intent; None on a merge recorded before this change). A
+`failed` outcome is not a merge.
+
+`deliveries(rows)` lists each `task.delivered` row: its event id,
+candidate, outcome, and time. A legacy or calibration task has none of
+either.
+
+For each merge, from the rows:
 
 - **`feedback`**: every `feedback.given` row after this merge's outcome row
   and before the task's next merge, with its text and provenance. Feedback
   given while the task was in `merge` belongs to no merge.
-- **`used`**: every `merge.used` row naming this merge's `effect_id`, with
-  note and provenance. `used_count` counts the rows whose `role_played` is
-  not true; a role-played mark is listed and not counted, since a stand-in
-  using a feature is not real use (`docs/mission.md:148`, a replay is not
-  real use).
+- **`used`**: every `delivery.used` row whose `effect_id` is this merge's.
 
-### Paths, rework, and revert, read from git when asked
+For each delivery, **`used`**: every `delivery.used` row naming that
+delivery with no `effect_id`. `used_count`, on both, counts the rows whose
+`role_played` is not true; a role-played mark is listed and not counted,
+since a stand-in using a feature is not real use (`docs/mission.md:148`).
 
-`after_merge(conn, task_id)` adds to each merge:
+`done_merges(conn, url=None, branch=None)` is one query: `effect.held` rows
+with `payload->>'action_type' = 'merge'` joined by `effect_id` to their
+`effect.outcome` with `kind: done` and their `effect.intent`, optionally
+filtered by `url` and `target_branch`, returning task id, effect id, head,
+url, branch, outcome time, and `landed`, in outcome order. Every
+cross-task reading uses it, never a read of every ledger.
 
-- **`paths`**: `git.diff_paths(repo, before, head_sha)`
-  (`core/git.py:537-542`, `--no-renames`, so a rename lists both paths),
-  in the first repository that holds both commits: the mirror when the
-  Brief names one and no `workspace.removed` row exists; for a
-  `--workspace` task, the workspace, read through `git.run`'s hostile check
-  as the merge predicate already does (`core/broker.py:511-514`); then the
-  project cache. None when none holds them, shown as "unknown", never as
-  empty.
-- **`later`**: every merge by another task to the same `url` and
-  `target_branch` whose outcome row comes after this one, whose own `paths`
-  share at least one path with this merge's: its task id, effect id,
-  `merged_at`, `days_after` (one decimal), and the shared paths. A later
-  merge whose paths are unknown is listed under `later_unknown` by task id,
-  so an unknown never reads as "no rework". The same task's own later merge
-  is the next entry in its `merges`, not repeated here.
-- **`revert`**: read from the repository that tracks the target branch:
-  the task's `origin.git` when `origin_url` is that local path, else the
-  project cache when `project.repo` equals `origin_url`; for a
-  `--workspace` task, or when neither exists, `revert` is None
-  ("unknown"). From it: `on_branch`, whether `head_sha` is an ancestor of
-  `refs/heads/<target_branch>` (`git.is_ancestor`, `core/git.py:529-530`);
-  `reverted_by`, each commit in `head_sha..refs/heads/<target_branch>` whose
-  message holds `This reverts commit <40 hex>` (the line `git revert`
-  writes) naming a commit in `before..head_sha`, with that commit's sha;
-  `source` (`origin` or `cache`) and `as_of`, the cache's `FETCH_HEAD`
-  time (the origin is the merge's own target, so it is current).
+### Rework, from the ledger
 
-Each git read uses the existing helpers in a worker thread
-(`git.threaded`); `trusted` only on the mirror, the origin, and the cache,
-which no turn writes. No call reaches a network: the cache is read as it
-was last fetched, and `as_of` says when.
+`rework(merge, done)` takes one merge and the `done_merges` rows for its
+`url` and `target_branch`. For every other task's merge whose outcome
+comes after this one's, it splits the shared paths with
+`machine.is_doc_path` into `shared_code` and `shared_docs` (finding 1):
 
-`_cache`'s file name (`core/workspace.py:699-704`) moves into
-`cache_path(origin, work)` so the read finds the same directory; `work` is
-`Path(brief.mirror).parent.parent`. `_cache` calls it; no behavior changes.
+- **`later`**: merges with a non-empty `shared_code`: task id, effect id,
+  `merged_at`, `days_after` (one decimal), `shared_code`, `shared_docs`.
+- **`later_docs`**: merges that share only doc paths, with the same
+  fields, so they are shown and not read as rework.
+- **`later_unknown`**: later merges whose `paths` are None, by task id, so
+  an unknown never reads as "no rework".
+
+When this merge's own `paths` are None, `later` and `later_docs` are None
+with the reason "paths not recorded". The same task's own later merge is
+the next entry in its `merges`, not repeated here.
+
+### Revert and on-branch, read from git
+
+These are the only readings that change after a merge, so they are the only
+git reads on the status surfaces. `revert(brief, merge)`:
+
+- A task whose `origin_url` is its own `origin.git` (the spec has no
+  `merge_url`) gets `revert: None` and `later: None`, `later_docs: None`,
+  each with the reason "private target": only this task's merges reach
+  that origin, so no other reading exists (finding 5).
+- A `--workspace` task gets `revert: None`, "no kernel copy of the target".
+- Otherwise the repository is `workspace.cache_path(origin_url, work)` with
+  `work = Path(brief.mirror).parent.parent` (finding 6). With no cache
+  there, `revert: None`, "no cache of the target".
+- From the cache: `on_branch`, `git.trusted(cache, "merge-base",
+  "--is-ancestor", head_sha, f"refs/heads/{branch}")`; `reverted_by`, from
+  `git.trusted(cache, "log", "--format=%H%x00%B%x1e",
+  f"{head_sha}..refs/heads/{branch}")` (finding 7), each commit whose body
+  holds `This reverts commit <40 hex>` naming a sha in the merge's recorded
+  `commits`, with the reverting commit's sha. GitHub's revert button writes
+  the same line in the body under a "Reverts owner/repo#N" title, so both
+  are read. A merge with `commits: None` has `reverted_by: None`. `as_of`
+  is the cache's `FETCH_HEAD` time; `source: "cache"`.
+
+Each read runs in `git.threaded`. No call reaches a network; the cache is
+read as last fetched, and `as_of` says when.
+
+`_cache`'s naming (`core/workspace.py:697-704`) moves into
+`cache_path(origin, work)`; `_cache` calls it with `source or spec.repo`;
+no provisioning behavior changes.
+
+`after_merge(conn, brief, rows)` assembles the merges with feedback, used,
+rework (one `done_merges` call per distinct url and branch), and revert.
 
 `tasks.status` is unchanged: the router, `fresh`, and `checks` call it on
 every step (`core/router.py:288-309`, `core/fresh.py:180-240`), and none of
-them reads outcomes. Only the two surfaces below call `after_merge`.
+them reads outcomes.
 
 ### The `used` mark
 
 `python -m core used TASK_ID [--note TEXT] [--by B] [--via V] [--role-played]`
-appends one `merge.used` row on the task: `effect_id` and `head_sha` of its
-latest merge, the note, and provenance (`ledger.provenance`,
-`core/ledger.py:24-28`), under the task's lock, and prints the row's id. A
-task with no merge gets "task X has no merge to mark used"; an unknown task
-"no task X". These answer what the mark is about (a mark names a merge),
-not whether the work is good. `machine.fold` ignores the row type, so the
-state does not move; feedback after a mark still goes to `patch`.
+appends one `delivery.used` row on the task, under the task's lock, and
+prints its id. The row names the task's latest `task.delivered` row
+(`delivery_event_id`, `candidate`), plus `effect_id` and `head_sha` of the
+task's latest `done` merge when it has one, else both null; then `note` and
+the provenance fields (`ledger.provenance`, `core/ledger.py:24-28`). A task
+with no delivery gets "task X has no delivery to mark used"; an unknown
+task "no task X". These say what the row names, not whether the work is
+good. A stopped task is marked like any other. `machine.fold` ignores the
+row type, so the state does not move.
 
 No turn can write it: it is no performer, signal, or effect, and the turn
 has no database credential.
 
 ### Surfaces
 
-- `python -m core status TASK_ID` adds `after_merge`: the list from
-  `after_merge`, beside `metered_spending` and `attention_counts`
-  (`core/__main__.py:711-715`).
+- `python -m core status TASK_ID` adds `after_merge` (the merges) and
+  `deliveries_used` (deliveries with marks and no merge), beside
+  `metered_spending` and `attention_counts` (`core/__main__.py:711-715`).
 - The task page shows an "After merge" table per merge (head, merged at,
   feedback count and texts, used count and marks, paths, later merges with
-  shared paths and days, revert) above the JSON; every value goes through
-  `esc`.
-- The index gains an "after merge" column for tasks with a merge: merges,
-  feedback after, used, all from rows it already reads (`ui/app.py:75-94`,
-  `core/tasks.py:846-884`); no git on the index.
+  shared code paths and days, later doc-only merges, revert) and a "Used"
+  list per delivery without a merge, above the JSON; every value goes
+  through `esc`.
+- `tasks.index` calls `outcomes.merges(rows)` on the rows it already reads
+  and `outcomes.done_merges(conn)` once, and adds `merges`,
+  `feedback_after`, `used`, and `reworked` (later merges with shared code)
+  per task (finding 9). The index column shows them; the index runs no git.
 
 ## Threat model
 
@@ -167,40 +248,46 @@ The turn controls the commits that land: their paths and messages, so a
 path name and a revert line are turn-authored text, and a turn can write a
 false "This reverts commit" line. These are shown, escaped, with the
 reverting commit's sha; no code path decides on them. The kernel must
-never: read the builder's clone (`repo/`), only the mirror, the origin, the
-cache, or a `--workspace` workspace through the hostile check the merge
-already applies; run git `trusted` outside the repositories only it writes;
-fetch from a network during a status read; write a row from the status
-page; or let a merge's outcome feed the router, the broker, the fold, or a
-verdict. `merge.used` is written only by the command line, with provenance.
+never: read the builder's clone (`repo/`), only the mirror, the cache, or a
+`--workspace` workspace through the hostile check the merge already
+applies; run git `trusted` outside the repositories only it writes; fetch
+from a network during a status read; run git on a turn-written directory
+from the status page; write a row from the status page; or let a merge's
+outcome feed the router, the broker's decision, the fold, or a verdict.
+`landed` is written by the kernel from its own read; `delivery.used` only
+by the command line, with provenance.
 
 ## Governance
 
 Nothing here adds a check, gate, hook, validator, review round, or approval
 step: every reading is shown and none holds, redirects, or refuses work.
-No grant is needed. The `used` command's refusal of a task with no merge
-is about what the row names, not a judgement of work. The verifier
-calibration that would use these readings as labels (issue 3, #3611) and
-any rule that acts on a revert are out of scope; acting on them would be a
-gate needing its own incident and Tom's tap.
+No grant is needed. `landed` is recorded after the predicate holds and a
+failure to read it never stops a merge. The `used` command's refusal of a
+task with no delivery is about what the row names, not a judgement of
+work. The verifier calibration that would use these readings as labels
+(issue 3, #3611) and any rule that acts on a revert are out of scope;
+acting on them would be a gate needing its own incident and Tom's tap.
 
 ## Stakes
 
-2 and 2: a new ledger row type and reads of stored data and the kernel's
-repositories (`docs/plans/valor-rebuild.md`, "a change to stored data ...
-is a 2"). No migration: `merge.used` is a row in the existing table.
+2 and 2: a new ledger row type, a new field on the merge's intent, and
+reads of stored data and the kernel's repositories
+(`docs/plans/valor-rebuild.md`, "a change to stored data ... is a 2"). No
+migration: both are rows and payload fields in the existing table.
 
 ## Done, as evidence
 
 1. `python -m core status` on a merged task in the test database prints
-   `after_merge` with the merge's head, feedback after it, paths, later
-   overlapping merges with `days_after`, revert reading, and used marks,
-   each from rows and git built in the test.
-2. `python -m core used` writes `merge.used` with provenance, and the
-   task's state is still `merged`.
-3. The task page renders the After merge table, escaped; the index shows
-   the column; both through the read-only session.
-4. The suite is green at head where it was at base; ruff clean.
+   `after_merge` with the merge's head, feedback after it, recorded paths,
+   later merges split into code and docs with `days_after`, the revert
+   reading, and used marks, each from rows and git built in the test.
+2. A merge released in the test database carries `landed` on its intent,
+   with its own commits and paths and not those of a merge it took in.
+3. `python -m core used` writes `delivery.used` with provenance on a task
+   with a merge and on one with only a delivery; the state is unchanged.
+4. The task page renders the After merge table and Used list, escaped; the
+   index shows the column; both through the read-only session.
+5. The suite is green at head where it was at base; ruff clean.
 
 ## Tests
 
@@ -208,64 +295,103 @@ is a 2"). No migration: `merge.used` is a row in the existing table.
 the test database:
 
 - **Two merges of one task.** Merge, feedback, merge again: two entries;
-  the second's `before` is the first's head; the feedback sits on the first.
+  the second's `landed.before` is the first's head; the feedback sits on
+  the first.
+- **A failed merge then a done one.** One merge listed; the failed effect
+  is not.
 - **Feedback before a merge is no merge's.** Feedback in `merge` (sent to
   patch) and a later merge: the merge lists no feedback.
+- **Own commits only.** A merges `a.py`; B, provisioned before A merged,
+  takes A's head in, adds `b.py`, merges: B's `landed.paths` is `["b.py"]`
+  and B's `commits` exclude A's.
 - **Rework.** Task A merges `a.py`; B (same url and branch, later) touches
-  `a.py` and `b.py` and is listed with shared `a.py` and its days; C
-  touches only `c.py` and is not; D touches `a.py` on another branch and is
-  not; E merged before A is not.
+  `a.py` and `b.py` and is under `later` with `shared_code: ["a.py"]` and
+  its days; C touches only `c.py` and is not listed; D touches `a.py` on
+  another branch and is not; E merged before A is not.
+- **Doc-only overlap.** B shares only `docs/data.md` with A: under
+  `later_docs`, not `later`. A shared `CLAUDE.md` counts as code.
 - **A rename counts both paths.** B renames `a.py`; it is listed against A.
-- **A removed mirror falls back to the cache**; with neither holding the
-  commits, `paths` is None and a later merge with unknown paths appears in
+- **Unrecorded paths.** A merge with no `landed` gives `paths: None`,
+  `later: None`; a later merge with no `landed` appears in A's
   `later_unknown`, never as no overlap.
-- **Revert.** A commit after the head reverting a commit inside the range
-  gives `reverted_by` with its sha; one naming a commit outside the range,
-  or an abbreviated sha, does not; a target branch moved off the head gives
-  `on_branch: false`; a `--workspace` task gives `revert: None`.
+- **A hostile `--workspace` config.** `git.own_changes` on a workspace
+  whose config `run` refuses records `paths: None` and raises nothing.
+- **Revert.** In the cache, a commit after the head whose body reverts one
+  of the merge's commits gives `reverted_by` with its sha; a GitHub-style
+  revert ("Reverts owner/repo#N" title, "This reverts commit X." body) is
+  detected; one naming a commit outside `commits`, or an abbreviated sha,
+  is not; a branch moved off the head gives `on_branch: false`.
+- **Where revert reads.** A task on its own `origin.git` gives `revert`,
+  `later`, and `later_docs` None with "private target"; a `--workspace`
+  task gives `revert: None`; a spec whose `repo` differs from its
+  `merge_url` reads from `cache_path(merge_url, work)` when that exists,
+  and gives "no cache of the target" when it does not.
 - **The cache's age.** `as_of` is the cache's `FETCH_HEAD` time.
-- **`used`.** The row carries effect id, head, note, provenance; the fold's
-  state stays `merged`; a mark on a task with no merge and on an unknown
-  task exits with the named messages; a role-played mark is listed and not
-  in `used_count`; a mark after a second merge names the second.
-- **Legacy and calibration tasks** give an empty list and no error.
+- **`used`.** On a merged task the row names the latest delivery, effect
+  id, and head, with note and provenance, and attaches to that merge; on a
+  delivered task with no merge it names the delivery with null effect and
+  is listed under the delivery; on a task in `merge` likewise; after a
+  second merge it names the second; on a stopped merged task it records
+  and the merges are still shown; no delivery and an unknown task exit
+  with the named messages; a role-played mark is listed and not in
+  `used_count`; the fold's state never moves.
+- **Legacy and calibration tasks** give empty lists and no error.
 - **`tasks.status` has no `after_merge`**, and runs no git (a stand-in
-  `diff_paths` that raises is never reached), so router steps are unchanged.
+  `git.trusted` that raises is never reached), so router steps are
+  unchanged.
+- **`done_merges`** returns other tasks' done merges on one url and branch
+  from one query.
 - **`cache_path`** names the directory `_cache` creates.
 
-`tests/test_ui.py`: the task page of a merged task shows the table and
-escapes a path holding `<script>`; the index column shows merges, feedback
-after, and used; a task with no merge shows none.
+`tests/test_broker.py`: a released merge's intent carries `landed`; a
+`GitError` in the read records null paths and the merge still lands; a
+reconciled merge keeps the intent's `landed`.
 
-Runs: `tests/test_outcomes.py`, `tests/test_ui.py`, `tests/test_machine.py`,
-`tests/test_session.py`, `tests/test_objective_tree.py`,
-`tests/test_workspace.py`, then the full suite; failures also checked at
-base.
+`tests/test_tasks.py`: `index` returns `merges`, `feedback_after`, `used`,
+and `reworked`.
+
+`tests/test_ui.py`: the task page of a merged task shows the table and
+escapes a path holding `<script>`; a delivered task with a mark and no
+merge shows the Used list; the index column shows the counts; a task with
+neither shows none.
+
+Runs: `tests/test_outcomes.py`, `tests/test_broker.py`, `tests/test_tasks.py`,
+`tests/test_ui.py`, `tests/test_machine.py`, `tests/test_session.py`,
+`tests/test_objective_tree.py`, `tests/test_workspace.py`, then the full
+suite; failures also checked at base.
 
 ## Files it changes
 
-`core/outcomes.py` (new), `core/__main__.py` (`used`, `status`, the
-docstring), `core/workspace.py` (`cache_path`), `ui/app.py`,
-`tests/test_outcomes.py` (new), `tests/test_ui.py`. Docs, for the docs
-check: `docs/data.md` (the `merge.used` row), `docs/mission.md` (how real
-use is read: the readings exist; no merge is marked used yet),
-`docs/sdlc-state-machine.md` (after `merged`, what the status reads),
-`core/README.md`, `ui/README.md`.
+`core/outcomes.py` (new), `core/broker.py` (`landed` on the merge intent),
+`core/git.py` (`own_changes`), `core/tasks.py` (`index` fields),
+`core/__main__.py` (`used`, `status`, the docstring), `core/workspace.py`
+(`cache_path`), `ui/app.py`, `tests/test_outcomes.py` (new),
+`tests/test_broker.py`, `tests/test_tasks.py`, `tests/test_ui.py`. Docs,
+for the docs check: `docs/data.md` (the `delivery.used` row and `landed` on
+`effect.intent`), `docs/mission.md` (how real use is read; work landed by
+hand has no merge row, so its paths, rework, and revert are not read; no
+delivery is marked used yet), `docs/sdlc-state-machine.md` (after
+`merged`, what the status reads), `core/README.md`, `ui/README.md`.
 
 ## Absorbs
 
-`_cache`'s naming, now one function both the provisioning and the read use.
+`_cache`'s naming, one function both the provisioning and the read use.
 
 ## Leaves out
 
 - "Did it run": a rollout record is issue 2 (#3610).
-- The verifier calibration and its labels: issue 3 (#3611).
+- The verifier calibration and its labels: issue 3 (#3611), which reads
+  `delivery.used` and `landed` as recorded here.
 - Any action on a revert or rework: no watch, no revert, no notice.
 - Marking use from a Telegram or email message; the command line only.
-- A rework window: the issue said 14 days; every later overlapping merge
-  is listed with `days_after` instead, so no number is chosen and the
-  reader sees the gap.
+- A rework window: the issue said 14 days and no doc gives the number;
+  every later overlapping merge is listed with `days_after`, so the reader
+  sees the gap.
+- Back-filling `landed` for merges recorded before this change: they show
+  "paths not recorded".
 - Fetching the remote to freshen the cache.
+- Paths, rework, and revert for work landed by hand: there is no merge
+  row to read them from.
 
 ## Rollout on Valor's Mac
 
@@ -279,18 +405,66 @@ use is read: the readings exist; no merge is marked used yet),
 
 ## Questions for Tom
 
-1. Should marking a merge used count as attention, beside questions and
-   feedback? Assumed no: it is evidence Tom offers, not a decision put to
-   him (`docs/mission.md:43-47`), so it is listed under the merge and left
-   out of `attention_counts`.
-2. Is "used" only Tom's word, or may it record someone else using the
-   result? Assumed anyone may be named with `--by`; a role-played mark is
-   shown and not counted as real use.
+None.
+
+## Decided by default
+
+- Marking a delivery used is not attention: it is evidence offered, not a
+  decision put to Tom (`docs/mission.md:43-47`), so it is listed under the
+  merge or delivery and left out of `attention_counts`.
+- Anyone may be named with `--by`; a role-played mark is shown and not
+  counted as real use.
 
 ## Decisions the lead may change
 
+- `landed` is written on the merge's `effect.intent`, not its outcome: the
+  intent is the row both the perform and `reconcile` paths share, and the
+  commits are fixed before the push. The finding asked for "when the merge
+  lands"; a merge counts only once its outcome is `done`, so the recorded
+  paths are those of what landed.
+- The used-mark row is `delivery.used`, not `merge.used`, since it can name
+  a delivery with no merge.
+- Merges recorded before this change get no git fallback for paths: the
+  status surfaces read git only for revert and on-branch.
 - No 14-day window (Leaves out).
-- Revert detection reads only `git revert`'s own message line and branch
-  ancestry; a hand-written undo without that line is not seen.
-- The index shows ledger-only counts; paths, rework, and revert are on the
-  task page and the command only, so the index runs no git.
+- Revert detection reads only the `This reverts commit` line `git revert`
+  and GitHub's revert both write, and branch ancestry; a hand-written undo
+  without that line is not seen.
+
+## Critique round 1
+
+Critique `critic-3612-r1`, verdict `revise`; all ten findings accepted.
+
+1. **Doc paths make every later merge rework.** Shared paths split by
+   `machine.is_doc_path` into `shared_code` and `shared_docs`; `later` needs
+   shared code, doc-only overlaps go to `later_docs`. Test added.
+2. **`used` refused the deliveries actually used.** The row is renamed
+   `delivery.used`; it names the latest delivery, plus the latest merge's
+   effect and head when there is one. Refused only for an unknown task or
+   one with no delivery. Marks without a merge are listed per delivery.
+   Tests for no-merge and `merge`-state tasks; `docs/mission.md` says hand
+   landed work has no merge row.
+3. **A moved target branch mixes in other tasks' paths.** Paths come from
+   the merge's own commits, `log --no-merges` excluding every earlier done
+   merge head on the same url and branch. Test added.
+4. **Per-view git and an unnamed cross-task lookup.** `before`, `commits`,
+   and `paths` are recorded as `landed` at release, from the mirror the
+   broker already reads; rework is a ledger fold; other tasks' merges come
+   from one query, `outcomes.done_merges`. Git on the status surfaces is
+   only revert and on-branch. Recorded on the intent rather than the
+   outcome, for the reason under Decisions. No read-time fallback for older
+   merges: they show "paths not recorded".
+5. **Private origin readings are empty by construction.** Such a task shows
+   `revert` and rework as None, "private target". Test added.
+6. **Cache chosen by `project.repo == origin_url`.** Reads
+   `cache_path(origin_url, work)` directly. Test added.
+7. **Helpers and `trusted` contradicted, no revert helper.** Named calls:
+   `git.trusted` `merge-base --is-ancestor` and `log --format=%H%x00%B%x1e`
+   on the cache; the `run`-based `git.own_changes` only for a `--workspace`
+   task at release.
+8. **Missed tests.** Added: failed then done merge; stopped after merge;
+   GitHub-style revert; doc-only overlap; hostile `--workspace` config.
+9. **`core/tasks.py` missing.** `index` calls `outcomes.merges` on the rows
+   it reads and `done_merges` once; listed in files, with tests.
+10. **Questions for Tom were technical.** Both moved to "Decided by
+    default"; the section is empty.
