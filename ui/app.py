@@ -11,6 +11,8 @@ write a row.
     /pending           the effects held for Tom
     /attention         the attention log across tasks
     /routines          each routine: period spending, last run, runs
+    /audit             the audit list (blind: no verdict, no link to the
+                       task page, which shows it) and the verifier's scores
 """
 
 import html
@@ -22,7 +24,7 @@ from typing import Any
 import psycopg
 from aiohttp import web
 
-from core import broker, ledger, outcomes, routines, tasks
+from core import audit_sample, broker, ledger, outcomes, routines, tasks
 from core.settings import settings
 
 STYLE = (
@@ -61,6 +63,7 @@ def layout(title: str, body: str) -> web.Response:
             ("/pending", "pending"),
             ("/attention", "attention"),
             ("/routines", "routines"),
+            ("/audit", "audit"),
         )
     )
     text = (
@@ -258,6 +261,36 @@ async def routines_page(conn) -> web.Response:
     return layout("Routines", body or "<p>No routines.</p>")
 
 
+async def audit_page(conn) -> web.Response:
+    """The list as `python -m core audit` gives it, and the scores as
+    `audit scores` prints them. A task id here is text, not a link: the task
+    page shows the verdict."""
+    found = await audit_sample.sample(conn)
+    listing = (
+        table(
+            ["task", "instruction", "base", "candidate", "read the work"],
+            [
+                [
+                    esc(c["task_id"]),
+                    esc(c["instruction"]),
+                    esc(c["base_sha"]),
+                    esc(c["sha"]),
+                    f"<pre>{esc(c['read'])}</pre>",
+                ]
+                for c in found
+            ],
+        )
+        if found
+        else f"<p>{esc(audit_sample.render_list(found))}</p>"
+    )
+    scored = audit_sample.render_scores(await audit_sample.scores(conn))
+    body = (
+        "<p>Label with <code>python -m core audit label TASK SHA pass|changes</code>.</p>"
+        f"{listing}<h2>Scores</h2><pre>{esc(scored)}</pre>"
+    )
+    return layout("Audit", body)
+
+
 def make_app(dsn: str | None = None) -> web.Application:
     """The application. Each request opens its own read-only session."""
     dsn = dsn or settings.dsn()
@@ -278,6 +311,7 @@ def make_app(dsn: str | None = None) -> web.Application:
         ("/pending", pending_page),
         ("/attention", attention_page),
         ("/routines", routines_page),
+        ("/audit", audit_page),
     ):
         app.router.add_get(path, view(page), allow_head=False)
     return app

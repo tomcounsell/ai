@@ -531,3 +531,50 @@ a figure" is withdrawn.
    other choice is named.
 6. **Small points.** `tests/test_outcomes.py` is run on the rebase. The
    diff's BASE is `Brief.base_sha`, cited in item 4.
+
+## Build record
+
+Built by `builder-3611` on branch `i3611-audit-sample`, from `i3611-plan`
+at 1cf124090, items 1 to 7 and their tests.
+
+**Item 8 is not built.** The outcome join with #3612 is built after a
+rebase onto #3612's merge, by the rule in "What this plan needs from
+#3612": its merged names are mapped to the per-merge revert reading, and
+with no such reading item 8 is dropped. `scores` already keys its figures
+by source (`sources["tom"]`), so revert labels land beside Tom's as a
+second source; `labels` gains the outcome rows then, and
+`tests/test_outcomes.py` is run on that rebase.
+
+What was built:
+
+- `core/audit_sample.py`: `reviewed` (the lookup), `record`, `labels`,
+  `in_force`, `sample`, `scores`, `figures`, `key`, `weight`, and two
+  renderers, `render_list` and `render_scores` (the plan's `render`, split
+  by what it renders). A merged candidate is a merge's `effect.held` row
+  naming it with an `effect.outcome` `done` for the same effect.
+- `core/__main__.py`: `audit`, `audit label`, `audit scores`. The label
+  value is an argparse choice; an unknown task and a candidate with no
+  session review are refused in the command path before `record`, writing
+  nothing.
+- `ui/app.py`: `GET /audit` and the nav entry; the scores block is
+  `render_scores`' text, so the page and `audit scores` print the same
+  figures. `ui/README.md` Scope and `core/README.md` carry the lines.
+- Tests: `tests/test_audit_sample.py` (24 tests, every case the Tests
+  section names for items 1 to 7) and one page test in `tests/test_ui.py`.
+
+Departures from the plan's wording, none in behavior:
+
+- The scoring fixtures write session `review.decided` rows straight into
+  the ledger rather than through `scripted.check`, since the scores read
+  rows and nothing else, and each fixture needs exact shas and many
+  candidates. The end-to-end test (item 7) runs two scripted tasks through
+  `scripted.check` and the merge, labels one from the command line, and
+  covers the Brief through `tasks.dispatch(..., fresh="review")`.
+- "Real labels per `by`" counts the labels in force (latest real label
+  per candidate), not every row, so a relabel counts once.
+- A forecast that is absent is counted as `absent`, apart from `skipped`
+  (present and not a number in 0 to 1).
+
+Docs left for the docs check: `docs/data.md` (the row and stream),
+`docs/architecture.md:509` and `:402-409`, `docs/mission.md:171` and
+`:396`, and `docs/judgement-layer.md` "Where labels come from".

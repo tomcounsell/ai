@@ -105,6 +105,17 @@ release EFFECT_ID              perform a held effect Tom approved (a send is
                                handed to its channel's bridge)
 correct TEXT [--by] [--via]    record Tom's next correction (global, direct)
 corrections                    every correction, in force for every turn
+audit                          the reviewed candidates with no label from Tom,
+                               in the list's weighted order, each with the git
+                               command that shows the work and never the
+                               verifier's verdict
+audit label TASK_ID SHA pass|changes [--note T] [--by B] [--via V] [--role-played]
+                               Tom's label on a candidate the verifier
+                               reviewed, written on the audit stream; anyone
+                               but Tom, Valor's sessions included, labels with
+                               --role-played
+audit scores                   the verifier's calibration: false accepts, false
+                               rejects, and Brier score per model, each with n
 serve [--plist]                the resident kernel: binds Tom's messages, owes
                                notices, and runs every task's next step as
                                rows land, until killed; `--plist` prints its
@@ -131,6 +142,7 @@ import signal
 from pathlib import Path
 
 from core import (
+    audit_sample,
     backup,
     broker,
     checks,
@@ -802,6 +814,36 @@ async def _run(args) -> None:
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
+        elif args.command == "audit":
+            print(await _audit(conn, args))
+
+
+async def _audit(conn, args) -> str:
+    """The list (no subcommand), `label`, and `scores`."""
+    if args.audit_command == "scores":
+        return audit_sample.render_scores(await audit_sample.scores(conn))
+    if args.audit_command is None:
+        return audit_sample.render_list(await audit_sample.sample(conn))
+    try:
+        await tasks.brief(conn, args.task_id)
+    except KeyError:
+        raise SystemExit(f"audit label refused: no task {args.task_id}") from None
+    if not await audit_sample.reviewed(conn, args.task_id, args.sha):
+        raise SystemExit(
+            f"audit label refused: task {args.task_id} has no verifier's review of {args.sha}; "
+            "`python -m core audit` lists what can be labelled"
+        )
+    row = await audit_sample.record(
+        conn,
+        args.task_id,
+        args.sha,
+        args.label,
+        note=args.note,
+        by=args.by,
+        via=args.via,
+        role_played=args.role_played,
+    )
+    return f"labelled {args.task_id} {args.sha} {args.label}, ledger row {row['event_id']}"
 
 
 async def _merge_target(conn, args) -> str:
@@ -1029,6 +1071,16 @@ def main() -> None:
     correct.add_argument("--by", default="tom")
     correct.add_argument("--via", default="the command line")
     sub.add_parser("corrections")
+    audit_cmd = sub.add_parser("audit").add_subparsers(dest="audit_command", parser_class=_Parser)
+    label = audit_cmd.add_parser("label")
+    label.add_argument("task_id")
+    label.add_argument("sha")
+    label.add_argument("label", choices=audit_sample.LABELS)
+    label.add_argument("--note")
+    label.add_argument("--by", default="tom")
+    label.add_argument("--via", default="the command line")
+    label.add_argument("--role-played", action="store_true")
+    audit_cmd.add_parser("scores")
     sub.add_parser("secure-login")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")

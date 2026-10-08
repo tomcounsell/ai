@@ -181,3 +181,40 @@ def test_a_task_with_no_merge_and_no_mark_shows_none(dsn):
     assert "<h2>After merge</h2>" not in page and "<h2>Used</h2>" not in page
     row = next(r for r in index.split("<tr>") if t in r)
     assert "merges " not in row
+
+
+def test_the_audit_page_is_blind_escaped_get_only_and_shows_the_scores_audit_scores_prints(dsn):
+    from core import audit_sample
+
+    async def go():
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            t = await tasks.start(conn, tasks.Brief(instruction=HOSTILE, base_sha="b" * 40))
+            await ledger.append(
+                conn,
+                t,
+                "review.decided",
+                {
+                    "candidate": {"sha": "c" * 40, "turn_id": "x"},
+                    "verdict": "pass",
+                    "reviewer_verdict": "pass",
+                    "predicted_failure": 0.37,
+                    "findings": [{"kind": "review", "text": "AUDIT-PAGE-FINDING"}],
+                    "model": "ui-audit-fixture",
+                    "leg": "session",
+                },
+            )
+            before = await count(dsn)
+            posted = await fetch(dsn, "/audit", "POST")
+            after = await count(dsn)
+            got = await fetch(dsn, "/audit")
+            scores = audit_sample.render_scores(await audit_sample.scores(conn))
+        return t, posted, before, after, got, scores
+
+    t, posted, before, after, (status, text), scores = run(go())
+    assert posted[0] == 405 and before == after
+    assert status == 200 and HOSTILE not in text and "&lt;script&gt;" in text
+    assert t in text and f"/task/{t}" not in text and "c" * 40 in text
+    assert "AUDIT-PAGE-FINDING" not in text.split("<h2>Scores</h2>")[0]
+    assert "0.37" not in text
+    assert ui_app.esc(scores) in text
+    assert '<a href="/audit">audit</a>' in text
