@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from core import broker, db, ledger, persona, runs, tasks
-from core.gateway import Gateway
+from core.gateway import ClaudeLogin, Gateway
 from harnesses import claude_code
 from tests.conftest import TEST_DB
 from tests.performers import OutboxAppend, WorkspaceWrite
@@ -32,7 +32,7 @@ pytestmark = [
 
 def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
     async def go():
-        gateway = Gateway(dsn)
+        gateway = Gateway(dsn, credential=ClaudeLogin())
         await gateway.start(port=listen())
         async with await db.connect(dsn) as conn:
             done_task = await tasks.start(conn, tasks.Brief(instruction="t"))
@@ -92,7 +92,7 @@ def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_t
         ).stdout.strip()
 
     async def go():
-        gateway = Gateway(dsn)
+        gateway = Gateway(dsn, credential=ClaudeLogin())
         await gateway.start(port=listen())
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
@@ -134,7 +134,7 @@ def test_a_live_turn_answers_as_the_persona_it_was_rendered(dsn, tmp_path):
     nothing about conduct."""
 
     async def go():
-        gateway = Gateway(dsn)
+        gateway = Gateway(dsn, credential=ClaudeLogin())
         await gateway.start(port=listen())
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="t"))

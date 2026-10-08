@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from core import corrections, db, runs, signals, tasks, workspace
+from core import corrections, db, runs, signals, spending, tasks, workspace
 from core.gateway import TURN_TOKEN, Gateway
-from core.settings import settings
+from core.settings import resolve_model, settings
 from harnesses import claude_code, pi
 from tests import scripted
 from tests.ports import listen
@@ -56,7 +56,7 @@ class Harness:
 
 
 HARNESSES = [
-    Harness("claude_code", claude_code, "haiku", "anthropic", settings.claude),
+    Harness("claude_code", claude_code, resolve_model("light"), "anthropic", settings.claude),
     Harness("pi", pi, "gpt-6.1-sol", "openai", settings.pi),
 ]
 
@@ -120,6 +120,24 @@ def _main_call(body: dict) -> bool:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_every_default_model_is_a_priced_pinned_id_and_turn_holds_no_login(tmp_path):
+    """A model alias is the CLI's to resolve, and a CLI update moved `haiku`
+    to an id the gateway has no price for. Every default names the light
+    seat's pinned id instead, and the test-only `turn`, like a workspace
+    turn, carries the placeholder credential, not the machine's own login."""
+    light = resolve_model("light")
+    assert light != "light" and spending.prices(light) is not None
+    assert tasks.Brief(instruction="t").model == light
+    built = [
+        claude_code.turn("hi", cwd=str(tmp_path)),
+        claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"}),
+    ]
+    for build in built:
+        command = build("http://127.0.0.1:1/t/x", "brief", "t1")
+        assert command.argv[command.argv.index("--model") + 1] == light
+    assert built[0]("http://127.0.0.1:1/t/x", "brief", "t1").env["CLAUDE_CODE_OAUTH_TOKEN"] == TURN_TOKEN
 
 
 def _signal_command(name: str, text: str) -> str:

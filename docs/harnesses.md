@@ -86,8 +86,15 @@ Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a t
 **`turn`** is one self-contained call: no tools by default, no session
 persistence, safe mode and `--setting-sources ""` as below, a system prompt of the dispatched text (persona, then Brief).
 The live tests use it. It copies the kernel's environment minus Claude Code's
-own variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no sandbox profile, so it can read whatever Tom's user can, the
+own variables and every libpq (`PG*`) and `VALOR_PG*` variable, and carries
+the placeholder credential a workspace turn does, so it never reads the
+machine user's own Claude Code login: the gateway supplies the kernel's. It runs under no sandbox profile, so it can read whatever Tom's user can, the
 kernel's password file included; it must not be given tools without one.
+
+Both builders default to the light seat's pinned model id
+(`claude-haiku-4-5`), as does a Brief, never an alias: the installed CLI
+resolves an alias, and may resolve it to a model the gateway has no price
+for, which the gateway refuses.
 
 **`workspace_turn`** is one turn of a task that works in a directory, and is
 what a real task runs. Its arguments:

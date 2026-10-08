@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from core import corrections, git, ledger, machine, persona
-from core.settings import settings
+from core.settings import resolve_model, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
@@ -35,7 +35,8 @@ class Brief:
     instance they name lacks Tom's own tap (`guard.granted`), Brief grant or
     not.
 
-    `workspace` is the directory a turn works in, `model` the model it runs,
+    `workspace` is the directory a turn works in, `model` the model it runs
+    (by default the light seat's pinned id, never an alias),
     `harness_name` the harness that runs it (`claude_code` or `pi`), and
     `harness` the harness's own settings for the task (its isolation).
     `target_branch` is the branch a merge
@@ -63,7 +64,7 @@ class Brief:
     max_effect_class: str = "propose"
     governance_grant: str | None = None
     workspace: str | None = None
-    model: str = "haiku"
+    model: str = resolve_model("light")
     harness_name: str = "claude_code"
     harness: dict[str, Any] = field(default_factory=dict)
     target_branch: str | None = None

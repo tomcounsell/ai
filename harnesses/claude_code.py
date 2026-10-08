@@ -41,10 +41,14 @@ from urllib.parse import urlparse
 from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
-from core.settings import settings
+from core.settings import resolve_model, settings
 
 # What `turn` leaves out of the environment it copies.
 DROP_ENV = ("CLAUDE", "ANTHROPIC", "PG", "VALOR_PG")
+
+# The model a turn runs when none is given: the light seat's pinned id, never
+# an alias the installed CLI resolves to a model the gateway has no price for.
+LIGHT = resolve_model("light")
 
 
 @functools.cache
@@ -64,19 +68,22 @@ def turn(
     prompt: str,
     *,
     cwd: str,
-    model: str = "haiku",
+    model: str = LIGHT,
     tools: str = "",
     max_output_tokens: int = 1024,
 ):
     """A builder: given the gateway base URL, the dispatched Brief, and the
     turn's id, the command for one tool-less turn with no workspace. It runs
     `claude` unsandboxed, and `claude` lives where a turn can replace it, so
-    it is for tests only: the router builds `workspace_turn`, never this."""
+    it is for tests only: the router builds `workspace_turn`, never this.
+    Like a workspace turn it carries the placeholder credential, never the
+    machine user's own Claude Code login; the gateway supplies the kernel's."""
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_ENV) and k != "AI_AGENT"}
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = TURN_TOKEN
         argv = [
             settings.claude,
             "-p",
@@ -136,7 +143,7 @@ def workspace_turn(
     *,
     cwd: str,
     resume: str | None = None,
-    model: str = "haiku",
+    model: str = LIGHT,
     harness: dict | None = None,
     max_output_tokens: int | None = None,
 ):
