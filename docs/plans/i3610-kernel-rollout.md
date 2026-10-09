@@ -2,7 +2,7 @@
 tracking: none
 slug: i3610-kernel-rollout
 type: plan
-status: planned
+status: merged
 issue: tomcounsell/ai#3610
 critique_rounds: 2
 review_rounds: 2
@@ -626,3 +626,29 @@ lead, on top of the docs check's commit.
   commit already says a failed migrate is not retried.
 - `test_rollout`, `test_serve`, `test_broker`: 80 passed. Six of the seven
   new cases fail on `081981b5d`; the docs-only roll passes there too.
+
+### Patch round 2
+
+From the lead, after `review-3610-p1` passed on `4bc39d828`.
+
+- `3bf51bf82`: a refused config with no merge of the kernel's own puts the
+  wake's merges back in `waiting`, so a wake with nothing new runs no git;
+  they are tried again on the `serve_tick_s` wake. The test ticks twice and
+  asserts `rollout.judge` ran once; it fails without the fix.
+
+## Merged
+
+- Checks:
+  - **Test: `pass`** on `081981b5d`. Its 17 probes also pass at `3bf51bf82`.
+  - **Review: `changes`**, four findings, all taken in patch round 1;
+    the re-review `review-3610-p1` gave **`pass`** on `4bc39d828`.
+  - **Docs: `updated`.** `f6c7e8980`, cherry-picked as `7b6505577`.
+- Patches `4bc39d828` and `3bf51bf82`. `test_rollout`, `test_serve` and
+  `test_broker` pass at `3bf51bf82`: 80 tests.
+- Known limits, not changed:
+  - a checkout whose origin has a `pushurl` is always log-only, which
+    fails safe;
+  - git quotes non-ASCII paths, so classification errs toward a restart,
+    and a dirty non-ASCII file falls back to the ff-only failure and a
+    retry.
+- Backup `valor_rebuild-20261009T054048Z.dump` was taken before the merge.
