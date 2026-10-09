@@ -45,7 +45,7 @@ same project that never stated it.
   holds `SELECT, INSERT` on both; the owner is Tom's macOS user
   (`docs/data.md`, Roles). PG 18 gives `PUBLIC` only `USAGE` on `public`,
   and a new schema grants `PUBLIC` nothing.
-- **Tom's words on the ledger.** `task.created` (the instruction),
+- **Tom's words on the ledger.** `task.started` (the instruction),
   `question.answered` (text, provenance), `feedback.given` (text,
   `on_delivery`, provenance) (`docs/data.md:131-132`, "Attention as ledger
   rows"). Provenance says `by`, `via`, `at`, and `role_played`. These rows
@@ -217,9 +217,10 @@ transcript would block the kernel's event loop, with its stop notices and
 bridges. Every call into `memory/` runs in `asyncio.to_thread`.
 
 - **`ingest(conn)`** reads, as `valor_kernel`, the ledger rows memory has
-  not taken: rows of type `task.created`, `question.answered`,
+  not taken: rows of type `task.started`, `question.answered`,
   `feedback.given`, `correction.recorded`, and `turn.ended`, whose ids are
-  not in memory's `Ingested` set (read through `memory/`). It takes
+  not in memory's `Ingested` set (read through `memory/`). A calibration
+  task's `task.started` is marked taken with no record: it runs no turn. It takes
   transcripts through `transcripts.joined` for each `turn.ended` that names
   them. Work is found by set difference, not by a high-water mark, so a
   row that commits after a higher id was taken is still taken.
@@ -227,7 +228,7 @@ bridges. Every call into `memory/` runs in `asyncio.to_thread`.
   connection while it runs, so two kernel processes (`serve` and a
   `core run`) do not ingest the same rows at once. Each ledger row is one
   unit: its records are saved, then its id is added to `Ingested`. A
-  record's key is `<ledger id>:<entry index>`, so a unit retried after a
+  record's key is `<ledger id>.<entry index>`, so a unit retried after a
   failure overwrites the same records rather than adding copies.
 - **`recall(conn, task_id, fresh)`** returns the text of the "Remembered"
   section, or the empty string, or `Memory: unavailable: <reason>`.
@@ -244,7 +245,7 @@ kernel.
 
 `memory.Record`, `Meta.backend = "postgres"`:
 
-- `key` (`KeyField`): `<ledger id>:<entry index>`.
+- `key` (`KeyField`): `<ledger id>.<entry index>`.
 - `project` (`KeyField`): the task's project spec `repo`; empty for the
   corrections stream and for a task with no project spec.
 - `ledger_id` (`SortedField(type=int, partition_by="project")`).
@@ -263,13 +264,13 @@ commands, tool results hold file contents and output. The kernel's
 prompts (`turn.started.argv`) are not ingested: Tom's words come from the
 rows that record them, for every harness, and the rest of a prompt carries
 critique findings a critic turn wrote. Pi turns contribute their
-`task.created`, answers, and feedback, and no transcript.
+`task.started`, answers, and feedback, and no transcript.
 
 ### Recall
 
-- **Query.** The task's instruction, from `task.created`.
+- **Query.** The task's instruction, from `task.started`.
 - **Candidates.** Records with `project` equal to the task's project
-  `repo` and `ledger_id` below the task's own `task.created` id: what was
+  `repo` and `ledger_id` below the task's own `task.started` id: what was
   known in this project before the task began. Memory reads them with
   `Record.query.filter(project=p, ledger_id__lt=cutoff)`, drops `origin =
   correction` (the corrections render whole in the same Brief), and passes
@@ -322,7 +323,9 @@ reach column 0.
       by the turn:
       > <text>
 
-`role_played` rows say "a stand-in for Tom" in place of "Tom's".
+`role_played` rows say "a stand-in for Tom" in place of "Tom's". A row
+whose provenance `by` is not `tom`, such as a child task's instruction
+written by its parent's turn, says "written by <by>".
 
 ### On and off
 
@@ -436,11 +439,11 @@ named.
   owned by the owner back to `valor_memory`, and running it twice changes
   nothing.
 - Ingest then recall round-trips: a preference in one task's
-  `task.created` is recalled for a later task in the same project whose
+  `task.started` is recalled for a later task in the same project whose
   instruction shares its words, and not for a task in another project.
 - A project's record is recalled when more than 4096 out-of-scope
   records outscore it on the query's words.
-- Records from the task's own rows and from rows after its `task.created`
+- Records from the task's own rows and from rows after its `task.started`
   are not recalled, even when they score higher.
 - Ingest leaves `events` and `documents` unchanged (counts and digests).
 - A transcript entry claiming to be Tom renders under the turn-written
@@ -503,7 +506,7 @@ the project memory scopes by.
 **What recall matches.** popoto's tokenizer does not stem. The query's
 words include `greeting` and `users`; the seed's instruction holds both.
 The record that must appear in the on run's Brief is the seed's
-`task.created` record, labelled as Tom's instruction (role played, since
+`task.started` record, labelled as Tom's instruction (role played, since
 the replay starts the task as the stand-in).
 
 **The run**, on one database `valor_rebuild_test_b1emu` on the machine
@@ -513,7 +516,7 @@ the arm `bare`:
 1. `VALOR_MEMORY=on`, `toy-pref-seed`: memory ingests the seed's rows.
 2. `VALOR_MEMORY=on`, `toy-pref` (run `toy-pref-on`): its Brief carries
    the seed's instruction under "Remembered". Its candidates are rows
-   below its own `task.created`, so the seed only.
+   below its own `task.started`, so the seed only.
 3. `VALOR_MEMORY=off`, `toy-pref` (run `toy-pref-off`): no section.
 
 **What counts.** The first `turn.started.brief` of `toy-pref-on` holds the
