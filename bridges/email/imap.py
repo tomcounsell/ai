@@ -181,12 +181,42 @@ def _open(cfg: Config, ends: Ends, opened: list) -> imaplib.IMAP4_SSL:
     return opened[0]
 
 
-async def network_changes(changed: asyncio.Event, command=ROUTE_MONITOR) -> None:
-    """Sets `changed` each time the kernel reports an interface or address
-    change (`INTERFACE_CHANGES`), read from `route -n monitor`. A path that
-    drops with no reset sends the client nothing, so this is the signal that
-    the connection may be dead. If the monitor cannot start or ends, one
-    line is logged and the watch relies on the re-issue alone."""
+async def _output(*command: str) -> str:
+    """What `command` prints, or "" when it cannot run or fails."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+    except OSError:
+        return ""
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace") if proc.returncode == 0 else ""
+
+
+async def path_state() -> str:
+    """The interface that carries the default route (`route -n get default`)
+    and what `ifconfig` reports for it: its status and addresses. "none"
+    when there is no default route. The same text twice means the path the
+    connection runs over did not change."""
+    for line in (await _output("route", "-n", "get", "default")).splitlines():
+        key, _, name = line.strip().partition(":")
+        if key == "interface" and name.strip():
+            return f"{name.strip()}\n{await _output('ifconfig', name.strip())}"
+    return "none"
+
+
+async def network_changes(changed: asyncio.Event, command=ROUTE_MONITOR, state=path_state) -> None:
+    """Sets `changed` when the path the connection runs over changes. The
+    kernel reports every interface or address change (`INTERFACE_CHANGES`,
+    read from `route -n monitor`), including the many that do not touch the
+    mail path (a container's bridge, `awdl0`, `utun`, a temporary IPv6
+    address); on each, `state` (the default route's interface and its
+    status and addresses) is read, and `changed` is set only when that
+    differs from the last read. A path that drops with no reset sends the
+    client nothing, so this is the signal that the connection may be dead.
+    If the monitor cannot start or ends, one line is logged and the watch
+    relies on the re-issue alone; it is not started again, since a monitor
+    that ends at once would need a timer to keep from spinning."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
@@ -195,9 +225,13 @@ async def network_changes(changed: asyncio.Event, command=ROUTE_MONITOR) -> None
         log.exception("email watch: the route monitor did not start; a dead path is found at the re-issue")
         return
     try:
+        last = await state()
         async for line in proc.stdout:
             if line.decode(errors="replace").startswith(INTERFACE_CHANGES):
-                changed.set()
+                now = await state()
+                if now != last:
+                    last = now
+                    changed.set()
         log.warning("email watch: the route monitor ended; a dead path is found at the re-issue")
     finally:
         if proc.returncode is None:
@@ -248,7 +282,7 @@ async def watch(
     same wake replaces it with `connect()`, and the connection the watch
     made last is closed when it ends."""
     made = None
-    again = False
+    by_event = False  # this connection replaces one the network change ended
     try:
         while True:
             ends, opened, entered = Ends(), [], []
@@ -271,11 +305,17 @@ async def watch(
                 await _until_changed(_session(cfg, db, ends, opened, entered), ends, changed)
             except Exception as e:
                 if changed is not None and changed.is_set():
-                    log.warning("email watch: the network changed; it reconnects at once")
-                    again = True
+                    # A reconnect the network started that fails before IDLE
+                    # waits for the tick, whatever else changes meanwhile.
+                    again = bool(entered) or not by_event
+                    log.warning(
+                        "email watch: the network changed; %s",
+                        "it reconnects at once" if again else "it reconnects on the next tick",
+                    )
                 else:
                     log.exception("email watch failed")
                     again = bool(entered) and isinstance(e, OSError | imaplib.IMAP4.abort)
+                by_event = again and changed is not None and changed.is_set()
             finally:
                 ends.end()
                 for c in opened:
@@ -283,6 +323,7 @@ async def watch(
                 ends.close()
             if again:
                 continue
+            by_event = False
             retry.clear()
             await retry.wait()
     finally:

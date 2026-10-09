@@ -146,37 +146,59 @@ def test_idle_reports_that_it_began(mailbox, monkeypatch):
         imap.logout(conn)
 
 
-def test_an_interface_change_is_told_by_the_route_monitor_and_chatter_is_not():
+def _states(*states):
+    """A `path_state` that answers each call with the next of `states`."""
+    answers = iter(states)
+
+    async def state():
+        return next(answers)
+
+    return state
+
+
+def _monitor(lines: str, probe):
     import asyncio
 
-    lines = "RTM_MISS: Lookup failed\nRTM_ADD: Add Route\nRTM_NEWADDR: address being added to iface\n"
-    command = ["sh", "-c", f"printf '{lines}'; sleep 5"]
+    command = ["sh", "-c", f"printf '{lines}'; sleep 1"]
 
     async def go():
         changed = asyncio.Event()
-        watching = asyncio.create_task(imap.network_changes(changed, command))
-        await asyncio.wait_for(changed.wait(), 5)
+        watching = asyncio.create_task(imap.network_changes(changed, command, probe))
+        await asyncio.sleep(0.6)
         watching.cancel()
         with pytest.raises(asyncio.CancelledError):
             await watching
+        return changed.is_set()
 
-    asyncio.run(go())
+    return asyncio.run(go())
+
+
+@pytest.mark.parametrize(
+    "lines, states, told",
+    [
+        # the default route's interface changed
+        ("RTM_NEWADDR: address added\\n", ("en0 a", "en0 b"), True),
+        # events for other interfaces (a container bridge, awdl0): the default route's is as it was
+        ("RTM_IFINFO: iface\\nRTM_NEWADDR: x\\nRTM_IFINFO2: y\\n", ("en0 a",) * 4, False),
+        # route chatter is not an interface message, so it is not even probed
+        ("RTM_MISS: Lookup failed\\nRTM_ADD: Add Route\\nRTM_DELETE: d\\n", ("en0 a",), False),
+        # the default route went away
+        ("RTM_IFINFO: down\\n", ("en0 a", "none"), True),
+    ],
+)
+def test_only_a_change_of_the_default_route_s_interface_is_told(lines, states, told):
+    assert _monitor(lines, _states(*states)) is told
 
 
 def test_a_route_monitor_that_cannot_start_ends_quietly():
     import asyncio
 
-    asyncio.run(imap.network_changes(asyncio.Event(), ["/nonexistent/route"]))
+    asyncio.run(imap.network_changes(asyncio.Event(), ["/nonexistent/route"], _states("x")))
 
 
-def test_route_chatter_is_not_a_change():
+def test_the_default_route_state_names_its_interface_and_is_stable():
     import asyncio
 
-    command = ["sh", "-c", "printf 'RTM_MISS: Lookup failed\\nRTM_ADD: Add Route\\n'"]
-
-    async def go():
-        changed = asyncio.Event()
-        await imap.network_changes(changed, command)
-        return changed.is_set()
-
-    assert asyncio.run(go()) is False
+    first = asyncio.run(imap.path_state())
+    assert first == asyncio.run(imap.path_state())
+    assert first == "none" or first.split("\n", 1)[0].strip()

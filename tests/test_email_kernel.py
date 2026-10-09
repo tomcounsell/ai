@@ -376,6 +376,48 @@ class _Fake:
         return self.connects
 
 
+def test_a_reconnect_the_network_started_that_fails_before_idle_waits_for_the_tick(monkeypatch):
+    """The first connection idles; the network changes; the new connection
+    is slow to fail, and more changes arrive while it does. None of them
+    starts a third connection."""
+    connects = []
+    changed = asyncio.Event()
+
+    def connect(cfg, ends=None):
+        connects.append(1)
+        if len(connects) > 1:
+            time.sleep(0.3)
+            raise OSError(60, "Operation timed out")
+        return object()
+
+    async def poll(cfg, conn, db, ends=None):
+        await changed.wait()
+        raise OSError(54, "reset")
+
+    monkeypatch.setattr(imap, "connect", connect)
+    monkeypatch.setattr(imap, "poll", poll)
+    monkeypatch.setattr(imap, "drop", lambda conn: None)
+
+    async def go():
+        class Db:
+            closed = broken = False
+
+        watching = asyncio.create_task(imap.watch(None, Db(), asyncio.Event(), changed=changed))
+        await asyncio.sleep(0.1)
+        changed.set()
+        await asyncio.sleep(0.1)  # the second connection is failing slowly now
+        for _ in range(3):
+            changed.set()
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.6)
+        watching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await watching
+
+    run(go())
+    assert len(connects) == 2
+
+
 @pytest.mark.parametrize(
     "fails, entered, again",
     [
