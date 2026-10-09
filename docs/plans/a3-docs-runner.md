@@ -11,24 +11,55 @@ governance_grant: none
 # The docs stage gets its runner
 
 Task A3 of `docs/plans/rebuild-finish-prompt.md`. The docs runner
-(`fresh.docs_runner`) is built and tested and is not registered, because
-`governance.adds` has no calibration record that passes its entry check
-(`docs/plans/m1-4b-records.md`, "Governance recalibration (2026-10-09)",
-run 4). Until it is registered, docs verdicts are recorded by hand with
-`python -m core verdict`. This plan finds why run 4 failed, revises the
-question's wording and the calibration's handling of rate limits, runs
-calibration run 5 on a test database, and on a passing record lands
-`GOVERNANCE.calibrated`, registers the docs runner, and deletes the
-`verdict` command and `verdicts.MANUAL_STAGES` as `m1-4c-outline.md` says.
+(`fresh.docs_runner`) is built and tested and is not registered: a plan
+rule (`docs/plans/m1-4b-runners.md`, Landing) ties its registration to a
+passing calibration record for `governance.adds`, and run 4 failed its
+entry check (`docs/plans/m1-4b-records.md`, "Governance recalibration
+(2026-10-09)"). Until it is registered, docs verdicts are recorded by hand
+with `python -m core verdict`.
+
+This plan registers the docs runner now, without that condition, and
+deletes the manual path; moves critique's and docs' verdicts off a file the
+turn owns onto the final message, as review's already is; fixes
+how calibration scores a rate-limited call; and records why run 4 failed
+and a revised wording ready for a later calibration run. No calibration run
+is made in this task, and the entry check's definition is unchanged.
 
 **Goal.** Mission item 1: every stage of the pipeline runs without Tom or
 the lead recording its verdict by hand.
 
-**Stakes.** `governance.adds` decides which diffs wait on Tom's grant.
-Worded too narrowly, a real checkpoint merges untapped; worded too widely,
-correct fixes wait on a tap and the docs stage stays manual.
+**Stakes.** The docs turn's own commits get no governance judgement today:
+a manual docs verdict is exempt from `governance_from`
+(`core/verdicts.py`, `record_check`), and the blind review judges the
+candidate, not the docs commits that come after it. Registering the
+runner gives those commits the same boolean review gives code.
 
-## Tom's ruling this answers to
+## Why docs is registered without a passing record
+
+- The condition is a plan choice of Valor's (`m1-4b-runners.md`:220-239),
+  echoed in `docs/sdlc-state-machine.md`, `docs/judgement-layer.md`,
+  `docs/harnesses.md`, `docs/architecture.md`, and `core/README.md`. No
+  ruling of Tom's sets it, and the CLAUDE.md paragraph asks the boolean
+  "over every diff" with no calibration precondition.
+- Review is registered today and routes on the same uncalibrated
+  classifier (`core/__main__.runners`); no code in `core/` reads
+  `GOVERNANCE.calibrated`. Docs differs from review in nothing that bears
+  on this.
+- Uncalibrated, the classifier errs toward an instance (an abstain or a
+  failure is `caution`), so the cost is a false instance reaching Tom as a
+  tap, the cost review already carries. In production the legs run as a
+  chain (open weight only where Jev abstains or fails), and on the prose
+  cases where Jev abstains open weight answered `proceed` on every call it
+  answered (`~/src/valor-build-notes/a3/diag*.json`), so a docs-only diff
+  mostly passes the chain correctly.
+- Removing the condition and the by-hand step adds nothing anything must
+  pass, so it needs no grant (Tom, 2026-10-09: removing an approval step is
+  not adding one).
+
+`GOVERNANCE.calibrated` stays `None`, an open record of measurement, not a
+precondition. A later calibration run that passes lands it as before.
+
+## Tom's ruling the wording answers to
 
 `docs/plans/valor-rebuild-feedback.md`, "Tom's ruling on governance.adds
 (2026-10-07)": count as a new checkpoint only a step that looks at work and
@@ -48,7 +79,8 @@ calibrate the question on inputs the kernel never sends.
 Run 4 asked 58 cases (11 `true` and 29 `false` from Tom, 18 drafted
 `false`) against `task_sha256` `67f93874...`. The entry check needs each
 leg right on every human label; an abstain or a failure counts as
-`caution`, which is wrong on a `false` case.
+`caution`, which is wrong on a `false` case. The check counts only
+Tom's labels (`_record` skips the drafted ones).
 
 The ledger rows of run 4 are gone (the suite reset
 `valor_rebuild_test_govcal`), so I asked both legs again through the
@@ -107,11 +139,12 @@ What each leg saw and why it answered caution:
    existing step.
 4. **The open-weight leg is rate limited, and a refused call counts as
    wrong.** Run 4: 22 of 58 calls refused with HTTP 429, 16 of them on
-   `false` cases. My passes: 22 of 118. All 22 of my 429s carried **no
+   `false` cases, 8 of those labelled by Tom. My passes: 22 of 118. All 22 of my 429s carried **no
    `Retry-After`**, so `judgement.post` sets no hold, and the next call
    went through at once. Calibration asks each leg alone (no fallback to
-   retry), so every such case is a `failed` answer, and on a `false` case a
-   wrong one. With this, run 5 fails whatever the wording.
+   retry), so every such case is a `failed` answer, and on a `false` case Tom
+   labelled, a wrong one. With this, no calibration run passes whatever
+   the wording.
 5. **Both legs vary between identical calls.** Open weight at temperature
    0 flips between about 0.95 and 0.05 on the same case and wording
    (`lock-in-expiry-runner`: 0.02, 0.95, 0.05, 0.95, 0.95 over five asks).
@@ -120,106 +153,95 @@ What each leg saw and why it answered caution:
    so a case near the boundary fails some runs and passes others.
 
 The cases run 4 got wrong, and nothing else, are explained by 1 to 4; 5 is
-why a wording that passes a case once does not prove it passes in run 5.
+why a wording that passes a case once does not prove it passes in the next run.
 
-## The revision
+## What is built
 
-### 1. The question (`core/judgement_tasks.py`, `GOVERNANCE`, question `adds`)
+### 1. The docs runner is registered and the manual path is deleted
 
-The opening and the `true` label's opening stay; the gloss follows Tom's
-ruling's words, says only the `+` lines are judged, and names the three
-kinds of code the legs mistook. The text becomes:
+1. `runners()` in `core/__main__.py` registers
+   `Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port)`; its
+   docstring drops the sentence about docs being recorded by hand.
+2. Deleted from `core/__main__.py`: the `verdict` subparser and its
+   arguments, the `verdict` dispatch branch, `_verdict`, `_instance` (used
+   only by `_verdict`), the `RUNNERS` constant (it exists only for the
+   manual refusal), and `verdict` in the help text. `_status_line`'s
+   `no runner` branch drops "record by hand: python -m core verdict ..."
+   and says only which stage has no runner; the router's `no runner`
+   status stays (`core/router.py`), since `router.run` takes its runners
+   as an argument and a caller may pass a partial set, as the tests do.
+3. Deleted from `core/verdicts.py`: `MANUAL_STAGES` (both entries; review
+   has a runner, so its entry only refused), `manual_allowed`, `_manual`,
+   the `leg: str = "manual"` default and the `by`, `via`, and
+   `role_played` parameters of both `record_check` and `record_critique`
+   (no writer in `core/` passes them once `_verdict` is gone), and the
+   `leg == "manual"` branches in `_session_leg`, `record_check`'s breadth,
+   `governance_from`, and reviewer-verdict conditions, and the reviewer
+   check at the `leg != "manual"` test further down. `leg` becomes a
+   required keyword. `governance=` and `InstanceSpec` stay: review's
+   reviewer-named instances use them. `VerdictRefused` stays. The module
+   docstring drops the manual sentences.
+4. Old rows with `leg: manual` still fold as before (the fold reads the
+   verdict, not the leg), and the attention log's `verdict` kind
+   (`core/tasks.py`, `ATTENTION_KINDS`) still lists them with their
+   provenance; the comment above `ATTENTION_KINDS` and the docstring at
+   `core/tasks.py:694` say a manual verdict is an older row.
+5. Tests:
+   - `tests/scripted.py`, `tests/test_pipeline.py`,
+     `tests/test_judgement_sites.py`, `tests/test_docs_runner.py`,
+     `tests/test_review.py`, `tests/test_fresh.py`: calls to
+     `record_check` and `record_critique` that relied on the `manual`
+     default pass `**scripted.SESSION_LEG` (or `leg="kernel"` with its
+     suites where the test runner's verdict is meant); a test about the
+     fold of an old `leg: manual` row appends the row itself.
+   - `tests/test_pipeline.py`: `manual_allowed`'s direct test (around line
+     785) and the `verdict` command tests are deleted.
+   - `tests/test_emulator_metering.py`: the test that docs is the only
+     stage without a runner becomes "every stage the state machine
+     schedules has a runner" (`MANUAL` goes); the test that runs
+     `python -m core verdict TASK docs no_change` drives docs through
+     `test_docs_runner.docs_runners` and expects `leg: session`.
+   - `tests/test_judgement.py`:
+     `test_breadth_and_governance_have_no_landed_record_so_docs_has_no_runner`
+     becomes a test that breadth and governance have no landed record and
+     that `Check.DOCS` is in `runners(None)`; it no longer imports
+     `RUNNERS` or `MANUAL_STAGES`.
+   - `tests/test_live_session.py`: docs runs through the registered docs
+     runner (one real docs turn, metered like the rest of that live run)
+     and the assertion expects `leg: session`.
+   - One test that `python -m core verdict` exits as an unknown command
+     (`m1-4c-outline.md`: "`verdict` is gone from the command line").
+   - A grep at build time for `MANUAL_STAGES`, `manual_allowed`,
+     `RUNNERS` from `core.__main__`, and `"verdict"` subprocess calls in
+     `tests/` catches any caller this list misses.
+6. Docs, status quo only. Every sentence that says docs waits for a
+   passing calibration, or that a person records a verdict by hand, says
+   what is built:
+   - `core/README.md`: the command list (no `verdict`), the docs runner
+     sentence (registered), the `verdict` sentence (gone), the attention
+     log's "manual verdict" (older rows), the composition-root line
+     (`verdict` gone from it), and the live-session line ("docs by hand"
+     becomes the docs runner).
+   - `docs/sdlc-state-machine.md:92-94`, `docs/judgement-layer.md:18` and
+     `:73-74`, `docs/harnesses.md:219-220`, `docs/architecture.md:320`
+     (the attention kind, now for older rows), `:364`, and the `:526`
+     table row, `docs/emulator.md:171` (`NO RUNNER` is a stage missing
+     from the runners the driver passes), `docs/data.md` (rows 108, 123,
+     127: `manual` in older rows only).
+   - `docs/plans/valor-rebuild.md:277`: "Breadth and governance route on
+     the entry check" becomes: breadth routes on its entry check;
+     governance answers the paragraph's boolean on every diff, review's
+     and docs', from the start, and its entry check is a measurement that
+     lands `GOVERNANCE.calibrated` when a record passes.
+   - `docs/plans/m1-4b-runners.md`, Landing: the sentence that keeps docs
+     on the manual path until a record passes is replaced by one saying
+     docs is registered without it (this plan).
+   - Plans of merged work and records (`m1-4c-review.md`,
+     `m1-4-checks.md`, `m1-5r-runners.md`, `m1-4b-records.md`, the
+     verifier records, `m2-4-local.md`) are records of what was decided
+     then and stay as they are.
 
-> Does this hunk add a check, gate, hook, validator, review round, or
-> approval step? Count only a step that looks at work, a request, or an
-> action, judges whether it is good enough or allowed, and on that
-> judgement stops it or sends it back; or a new condition someone must
-> meet to pass such a step, such as a grant, an approval, or a merge.
-> Judge only the lines the hunk adds, those marked +; the other lines are
-> the enclosing function, shown for context, and what they already did is
-> not added. None of these: tests and the code that serves them (fixtures,
-> helpers, scripted stand-ins, recording scripts), even where they exit
-> early or refuse to run; code that makes the work itself correct, such as
-> a lock or a transaction that makes two runs take turns (a second run that
-> waits, or is told one is already running, is not stopped by a
-> judgement), or a parser that turns away input it cannot read, parse, or
-> store, which judges its form and not the work; code that serves existing
-> steps: running them in order, reading what they decided, or rendering
-> messages about them; a rewrite of how existing code does what it already
-> did; and prose, a plan included, that only describes what code does.
-
-The label rubrics (the text each leg reads per answer, not Tom's labels):
-
-- `true`: "it adds a check, gate, hook, validator, review round, or
-  approval step: a new judgement that can stop work or send it back, or a
-  new condition on passing one"
-- `false`: "it adds none of these: only tests and the code that serves
-  them, code that makes the work itself correct (a lock, a transaction, a
-  parser that refuses what it cannot read), code that runs, reads, or
-  renders existing steps, or prose that only describes what code does"
-
-Both keep the phrases the wording test pins ("makes the work itself
-correct", "only describes what code does").
-
-Measured under this wording (variant `v3`, two passes, the 14 cases):
-every `true` control case `caution` on both legs (Jev p 0.03 to 0.17, open
-weight 0.00 to 0.05); `lock-in-expiry-runner`, `lock-prose-in-routines-doc`,
-`router-session-advisory-lock`, `signals-surrogate-refusal`,
-`oversized-turn-output-plan` and both test hunks `proceed` on Jev (0.66 to
-0.93). Not yet right: Jev on `notice-text-rendering` (0.49, 0.51) and on
-`fresh-verdict-parser-rewrite` (0.66 once, 0.60 once); open weight once
-`caution` on `signals-surrogate-refusal` (0.05). A wording that widened the
-exclusions to "writing the text of messages and notices ... approvals and
-grants included" (`v4`) did not move Jev on the notice case (0.53, 0.55)
-and made open weight answer `proceed` on Tom's `true` case
-`judge-thin-request-to-clarify` once (0.85): widening the exclusions
-further trades a false caution for a missed checkpoint, which is the worse
-error. So `v3` is the revision, and run 5 is expected to be close, with
-the notice case the likeliest failure on Jev.
-
-The wording is fitted to the cases it is then scored on, as the judge's
-was (`JUDGE`, "Fitted over runs 1 to 5"). The comment above
-`GOVERNANCE.calibrated` says so.
-
-### 2. A rate-limited case is asked again (`core/judgement_sites.py`, `calibrate`)
-
-A bug fix in calibration: a 429 is no answer, and calibration scores it as
-one. After the pass over every case, `calibrate` asks again each
-(case, leg) whose every attempt failed `rate_limited`, in case order,
-waiting first until the endpoint's `Retry-After` hold (`judgement._HELD`)
-has passed when the provider named one. It repeats while a pass answers at
-least one of them; a pass that answers none ends it, and those cases are
-scored as today. No count and no delay of our own: each further pass needs
-the one before to have made progress, and the only wait is the provider's
-own. Each ask is its own judgement row on the calibration task, metered
-like any other; the case's result is the last ask's. The record adds, per
-leg, `asked_again` (how many re-asks) as information. Nothing outside
-calibration changes: a review's governance fan-out keeps its fallback leg
-as its retry.
-
-### 3. Tests (`tests/test_judgement_sites.py`, scripted legs on loopback)
-
-- A leg that answers 429 once and then 200 on one case: the record scores
-  that case on the 200 answer, `asked_again` is 1, and the task holds two
-  judgement rows for it.
-- A leg that always answers 429: one further pass, then the case is scored
-  `failed`, `caution`, wrong on a `false` label; `calibrate` returns.
-- A 429 with `Retry-After: 2`: the further pass sends nothing before the
-  hold passes (time and sleep monkeypatched; the scripted endpoint records
-  the time of each request).
-- The wording test
-  (`test_the_governance_question_excludes_correctness_code_and_descriptive_prose`)
-  also asserts the text contains "Judge only the lines
-  the hunk adds". This pins the documented reading of a `-W` hunk.
-- `test_judgement.py:712` (a landed `calibrated` equals the task's current
-  digest) covers the landing in section "On a pass".
-
-Suites: `tests/test_judgement_sites.py`, `tests/test_judgement.py`,
-`tests/test_docs_runner.py`, `tests/test_review.py`,
-`tests/test_pipeline.py`, then the full suite on
-`VALOR_TEST_DB=valor_rebuild_test_a3build`; ruff check and format.
-
-## Critique's and docs' verdicts reach the kernel the way review's does
+### 2. Critique's and docs' verdicts reach the kernel the way review's does
 
 Folded in by the lead (`~/src/valor-build-notes/triage-followups.md`,
 "critique/docs read .valor/verdict.json"). Critique and docs end their turn
@@ -229,10 +251,10 @@ file (`fresh.py` critique runner and `_docs_turn`, both through
 any process the session starts can rewrite the file until the turn is
 reaped, which is why review already takes its verdict from the turn's final
 message on the harness's stdout (`final_verdict`), a pipe no process the
-session starts can write. Critique runs today with this opening; docs
-has it as soon as its runner is registered.
+session starts can write. Critique runs today with this opening, and
+docs would from the moment section 1 registers it.
 
-What changes, landing on either outcome of run 5 (critique uses it today):
+What changes:
 
 1. The critique runner and `_docs_turn` read the verdict with
    `final_verdict(ended["result"].get("text"))`, as `review_runner` does,
@@ -266,169 +288,195 @@ What changes, landing on either outcome of run 5 (critique uses it today):
    in `tests/test_harness_contract.py` already covers the channel for
    review; it gains a critique case on the same forger.
 
-### The Pi seat's `.pi/settings.json` in critique and docs checkouts
+### 3. A rate-limited case is asked again in calibration (`core/judgement_sites.py`, `calibrate`)
 
-Checked. Pi reads `<cwd>/.pi/settings.json` whatever flags it is given
-(`harnesses/pi.py`, docstring). Review's and critique's checkouts are both
-`workspace.blind_checkout`, which leaves `BLIND_LEFT_OUT` (`.pi`) out of the
-working tree, so neither exposes it. Docs uses `fresh.docs_clone`, a real
-clone with every path checked out, `.pi/` included. Today docs runs at the
-`frontier` seat, Claude Code with `--setting-sources ""`, which reads no
-project settings file, so nothing reads it; a docs seat moved to Pi (a
-one-line `SEATS` edit) would read the candidate's `.pi/settings.json`.
-`BLIND_LEFT_OUT`'s comment states the invariant as "for every harness ... a
-candidate must not set what the verifier's session runs with", and the docs
-session is a fresh session judging the candidate, so `docs_clone` meets it
-the same way: the same sparse checkout leaving `BLIND_LEFT_OUT` out
-(`core.sparseCheckout`, a `!/.pi` line), applied after the clone. A docs
-commit cannot touch `.pi/` (`machine.is_doc_path` takes Markdown outside
-instruction directories), and a sparse checkout keeps the paths in the
-index, so the docs session's commits carry them unchanged. Test: a
-candidate whose tree holds `.pi/settings.json` gives a docs checkout with no
-`.pi` in the working tree and the file still in `HEAD`'s tree.
+A bug fix in calibration: a 429 is no answer, and calibration scores it as
+one. After the pass over every case, `calibrate` asks again each
+(case, leg) whose every attempt failed `rate_limited`, in case order,
+waiting first until the endpoint's `Retry-After` hold (`judgement._HELD`)
+has passed when the provider named one. It repeats while a pass answers at
+least one of them; a pass that answers none ends it, and those cases are
+scored as today. No count and no delay of our own: each further pass needs
+the one before to have made progress, and the only wait is the provider's
+own. Each ask is its own judgement row on the calibration task, metered
+like any other; the case's result is the last ask's. The record adds, per
+leg, `asked_again` (how many re-asks) as information. Nothing outside
+calibration changes: a review's governance fan-out keeps its fallback leg
+as its retry.
 
-## Calibration run 5
+Built now, though no calibration run is made in this task, so the next
+run scores judgements and not refusals.
 
-On the build branch's commit with sections 1 to 3, never on the real
-ledger `valor_rebuild`:
+Tests (`tests/test_judgement_sites.py`, scripted legs on loopback):
 
-1. `memory_pressure`, then the full suite (it drops and recreates the test
-   database, so it runs first).
-2. `db.migrate("valor_rebuild_test_a3build", fresh=True)` from the
-   worktree's `.venv` (the call the suite's `dsn` fixture makes; never
-   `python -m core migrate`, which also runs `secure-login` on the
-   cluster).
-3. `VALOR_DB=valor_rebuild_test_a3build .venv/bin/python -m core calibrate
-   ~/src/valor-demo/items/judgement/governance.adds.json`, the case file
-   unchanged (58 cases, SHA-256
-   `15939e08cba89e4cc8a57a7ed7b10d5f40760054306b8d0162100b7e7a8007ba`,
-   checked before the run). The command refuses any endpoint but the two
-   providers', so the record is a provider record. Expected spend about
-   $0.02 (run 4: $0.01846), metered on the test database.
-4. The printed record saved as `~/src/valor-build-notes/govcal/run5.json`
-   at once, since the next suite run drops the database.
-5. Recorded in `docs/plans/m1-4b-records.md` under "Governance
-   recalibration (2026-10-09)" as run 5: database, calibration task,
-   event id, `task_sha256`, case file digest, per leg the wrong cases with
-   p, abstains, `asked_again`, Brier, estimate check, spend, entry check.
+- A leg that answers 429 once and then 200 on one case: the record scores
+  that case on the 200 answer, `asked_again` is 1, and the task holds two
+  judgement rows for it.
+- A leg that always answers 429: one further pass, then the case is scored
+  `failed`, `caution`, wrong on a `false` label; `calibrate` returns.
+- A 429 with `Retry-After: 2`: the further pass sends nothing before the
+  hold passes (time and sleep monkeypatched; the scripted endpoint records
+  the time of each request).
 
-## On a pass
+### 4. A revised wording, ready for a later calibration run
 
-One commit on the same branch, after the record:
+Not built in this task: no calibration run measures it now, and 7 of Tom's
+11 `true` cases and 25 of his 29 `false` cases have never been asked under
+it, so landing it would narrow the classifier review and docs route on
+without a measurement. It lands with the calibration run that measures it,
+together with the wording test's new phrase ("Judge only the lines the
+hunk adds"). Until then `GOVERNANCE` keeps its current text.
 
-1. `GOVERNANCE.calibrated` = run 5's `task_sha256`; the comment above it
-   names run 5 (test database `valor_rebuild_test_a3build`, calibration
-   task, event, Brier per leg) and that the wording was fitted over runs 4
-   and 5.
-2. `runners()` in `core/__main__.py` registers
-   `Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port)`; its
-   docstring says docs has its runner.
-3. Deleted, as `m1-4c-outline.md` lists: the `verdict` subcommand (its
-   parser, `_verdict`, `_instance` if nothing else uses it, the dispatch
-   branch, and its lines in the help text), `verdicts.MANUAL_STAGES`,
-   `verdicts.manual_allowed`, `verdicts._manual`, the `RUNNERS` constant
-   that exists only for the manual refusal, and the `by`, `via` and
-   `role_played` parameters of `record_check` if, once the command is
-   gone, nothing else in `core/` passes them (a grep at build time
-   decides). The `--behavior` path is already gone (no match in
-   `core/`). `VerdictRefused` stays; other writers raise it. Rows with
-   `leg: manual` still fold, and the attention log's `verdict` kind still
-   lists them.
-4. Tests: `tests/test_pipeline.py` and `tests/test_live_session.py` drive
-   docs through the scripted docs runner (`tests/test_docs_runner.py`'s
-   `docs_runners`) instead of the command line; tests of the manual
-   command's refusals are deleted with it; one test asserts
-   `python -m core verdict` is not a command (the outline's "`verdict` is
-   gone from the command line").
-5. Docs, status quo only: `core/README.md` (the command list, the docs
-   runner sentence, which says a passing record on the real ledger, and
-   the `verdict` sentence), `docs/sdlc-state-machine.md:93`,
-   `docs/architecture.md:320`, `docs/data.md`, `core/verdicts.py`'s module
-   docstring, and `docs/plans/valor-rebuild.md`'s milestone line for the
-   docs stage.
+The opening and the `true` label's opening stay; the gloss follows Tom's
+ruling's words, says only the `+` lines are judged, and names the kinds of
+code the legs mistook:
+
+> Does this hunk add a check, gate, hook, validator, review round, or
+> approval step? Count only a step that looks at work, a request, or an
+> action, judges whether it is good enough or allowed, and on that
+> judgement stops it or sends it back; or a new condition someone must
+> meet to pass such a step, such as a grant or an approval before a merge.
+> Running an existing step where it did not run before (a new call site, a
+> new event, a new path) is adding it. Judge only the lines the hunk adds,
+> those marked +; the other lines are the enclosing function, shown for
+> context, and what they already did is not added. None of these: tests
+> and the code that serves them (fixtures, helpers, scripted stand-ins,
+> recording scripts), even where they exit early or refuse to run; code
+> that makes the work itself correct, such as a lock or a transaction that
+> makes two runs take turns (a second run that waits, or is told one is
+> already running, is not stopped by a judgement), or a parser that turns
+> away input it cannot read, parse, or store, which judges its form and
+> not the work; code that reads what an existing step decided, or renders
+> messages about it; a rewrite of how existing code does what it already
+> did; and prose, a plan included, that only describes what code does.
+
+The label rubrics (the text each leg reads per answer, not Tom's labels):
+
+- `true`: "it adds a check, gate, hook, validator, review round, or
+  approval step: a new judgement that can stop work or send it back, a new
+  condition on passing one, or an existing one run where it did not run
+  before"
+- `false`: "it adds none of these: only tests and the code that serves
+  them, code that makes the work itself correct (a lock, a transaction, a
+  parser that refuses what it cannot read), code that reads or renders
+  what an existing step decided, or prose that only describes what code
+  does"
+
+Both keep the phrases the wording test pins ("makes the work itself
+correct", "only describes what code does").
+
+What was measured is the wording before two changes, variant `v3`
+(`~/src/valor-build-notes/a3/variants3.json`), two passes over 14 cases:
+every `true` control case `caution` on both legs (Jev p 0.03 to 0.17, open
+weight 0.00 to 0.05); `lock-in-expiry-runner`, `lock-prose-in-routines-doc`,
+`router-session-advisory-lock`, `signals-surrogate-refusal`,
+`oversized-turn-output-plan` and both test hunks `proceed` on Jev (0.66 to
+0.93). Not right: Jev on `notice-text-rendering` (0.49, 0.51; 0.35 to 0.55
+over nine asks and five wordings, so a later run should expect Jev to
+abstain there) and on `fresh-verdict-parser-rewrite` (0.66 once, 0.60
+once); open weight once `caution` on `signals-surrogate-refusal` (0.05). A
+wording that widened the exclusions to "writing the text of messages and
+notices ... approvals and grants included" (`v4`) did not move Jev on the
+notice case (0.53, 0.55) and made open weight answer `proceed` on Tom's
+`true` case `judge-thin-request-to-clarify` once (0.85). The two changes
+since `v3` narrow the exclusions, not widen them: "code that serves
+existing steps: running them in order, reading what they decided, or
+rendering messages about them" became "code that reads what an existing
+step decided, or renders messages about it", with a sentence that running
+an existing step somewhere new is adding it, so a new call site of a gate
+cannot read as excused; and "a grant, an approval, or a merge" became "a
+grant or an approval before a merge", since a merge is not a condition.
+
+The wording is fitted to the cases it is then scored on, as the judge's
+was (`JUDGE`, "Fitted over runs 1 to 5"); the comment above
+`GOVERNANCE.calibrated` will say so when it lands.
+
+## Records
+
+`docs/plans/m1-4b-records.md`, under "Governance recalibration
+(2026-10-09)", gains one entry: the diagnosis above in brief, the four
+diagnostic passes (calibration tasks `52106d0c5b78`, `19b0ea8b835c`,
+`f95ad68cb45c`, `347c4cbec9f3`, $0.0605 metered on
+`valor_rebuild_test_a3build`), that their ledger rows went with the test
+database at the next suite run and their answers are kept in
+`~/src/valor-build-notes/a3/diag*.json`, and that docs is registered
+without a passing record (this plan).
+
+## Suites
+
+`tests/test_judgement_sites.py`, `tests/test_judgement.py`,
+`tests/test_docs_runner.py`, `tests/test_review.py`, `tests/test_fresh.py`,
+`tests/test_pipeline.py`, `tests/test_emulator_metering.py`,
+`tests/test_harness_contract.py`, then the full suite on
+`VALOR_TEST_DB=valor_rebuild_test_a3build` after `memory_pressure`; ruff
+check and format. `tests/test_live_session.py` and
+`tests/test_live_fresh.py` run with `VALOR_LIVE=1`, metered.
 
 Merges after A1, through the pipeline. The diff changes `core/`, so the
 merge is rolled out by the kernel's own rollout (#3610) or by hand.
 
-## On a fail
-
-Run 5 is recorded the same way with its failing cases; `calibrated` stays
-`None` with its comment naming run 5; the docs runner stays unregistered;
-nothing in section "On a pass" is built. The branch stops at the record and
-the lead runs an advisor on the failing legs (Jev, open weight, or both)
-before a run 6, with run 5's record, this diagnosis, and
-`~/src/valor-build-notes/a3/` as its inputs. Choices the advisor may weigh,
-none taken here: a narrower or plainer wording for Jev's notice and parser
-cases; the floors (the floors' comment says they are set "from human labels once real
-tasks have produced thirty or more rows"; the case file holds 40 of
-Tom's labels); and that an entry check
-of one run over legs that vary between identical calls (diagnosis 5) passes
-by chance on near-boundary cases. Tom's labels and the case inputs stay
-fixed in every one.
-
 ## Governance
 
-The question's wording narrows what an existing check counts; the re-ask
-fixes a calibration bug; registering the docs runner gives the docs stage,
-granted with the pipeline on 2026-10-01 (`core/guards.py`), the runner it
-was granted with; deleting the `verdict` command removes a by-hand step.
-Moving critique's and docs' verdict to the final message changes which channel an existing verdict arrives on and deletes a check (`no_verdict_yet`); the docs clone leaving `.pi` out applies the invariant `BLIND_LEFT_OUT` already states for every fresh verifier session, and refuses nothing. None adds a check, gate, hook, round, review step, or guard, so the plan
-asks for no grant. If review answers `governance.adds` true on a hunk, the
-incident is run 4 (`docs/plans/m1-4b-records.md`: docs verdicts recorded by
-hand because no record passed) and the mission item is 1.
+Registering the docs runner gives the docs stage, granted with the
+pipeline on 2026-10-01 (`core/guards.py`), the runner it was granted with,
+and removes a plan condition on it; deleting the `verdict` command removes
+a by-hand step. Moving critique's and docs' verdict to the final message
+changes the channel an existing verdict arrives on and deletes a check
+(`no_verdict_yet`). The re-ask fixes how calibration scores a refusal. The
+revised wording is not built here. None adds a check, gate, hook, round,
+review step, or guard, so the plan asks for no grant. If review answers
+`governance.adds` true on a hunk, the incident is run 4
+(`docs/plans/m1-4b-records.md`: docs verdicts recorded by hand because no
+record passed) and the mission item is 1.
 
 ## Threat model
 
-- **A candidate steering the classifier.** The hunk is text the turn
-  wrote. The wording gives a candidate more words to argue with ("only a
-  parser", "only a lock"). The `DATA_ONLY` line stays in both legs'
-  prompts; the legs judge the code, and the `true` controls stayed at p
-  0.17 or under on both legs. The reviewer can add an instance a leg
-  missed (`docs/judgement-layer.md`, note 6).
-- **A missed checkpoint is the worse error.** Section 1 records the one
-  wording that made a leg miss Tom's `true` case, and it is not the one
-  chosen. Run 5 scores all 11 `true` cases; one wrong fails the run.
-- **The real ledger.** Run 5 and every diagnostic run on
-  `valor_rebuild_test_a3build`. The calibrate command refuses non-provider
-  endpoints, and the key file is read only by `port()`; no key is printed
-  or passed on a command line.
+- **A docs commit that adds a rule.** Docs commits are Markdown only
+  (`machine.is_doc_path`), and a doc can still add a rule. Today they pass
+  with no governance judgement (the manual path is exempt); after this
+  plan each kept hunk is judged, and an instance waits on Tom's tap.
+- **False instances from an uncalibrated classifier.** The cost is a tap
+  on prose that adds no rule, the same cost review carries on code. The
+  chain answers most prose `proceed` (above). Calibration keeps measuring.
+- **A turn's process forging a verdict.** After this plan no fresh
+  session's verdict is a file in its checkout; every one is the final
+  message on the harness's stdout, which a process the session leaves
+  running cannot write.
+- **The real ledger.** The diagnostics ran on `valor_rebuild_test_a3build`;
+  the build runs nothing against `valor_rebuild`. No key is printed or
+  passed on a command line.
 - **The re-ask.** It runs only inside `calibrate`, only on calls billed
   nothing (a 429 is `billed: none`), and ends on the first pass without
   progress, so a provider that refuses everything costs one extra pass of
   free refusals.
 
-- **A turn's process forging a verdict.** After this plan no fresh
-  session's verdict is a file in its checkout; every one is the final
-  message on the harness's stdout, which a process the session leaves
-  running cannot write. A candidate's `.pi/settings.json` reaches no fresh
-  session's working tree.
-
 ## Done, as evidence
 
-1. The revised question and rubrics in `core/judgement_tasks.py`; the
-   re-ask in `calibrate`; the tests of section 3 passing; the full suite
-   and ruff clean on `valor_rebuild_test_a3build`.
-2. Run 5's record in `~/src/valor-build-notes/govcal/run5.json` and in
-   `docs/plans/m1-4b-records.md`, from a run on the test database with the
-   unchanged 58-case file, every leg answering every case or the
-   `asked_again` count saying why not.
-3. On a pass: `GOVERNANCE.calibrated` equals run 5's `task_sha256`
-   (`test_judgement.py:712` passes); `runners()` holds `Check.DOCS`;
-   `python -m core verdict` is refused by argparse as an unknown command;
-   `MANUAL_STAGES` and `manual_allowed` appear nowhere in `core/`; the docs
-   named in "On a pass" say what the code does.
-4. Critique and docs take their verdict from the final message:
-   `read_verdict` appears nowhere in `core/`; the scripted runners pass;
-   the docs checkout of a candidate holding `.pi/` has none in its working
-   tree.
-5. On a fail: the record, `calibrated` `None`, and the lead's advisor
-   started on the failing legs.
+1. `runners()` holds `Check.DOCS`; `python -m core verdict` exits as an
+   unknown command; `MANUAL_STAGES`, `manual_allowed`, `_manual`, and
+   `RUNNERS` appear nowhere in `core/` or `tests/`; `record_check` and
+   `record_critique` take no `by`, `via`, or `role_played`.
+2. Critique and docs take their verdict from the final message:
+   `read_verdict` and `no_verdict_yet` appear nowhere in `core/`; the
+   scripted runners pass; a valid `.valor/verdict.json` with a prose final
+   message records nothing.
+3. The re-ask in `calibrate` with its three tests passing.
+4. The docs named in section 1, step 6 say what the code does; a grep of
+   `docs/*.md`, `core/README.md`, and `skills/` for "by hand" next to
+   "verdict", "registered once", and `core verdict` finds nothing but
+   records.
+5. The m1-4b record entry.
+6. The full suite and ruff clean on `valor_rebuild_test_a3build`.
 
-## Questions for Tom (answer assumed; work carries on)
+## Decided by default
 
-- Is a passing record on a test database enough to land `calibrated`?
-  `core/README.md` says the docs runner is registered on a record "on the
-  real ledger". Assumed yes: the finishing run's task says run 5 runs on a
-  test database, never the real ledger, and lands on a pass; the record's
-  content is the providers' answers either way, and the README sentence is
-  changed to match.
+- A later calibration record made on a test database is enough to land
+  `GOVERNANCE.calibrated`: the record's content is the providers' answers
+  wherever the rows are stored, the finishing task runs calibration on a
+  test database, never the real ledger, and `core/README.md`'s "on the real
+  ledger" goes with the sentence it sits in.
+- The revised wording is not landed without a run that measures it
+  (section 4).
+- Plans of merged work keep their text as records; only the governing plan
+  (`valor-rebuild.md`) and the source of the rule (`m1-4b-runners.md`,
+  Landing) are reworded.
