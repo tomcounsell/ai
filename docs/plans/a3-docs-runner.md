@@ -429,6 +429,11 @@ expects the step to answer `MERGED` with the merge `done`. Rebased onto
 the rebuild branch at daee94e81 (C3) with no conflict.
 `tests/test_emulator_metering.py` on `valor_rebuild_test_a3build`, ports
 6450-6459, container test included: 29 passed; ruff clean.
+`tests/test_live_fresh.py` with `VALOR_LIVE=1`, alone: the critique case
+passed, its verdict read from the final message. Both review cases failed
+in the test's own setup (`scripted.check`: "has no candidate waiting on
+its checks"), before any review session ran; that file's setup is stale
+after A1 and is a task of its own.
 
 ## Suites
 
