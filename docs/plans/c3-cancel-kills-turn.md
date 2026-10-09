@@ -257,5 +257,13 @@ it. Test 5 pins it: red before (`PermissionError` from `_kill_group`),
 green after, five runs out of five. Rebased onto
 `origin/valor-cori-rebuild` at aee005097 (A1 and C4) with no conflict.
 `tests/test_reap.py` `-m "not container"` on `valor_rebuild_test_c3build`,
-ports 6730-6739; ruff clean. Container runs: see the patch report
-(`~/src/valor-build-notes/patch-c3.md`).
+ports 6730-6739: 10 passed; with `tests/test_kernel.py`, 38 passed; ruff
+clean. Container runs: `tests/test_review.py -m container` 29 passed
+(both stop tests among them);
+`test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict`
+passed. `tests/test_live_fresh.py` with `VALOR_LIVE=1` failed all three,
+and failed the same three with the base's `core/runs.py` in place: the
+critique turn ends `done` rc 0 with no `.valor/verdict.json`, and both
+reviews stop in the test's own setup (`scripted.check`: no candidate
+waiting on its checks). The file predates the A1 machine change and is
+not C3's; it is a task of its own.
