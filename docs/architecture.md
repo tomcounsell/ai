@@ -449,11 +449,24 @@ charges calls whose holder died at their estimate, ends turns with no end
 as `interrupted` and reaps their processes, records a turn that ended and
 was never collected (a collection that fails is logged and retried as a
 job before the task's next step), settles kernel effects left between intent and
-outcome, and stops services a killed kernel left up (not those a live kernel keeps). A provisioning a
+outcome, stops services a killed kernel left up (not those a live kernel keeps), and ends the
+rollout of each of its own merges the running commit contains. A provisioning a
 killed kernel left unfinished is redone by provisioning, not by recovery: it reaps what the dead
 attempt left running, clears its directory, and makes it again. Serves reliable stop
 and recovery, and Mission item 1: Tom never coordinates the gaps between
 steps.
+
+The kernel rolls itself forward to its own merges (`core/rollout.py`): a
+merge whose outcome names the push URL and branch of the checkout it runs
+from. A merge that changes only `persona/`, `skills/`, `docs/`, `tests/`
+or top-level `*.md` is fast-forwarded at once, since those are read per
+turn or never. Any other holds new jobs until the running ones end, then
+cancels the background turn, fast-forwards the checkout, runs the merged
+code's `db.migrate`, writes `rollout.restarting`, and exits; launchd
+starts it again on the merged code. A change to the dependencies or the
+schema stops before the checkout moves, and the lead rolls it by hand. A
+failed step lifts the hold, writes `rollout.failed` and a notice, and is
+tried again on the next `serve_tick_s` wake.
 
 **Steering.** A message for a task mid-turn is a ledger row
 (`message.steered`), delivered as the opening of the next working turn

@@ -16,12 +16,15 @@ On start it recovers (`recover`) what a killed kernel left:
   collection that raises is logged and the kernel starts; the task is
   collected by a job before it is stepped, parked like any job that fails;
 - an intent of a kernel type with no outcome: reconciled;
-- services a killed kernel left up: swept.
+- services a killed kernel left up: swept;
+- a kernel merge with a rollout row and no `rollout.ended` that the
+  running commit contains: ended `done` (`core/rollout.py`).
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
-(`intake.bind`), requests the notices each task owes (`notices.owe`), and
-schedules jobs (`schedule`). A job is one step of one task
+(`intake.bind`), requests the notices each task owes (`notices.owe`),
+rolls the kernel forward to its own merges (`roll`), and schedules jobs
+(`schedule`). A job is one step of one task
 (`router.step`), a release Tom asked for, a provisioning, or the
 collection recover could not make; one job per
 task at a time, and one harness job at a time in this process. A turn also
@@ -39,18 +42,33 @@ the task: it is tried again on the next row on its stream or the next
 `serve_tick_s` wake, whichever comes first, and never in a loop. A wake's
 failure in binding, notices, or scheduling is logged per task, and the
 kernel goes on.
+
+A merge of the kernel's own code (its outcome names the checkout's push
+URL and branch) rolls the running kernel forward. One that changes only
+`persona/`, `skills/`, `docs/`, `tests/` or top-level `*.md` is
+fast-forwarded at once. Any other first holds `schedule` until every job
+but the background turn's has ended, then cancels the background turn,
+fast-forwards the checkout, runs the merged code's migrate, writes
+`rollout.restarting`, and raises `rollout.Restart`, which leaves `serve`;
+launchd starts the kernel again. A failed step writes `rollout.failed` and
+a notice, lifts the hold, and is tried again on the next `serve_tick_s`
+wake; a change to the dependencies or the schema stops before the checkout
+moves and is the lead's.
 """
 
 import asyncio
+import functools
 import json
 import os
 import plistlib
 import sys
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+import psycopg
 
 from core import (
     broker,
@@ -60,6 +78,7 @@ from core import (
     ledger,
     machine,
     notices,
+    rollout,
     router,
     runs,
     session,
@@ -161,8 +180,13 @@ async def recover(
     conn,
     performers: router.PerformersFactory | None = None,
     kernel_types: tuple[str, ...] = ("push_branch", "merge"),
+    *,
+    checkout: Path | None = None,
+    running: str | None = None,
 ) -> dict[str, list]:
-    """Settle what a killed kernel left. Returns what was done, by kind."""
+    """Settle what a killed kernel left. Returns what was done, by kind.
+    With the kernel's `checkout` and the `running` commit, also ends the
+    rollouts that commit contains (`rolled`)."""
     done: dict[str, list] = {
         "charged": [],
         "interrupted": [],
@@ -170,6 +194,7 @@ async def recover(
         "uncollected": [],
         "reconciled": [],
         "swept": [],
+        "rolled": [],
     }
 
     # Calls opened with no charge, whose holder is gone: the worst case.
@@ -268,7 +293,74 @@ async def recover(
             async with conn.transaction():
                 await ledger.append(conn, task_id, "services.reaped", {"processes": processes})
     done["swept"] = reaped
+
+    if checkout is not None and running is not None:
+        try:
+            done["rolled"] = await _rolled(conn, checkout, running)
+        except git.GitError as exc:
+            _log(f"the kernel's checkout cannot be read; rollouts not ended: {exc}")
     return done
+
+
+async def _rolled(conn, checkout: Path, running: str) -> list[str]:
+    """End every kernel merge with a `rollout.restarting` or
+    `rollout.failed` row, or covered by a restarting row, that has no
+    `rollout.ended` and whose sha the running commit contains: `rolled_by`
+    the merge whose restart covered it, or `by: started` when no restart
+    names it (rolled by hand, or carried by a later restart)."""
+    ended = {
+        r[0]
+        for r in await (
+            await conn.execute("SELECT payload->>'effect_id' FROM events WHERE type = 'rollout.ended'")
+        ).fetchall()
+    }
+    named: dict[str, dict[str, Any]] = {}
+    for task_id, type_, p in await (
+        await conn.execute(
+            "SELECT task_id, type, payload FROM events "
+            "WHERE type IN ('rollout.restarting', 'rollout.failed') ORDER BY id"
+        )
+    ).fetchall():
+        if type_ == "rollout.restarting":
+            named[p["effect_id"]] = {"task": task_id, "sha": p["sha"], "own": True}
+            for c in p.get("covers") or []:
+                if not named.get(c["effect_id"], {}).get("own"):
+                    named[c["effect_id"]] = {"task": c["task_id"], "sha": c["sha"], "by": p["effect_id"]}
+        else:
+            named.setdefault(p["effect_id"], {"task": task_id, "sha": p["sha"]})
+    open_ = {e: v for e, v in named.items() if e not in ended}
+    if not open_:
+        return []
+
+    def contained() -> set[str]:
+        return {e for e, v in open_.items() if git.is_ancestor(checkout, v["sha"], running)}
+
+    held = await git.threaded(contained)
+    rolled = []
+    for effect_id, v in open_.items():
+        if effect_id not in held:
+            continue
+        payload: dict[str, Any] = {"effect_id": effect_id, "outcome": "done", "head": running}
+        if v.get("by") and (v["by"] in held or v["by"] in ended):
+            payload["rolled_by"] = v["by"]
+        elif not v.get("own"):
+            payload["by"] = "started"
+        async with conn.transaction():
+            await ledger.append(conn, v["task"], "rollout.ended", payload)
+        rolled.append(effect_id)
+    return rolled
+
+
+# The kernel's merge outcomes not yet ended, oldest first.
+MERGE_OUTCOMES = (
+    "SELECT o.id, o.task_id, o.payload->>'effect_id', o.payload->'result' FROM events o "
+    "JOIN events i ON i.type = 'effect.intent' AND i.payload->>'effect_id' = o.payload->>'effect_id' "
+    "LEFT JOIN events h ON h.type = 'effect.held' AND h.payload->>'effect_id' = o.payload->>'effect_id' "
+    "WHERE o.type = 'effect.outcome' AND o.payload @> '{\"kind\": \"done\"}' "
+    "AND COALESCE(i.payload->>'action_type', h.payload->>'action_type') = 'merge' "
+    "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'rollout.ended' "
+    "AND e.payload->>'effect_id' = o.payload->>'effect_id') ORDER BY o.id"
+)
 
 
 class Kernel:
@@ -281,8 +373,21 @@ class Kernel:
         performers: router.PerformersFactory | None,
         dsn: str,
         uncollected: set[str] | None = None,
+        *,
+        checkout: Path | None = None,
+        started: str | None = None,
+        migrate: Callable[[str], None] | None = None,
+        credential: str | Path | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
+        # The checkout this process runs from and its commit then; with no
+        # checkout, nothing is rolled.
+        self.checkout, self.started, self.credential = checkout, started, credential
+        self.migrate = migrate or (functools.partial(rollout.migrate, checkout) if checkout else None)
+        self.restart_due: rollout.Merge | None = None  # holds `schedule` until the jobs end
+        self.judged: set[str] = set()  # merge effects contained in `started`, or not the kernel's
+        self.waiting: set[str] = set()  # failed since the last `serve_tick_s` wake
+        self.final: set[str] = set()  # failed at a step that repeats: not tried again by this process
         # Tasks whose ended turn recover could not collect: collected by a
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
@@ -299,11 +404,12 @@ class Kernel:
         self.wake = asyncio.Event()
 
     async def tick(self, conn) -> None:
-        """One wake: bind, owe, schedule. A failure for one task is logged,
+        """One wake: bind, owe, roll, schedule. A failure for one task is logged,
         and the others go on."""
         now = time.monotonic()
         if now - self.parked_at >= settings.serve_tick_s:
             self.parked.clear()
+            self.waiting.clear()
             self.parked_at = now
         await intake.bind(conn)
         for task_id in await self.active(conn):
@@ -311,7 +417,166 @@ class Kernel:
                 await notices.owe(conn, task_id)
             except Exception as exc:  # noqa: BLE001  one task's notice fails alone
                 _log(f"task {task_id}: notices failed: {exc!r}")
+        try:
+            await self.roll(conn)
+        except rollout.Restart:
+            raise
+        except Exception as exc:  # noqa: BLE001  a rollout's failure leaves the wake to schedule
+            self.restart_due = None
+            _log(f"rollout failed: {exc!r}")
         await self.schedule(conn)
+
+    def _holding(self) -> bool:
+        """A job other than the background turn's is running."""
+        return any(t != self.background for t in self.jobs)
+
+    async def roll(self, conn) -> None:
+        """Roll the kernel forward to its due merge, if any (module
+        docstring). Git runs off the loop; a wake with nothing new runs none."""
+        if self.checkout is None or self.started is None:
+            return
+        if self.restart_due is not None and self._holding():
+            return
+        merges = []
+        for row, task_id, effect_id, result in await (await conn.execute(MERGE_OUTCOMES)).fetchall():
+            if effect_id in self.judged or effect_id in self.final:
+                continue
+            m = rollout.Merge.of(row, task_id, effect_id, result)
+            if m is None:
+                self.judged.add(effect_id)
+            else:
+                merges.append(m)
+        retry = self.restart_due is not None
+        self.restart_due = None
+        if not merges or (not retry and all(m.effect_id in self.waiting for m in merges)):
+            return
+        try:
+            due, judged = await git.threaded(rollout.judge, self.checkout, self.started, merges)
+        except git.GitError as exc:
+            await self._failed(conn, merges[-1], ["fetch"], "fetch", str(exc))
+            return
+        self.judged.update(judged)
+        if not due or (not retry and all(m.effect_id in self.waiting for m in due)):
+            return
+        plan = await git.threaded(rollout.prepare, self.checkout, self.started, due, self.credential)
+        for m in plan.superseded:
+            await self._ended(
+                conn, m, outcome="superseded", sha=m.sha, reason=f"{m.sha} is not on {m.branch}"
+            )
+        m = plan.target
+        if m is None:
+            return
+        if plan.failed is not None:
+            await self._failed(conn, m, plan.steps, *plan.failed)
+            return
+        if plan.restart:
+            if self._holding():
+                self.restart_due = m
+                _log(f"rollout of {m.sha}: holding new jobs until the running ones end")
+                return
+            await self._apply(conn, plan)
+            return
+        steps = [*plan.steps, "fast-forward"]
+        try:
+            _, head = await git.threaded(rollout.fast_forward, self.checkout, m.sha)
+        except git.GitError as exc:
+            await self._failed(conn, m, steps, "fast-forward", str(exc))
+            return
+        await self._ended(conn, m, outcome="done", head=head, steps=steps)
+        for c in plan.covered:
+            await self._ended(conn, c, outcome="done", head=head, rolled_by=m.effect_id)
+        _log(f"rolled out {m.sha} with no restart")
+
+    async def _apply(self, conn, plan: rollout.Plan) -> None:
+        """Cancel the background turn, fast-forward, migrate, and raise
+        `Restart`; every other job has ended."""
+        m = plan.target
+        job = self.jobs.get(self.background) if self.background else None
+        if job is not None:
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+        steps = [*plan.steps, "fast-forward"]
+        try:
+            before, _ = await git.threaded(rollout.fast_forward, self.checkout, m.sha)
+        except git.GitError as exc:
+            await self._failed(conn, m, steps, "fast-forward", str(exc))
+            return
+        steps.append("migrate")
+        database = psycopg.conninfo.conninfo_to_dict(self.dsn).get("dbname") or settings.database
+        try:
+            await git.threaded(self.migrate, database)
+        except Exception as exc:  # noqa: BLE001  any failure of the merged migrate is the rollout's
+            try:
+                mixed = await git.threaded(rollout.step_back, self.checkout, before, m.sha)
+            except git.GitError:
+                mixed = True
+            await self._failed(conn, m, steps, "migrate", str(exc), mixed=mixed)
+            return
+        covers = [{"effect_id": c.effect_id, "task_id": c.task_id, "sha": c.sha} for c in plan.covered]
+        async with conn.transaction():
+            await ledger.append(
+                conn,
+                m.task_id,
+                "rollout.restarting",
+                {
+                    "effect_id": m.effect_id,
+                    "sha": m.sha,
+                    "from": self.started,
+                    "steps": steps,
+                    "covers": covers,
+                },
+            )
+        _log(f"rollout of {m.sha}: restarting")
+        raise rollout.Restart(m.sha)
+
+    async def _ended(self, conn, m: rollout.Merge, **payload) -> None:
+        async with conn.transaction():
+            await ledger.append(conn, m.task_id, "rollout.ended", {"effect_id": m.effect_id, **payload})
+
+    async def _failed(
+        self, conn, m: rollout.Merge, steps: list[str], step: str, reason: str, *, mixed: bool = False
+    ) -> None:
+        """A `rollout.failed` row when the step or reason changed, and the
+        merge's one notice (and one more when the kernel is left on mixed
+        code). Tried again on the next `serve_tick_s` wake, or, for a step
+        that repeats, not by this process."""
+        self.waiting.add(m.effect_id)
+        if step in rollout.FINAL:
+            self.final.add(m.effect_id)
+        _log(f"rollout of {m.sha} (effect {m.effect_id}) failed at {step}: {reason}")
+        latest = await (
+            await conn.execute(
+                "SELECT payload FROM events WHERE type = 'rollout.failed' AND payload->>'effect_id' = %s "
+                "ORDER BY id DESC LIMIT 1",
+                (m.effect_id,),
+            )
+        ).fetchone()
+        async with conn.transaction():
+            if mixed or latest is None or (latest[0].get("step"), latest[0].get("reason")) != (step, reason):
+                await ledger.append(
+                    conn,
+                    m.task_id,
+                    "rollout.failed",
+                    {"effect_id": m.effect_id, "sha": m.sha, "step": step, "reason": reason, "steps": steps}
+                    | ({"mixed": True} if mixed else {}),
+                )
+            await notices.request(
+                conn,
+                m.task_id,
+                kind="rollout",
+                about_key=f"rollout:{m.effect_id}",
+                text=_rollout_text(m, step, reason),
+            )
+            if mixed:
+                await notices.request(
+                    conn,
+                    m.task_id,
+                    kind="rollout",
+                    about_key=f"rollout:{m.effect_id}:mixed",
+                    text=f"The kernel's checkout could not be moved back after task {m.task_id}'s merge {m.sha} "
+                    "failed to migrate: the running kernel's checkout holds code it did not start from (mixed "
+                    "code) until it restarts. Fix the migrate or the checkout by hand.",
+                )
 
     async def active(self, conn) -> list[str]:
         rows = await (
@@ -332,6 +597,8 @@ class Kernel:
                 await self.settle(task_id)
             except Exception as exc:  # noqa: BLE001  one task's settling fails alone
                 _log(f"task {task_id}: settling failed: {exc!r}")
+        if self.restart_due is not None:
+            return  # a restart is due: no new job until the running ones end
         for task_id in active:
             if task_id in self.jobs:
                 continue
@@ -559,6 +826,17 @@ def _log(text: str) -> None:
     print(text, file=sys.stderr, flush=True)
 
 
+def _rollout_text(m: rollout.Merge, step: str, reason: str) -> str:
+    head = f"Task {m.task_id}'s merge {m.sha} did not roll out to the running kernel"
+    if step == "dependencies":
+        return f"{head}: it changes the kernel's dependencies. Run `uv sync` and the rollout by hand."
+    if step == "schema":
+        return f"{head}: it changes core/schema.sql. Back up, migrate, and restart the kernel by hand."
+    if step == "migrate":
+        return f"{head}: the merged migrate failed: {reason}. The kernel does not try it again until it restarts."
+    return f"{head}: {step} failed: {reason}. It is tried again every {settings.serve_tick_s:g} seconds."
+
+
 def _provision_due(rows: list[dict[str, Any]]) -> bool:
     """No provisioning failed, or Tom steered the task since the last did."""
     failed = max((r["id"] for r in rows if r["type"] == "workspace.failed"), default=None)
@@ -578,8 +856,14 @@ async def serve(
     *,
     dsn: str | None = None,
     gateway: Gateway | None = None,
+    checkout: Path | None = ROOT,
+    migrate: Callable[[str], None] | None = None,
+    credential: str | Path | None = None,
 ) -> None:
-    """Run the kernel until killed."""
+    """Run the kernel until killed, or until a rollout of its own merge
+    raises `rollout.Restart`. `checkout` is the checkout it runs from and
+    rolls forward; `credential` the GitHub key file for the fetch
+    (default `settings.github_keyfile`)."""
     dsn = dsn or settings.dsn()
     conn = await db.connect(dsn, application_name="valor-kernel")
     listener = await db.connect(dsn, application_name="valor-kernel-listen")
@@ -587,14 +871,30 @@ async def serve(
     kernel = None
     try:
         await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),))
-        done = await recover(conn, performers)
+        started = None
+        if checkout is not None:
+            try:
+                started = await git.threaded(git.head, checkout)
+            except git.GitError as exc:
+                _log(f"the kernel's checkout cannot be read; nothing is rolled out by this process: {exc}")
+        done = await recover(conn, performers, checkout=checkout, running=started)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
         if gateway is None:
             from core.gateway import ClaudeLogin, OpenAIKey
 
             gateway = Gateway(dsn, credential=ClaudeLogin(), openai_credential=OpenAIKey())
             await gateway.start()
-        kernel = Kernel(gateway, runners, performers, dsn, set(done["uncollected"]))
+        kernel = Kernel(
+            gateway,
+            runners,
+            performers,
+            dsn,
+            set(done["uncollected"]),
+            checkout=checkout,
+            started=started,
+            migrate=migrate,
+            credential=credential if credential is not None else settings.github_keyfile,
+        )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))
         try:
@@ -602,6 +902,8 @@ async def serve(
                 kernel.wake.clear()
                 try:
                     await kernel.tick(conn)
+                except rollout.Restart:
+                    raise
                 except Exception as exc:  # noqa: BLE001  the next wake tries again
                     _log(f"kernel wake failed: {exc!r}")
                     if conn.closed:

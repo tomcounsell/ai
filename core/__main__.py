@@ -331,7 +331,12 @@ async def _serve() -> None:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
         raise SystemExit(f"serve refused: {exc}") from None
-    await serve.serve(runners(judgement_port), _performers)
+    from core import rollout
+
+    try:
+        await serve.serve(runners(judgement_port), _performers)
+    except rollout.Restart as exc:
+        raise SystemExit(str(exc)) from None  # status 1: launchd starts the merged code
 
 
 async def _run_task(task_id: str) -> str:

@@ -10,6 +10,7 @@ task in it. The kill tests run the kernel as a process of its own
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import signal
@@ -21,7 +22,21 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, router, runs, serve, session, signals, slot, spending, tasks
+from core import (
+    broker,
+    db,
+    ledger,
+    machine,
+    rollout,
+    router,
+    runs,
+    serve,
+    session,
+    signals,
+    slot,
+    spending,
+    tasks,
+)
 from core import workspace as kws
 from core.__main__ import _performers
 from core.gateway import Gateway
@@ -1526,3 +1541,39 @@ def test_a_stale_provisioning_job_clears_nothing(fresh, op, tmp_path, why):
     run(go())
     assert (root / "sentinel").read_text() == "here"
     assert run(rows(fresh, task)) == before
+
+
+def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, capsys):
+    import core.gateway
+
+    ticks, closed = [], []
+
+    async def tick(self, conn):
+        ticks.append(conn)
+        if len(ticks) == 1:
+            raise RuntimeError("one wake failed")
+        raise rollout.Restart("a" * 40)
+
+    async def close(self):
+        closed.append("kernel")
+
+    class Stand:
+        def __init__(self, *args, **kw):
+            pass
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            closed.append("gateway")
+
+    monkeypatch.setattr(serve.Kernel, "tick", tick)
+    monkeypatch.setattr(serve.Kernel, "close", close)
+    monkeypatch.setattr(serve, "Gateway", Stand)
+    monkeypatch.setattr(core.gateway, "ClaudeLogin", Stand)
+    monkeypatch.setattr(core.gateway, "OpenAIKey", Stand)
+    monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, serve_tick_s=0.05))
+    with pytest.raises(rollout.Restart):
+        run(serve.serve({}, dsn=fresh, checkout=None))
+    assert len(ticks) == 2 and closed == ["kernel", "gateway"]
+    assert "kernel wake failed: RuntimeError('one wake failed')" in capsys.readouterr().err

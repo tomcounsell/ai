@@ -456,7 +456,8 @@ decided below.
   still safe through `recover`.
 - **Bridges and routines are not rolled by the kernel.** They stay the
   lead's steps (Leaves out).
-- **A dependency or schema change is the lead's.** The kernel runs no `uv` and no `pg_dump`.
+- **A dependency or schema change is the lead's.** The kernel runs no
+  `uv` and no `pg_dump`.
 
 ### Critique round 1 (`critic-3610-r1`, verdict revise)
 
@@ -571,3 +572,26 @@ refusing checkout, no reset over the lead's commit) rather than add any.
 
 The two overstated round 1 claims (#3, #5) are corrected in place above.
 
+
+## Build record
+
+Built on `i3610-kernel-rollout` from the plan above and both critique
+rounds.
+
+- `core/rollout.py`: `judge`, `fetch`, `prepare`, `refused`,
+  `fast_forward`, `step_back`, `migrate_argv`, `migrate`, `Restart`.
+- `core/serve.py`: `Kernel.roll`, `_apply`, `_failed`, `_ended`, the hold
+  in `schedule`, the `waiting` reset on the `serve_tick_s` wake, the
+  `rolled` pass in `recover`, and `serve`'s `checkout`, `migrate`,
+  `credential` and `except rollout.Restart: raise`.
+  `core/__main__.py`: `serve` exits with `kernel restarting for <sha>`.
+- `tests/test_rollout.py` holds every test the Tests section names;
+  `tests/test_serve.py` holds the loop's `Restart` and failed-wake test.
+  `tests/kernel_child.py` passes `checkout=None`, so the kill tests'
+  kernels never roll the build's checkout.
+- Docs: `core/README.md`, `docs/architecture.md`, `docs/data.md` (the
+  three `rollout.*` rows), `docs/plans/valor-rebuild.md` (the takeover
+  point), `.claude/skills/build/SKILL.md` (the merge bullet).
+- A judge step refused by the checkout's config is recorded as a failure
+  at `fetch` on the newest due merge. A failure with `mixed` always
+  writes its row.

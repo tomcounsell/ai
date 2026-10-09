@@ -72,7 +72,7 @@ async def main() -> None:
     else:
         runners = {k: v for k, v in scripted.RUNNERS.items() if k is not State.JUDGE}
     print(f"kernel {os.getpid()}", flush=True)
-    await serve.serve(runners, _performers, dsn=dsn, gateway=gateway)
+    await serve.serve(runners, _performers, dsn=dsn, gateway=gateway, checkout=None)
 
 
 if __name__ == "__main__":

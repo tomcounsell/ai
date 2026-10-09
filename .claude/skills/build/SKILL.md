@@ -225,7 +225,11 @@ builder's narration.
   fast-forward `valor-cori-rebuild` to the docs
   head, push, run the plan's rollout steps (back up first with
   `python -m core backup`), record them under "Merged", set
-  `status: merged`, remove the task's worktrees.
+  `status: merged`, remove the task's worktrees. A merge the kernel
+  releases rolls the kernel forward itself (`core/rollout.py`), except a
+  change to `uv.lock`, `pyproject.toml` or `core/schema.sql`: its
+  `rollout.failed` notice names it, and the lead runs `uv sync`, the
+  backup, the migrate and the restart by hand.
 
 ## 6. Phase B: Valor builds itself
 
