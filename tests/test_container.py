@@ -725,7 +725,7 @@ def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend)
     assert (
         v["setup"][0]["output"] == f"vm-head-{candidate[:12]}/out/setup-0.out" and "tail" not in v["setup"][0]
     )
-    assert "msgpack" in (kws.Layout(Path(b.mirror).parent).checks / v["setup"][0]["output"]).read_text()
+    assert "toy==0.1.0" in (kws.Layout(Path(b.mirror).parent).checks / v["setup"][0]["output"]).read_text()
 
 
 @pytest.mark.container
