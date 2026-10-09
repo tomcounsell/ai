@@ -88,9 +88,25 @@ runtime read as absent (`container.present` is false), as it does under
 the check profile, so `reap` returns before any CLI call. A `container`
 test still shares the machine lock and the runtime.
 
-**Test.** `tests/test_container.py`: outside a `container` test, with a
-CLI that records its calls, `present()` is false and `reap` returns
-nothing without a call.
+**Test.** `tests/test_container.py`: outside a `container` test, against
+a CLI that records its calls and reports a running system listing nothing,
+`present()` is false and `reap` makes no call, so never `system stop`;
+with the runtime read as present, the same sweep runs `system stop`.
+
+## Other callers with a lock of their own
+
+`container.reap` has one caller, `Router.sweep`. The machine lock's path
+is `$HOME/Library/Application Support/valor/container.lock`, fixed at
+import. Outside pytest nothing gives a kernel another lock: the live
+kernel, the emulator's replay driver and the kernels it starts
+(`core run`, inheriting the environment), and the kernels tests start as
+subprocesses (`tests/scripted.py`, `tests/kernel_child.py`, which pass
+`HOME` through) all run as the one user with the real `HOME`, so they share
+the machine lock. The tests that set another `HOME` (a turn shell, a git
+http backend, a harness under a stray home) start no kernel, and set it
+after `core.container` is imported. Another macOS user has another lock
+and also another runtime. Inside pytest, the change covers every
+in-process run outside a `container` test. Nothing else is in scope.
 
 **Docs.** `docs/sandbox.md` (tests that use the runtime) and the
 `tests/conftest.py` docstring.
@@ -110,4 +126,6 @@ None.
 
 ## Patch rounds
 
-None yet.
+1. The test asserts `system stop` is never run, against a CLI that would
+   reach it with the runtime read as present; the other callers of
+   `reap` are checked (above).

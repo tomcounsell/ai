@@ -452,18 +452,26 @@ def test_an_image_another_database_recorded_survives_a_tests_prune_and_cleanup(t
     assert kernels not in deleted and f"{container.REPO}/base:x" in deleted
 
 
-def test_outside_a_container_test_the_runtime_reads_as_absent(tmp_path, monkeypatch):
-    """A test not marked `container` holds only the session's own lock, so
-    it never reaches the machine's runtime: the sweep every run starts with
-    makes no CLI call, and so never stops a kernel's verification."""
+def test_outside_a_container_test_the_sweep_never_stops_the_runtime(tmp_path, monkeypatch):
+    """A test not marked `container` holds only the session's own lock, and
+    the runtime reads as absent to it: the sweep every run starts with makes
+    no CLI call, so it never runs `container system stop` under a kernel's
+    verification. With the runtime read as present, the same sweep against a
+    running system listing nothing would stop it."""
     calls = tmp_path / "calls"
     cli = tmp_path / "container"
-    cli.write_text(f'#!/bin/sh\necho "$*" >> {calls}\necho "status running"\n')
+    cli.write_text(
+        f'#!/bin/sh\necho "$*" >> {calls}\ncase "$1" in list) echo "[]" ;; *) echo "status running" ;; esac\n'
+    )
     cli.chmod(0o755)
     monkeypatch.setattr(container, "require", lambda: str(cli))
+    dsn = f"dbname={conftest.TEST_DB}"
     assert not container.present()
-    assert container.reap(f"dbname={conftest.TEST_DB}") == []
+    assert container.reap(dsn) == []
     assert not calls.exists()
+    monkeypatch.setattr(container, "present", lambda: True)
+    container.reap(dsn)
+    assert "system stop" in calls.read_text().splitlines()
 
 
 # -- the lock --------------------------------------------------------------------------------
