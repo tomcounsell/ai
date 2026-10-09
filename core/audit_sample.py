@@ -135,13 +135,13 @@ async def recorded(conn) -> list[dict[str, Any]]:
 
 
 async def _merge_candidates(conn) -> dict[tuple[str, str], str]:
-    """The candidate each merge carried, by task and effect id: the held
-    row's `payload.candidate.sha`, not the merge head, which is the docs
-    head when docs committed."""
+    """The candidate each merge carried, by task and effect id: its intent
+    row's (or a ledger's older held row's) `payload.candidate.sha`, not the
+    merge head, which is the docs head when docs committed."""
     rows = await (
         await conn.execute(
             "SELECT task_id, payload->>'effect_id', payload->'payload'->'candidate'->>'sha' FROM events "
-            "WHERE type = 'effect.held' AND payload->>'action_type' = 'merge'"
+            "WHERE type IN ('effect.held', 'effect.intent') AND payload->>'action_type' = 'merge'"
         )
     ).fetchall()
     return {(r[0], r[1]): r[2] for r in rows if r[2]}
@@ -220,12 +220,13 @@ async def _verdicts(conn) -> list[dict[str, Any]]:
 
 
 async def _merged(conn) -> set[tuple[str, str]]:
-    """The candidates a done merge carried: a merge's held row names its
-    candidate, and an outcome `done` for the same effect is the merge."""
+    """The candidates a done merge carried: a merge's intent row (or a
+    ledger's older held row) names its candidate, and an outcome `done` for
+    the same effect is the merge."""
     rows = await (
         await conn.execute(
             "SELECT h.task_id, h.payload->'payload'->'candidate'->>'sha' FROM events h "
-            "WHERE h.type = 'effect.held' AND h.payload->>'action_type' = 'merge' AND EXISTS ("
+            "WHERE h.type IN ('effect.held', 'effect.intent') AND h.payload->>'action_type' = 'merge' AND EXISTS ("
             "SELECT 1 FROM events o WHERE o.type = 'effect.outcome' AND o.task_id = h.task_id "
             "AND o.payload->>'effect_id' = h.payload->>'effect_id' AND o.payload->>'kind' = 'done')"
         )

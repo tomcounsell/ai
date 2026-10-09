@@ -37,9 +37,7 @@ DROP INDEX IF EXISTS events_one_call_row;
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_effect_row
     ON events (type, (payload->>'effect_id'))
     WHERE type IN ('effect.held', 'effect.intent', 'effect.outcome', 'effect.refused');
-CREATE UNIQUE INDEX IF NOT EXISTS events_approval_used_once
-    ON events ((payload->>'approval_id'))
-    WHERE type = 'effect.intent' AND payload->>'approval_id' IS NOT NULL;
+DROP INDEX IF EXISTS events_approval_used_once;
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_correction_number
     ON events ((payload->>'number'))
     WHERE type = 'correction.recorded';

@@ -1,5 +1,5 @@
 """Replay one item in one arm: build its workspace, start the task, and run
-it with a stand-in for Tom until the task reaches a held merge the
+it with a stand-in for Tom until the task merges a delivery the
 stand-in accepts (or its feedback rounds are spent), stops, or is handed
 to Tom. Writes the record to $VALOR_DEMO/results/<run>.json.
 
@@ -39,22 +39,19 @@ Relative paths are relative to the item file. Keep items and answer keys
 outside every run directory (for example $VALOR_DEMO/items/): a turn's
 sandbox lets it read its own run and nothing else in $VALOR_DEMO.
 
-The task runs at effect ceiling `act` with no governance grant. Every held
-`push_branch` is approved and released by this driver under Tom's standing
-permission for pushes to local bare origins, and only when the push URL in
-the kernel's record of the task (`core workspace show`, the URL the
-kernel's performer pushes to) is the bare origin the kernel provisioned in
-the task's directory. Nothing is read from the turn's workdir, whose git
-config the turn can rewrite. The driver never answers a merge:
-every `merge` effect of the task is skipped, the current one and any a later
-candidate superseded. Any other held effect stays held and the run ends.
+The task runs at effect ceiling `act` with no governance grant. Its pushes
+and its merge go to the bare origin the kernel provisioned in the task's
+directory and leave when requested; as a replay, it has no send performer,
+so a send it asks for is refused. Nothing is read from the turn's workdir,
+whose git config the turn can rewrite.
 
 A task in `merge` is read from its status, in this order: a delivery that
 did not pass ends the run `to tom`; a governance instance not granted, or
 a join of `governance_refused`, exits the driver to await Tom's grant; a
-refused merge ends the run `to tom`; a held merge goes to the stand-in,
-whose accept or spent feedback rounds end the run `held`; otherwise the
-task runs on. A stopped task ends the run `stopped`.
+refused or failed merge ends the run `to tom`; otherwise the task runs on.
+A merged task goes to the stand-in, whose accept or spent feedback rounds
+end the run `merged` and whose feedback runs the task on. A stopped task
+ends the run `stopped`.
 
 Each answer of `core run` ends the step one way. `QUESTION`, `DELIVERED`,
 `STOPPED` and `MERGED` go back to the task's status. `ALREADY RUNNING`
@@ -85,7 +82,6 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
-from core import workspace as kws
 from tests.emulator import workspace as replay_workspace
 from tests.emulator.common import (
     DEMO,
@@ -105,10 +101,6 @@ from tests.emulator.stand_in import stand_in
 
 # The answers of `core run` after which the next step reads the task's status.
 GOES_ON = ("QUESTION", "DELIVERED", "STOPPED", "MERGED")
-PUSH_NOTE = (
-    "Tom's standing permission: pushes to a replay workspace's local bare origin are "
-    "pre-authorized (replay driver)"
-)
 
 
 def load_item(path: str) -> dict:
@@ -137,43 +129,9 @@ def _save(result: dict) -> None:
     tmp.replace(path)
 
 
-def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
-    """Approve and release every held push of the task when the push URL
-    in the kernel's record of the task (`ws["origin"]`, from `core
-    workspace show`) is the bare origin the kernel provisioned in the
-    task's directory. Every merge effect is skipped: the driver never
-    answers a merge. Returns the held effects left alone."""
-    own_origin = ws["origin"] == str(kws.Layout(Path(ws["task_dir"])).origin)
-    left = []
-    for line in core("pending").splitlines():
-        effect_id, owner, action, *_ = line.split()
-        if owner != task_id or action == "merge":
-            continue
-        if action != "push_branch" or not own_origin:
-            left.append(effect_id)
-            log.append(
-                {"at": now(), "step": "held effect left for Tom", "effect": line, "push_url": ws["origin"]}
-            )
-            continue
-        core(
-            "approve",
-            effect_id,
-            "--note",
-            PUSH_NOTE,
-            "--by",
-            "replay driver",
-            "--via",
-            "replay driver",
-            "--role-played",
-        )
-        released = core("release", effect_id)
-        log.append({"at": now(), "step": "push released", "effect_id": effect_id, "outcome": released})
-    return left
-
-
 def merge_case(state: dict) -> str:
-    """What a task in `merge` waits on: `to tom`, `awaiting a grant`,
-    `held`, or `run`."""
+    """What a task in `merge` waits on: `to tom`, `awaiting a grant`, or
+    `run`."""
     if (state.get("delivery") or {}).get("outcome") == "did_not_pass":
         return "to tom"
     join = state.get("join") or {}
@@ -183,10 +141,8 @@ def merge_case(state: dict) -> str:
     ):
         return "awaiting a grant"
     effect = state.get("merge_effect") or {}
-    if effect.get("state") == "refused":
+    if effect.get("state") in ("refused", "failed"):
         return "to tom"
-    if effect.get("state") == "held":
-        return "held"
     return "run"
 
 
@@ -354,8 +310,8 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     the driver, or run the task once."""
     task_id, log, run_name = result["task_id"], result["log"], result["run"]
     state = status(task_id)
-    if state["state"] in ("stopped", "merged"):
-        result["outcome"] = state["state"]
+    if state["state"] == "stopped":
+        result["outcome"] = "stopped"
         return
     case = merge_case(state) if state["state"] == "merge" else None
     if case == "to tom":
@@ -364,7 +320,7 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     if case == "awaiting a grant":
         result["paused"] = "awaiting a grant"
         return
-    if state["state"] == "waiting" or case == "held":
+    if state["state"] in ("waiting", "merged"):
         reply = stand_in(
             task_id,
             item["answer_key"],
@@ -381,7 +337,7 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
             file=sys.stderr,
         )
         if reply["kind"] in ("accept", "cap"):
-            result["outcome"] = "held"
+            result["outcome"] = "merged"
         if reply["kind"] != "nothing":
             return
     try:
@@ -393,9 +349,7 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     log.append({"at": now(), "step": "run", "said": line[:2000]})
     said = line.splitlines()[0] if line else ""
     print(f"{run_name}: {said}", file=sys.stderr)
-    if release_pushes(task_id, ws, log):
-        result["outcome"] = "an effect other than a local push is held for Tom"
-    elif said.startswith("ALREADY RUNNING"):
+    if said.startswith("ALREADY RUNNING"):
         log.append({"at": now(), "step": "waiting on the run lock"})
         wait_run_lock(task_id)
     elif not said.startswith(GOES_ON):

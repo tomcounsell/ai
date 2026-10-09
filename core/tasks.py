@@ -746,7 +746,7 @@ def _digest(rows: list[dict[str, Any]]) -> tuple[dict[str, str | None], dict[str
         elif kind == "turn.ended":
             turns[p["turn_id"]] = p["outcome"]
         elif kind == "effect.held":
-            effects[p["effect_id"]] = "pending"
+            effects[p["effect_id"]] = "released"
         elif kind == "effect.intent":
             effects[p["effect_id"]] = "in_flight"
         elif kind == "effect.outcome":

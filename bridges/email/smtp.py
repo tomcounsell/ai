@@ -63,7 +63,7 @@ def _blobs(payload: dict[str, Any]) -> list[tuple[str, bytes]]:
         except OSError as e:
             raise SendRefused(f"{path}: cannot be read ({e.strerror})") from None
         if hashlib.sha256(data).hexdigest() != f["sha256"]:
-            raise SendRefused(f"{path}: its sha256 is not the one approved")
+            raise SendRefused(f"{path}: its sha256 is not the one requested")
         blobs.append((path.name, data))
     return blobs
 

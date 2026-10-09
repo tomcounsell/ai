@@ -93,11 +93,11 @@ class Expected:
 
 def read_file(entry: dict[str, str]) -> tuple[str, bytes]:
     """The file's bytes, read once and hashed; raises before anything is
-    sent when they are not the bytes Tom approved."""
+    sent when they are not the bytes the request named."""
     path = Path(entry["path"])
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != entry["sha256"]:
-        raise ValueError(f"{path.name} changed after approval")
+        raise ValueError(f"{path.name} changed after it was requested")
     return path.name, data
 
 

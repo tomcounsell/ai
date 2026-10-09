@@ -25,8 +25,8 @@ one. A signal that means nothing in the state, a plan not committed, or a
 candidate on a tree with uncommitted changes goes to `errors`, and the next
 prompt says so. The merge is the kernel's to request: a turn's request for
 one never reaches the broker. An `email.send` naming `reply_to` is made
-the reply to all of that received email before it is requested, so Tom's
-approval covers its final recipients.
+the reply to all of that received email before it is requested, so the
+request names its final recipients.
 
 Every question is a `question.asked` row and its answer a
 `question.answered` row with Tom's provenance, and his feedback a
@@ -779,7 +779,7 @@ def _errors_report(collected: dict[str, Any] | None) -> str:
 
 def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> str:
     """What became of the last turn's effect requests, as the ledger has
-    them now (a held push Tom has since released reads as done), each named
+    them now (a send released to its bridge reads as done once it went), each named
     by its request file and effect id: the request itself is the turn's
     and is not repeated into its next prompt."""
     if not collected or not collected.get("effects"):
@@ -791,7 +791,7 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
             continue
         kind = now.get(e["effect_id"], e["kind"])
         said = {
-            "pending": "held for Tom's approval",
+            "released": "released to its bridge",
             "done": "done",
             "refused": f"refused: {e['error']}",
             "failed": f"failed: {e['error']}",

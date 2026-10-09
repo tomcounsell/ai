@@ -25,16 +25,17 @@ row, or `settings.serve_tick_s` with none) binds every recorded message
 (`intake.bind`), requests the notices each task owes (`notices.owe`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
-(`router.step`), a release Tom asked for, a provisioning, or the
-collection recover could not make; one job per
+(`router.step`), a provisioning, or the collection recover could not
+make; one job per
 task at a time, and one harness job at a time in this process. A turn also
 holds the machine's turn slot (`core/slot.py`), which `python -m core run`
 shares.
 
 A task is stepped again when it moved, or when a row it did not write
-lands on its stream (an answer, a steer, a stop, a release's outcome); a
+lands on its stream (an answer, a steer, a stop, an effect's outcome); a
 step that ends anywhere else waits for such a row, so a failing turn is
-not retried in a loop.
+not retried in a loop. A step that answers `parked` (a merge whose facts
+git could not read, or whose push has no answer yet) parks the task.
 
 A job that cannot start its work (another process holds the task's
 services, or the job raises before the task's own rows record why) parks
@@ -649,10 +650,6 @@ class Kernel:
         if task_id in self.uncollected:
             self._start(task_id, self._recollect(task_id), latest)
             return None
-        released = await self._kernel_release(conn, task_id)
-        if released is not None:
-            self._start(task_id, self._release(task_id, released), latest)
-            return None
         b = await tasks.brief(conn, task_id)
         if b.project and not b.workspace:
             if _provision_due(rows):
@@ -665,18 +662,6 @@ class Kernel:
         elif f.state in HARNESS:
             return (await tasks.background(conn, task_id), latest, task_id)
         return None
-
-    async def _kernel_release(self, conn, task_id: str) -> str | None:
-        row = await (
-            await conn.execute(
-                "SELECT r.payload->>'effect_id' FROM events r WHERE r.task_id = %s AND r.type = 'release.requested' "
-                "AND r.payload->>'owner' = 'kernel' AND NOT EXISTS (SELECT 1 FROM events e "
-                "WHERE e.type IN ('effect.intent', 'effect.outcome', 'effect.refused') "
-                "AND e.payload->>'effect_id' = r.payload->>'effect_id') ORDER BY r.id LIMIT 1",
-                (task_id,),
-            )
-        ).fetchone()
-        return None if row is None else row[0]
 
     def _start(self, task_id: str, coro, latest: int) -> None:
         job = asyncio.create_task(coro)
@@ -700,17 +685,6 @@ class Kernel:
         async with await db.connect(self.dsn) as conn:
             await recollect(conn, task_id, self.performers)
         self.uncollected.discard(task_id)
-
-    async def _release(self, task_id: str, effect_id: str) -> None:
-        async with await db.connect(self.dsn) as conn:
-            built = (
-                self.performers(await tasks.brief(conn, task_id)) if self.performers else broker.Performers()
-            )
-            try:
-                await broker.release(conn, built, effect_id)
-            except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
-                # The broker wrote `effect.refused`; any other failure parks the task.
-                _log(f"release {effect_id} of task {task_id} refused: {exc}")
 
     async def _provision(self, task_id: str, name: str | None) -> None:
         """Provision a task started by message, off the loop. A failure is a
@@ -802,6 +776,10 @@ class Kernel:
         if out.get("preempted"):
             # Nothing moved: the step is ready again, behind the foreground.
             self.seen.pop(task_id, None)
+        elif out.get("status") == "parked":
+            # Asked again on the next row or the next `serve_tick_s` wake.
+            self.seen.pop(task_id, None)
+            self.parked[task_id] = latest
         elif out.get("status") != "moved":
             # Seen: the rows the step read, and the rows it wrote up to the
             # first another writer added while it ran, which steps it again.

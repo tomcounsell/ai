@@ -1,5 +1,5 @@
 """A stand-in for Tom: answers a replay task's open question, or reviews its
-held merge, strictly from an answer key, and records the reply in the
+merged delivery, strictly from an answer key, and records the reply in the
 ledger as role-played.
 
     .venv/bin/python -m tests.emulator.stand_in TASK_ID ANSWER_KEY EMULATOR_TASK \
@@ -8,14 +8,14 @@ ledger as role-played.
 The answer key is Tom's recorded intent for the request, in his words where
 there are any (a Notion card, the questions he answered, the review he gave).
 The stand-in answers briefly, reveals only what was asked, and says "Your
-call." where the key is silent. At a held merge it accepts, or gives one
+call." where the key is silent. At a merged delivery it accepts, or gives one
 round of project-manager feedback naming the single most important
 divergence from the key, at most `--max-feedback` rounds per task; after
 that it records nothing and reports `cap`.
 
 Its model is the `frontier` seat. Its calls go through the kernel's
 gateway and are metered on the run's emulator task (`common.Meter`). It
-reads the delivery from the task's kernel mirror, at the held merge's head,
+reads the delivery from the task's kernel mirror, at its merge's head,
 never from the turn's workdir. The reply goes into the ledger through
 `python -m core answer|feedback --role-played`, by "stand-in (<model>)".
 
@@ -94,8 +94,8 @@ def stand_in(
     max_feedback: int = 2,
     workdir: Path | None = None,
 ) -> dict:
-    """Reply to whatever the task waits on: its open question, or its held
-    merge. `base` is the commit the delivery is diffed against; `mirror` is
+    """Reply to whatever the task waits on: its open question, or its merged
+    delivery. `base` is the commit the delivery is diffed against; `mirror` is
     the task's kernel mirror; `workdir` holds each call's fresh config."""
     state = status(task_id)
     brief = asyncio.run(_brief(task_id))
@@ -119,8 +119,7 @@ def stand_in(
         core("answer", task_id, text, "--by", by, "--role-played")
         return {"kind": "answer", "text": text, "reason": None}
 
-    effect = state.get("merge_effect") or {}
-    if state["state"] == "merge" and effect.get("state") == "held":
+    if state["state"] == "merged":
         rounds = sum(1 for a in state["attention"] if a["kind"] == "feedback")
         if rounds >= max_feedback:
             return {"kind": "cap", "text": None, "reason": f"{rounds} feedback rounds used"}

@@ -13,7 +13,7 @@ correctness and tests, and simplicity, and lists the divergences from the
 reference. The verdict goes into the result file under `judge` (an earlier
 verdict moves to `judge_history`).
 
-The final commit is the result's `final_rev` (the held merge's head, else
+The final commit is the result's `final_rev` (the merge's head, else
 the candidate). Everything is read from the task's kernel mirror, a
 repository no turn writes, never from the turn's workdir. The candidate's
 diff is the whole diff, as the baseline judge's was: nothing a turn chose

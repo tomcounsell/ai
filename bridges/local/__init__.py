@@ -5,7 +5,7 @@ The page (`chat.html`, `chat.js`, and the vendored renderer and
 sanitizer in `vendor/`) polls `GET /log` and posts Tom's
 messages to `POST /send`; both carry the token from the mode-600 file
 `settings.local_tokenfile` in the `X-Valor-Token` header. The ledger is
-the platform: a notice or an approved `local.send_message` is shown once it
+the platform: a notice or a requested `local.send_message` is shown once it
 has a `notice.sent` or `effect.outcome` row, so sending is a ledger write
 and `lookup` returns what `perform` returns. Governed by
 `docs/bridges/local.md`.

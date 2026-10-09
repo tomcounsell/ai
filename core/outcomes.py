@@ -5,7 +5,7 @@ work (`delivery.used`, written only by `python -m core used`).
 
 What a merge landed (`landed`: the head it came after, its own commits, and
 the paths they change) is recorded by the broker on the merge's
-`effect.intent` at release, from the kernel mirror (`landed`), so rework is
+`effect.intent` at request, from the kernel mirror (`landed`), so rework is
 a fold over rows (`done_merges`, `rework`). Git is read only for revert
 and on-branch, on the status surfaces and by the audit scores
 (`core/audit_sample.py`, which label a reverted merge's candidate
@@ -49,12 +49,13 @@ def _provenance(p: dict[str, Any]) -> dict[str, Any]:
 
 def merges(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One task's merges, in outcome order: each `effect.outcome` with
-    `kind: done` whose effect is an `effect.held` with `action_type:
-    merge`. Each carries its `effect_id`, `head_sha`, `url`, and
-    `target_branch` (from the held row), `merged_at` and `event_id` (the
+    `kind: done` whose effect's first row carrying the action (its
+    `effect.intent`, or the `effect.held` a ledger's older merge has) has
+    `action_type: merge`. Each carries its `effect_id`, `head_sha`, `url`,
+    and `target_branch` (from that row), `merged_at` and `event_id` (the
     outcome row), `landed` (from the intent; None for a merge recorded
     before it was), and `delivery_event_id`, the latest `task.delivered`
-    before its `effect.held`. A failed merge is not one."""
+    before that row. A failed merge is not one."""
     held: dict[str, dict[str, Any]] = {}
     intents: dict[str, dict[str, Any]] = {}
     delivered = None
@@ -63,9 +64,9 @@ def merges(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         kind, p = row["type"], row["payload"]
         if kind == "task.delivered":
             delivered = row["id"]
-        elif kind == "effect.held" and p.get("action_type") == "merge":
-            held[p["effect_id"]] = {"payload": p.get("payload") or {}, "delivery_event_id": delivered}
-        elif kind == "effect.intent":
+        if kind in ("effect.held", "effect.intent") and p.get("action_type") == "merge":
+            held.setdefault(p["effect_id"], {"payload": p.get("payload") or {}, "delivery_event_id": delivered})
+        if kind == "effect.intent":
             intents[p.get("effect_id")] = p
         elif kind == "effect.outcome" and p.get("kind") == "done" and p.get("effect_id") in held:
             h = held[p["effect_id"]]
@@ -145,8 +146,10 @@ def _feedback(rows: list[dict[str, Any]], merge: dict[str, Any]) -> list[dict[st
 
 async def done_merges(conn, url: str | None = None, branch: str | None = None) -> list[dict[str, Any]]:
     """Every task's done merges, in outcome order, from one query: each
-    `effect.held` merge joined to its `effect.outcome` with `kind: done` and
-    its `effect.intent`, optionally only those to `url` and `branch`. Each
+    merge (its first row carrying the action: the `effect.intent`, or the
+    `effect.held` a ledger's older merge has) joined to its `effect.outcome`
+    with `kind: done` and its `effect.intent`, optionally only those to
+    `url` and `branch`. Each
     as `task_id`, `effect_id`, `head_sha`, `url`, `target_branch`,
     `merged_at`, `event_id` (the outcome row), and `landed`."""
     where = ""
@@ -167,7 +170,11 @@ async def done_merges(conn, url: str | None = None, branch: str | None = None) -
             "AND o.payload->>'effect_id' = h.payload->>'effect_id' AND o.payload->>'kind' = 'done' "
             "LEFT JOIN events i ON i.task_id = h.task_id AND i.type = 'effect.intent' "
             "AND i.payload->>'effect_id' = h.payload->>'effect_id' "
-            "WHERE h.type = 'effect.held' AND h.payload->>'action_type' = 'merge'" + where + " ORDER BY o.id",
+            "WHERE h.type IN ('effect.held', 'effect.intent') AND h.payload->>'action_type' = 'merge' "
+            "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = h.task_id AND e.id < h.id "
+            "AND e.type IN ('effect.held', 'effect.intent') AND e.payload->>'effect_id' = h.payload->>'effect_id')"
+            + where
+            + " ORDER BY o.id",
             args,
         )
         found = await cur.fetchall()

@@ -34,7 +34,7 @@ name drivers; a driver's program comes from config. So every call:
   gc, the `ext::` transport, and push's tag following, submodule recursion,
   and signing off on its command line, which overrides the repository's
   config; a push also passes `--no-follow-tags --no-recurse-submodules
-  --no-signed`, so it sends exactly the one commit Tom's approval binds;
+  --no-signed`, so it sends exactly the one commit the request names;
 - on a call carrying the GitHub credential, also pins
   `http.followRedirects=false` and an empty `http.proxy`, at the general
   scope and the URL's own (`credential_pins`), so the header reaches the

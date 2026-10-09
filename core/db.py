@@ -37,7 +37,8 @@ def migrate(
     passfile: str | None = None,
 ) -> str:
     """Create the kernel role and the database if missing, apply `schema`
-    as the owner, and record correction 1 if the ledger has none. `fresh`
+    as the owner, record correction 1 if the ledger has none, and refuse
+    every effect still held for an approval (`_refuse_held`). `fresh`
     drops the database first; tests use it, since the ledger itself can
     never be emptied. Touches no role password, no password file, and no
     `pg_hba.conf` (that is `credentials.secure_login`). Returns the kernel
@@ -59,6 +60,7 @@ def migrate(
         verdict_constraint(conn)
         _seed_correction_one(conn)
         guards.seed(conn)
+        _refuse_held(conn)
     return settings.dsn(database=database, **where)
 
 
@@ -121,3 +123,41 @@ def _seed_correction_one(conn: psycopg.Connection) -> None:
                     ),
                 ),
             )
+
+
+HELD_REASON = "held for an approval the kernel no longer takes; request it again"
+
+
+def _refuse_held(conn: psycopg.Connection) -> int:
+    """One `effect.refused`, `at: migrate`, for each `effect.held` with no
+    intent, outcome, or refusal and no `release.requested` naming a bridge
+    `owner` (a bridge's outbox releases that one). It carries the held row's
+    action, so a refused merge is still the task's merge effect and
+    `verdicts.ensure_merge` requests it again. Each is written under its
+    task's lock, the selector read again inside it, so a second run writes
+    nothing. Returns how many it wrote."""
+    select = (
+        "SELECT h.task_id, h.payload FROM events h WHERE h.type = 'effect.held' {} AND NOT EXISTS ("
+        "SELECT 1 FROM events e WHERE e.payload->>'effect_id' = h.payload->>'effect_id' "
+        "AND e.type IN ('effect.intent', 'effect.outcome', 'effect.refused')) AND NOT EXISTS ("
+        "SELECT 1 FROM events r WHERE r.type = 'release.requested' "
+        "AND r.payload->>'effect_id' = h.payload->>'effect_id' AND r.payload->>'owner' IS NOT NULL) "
+        "ORDER BY h.id"
+    )
+    written = 0
+    found = conn.execute(select.format("")).fetchall()
+    conn.commit()  # each refusal below is its own transaction
+    for task_id, held in found:
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"task:{task_id}",))
+            still = conn.execute(
+                select.format("AND h.payload->>'effect_id' = %s"), (held["effect_id"],)
+            ).fetchone()
+            if still is None:
+                continue
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES (%s, 'effect.refused', %s)",
+                (task_id, Jsonb({**held, "reason": HELD_REASON, "at": "migrate"})),
+            )
+            written += 1
+    return written

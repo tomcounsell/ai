@@ -2,15 +2,16 @@
 
 A bridge (Telegram, email) is a process of its own. It receives messages
 and records them through `core.intake`, and it sends what the outbox
-yields: a release Tom approved, or an operator notice. It decides nothing:
-the kernel binds every message, holds every send for Tom, and checks every
-release. A bridge imports `core.bridge`, `core.intake`, `core.broker`,
+yields: a send a task requested, or an operator notice. It decides
+nothing: the kernel binds every message, refuses or releases every send at
+request, and checks every release. A bridge imports `core.bridge`, `core.intake`, `core.broker`,
 `core.settings`, `core.db`, and `core.credentials`, and nothing else from
 `core/`.
 
 The kernel declares each channel's send type here (`DECLARED`): its class,
 the usage line a turn reads, and what refuses it. Every task's Performers holds
-them, so a turn can request a send and `request` holds it for Tom. The
+them, so a turn can request a send and `request` releases it to its
+channel's bridge. The
 bridge supplies only how to send (`perform`) and how to find a send that
 happened (`lookup`); `serve` joins the two into the performer the broker
 runs.
@@ -19,8 +20,8 @@ Each task's declared sends carry its workspace. A file a send names must
 be a regular file there, reached through no link; the kernel takes its
 size from the opened file's `fstat` and never reads it, and a file that is
 missing, a link, or outside the workspace gets one answer, so a refusal
-says nothing about a path outside. Whether the bytes are what Tom
-approved is the bridge's: `perform` reads each file once and refuses one
+says nothing about a path outside. Whether the bytes are the ones the
+request named is the bridge's: `perform` reads each file once and refuses one
 whose sha256 differs.
 
 The limits (`LIMITS`) are protocol facts, so the kernel refuses an
@@ -168,7 +169,7 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
     the channel's size function is set. A refusal names the file by its
     place in `files`, not its path. The kernel never reads a file a turn
     names: one that is missing, a link, or outside the workspace gets the
-    same answer, and whether its bytes are what Tom approved is the bridge's
+    same answer, and whether its bytes are the ones requested is the bridge's
     `perform`."""
     limits = LIMITS[channel]
     files = action.payload.get("files")
@@ -254,7 +255,7 @@ DECLARED: dict[str, Declared] = {
         usage=(
             '`telegram.send_message`: target the chat id as text, payload `{"text": "...", '
             '"reply_to": null, "topic_id": null, "files": [{"path": "...", "sha256": "..."}]}`, each path absolute '
-            "and inside your workspace; sent once Tom approves."
+            "and inside your workspace; it leaves when you request it."
         ),
         owner="telegram",
         check=_refuse_telegram,
@@ -268,7 +269,7 @@ DECLARED: dict[str, Declared] = {
             '"files": [{"path": "...", "sha256": "..."}]}`, each path absolute and inside your workspace; '
             'or, to reply to all of a received email, payload `{"reply_to": "<its message id>", "body": "...", '
             '"files": [...]}` with any target, and the recipients, subject, and threading are filled in from it; '
-            "sent once Tom approves."
+            "it leaves when you request it."
         ),
         owner="email",
         check=_refuse_email,
@@ -278,7 +279,7 @@ DECLARED: dict[str, Declared] = {
         effect_class="act",
         usage=(
             '`local.send_message`: target `local`, payload `{"text": "..."}`; shown on Tom\'s local chat page '
-            "once Tom approves."
+            "when you request it."
         ),
         owner="local",
         check=_refuse_local,
@@ -365,7 +366,7 @@ class Bridge(Protocol):
 
 class Outbox:
     """What the bridge sends, from the ledger. Iterating yields, oldest
-    first, every release Tom approved for this channel with no intent,
+    first, every release requested for this channel with no intent,
     outcome, or refusal, then every notice on this channel not yet sent;
     then waits for a row of either kind, or `settings.serve_tick_s`, and on
     that wake reconciles this channel's dangling sends, calls the bridge's
@@ -473,7 +474,7 @@ class Outbox:
         side by side; the outbox's own is used when None."""
         try:
             return await broker.release(conn or self.perform_conn, self.performers, item.effect_id)
-        except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
+        except (broker.Refused, tasks.TaskStopped) as exc:
             return broker.Outcome(item.effect_id, "refused", error=str(exc) or type(exc).__name__)
 
     async def sent(self, item: NoticeDue, sent: list[dict[str, str]]) -> None:

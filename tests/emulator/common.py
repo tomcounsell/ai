@@ -294,13 +294,13 @@ def rows(task_id: str, *, dsn: str | None = None) -> list[dict]:
 
 
 def review_rev(task_id: str, state: dict, *, dsn: str | None = None) -> str | None:
-    """The commit a delivery is read at: the held merge's `head_sha` (the
-    payload of the task's `effect.held` row for `merge_effect`), else the
+    """The commit a delivery is read at: the done merge's `head_sha` (the
+    payload of the task's `effect.intent` row for `merge_effect`), else the
     current candidate."""
     effect = state.get("merge_effect")
-    if effect and effect.get("state") == "held":
+    if effect and effect.get("state") == "done":
         for r in rows(task_id, dsn=dsn):
-            if r["type"] == "effect.held" and r["payload"].get("effect_id") == effect["effect_id"]:
+            if r["type"] == "effect.intent" and r["payload"].get("effect_id") == effect["effect_id"]:
                 return r["payload"]["payload"]["head_sha"]
     candidate = state.get("candidate")
     return candidate["sha"] if candidate else None

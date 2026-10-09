@@ -617,6 +617,8 @@ def _effects(rows: list[dict]) -> str:
             effects[p["effect_id"]] = {**p, "state": "held" if kind == "effect.held" else "refused"}
         elif kind == "effect.intent" and p.get("effect_id") in effects:
             effects[p["effect_id"]]["state"] = "released"
+        elif kind == "effect.intent":
+            effects[p["effect_id"]] = {**p, "state": "released"}
         elif kind == "effect.outcome" and p.get("effect_id") in effects:
             effects[p["effect_id"]]["state"] = f"released, {p.get('kind')}"
     out = []

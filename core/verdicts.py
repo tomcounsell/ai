@@ -524,11 +524,14 @@ def merge_action(f: machine.Fold, b: tasks.Brief) -> broker.Action | None:
 
 async def ensure_merge(conn, performers: broker.Performers, task_id: str) -> broker.Outcome | None:
     """Request the merge for a task in `merge` whose current candidate's
-    delivery passed (or passed with gaps) and has no merge effect yet.
-    Idempotent: the broker returns a held effect for the same payload. It
-    requests nothing while a governance instance awaits Tom's tap, nor again
-    after a refusal of the same payload unless Tom has granted something
-    since, so runs never pile refusals up."""
+    delivery passed (or passed with gaps) and whose merge is not in flight
+    or done. It requests nothing while a governance instance awaits Tom's
+    tap. The request carries `merge:<payload digest>:<grants>` as its
+    `request_id`, so the broker answers a second request for the same
+    payload and grants with the first effect's standing (refused, failed,
+    in flight) under the task's lock: runs never pile refusals up or push
+    a failed merge again, and two racing steps make one intent. A new head
+    or a new grant is a fresh request."""
     f = machine.fold(await ledger.read(conn, task_id))
     if f.legacy or f.calibration or f.state is not State.MERGE or f.candidate is None:
         return None
@@ -541,13 +544,7 @@ async def ensure_merge(conn, performers: broker.Performers, task_id: str) -> bro
     if action is None:
         return None
     effect = f.merge_effect
-    if effect and effect["state"] in ("held", "in_flight", "done"):
+    if effect and effect["state"] in ("in_flight", "done"):
         return None
-    if (
-        effect
-        and effect["state"] == "refused"
-        and effect["payload_sha256"] == ledger.digest(action.payload)
-        and effect["grants"] == len(f.granted)
-    ):
-        return None
-    return await broker.request(conn, performers, task_id, action)
+    request_id = f"merge:{ledger.digest(action.payload)}:{len(f.granted)}"
+    return await broker.request(conn, performers, task_id, action, request_id=request_id)

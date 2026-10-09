@@ -13,7 +13,7 @@ start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
                                `--parent` starts a child of that task, its
                                ceiling the parent's unless `--ceiling` asks
                                for one at or below it (default without a
-                               parent: propose).
+                               parent: act).
                                The task starts in judge. The merge lands on
                                `--target-branch` (default: the branch origin's
                                HEAD names) at origin's URL as it is now
@@ -98,11 +98,6 @@ used TASK_ID --by B [--delivery EVENT_ID] [--note TEXT] [--via V] [--role-played
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task and every task under it now,
                                wherever their turns run
-pending                        act-class effects held for Tom
-approve EFFECT_ID --note TEXT [--by B] [--via V] [--role-played]
-                               Tom's tap on one held effect
-release EFFECT_ID              perform a held effect Tom approved (a send is
-                               handed to its channel's bridge)
 correct TEXT [--by] [--via]    record Tom's next correction (global, direct)
 corrections                    every correction, in force for every turn
 audit                          the reviewed candidates with no label from Tom,
@@ -126,7 +121,7 @@ backup [--plist]               dump the kernel database to the backup disk and
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
-This module is the composition root: `run`, `verdict`, `release`, and
+This module is the composition root: `run`, `verdict`, and
 `calibrate` wire the Claude Code harness, the judgement legs, the runners,
 and the workspace performers into the kernel. Nothing else in `core/`
 imports outside it.
@@ -179,7 +174,9 @@ from core.settings import (
 
 def _performers(b: tasks.Brief) -> broker.Performers:
     """The task's own performers, built from its Brief, and every channel's
-    declared send (`core/bridge.py`). push_branch goes to the task's own bare
+    declared send (`core/bridge.py`). A replay task (`Brief.replay`) gets the
+    kernel performers only, so a send it asks for is refused `no performer`.
+    push_branch goes to the task's own bare
     origin; the merge pushes to the Brief's origin URL, from the kernel mirror
     with the GitHub credential when the kernel provisioned the task, and from
     the workspace with none otherwise. A declared send sizes its files in the
@@ -198,6 +195,8 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
+    if b.replay:
+        return broker.Performers(*kernel)
     return broker.Performers(*kernel, *declared_performers(b.workspace))
 
 
@@ -290,13 +289,6 @@ def _status_line(task_id: str, out: dict) -> str:
             lines.append(
                 f"\ngovernance awaiting Tom: instance {i['id']} in {i['path']}\n"
                 f'  grant with: python -m core grant {task_id} {i["id"]} --note "..."'
-            )
-        held = [e for e, s in state.get("effects", {}).items() if s == "pending"]
-        for effect_id in held:
-            lines.append(
-                f"\nheld for Tom: effect {effect_id}\n"
-                f'  approve with: python -m core approve {effect_id} --note "..."\n'
-                f"  then:         python -m core release {effect_id}"
             )
         return "\n".join(lines)
     if status == "calibration task":
@@ -400,7 +392,7 @@ async def _start_task(conn, args, **fields) -> str:
             role_played=args.role_played,
             **fields,
         )
-    brief = tasks.Brief(max_effect_class=args.ceiling or "propose", **fields)
+    brief = tasks.Brief(max_effect_class=args.ceiling or "act", **fields)
     return await tasks.start(conn, brief, marker=marker, by=args.by, role_played=args.role_played)
 
 
@@ -777,41 +769,6 @@ async def _run(args) -> None:
                 print("already stopped")
             else:
                 print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
-        elif args.command == "pending":
-            for effect in await broker.pending(conn):
-                print(
-                    f"{effect['effect_id']}  {effect['task_id']}  {effect['action_type']} -> {effect['target']}"
-                    f"  {json.dumps(effect['payload'], sort_keys=True)}"
-                )
-        elif args.command == "approve":
-            print(
-                await broker.approve(
-                    conn,
-                    args.effect_id,
-                    note=args.note,
-                    by=args.by,
-                    via=args.via,
-                    role_played=args.role_played,
-                )
-            )
-        elif args.command == "release":
-            row = await (
-                await conn.execute(
-                    "SELECT task_id FROM events WHERE type = 'effect.held' AND payload->>'effect_id' = %s",
-                    (args.effect_id,),
-                )
-            ).fetchone()
-            if row is None:
-                raise SystemExit(f"no held effect {args.effect_id}")
-            performers = _performers(await tasks.brief(conn, row[0]))
-            try:
-                outcome = await broker.release(conn, performers, args.effect_id)
-            except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
-                raise SystemExit(f"release refused: {exc}") from None
-            print(
-                f"{outcome.kind} {json.dumps(outcome.result, sort_keys=True)}"
-                + (f" {outcome.error}" if outcome.error else "")
-            )
         elif args.command == "merge-target":
             print(await _merge_target(conn, args))
         elif args.command == "correct":
@@ -1063,14 +1020,6 @@ def main() -> None:
     stop = sub.add_parser("stop")
     stop.add_argument("task_id")
     stop.add_argument("--reason", default="stopped from the command line")
-    sub.add_parser("pending")
-    approve = sub.add_parser("approve")
-    approve.add_argument("effect_id")
-    approve.add_argument("--note", required=True)
-    approve.add_argument("--by", default="tom")
-    approve.add_argument("--via", default="the command line")
-    approve.add_argument("--role-played", action="store_true")
-    sub.add_parser("release").add_argument("effect_id")
     correct = sub.add_parser("correct")
     correct.add_argument("text")
     correct.add_argument("--by", default="tom")

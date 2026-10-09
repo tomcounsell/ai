@@ -2,8 +2,9 @@
 
 A bridge records each message it receives with `receive`, on the
 channel's stream, then acknowledges it to the platform. The kernel binds
-each recorded message (`bind`) to what it means: an answer, feedback, an
-approval, a stop, a steer of a running task, or a new task. A bridge holds
+each recorded message (`bind`) to what it means: an answer, feedback, a
+stop, a steer of a running task, or a new task. A task a message starts
+runs at ceiling `act`. A bridge holds
 no binding logic.
 
 `verified` is set here, not by the bridge: every Telegram record is
@@ -24,19 +25,18 @@ The binding table, first match wins:
 | The record | Bound as |
 | --- | --- |
 | Not verified, or not from the operator | `none` |
+| A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
 | A reply to a merged or stopped task | `none`, with a notice |
 | A Telegram or local reply to a task's notice or send, exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
 | A reply to the delivered notice, task in `merge` | `feedback` |
-| A Telegram or local reply to an effect notice, exactly `approve` | `approve` |
-| The same, the effect already released or done | `none`, with a notice |
 | Any other reply to a task's notice or send | `steer` |
 | Not a reply, with text or files | `start` |
 | Not a reply, empty | `none` |
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
-and owes a notice; by email, `approve` and `stop` always steer, and the
-notice says they come by reply on the operator channel. A binding notice
+and owes a notice; by email, `stop` always steers, and the notice says it
+comes by reply on the operator channel. A binding notice
 goes back in reply in the message's own chat on Telegram and the local
 chat; about an email, it goes to the operator channel and chat. A binding that raises is rolled back
 and bound `none` with the error, owing a notice; later messages never wait
@@ -94,8 +94,8 @@ def _verified_local(inbound: Inbound) -> bool:
 
 VERIFY = {"telegram": _verified_telegram, "email": _verified_email, "local": _verified_local}
 
-# The channels where Tom replies to a message, so `approve` and `stop`
-# bind and a binding notice goes back in reply.
+# The channels where Tom replies to a message, so `stop` binds and a
+# binding notice goes back in reply.
 REPLIES = ("telegram", "local")
 # The local chat page's one chat.
 LOCAL_CHAT = "local"
@@ -362,16 +362,27 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     await ledger.lock(conn, f"task:{task_id}")
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
-    if f.state in (State.MERGED, State.STOPPED):
-        as_ = await _bound(conn, p, task_id, "none")
-        await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
-        return as_
     text = (p.get("text") or "").strip()
     exact = text.casefold()
     replies = p["channel"] in REPLIES
     via = p["channel"]
     notice = (replied.get("notice") or {}) if "notice" in replied else {}
     kind, about = notice.get("kind"), notice.get("about_key") or ""
+    merge = f.merge_effect or {}
+    if (
+        kind == "report"
+        and f.state is State.MERGED
+        and about == f"report:{merge.get('effect_id')}"
+        and text
+        and not _near(text, "stop")
+    ):
+        as_ = await _bound(conn, p, task_id, "feedback")
+        await session.feedback(conn, task_id, text, by="tom", via=via)
+        return as_
+    if f.state in (State.MERGED, State.STOPPED):
+        as_ = await _bound(conn, p, task_id, "none")
+        await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
+        return as_
 
     if replies and exact == "stop":
         as_ = await _bound(conn, p, task_id, "stop")
@@ -385,8 +396,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         as_ = await _bound(conn, p, task_id, "feedback")
         await session.feedback(conn, task_id, text, by="tom", via=via)
         return as_
-    if replies and exact == "approve" and kind == "effect":
-        return await _approve(conn, p, task_id, about.removeprefix("effect:"))
 
     as_ = await _bound(conn, p, task_id, "steer")
     await ledger.append(
@@ -403,21 +412,14 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             "provenance": ledger.provenance("tom", via, False),
         },
     )
-    for word in ("approve", "stop"):
-        if _near(text, word):
-            said = (
-                f"Not {'an approval' if word == 'approve' else 'a stop'}; reply `{word}`. "
-                "Your message steers the task."
-                if replies
-                else f"Approvals and stops come by reply {_where()}; your email steers the task."
-            )
-            await _notice(conn, task_id, p, said)
-            break
-    if notices._held(rows):
-        await _notice(
-            conn, task_id, p, f"Task {task_id} is waiting on approval; reply `approve` or `stop`.", ":waiting"
+    if _near(text, "stop"):
+        said = (
+            "Not a stop; reply `stop`. Your message steers the task."
+            if replies
+            else f"Stops come by reply {_where()}; your email steers the task."
         )
-    elif f.state is State.MERGE:
+        await _notice(conn, task_id, p, said)
+    if f.state is State.MERGE and notices._delivered_owed(f, rows) is not None:
         await _notice(
             conn,
             task_id,
@@ -425,42 +427,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             f"Task {task_id} is in merge; reply to the delivered notice to give feedback.",
             ":waiting",
         )
-    return as_
-
-
-async def _approve(conn, p: dict[str, Any], task_id: str, effect_id: str) -> str | None:
-    from core import broker
-    from core.bridge import DECLARED
-
-    standing = {
-        r[0]
-        for r in await (
-            await conn.execute(
-                "SELECT type FROM events WHERE payload->>'effect_id' = %s AND type IN "
-                "('release.requested', 'effect.intent', 'effect.outcome', 'effect.refused')",
-                (effect_id,),
-            )
-        ).fetchall()
-    }
-    if standing:
-        as_ = await _bound(conn, p, task_id, "none")
-        said = "already done" if standing & {"effect.outcome", "effect.refused"} else "already released"
-        await _notice(conn, task_id, p, f"Effect {effect_id} is {said}; nothing was done.")
-        return as_
-    as_ = await _bound(conn, p, task_id, "approve")
-    held = await broker._held(conn, effect_id)
-    approval_id = await broker.approve(conn, effect_id, note=p.get("text") or "", by="tom", via=p["channel"])
-    declared = DECLARED.get(held["payload"]["action_type"])
-    await ledger.append(
-        conn,
-        task_id,
-        "release.requested",
-        {
-            "effect_id": effect_id,
-            "approval_id": approval_id,
-            "owner": declared.owner if declared else "kernel",
-        },
-    )
     return as_
 
 
@@ -493,6 +459,7 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
         model=model,
         harness_name=harness_name,
         project={"name": spec.name} if spec else None,
+        max_effect_class="act",
     )
     as_ = await _bound(conn, p, brief.id, "start")
     await tasks.start(conn, brief, by="tom", via=p["channel"])

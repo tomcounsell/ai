@@ -8,7 +8,6 @@ write a row.
                        and what came after its merges
     /task/ID           one task: what came after each merge, its status,
                        and its ledger
-    /pending           the effects held for Tom
     /attention         the attention log across tasks
     /routines          each routine: period spending, last run, runs
     /audit             the audit list (blind: no verdict, no count by
@@ -25,7 +24,7 @@ from typing import Any
 import psycopg
 from aiohttp import web
 
-from core import audit_sample, broker, ledger, outcomes, routines, tasks
+from core import audit_sample, ledger, outcomes, routines, tasks
 from core.settings import settings
 
 STYLE = (
@@ -61,7 +60,6 @@ def layout(title: str, body: str) -> web.Response:
         f'<a href="{href}">{name}</a>'
         for href, name in (
             ("/", "tasks"),
-            ("/pending", "pending"),
             ("/attention", "attention"),
             ("/routines", "routines"),
             ("/audit", "audit"),
@@ -199,26 +197,6 @@ async def task_page(conn, task_id: str) -> web.Response:
     return layout(f"Task {task_id}", body)
 
 
-async def pending_page(conn) -> web.Response:
-    held = await broker.pending(conn)
-    return layout(
-        "Pending approvals",
-        table(
-            ["task", "effect", "action", "target", "class"],
-            [
-                [
-                    link(h["task_id"]),
-                    esc(h.get("effect_id")),
-                    esc(h.get("action_type")),
-                    esc(h.get("target")),
-                    esc(h.get("effect_class")),
-                ]
-                for h in held
-            ],
-        ),
-    )
-
-
 async def attention_page(conn) -> web.Response:
     entries = await tasks.attention_log(conn)
     return layout(
@@ -317,7 +295,6 @@ def make_app(dsn: str | None = None) -> web.Application:
     for path, page in (
         ("/", tasks_page),
         ("/task/{task_id}", task_page),
-        ("/pending", pending_page),
         ("/attention", attention_page),
         ("/routines", routines_page),
         ("/audit", audit_page),

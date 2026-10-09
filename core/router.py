@@ -74,8 +74,10 @@ async def run(
     `performers` builds the task's own from its Brief (the composition
     root's factory); without it the task has none.
     Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
-    runner`, `legacy`, `calibration task`, `already running`, `lock lost`, or what a runner
-    returned: `failed`) and the task's state."""
+    runner`, `legacy`, `calibration task`, `already running`, `lock lost`,
+    `parked` (a merge whose facts git could not read, or whose push has no
+    answer yet), or what a runner returned: `failed`) and the task's
+    state."""
     dsn = dsn or gateway.dsn
     services = await _Services.open(dsn, task_id)
     try:
@@ -354,11 +356,17 @@ async def _once(
         if f.state in SETTLED:
             return {"status": SETTLED[f.state], "state": await tasks.status(conn, task_id)}
         if f.state is State.MERGE:
-            # A release that died mid-merge: settle it from the target, then fold again.
+            # A merge that died mid-push: settle it from the target, then fold again.
             dangling = f.merge_effect and f.merge_effect["state"] == "in_flight"
             if dangling and await broker.reconcile(conn, performers, f.merge_effect["effect_id"]) is not None:
                 return {"status": "moved"}
-            await verdicts.ensure_merge(conn, performers, task_id)
+            asked = await verdicts.ensure_merge(conn, performers, task_id)
+            if asked is not None and asked.kind == "done":
+                return {"status": "moved"}  # merged: the next step settles it
+            if dangling or (asked is not None and asked.kind == "unknown"):
+                # Git could not say, or the merge is in flight with no
+                # answer yet: asked again on the next row or tick.
+                return {"status": "parked", "state": await tasks.status(conn, task_id)}
             return {"status": "delivered", "state": await tasks.status(conn, task_id)}
     ran["state"] = f.state.value
     ctx = Context(gateway, task_id, dsn, alive, performers=performers)

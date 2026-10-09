@@ -14,10 +14,10 @@ what lets them write a remote the turn cannot. `lookup` asks the remote what
 the branch holds, which is how a dangling intent is reconciled.
 
 `push_branch` names its branch as its target and its commit as `head_sha`,
-so the digest Tom approves binds both, and it refuses the task's target
+so the request's digest binds both, and it refuses the task's target
 branch: the only way onto that branch is the merge and its predicate.
 `merge` is offered to no turn; its payload carries the URL, the target
-branch, the head, and the candidate, so Tom's approval binds all four, and
+branch, the head, and the candidate, so the request binds all four, and
 `Merge` is built from the task's Brief, so it refuses a payload naming any
 other URL or branch. A merge to a remote (not a local path) lands only on a
 pair in the merge-target list (`core.targets`), never on the branch the
@@ -43,7 +43,7 @@ class PushBranch:
     effect_class = "act"
     usage = (
         '`push_branch`: target the branch name, payload `{"head_sha": "<full sha>"}`; pushes that '
-        "commit to that branch of the task's origin once Tom approves. Not the branch merges land on."
+        "commit to that branch of the task's origin when you request it. Not the branch merges land on."
     )
 
     def __init__(self, workspace: str | Path, url: str | None = None, protected: str | None = None):
@@ -52,7 +52,7 @@ class PushBranch:
         self.protected = protected
 
     async def refuse(self, conn, action) -> str | None:
-        """Checked at request and again at release, before the intent."""
+        """Checked at request, before the intent."""
         if self.protected and action.target == self.protected:
             return f"{self.protected} is the task's target branch; only the merge lands there"
         return await git.threaded(self._rewrites)

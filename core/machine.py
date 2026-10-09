@@ -564,21 +564,28 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
 
 
 def _merge_effect(f: Fold, kind: str, p: dict[str, Any], entry: dict[str, Any]) -> str | None:
-    if kind in ("effect.held", "effect.refused"):
+    """A merge effect registers from the row that first carries its action:
+    `effect.refused`, `effect.intent` (a merge the broker performed at
+    once), or `effect.held` (a ledger's merge held for an approval the
+    kernel no longer takes)."""
+    fresh = not f.merge_effect or p.get("effect_id") != f.merge_effect["effect_id"]
+    if kind in ("effect.held", "effect.refused") or (kind == "effect.intent" and fresh):
         if p.get("action_type") != "merge":
             return None
         named = _candidate((p.get("payload") or {})["candidate"])
         if named != f.candidate:
             return "a merge effect for a candidate that is not the current one"
+        state = {"effect.held": "held", "effect.refused": "refused", "effect.intent": "in_flight"}[kind]
         f.merge_effect = {
             "effect_id": p["effect_id"],
-            "state": "held" if kind == "effect.held" else "refused",
+            "state": state,
             "candidate": {"sha": named.sha, "turn_id": named.turn_id},
             "payload_sha256": p.get("payload_sha256"),
-            "grants": len(f.granted),  # the grants that stood when it was held or refused
+            "grants": len(f.granted),  # the grants that stood when it was requested
+            **({"at": p["at"]} if kind == "effect.refused" and p.get("at") else {}),
         }
         return None
-    if not f.merge_effect or p.get("effect_id") != f.merge_effect["effect_id"]:
+    if fresh:
         return None
     if kind == "effect.intent":
         f.merge_effect = {**f.merge_effect, "state": "in_flight"}
@@ -659,7 +666,7 @@ def is_doc_path(path: str) -> bool:
 
 @dataclass(frozen=True)
 class GitFacts:
-    """What the broker reads from the workspace at release, between the
+    """What the broker reads from the workspace at request, between the
     candidate and the head being merged."""
 
     ancestor: bool
@@ -667,10 +674,8 @@ class GitFacts:
     paths: tuple[str, ...]
 
 
-def merge_predicate(
-    f: Fold, payload: dict[str, Any], *, approval_unused: bool, facts: GitFacts | None
-) -> list[str]:
-    """The five terms of the merge predicate over a merge effect's payload.
+def merge_predicate(f: Fold, payload: dict[str, Any], *, facts: GitFacts | None) -> list[str]:
+    """The four terms of the merge predicate over a merge effect's payload.
     Returns each term that does not hold, named; empty means the merge may
     be performed. Each term reads a row or a git fact."""
     failed = []
@@ -711,6 +716,4 @@ def merge_predicate(
             "4: docs updated or unchanged, its commits running from the candidate to this head "
             "with no merge commit and touching only doc paths, any governance granted"
         )
-    if not approval_unused:
-        failed.append("5: an unused approval from Tom bound to this merge's digest")
     return failed
