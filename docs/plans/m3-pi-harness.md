@@ -596,3 +596,15 @@ Merged 2026-10-04 by the merge train, fast-forward to abcd8da75.
 - **Follow-ups.** The turn output files under a denied path: in a
   provisioned task `<work>` is denied to every profile, so a working Pi
   turn there likely aborts too (not run). Steps 3 and 4 wait for 1.4c, 1.5.
+
+## Rollout 4: Pi carries #633
+
+Run 2026-10-09 on the resident kernel and the real ledger, popoto at base e5190353 with the pop-a request text, `--ceiling act --harness pi --model gpt-6.1-sol`. The finished task is `f917b77bfdd3`. It reached the merge stage and the merge is held (effect 481509881e10, no grants) until a release. Two earlier tasks were stopped and are not part of the result.
+
+- **Model id.** `--model gpt-6.1` fails at plan ("no context window for gpt-6.1: the OpenAI price table has no entry"); the table holds `gpt-6.1-sol`. That first task (`cc93b252fa49`) was stopped at $0.000045.
+- **Plan question.** The plan turn asked whether repeated list-like access could reuse a cached result. Valor answered as a stand-in (`--by valor --role-played`) with Tom's recorded contract: `len()` still executes, re-iteration re-queries, builder mutators drop the parked result.
+- **Stages.** judge precise; plan; critique (1 round, no revision); build (candidate 9f62a4f780c2, Pi on gpt-6.1-sol); test pass; review pass (in the VM); docs no_change, recorded by hand because docs has no runner; join passed; merge held.
+- **Redis 6379 red.** With the suite as the project's first spec, the test check was red at base and at head alike: base 2259 failing, head 2318 errors, 1135 passed, 1 failed. Every error is a `ConnectionError` to `localhost:6379` ("Operation not permitted"); `tests/test_connection.py` does not use the kernel's `REDIS_URL` port. The candidate did not cause it. The spec now ignores that file and the test check passes at head.
+- **Earlier failures, all kernel side.** The first task's review failed on disk space (data volume full) twice, once at the base image build and once at the image export. Between them `deps.sh` read the build backend's `running egg_info` line as a requirement; that was fixed in C5. A step that fails leaves the task waiting, and the kernel keeps the task's locks, so `core run` answered "already running" until the kernel was restarted.
+- **Offline dependency sync.** In the VM the suite's `uv sync --frozen --extra dev` exits 1 within half a second at base and at head. The result keeps no setup stderr, so the cause is not known. The check still recorded pass.
+- **Spend, task f917b77bfdd3, metered by the gateway.** Judge $0.000045, plan $0.0850, critique $0.5189, build $0.3849, test breadth $0.00036, review $0.7393, governance $0.0008; total $1.7293. The two stopped tasks cost about $1.17 and $0.00005.
