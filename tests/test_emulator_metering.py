@@ -633,7 +633,7 @@ def test_review_and_docs_are_run_by_the_kernels_runners_in_one_driver_step(monke
     """The kernel's own `runners()`, its fresh sessions played by the scripted
     session and its judgement port the local upstream answering `false`,
     carry critique, build, test, review, and docs in one `core run` the
-    driver makes, to the held merge."""
+    driver makes, to the merge, done at request."""
     import core.__main__ as kernel
     from tests import judgement_upstream, test_checks
 
