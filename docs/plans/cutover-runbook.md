@@ -343,7 +343,9 @@ Check: six lines ending `Valor the Cowboy`; the cutover date; `179144806`
 
 ## 8. Grants and the kernel
 
-**8.1 Merge grants** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md); Q2). Four pairs.
+**8.1 Merge grants** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md); Q2). Four pairs, one step: Tom runs the four
+`merge-target add` commands listed in item 2 of that file, one per project's
+real remote and branch. Without a pair, a merge to that remote is refused.
 
 ```
 $PY -m core merge-target list
