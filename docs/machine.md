@@ -406,6 +406,11 @@ disk after each dump's renames. `python -m core restore DUMP`
 restores a dump into a scratch cluster under the kernel key directory (the
 `pg_scratch` setting, `~/.config/valor-kernel/run`, which no sandbox profile
 can read or write), compares it with its manifest, and removes the cluster.
+The digests cover `events` and `documents`, not the schema `memory`, whose
+records are rebuilt by ingesting the ledger again. A restore is made with
+`--no-owner`, so after restoring a dump for use, run `python -m core
+migrate` against it: it gives the schema `memory` and its tables back to
+`valor_memory`.
 
 **Rehearsed on 2026-10-01** from the command line: `backup` wrote
 `valor_rebuild-20261001T151206Z.dump` (1,416 events, max id 1,416, 22

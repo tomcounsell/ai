@@ -4,22 +4,22 @@ What Valor remembers across sessions.
 
 ## Scope
 
-- The operator record: what Valor knows about Tom and his preferences.
-- Reading and curating the corrections and exemplar streams (same store, distinct source class, the exemplars recording work Tom loved and why). `core/` keeps both in the ledger and owns them; memory never writes them.
-- Episodic memory.
+- Episodic memory: raw records of Tom's words (task instructions, answers, feedback), the corrections stream, and the text entries of each turn's transcript, taken from the ledger after each turn.
+- Recall: the Remembered section of a working session's Brief, found by BM25 among one project's records from before the task began, quoted and escaped as data.
+- `records.py` holds the popoto models and their Postgres backend (schema `memory`, role `valor_memory`); `ingest.py` turns a ledger row, handed over as plain data, into records; `recall.py` searches and renders.
 
-Built last, on popoto over Postgres. Until popoto's Postgres support ships, this directory holds this README and the port `core/` reads memory through.
+Built on popoto 1.10.0's Postgres backend. `VALOR_MEMORY=off` means nothing here is imported.
 
-Governed by [docs/data.md](../docs/data.md) (Memory, last).
+Governed by [docs/data.md](../docs/data.md) (Memory, last) and [docs/plans/b1-memory.md](../docs/plans/b1-memory.md).
 
 ## Imports
 
-- May import: `core/` ports only.
-- Imported by: nothing directly. `core/` reads memory through its own port; nothing else reaches in.
+- May import: popoto. Nothing from `core/`: the port hands over plain data and memory's own DSN, never a kernel connection.
+- Imported by: `core/memory.py`, the port, only. Nothing else reaches in.
 
 ## Effect classes
 
-Holds none. Writes to memory are kernel-mediated records, not effects on the world.
+Holds none. Writes to memory are kernel-mediated records, not effects on the world, and nothing read from memory grants anything.
 
 ## Not here
 

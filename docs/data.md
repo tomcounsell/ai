@@ -375,9 +375,11 @@ turns shared one digest and why the prompt cache can hold across turns.
 Subagents Claude Code starts inside a turn do not get the Brief; that gap is
 `docs/architecture.md`'s.
 
-Rendering is the one place stored data becomes prompt text. Memory, when
-it exists, enters the same way: read through the port at render time,
-recorded in the rendered text, never accumulated in a session.
+Rendering is the one place stored data becomes prompt text. Memory enters
+the same way: read through the port at render time, recorded in the
+rendered text, never accumulated in a session. The Remembered section is
+part of the store state that renders the Brief, so a record ingested
+between two turns can change it.
 
 ## Attention as ledger rows
 
@@ -449,12 +451,14 @@ REFERENCES.md sense.
 | Role | Login | Privileges | Used by |
 |---|---|---|---|
 | `valor_kernel` | yes, with its password on the kernel databases | `SELECT, INSERT` on `events` and `documents`; nothing else | Every kernel process: the CLI, the gateway, the runner |
+| `valor_memory` | yes, with its password on the kernel databases | Owns the schema `memory` and its tables; nothing on `events` or `documents` | Memory's popoto backend, through `core/memory.py` |
 | Owner | Tom's macOS user by default (`VALOR_PG_OWNER`; `settings.owner_role`, which is also the bootstrap superuser of every scratch cluster), with its password on the kernel databases | Owns the database and the schema | `python -m core migrate`, `backup`, and the test fixtures, nothing else |
 
 `python -m core migrate` (`core/db.py`, `migrate`) connects as the owner,
-creates `valor_kernel` if missing, creates the database if missing,
-applies `core/schema.sql`, and records correction 1 (the governance
-paragraph, from `CLAUDE.md`) if the ledger has no correction 1; it then
+creates `valor_kernel` and `valor_memory` if missing, creates the
+database if missing, applies `core/schema.sql`, records correction 1 (the
+governance paragraph, from `CLAUDE.md`) if the ledger has no correction 1,
+and gives the schema `memory` and its tables to `valor_memory`; it then
 runs `secure-login` (below). Every other connection is `valor_kernel`
 (`core/settings.py`, `dsn`). Least privilege [11]: the role that runs the
 kernel holds exactly what appending and reading need. `LISTEN`,
@@ -552,31 +556,32 @@ call in every run by replaying a recorded provider response.
 
 ## Memory, last
 
-Memory is built last, on popoto [20] over Postgres. Popoto's Postgres
-backend is tracked in its issue 631; until it ships, `memory/` holds its
-README and the port `core/` reads memory through, and nothing in the
-kernel depends on popoto.
-
-Memory goes into the same Postgres as everything else. The design rules it
-must keep:
+Memory is popoto [20] 1.10.0's Postgres backend in the kernel database's
+schema `memory`, owned by `valor_memory` (docs/plans/b1-memory.md).
+`VALOR_MEMORY=off` means no import, no ingest, and no section.
 
 - **Memory grants nothing.** Retrieved content can act as instructions to
-  a model [7], so nothing read from memory changes a ceiling or
-  a grant. Memory's tables are its own, under a role with no privilege
-  on `events` or `documents`.
-- **Memory never writes the ledger.** The kernel reads memory through the
-  port at render time (Rendering at turn time, above), and the rendered
-  text is recorded in `turn.started` like the rest of the Brief.
-- **Episodic memory ingests raw turns.** Popoto's measurement found raw
-  turn ingestion beat LLM extraction on judged accuracy [20]; the turns
-  memory ingests are the ones the harness transcripts already hold.
+  a model [7], so nothing read from memory changes a ceiling or a
+  grant. `core/memory.py` returns a string and nothing else, and
+  `valor_memory` holds no privilege on `events` or `documents`.
+- **Memory never writes the ledger.** After the turn slot is released,
+  `run_turn` ingests the rows memory has not taken (`task.started`,
+  answers, feedback, corrections, and each `turn.ended`'s transcript text
+  entries, the turn's prompt and every tool use and result left out), one
+  unit per row, keyed by ledger id, under an advisory lock.
+- **Raw entries**, no model call: raw turn ingestion beat LLM extraction
+  on judged accuracy in popoto's measurement [20].
+- **Recall.** A working session's Brief gains a Remembered section after
+  the corrections: BM25 over the task's instruction, among the project's
+  records from before the task began, ten records within 4000 estimated
+  tokens, in ledger order. Each record is quoted and escaped as data,
+  labelled by its row's provenance; a transcript entry is always the
+  turn's. Fresh sessions get none, and a failure renders `Memory:
+  unavailable: <reason>`.
 
-Tom's corrections are rows in the kernel's ledger, on the `corrections`
-stream (`core/corrections.py`), and the exemplar ledger shares that store
-as source class `exemplar`. `core/` owns both streams: they render into
-every Brief, which is why they sit beside the effects rather than in
-memory. Memory, when built, reads and curates them through the port; it
-never writes the streams or owns them.
+Tom's corrections and exemplars are the `corrections` stream
+(`core/corrections.py`), which `core/` owns and renders whole into every
+Brief; memory takes them as records and never writes them.
 
 ## Gaps
 
@@ -592,4 +597,3 @@ never writes the streams or owns them.
 4. **One backup disk.** The ledger is kept forever and dumped to one
    external disk, 30 dumps deep (`docs/machine.md`, Backups). There is no
    second copy elsewhere.
-5. **Memory's schema.** Waits on popoto's Postgres backend [20].

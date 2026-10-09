@@ -52,4 +52,4 @@ The canonical bibliography for Valor. Every design assumption in the README and 
 ## Internal systems
 
 20. Counsell, T. (2026). *Popoto: Agent Memory on Redis and Valkey.* https://popoto.io and https://github.com/tomcounsell/popoto
-    The memory layer. Its benchmarks page carries the measurement that raw turn ingestion beat LLM extraction on judged accuracy (LoCoMo subset, 77 scored items), which is why episodic memory has no extraction step. Postgres backend: https://github.com/tomcounsell/popoto/issues/631
+    The memory layer. Its benchmarks page carries the measurement that raw turn ingestion beat LLM extraction on judged accuracy (LoCoMo subset, 77 scored items), which is why episodic memory has no extraction step. Memory runs on its Postgres backend (`popoto.backends.postgres`, `keyword_search` for BM25 and `context_assembler`'s token estimate), release 1.10.0, pinned as `popoto[postgres]==1.10.0`.

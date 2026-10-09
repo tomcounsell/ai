@@ -449,3 +449,21 @@ def test_the_token_estimate_is_popoto_1_10_0s():
     from popoto.recipes.context_assembler import _estimate_tokens
 
     assert _estimate_tokens("Tom prefers tabs over spaces in the greeter.") == 10
+
+
+def test_a_task_is_taken_once_it_has_a_turn_and_never_before(dsn):
+    repo = project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            idle = await tasks.start(conn, tasks.Brief(instruction="Pangolin idle.", project={"repo": repo}))
+            later = await started(conn, "pangolin", repo)
+        await ingest(dsn)
+        before = await recall(dsn, later)
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, idle, "turn.started", {"turn_id": ledger.new_id()})
+        await ingest(dsn)
+        return before, await recall(dsn, later)
+
+    before, after = run(go())
+    assert before == "" and "  > Pangolin idle." in after
