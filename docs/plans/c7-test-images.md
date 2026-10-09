@@ -2,7 +2,7 @@
 tracking: none
 slug: c7-test-images
 type: build
-status: built
+status: merged
 stakes: low
 critique_rounds: 0
 review_rounds: 0
