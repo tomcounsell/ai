@@ -86,15 +86,15 @@ same stages by hand:
 | build | one builder agent per task |
 | test, review, docs | three fresh agents in parallel on the same commit; review is Opus |
 | patch | the same builder agent, resumed with every finding at once |
-| merge | Tom's tap, then a push to the rebuild branch |
+| merge | a push to the rebuild branch, performed at request when the predicate holds |
 
 The driving session keeps no findings log beyond the plan file and the
 verdicts in each commit message.
 
 **The takeover point.** When milestone 1 is done, Valor builds everything
-after it through its own kernel. Tom starts each task and taps each merge
-from the command line, and from Telegram while the new bridge is up (see
-Where it runs). Each task's workspace is a fresh clone of this repository;
+after it through its own kernel. Tom starts each task, and each merge leaves
+at request and is reported to him on the operator channel, Telegram while
+the new bridge is up (see Where it runs). Each task's workspace is a fresh clone of this repository;
 a merge pushes to the rebuild branch on GitHub. The running kernel runs
 from the lead's checkout, and after its own merge lands it rolls that
 checkout forward (`core/rollout.py`): a merge that changes only persona,
@@ -512,8 +512,8 @@ a routine never makes Tom's task wait for the slot. The first two routines:
 the emulator sweep (including the `routed` arm), which measures and
 reports and blocks nothing (its second need: the demonstration and the
 baseline both ran it by hand), and the ninety-day expiry sweep, which opens
-one deletion branch held for Tom's tap. A read-only page
-in `ui/` shows tasks, spend, pending approvals, the attention log, and
+one deletion branch, merged at request. A read-only page
+in `ui/` shows tasks, spend, the attention log, and
 routine runs with their period spending, since status messages to Tom are
 not sent.
 

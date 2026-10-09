@@ -65,7 +65,7 @@ Effects have classes. Every capability declares one, and every task carries a ce
 |-------|---------|----------------|
 | `read` | read, no effect | the grant |
 | `propose` | reversible: sandbox writes, drafts, branches, and effects that can be withdrawn, such as a PR or a message draft | the grant; Valor asks first when Tom would want to be asked |
-| `act` | irreversible effect or money: merge, send, pay, deploy | Tom, one approval per invocation |
+| `act` | irreversible effect or money: merge, send, pay, deploy | inside the task's ceiling, performed when requested; a report to Tom says what left |
 
 The drive to ask comes from Cooperative Inverse Reinforcement Learning [3]: the human and the agent share a reward the agent does not know, so its best move under uncertainty is to learn and to ask. Valor borrows the shape without claiming the guarantee, since nothing here is trained. The Off-Switch Game [8] shows why the borrow is partial: the incentive to allow shutdown holds only while the uncertainty holds, and later work shows it is fragile [9, 10]. Valor does not rely on the model's incentive. The off switch is in the kernel.
 
@@ -91,7 +91,7 @@ The full bibliography is [REFERENCES.md](REFERENCES.md). Numbers here and in `do
 
 ## Three tiers
 
-- **Kernel.** Deterministic code that holds authority: effect classes and the broker, approvals, the ledger, stop, and steering. No LLM call decides what a thing may do.
+- **Kernel.** Deterministic code that holds authority: effect classes and the broker, the ledger, stop, and steering. No LLM call decides what a thing may do.
 - **Judgement.** A hosted Jev-class model handles every decision that is not authority: classification, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as the fallback. Low-confidence calls go to a human. A classifier decides what a thing is; it never decides what a thing may do.
 - **Agents.** Frontier agents do the hard work, one `claude -p` turn at a time, each inside an effect ceiling set by the kernel, every call metered.
 

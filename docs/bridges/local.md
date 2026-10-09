@@ -15,7 +15,7 @@ launchd job.
 | Mechanism | Serves |
 |---|---|
 | Tom's messages recorded and bound like Telegram messages | Mission item 1: work arrives the way Tom sends it, on a Mac with no other channel |
-| Every `local.send_message` an `act` effect, approved by reply on the page | Constraint "Bounded authority, metered spending" |
+| Every `local.send_message` an `act` effect, released by the broker at request and shown on the page | Constraint "Bounded authority, metered spending" |
 | The ledger is the platform: a send is shown once it has an outcome | Constraint "Reliable stop, recovery, and correction": nothing is lost or shown twice |
 
 ## The page
@@ -86,7 +86,7 @@ server's clock in UTC, and `reply_to` as posted. Every local record is
 verified and from the operator: the bridge writes one only after the
 request's token matched (`secrets.compare_digest`) the token file, and the
 chat has one member. The kernel binds it as it binds a Telegram message:
-the exact words `approve` and `stop` bind on a reply, a near miss steers
+the exact word `stop` binds on a reply, a near miss steers
 and owes a notice, and a binding notice goes back in reply in the local
 chat.
 
@@ -134,15 +134,15 @@ notice is marked sent with its notice id as the message id.
   is added; Tom's answer is pending in
   [m2-4-local.md](../plans/m2-4-local.md), and accepting it for the proof
   of concept is assumed.
-- **A message's text.** A notice or an approved send is text a turn wrote,
-  shown on the page that holds the token and takes approvals, so it must
+- **A message's text.** A notice or a send is text a turn wrote,
+  shown on the page that holds the token and takes stops, so it must
   never run. It is rendered as [above](#the-page): HTML in it escaped,
   the Markdown output sanitized, and inline script refused by the page's
   CSP as a second layer.
 - **Framing.** A page a turn serves on 8000 to 8009 cannot frame the chat
   page: `GET /` sends `frame-ancestors 'none'`.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
-  (`/dev/ttys*`), so a terminal approval surface can be overprinted with a
+  (`/dev/ttys*`), so a terminal chat can be overprinted with a
   forged notice at once. The browser route needs a browser restart and has
   to get past the browser's own protections.
 - **Other local processes and web pages** are what the token is for.
@@ -158,9 +158,9 @@ notice is marked sent with its notice id as the message id.
 - Files in either direction; more than one local chat; reaching the page
   from another device; browser notifications; paging long history;
   images in a text; syntax highlighting.
-- A merge approved on the page fails with the GitHub credential named when
-  this Mac holds none.
-- An approved `email.send` waits for an email bridge this Mac does not
+- A merge to a granted GitHub remote fails with the GitHub credential
+  named when this Mac holds none.
+- A requested `email.send` waits for an email bridge this Mac does not
   run; nothing is sent and the page shows no outcome.
 - The local and Telegram channels cannot both be the operator channel.
 

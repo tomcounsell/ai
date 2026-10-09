@@ -19,7 +19,7 @@ add a check, gate, hook, round, or review step?
 - `governance.json`, each hunk the kernel judged to add governance (id,
   path, lines, the added lines, granted or not), the abstentions, and any
   hunk left unjudged;
-- `effects.md`, the task's held, released, and refused effects.
+- `effects.md`, the task's requested, performed, and refused effects.
 
 **Exit evidence.** Your final message ends with the verdict object, bare
 or in a fenced json block; prose before it is read past. The kernel reads it from your session's result, which

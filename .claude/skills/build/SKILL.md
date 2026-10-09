@@ -217,7 +217,7 @@ builder's narration.
   head, push, run the plan's rollout steps (back up first with
   `python -m core backup`), record them under "Merged", set
   `status: merged`, remove the task's worktrees. A merge the kernel
-  releases rolls the kernel forward itself (`core/rollout.py`), except a
+  performs rolls the kernel forward itself (`core/rollout.py`), except a
   change to `uv.lock`, `pyproject.toml` or `core/schema.sql`, or a rollout
   that fails: its `rollout.failed` notice names the step. For a change to
   those three files the lead runs `uv sync`, the backup, the migrate and

@@ -10,7 +10,7 @@ is needed. Postgres is the one store; memory joins it last.
 This doc owns the storage: tables, roles, the integrity mechanisms, how
 state is read, how a turn's Brief is rendered from the store, test
 databases, and where memory will live. `docs/architecture.md` owns what the
-kernel does with the rows (metered spending, the broker, approvals, stop, steering).
+kernel does with the rows (metered spending, the broker, stop, steering).
 
 ## What serves what
 
@@ -18,7 +18,7 @@ kernel does with the rows (metered spending, the broker, approvals, stop, steeri
 |---|---|
 | Append-only events table, locked by grant and trigger | Constraint "Reliable stop, recovery, and correction": a ledger the system cannot edit records every effect |
 | Write-once JSONB documents, no foreign keys | Tom's decision: Postgres only, document strategies |
-| Partial unique indexes | Constraint "Bounded authority, metered spending" (one charge per call, one tap per effect) and lossless stop (one stop per task) |
+| Partial unique indexes | Constraint "Bounded authority, metered spending" (one charge per call, one release per effect) and lossless stop (one stop per task) |
 | Per-task advisory locks | Constraint "Bounded authority, metered spending": a call and a stop racing on one task cannot both win |
 | State as a fold over events | Lossless stop: nothing to reconcile between a stored status and the record |
 | Brief and corrections rendered at turn time | Constraint: corrections reach every session and agent |
@@ -136,19 +136,19 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/audit_sample.py` | `audit.labelled` | on the `audit` stream: `task_id`, `candidate_sha`, `label` (`pass` or `changes`), note, provenance. Real when `role_played` is false, whatever `by` names; the latest real label on a candidate is in force. A label of a reverted merge's candidate is read from git when the scores are asked for and is never a row | Evidence "Independent checks" |
 | `core/targets.py` | `merge_target.granted` | on the `merge_targets` stream: url, branch, Tom's note, provenance (`by` always tom). A merge to a remote lands only on a pair whose latest row is this | Bounded authority |
 | `core/targets.py` | `merge_target.revoked` | url, branch, note, provenance (`by` anyone) | Bounded authority |
-| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
-| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason; when jsonb refuses the request's fields, only `effect_id`, effect class, `adds_governance`, `payload_sha256`, `request_id` and a reason naming Postgres's refusal; `at: release` when a release Tom asked for was refused, with an `effect_refused` notice | Bounded authority |
-| `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
-| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, `approval_id`, and the action: `action_type`, target, payload, `payload_sha256`, `effect_class`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
+| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts): an effect a bridge performs, waiting for that bridge | An effect is performed by its owner |
+| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason; when jsonb refuses the request's fields, only `effect_id`, effect class, `adds_governance`, `payload_sha256`, `request_id` and a reason naming Postgres's refusal; `at: release` when the bridge's release was refused (a stopped task, no performer, a performer's refusal); `at: migrate` for an effect the migration found held for an approval, with the reason that it is to be requested again | Bounded authority |
+| `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`). No code writes it; the attention fold reads the rows a ledger holds | Attention spent |
+| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, the action (`action_type`, target, payload, `payload_sha256`, `effect_class`), `adds_governance`, and `request_id` when the request had one. Older rows also hold an `approval_id`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error; a performer's answer jsonb refuses is written with an empty result and an error naming Postgres's reason | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
 | `core/intake.py` | `message.received` | on the stream named for the channel: `received_id`, `verified`, and the bridge's record whole (`channel`, `chat_id`, `chat_kind`, `message_id`, `sender_id`, `sender_name`, `sent_at`, `kind`, `text`, `reply_to`, `thread`, `topic_id`, `attachments`, `headers`) | Mission item 1; one row per inbound message |
-| `core/intake.py` | `message.bound` | `received_id`, `task_id`, `as` (`start`, `steer`, `answer`, `feedback`, `approve`, `stop`, `none`), `error` when binding raised | A message acts once |
+| `core/intake.py` | `message.bound` | `received_id`, `task_id`, `as` (`start`, `steer`, `answer`, `feedback`, `stop`, `none`; older rows also `approve`), `error` when binding raised | A message acts once |
 | `core/intake.py` | `message.steered` | `received_id`, channel, chat and message ids, text, attachments, provenance; the next working turn opens with it | Corrections reach every session |
-| `core/notices.py` | `notice.requested` | `notice_id`, `channel`, `chat_id`, `kind`, `about_key`, `text` (ending in the notice's id; when jsonb refuses the text, kernel text naming the kind, `about_key` and Postgres's reason), `reply_to` | Mission item 6; what Tom is owed |
+| `core/notices.py` | `notice.requested` | `notice_id`, `channel`, `chat_id`, `kind` (`report` for an `act` effect that is done, `about_key` `report:` and its effect id), `about_key`, `text` (ending in the notice's id; when jsonb refuses the text, kernel text naming the kind, `about_key` and Postgres's reason), `reply_to` | Mission item 6; what Tom is owed |
 | `core/notices.py` | `notice.undeliverable` | `notice_id`, `reason`: no operator channel or chat is set, so no bridge sends it | A notice never sent is seen |
 | `core/bridge.py` | `notice.sent` | `notice_id` and `sent`, the platform's message ids, written by the bridge | A notice is sent once |
-| `core/intake.py`, `core/broker.py` | `release.requested` | `effect_id`, `approval_id`, `owner` (the channel whose bridge performs it, or `kernel`) | An approved effect is performed by its owner |
+| `core/broker.py` | `release.requested` | `effect_id`, `owner` (the channel whose bridge performs it), written with the `effect.held` row; older rows also hold an `approval_id`, or `owner` `kernel` | An effect is performed by its owner |
 | `core/serve.py` | `workspace.provisioned` | `fields`, the Brief fields the provisioning made, laid over the stored Brief | A message-started task gets its workspace |
 | `core/serve.py` | `workspace.failed` | `reason`; a notice follows, and a steer tries again | A failure is the task's to report |
 | `core/serve.py` | `rollout.restarting` | `effect_id` of a kernel merge, `sha`, `from` (the commit the kernel started from), `steps`, `covers` (each older merge it carries: `effect_id`, `task_id`, `sha`); the kernel exits next and launchd starts it on the merged code | A merged kernel change reaches the running kernel |
@@ -206,7 +206,6 @@ the kernel code does.
 |---|---|---|---|
 | `events_one_call_row` | `(type, payload->>'call_id')` | `gateway.opened`, `gateway.reserved`, `gateway.charged` | A model call opened or charged twice (`gateway.reserved` is the legacy name for an opened call) |
 | `events_one_effect_row` | `(type, payload->>'effect_id')` | `effect.held`, `effect.intent`, `effect.outcome`, `effect.refused` | Two intents or two outcomes for one effect |
-| `events_approval_used_once` | `payload->>'approval_id'` | `effect.intent` with an approval | One approval releasing two effects: one tap, one effect |
 | `events_one_correction_number` | `payload->>'number'` | `correction.recorded` | Two corrections sharing a number |
 | `events_one_stop` | `task_id` | `task.stopped` | A task stopped twice |
 | `events_one_judge` | `task_id` | `judge.decided` | Two judge verdicts for one task |
@@ -327,8 +326,8 @@ gains a field, readers handle both shapes. A task whose `task.started` has
 no `sdlc` predates the state machine: it folds read-only by the old
 kernel's precedence (stopped; a delivery not reopened by feedback is
 `merge`; an unanswered question is `waiting`; feedback after a delivery is
-`patch`; any turn is `build`; else `judge`), and nothing but stop,
-approve, and release writes to it. A calibration task folds with
+`patch`; any turn is `build`; else `judge`), and nothing but stop writes
+to it. A calibration task folds with
 `calibration` set and nothing else, and every SDLC writer, stop,
 and turn refuses it. The instance so far is
 provenance (`core/tasks.py`, `provenance`): a field a row never recorded
@@ -389,7 +388,8 @@ are folds over rows the kernel already writes:
   answer.
 - `feedback.given`: Tom's feedback on a delivery, bound to the delivery it
   answers (`on_delivery`).
-- `approval.granted`: Tom's tap on a held effect, with his literal message.
+- `approval.granted`: a tap on a held effect, with the literal message.
+  No code writes one; the fold reads the rows a ledger holds.
 
 Answers and feedback carry **provenance**: `by` (who wrote it), `via`
 (the channel), `at`, and `role_played` (true when someone stood in for
@@ -399,16 +399,15 @@ the ledger could not say so (rebuild-demonstration.md, Kernel findings 5).
 `tasks.status` returns the attention log as one list, each entry labelled
 by kind with its provenance.
 
-Approvals carry the same provenance as an answer,
+Recorded approvals carry the same provenance as an answer,
 `role_played` included, because two of the demonstration's three pushes
 (rows 204 and 253) were approved under Tom's standing permission for local
 copies rather than by a tap each (rebuild-demonstration.md, Where Tom acted
-as project manager); the replay driver approves its pushes with
-`role_played: true`. `tasks.status` counts each kind apart in
+as project manager). `tasks.status` counts each kind apart in
 `attention_counts` (total, role-played, unknown), so approvals never add to
 the questions and feedback counted as interruptions. The `by` on rows
 written before this shape is unreliable: every earlier approval says
-`tom`, the replay driver's included.
+`tom`, those the replay driver wrote included.
 
 The attention cost of a task is counted in the design
 (`docs/architecture.md`, The attention log); the attention it spent is the
@@ -425,12 +424,12 @@ four reasons that follow from the constraints:
    is the thing the constraint forbids. Facts that change are new events;
    facts that never change are documents.
 2. **Integrity lives where the decision is made.** Whether an answer has an
-   open question to answer, whether a release has a matching unused
-   approval, whether a task can take feedback: the kernel checks each
+   open question to answer, whether a merge's verdicts and grants are on
+   its candidate, whether a task can take feedback: the kernel checks each
    against the fold, under the task's lock, in the transaction that writes
    the row. A foreign key could check only that an id exists, which is the
    least of it. The checks a key would carry that do matter, uniqueness of
-   calls, effects, approvals, corrections, and stops, are the partial
+   calls, effects, releases, corrections, and stops, are the partial
    unique indexes.
 3. **New facts need no migration.** A new event type or document kind is
    a new string. Feedback, provenance, and `role_played` needed no schema
@@ -562,7 +561,7 @@ must keep:
 
 - **Memory grants nothing.** Retrieved content can act as instructions to
   a model [7], so nothing read from memory changes a ceiling or
-  an approval. Memory's tables are its own, under a role with no privilege
+  a grant. Memory's tables are its own, under a role with no privilege
   on `events` or `documents`.
 - **Memory never writes the ledger.** The kernel reads memory through the
   port at render time (Rendering at turn time, above), and the rendered

@@ -115,8 +115,8 @@ objective's Brief, and never widens at run time; a child's ceiling is at or
 below its parent's. Least privilege [11] sets the default: a routine gets the
 lowest class its job needs.
 
-**Attention.** A routine spends Tom's attention only through a question or a
-held `act`, and both are ledgered against the run (Mission item 6). A
+**Attention.** A routine spends Tom's attention only through a question, a
+grant it needs, or a report of an `act` that left, and each is ledgered against the run (Mission item 6). A
 routine's attention is counted on the same footing as its money when the
 ninety-day review below asks whether it earned its place.
 
@@ -139,12 +139,11 @@ notice.
 |---|---|---|
 | `read` | run a test suite against real Postgres and report; read error reports from a service; list workspaces whose branches have merged | the routine's committed Brief |
 | `propose` | open a branch with a fix for a failure it found; draft a summary; start a child task, inside its own ceiling, to investigate a failure; remove a workspace whose commits are already on the origin | the Brief; the performer declares the class |
-| `act` | merge, send, deploy, pay, delete anything not recoverable elsewhere | Tom, one approval per action, through the same approval surface as any task |
+| `act` | merge, send, deploy, pay, delete anything not recoverable elsewhere | the Brief's ceiling, which Tom set; the broker performs it at request and Tom gets a report of it |
 
-A schedule is not a standing approval. An `act` requested by a routine is
-held in `python -m core pending` until Tom approves and releases it, exactly
-as the demonstration's pushes were held, approved, and released
-(rebuild-demonstration.md, "Where Tom acted as project manager").
+An `act` requested by a routine is performed at request when its ceiling
+is `act`, like any task's, and refused when the ceiling is lower; the
+refusal is a row on the run.
 
 The kinds of scheduled work this design carries:
 
@@ -194,13 +193,12 @@ rule. Workspace reclaim, which removes things, is not; it is work.
   its effects, and its end are ledger rows like any task's. A run's result
   is its delivery, read with `python -m core status <task>`.
 - **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
-  `VALOR_UI_PORT`): every task, one task with its ledger, the effects held
-  for Tom, the attention log, and each routine with its last run, its last
+  `VALOR_UI_PORT`): every task, one task with its ledger, the attention log, and each routine with its last run, its last
   result and its period spending. It is read-only and answers GET only; the
   address is the loopback one, on a port no sandbox profile opens.
 - **Attention.** A question from a routine reaches Tom through the same
   path as any task's question and is ledgered with its answer and
-  provenance. A held `act` appears in the pending approvals.
+  provenance. An `act` that left reaches Tom as a report.
 
 Nothing a routine finds is pushed to Tom unless it needs a decision.
 
@@ -236,18 +234,11 @@ in place of an instance: a new grant row (fresh id, new expiry, the old row's
 incident and mission items) is written on the old grant's own task and
 expires on its own date. Keeping one takes both, before the merge: his
 feedback, so the branch leaves the grant's hunk, and his `grant` naming the
-listed id; the lead does not merge a sweep while a keep he asked for is not
-yet written. A merged sweep's listing of another project's grant removes nothing.
+listed id; a keep lands before the sweep's delivery passes, since a
+passing delivery is merged at once. A merged sweep's listing of another project's grant removes nothing.
 A routine whose toml cannot be read is reported in the run's line and the rest
 go on. The sweep's one task has the ceiling `act` and opens one branch removing everything due.
 Opening the branch is `propose`. Merging it is `act`. The deletion is the
-default, so Tom's tap is not asked for it: the merge is the build lead's call
-and is released like any other merge. Keeping something past expiry takes a reason in the branch's
+default: the merge is performed at request like any other merge. Keeping something past expiry takes a reason in the branch's
 review; the default is the deletion (Mission item 5; the
 governance constraint).
-
-## Gaps
-
-- The kernel has no class for a merge approved in advance. The sweep's
-  deletion merge is released like any merge, by the build lead's call, with no
-  tap from Tom.

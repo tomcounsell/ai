@@ -99,7 +99,7 @@ with the machine's Claude login would spend outside it, visible only on the
 provider's invoice. Tom accepted that risk on 2026-10-01 and chose not to
 close it, with no separate macOS user for turns: the gateway is for
 visibility and honest metering. Bounded authority is unchanged by this. Effects on shared targets leave only through the broker,
-and every `act` waits for Tom's tap.
+inside each task's ceiling, and every `act` that leaves is reported to Tom.
 
 ### What the governance constraint means in practice
 
@@ -213,7 +213,7 @@ over those rows, the same way its spend is a fold over gateway charges.
 | Question | `question.asked` | Valor's question, the turn that asked it |
 | Answer | `question.answered` | The answer, bound to its question by id, with provenance |
 | Feedback | `feedback.given` | Feedback on a delivery, the delivery it answers, with provenance |
-| Approval | `approval.granted` | Tom's tap on one held `act` effect, bound to that effect's payload digest, with his literal note |
+| Approval | `approval.granted` | Read only: a tap on one held `act` effect the ledger already holds; nothing writes one now |
 | Correction | `correction.recorded` | A correction or exemplar, global, numbered, with provenance |
 
 Provenance on every row Tom (or someone for him) writes: `by` (who wrote it),
@@ -228,10 +228,11 @@ recovery, and correction**).
 What the current kernel does: `question.answered` and `feedback.given`
 carry `by`, `via`, `at`, and `role_played`, and so do `approval.granted`
 and the other attention rows. `python -m core status` returns the task's `attention`
-list (questions with their answers, feedback, and approvals) in
-ledger order, and `attention_counts`, which counts each kind apart, so
-approvals never add to the interruption count of questions and feedback
-(`core/tasks.py`). A row written before a provenance field existed reads it
+list (questions with their answers, feedback, approvals the ledger holds,
+manual verdicts, and grants) in ledger order, and `attention_counts`, which
+counts each kind apart (`core/tasks.py`). The log keeps counting questions
+and feedback; it has no authority taps left to count, since an `act`
+inside its task's ceiling leaves without one. A row written before a provenance field existed reads it
 as null and counts as unknown: three answers and feedback from the
 demonstration have no `role_played`, and every approval before this shape
 carries only `by: tom`, which is unreliable, since the replay driver's
@@ -244,10 +245,11 @@ Each entry is classified on three axes after the task finishes:
 
 1. **Kind of work.** *PM work* is judging and steering the product: an
    answer to a question about intent, feedback that sends a delivery back.
-   *Authority* is a tap on an `act` effect: a merge, a send, a push. The two
-   are counted separately. Authority taps are the price of **Bounded
-   authority, metered spending** and are not a defect. PM work Valor could have
-   carried is the defect Mission item 6 names.
+   *Authority* is a governance grant on one instance, the only tap left;
+   an `act` inside its task's ceiling needs none. The two are counted
+   separately. A grant is the price of **Bounded authority, metered
+   spending** and is not a defect. PM work Valor could have carried is the
+   defect Mission item 6 names.
 2. **Whether it changed the outcome.** A question whose answer changed what
    got built met the bar Mission item 3 sets. A question whose answer
    changed nothing cost attention for nothing. A feedback round that changed
@@ -276,8 +278,8 @@ drift [14].
 Mission item 6 shows each task's attention cost beside its metered spending.
 The current kernel meters money (`core/spending.py`); attention is recorded and
 reported. In the design a task's attention cost is counted in
-interruptions: questions and feedback rounds, with approvals counted separately, since an approval is the price
-of keeping Valor's authority small rather than a sign it was confused (Tom,
+interruptions: questions and feedback rounds, with grants counted separately, since a grant is the price
+of keeping governance small rather than a sign Valor was confused (Tom,
 2026-10-01). The kernel never refuses a question because of the count, because a
 refused question makes Valor guess, which costs more attention later; the
 count is shown on the delivery. The mechanism is

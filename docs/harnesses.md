@@ -10,7 +10,7 @@ workspace it works in (workspace.md).
 `harnesses/` holds the wrappers. `core/runs.py` holds the port and runs one
 turn; `core/session.py` runs a task's turns; `core/signals.py` holds the
 signal channel. The gateway's pricing, opening, and charging belong to
-`docs/architecture.md`, as do the task loop's states, the broker, approvals,
+`docs/architecture.md`, as do the task loop's states, the broker,
 stop, and the execution record. This doc covers the harness's side of each.
 
 ## The harness port
@@ -221,7 +221,7 @@ governance's judgement passes its entry check.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its
 `turn.collected`) and what became of the effects it requested, read from the ledger now, so a push
-Tom has since released reads as done. An answer or feedback is spent only by a turn that finishes:
+performed since reads as done. An answer or feedback is spent only by a turn that finishes:
 after a failed or stopped turn the next one opens with it again. That rule exists because a failed
 turn once consumed feedback 1 and the retry was prompted "Continue." (rebuild-demonstration.md,
 Kernel findings 4).

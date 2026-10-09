@@ -185,11 +185,11 @@ satsol 360, psyoptimal 116, gato-os and gato 103, popoto 45, cuttlefish 12.
 **3.1 The new kernel is idle**, so the restart in step 8 cuts no turn.
 
 ```
-$PY -m core pending
+$SQL "select count(*) from events r where r.type = 'release.requested' and not exists (select 1 from events e where e.payload->>'effect_id' = r.payload->>'effect_id' and e.type in ('effect.outcome', 'effect.refused'))"
 $SQL "select count(*) from events where at > now() - interval '10 minutes' and type not like 'routine.%'"
 ```
 
-Check: `pending` prints nothing held, and the count is 0. If a task is mid
+Check: the first count lists no send waiting for a bridge, and the second is 0. If a task is mid
 turn, wait for its turn to end (`core status TASK_ID`); do not stop it.
 
 **3.2 The old worker has no live turn** (G5). The old sessions are not

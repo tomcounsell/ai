@@ -5,7 +5,7 @@ Self-contained comms modules.
 ## Scope
 
 - One module per channel: `telegram/`, `email/`, `local/`, and later others.
-- Each does I/O and the outbox only: receive, normalize, hand to `core/`; take an approved outbound message and deliver it.
+- Each does I/O and the outbox only: receive, normalize, hand to `core/`; take an outbound message the broker released and deliver it.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
@@ -21,7 +21,7 @@ Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns 
 ## Effect classes
 
 - Inbound receipt is `read`.
-- Delivering a message is `act` (send). A bridge delivers only what the broker releases with an approval on the ledger; it never decides that a message may go.
+- Delivering a message is `act` (send). A bridge delivers only what the broker released on the ledger (`release.requested`); it never decides that a message may go.
 - Posting a withdrawable draft where the channel allows it is `propose`.
 - A bridge declares, per operation, which class it performs, and reaches the world only through the broker.
 
@@ -32,5 +32,5 @@ Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns 
 - Routing, triage, and judgement about what a message means or who handles it. That is `core/`.
 - Session creation, queueing, and turn execution. That is `core/` and `harnesses/`.
 - Persona rendering or text rewriting before send. That is `persona/` through `core/`.
-- Retry policies that resend without a new approval.
+- Retry policies that resend without a new request.
 - Dashboards or status pages. That is `ui/`.

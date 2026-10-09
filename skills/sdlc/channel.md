@@ -14,7 +14,7 @@ and your next turn says so.
 - An effect beyond the workspace is a request, one JSON file per request
   in `.valor/effects/<name>.json`, of the form
   `{"action_type": "...", "target": "...", "payload": {...}}`. The kernel
-  performs it or holds it for Tom's approval, and your next turn says what
+  performs it or refuses it, and your next turn says what
   became of it. Available here:
 
 {effects}

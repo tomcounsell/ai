@@ -1,7 +1,7 @@
 """The working session on real Postgres and real git: a thin request asks,
 Tom's answer lands in the session that asked, the plan is recorded from a
 committed file, the build's candidate goes through the checks to a merge
-held for Tom, and feedback after the merge patches in the same session.
+performed at request, and feedback after the merge patches in the same session.
 
 No model call: each turn is a scripted subprocess (`tests/scripted.py`)
 that plays its stage by writing `.valor/` files and committing, the way a

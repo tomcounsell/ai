@@ -17,10 +17,10 @@ Mission item 6 makes attention a ledger item. Every point where Tom acts on
 a task is a row with provenance: `question.asked` and `question.answered`
 (from `clarify`, `plan`, `build`, `patch`) and `feedback.given` (from
 `merge`, `merged`) carry `by`, `via`, `at`, and `role_played`;
-`approval.granted` carries Tom's literal message and the same provenance,
-so a push approved under his standing permission records
-`role_played: true`; a guard grant carries his message, the incident, the
+an `approval.granted` row the ledger already holds carries Tom's literal
+message and the same provenance, and is still counted; nothing writes
+one now; a guard grant carries his message, the incident, the
 mission item, and the expiry. Questions and feedback rounds count as
-interruptions, approvals separately (`attention_counts`); both are shown on
+interruptions, approvals and grants separately (`attention_counts`); both are shown on
 the delivery and never block (Tom, 2026-10-01). The attention log's format
 is specified in [mission.md](mission.md).

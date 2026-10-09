@@ -17,7 +17,7 @@ resident kernel, `python -m core serve`. The Telegram bridge is built in
 only during Tom's test windows. Its tests run over the real port and the
 test database, with a local emulator (`tests/telegram_emulator.py`) as
 Telegram. Tom also reaches a task through `python -m core` (`answer`,
-`feedback`, `approve`, `release`, `stop`, `correct`), and those records
+`feedback`, `grant`, `stop`, `correct`), and those records
 carry `via: "the command line"`. The section "As built" below says what
 the bridge's code does.
 
@@ -26,7 +26,7 @@ the bridge's code does.
 | Mechanism | Serves |
 |---|---|
 | Receiving Tom's messages anywhere, any time | Mission item 1 (Tom gives work in conversation and never coordinates the gaps) |
-| Questions, deliveries, and approval prompts reaching Tom where he already is | Mission item 6 (attention spent as carefully as money) |
+| Questions, deliveries, and reports reaching Tom where he already is | Mission item 6 (attention spent as carefully as money) |
 | Replies bound to the task they answer, by structure | Constraint "Reliable stop, recovery, and correction": corrections and feedback carry provenance |
 | Every send an `act` effect released by the broker | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Idempotent receipt and send, acknowledged only after the ledger commits | Constraint "Reliable stop, recovery, and correction": stop and restart lose nothing |
@@ -89,8 +89,9 @@ Every outbound operation is a broker performer, with the same shape as the
 `effect_class`, `perform(action, key)`, and `lookup(action, key, since)`.
 The Telegram `lookup` does not read `since`; it works from the message id
 kept in `telegram-sends.json`. The broker
-holds every `act` request until Tom approves it, writes `effect.intent`
-before `perform` runs, and writes `effect.outcome` after. A kill between the
+performs an `act` request inside the task's ceiling, refuses one above it,
+writes `effect.intent` before `perform` runs, and writes `effect.outcome`
+after. A kill between the
 two leaves a dangling intent, which `lookup` reconciles by asking the platform
 whether the message with that idempotency key exists.
 
@@ -100,8 +101,8 @@ whether the message with that idempotency key exists.
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 | `local.send_message` | `act` | `local` | `text`; see [local.md](local.md) |
 
-The payload is the message. The digest Tom approves binds the exact text, the
-reply target, and each file's bytes, so what leaves is what he saw. `text`
+The payload is the message. The digest binds the exact text, the reply target,
+and each file's bytes, so what leaves is what was requested. `text`
 is absent, null, or a string; any other value is refused with "the text
 must be a string". `files`
 is absent, null, or a list of objects each with a string `path` and a string
@@ -115,29 +116,28 @@ each file once and sends nothing when its sha256 differs from the payload's.
 
 The Telegram connection belongs to one process: an MTProto session cannot be
 shared safely between two. So performers for a channel run inside that
-channel's bridge process, not in whichever process ran `core release`.
+channel's bridge process, not in the kernel's.
 
 The outbox is a query over the ledger, not a separate queue: every
 `release.requested` row whose `owner` is the bridge's channel and whose
 effect has no intent, outcome, or `effect.refused`, then every
 `notice.requested` with no `notice.sent`.
 
-The kernel writes `release.requested` when Tom approves a send, after
-the release checks. The bridge listens on a Postgres notification channel
+The broker writes `release.requested` with the send's `effect.held` row,
+when the request passes its checks. The bridge listens on a Postgres notification channel
 (`valor_events`, notified by every new row) and on each wake the outbox
 yields what is due and reconciles its own dangling intents:
 `Outbox.dangling()` lists them and `Outbox.settle(effect_id, conn)` asks the
 target about one (`broker.reconcile`) on a connection the caller gives.
 `Outbox.perform(item, conn)` calls `broker.release` in the bridge's
 process, on the caller's connection when one is given: it reads the `task.stopped`
-fence, binds the unused approval, writes the intent, calls the performer,
-and writes the outcome. A refused release writes `effect.refused` once, with a notice
-to Tom, and is not yielded again. The bridge calls nothing the outbox did not yield.
+fence, writes the intent, calls the performer, and writes the outcome. A
+refused release writes `effect.refused` once and is not yielded again. The bridge calls nothing the outbox did not yield.
 
 ### Operator notices
 
 Some messages are the kernel speaking to Tom about his own work: a question a
-turn asked, a delivery, a held effect waiting for his tap, a failed workspace, a message that was not acted on. These are operator notices.
+turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
 A notice goes only to Tom's operator chat, which is fixed in settings. No
 turn, task, or payload names the recipient, so a notice cannot reach anyone
@@ -146,8 +146,8 @@ concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
 
-Notices are the approval surface itself, so they do not wait for an
-approval (Tom, 2026-10-01). The README's effect table names "send" as
+Notices are how the kernel speaks to Tom, so they are not requested as
+effects (Tom, 2026-10-01). The README's effect table names "send" as
 `act`; a notice to Tom's own chat is the one send outside it. Every other message, including a reply in a group where Tom is one
 member, is an `act` effect. Each notice is also an attention item: the
 Evidence section counts "decisions escalated to Tom per finished task", and
@@ -256,9 +256,7 @@ deterministically to the record the notice carried:
 | Tom replies to | Becomes | Ledger row |
 |---|---|---|
 | A question notice | His answer to that question | `question.answered` |
-| A delivery notice | Feedback on that delivery, which puts the task back to work | `feedback.given` |
-| An approval prompt, with exactly `approve` | His tap on that held effect; his literal message is the note | `approval.granted` |
-| An approval prompt, anything else | A message about the effect; the effect stays held | `message.received` only |
+| A delivery notice, or a merge's report | Feedback on that delivery, which puts the task back to work | `feedback.given` |
 | Any notice of a task, with exactly `stop` | Stop of the task and every task under it | `task.stopped`, one per task |
 
 `question.answered` and `feedback.given` already exist and already carry
@@ -269,15 +267,12 @@ stand-in speaking for Tom does so through the command line with
 finding is why both fields exist: rows 177 and 207 both read `"by": "tom"`
 and 207 was role-played (rebuild-demonstration.md, Kernel findings, item 5).
 
-Approval and stop bind by structure, a verified sender replying to a known
-message with a fixed token, because they decide what may happen. A classifier
-decides what a thing is; it never decides what a thing may do. Free text that
-reads like approval does not approve: the effect stays held, and the
-judgement layer may raise it with Tom.
-
-Approving from chat records `approval.granted` the same way `core approve`
-does. Performing an approved send is the outbox's job; the approve-then-release
-sequence itself belongs to [architecture.md](../architecture.md).
+Stop binds by structure, a verified sender replying to a known message
+with a fixed token, because it decides what may happen. A classifier
+decides what a thing is; it never decides what a thing may do. A reply
+near `stop` that is not it is told "Not a stop; reply `stop`. Your message
+steers the task." and steers. How an act leaves belongs to
+[architecture.md](../architecture.md).
 
 ### Unbound messages: classified by the judgement layer
 
@@ -311,15 +306,14 @@ A low-confidence call takes its judgement task's abstain route
 being acted on. Where that route reaches Tom it costs attention, so the
 floor is set from the calibration record and the attention log, not once.
 
-A task started from a message takes its effect ceiling
-from settings, never from the message text, which would let a classifier
-set authority, with every push or send still waiting for Tom's tap (Tom,
-2026-10-01). It runs on the `frontier` seat, like any task that goes
+A task started from a message takes the effect ceiling `act`, set in the
+kernel and never from the message text, which would let a classifier set
+authority (Tom, 2026-10-01); its pushes, sends, and merge leave at request. It runs on the `frontier` seat, like any task that goes
 through the SDLC (`core/intake.py`, `_start`).
 
 A correction or exemplar is content, rendered into turns. It never widens a
 ceiling or grants governance. Those change only through
-`core/` commands and approvals.
+`core/` commands.
 
 ### Other people
 
@@ -332,14 +326,14 @@ only when Tom asks for it.
 
 **Verbatim.** The bridge sends the payload's text as it is, with the reply
 target and files the payload names. Persona rendering happens in `core/`
-before the request, so the digest Tom approves is of the final text. A bridge
-that reformatted, trimmed, or prefixed a message would send something he did
-not approve.
+before the request, so the digest is of the final text. A bridge that
+reformatted, trimmed, or prefixed a message would send something no one
+requested.
 
 **Length.** Telegram refuses a text message over 4,096 UTF-16 code units
 after entity parsing. A longer text is sent as consecutive messages
 (`split_text`), each within the limit, broken at a newline, else a space;
-the bytes are unchanged, so the approval still holds. A file over 2000 MiB
+the bytes are unchanged, so the digest still holds. A file over 2000 MiB
 is refused when it is requested.
 
 **Idempotency.** MTProto's send request carries a `random_id` the server
@@ -362,7 +356,7 @@ with its file is the exception and stays in doubt (Local state). Two matches for
 one message is `broker.Unknown`: nothing is concluded. When some of a
 split send's messages are on screen and the rest are not, `lookup` sends
 the rest, each under its own `random_id`, and the send settles as done:
-Tom approved the whole, and a message Telegram already holds is refused
+the request was for the whole, and a message Telegram already holds is refused
 as a duplicate rather than shown twice. If a file of the send is gone or
 Telegram refuses to finish it, the send settles as done with the messages
 on screen. The outcome records `chat_id` and
@@ -376,14 +370,13 @@ for a flood wait, the wait time, which later requests wait out. A flood wait on 
 screen, is waited out for exactly the seconds Telegram gives, and the
 send goes on. A
 connection lost after a request was written is `broker.Unknown`: no
-outcome, and the outbox's reconcile settles it through `lookup`. Sending again is a new request and a new
-approval. The bridge keeps no retry loop, dead-letter queue, or resend
+outcome, and the outbox's reconcile settles it through `lookup`. Sending again is a new request. The bridge keeps no retry loop, dead-letter queue, or resend
 schedule.
 
 ## Stop and recovery
 
-A stopped task's held effects stay held, and `broker.release` refuses them
-because it reads the `task.stopped` fence. A bridge process killed at any
+A stopped task's released sends are refused by `broker.release`, which
+reads the `task.stopped` fence and records each refused once. A bridge process killed at any
 point loses nothing: an unacknowledged inbound message replays and lands
 once; a send killed after its intent is reconciled by `lookup` on restart; a
 send killed before its intent was never sent and is still in the outbox.
@@ -401,8 +394,7 @@ Its resident memory counts against the RAM plan in
   judgement layer reads it and the kernel decides what it may do.
 - **Persona rewriting.** It does not draft, rephrase, shorten, prefix, or
   add links to outbound text.
-- **Retries without approval.** A failed send stays failed until a new
-  request is approved.
+- **Retries.** A failed send stays failed until a new request.
 - **Lifecycle signalling.** It posts no acknowledgement reactions, typing
   indicators, or progress messages of its own. Progress Tom needs comes as a
   notice from `core/`.
@@ -451,11 +443,6 @@ An implementation conforms to the port when:
   backs it: it matches each message of the notice on its full text, which
   carries the notice's short id. A notice cut off part way is finished the
   same way a split send is: the messages not on screen are sent.
-- **Approving sends one at a time.** Every reply Valor sends to anyone other
-  than Tom waits for his tap. In a busy group that is many taps. A standing
-  grant (say, "replies in this chat") would cut them, but the broker has no
-  standing grants: every release consumes one approval bound to one digest.
-  Whether to add one is Tom's call, since it widens authority.
 
 ## As built
 

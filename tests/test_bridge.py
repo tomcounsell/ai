@@ -313,7 +313,7 @@ def test_malformed_files_refused_at_request(dsn, op, tmp_path, files, said):
 @pytest.mark.parametrize("files", [None, [], [{"path": "<ws>/a.txt", "sha256": "0" * 64}]], ids=repr)
 def test_well_formed_files_pass_to_sizing(dsn, op, tmp_path, files):
     """No files, or a list of {path, sha256} naming a regular file in the
-    workspace, is sized and held for Tom."""
+    workspace, is sized and released to its bridge."""
     (tmp_path / "a.txt").write_text("a")
     files = json.loads(json.dumps(files).replace("<ws>", str(tmp_path)))
 

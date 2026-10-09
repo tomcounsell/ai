@@ -108,7 +108,7 @@ starts the task (`core/workspace.py`; docs/workspace.md):
 - **The origin.** A local bare repository is the clone's only remote,
   `main` at the base, and its `HEAD` names `main`, so a task's merge has a
   target branch. Only the broker's `push_branch` and `merge` performers
-  write it, after approval. The run's spec names no `merge_url`, so nothing reaches GitHub.
+  write it, at request. The run's spec names no `merge_url`, so nothing reaches GitHub.
 - **Services.** A Postgres cluster of the task's own, with its own roles,
   passwords, and port, separate from the kernel's database, and a
   `redis-server` of its own when the run asks, with no persistence and its
@@ -153,15 +153,14 @@ keys in the kernel key directory.
 
 | Outcome | When |
 |---|---|
-| `held` | the task holds its merge and the stand-in accepted it, or its feedback rounds (default 2) are spent; the feedback count is recorded |
-| `to tom` | the delivery did not pass, or the merge was refused: the pipeline hands the task to Tom |
+| `merged` | the task merged to its bare origin and the stand-in accepted it, or its feedback rounds (default 2) are spent; the feedback count is recorded |
+| `to tom` | the delivery did not pass, or the merge was refused or failed: the pipeline hands the task to Tom |
 | `stopped` | the task was stopped |
-| `an effect other than a local push is held for Tom` | a held effect that is neither a `push_branch` nor a merge |
 
 A task in `merge` is read from its status in this order: a delivery that
 did not pass, then a governance instance not granted or a join of
-`governance_refused`, then a refused merge, then a held merge, and
-otherwise it runs on.
+`governance_refused`, then a refused or failed merge, and otherwise it
+runs on. A merged task goes to the stand-in.
 
 After each `core run` the driver reads the first word of its answer.
 `QUESTION`, `DELIVERED`, `STOPPED` and `MERGED` go on to the next step.
@@ -175,16 +174,11 @@ invocation resumes the same task.
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
 
-The driver approves and releases a held `push_branch` only when the push
-URL in the kernel's record of the task (`core workspace show`) is exactly
-the bare origin the kernel provisioned in the task's directory, under Tom's
-standing permission for pushes to local copies; it records that permission
-in the approval note. It never answers a merge: every merge effect of the
-task is skipped, the current one and any a later candidate superseded, and
-the held merge is the run's evidence. Any other held effect stays held and
-ends the run. This is the effect-class constraint applied to the driver: it
-holds authority only for pushes to the run's own local origin, which Tom
-pre-authorized.
+The task's pushes and merge go to the bare origin the kernel provisioned
+in the task's directory and leave at request; the merge is the run's
+evidence. A replay task has the kernel's performers only, so a send it asks
+for is refused `no performer` and nothing reaches a person. The driver
+performs no effect itself.
 
 A run whose result file has no outcome resumes its task; one with an
 outcome is refused unless `--rebuild` is given. Each replay turn
@@ -198,7 +192,7 @@ Plays Tom from the answer key, never beyond it. On a question it answers
 briefly, by number, reveals only what was asked, and says "Your call." where
 the key is silent. If Valor states an approach that contradicts the key on
 something that changes what gets built, it adds the single most important
-correction. At a held merge it reads Valor's delivery note and the diff
+correction. At a merged delivery it reads Valor's delivery note and the diff
 from the base to the merge's head, taken from the task's kernel mirror and
 never the turn's workdir, and either accepts, when the delivery does what the key asks in
 substance, or gives one point of project-manager feedback: the single most
@@ -217,7 +211,7 @@ stop, recovery, and correction" that corrections carry provenance (rebuild-demon
 
 ### The judge: `tests/emulator/judge.py`
 
-Runs the item's verification on the final commit (the held merge's head,
+Runs the item's verification on the final commit (the merge's head,
 else the candidate) and nothing else. The commit is exported with `git
 archive` from the task's kernel mirror into a fresh tree at
 `<task_dir>/checks/verify-<run>/`, which only the kernel writes, so no turn
@@ -290,7 +284,7 @@ Each run writes `results/<run>.json`, atomically, after every step:
   harness's own cumulative figure;
 - `kernel_spend_usd`, the item task's metered spending, and
   `emulator_spend_usd`, the emulator task's, with its `open_calls`;
-- `final_rev`, the held merge's head or the candidate, `merge_effect_id`,
+- `final_rev`, the merge's head or the candidate, `merge_effect_id`,
   and the diff stat against the base, from the mirror;
 - `judge_model`, and `judge`: scores, divergences, rationale, the diff's
   size and truncation, every verification command's exit code
@@ -470,7 +464,7 @@ decision to keep the change is his. Today it runs by hand, one item at a
 time.
 
 The emulator refuses no merge. Milestone 1.5's takeover gate (three items
-reaching a held merge at the baseline's bars) is a one-time Done item Tom
+reaching a merge at the baseline's bars) is a one-time Done item Tom
 set for the rebuild, read from emulator runs by the build; it is not a
 standing rule, and no merge is refused on a score.
 

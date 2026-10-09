@@ -111,7 +111,7 @@ port's input needs validation the dataclasses cannot give without hand code.
 resident kernel, kept alive by launchd: it binds what the bridges record,
 writes the notices Tom is owed, and schedules every task's turns, one turn
 per machine, waking on each ledger notification. The other commands
-(`start`, `run`, `answer`, `feedback`, `approve`, `release`, `stop`,
+(`start`, `run`, `answer`, `feedback`, `grant`, `stop`,
 `status`, `ledger`, `correct`) are one short process each, and `run` steps
 one task from the command line. All state is in Postgres. The gateway, the
 broker, and the turn runner stay in one process outside every sandbox, so
@@ -151,7 +151,7 @@ What the stack contributes to the ledger's integrity:
   every effect".
 - **Partial unique indexes** make each fold over the ledger total: one
   opening and one charge per gateway call, one row of each kind per
-  effect, an approval consumed by at most one intent, one stop per task, one
+  effect, one release per effect, one stop per task, one
   correction per number.
 - **Transaction-scoped advisory locks** (`pg_advisory_xact_lock`) serialize
   the stop check and the append that opens a call, per task. They need no table privilege, so the insert-only
@@ -477,21 +477,19 @@ and how the merge authenticates are in [performers.md](performers.md).
 Status: **in use**.
 
 Serves "Bounded authority, metered spending": a sandbox holds no credential capable of an effect
-outside it, and every effect that leaves is a typed action [11]. The effect protocol and approvals
-are [architecture.md](architecture.md).
+outside it, and every effect that leaves is a typed action [11]. The effect protocol
+is [architecture.md](architecture.md).
 
 ## 9. Surfaces
 
-**Approval surface.** The `python -m core` CLI: `pending`, `approve
-EFFECT --note`, `release EFFECT`, `answer`, `feedback --by --role-played`,
-`status`. Status: **in use**. Serves "every `act` needs Tom, per action" and
+**Command line.** The `python -m core` CLI: `answer`, `feedback --by
+--role-played`, `grant`, `stop`, `status`. Status: **in use**. Serves
 Mission item 6, since `status` shows the attention log.
 
-**Approving from a phone.** Tom approves away from a terminal through a
-bridge or a small web page. Status: **open**. Whether an `act` approval also
-needs a passkey signature over the exact payload, verified by the broker, is
-**open**; it matters the day an approval arrives over a channel that a
-session hijack could forge.
+**From a phone.** Tom answers, gives feedback, and stops away from a
+terminal through a bridge. Status: **in use**. A grant is given with
+`python -m core grant`; giving one from a phone, and whether it then needs
+a passkey signature verified by the kernel, is **open**.
 
 **Bridges.** Telegram, email, and a local chat page, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
@@ -505,7 +503,7 @@ is [bridges/telegram.md](bridges/telegram.md),
 [bridges/email.md](bridges/email.md), and [bridges/local.md](bridges/local.md).
 
 **Dashboard.** Read-only views over `core/` read models: tasks, spend, the
-ledger, pending approvals, the attention log, and each routine's last run
+ledger, the attention log, and each routine's last run
 and period spending (`ui/README.md`). It is aiohttp, serves GET only on
 `127.0.0.1:8790`. Status: **in use**.
 

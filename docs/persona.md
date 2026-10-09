@@ -256,7 +256,7 @@ An escalation names the options, the evidence, and Valor's recommendation:
 "Option A is faster and harder to maintain. Option B adds two days. I
 recommend B because ..."
 
-Every question, answer, piece of feedback, and approval is ledgered with
+Every question, answer, piece of feedback, and grant is ledgered with
 its provenance, including whether the answer was role-played on Tom's
 behalf (`role_played`), and attention spent is a ledger item, counted per
 task on the same footing as money (see `docs/mission.md` and
@@ -300,12 +300,12 @@ The persona governs content; the broker governs departure.
 | Kind | Effect class | Who authorizes |
 |---|---|---|
 | A draft, a branch, a reply prepared for sending | `propose` | the grant |
-| A sent message or email, a push, a merge, a post | `act` | Tom, one approval per instance |
+| A sent message or email, a push, a merge, a post | `act` | the task's ceiling; performed when requested, and reported to Tom |
 
 The effect classes are the kernel's (README, "What corrigible means here";
 `docs/architecture.md`). In the current kernel the outbound actions are
-`push_branch` and the kernel's `merge`, each held for Tom's approval and
-then released.
+`push_branch` and the kernel's `merge`, each performed when requested
+inside the task's ceiling, the merge only when its predicate holds.
 
 Content rules for anything that leaves:
 

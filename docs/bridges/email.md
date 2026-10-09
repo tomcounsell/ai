@@ -14,9 +14,9 @@ prints its launchd job. The last section lists the modules.
 
 | Mechanism | Serves |
 |---|---|
-| Email received and recorded, and sent as an approved `act` effect | Mission item 1: work arrives the way the people around Tom already send it |
+| Email received and recorded, and sent as an `act` effect | Mission item 1: work arrives the way the people around Tom already send it |
 | Each send's `Message-ID` and thread root recorded with its result | Constraint "Reliable stop, recovery, and correction": a send carries provenance in the ledger |
-| Every send an `act` effect, with recipients inside the approved digest | Constraint "Bounded authority, metered spending"; effect classes [11] |
+| Every send an `act` effect, with recipients inside the requested digest | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Receipt acknowledged only after the ledger commits; sends reconciled by `Message-ID` | Constraint "Reliable stop, recovery, and correction": nothing is lost or sent twice |
 | Inbound mail treated as data, never as authority | Retrieved content can act as instructions [7] |
 
@@ -116,7 +116,7 @@ from Tom's address is recorded and starts nothing. The bridge never sets
 
 **Nothing binds.** Every email record is unverified, so intake binds it as
 `none`: mail from Tom is recorded in the ledger and does not start, answer,
-steer, approve, or stop anything. Approvals and stops come through the
+steer, or stop anything. Stops come through the
 operator channel (Telegram, or the local chat page) or the command line, which an email reply could not carry reliably anyway
 (quoted history and signatures surround what the person typed).
 
@@ -133,7 +133,7 @@ lowercased, sorted, and comma-joined, and its payload is the whole message:
 | `in_reply_to`, `references` | Threading headers, when the message replies |
 | `files` | Each attachment as a path and its sha256 |
 
-The digest Tom approves covers the recipients, the subject, the body, and
+The digest covers the recipients, the subject, the body, and
 each file's bytes. `subject`, `body` and `in_reply_to` are each absent,
 null, or a string, and `to`, `cc` and `references` each absent, null, or a
 list of strings; any other shape is refused with "subject, body and
@@ -145,7 +145,7 @@ inside the task's workspace, sized there by the kernel without reading it,
 and one that is missing, a link, or outside the workspace is refused with
 one answer. `perform` reads each file once and compares its sha256
 with the payload's; a mismatch or a missing file fails before SMTP
-connects, so a file changed after Tom's tap never leaves. The message is
+connects, so a file changed after the request never leaves. The message is
 built by `core/mail.py`'s `email_message`, which the bridge reaches through
 `core.bridge`: a UTF-8 `text/plain` body, files as `multipart/mixed`
 parts (each file's own bytes in base64; a `message/*` type, such as
@@ -161,7 +161,7 @@ transport requires added: `From` (Valor's address), `Date`, and
 the message `email_message` builds, each attachment base64 encoded, from
 the sizes the kernel took without reading the files. A send over
 25,000,000 bytes is refused at request time with that limit as the
-reason, so Tom never approves an impossible send. The performer builds
+reason, so an impossible send never reaches the outbox. The performer builds
 with the same builder, so the size measured is the size sent. `MAIL FROM`
 carries `SIZE` when the server advertises it.
 
@@ -174,7 +174,7 @@ through `mail.reply_all`: the original sender in `To`, every other
 repeats, with a `Re:` subject, `In-Reply-To`, and the whole `References`
 chain. A `reply_to` that names no received email is
 an error to the turn and requests nothing. Tom sees the recipient list in
-the approval prompt. The bridge sends to
+the send's report. The bridge sends to
 the addresses in the payload and to no others.
 
 **Idempotency.** The `Message-ID` is `<valor.<first 32 hex of the key's
@@ -224,7 +224,7 @@ notice on the first wake after. After the 250,
 done. When the server accepts
 the message for some recipients and refuses others, the outcome is `done`
 with `refused` listing each address and its reply; reaching them is a new
-request and a new approval. The bridge keeps no retry loop, backoff
+request. The bridge keeps no retry loop, backoff
 schedule, or dead-letter queue.
 
 **Operator notices.** Notices go to Tom's operator channel, Telegram or the
@@ -233,7 +233,7 @@ email bridge performs the outbox's releases and ignores its notices.
 
 ## Stop and recovery
 
-A stopped task's held sends stay held, and `broker.release` refuses a
+A stopped task's released sends are refused: `broker.release` refuses a
 release for it on the `task.stopped` fence and records it refused. The
 bridge ends a call only around its own server call: an SMTP send, after the
 broker has written the intent, and a Sent Mail lookup. When Tom stops the
@@ -265,8 +265,8 @@ it exits.
 - **Triage or judgement.** It does not classify mail, screen for prompt
   injection, or decide what deserves a reply. Inbound mail is data [7].
 - **Persona rewriting.** It does not draft, rephrase, add prefixes, or
-  convert formats. The body it sends is the body Tom approved.
-- **Retries without approval.** A failed send stays failed.
+  convert formats. The body it sends is the body requested.
+- **Retries.** A failed send stays failed.
 - **State of its own.** It keeps no message-id map, UID cursor, history
   cache, or queue outside the ledger. Its only local state is the inbound
   directory.
@@ -312,5 +312,3 @@ The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
   the watch, and every other send go on.
 - **Email starts, answers, and steers nothing.** No email record is
   verified, so mail from Tom is recorded and binds as `none`.
-- **Approving every send.** As on Telegram, each send to anyone but Tom
-  waits for his tap, and the broker has no standing grants.

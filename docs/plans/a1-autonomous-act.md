@@ -576,23 +576,22 @@ None.
 
 ## Critique record
 
-Round 1 (`~/src/valor-build-notes/critic-a1-r1.md`), verdict revise.
-Answered: replay tasks build kernel performers only (B1); `ensure_merge`
-skips `failed` and passes a payload-and-grants `request_id` so `_prior`
-answers under the task lock (B2); an unreadable git fact writes no row
-and returns `unknown` (B3); Done 8 is a byte comparison test (B4); the
-Done 5 pattern, the missed files and docs, `MergeRefused`, the
-report-feedback branch's place, the steer notice, `core run`'s status,
-report recipients, the fold's `at`, the migration selector, existing
-`propose` tasks, and the kernel's own merges (should-fix 1-10).
+Round 1 (`~/src/valor-build-notes/critic-a1-r1.md`), revise. Answered:
+replay tasks build kernel performers only (B1); `ensure_merge` passes a
+payload-and-grants `request_id`, so `_prior` answers under the task lock
+(B2); an unreadable git fact writes no row and returns `unknown` (B3);
+Done 8 is a byte comparison test (B4); should-fix 1-10 as written above.
 
-Round 2 (`~/src/valor-build-notes/critic-a1-r2.md`), verdict revise;
-rounds spent, applied by the lead's decisions: only `Brief.replay` is
-exempt from reports (N1); an ancestry read git cannot answer is
-`unknown`, and the kernel parks the task so its merge is asked again on
-the next tick (N2); `stop` to a merge's report binds `none`, and the
-report ends with the feedback line (N3); the rollout stops the kernel and
-bridges, migrates, then starts, and the missed tests are listed (N4); the
-failed merge as the major-blocker question, the merge-target grants as
-standing authority, the queued-sends inspection, and the stale texts
-(should-fix 1-5). The replay wiring and the paragraph test stand.
+Round 2 (`~/src/valor-build-notes/critic-a1-r2.md`), revise; rounds spent,
+applied by the lead's decisions: only `Brief.replay` is exempt from
+reports (N1); an unreadable ancestry is `unknown` and parks the task (N2);
+`stop` to a merge's report binds `none`, and the report ends with the
+feedback line (N3); the rollout stops, migrates, then starts (N4); the
+failed merge as the major-blocker question, merge-target grants as
+standing authority, the queued-sends inspection, the stale texts.
+
+Build (`~/src/valor-build-notes/builder-a1.md`): as designed. A refused
+or failed merge stands per payload and grant count, a performer's config
+refusal included; `adds_governance` rides on the intent row; a refused
+release owes no notice; tests stop a task whose released sends no bridge
+of a later test should send.

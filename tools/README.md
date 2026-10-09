@@ -12,7 +12,7 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 
 ## Performers
 
-- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, after Tom's tap; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, released only when the merge predicate holds; no turn is offered it. `push_branch` pushes to the task's `push_url` (else the origin URL recorded at start) and never carries a credential. `merge` is built from the task's Brief, pushes to its origin URL, and lands on a remote only on a (URL, branch) pair Tom granted and never on the remote's default branch, from the kernel mirror with the GitHub token ([docs/machine.md](../docs/machine.md), Keychain). Both refuse a workspace whose own config names a program, redirects a push, or includes other config (`core.git.hostile`). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
+- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, when requested; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, performed only when the merge predicate holds; no turn is offered it. `push_branch` pushes to the task's `push_url` (else the origin URL recorded at start) and never carries a credential. `merge` is built from the task's Brief, pushes to its origin URL, and lands on a remote only on a (URL, branch) pair Tom granted and never on the remote's default branch, from the kernel mirror with the GitHub token ([docs/machine.md](../docs/machine.md), Keychain). Both refuse a workspace whose own config names a program, redirects a push, or includes other config (`core.git.hostile`). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
 
 ## Judgement legs
 
@@ -31,7 +31,7 @@ Adapters behind `core/judgement.py`'s `JudgementPort` ([docs/judgement-layer.md]
 - Every tool declares one class per operation: `read`, `propose`, or `act`.
 - `read`: queries and fetches with no effect.
 - `propose`: sandbox writes, branches, drafts, anything that can be withdrawn.
-- `act`: merge, send, pay, deploy. Released by the broker only with Tom's approval on the ledger.
+- `act`: merge, send, pay, deploy. Performed by the broker when requested inside the task's ceiling, and reported to Tom.
 - A tool that cannot say which class an operation is does not ship.
 
 ## Not here

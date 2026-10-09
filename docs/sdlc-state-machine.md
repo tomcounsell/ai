@@ -57,7 +57,7 @@ ninety-day expiry.
 | `checks.review` | an independent verdict on the candidate | blind verifier, fresh session | `pass`, `changes`, `governance_refused` | the join |
 | `checks.docs` | no doc says something the candidate made untrue | fresh session, doc paths only | `updated`, `no_change`, `changes` | the join |
 | `patch` | every finding from the join resolved | working session, resumed | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting`, Tom |
-| `merge` | the delivery shown, the merge held for Tom's tap | kernel, broker, Tom | `released`, `feedback`, `governance_granted` | `merged`, `patch`, `checks` |
+| `merge` | the delivery merged, or shown to Tom when it cannot be | kernel, broker, Tom | `merged`, `feedback`, `governance_granted` | `merged`, `patch`, `checks` |
 | `merged` | the change is on the target branch | nothing | `feedback` | `patch` |
 | `stopped` | nothing more happens | nothing, ever again | | none |
 
@@ -99,7 +99,7 @@ legacy and folds read-only by the old kernel's precedence (stopped; a
 delivery not reopened by feedback is `merge`; an unanswered question is
 `waiting`; feedback after a delivery is `patch`; any turn is `build`; else
 `judge`). The router, verdicts, answers, feedback, and grants refuse it;
-status, stop, approve, and release work.
+status and stop work.
 
 ## Types
 
@@ -491,26 +491,28 @@ branches again on the new candidate; `asked`, `idle`, and `failed` as in
 **Why.** Tom's decision of 2026-10-01; the demonstration's two send-backs
 were one resumed turn each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 
-### `merge`: shown to Tom, merge held for his tap
+### `merge`: merged at request, or shown to Tom
 
-**Goal.** Tom sees the result and decides; nothing irreversible happens
-without his tap.
+**Goal.** A delivery that passed lands on the target branch, and Tom hears
+what landed; one that cannot land reaches Tom with what stands in its way.
 
 **Entry.** The join sent the task here, as a delivery that passed or one
 that did not.
 
-**What runs.** `task.delivered` with the delivery summary reaches Tom
-through a bridge: what was delivered, how it was verified, the test,
-review, and docs verdicts with any breadth gaps, the tech-debt additions,
-and the decisions Valor made that Tom may want to change, the one that most
-changes the outcome first. The merge, and every other `act` effect the task
-requested, sits held in the broker.
+**What runs.** The kernel writes `task.delivered` with the delivery
+summary: what was delivered, how it was verified, the test, review, and
+docs verdicts with any breadth gaps, the tech-debt additions, and the
+decisions Valor made that Tom may want to change, the one that most changes
+the outcome first. It then requests the merge, and the broker performs it
+at request when the predicate below holds. A done merge owes Tom a `report`
+notice; a reply to it is `feedback.given`. The summary reaches Tom as the
+delivered notice only when the delivery did not pass, a governance instance
+waits for his grant, or the merge was refused or failed.
 
-**Exit evidence.** `released`: `approval.granted` bound to the effect's
-payload digest, carrying Tom's literal message, then `effect.intent` and
-`effect.outcome`. One tap, one effect. `feedback`: `feedback.given`, to
-`patch`. `governance_granted`: Tom's grant on a refused review, back to
-`checks`, where only review reruns.
+**Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done`
+for the merge. `feedback`: `feedback.given`, to `patch`.
+`governance_granted`: Tom's grant on a refused review, back to `checks`,
+where only review reruns.
 
 **The merge predicate.** The broker performs a merge only when all of
 these are facts in the task's ledger:
@@ -527,20 +529,24 @@ these are facts in the task's ledger:
 4. the docs verdict `updated` or `no_change`, its commits running from `C`
    to the head being merged with no merge commit between, every path `git
    diff --no-renames` names between them a doc path (so a rename out of a
-   code path counts the old path), read from git at release, and its
-   governance boolean answered no or each instance granted;
-5. an unused `approval.granted` bound to this merge effect's digest.
+   code path counts the old path), read from git at request, and its
+   governance boolean answered no or each instance granted.
 
 Each term is deterministic: a row exists or a git fact holds, or not. No
-model call decides whether a merge may happen. The broker checks all five
+model call decides whether a merge may happen. The broker checks all four
 and writes the merge's intent in one transaction under the task's lock. A
+term that does not hold is an `effect.refused` naming it. When git cannot
+be read, no row is written, the task is parked, and the next step asks
+again. The kernel requests a merge once for each payload and grant count,
+so a refused or failed merge stands until a new candidate, a new docs head,
+or a new grant changes the request. A
 merge whose performing process died leaves an intent with no outcome; a
 later run settles it from the target once it answers (`broker.reconcile`).
 
 **Where a merge goes.** At start the kernel records origin's push URL (as
 an absolute path) and the target branch (the flag, or the branch origin's
 `HEAD` names). The merge's payload carries both with the head and the
-candidate, so Tom's approval binds them, and the push goes to that URL
+candidate, so the request binds them, and the push goes to that URL
 whatever the workspace's config says later; a workspace whose own config
 names a program, redirects a push, or includes other config is refused
 (`core/git.py`, `HOSTILE`). For a task the kernel provisioned, the origin
@@ -555,7 +561,7 @@ digests its path, the hunk header's function context, and its added lines,
 without line numbers, so the same hunk on a rerun or a later candidate
 keeps its id and its grant; a changed, moved, or split hunk needs a new
 tap, and identical added lines in one function context of one file share
-an id. After the release the task is
+an id. After the merge the task is
 `merged`; a defect found in use comes back as `feedback.given` on the same
 task and goes to `patch` (Mission item 1, "resolving discovered defects").
 After a merge, `python -m core status` reads what came after it
@@ -567,10 +573,10 @@ kernel's cache of the target as last fetched. The audit scores read a
 revert as a `changes` label on the merged candidate. None of it moves the
 fold or decides anything.
 
-**Why.** Mission items 1 and 6; `act` needs Tom per action [11]. Delivery
+**Why.** Mission items 1 and 6; `act` runs inside the ceiling Tom set. Delivery
 1 of the demonstration left out the decision that mattered most
 (rebuild-demonstration.md, Attention log), hence the order rule. **Exists
-in the kernel:** held `act` effects, approve, release, one-time approval.
+in the kernel:** the merge at request, its report, and the predicate.
 
 ### `stopped`
 

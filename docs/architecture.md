@@ -18,7 +18,7 @@ the rebuild adds, with the evidence that justifies it.
 
 | Tier | Decides | Never decides |
 |---|---|---|
-| Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, approval, stop | what a request means |
+| Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, governance grant, merge predicate, stop | what a request means |
 | Judgement (a hosted Jev-class model behind one port, open-weight fallback behind the same port) | what a thing is: is this request underspecified, does this diff add governance | whether it may proceed |
 | Agents (frontier models, one `claude -p` turn at a time) | how to do the work | anything about their own authority |
 
@@ -39,8 +39,8 @@ prompt layer.
 or `TRUNCATE` raises, and the kernel's role `valor_kernel` is granted
 `SELECT` and `INSERT` only. Grants are the first lock, the trigger the
 second. Unique indexes make every fold total: one opening and one charge
-per model call, one row of each kind per effect, one stop per task, an
-approval consumed by at most one effect, one correction per number, one
+per model call, one row of each kind per effect, one stop per task, one
+correction per number, one
 judge verdict per task, one row of each kind per turn, and one grant per
 guard and per governance instance. Writers take a transaction-scoped
 advisory lock on the task, so two processes racing on one task serialise.
@@ -106,7 +106,7 @@ task's ceiling bounds everything beneath it [11].
 |---|---|---|
 | `read` | no effect | the grant |
 | `propose` | reversible: a file in the workspace, a branch, a draft, anything that can be withdrawn | the grant; Valor asks first when Tom would want to be asked |
-| `act` | irreversible or money: push to a shared remote, merge, send, pay, deploy | Tom, one approval per invocation |
+| `act` | irreversible or money: push to a shared remote, merge, send, pay, deploy | the task's ceiling; performed when requested, and reported to Tom |
 
 **Built.** The broker is the one path to the world. A **performer** is the
 code that carries out one action type, and it declares that type's class;
@@ -120,8 +120,9 @@ task's lock:
 - refuses, with an `effect.refused` row, an action with no performer, on a
   stopped task, above the task's ceiling, adding governance without Tom's
   grant, or one its performer's `refuse` declines;
-- performs `read` and `propose` at once;
-- holds every `act` as `effect.held` for Tom.
+- performs `read`, `propose`, and `act` at request; a send of a type a
+  bridge declares is written as `effect.held` with `release.requested` in
+  one transaction, and the owning bridge's outbox performs it.
 
 Performing writes `effect.intent` and commits it before the performer runs,
 then `effect.outcome`, holding a session lock on the effect throughout. A
@@ -136,9 +137,11 @@ A `merge` adds governance when the review or docs verdict on its
 candidate answered the governance boolean yes, computed by the broker and
 never said by the requester; it is refused while any instance lacks Tom's
 tap (`guard.granted`), and the Brief's `governance_grant` does not stand in.
-This is the governing constraint as a kernel fact. A `merge` is released
-only when the merge predicate holds, checked in the transaction that
-writes its intent ([sdlc-state-machine.md](sdlc-state-machine.md)).
+This is the governing constraint as a kernel fact. A `merge` is performed
+only when the merge predicate holds, read in the transaction that writes
+its intent ([sdlc-state-machine.md](sdlc-state-machine.md)); a term that
+does not hold is an `effect.refused` naming it, and a merge whose git facts
+cannot be read writes no row and is asked again on the task's next step.
 
 Two performers run in the kernel's process, never forcing: `push_branch`
 (`act`) pushes one commit to one branch, never the target branch, to `push_url`
@@ -152,34 +155,32 @@ refuses a workspace whose config names a program, redirects a push, sets any
 `push.*` or `http.*`, or includes other config (`core/git.py`;
 [tech-stack.md](tech-stack.md), the broker's performers).
 
-The constraint it enforces: bounded authority, metered spending. In the first
-demonstration all three deliveries went out as held pushes that landed only
-after Tom's approval (rebuild-demonstration.md, Where Tom acted as project
-manager).
+The constraint it enforces: bounded authority, metered spending.
 
-## Approvals: approve, then release
+## How an act leaves
 
-**Built.** An `act` leaves in two steps, so that the tap and the effect are
-separate records:
+**Built.** An `act` inside its task's ceiling leaves when it is requested.
+What bounds it is the ceiling, stop, the governance grant, the merge
+predicate, and each performer's `refuse`; nothing waits for a tap. A merge
+is requested once per payload (`request_id` `merge:<digest>:<grants>`): a
+refused or failed one stands until a new candidate or docs head, or a
+grant, makes a new request.
 
-1. **Approve.** `approval.granted` binds Tom's tap to the held effect's
-   payload digest and stores his literal message as `note`, with `by`,
-   `via`, `at`, and `role_played`, so a stand-in's tap is never read as
-   Tom's (an approval row holding only `by` reads the rest as unknown).
-2. **Release.** The broker finds an unused approval whose digest matches,
-   writes the intent with that `approval_id`, and performs; for a `merge`
-   the predicate is checked in the same transaction. A unique index makes
-   each approval good for one intent: one tap, one effect. An effect whose
-   payload changed after approval has no matching approval and is refused.
-   For a bridge's send type the kernel's release writes `release.requested`
-   instead, and the owning bridge's outbox performs it through the broker.
+What reaches Tom is a report of what left: when an `act` effect's outcome
+is `done`, the same transaction requests one `report` notice
+(`report:<effect_id>`) to the operator channel, saying what left in kernel
+words. A merge's report gives the task, branch, head, delivery summary, and
+each check's outcome, and ends "Reply to this message to give feedback". No
+report is written for a push (a step inside the task), for a send that
+itself reached Tom (a Telegram send to the operator, an email only to Tom's
+addresses, any local chat send), or for a replay task. A replay task is
+built with the kernel performers only, so a send it asks for is refused
+`no performer`.
 
-**Design.** On a bridge, an approval is a typed card the kernel renders
-from structured fields: the action, its target, a summary of the payload,
-and the destination's audience. Agent prose appears only in a marked,
-length-capped note, since agent text on a card is a persuasion channel
-aimed at the one person who can widen authority. An unanswered approval
-expires into a refusal with a typed cause, never an indefinite wait.
+`approval.granted` rows the ledger already holds are read and counted;
+nothing writes one. `db.migrate` refuses each effect still held for an
+approval (`effect.refused`, `at: migrate`), except a send whose bridge's
+outbox holds its release.
 
 ## Stop
 
@@ -260,7 +261,7 @@ Three records say what happened in a turn:
 |---|---|---|---|
 | Gateway rows | the gateway (`route: gateway` or `openai`); the judgement port for its own calls (`route: judgement`) | every model call: model, opening estimate, charge, usage; on the OpenAI route the credential, tier, tool calls, and request id | yes |
 | Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness and its release, argv, the dispatched text, its digest, the persona's digest and size, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, the paths of its stdout and stderr files, metered spend, the transcript copy's digests) | yes |
-| Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
+| Effect ledger | the broker | intent, outcome, refusal, and a bridge send's hold and release, for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record,
 copied into the store when the turn ends, but it is the agent's own account
@@ -312,8 +313,9 @@ the system cannot perform against".
 
 **Built.** Every question is a `question.asked` row and its answer a
 `question.answered` row; every piece of feedback on a delivery is a
-`feedback.given` row naming the delivery it answers; every tap is an
-`approval.granted` row, and every governance grant a `guard.granted` row.
+`feedback.given` row naming the delivery it answers; every governance
+grant is a `guard.granted` row, and an `approval.granted` row the ledger
+already holds is read with the rest.
 Each carries provenance: `by`, `via`, `at`, and `role_played`, true when
 someone stood in for Tom. `tasks.status` folds these into the task's
 attention log, in ledger order, labelled by kind (`question`, `feedback`,
@@ -331,7 +333,8 @@ ledger could not say so (rebuild-demonstration.md, Kernel findings 5).
   attention log. Valor proposes the label in its next delivery; Tom's
   correction overrides it.
 - **An attention cost.** Each task counts its interruptions: questions and
-  feedback rounds, with approvals counted separately (Tom, 2026-10-01). The
+  feedback rounds, with approvals and grants counted separately (Tom,
+  2026-10-01). The
   kernel never refuses a question because of the count, because a refused
   question makes Valor guess, which costs more attention later. The count
   is shown on the delivery. Per-task attention beside metered spending is
@@ -376,7 +379,7 @@ metered through the gateway. The verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
   deterministic check results, the governance instances, and the task's
-  held and refused effects, as files the kernel writes. It never reads the
+  requested and refused effects, as files the kernel writes. It never reads the
   agent's narrative (`done.md`, the transcript), so it judges what happened
   and not what Valor said happened.
 - **Runs deterministic checks first**: the kernel reruns the repository's
@@ -481,13 +484,13 @@ feedback work this way. Serves: corrections reach every session.
 
 A bridge is I/O: it turns an inbound message into a request or a reply on a
 task, and renders the kernel's outbound records (questions, deliveries,
-approval cards) on its medium. The kernel's loop is the one execution
+reports) on its medium. The kernel's loop is the one execution
 engine; delivery is keyed by transport, so a task started by email answers
 by email. The kernel side of the port is built (`core/intake.py`,
 `core/notices.py`, `core/bridge.py`): one `message.received` row per
 inbound message, bound by the kernel to start, steer, answer, feedback,
-approve, stop, or none; notices owed by the fold; and an outbox that hands
-each bridge its sends after Tom's approval. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
+stop, or none; notices owed by the fold; and an outbox that hands
+each bridge the sends the broker released. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
 email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local chat page in `bridges/local/` ([bridges/local.md](bridges/local.md)), each a process of its own.
 
 ## How a task flows from request to merge
@@ -507,10 +510,12 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local ch
    blind verifier, and a docs session committing only doc paths. Their
    findings go together to one patch in the resumed working session, and
    the three run again on the new candidate, within the loop counts.
-7. **Merge.** The delivery reaches Tom with its summary, the decisions he
-   may want to change, and its held effects, each `act` a card his tap
-   approves and release performs. Feedback, before or after the merge,
-   goes to `patch` on the same task.
+7. **Merge.** A passing delivery merges itself when the merge predicate
+   holds, and the merge's report reaches Tom with its summary and each
+   check's outcome. A delivery that will not merge by itself (it did not
+   pass, a governance instance awaits a grant, or its merge was refused or
+   failed) reaches him as the delivered notice, with the reason. Feedback
+   by reply to either goes to `patch` on the same task.
 
 The attention log, the money spent, and every verdict are read from the
 ledger at every step. The states, verdicts, loops, and the merge predicate
@@ -521,16 +526,15 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Failure | Caught by | Serves |
 |---|---|---|
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
-| Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
-| Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
+| Irreversible effect beyond the task's authority | broker reads the class from the performer and refuses an `act` above the task's ceiling or on a stopped task; a replay task has no send performer; every `act` that leaves is reported | bounded authority |
 | Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review runner calls it, and the docs runner is registered once governance passes its entry check) | governing constraint |
-| A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
+| A merge on a model's say-so, or redirected by a turn | the merge predicate, four terms read from rows and git, read with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the merge's payload; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling merge intent reconciled from the target | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
-| A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals | provenance |
+| A stand-in's words read as Tom's | `role_played` on answers, feedback, verdicts | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |

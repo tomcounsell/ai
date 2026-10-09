@@ -47,8 +47,9 @@ spending".
 - No judgement changes an effect ceiling, a `governance_grant`, or
   an approval. Those are kernel facts, and Tom is the only source of the last
   two [11].
-- No `act` proceeds on a judgement. An `act` still needs Tom's tap, one per
-  invocation, whatever a judgement said about it.
+- No judgement lets an `act` past the kernel. An `act` leaves only inside
+  its task's ceiling, for a task not stopped, and a merge only when its
+  predicate holds, whatever a judgement said about it.
 - A judgement can route work toward more caution or toward a human, and the
   kernel decides whether that routing is allowed. A judgement that routes
   work away from a human is a gate in the governance sense and needs a grant
