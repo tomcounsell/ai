@@ -130,10 +130,15 @@ Read from the released sdist.
   `BM25Field.search(model, field, query, limit=10, allowed_keys=)`
   (`fields/bm25_field.py:526`) ranks only the keys allowed, widening its
   window until `limit` allowed hits are found, up to popoto's
-  `SCOPED_SEARCH_FETCH_CAP` of 4096; ties break by key, so the same store
-  gives the same order. `SortedField` filters by range (`__lt`), and
-  `partition_by` partitions it by a key field. Only `EmbeddingField` needs
-  the `vector` extension, and popoto never creates an extension.
+  `SCOPED_SEARCH_FETCH_CAP` of 4096: on Postgres an allowed key is kept
+  only when its corpus-wide rank is within 4096
+  (`backends/postgres/search.py:1257-1298`). The backend's
+  `keyword_search(spec, field, tokens, limit=, allowed=, stats="corpus")`
+  with no `fetch_cap` ranks the allowed keys with no such cut. Ties break
+  by key, so the same store gives the same order. `SortedField` filters by
+  range (`__lt`), and `partition_by` partitions it by a key field. Only
+  `EmbeddingField` needs the `vector` extension, and popoto never creates
+  an extension.
 - **Process state.** `set_backend`'s default, the pools per DSN and pid,
   model bindings, and table-ready caches are process-wide;
   `set_backend(None)`, `reset_bindings()`, and `close_pools()` clear them.
@@ -266,11 +271,14 @@ critique findings a critic turn wrote. Pi turns contribute their
 - **Candidates.** Records with `project` equal to the task's project
   `repo` and `ledger_id` below the task's own `task.created` id: what was
   known in this project before the task began. Memory reads them with
-  `Record.query.filter(project=p, ledger_id__lt=cutoff)`, drops
-  `origin = correction` (the corrections render whole in the same Brief),
-  and passes their keys as `allowed_keys` to `BM25Field.search(Record,
-  "text", query, limit=10)`. A task with no project spec recalls nothing,
-  since it has no project to scope by.
+  `Record.query.filter(project=p, ledger_id__lt=cutoff)`, drops `origin =
+  correction` (the corrections render whole in the same Brief), and passes
+  their keys as `allowed` to the Postgres backend's `keyword_search(...,
+  limit=10, stats="corpus")` with no `fetch_cap`, so in-scope records are
+  found however many out-of-scope records outscore them. `keyword_search`
+  is popoto's internal API; the pin `==1.10.0` holds it, as it holds
+  `_estimate_tokens`. A task with no project spec recalls nothing, since
+  it has no project to scope by.
 - **Size.** popoto's recipe defaults: 10 records, and records are added
   in rank order while the running count from
   `context_assembler._estimate_tokens` stays within 4000. That function is
@@ -282,7 +290,8 @@ critique findings a critic turn wrote. Pi turns contribute their
   review, and docs read a blind checkout, not other tasks' narrative.
 - **Rendered at turn time.** Each dispatch searches again, as
   `docs/data.md:353-380` requires, and keeps no copy. The candidate set
-  is fixed for the task's life; what can move between its turns is the
+  grows only by rows inserted before the task began and ingested late;
+  what else can move between its turns is the
   ranking, since BM25's corpus statistics change as other tasks' records
   arrive. A changed section changes the Brief from that section on; the
   persona, head, and corrections before it keep their cache. A turn whose
@@ -412,10 +421,12 @@ the least privilege `docs/data.md` already requires of memory.
 
 ## Tests
 
-TDD, in `tests/test_memory.py` unless named, on `VALOR_TEST_DB`. A fixture
-calls `set_backend(None)`, `reset_bindings()`, and `close_pools()` around
-each fresh test database, so no cached table or pool outlives the
-database it named.
+TDD, in `tests/test_memory.py` unless named, on `VALOR_TEST_DB`. Memory is
+on by default, so every test that runs a turn ingests and recalls: the
+shared fresh-database fixture in `tests/conftest.py` calls
+`set_backend(None)`, `reset_bindings()`, and `close_pools()` around each
+fresh test database, so no cached table or pool outlives the database it
+named.
 
 - `valor_memory` is refused `SELECT` and `INSERT` on `events` and
   `documents`.
@@ -427,6 +438,8 @@ database it named.
 - Ingest then recall round-trips: a preference in one task's
   `task.created` is recalled for a later task in the same project whose
   instruction shares its words, and not for a task in another project.
+- A project's record is recalled when more than 4096 out-of-scope
+  records outscore it on the query's words.
 - Records from the task's own rows and from rows after its `task.created`
   are not recalled, even when they score higher.
 - Ingest leaves `events` and `documents` unchanged (counts and digests).
@@ -516,8 +529,11 @@ come from a module-level `GREETINGS` dict, checked by verify).
 After merge, and after A1. The kernel's rollout stops this merge at
 `dependencies`, before its fast-forward (`core/rollout.py:14-22`).
 
-1. With no turn running, note the checkout's head as the way back, then
-   `git fetch` and `git merge --ff-only` it to the merged sha.
+1. With no turn running, stop the kernel through launchd (`launchctl
+   bootout gui/$(id -u)/com.valor.kernel`, as
+   `docs/plans/cutover-runbook-back.md:35-40` does), note the checkout's
+   head as the way back, then `git fetch` and `git merge --ff-only` it to
+   the merged sha.
 2. `python -m core backup` to `/Volumes/PINK/valor_temp`, and its restore
    check passes.
 3. `uv sync`.
@@ -525,15 +541,16 @@ After merge, and after A1. The kernel's rollout stops this merge at
    `memory`, and `secure-login` adds `valor_memory`'s password lines.
 5. `python -m core memory ingest`: the backfill of every row taken so
    far, one ledger row per unit, while the kernel is stopped.
-6. Write the plist (`python -m core serve --plist`) and restart the
-   kernel through launchd.
+6. Write the plist (`python -m core serve --plist`) and start the kernel
+   through launchd (`launchctl bootstrap`).
 7. Confirm: the next working turn's `turn.started.brief` carries a
    section or none, and never `Memory: unavailable`.
 
-**Back out.** If the kernel starts and memory misbehaves: write the plist
-with `VALOR_MEMORY=off` and restart; memory is not imported. If the
-kernel does not start (a broken import or dependency): `git reset --keep`
-to the head noted in step 1, `uv sync`, restart. The schema and role stay
+**Back out.** Each starts by stopping the kernel as in step 1. If the
+kernel starts and memory misbehaves: write the plist with
+`VALOR_MEMORY=off` and start it; memory is not imported. If the kernel
+does not start (a broken import or dependency): `git reset --keep` to the
+head noted in step 1, `uv sync`, and start it. The schema and role stay
 and hold nothing the kernel reads.
 
 ## Decided by default
@@ -556,41 +573,19 @@ and hold nothing the kernel reads.
 - The query is the task's instruction; the scope is the project's `repo`.
 - The evidence items are new toy-greeter items, not a replayed PR.
 
-## Critique round 1
+## Critique rounds
 
-From `~/src/valor-build-notes/critic-b1-r1.md`, verdict revise.
+Round 1 (`~/src/valor-build-notes/critic-b1-r1.md`, revise): ingest left
+the slot and the event loop; set difference, keyed records, and a lock
+replaced the mark; recall got its scope by project and time; the evidence
+shares words and its key holds no preference; Tom's words come from his
+rows; records are escaped; fresh sessions get nothing; the kept recall is
+dropped for `docs/data.md:353-380`; the rollout fast-forwards first and
+backs out by `git reset --keep`; migrate re-owns a restored schema;
+popoto's state is reset per database; memory needs no database `CREATE`.
 
-1. Ingest held the turn slot: it runs after `slot.held` returns.
-2. Sync popoto on the event loop: calls run in `asyncio.to_thread`.
-3. The high-water mark lost late commits and allowed duplicates: work by
-   set difference over `Ingested`, keyed records, one advisory lock.
-4. Recall could not express "before the task began": a `SortedField`
-   range filter in the project's partition gives the keys, and
-   `BM25Field.search(allowed_keys=)` ranks only them.
-5. The evidence could not match and the key leaked the preference: the
-   seed shares `greeting` and `users`, the required record is named, the
-   `toy-pref` key holds no preference, the seed has its own key, and an
-   off run that meets the preference is a rerun, not a pass.
-6. Kernel prompts were the wrong source and label: Tom's words come from
-   `task.created`, `question.answered`, `feedback.given`, and the
-   corrections stream; prompts are not ingested; pi contributes rows, not
-   transcripts.
-7. Break-out and cross-project leaks: records are escaped, recall is
-   scoped by project, fresh sessions get no section,
-   `docs/harnesses.md:356-358` is updated.
-8. The kept recall contradicted `docs/data.md:353-380`: the copy is
-   dropped and the design follows the doc; one sentence says memory's
-   records are part of the store state. Nothing is kept, so an
-   unavailable first recall is not kept either.
-9. Rollout: fetch and fast-forward first, a by-hand backfill, the switch
-   reached through `PLIST_ENV`, a back-out by `git reset --keep` and
-   `uv sync`, the password file changed by temporary file and rename.
-10. Restore: the wrong reason and the restore-check step are dropped;
-    migrate gives a restored schema back to `valor_memory`; the digest
-    gap is stated.
-11. Test isolation: popoto's state is cleared per fresh database.
-12. Database `CREATE`: memory uses plain models and `BM25Field` only.
-13. Smaller points: test wording is `USAGE` and `SELECT`; `memory/`
-    takes the DSN as data and imports nothing from `core/`; the first
-    user entry and tool uses are skipped; the token counter is named;
-    `-p no:popoto` is dropped; what the role isolates is stated.
+Round 2 (`~/src/valor-build-notes/critic-b1-r2.md`, revise, the last):
+recall calls `keyword_search` with no `fetch_cap`, with a test past 4096;
+the rollout stops the kernel through launchd first and the back-out does
+too; the popoto reset sits on the shared fixture in `tests/conftest.py`;
+the candidate set grows by late-ingested earlier rows.
