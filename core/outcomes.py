@@ -65,7 +65,9 @@ def merges(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if kind == "task.delivered":
             delivered = row["id"]
         if kind in ("effect.held", "effect.intent") and p.get("action_type") == "merge":
-            held.setdefault(p["effect_id"], {"payload": p.get("payload") or {}, "delivery_event_id": delivered})
+            held.setdefault(
+                p["effect_id"], {"payload": p.get("payload") or {}, "delivery_event_id": delivered}
+            )
         if kind == "effect.intent":
             intents[p.get("effect_id")] = p
         elif kind == "effect.outcome" and p.get("kind") == "done" and p.get("effect_id") in held:

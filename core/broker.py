@@ -612,7 +612,9 @@ async def _outcome(conn, task_id: str, outcome: dict[str, Any], described: dict[
         written = {**outcome, "result": {}, "error": f"the performer's answer: {ledger.UNSTORABLE}: {why}"}
         await ledger.append(conn, task_id, "effect.outcome", written)
     if written["kind"] == "done":
-        await notices.report(conn, task_id, {**described, "effect_id": outcome["effect_id"]}, written["result"])
+        await notices.report(
+            conn, task_id, {**described, "effect_id": outcome["effect_id"]}, written["result"]
+        )
     return written
 
 

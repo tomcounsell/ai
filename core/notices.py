@@ -135,7 +135,11 @@ async def owe(conn, task_id: str) -> list[str]:
             about, why = owed
             made.append(
                 await request(
-                    conn, task_id, kind="delivered", about_key=about, text=delivered_text(task_id, f.delivery, why)
+                    conn,
+                    task_id,
+                    kind="delivered",
+                    about_key=about,
+                    text=delivered_text(task_id, f.delivery, why),
                 )
             )
     return [m for m in made if m]
@@ -171,7 +175,11 @@ def _delivered_owed(f: machine.Fold, rows: list[dict[str, Any]]) -> tuple[str, s
 
 def _to_tom(effect: dict[str, Any]) -> bool:
     """Whether a send is itself a message to Tom."""
-    kind, target, payload = effect.get("action_type"), str(effect.get("target") or ""), effect.get("payload") or {}
+    kind, target, payload = (
+        effect.get("action_type"),
+        str(effect.get("target") or ""),
+        effect.get("payload") or {},
+    )
     if kind == "local.send_message":
         return True
     if kind == "telegram.send_message":
