@@ -11,6 +11,7 @@ Live spend: none.
 """
 
 import asyncio
+import socket
 from pathlib import Path
 
 import aiohttp
@@ -543,10 +544,17 @@ def test_a_started_stream_whose_client_leaves_is_charged_once(dsn):
     assert not state["open_calls"] and tasks.audit(state) == []
 
 
+def _closed_port() -> int:
+    """A port nothing listens on: bound, read, closed."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def test_an_unreachable_upstream_is_a_502_naming_it(dsn):
     async def go():
         task = await _new_task(dsn)
-        gateway = Gateway(dsn, upstream="http://127.0.0.1:6561")  # nothing listens here
+        gateway = Gateway(dsn, upstream=f"http://127.0.0.1:{_closed_port()}")
         await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:

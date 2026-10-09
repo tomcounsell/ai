@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 import os
 import plistlib
 import sys
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verb == "run":
         from . import EmailBridge, serve
 
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         try:
             asyncio.run(serve(EmailBridge()))
         except asyncio.CancelledError:

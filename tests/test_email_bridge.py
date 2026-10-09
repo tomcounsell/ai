@@ -49,3 +49,16 @@ def test_keys_copies_the_mail_logins_into_the_kernel_key_directory(tmp_path, mon
     assert moved.mail_keyfile == str(keys / "mail-keys")
     assert (keys / "mail-keys").exists()
     assert "IMAP_PASSWORD: written" in capsys.readouterr().out
+
+
+def test_run_logs_with_timestamps(monkeypatch):
+    seen = {}
+
+    async def serve(_bridge):
+        return None
+
+    monkeypatch.setattr("bridges.email.serve", serve)
+    monkeypatch.setattr("bridges.email.EmailBridge", lambda: object())
+    monkeypatch.setattr(cli.logging, "basicConfig", lambda **kw: seen.update(kw))
+    assert cli.main(["run"]) == 1
+    assert "%(asctime)s" in seen["format"]

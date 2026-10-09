@@ -454,7 +454,8 @@ must not reach. It runs as Tom's user.
   the step's stdout and stderr, and pytest takes a descriptor it cannot
   `fstat` for closed, so without that read it loses all its output.
 - **Denied entirely:** the kernel's own paths, each named by its setting: the
-  kernel key directory (`pg_passfile`'s), the machine cluster's data directory
+  kernel key directory (`pg_passfile`'s), the effect lock and output files
+  directory (`performing_dir`), the machine cluster's data directory
   (`pg_data_dir`), and the backup disk (`backup_dir`).
 - **Above every denied path:** each directory above a path any rule denies,
   up to but not including `/`, is denied as itself (not its entries), as
