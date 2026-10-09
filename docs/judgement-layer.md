@@ -275,6 +275,8 @@ A judgement task routes real work only after it has a calibration record, and ke
 while its live record holds. Serves: Evidence "Independent checks", and constraint "Reliable stop,
 recovery, and correction" ("Autonomy shrinks automatically on evidence and grows only by Tom's
 decision").
+Governance is the exception: it answers on every review and docs diff, and its
+record is an open measurement.
 
 **What a record measures.** Labels come from humans, not from another model:
 calibration is scored against human-labelled cases, because model assistance

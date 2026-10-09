@@ -247,9 +247,8 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   `scripts/replay_workspace.py`), including the app's environment so the
   suite can run.
 - Fresh sessions for critique, review, and docs, registered as runners in
-  the composition root (`core/__main__.py`, `RUNNERS`); each stage whose
-  runner lands is removed from `python -m core verdict`, and the command
-  is deleted. Tests show, through the router: the docs branch's commits
+  the composition root (`core/__main__.py`, `runners()`); the command
+  that recorded a verdict by hand is deleted. Tests show, through the router: the docs branch's commits
   outside doc paths (`machine.is_doc_path`) are dropped when its turn ends
   and recorded as a `changes` finding; a branch whose turn fails or is
   stopped leaves no verdict, and the next run reruns that branch and only
