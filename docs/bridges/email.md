@@ -281,7 +281,7 @@ it exits.
 | Module | Holds |
 |---|---|
 | `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
-| `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`) |
+| `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`); `run` logs at INFO, each line `time level message` |
 | `bridges/email/config.py` | `Config`, from settings and `mail-keys`; the passwords are held here only |
 | `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |
 | `bridges/email/imap.py` | The watch: search, receive, and IDLE (`IDLE_REISSUE_S`) |
