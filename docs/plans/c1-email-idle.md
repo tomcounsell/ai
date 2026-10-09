@@ -2,7 +2,7 @@
 tracking: none
 slug: c1-email-idle
 type: build
-status: building
+status: built
 critique_rounds: 1
 review_rounds: 1
 governance_grant: none
@@ -138,3 +138,12 @@ tick path.
 
 None that block. Assumed: the re-issue at 29 minutes stays the probe when
 no network change is seen.
+
+## Build record
+
+Head at this record: see `git log`. Email, mail, bridge, local bridge and
+serve tests: 207 passed on `valor_rebuild_test_c1build`. The container
+suites (`test_checks.py`, `test_container.py`) were not run to the end:
+they drive Apple container VMs, stalled or failed on this Mac while other
+builders' suites ran, and touch nothing this change does. Ruff check and
+format clean.
