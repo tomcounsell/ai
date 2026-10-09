@@ -5,7 +5,7 @@ forces an arm); run until Valor asks Tom a question; answer; run through the
 plan, the fresh critique session, and the build until Valor builds a
 candidate and requests a push; the test runner over the spec's suite
 (`true`, so the suite was not run); the review runner's fresh session;
-docs by hand; approve and release the push and the merge; the
+docs by hand; the push and the merge are done at request; the
 bare origin gets both; every turn's Brief carried the corrections and its
 stage.
 
@@ -103,27 +103,20 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     candidate = state["candidate"]["sha"]
     core("verdict", task, "docs", "no_change", *who)
     state = json.loads(core("status", task))
-    assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
+    assert state["state"] == "merged" and state["merge_effect"]["state"] == "done"
     # The plan and the build stages may each push their own commits; every
-    # push is held for Tom, and the merge is held for Tom.
-    pending = {e for e, s in state["effects"].items() if s == "pending"}
-    held = [r for r in rows("effect.held") if r["effect_id"] in pending]
-    assert len(held) == len(pending)
-    assert [r["action_type"] for r in held].count("merge") == 1
-    pushes = [r for r in held if r["action_type"] == "push_branch"]
-    assert pushes, "expected at least one push_branch held for Tom"
-    assert not rows("effect.outcome"), "nothing leaves before Tom's tap"
-    for effect in [r["effect_id"] for r in pushes] + [state["merge_effect"]["effect_id"]]:
-        core("approve", effect, "--note", "yes")
-        core("release", effect)
-    granted = {r["effect_id"] for r in rows("approval.granted")}
-    # Every outcome follows a tap, and every tapped effect has its outcome.
-    assert {r["effect_id"] for r in rows("effect.outcome")} == granted
+    # push and the merge is done at request, with no tap.
+    done = {e for e, s in state["effects"].items() if s == "done"}
+    asked = [r for r in rows("effect.intent") if r["effect_id"] in done]
+    assert [r["action_type"] for r in asked].count("merge") == 1
+    pushes = [r for r in asked if r["action_type"] == "push_branch"]
+    assert pushes, "expected at least one push_branch"
+    assert not rows("approval.granted")
     assert sh("git", "rev-parse", "main", cwd=origin) == candidate
     pushed = sh("git", "rev-parse", "valor/greeting", cwd=origin)
     assert pushed == pushes[-1]["payload"]["head_sha"]
     assert "Morning, Tom." in sh("git", "show", f"{pushed}:greeting.txt", cwd=origin)
-    # What Tom approved to push is in what was merged.
+    # What was pushed is in what was merged.
     sh("git", "merge-base", "--is-ancestor", pushed, candidate, cwd=origin)
     assert json.loads(core("status", task))["state"] == "merged"
 
@@ -147,4 +140,4 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     assert all("--resume" not in t["argv"] for t in started if t.get("fresh"))
     state = json.loads(core("status", task))
     assert state["attention_counts"]["question"]["total"] == 1
-    assert state["attention_counts"]["approval"]["total"] == len(held)
+    assert state["attention_counts"]["approval"]["total"] == 0

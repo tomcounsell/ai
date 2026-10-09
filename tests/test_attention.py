@@ -1,4 +1,4 @@
-"""Tom's taps on real Postgres: approvals carry provenance and count apart
+"""Tom's taps on real Postgres: recorded approvals carry provenance and count apart
 from questions and feedback, old rows read what they recorded and nothing
 more, and a legacy ledger's money rows fold into metered spending and
 never into the attention log.
@@ -7,18 +7,13 @@ No model call. Live spend: none.
 """
 
 import asyncio
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, db, ledger, tasks
-from tests.conftest import TEST_DB
-from tests.performers import OutboxAppend
+from core import db, ledger, tasks
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -34,50 +29,53 @@ async def new_task(dsn, **kw) -> str:
         return await tasks.start(conn, tasks.Brief(instruction="test", **kw))
 
 
-def cli(*args) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "core", *args],
-        cwd=ROOT,
-        env={**os.environ, "VALOR_DB": TEST_DB},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-async def _held(dsn, task, tmp_path, text) -> str:
-    perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
-    async with await db.connect(dsn) as conn:
-        return (
-            await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": text}))
-        ).effect_id
-
-
 # -- approvals ---------------------------------------------------------------------
 
 
-def test_an_approval_carries_provenance_and_counts_apart_from_questions_and_feedback(dsn, tmp_path):
+def test_a_recorded_approval_carries_provenance_and_counts_apart_from_questions_and_feedback(dsn):
+    """Nothing asks for a tap any more; approvals the ledger already holds
+    still read with their provenance and count apart."""
+
     async def go():
         task = await new_task(dsn, max_effect_class="act")
-        played = await _held(dsn, task, tmp_path, "one")
-        live = await _held(dsn, task, tmp_path, "two")
-        return task, played, live
-
-    task, played, live = run(go())
-    out = cli("approve", played, "--note", "standing permission", "--by", "stand-in", "--role-played")
-    assert out.returncode == 0, out.stderr
-    assert cli("approve", live, "--note", "yes, send it").returncode == 0
-
-    async def after():
-        perf = broker.Performers(OutboxAppend(tmp_path / "outbox.jsonl"))
+        async with await db.connect(dsn) as conn, conn.transaction():
+            for aid, eid, note, prov in (
+                (
+                    "a1",
+                    "e1",
+                    "standing permission",
+                    {"by": "stand-in", "via": "the command line", "role_played": True},
+                ),
+                (
+                    "a2",
+                    "e2",
+                    "yes, send it",
+                    {
+                        "by": "tom",
+                        "via": "the command line",
+                        "role_played": False,
+                        "at": "2026-09-30T00:00:00+00:00",
+                    },
+                ),
+            ):
+                await ledger.append(
+                    conn,
+                    task,
+                    "approval.granted",
+                    {
+                        "approval_id": aid,
+                        "effect_id": eid,
+                        "payload_sha256": "x",
+                        "note": note,
+                        "provenance": prov,
+                    },
+                )
         async with await db.connect(dsn) as conn:
-            released = await broker.release(conn, perf, played)
-            return released, await tasks.status(conn, task)
+            return await tasks.status(conn, task)
 
-    released, state = run(after())
-    assert released.kind == "done"  # still bound to the digest
+    state = run(go())
     approvals = [a for a in state["attention"] if a["kind"] == "approval"]
-    assert [a["effect_id"] for a in approvals] == [played, live]
+    assert [a["effect_id"] for a in approvals] == ["e1", "e2"]
     first, second = (a["provenance"] for a in approvals)
     assert first["by"] == "stand-in" and first["role_played"] is True and first["via"] == "the command line"
     assert second["by"] == "tom" and second["role_played"] is False and second["at"]

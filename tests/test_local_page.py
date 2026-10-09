@@ -212,14 +212,11 @@ def test_the_page_sends_shows_replies_and_renders_text_as_text(dsn, op):
             # Valor's notice arrives by the poll, and its text is not run.
             task = await new_task(dsn)
             async with await db.connect(dsn) as conn:
-                held = await broker.request(
-                    conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": words})
-                )
-                (nid,) = await notices.owe(conn, task)
+                nid = await notices.request(conn, task, kind="test", about_key=f"t:{task}", text=words)
             await tab.wait("!!document.querySelector('#log li[data-event-id].valor')", timeout=10)
             mine = (
                 "[...document.querySelectorAll('#log li.valor')].filter(l => l.textContent.includes("
-                + json.dumps(held.effect_id)
+                + json.dumps(nid)
                 + "))[0]"
             )
             await tab.wait(f"!!{mine}", timeout=10)
@@ -229,21 +226,21 @@ def test_the_page_sends_shows_replies_and_renders_text_as_text(dsn, op):
             await tab.js(f"{mine}.click()")
             assert await tab.js(f"{mine}.classList.contains('chosen')")
             assert "Replying to:" in await tab.js("document.getElementById('reply').textContent")
-            await tab.type_and_send("approve")
+            await tab.type_and_send("go on")
             await tab.wait("document.getElementById('reply').textContent === ''")
             await tab.wait("!document.querySelector('#log li.chosen')")
-            # Other tests post `approve` to the same session's ledger, so
-            # only the replies to this notice count.
-            replied = [
-                r for r in await local_received(dsn) if r["text"] == "approve" and r["reply_to"] == nid
-            ]
+            replied = [r for r in await local_received(dsn) if r["text"] == "go on" and r["reply_to"] == nid]
             assert len(replied) == 1
             bound = await bind(dsn, {"received_id": replied[0]["received_id"]})
-            assert bound["as"] == "approve"
+            assert bound["as"] == "steer"
 
-            # The approved text is shown, once, as text.
+            # A send Valor requests goes out at request, shown once, as text.
+            async with await db.connect(dsn) as conn:
+                sent = await broker.request(
+                    conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": words})
+                )
             await until(
-                lambda: of_type(dsn, "effect.outcome", effect_id=held.effect_id),
+                lambda: of_type(dsn, "effect.outcome", effect_id=sent.effect_id),
                 timeout=10,
             )
             await tab.wait(

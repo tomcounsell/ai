@@ -1117,7 +1117,10 @@ def test_a_failed_merge_stays_in_merge_and_is_not_requested_again_for_the_same_p
 
     first, again, written = run(go())
     assert first["state"]["merge_effect"]["state"] == "failed"
-    assert again["state"]["state"] == "merge" and again["state"]["merge_effect"] == first["state"]["merge_effect"]
+    assert (
+        again["state"]["state"] == "merge"
+        and again["state"]["merge_effect"] == first["state"]["merge_effect"]
+    )
     assert len([r for r in written if r["type"] == "effect.intent"]) == 1
 
 

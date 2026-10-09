@@ -181,10 +181,7 @@ def _send_and_receive(dsn, mailbox, deliver_after: bool):
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
             held = await broker.request(conn, declared(), task, broker.Action("email.send", to, payload))
-            assert held.kind == "pending", held
-            await broker.approve(conn, held.effect_id, note="approve")
-            released = await broker.release(conn, declared(), held.effect_id)
-            assert released.kind == "released", released
+            assert held.kind == "released", held
         served = asyncio.create_task(bridge.serve(EmailBridge(cfg, dsn), dsn))
         try:
             if deliver_after:
@@ -491,6 +488,8 @@ def test_a_reply_all_is_filled_in_from_the_received_email_before_it_is_held(dsn,
                     performers=declared(),
                 )
             rows = await ledger.read(conn, task)
+            # The send is released at request; no bridge here sends it, nor a later test's.
+            await tasks.stop(conn, task, reason="the test only reads what was held")
         return rows
 
     rows = run(go())
@@ -547,11 +546,13 @@ def test_the_size_refused_at_request_is_the_whole_encoded_message(dsn, op, tmp_p
                 task,
                 broker.Action("email.send", to, payload(body_for(25_000_001))),
             )
+            # The send is released at request; no later test's bridge sends it.
+            await tasks.stop(conn, task, reason="the test only reads what was held")
         return at, over
 
     with configure(email_address="valor@test.local"):
         at, over = run(go())
-    assert at.kind == "pending"
+    assert at.kind == "released"
     assert over.kind == "refused" and "is 25000001 bytes, over email's limit of 25000000 bytes" in over.error
 
 
@@ -626,7 +627,7 @@ def bridge_child(dsn, cfg, log) -> subprocess.Popen:
 
 
 def killed_mid_send(dsn, mailbox, tmp_path, when: threading.Event) -> tuple[str, str]:
-    """A released send performed by a bridge process killed (SIGKILL, by
+    """A requested send performed by a bridge process killed (SIGKILL, by
     its PID) once `when` is set; then the outbox's reconcile. Returns the
     effect id and the outcome's kind."""
     to = "tom@yuda.me"
@@ -638,8 +639,6 @@ def killed_mid_send(dsn, mailbox, tmp_path, when: threading.Event) -> tuple[str,
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
             h = await broker.request(conn, declared(), task, broker.Action("email.send", to, payload))
-            await broker.approve(conn, h.effect_id, note="approve")
-            await broker.release(conn, declared(), h.effect_id)
         return h.effect_id
 
     effect_id = run(held())
@@ -754,18 +753,16 @@ async def released(dsn, task, payload, workspace=None) -> str:
     async with await db.connect(dsn) as conn:
         action = broker.Action("email.send", ",".join(sorted(payload["to"])), payload)
         held = await broker.request(conn, declared(workspace), task, action)
-        assert held.kind == "pending", held
-        await broker.approve(conn, held.effect_id, note="approve")
-        assert (await broker.release(conn, declared(workspace), held.effect_id)).kind == "released"
+        assert held.kind == "released", held
     return held.effect_id
 
 
-def test_a_file_swapped_after_approval_fails_the_send_and_is_never_sent(dsn, op, mailbox, tmp_path):
+def test_a_file_swapped_after_the_request_fails_the_send_and_is_never_sent(dsn, op, mailbox, tmp_path):
     plan = tmp_path / "plan.txt"
-    plan.write_bytes(b"approved bytes")
+    plan.write_bytes(b"requested bytes")
     payload = {"to": ["tom@yuda.me"], "cc": [], "subject": "Re: plans", "body": "Attached.",
                "in_reply_to": None, "references": [],
-               "files": [{"path": str(plan), "sha256": hashlib.sha256(b"approved bytes").hexdigest()}]}  # fmt: skip
+               "files": [{"path": str(plan), "sha256": hashlib.sha256(b"requested bytes").hexdigest()}]}  # fmt: skip
 
     async def go():
         task = await new_task(dsn)
@@ -774,7 +771,7 @@ def test_a_file_swapped_after_approval_fails_the_send_and_is_never_sent(dsn, op,
         return await served_until(dsn, mailbox.config(), effect_id, settled="effect.outcome")
 
     (failed,) = run(go())
-    assert failed["kind"] == "failed" and "sha256 is not the one approved" in failed["error"]
+    assert failed["kind"] == "failed" and "sha256 is not the one requested" in failed["error"]
     assert mailbox.smtp.connections == 0 and mailbox.smtp.accepted == []
 
 
@@ -1310,8 +1307,8 @@ def test_a_send_the_server_took_after_tom_stopped_the_task_settles_from_sent_mai
     assert len(mailbox.smtp.accepted) == 1
 
 
-def test_a_release_for_a_task_stopped_after_approval_is_recorded_refused(dsn, op, mailbox):
-    """Tom approved and released the send, then stopped the task before the
+def test_a_release_for_a_task_stopped_after_the_request_is_recorded_refused(dsn, op, mailbox):
+    """The send was requested and released, then the task stopped before the
     bridge performed it: the broker's fence refuses it, once, and nothing
     is sent."""
 

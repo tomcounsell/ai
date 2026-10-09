@@ -13,6 +13,7 @@ import pytest
 
 from core import broker, db, ledger, runs, spending, tasks
 from core.gateway import Gateway
+from tests import scripted
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.ports import listen
 
@@ -106,10 +107,10 @@ def test_prices_round_up_and_match_dated_ids():
     assert spending.prices("some-unpriced-model") is None
 
 
-# -- effects: classes, ceiling, and Tom's tap ------------------------------------
+# -- effects: classes, ceiling, and the request ---------------------------------
 
 
-def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_path):
+def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_path):
     perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
@@ -126,23 +127,15 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
             again = await broker.request(
                 conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
             )
-            with pytest.raises(broker.NotApproved):
-                await broker.release(conn, perf, held.effect_id)
-            lines_before = _lines(tmp_path / "outbox.jsonl")
-            await broker.approve(conn, held.effect_id, note="send it")
-            sent = await broker.release(conn, perf, held.effect_id)
-            repeat = await broker.release(conn, perf, held.effect_id)
             state = await tasks.status(conn, task)
-        return wrote, held, twin, once, again, lines_before, sent, repeat, state
+        return wrote, held, twin, once, again, state
 
-    wrote, held, twin, once, again, lines_before, sent, repeat, state = run(go())
+    wrote, held, twin, once, again, state = run(go())
     assert wrote.kind == "done" and (tmp_path / "a.txt").read_text() == "a"
     # Two identical requests are two effects; one request_id is one.
-    assert held.kind == "pending" and twin.kind == "pending" and twin.effect_id != held.effect_id
-    assert again.effect_id == once.effect_id
-    assert lines_before == 0
-    assert sent.kind == "done" and repeat.kind == "done"
-    assert _lines(tmp_path / "outbox.jsonl") == 1
+    assert held.kind == "done" and twin.kind == "done" and twin.effect_id != held.effect_id
+    assert again.effect_id == once.effect_id and again.kind == "done"
+    assert _lines(tmp_path / "outbox.jsonl") == 3
     assert tasks.audit(state) == []
 
 
@@ -181,8 +174,8 @@ def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_pat
         return held, rows
 
     held, rows = run(go())
-    assert held.kind == "pending"
-    assert next(r for r in rows if r["type"] == "effect.held")["payload"]["adds_governance"] is False
+    assert held.kind == "done"
+    assert next(r for r in rows if r["type"] == "effect.intent")["payload"]["adds_governance"] is False
 
 
 # -- stop is immediate and lossless ---------------------------------------------
@@ -618,13 +611,13 @@ def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_a
             settled = await broker.reconcile(
                 conn, broker.Performers(WorkspaceWrite(tmp_path)), intent["effect_id"]
             )
-            return rows, intent, settled, await broker.held_task(conn, intent["effect_id"]), task
+            return rows, intent, settled, await scripted.task_of(conn, intent["effect_id"]), task
 
     rows, intent, settled, owner, task = run(go())
     assert not [r for r in rows if r["type"] in ("effect.held", "effect.outcome")]
     assert intent["action_type"] == "workspace_write" and intent["target"] == "note.txt"
     assert intent["payload"] == {"text": "hello"} and intent["effect_class"] == "propose"
-    assert intent["payload_sha256"] == ledger.digest({"text": "hello"}) and intent["approval_id"] is None
+    assert intent["payload_sha256"] == ledger.digest({"text": "hello"}) and "approval_id" not in intent
     assert settled.kind == "done" and owner == task
 
 
@@ -644,7 +637,7 @@ def test_an_intent_without_the_action_reads_it_from_the_held_row_and_without_one
             await ledger.append(conn, task, "effect.held", {"effect_id": held, **described})
             for effect_id in (held, bare):
                 await ledger.append(conn, task, "effect.intent", {
-                    "effect_id": effect_id, "idempotency_key": action.key(effect_id), "approval_id": None,
+                    "effect_id": effect_id, "idempotency_key": action.key(effect_id),
                 })  # fmt: skip
             return (
                 await broker.reconcile(conn, perf, held),

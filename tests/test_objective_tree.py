@@ -436,7 +436,7 @@ def test_start_parent_from_the_command_line_on_both_paths(dsn, tmp_path):
                 for x in (inherited, asked, plain)
             ]
 
-    assert run(ceilings()) == ["read", "read", "propose"]
+    assert run(ceilings()) == ["read", "read", "act"]
     refusals = {
         "above": (["--parent", p, "--ceiling", "propose"], "propose"),
         "unknown": (["--parent", "no-such-task"], "no task no-such-task"),
@@ -600,27 +600,23 @@ def test_a_walk_over_a_large_tree_holds_only_the_tree_lock_and_the_named_nodes(d
     assert all(free) and held == [False, False]
 
 
-def test_after_the_roots_stop_the_grandchilds_call_effect_and_approved_release_are_refused(dsn, tmp_path):
+def test_after_the_roots_stop_the_grandchilds_call_and_effects_are_refused(dsn, tmp_path):
     async def go():
         perf = performers(tmp_path)
         async with await db.connect(dsn) as conn:
             r = await root(conn)
             c = await child(conn, r)
             g = await child(conn, c)
-            held = await broker.request(conn, perf, g, ACTIONS["act"](1))
-            await broker.approve(conn, held.effect_id, note="yes")
             await tasks.stop(conn, r, reason="test")
             with pytest.raises(tasks.TaskStopped):
                 await spending.open_call(conn, g, call())
+            acted = await broker.request(conn, perf, g, ACTIONS["act"](1))
             refused = await broker.request(conn, perf, g, ACTIONS["propose"](2))
-            with pytest.raises(tasks.TaskStopped):
-                await broker.release(conn, perf, held.effect_id)
-            return held, refused, await ledger.read(conn, g)
+            return acted, refused, await ledger.read(conn, g)
 
-    held, refused, rows = run(go())
-    assert held.kind == "pending"
-    assert refused.kind == "refused" and refused.error == "task stopped"
-    assert [r["payload"]["reason"] for r in rows if r["type"] == "effect.refused"] == ["task stopped"]
+    acted, refused, rows = run(go())
+    assert acted.kind == "refused" and refused.kind == "refused" and refused.error == "task stopped"
+    assert [r["payload"]["reason"] for r in rows if r["type"] == "effect.refused"] == ["task stopped"] * 2
     (gw,) = [r for r in rows if r["type"] == "gateway.refused"]
     assert gw["payload"]["reason"] == "stopped"
     assert not [r for r in rows if r["type"] == "effect.intent"]

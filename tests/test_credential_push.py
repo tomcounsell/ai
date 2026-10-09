@@ -472,15 +472,12 @@ def test_a_release_cancelled_mid_push_kills_git_and_reconciles_to_failed(dsn, tm
 
         async def go():
             task = await scripted.start(dsn, ws, judge=None)
-            async with await db.connect(dsn) as conn:
-                held = await broker.request(
-                    conn, perf, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
-                )
-                await broker.approve(conn, held.effect_id, note="push")
 
             async def release():
                 async with await db.connect(dsn) as conn:
-                    return await broker.release(conn, perf, held.effect_id)
+                    return await broker.request(
+                        conn, perf, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
+                    )
 
             releasing = asyncio.create_task(release())
             while not server.holding.is_set():
@@ -489,8 +486,13 @@ def test_a_release_cancelled_mid_push_kills_git_and_reconciles_to_failed(dsn, tm
             with contextlib.suppress(asyncio.CancelledError):
                 await releasing
             async with await db.connect(dsn) as conn:
+                (effect_id,) = [
+                    r["payload"]["effect_id"]
+                    for r in await ledger.read(conn, task)
+                    if r["type"] == "effect.intent"
+                ]
                 for _ in range(200):  # until the killed git is reaped
-                    settled = await broker.reconcile(conn, perf, held.effect_id)
+                    settled = await broker.reconcile(conn, perf, effect_id)
                     if settled is not None:
                         break
                     await asyncio.sleep(0.05)

@@ -1,7 +1,7 @@
 """Real `claude -p` turns through the gateway: one metered turn and a stop
 mid-stream, one turn that answers as the persona it was rendered, and one
-turn whose reply becomes a `propose` effect done at
-once and an `act` effect held until Tom approves it from the command line.
+turn whose reply becomes a `propose` effect and an `act` effect, each done
+at request.
 
 Live spend: about $0.04 per run, metered by the gateway (four Haiku turns
 under 1,024 and 4,096 output tokens; the stopped call is charged its full
@@ -11,16 +11,12 @@ Runs only when `VALOR_LIVE=1`, so a plain test run spends nothing.
 
 import asyncio
 import os
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
 from core import broker, db, ledger, persona, runs, tasks
 from core.gateway import ClaudeLogin, Gateway
 from harnesses import claude_code
-from tests.conftest import TEST_DB
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.ports import listen
 
@@ -77,19 +73,9 @@ def test_one_turn_is_metered_and_a_stop_mid_stream_is_lossless(dsn, tmp_path):
     assert tasks.audit(done_state) == [] and tasks.audit(stop_state) == []
 
 
-def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_the_cli(dsn, tmp_path):
+def test_a_live_reply_is_written_at_once_and_sent_at_request(dsn, tmp_path):
     outbox = tmp_path / "outbox.jsonl"
     perf = broker.Performers(WorkspaceWrite(tmp_path), OutboxAppend(outbox))
-
-    def cli(*args):
-        return subprocess.run(
-            [sys.executable, "-m", "core", *args],
-            cwd=Path(__file__).resolve().parent.parent,
-            env={**os.environ, "VALOR_DB": TEST_DB},
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
 
     async def go():
         gateway = Gateway(dsn, credential=ClaudeLogin())
@@ -106,25 +92,18 @@ def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_t
             wrote = await broker.request(
                 conn, perf, task, broker.Action("workspace_write", "reply.txt", {"text": text})
             )
-            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": text}))
-            with pytest.raises(broker.NotApproved):
-                await broker.release(conn, perf, held.effect_id)
-            lines_before = outbox.exists()
-            pending = cli("pending")
-            cli("approve", held.effect_id, "--note", "yes, send it")
-            sent = await broker.release(conn, perf, held.effect_id)
-            again = await broker.release(conn, perf, held.effect_id)
+            sent = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": text}))
+            again = await broker.release(conn, perf, sent.effect_id)
             state = await tasks.status(conn, task)
         await gateway.close()
-        return ended, text, wrote, held, lines_before, pending, sent, again, state
+        return ended, text, wrote, sent, again, state
 
-    ended, text, wrote, held, lines_before, pending, sent, again, state = asyncio.run(go())
+    ended, text, wrote, sent, again, state = asyncio.run(go())
     assert ended["outcome"] == "done" and "ready" in text.lower()
     assert wrote.kind == "done" and (tmp_path / "reply.txt").read_text() == text
-    assert held.kind == "pending" and not lines_before and held.effect_id in pending
-    assert sent.kind == "done" and again.effect_id == held.effect_id
+    assert sent.kind == "done" and again.effect_id == sent.effect_id
     assert len(outbox.read_text().splitlines()) == 1
-    assert state["attention_counts"]["approval"]["total"] == 1
+    assert state["attention_counts"]["approval"]["total"] == 0
     assert tasks.audit(state) == []
 
 

@@ -139,7 +139,7 @@ async def held_send(dsn, text: str) -> tuple[str, str]:
         held = await broker.request(
             conn, bridges.declared(), task, broker.Action(SEND, "local", {"text": text})
         )
-    assert held.kind == "pending", held
+    assert held.kind == "released", held
     return task, held.effect_id
 
 
@@ -170,19 +170,12 @@ def test_a_posted_message_is_recorded_once_and_starts_a_task_under_valor(dsn, op
     assert bound["as"] == "start" and project == {"name": "valor"}
 
 
-def test_a_held_send_is_approved_from_the_page_and_shown_once(dsn, op):
+def test_a_requested_send_is_shown_once_with_no_report(dsn, op):
     words = "<img src=x onerror=alert(1)>"
 
     async def go():
-        task, effect = await held_send(dsn, words)
+        _, effect = await held_send(dsn, words)
         async with serving(dsn, op) as page:
-            async with await db.connect(dsn) as conn:
-                (nid,) = await notices.owe(conn, task)
-            notice = await page.row(nid)
-            assert notice["from"] == "valor" and effect in notice["text"]
-
-            approve = await bind(dsn, await page.post("approve", reply_to=notice["message_id"]))
-            assert approve["as"] == "approve"
             shown = await page.row(effect)
             await asyncio.sleep(0.5)  # another wake of the outbox shows nothing more
             log = await page.log()
@@ -191,8 +184,8 @@ def test_a_held_send_is_approved_from_the_page_and_shown_once(dsn, op):
     effect, shown, log = run(go())
     assert shown["text"] == words and shown["from"] == "valor"
     assert [r["text"] for r in log].count(words) == 1
-    (granted,) = run(of_type(dsn, "approval.granted", effect_id=effect))
-    assert granted["provenance"]["via"] == "local"
+    # A send to Tom's own page is itself the message: it owes no report.
+    assert not run(of_type(dsn, "notice.requested", about_key=f"report:{effect}"))
     (released,) = run(of_type(dsn, "release.requested", effect_id=effect))
     assert released["owner"] == "local"
     (outcome,) = run(of_type(dsn, "effect.outcome", effect_id=effect))
@@ -208,7 +201,7 @@ def test_stop_by_reply_and_a_near_miss_steers_with_a_notice_in_reply(dsn, op):
                 nid = await notices.request(conn, task, kind="test", about_key=f"t:{task}", text="about it")
             notice = await page.row(nid)
 
-            near_post = await page.post("Approve!", reply_to=notice["message_id"])
+            near_post = await page.post("Stop!", reply_to=notice["message_id"])
             near = await bind(dsn, near_post)
             (said,) = [
                 n
@@ -222,7 +215,7 @@ def test_stop_by_reply_and_a_near_miss_steers_with_a_notice_in_reply(dsn, op):
 
     task, near, said, reply, near_post, stop = run(go())
     assert near["as"] == "steer"
-    assert said["channel"] == "local" and said["chat_id"] == "local" and "Not an approval" in said["text"]
+    assert said["channel"] == "local" and said["chat_id"] == "local" and "Not a stop" in said["text"]
     (posted,) = [r for r in run(local_received(dsn)) if r["received_id"] == near_post["received_id"]]
     assert said["reply_to"] == reply["reply_to"] == posted["message_id"]
     assert stop["as"] == "stop"
@@ -272,9 +265,6 @@ class Dies(local.LocalBridge):
 def test_killed_between_intent_and_outcome_the_restart_reconciles_done_and_shows_it_once(dsn, op):
     async def go():
         _, effect = await held_send(dsn, "survives a crash")
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="approve")
-            assert (await broker.release(conn, bridges.declared(), effect)).kind == "released"
         async with bridges.outbox(dsn, Dies(dsn)) as box:
             (item,) = [i for i in await box.due() if getattr(i, "effect_id", None) == effect]
             with pytest.raises(Killed):
@@ -367,9 +357,7 @@ def test_an_email_binding_notice_goes_to_and_names_the_operator_channel(dsn, op,
         mailed = await a_send(dsn, task, "email", "thread-local")
         bound = await say(
             dsn,
-            msg(
-                "Approve please", reply_to=mailed, channel="email", sender=OPERATOR_EMAIL, chat="thread-local"
-            ),
+            msg("Stop please", reply_to=mailed, channel="email", sender=OPERATOR_EMAIL, chat="thread-local"),
         )
         said = [
             n

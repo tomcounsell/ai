@@ -6,7 +6,7 @@ lasts the session and intake records each (chat, message id) once.
 operator's settings and a project spec do: the first is the operator
 chat, the rest a project's. `connected` runs a bridge on the emulator
 over `from_core(dsn)`, with its state files in the test's directory, so a
-second `connected` there is a restart. `release` puts one approved send
+second `connected` there is a restart. `release` puts one requested send
 in the ledger for the outbox to yield.
 """
 
@@ -118,15 +118,13 @@ def send(target: str, text: str = "", **payload: Any) -> broker.Action:
 
 
 async def release(dsn: str, action: broker.Action, workspace: str | None = None) -> str:
-    """A send held, approved by Tom, and requested of the bridge; the files
-    it names are in `workspace`."""
+    """A send requested, so released to the bridge; the files it names are
+    in `workspace`."""
     task = await bridges.new_task(dsn)
     async with await db.connect(dsn) as conn:
-        held = await broker.request(conn, bridges.declared(workspace), task, action)
-        await broker.approve(conn, held.effect_id, note="approve")
-        out = await broker.release(conn, bridges.declared(workspace), held.effect_id)
+        out = await broker.request(conn, bridges.declared(workspace), task, action)
     assert out.kind == "released", out
-    return held.effect_id
+    return out.effect_id
 
 
 async def reconcile(dsn: str, bridge, effect_id: str) -> broker.Outcome | None:

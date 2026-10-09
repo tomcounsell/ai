@@ -124,29 +124,23 @@ def test_the_ports_split_and_limits_are_what_the_bridge_sends_by(emu, dsn, tmp_p
     run(go())
 
 
-def test_approve_by_reply_to_the_effect_notice_and_the_send_goes_out(emu, dsn, tmp_path, op):
+def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn, tmp_path, op):
     async def go():
         task = await new_task(dsn)
         async with connected(emu.url, dsn, tmp_path) as bridge:
             async with await db.connect(dsn) as conn:
-                held = await broker.request(conn, bridges.declared(), task, send(op, "the approved words"))
-            target = (await deliver(dsn, bridge, task))["effect"]
-
-            near = await tom(emu, dsn, op, "Approve.", reply_to=int(target))
-            assert near["as"] == "steer"
-            assert any("Not an approval" in n["text"] for n in await replies_to(dsn, near["received_id"]))
-            assert not await of_type(dsn, "release.requested", effect_id=held.effect_id)
-
-            assert (await tom(emu, dsn, op, "approve", reply_to=int(target)))["as"] == "approve"
+                held = await broker.request(conn, bridges.declared(), task, send(op, "the requested words"))
+            assert held.kind == "released"
             async with bridges.outbox(dsn, bridge) as box:
                 assert (await box.perform(await due(box, held.effect_id))).kind == "done"
-            assert "the approved words" in [m["text"] for m in emu.own(int(op))]
-            [granted] = await of_type(dsn, "approval.granted", effect_id=held.effect_id)
-            assert granted["provenance"]["via"] == "telegram"
+            assert "the requested words" in [m["text"] for m in emu.own(int(op))]
+            # A send to Tom's own chat is itself the message: no report.
+            assert not await of_type(dsn, "notice.requested", about_key=f"report:{held.effect_id}")
+            (outcome,) = await of_type(dsn, "effect.outcome", effect_id=held.effect_id)
+            target = outcome["result"]["sent"][0]["message_id"]
 
-            again = await tom(emu, dsn, op, "approve", reply_to=int(target))
-            assert again["as"] == "none" and await replies_to(dsn, again["received_id"])
-            assert (await tom(emu, dsn, op, "thanks", reply_to=int(target)))["as"] == "steer"
+            near = await tom(emu, dsn, op, "approve", reply_to=int(target))
+            assert near["as"] == "steer" and near["task_id"] == task
 
             started = await tom(emu, dsn, op, "write a haiku")
             assert started["as"] == "start" and started["task_id"] not in (task, None)
@@ -215,16 +209,20 @@ def test_an_answer_by_reply_to_the_question_notice(emu, dsn, tmp_path, op):
 
 
 @pytest.mark.macos
-def test_feedback_by_reply_to_the_delivered_notice(emu, dsn, tmp_path, op):
+def test_feedback_by_reply_to_the_merge_report(emu, dsn, tmp_path, op):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
         await scripted.checks(dsn, task)
-        assert machine.fold(await rows(dsn, task)).state is State.MERGE
+        f = machine.fold(await rows(dsn, task))
+        assert f.state is State.MERGED
+        (report,) = await of_type(dsn, "notice.requested", about_key=f"report:{f.merge_effect['effect_id']}")
         async with connected(emu.url, dsn, tmp_path) as bridge:
-            target = (await deliver(dsn, bridge, task))["delivered"]
-            bound = await tom(emu, dsn, op, "approve", reply_to=int(target))
+            async with bridges.outbox(dsn, bridge) as box:
+                await bridge.sender.notice(await due(box, report["notice_id"]), box)
+            (sent,) = await of_type(dsn, "notice.sent", notice_id=report["notice_id"])
+            bound = await tom(emu, dsn, op, "rename the file", reply_to=int(sent["sent"][0]["message_id"]))
         assert bound["as"] == "feedback" and bound["task_id"] == task
 
     run(go())
