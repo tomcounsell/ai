@@ -2,7 +2,7 @@
 tracking: none
 slug: a2-advisor
 type: plan
-status: merged
+status: done
 critique_rounds: 2
 review_rounds: 2
 ---
