@@ -2,6 +2,9 @@
 task's workspace, read when the turn ends.
 
 - `.valor/question.md`: a question for Tom. The task waits for his answer.
+- `.valor/advice.md`: a question for the advisor, a fresh session on the
+  other vendor's model; the next turn opens with its answer. It counts
+  only on a turn that ends no stage (`core/session.py`).
 - `.valor/no_question.md`: from a clarify turn, why no question would
   change the result, and the approach.
 - `.valor/plan.json`: from a plan turn, the committed plan file and its
@@ -40,7 +43,7 @@ from typing import Any
 from core import workspace
 
 DIR = ".valor"
-TEXT_SIGNALS = ("question", "no_question", "done")
+TEXT_SIGNALS = ("question", "no_question", "done", "advice")
 
 
 def kind(value: Any) -> str:
@@ -55,6 +58,7 @@ class Signals:
     question: str | None = None
     no_question: str | None = None
     done: str | None = None
+    advice: str | None = None
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)

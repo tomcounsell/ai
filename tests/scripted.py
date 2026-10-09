@@ -74,6 +74,13 @@ def head():
     return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 act = cfg.get(stage, "default")
+asks = cfg.get("advise") or []
+if asks:  # each entry is one working turn's: `text` for advice.md, `act` for the stage
+    entry = asks.pop(0)
+    cfg_path.write_text(json.dumps(cfg))
+    act = entry.get("act", act)
+    if "text" in entry:
+        (v / "advice.md").write_text(entry["text"])
 if cfg.get("request_merge"):
     (v / "effects" / "merge.json").write_text(json.dumps({"action_type": "merge", "target": "main",
         "payload": {"head_sha": head()}}))
@@ -431,6 +438,8 @@ elif act == "review":
     # The reviewer's verdict is its final message; `review_text` is the
     # message as written, and `review_error` a harness that reports an error.
     result = cfg.get("review_text") or json.dumps(cfg.get("review_verdict") or {"verdict": "pass", "findings": []})
+if stage == "advice":  # the advisor answers in its final message; `advice_text` is that message
+    result = cfg.get("advice_text", "Plain, as Tom writes.")
 print(json.dumps({"result": result, "session_id": "00000000-0000-4000-8000-0000000000f1",
                   "is_error": bool(act == "review" and cfg.get("review_error"))}))
 """
@@ -509,6 +518,20 @@ async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", s
 
 def fresh_runners(ws: Path) -> dict:
     return {**RUNNERS, State.CRITIQUE: fresh.critique_runner(fresh_for(ws / ".git"))}
+
+
+def advising_runners(ws: Path, fresh_for_=None) -> dict:
+    """The fresh runners, with every working state's run able to ask the
+    advisor (`fresh.advise`), played by the fresh script."""
+    advise = fresh.advise(fresh_for_ or fresh_for(ws / ".git"))
+
+    async def working_advised(ctx: router.Context) -> dict:
+        return await session.run(
+            ctx.gateway, ctx.task_id, turn_for, dsn=ctx.dsn, alive=ctx.alive,
+            performers=ctx.performers, advise=advise,
+        )  # fmt: skip
+
+    return {**fresh_runners(ws), **dict.fromkeys(machine.WORKING, working_advised)}
 
 
 # -- the broker, with the task's own performers ---------------------------------

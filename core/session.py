@@ -5,7 +5,9 @@ Serves Mission item 1 (one working context from inspection to delivery) and
 Mission item 6 (Tom's answer lands in the context that asked). `run` runs
 one state's turns until the task leaves that state, or until there is
 something for Tom: a failed turn, a stop. A turn that finishes without its
-stage's signal is followed by the next, prompted `Continue.`
+stage's signal is followed by the next, prompted `Continue.`; when it
+left only `.valor/advice.md`, the advisor (`fresh.advise`) answers first
+and the next turn opens with that answer, quoted.
 The router (`core/router.py`) decides what runs next.
 
 A turn's prompt is data from the row that moved the task into its state
@@ -49,6 +51,12 @@ from core.settings import settings
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
 Alive = Callable[[], Awaitable[bool]]
+# Puts a turn's question to the advisor: (gateway, task id, dsn, alive, the
+# `turn.collected` payload that asked) -> a status (`fresh.advise`).
+Advise = Callable[[Gateway, str, str, Alive, dict[str, Any]], Awaitable[dict[str, Any]]]
+ADVICE_GIVEN = "advice.given"
+ADVICE_BESIDE = "advice.md beside a signal that ends the stage; not asked"
+ADVICE_UNFINISHED = "advice.md from a turn that did not finish; not asked"
 
 
 async def _always() -> bool:
@@ -62,11 +70,15 @@ async def run(
     dsn: str | None = None,
     alive: Alive = _always,
     performers: broker.Performers | None = None,
+    advise: Advise | None = None,
 ) -> dict[str, Any]:
     """Run turns in the task's current working state until it leaves it.
     Returns `status`: `moved` (the fold left the state), `failed`,
     `stopped`, or `lock lost` (the router's run lock died), with the task's
-    `state` from `tasks.status`."""
+    `state` from `tasks.status`. Before each turn, a question for the
+    advisor that is still pending (`pending_advice`) is put to `advise`
+    (`fresh.advise`); its `lock lost`, `stopped`, or preemption ends the
+    run as a turn's does, so the question is asked on the next run."""
     dsn = dsn or gateway.dsn
     performers = performers or broker.Performers()
     async with await db.connect(dsn) as conn:
@@ -81,7 +93,14 @@ async def run(
             if now["state"] != state.value:
                 return {"status": "moved", "state": now}
             b = await tasks.brief(conn, task_id)
-            prompt, resume = await next_prompt(conn, task_id)
+            asked = pending_advice(await ledger.read(conn, task_id)) if advise else None
+            if asked is None:
+                prompt, resume = await next_prompt(conn, task_id)
+        if asked is not None:
+            advised = await advise(gateway, task_id, dsn, alive, asked)
+            if advised.get("status") in ("lock lost", "stopped") or advised.get("preempted"):
+                return advised
+            continue
         try:
             ended = await runs.run_turn(
                 gateway,
@@ -215,7 +234,30 @@ def _verdict(
     brief: tasks.Brief | None = None,
 ) -> tuple[str, dict[str, Any], list[str]]:
     """The turn's verdict in its state, what goes with it, and the signals
-    that did not count."""
+    that did not count. `advice.md` counts only on a turn that finished
+    and wrote no signal that ends a stage (its verdict is `idle`); then it
+    goes with the verdict as `advice`."""
+    verdict, extra, errors = _stage_verdict(state, found, workspace, turn_id, finished, brief)
+    if found.advice is not None:
+        ended = any(getattr(found, name) is not None for name in ("question", "no_question", "plan", "done"))
+        if ended:
+            errors.append(ADVICE_BESIDE)
+        elif verdict != "idle":
+            errors.append(ADVICE_UNFINISHED)
+        else:
+            extra["advice"] = found.advice
+    return verdict, extra, errors
+
+
+def _stage_verdict(
+    state: State,
+    found: signals.Signals,
+    workspace: str | None,
+    turn_id: str,
+    finished: bool,
+    brief: tasks.Brief | None = None,
+) -> tuple[str, dict[str, Any], list[str]]:
+    """The turn's verdict from the signals that end a stage."""
     errors: list[str] = list(found.unreadable)
     extra: dict[str, Any] = {}
     meant = {
@@ -267,8 +309,10 @@ def _collected(
     candidate: dict[str, str] | None,
     errors: list[str],
     effects: list[dict[str, Any]],
+    advice: str | None = None,
 ) -> dict[str, Any]:
-    """The `turn.collected` payload."""
+    """The `turn.collected` payload. `advice` is the question for the
+    advisor when it counted (`_verdict`), never `found.advice` as written."""
     return {
         "turn_id": turn_id,
         "state": state.value,
@@ -276,6 +320,7 @@ def _collected(
         "question": found.question,
         "no_question": found.no_question,
         "done": found.done,
+        "advice": advice,
         "plan": found.plan,
         "candidate": candidate,
         "errors": errors,
@@ -336,7 +381,9 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
     is left and it is still refused, every part is, and the row keeps only
     what the kernel wrote and the file names of the requests."""
     errors = [*found.unreadable, *([found.plan_error] if found.plan_error else [])]
-    why = await ledger.unstorable(conn, _collected(turn_id, state, found, None, None, errors, found.effects))
+    why = await ledger.unstorable(
+        conn, _collected(turn_id, state, found, None, None, errors, found.effects, found.advice)
+    )
     if why is None:
         return found
     kept = dataclasses.replace(found, effects=list(found.effects), unreadable=list(found.unreadable))
@@ -354,7 +401,9 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
         if "request" in entry and (refused := await ledger.unstorable(conn, {"effects": [entry]})):
             kept.effects[i] = {"file": entry["file"], "error": f"unreadable request: {UNSTORABLE}: {refused}"}
     errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
-    why = await ledger.unstorable(conn, _collected(turn_id, state, kept, None, None, errors, kept.effects))
+    why = await ledger.unstorable(
+        conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice)
+    )
     if why is None:
         return kept
     # Refused only together: drop the largest part left, answered with
@@ -363,7 +412,7 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
         _drop(kept, part[1], f"{UNSTORABLE} beside the turn's other parts: {why}")
         errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
         why = await ledger.unstorable(
-            conn, _collected(turn_id, state, kept, None, None, errors, kept.effects)
+            conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice)
         )
         if why is None:
             return kept
@@ -466,7 +515,9 @@ async def record(
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         current = machine.fold(await ledger.read(conn, task_id)).state
-        collected = _collected(turn_id, state, found, verdict, extra.get("candidate"), errors, effects)
+        collected = _collected(
+            turn_id, state, found, verdict, extra.get("candidate"), errors, effects, extra.get("advice")
+        )
         follow = None
         if current is state and verdict == "asked":
             follow = (
@@ -740,11 +791,65 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
         prompt = (await tasks.brief(conn, task_id)).instruction
     else:
         prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."
+    advice = _advice_report(rows)
     steering = _steering(f.steering)
     notes = _errors_report(f.last_collected)
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
     children = _children_report(await tasks.reports(conn, task_id))
-    return "\n\n".join(x for x in (prompt, steering, notes, report, children) if x), f.session
+    parts = (prompt, advice, steering, notes, report, children)
+    return "\n\n".join(x for x in parts if x), f.session
+
+
+def _working_turn_finished(rows: list[dict], turn_states: dict[str, str]) -> bool:
+    """Whether a working-session turn ended done and without an error in
+    `rows` (a fresh session's turn, the advisor's included, is no working
+    turn)."""
+    for r in rows:
+        if r["type"] != "turn.ended":
+            continue
+        p = r["payload"]
+        result = p.get("result") if isinstance(p.get("result"), dict) else {}
+        state = turn_states.get(str(p.get("turn_id")))
+        if p.get("outcome") == "done" and not result.get("is_error") and state not in (None, machine.FRESH):
+            return True
+    return False
+
+
+def pending_advice(rows: list[dict]) -> dict[str, Any] | None:
+    """The `turn.collected` payload whose question the advisor has yet to
+    answer, or None. Only the latest collected turn can name one: its
+    verdict is `idle`, it carries `advice`, it ran in the task's current
+    state, no `advice.given` names it, and no working turn has finished
+    after it. So a run ended between the question and the answer asks it
+    on its next run, and an older question is never asked."""
+    f = machine.fold(rows)
+    last = next((i for i in range(len(rows) - 1, -1, -1) if rows[i]["type"] == "turn.collected"), None)
+    if last is None:
+        return None
+    p = rows[last]["payload"]
+    if p.get("verdict") != "idle" or not p.get("advice") or p.get("state") != f.state.value:
+        return None
+    after = rows[last + 1 :]
+    if any(r["type"] == ADVICE_GIVEN and r["payload"].get("asked_turn_id") == p["turn_id"] for r in after):
+        return None
+    return None if _working_turn_finished(after, f.turn_states) else p
+
+
+def _advice_report(rows: list[dict]) -> str:
+    """The advisor's latest answer, or why it gave none, until a working
+    turn finishes after it: its words quoted as prompt data under a label,
+    never an instruction."""
+    i = next((i for i in range(len(rows) - 1, -1, -1) if rows[i]["type"] == ADVICE_GIVEN), None)
+    if i is None or _working_turn_finished(rows[i + 1 :], machine.fold(rows).turn_states):
+        return ""
+    p = rows[i]["payload"]
+    if p.get("answer") is not None:
+        head = (
+            f"# The advisor's answer\n\nFrom {p.get('seat')} ({p.get('model')}), "
+            f"reading your commit {str(p.get('head') or '')[:12]}:"
+        )
+        return "\n".join([head, *tasks.quoted(p["answer"])])
+    return "\n".join(["# The advisor did not answer", "", *tasks.quoted(p.get("error"))])
 
 
 def _children_report(found: list[dict[str, Any]]) -> str:

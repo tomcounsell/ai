@@ -211,7 +211,13 @@ def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_na
 
 async def _working(ctx: router.Context) -> dict:
     return await session.run(
-        ctx.gateway, ctx.task_id, _turn_for, dsn=ctx.dsn, alive=ctx.alive, performers=ctx.performers
+        ctx.gateway,
+        ctx.task_id,
+        _turn_for,
+        dsn=ctx.dsn,
+        alive=ctx.alive,
+        performers=ctx.performers,
+        advise=fresh.advise(_fresh_for),
     )
 
 

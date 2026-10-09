@@ -8,8 +8,14 @@ name is not read,
 and your next turn says so.
 
 - A question for Tom goes in `.valor/question.md`; then end your turn. Ask
-  only when the answer materially changes the outcome or the authority the
-  work needs. Your next turn opens with his answer, in this same session.
+  only for vision, priorities, the cost and benefit of a tradeoff in how
+  the company works, or something only Tom holds; for anything else, ask
+  the advisor. Your next turn opens with his answer, in this same session.
+- A second opinion: write your question and the evidence in
+  `.valor/advice.md` and end your turn. An advisor on another vendor's
+  model reads it with a checkout of your committed work, and your next
+  turn opens with its answer. The advisor informs; you decide. Commit what
+  it should see.
 - What ends each stage is named in the stage section below.
 - An effect beyond the workspace is a request, one JSON file per request
   in `.valor/effects/<name>.json`, of the form

@@ -317,7 +317,12 @@ Effects beyond the workspace are requests to the broker.
 - `idle`: the turn finished with neither. The task stays in `build`, and
   the run goes on to the next turn, resumed with the prompt `Continue.`
   and what made any signal not count. The run ends only when a turn leaves
-  the state, fails, the task is stopped, or the run loses its lock.
+  the state, fails, the task is stopped, or the run loses its lock. An
+  `idle` turn that left `.valor/advice.md` first gets the advisor's answer
+  (`core/fresh.py`, a blind fresh session on the other vendor's seat,
+  `advice.given`), and the next turn opens with it, quoted. Beside a
+  signal that ends the stage, or from a turn that did not finish, the
+  advice question does not count.
 - `failed`: the harness reported an error or the turn did not finish. The
   step writes `step.failed` (the state, the check, the reason, the turn)
   and the run returns; the task waits for a row it did not write (a steer,

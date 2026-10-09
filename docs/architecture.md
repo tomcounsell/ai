@@ -224,7 +224,10 @@ read the result. The kernel never knows which harness it runs; see
 A task's clarify, plan, build, and patch turns resume one working session,
 so Valor keeps its context across a question, a send-back, and feedback; a
 patch is that session resumed, never a new agent (Tom, 2026-10-01).
-Critique, review, and docs run in fresh sessions. Prompts per state are in
+Critique, review, and docs run in fresh sessions, and so does the advisor: a
+working turn that finishes with only `.valor/advice.md` gets a second
+opinion from a blind fresh session on the other vendor's seat, and its next
+turn opens with the answer, quoted. Prompts per state are in
 [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under

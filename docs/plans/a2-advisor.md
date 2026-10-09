@@ -2,7 +2,7 @@
 tracking: none
 slug: a2-advisor
 type: plan
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -481,3 +481,21 @@ Notes taken: git reads in a worker thread; one call site
 (`pending_advice` at the top of the loop); "supports" for the review
 runner at `reviewer_openai`; the A1 hedge dropped. Steering is not an
 advisor input; the working session holds it when it decides.
+
+## Build
+
+Built in `a2-advisor`. The tests sit in one file, `tests/test_advisor.py`,
+rather than split across `test_session.py` and `test_fresh.py`; the
+scripted harness (`tests/scripted.py`) gains an `advise` script and
+`advising_runners`. Decisions taken in the build:
+
+- The seat is the first of `ADVISOR_SEATS` (`reviewer_openai`, then
+  `reviewer`) whose harness is not the task's.
+- Advice counts only from an `idle` turn with no question, no-question
+  statement, plan signal, or delivery note beside it; a stage signal
+  present makes it not count even when it did not count itself.
+- `advise` returns `advised` once `advice.given` is written, answer or
+  error, and the loop goes on; `lock lost`, `stopped`, and
+  `slot.PREEMPTED` end the run as a working turn's would.
+- `core/__main__.py` is the one call site that wires `fresh.advise` into
+  every working state's runner.

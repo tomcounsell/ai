@@ -360,7 +360,8 @@ async def dispatch(
     is in (`skills/sdlc/<state>.md`). A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
-    no effect and no question, and its stage's file. A working session's
+    no effect and no question, and its stage's file; the advisor (`advice`)
+    gets only its stage file, since it answers in prose. A working session's
     Brief whose task has children ends with their Children section
     (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
@@ -389,7 +390,8 @@ async def dispatch(
     sections = [rendered, head, corrections.render(standing)]
     lines: list[str] = []
     if fresh:
-        sections.append(verdict_text())
+        if fresh != "advice":  # the advisor answers in prose, in its own stage file
+            sections.append(verdict_text())
         stage = stage_text(fresh)
         if stage:
             sections.append(stage)

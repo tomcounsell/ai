@@ -1,5 +1,5 @@
 """Fresh sessions: one turn that never resumes and never reads the working
-session. Critique, review, and docs run here.
+session. Critique, review, docs, and the advisor run here.
 
 A fresh session gets:
 
@@ -58,6 +58,7 @@ from core import (
     ledger,
     machine,
     runs,
+    session,
     slot,
     tasks,
     verdicts,
@@ -265,6 +266,144 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
         except (ValueError, verdicts.VerdictRefused) as exc:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
         return {"status": "moved"}
+
+    return run
+
+
+# -- the advisor -----------------------------------------------------------------------------
+
+ADVICE_GIVEN = session.ADVICE_GIVEN
+ADVISOR_SEATS = ("reviewer_openai", "reviewer")
+
+
+def advisor_seat(harness_name: str) -> str:
+    """The advisor's seat: the first of `ADVISOR_SEATS` whose harness is
+    not the task's own, so the second opinion comes from the other
+    vendor's model (a Claude Code task asks Pi's OpenAI seat; a Pi task
+    asks Claude Code's)."""
+    return next(s for s in ADVISOR_SEATS if resolve_seat(s)[0] != harness_name)
+
+
+def _advice_files(rows: list[dict], f: machine.Fold, b: tasks.Brief, asked: dict, diff: str, left: list[str]):
+    plan = f.plan or {}
+    return {
+        "question.md": asked["advice"],
+        "request.md": b.instruction,
+        "answers.md": _answers(rows),
+        "plan.md": (
+            f"The plan file: {_quoted(plan.get('path'))} at {plan.get('commit')}\n"
+            if plan
+            else "No plan is recorded yet.\n"
+        ),
+        "diff.patch": diff,
+        "uncommitted.md": (
+            "Paths the working session has not committed, which your checkout does not hold:\n"
+            + "\n".join(f"- {_quoted(p)}" for p in left)
+            if left
+            else "Nothing is uncommitted."
+        ),
+    }
+
+
+def _look(b: tasks.Brief, turn_id: str) -> tuple[str | None, list[str], str | None]:
+    """The workspace's head and uncommitted paths, the head kept in the
+    mirror at `refs/valor/advice/<turn_id>`; or why not."""
+    try:
+        head, left = git.head(b.workspace), git.dirty(b.workspace)
+    except git.GitError as exc:
+        return None, [], str(exc)
+    if head is None:
+        return None, left, "the workspace has no commit"
+    return head, left, session._keep(b, head, f"refs/valor/advice/{turn_id}", turn_id)
+
+
+def advise(fresh_for: FreshFor):
+    """The advisor, for `session.run`: one fresh session at `advisor_seat`
+    on the asking turn's question (`asked`, its `turn.collected` payload),
+    in a blind checkout of the working session's committed head, its answer
+    read from its final message and appended as `advice.given`. The advisor
+    holds nothing and decides nothing: an advisor that cannot answer is
+    recorded with the reason, and the next working turn is told it. Returns
+    `advised` once the row is written, or `stopped`, `lock lost`, or a
+    preemption, with nothing written."""
+
+    async def run(gateway, task_id: str, dsn: str, alive, asked: dict[str, Any]) -> dict[str, Any]:
+        turn_id = asked["turn_id"]
+        async with await db.connect(dsn) as conn:
+            if await tasks.is_stopped(conn, task_id):
+                return {"status": "stopped"}
+            rows = await ledger.read(conn, task_id)
+            b = await tasks.brief(conn, task_id)
+        f = machine.fold(rows)
+        seat = advisor_seat(b.harness_name)
+        harness_name, model = resolve_seat(seat)
+        given: dict[str, Any] = {"asked_turn_id": turn_id, "seat": seat, "model": model, "head": None}
+
+        async def record(**fields) -> dict[str, Any]:
+            if not await alive():
+                return {"status": "lock lost"}
+            row = {**given, "usd_micros": 0, **fields}
+            async with await db.connect(dsn) as conn, conn.transaction():
+                await ledger.lock(conn, f"task:{task_id}")
+                if await tasks.is_stopped(conn, task_id):
+                    return {"status": "stopped"}
+                why = await ledger.unstorable(conn, row)
+                if why is not None:
+                    row = {k: v for k, v in row.items() if k != "answer"}
+                    row["error"] = f"the advisor's answer: {ledger.UNSTORABLE}: {why}"
+                await ledger.append(conn, task_id, ADVICE_GIVEN, row)
+            return {"status": "advised"}
+
+        if not b.mirror:
+            return await record(error="a fresh session runs only in a workspace the kernel provisioned")
+        head, left, why = await git.threaded(_look, b, turn_id)
+        given["head"] = head
+        if why is not None:
+            return await record(error=why)
+        lay = workspace.Layout(Path(b.mirror).parent)
+        check_dir = workspace.fresh_dir(lay.checks / f"advice-{turn_id}")
+        checkout = check_dir / "repo"
+        try:
+            made = await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, head, checkout)
+            diff = await asyncio.to_thread(
+                git.trusted, checkout, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                made["base"], made["candidate"],
+            )  # fmt: skip
+            files = _advice_files(rows, f, b, asked, diff, left)
+            await asyncio.to_thread(workspace.write_inputs, checkout, files)
+        except (workspace.ValorInTree, git.GitError, OSError, ValueError) as exc:
+            return await record(error=f"the advisor's checkout: {exc}")
+        harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
+        if not await alive():
+            return {"status": "lock lost"}
+        try:
+            ended = await runs.run_turn(
+                gateway,
+                task_id,
+                fresh_for(prompt(list(files)), str(checkout), model, harness, harness_name),
+                dsn=dsn,
+                state=asked["state"],
+                fresh="advice",
+            )
+        except tasks.TaskStopped:
+            return {"status": "stopped"}
+        if ended["outcome"] == "preempted":
+            return dict(slot.PREEMPTED)
+        if ended["outcome"] == "stopped":
+            return {"status": "stopped"}
+        result = ended["result"]
+        spent = {"advisor_turn_id": ended["turn_id"], "usd_micros": int(ended.get("metered_usd_micros") or 0)}
+        if ended["outcome"] != "done" or result.get("is_error"):
+            return await record(
+                **spent,
+                error=f"the advisor's turn failed (outcome {ended['outcome']}, exit {ended.get('returncode')})",
+            )
+        if result.get("text") is None and result.get("unrecorded"):
+            return await record(**spent, error=result["unrecorded"])
+        answer = (result.get("text") or "").strip()
+        if not answer:
+            return await record(**spent, error="the advisor's final message was empty")
+        return await record(**spent, answer=answer)
 
     return run
 

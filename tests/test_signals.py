@@ -72,15 +72,16 @@ def leaked(found: signals.Signals) -> bool:
     return MARKER in json.dumps(asdict(found))
 
 
+@pytest.mark.parametrize("name", ["question", "advice"])
 @pytest.mark.parametrize("target", ["marker.txt", "fifo"])
-def test_a_linked_question_is_not_followed(ws, outside, target):
+def test_a_linked_question_is_not_followed(ws, outside, target, name):
     before = listing(outside)
-    (ws / ".valor" / "question.md").symlink_to(outside / target)
+    (ws / ".valor" / f"{name}.md").symlink_to(outside / target)
     found = collect(ws)
-    assert found.question is None and not leaked(found)
-    assert found.unreadable == ["question.md is a link, not a plain file"]
-    assert (ws / ".valor" / "handled" / "turn-1" / "question.md").is_symlink()
-    assert not (ws / ".valor" / "question.md").exists(follow_symlinks=False)
+    assert getattr(found, name) is None and not leaked(found)
+    assert found.unreadable == [f"{name}.md is a link, not a plain file"]
+    assert (ws / ".valor" / "handled" / "turn-1" / f"{name}.md").is_symlink()
+    assert not (ws / ".valor" / f"{name}.md").exists(follow_symlinks=False)
     assert listing(outside) == before
 
 
@@ -179,18 +180,25 @@ def test_plain_files_are_collected_and_moved(ws):
     v = ws / ".valor"
     (v / "question.md").write_text("Which one?\n")
     (v / "done.md").write_text("built\n")
+    (v / "advice.md").write_text("Rebase or merge?\n")
     (v / "plan.json").write_text(json.dumps({"path": "docs/plans/x.md"}))
     (v / "effects").mkdir()
     (v / "effects" / "b.json").write_text(json.dumps({"action_type": "send", "target": "tom"}))
     (v / "effects" / "a.json").write_text("not json")
     found = collect(ws)
-    assert found.question == "Which one?" and found.done == "built"
+    assert found.question == "Which one?" and found.done == "built" and found.advice == "Rebase or merge?"
     assert found.plan == {"path": "docs/plans/x.md"} and found.unreadable == []
     assert [e["file"] for e in found.effects] == ["a.json", "b.json"]
     assert found.effects[1]["request"] == {"action_type": "send", "target": "tom", "payload": {}}
     assert "error" in found.effects[0]
     handled = v / "handled" / "turn-1"
-    assert sorted(p.name for p in handled.iterdir()) == ["done.md", "effects", "plan.json", "question.md"]
+    assert sorted(p.name for p in handled.iterdir()) == [
+        "advice.md",
+        "done.md",
+        "effects",
+        "plan.json",
+        "question.md",
+    ]
     assert sorted(p.name for p in (handled / "effects").iterdir()) == ["a.json", "b.json"]
     assert collect(ws, "turn-2") == signals.Signals()
 

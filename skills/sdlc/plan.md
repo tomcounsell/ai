@@ -21,5 +21,6 @@ Tom's answer, or a critique's findings on your last plan.
      "critique_rounds": 0, "review_rounds": 0,
      "scope": [{"item": "<added work>", "debt": "<the debt it pays>"}]}
 
-The kernel records it from the committed file. A material question found
-while planning goes in `.valor/question.md` instead.
+The kernel records it from the committed file. A question only Tom can
+answer goes in `.valor/question.md` instead; for a second opinion,
+`.valor/advice.md`.
