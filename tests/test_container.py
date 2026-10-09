@@ -703,7 +703,7 @@ def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend)
                    capture_output=True)  # fmt: skip
     files = {
         **test_checks.BASE_TESTS,
-        ".gitignore": "setup-*\n.venv/\n",
+        ".gitignore": "setup-*\n.venv/\n*.egg-info/\n",
         "pyproject.toml": pyproject,
         "uv.lock": (project / "uv.lock").read_text(),
         "toy/__init__.py": "",
