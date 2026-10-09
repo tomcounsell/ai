@@ -228,3 +228,10 @@ were not run to the end: the container runtime was wedged under a
 concurrent container suite of another builder (`container system status`
 hung for minutes); none of them calls `run_turn`. Ruff check and format
 clean.
+
+Rebased onto `origin/valor-cori-rebuild` (8 commits, cutover runbook and
+scripts, none in `core/runs.py` or the tests touched here) and reran
+`tests/test_reap.py` and `tests/test_kernel.py`: 37 passed. One earlier
+run of the pair failed `test_a_turn_that_exits_cuts_its_silent_calls` on
+its 20 s wait for the upstream under a load average near 9 from
+concurrent suites; it passed three times alone and in the pair rerun.
