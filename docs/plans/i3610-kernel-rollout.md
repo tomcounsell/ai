@@ -575,8 +575,7 @@ The two overstated round 1 claims (#3, #5) are corrected in place above.
 
 ## Build record
 
-Built on `i3610-kernel-rollout` from the plan above and both critique
-rounds.
+Built on `i3610-kernel-rollout` from the plan and both critique rounds.
 
 - `core/rollout.py`: `judge`, `fetch`, `prepare`, `refused`,
   `fast_forward`, `step_back`, `migrate_argv`, `migrate`, `Restart`.
@@ -592,6 +591,9 @@ rounds.
 - Docs: `core/README.md`, `docs/architecture.md`, `docs/data.md` (the
   three `rollout.*` rows), `docs/plans/valor-rebuild.md` (the takeover
   point), `.claude/skills/build/SKILL.md` (the merge bullet).
-- A judge step refused by the checkout's config is recorded as a failure
-  at `fetch` on the newest due merge. A failure with `mixed` always
-  writes its row.
+- A judge step refused by the checkout's config fails at `fetch` on the
+  newest due merge; a failure with `mixed` always writes its row.
+- Suite without `tests/test_container.py`: 1804 passed, 26 skipped, 3
+  failed. The three (two in `test_pi.py`, one in `test_workspace.py`)
+  pass with `--basetemp` outside `~/src`, which their sandbox profile
+  treats as the checkout.

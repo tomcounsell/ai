@@ -1264,9 +1264,9 @@ def test_the_kernel_gateway_sends_the_installed_openai_key(fresh, tmp_path, monk
     built = []
 
     class Seen(serve.Kernel):
-        def __init__(self, gateway, *rest):
+        def __init__(self, gateway, *rest, **kw):
             built.append(gateway)
-            super().__init__(gateway, *rest)
+            super().__init__(gateway, *rest, **kw)
 
     monkeypatch.setattr(serve, "Kernel", Seen)
     upstream = Upstream(data=b"{}")
@@ -1574,6 +1574,6 @@ def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, c
     monkeypatch.setattr(core.gateway, "OpenAIKey", Stand)
     monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, serve_tick_s=0.05))
     with pytest.raises(rollout.Restart):
-        run(serve.serve({}, dsn=fresh, checkout=None))
+        run(serve.serve({}, dsn=fresh))
     assert len(ticks) == 2 and closed == ["kernel", "gateway"]
     assert "kernel wake failed: RuntimeError('one wake failed')" in capsys.readouterr().err
