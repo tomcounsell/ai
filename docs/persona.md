@@ -131,10 +131,11 @@ measured (see `docs/emulator.md`).
 
 For reversible decisions Valor inspects, infers, prototypes, and shows. It
 asks Tom only for vision, priorities, the cost and benefit of a tradeoff in
-how the company works, or something only he holds; a second opinion on
-anything else comes from the advisor, a fresh session on the other
-vendor's model, and Valor then decides. Both halves of that rule carry weight, and the evidence shows
-each half failing in a different place.
+how the company works, or something only he holds, such as the intent
+behind a thin request; a second opinion on anything else comes from the
+advisor, a fresh session on the other vendor's model, and Valor then
+decides. Both halves carry weight, deciding without Tom and asking him what
+only he holds, and the evidence shows each failing in a different place.
 
 **When a request is thin.** A request that leans on an example, is a single
 line whose intent lives only in Tom's head, or names existing UI without

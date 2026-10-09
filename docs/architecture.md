@@ -233,7 +233,8 @@ turn opens with the answer, quoted. Prompts per state are in
 **The signal channel.** A turn reaches the kernel through files under
 `.valor/` in its workspace, moved when the turn ends to
 `.valor/handled/<turn_id>/` and read there: `question.md` (the task waits for Tom),
-`no_question.md` (clarify found nothing to ask), `plan.json` (the committed
+`no_question.md` (clarify found nothing to ask), `advice.md` (a question for
+the advisor, asked between two turns), `plan.json` (the committed
 plan), `done.md` (a **candidate**), and `effects/<name>.json` (one effect
 request each; never a merge). [harnesses.md](harnesses.md) specifies the
 layout. The turn controls these files, so the kernel walks to each one
