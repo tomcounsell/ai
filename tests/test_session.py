@@ -109,8 +109,9 @@ def test_a_candidate_merges_by_itself_and_feedback_after_the_merge_patches(dsn, 
     assert delivered["status"] == "merged" and delivered["state"]["delivery"]["outcome"] == "passed"
     assert "greeting.txt" in delivered["state"]["delivered"]
     assert merged.kind == "done" and git(origin, "rev-parse", "main") == cand["sha"]
-    assert git(origin, "rev-parse", "valor/greeting") == cand["sha"]
     assert patched["status"] == "no runner" and patched["state"]["candidate"]["sha"] != cand["sha"]
+    # The patch turn's push left at request, so the branch holds the patch.
+    assert git(origin, "rev-parse", "valor/greeting") == patched["state"]["candidate"]["sha"]
     t = scripted.turns(ws)
     assert [x["stage"] for x in t] == ["plan", "build", "patch"]
     assert t[1]["prompt"].startswith("# Critique: sound")

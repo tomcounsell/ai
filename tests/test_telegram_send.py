@@ -107,7 +107,7 @@ def test_a_changed_file_raises_before_anything_is_sent(emu, dsn, tmp_path, c):
         async with connected(emu.url, dsn, tmp_path) as bridge:
             perform_fn, _ = bridge.performers()[SEND]
             f.write_bytes(b"changed bytes")
-            with pytest.raises(ValueError, match="changed after approval"):
+            with pytest.raises(ValueError, match="changed after it was requested"):
                 await perform_fn(
                     send(group, "with a file", files=[{"path": str(f), "sha256": digest}]), "t:e1"
                 )

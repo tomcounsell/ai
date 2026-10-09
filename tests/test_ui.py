@@ -38,13 +38,13 @@ def test_every_page_renders_and_a_hostile_ledger_value_is_escaped(dsn):
             t = await tasks.start(conn, tasks.Brief(instruction=HOSTILE))
             await ledger.append(conn, t, "question.asked", {"text": HOSTILE, "question_id": "q"})
         out = {}
-        for path in ("/", f"/task/{t}", "/pending", "/attention", "/routines"):
+        for path in ("/", f"/task/{t}", "/attention", "/routines"):
             out[path] = await fetch(dsn, path)
         out["missing"] = await fetch(dsn, "/task/no-such-task")
         return t, out
 
     t, out = run(go())
-    for path in ("/", f"/task/{t}", "/pending", "/attention", "/routines"):
+    for path in ("/", f"/task/{t}", "/attention", "/routines"):
         status, text = out[path]
         assert status == 200 and HOSTILE not in text, path
     assert "&lt;script&gt;" in out["/"][1] and "&lt;script&gt;" in out[f"/task/{t}"][1]
@@ -55,7 +55,7 @@ def test_every_page_renders_and_a_hostile_ledger_value_is_escaped(dsn):
 def test_any_method_but_get_is_refused_and_writes_nothing(dsn, method):
     async def go():
         before = await count(dsn)
-        got = [await fetch(dsn, path, method) for path in ("/", "/pending", "/routines")]
+        got = [await fetch(dsn, path, method) for path in ("/", "/attention", "/routines")]
         return before, got, await count(dsn)
 
     before, got, after = run(go())

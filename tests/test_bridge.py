@@ -173,6 +173,7 @@ def test_two_identical_sends(dsn, op):
             a = await broker.request(conn, declared(), task, send(), request_id="t1/a.json")
             b = await broker.request(conn, declared(), task, send(), request_id="t1/b.json")
             a2 = await broker.request(conn, declared(), task, send(), request_id="t1/a.json")
+            await tasks.stop(conn, task, reason="the test only reads what was released")
         return a, b, a2
 
     a, b, a2 = run(go())
@@ -320,7 +321,9 @@ def test_well_formed_files_pass_to_sizing(dsn, op, tmp_path, files):
     async def go():
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
-            return await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
+            out = await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
+            await tasks.stop(conn, task, reason="the test only reads what was released")
+        return out
 
     out = run(go())
     assert out.kind == "released", out
@@ -379,6 +382,7 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
             nobody = await broker.request(
                 conn, performers, task, broker.Action("email.send", to, {"to": [], "body": "x"})
             )
+            await tasks.stop(conn, task, reason="the test only reads what was released")
         return over_file, at_file, measured, over, under, nobody
 
     over_file, at_file, measured, over, under, nobody = run(go())
