@@ -400,12 +400,17 @@ def test_a_runtime_that_is_down_is_told_apart_from_a_missing_image(tmp_path, mon
     monkeypatch.setattr(container, "IMAGES", tmp_path / "images.json")
     monkeypatch.setattr(container, "inspect", absent)
     container._record("valor/x:1", "sha256:a", "tests")
-    monkeypatch.setattr(container, "running", lambda: False)
+
+    async def status(stop, *args, **kw):
+        return (1, "") if state["down"] else (0, "status   running\n")
+
+    state = {"down": True}
+    monkeypatch.setattr(container, "short", status)
     with pytest.raises(container.Failed, match="runtime is down") as down:
         unstopped(container.checked, "valor/x:1")
     assert down.value.cause == "kernel"
     assert container._images()["valor/x:1"]["digest"] == "sha256:a"
-    monkeypatch.setattr(container, "running", lambda: True)
+    state["down"] = False
     assert unstopped(container.checked, "valor/x:1") is None
     assert "valor/x:1" not in container._images()
 

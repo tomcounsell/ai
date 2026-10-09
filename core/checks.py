@@ -447,7 +447,7 @@ def compare(
       and every id that passed at base and is absent or skipped at head,
       unless the diff removes its definition; a head run the commit broke
       (`cause: commit`) is a failure itself, and so is a head whose report
-      holds no test at all (`NO_TESTS`); with no per-test result on
+      has no passed, failed or skipped test (`NO_TESTS`: nothing ran, or collection errored); with no per-test result on
       either side, a head that fails while the base passes, or the note
       `BOTH_FAIL` when both fail;
     - `deleted_at_head`: ids passing at base, absent at head, whose
@@ -478,7 +478,7 @@ def compare(
         if not failures and head.get("exit") not in (0, None):
             failures.append(f"the suite exited {head.get('exit')} at head with no per-test results")
     else:
-        if not any(ht.values()):
+        if not (ht["passed"] or ht["failed"] or ht["skipped"]):
             failures.append(NO_TESTS)
         head_pass = set(ht["passed"])
         head_fail = set(ht["failed"]) | set(ht["errored"])

@@ -205,11 +205,14 @@ async def short(
         return code, out.read_bytes().decode(errors="replace")
 
 
+def _is_running(code: int, out: str) -> bool:
+    return code == 0 and re.search(r"^status\s+running$", out, re.MULTILINE) is not None
+
+
 def running() -> bool:
     """Whether the container system is up. `container system status` exits
     non-zero when it is stopped."""
-    code, out = call("system", "status")
-    return code == 0 and re.search(r"^status\s+running$", out, re.MULTILINE) is not None
+    return _is_running(*call("system", "status"))
 
 
 async def start(stop: asyncio.Task) -> float:
@@ -382,7 +385,7 @@ async def checked(tag: str, stop: asyncio.Task) -> str | None:
     held = await inspect(tag, stop)
     if recorded is not None and held == recorded:
         return recorded
-    if held is None and not await asyncio.to_thread(running):
+    if held is None and not _is_running(*await short(stop, "system", "status")):
         raise Failed("kernel", f"the container runtime is down, so {tag} cannot be checked")
     if held is not None:
         await short(stop, "image", "delete", tag)

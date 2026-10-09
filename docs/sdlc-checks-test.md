@@ -31,8 +31,9 @@ base and are gone at head), `failing_at_base` (shown, never counted), the
 behaviors, the breadth judgement (id, actions, model, cost, guard id, and
 `information` while uncalibrated), and the verdict the kernel computes: any
 failure `red`, else any behavior `gaps`, else `pass`. Per-test results at
-base and none at head is `red`. A head whose report holds no test at all (the
-suite collected nothing; pytest exits 5) is `red` too, never `pass`.
+base and none at head is `red`. A head whose report has no passed, failed or skipped test (the
+suite collected nothing, pytest exits 5, or collection errored, exit 2) is
+`red` too, never `pass`.
 
 **Why.** Mission item 1 ("testing actual use"). On popoto #633 the clarify
 arm broke a bound in an existing test and was accepted anyway

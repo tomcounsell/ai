@@ -212,6 +212,23 @@ def test_a_bad_junit_report_is_no_per_test_result(tmp_path, plant, why):
     assert tests is None and why in got and time.monotonic() - started < 2
 
 
+def test_a_collection_error_report_is_a_head_with_nothing_run(tmp_path):
+    """pytest's JUnit for a suite that stops at collection (exit 2): one
+    errored testcase for the module, no passed or failed test."""
+    name = _report(tmp_path, "x")
+    (tmp_path / name / checks.JUNIT).write_bytes(
+        b'<testsuites><testsuite name="pytest" errors="1" tests="1">'
+        b'<testcase classname="" name="tests.test_a" time="0.0">'
+        b'<error message="collection failure">ImportError</error></testcase></testsuite></testsuites>'
+    )
+    tests, _ = checks.read_junit(tmp_path, name)
+    head = {"exit": 2, "tests": tests, "cause": None}
+    assert (
+        checks.NO_TESTS
+        in checks.compare({"exit": 0, "tests": None, "cause": None}, head, lambda _t: False)["failures"]
+    )
+
+
 def test_a_junit_report_gives_ids_by_outcome_whatever_its_size(tmp_path):
     many = "".join(f'<testcase classname="t.m" name="p{i}"/>' for i in range(20000))
     name = _report(
@@ -287,6 +304,8 @@ def never(_tid):
         # A suite that collects no tests (pytest exits 5, writing an empty report) is not a pass.
         (_run(0, _tests(["m::a"])), _run(5, _tests()), [checks.NO_TESTS, "m::a"]),
         (_run(5, _tests()), _run(5, _tests()), [checks.NO_TESTS]),
+        # A collection error is an errored testcase: exit 2, nothing passed or failed.
+        (_run(0), _run(2, _tests(errored=["m::<collection>"])), [checks.NO_TESTS, "m::<collection>"]),
     ],
 )
 def test_compare(base, head, failures):
