@@ -55,3 +55,21 @@ installed. A process under a sandbox profile reads the
 runtime as absent, since every profile denies it (`container.present()`), so a
 router's sweep run there leaves containers alone. The runtime is in
 [tech-stack.md](tech-stack.md), its memory cost in [machine.md](machine.md).
+
+**Images and their record.** Every image the kernel builds is named
+`<REPO>/<name>:<key>` (`container.REPO`, `valor`): `valor/base:<digest of
+core/images/base/>` and `valor/<project>:<dependency key>`. Each build is
+recorded in `images.json` beside the machine lock, with the digest and the
+`valor.db` label of the database that built it. A prune deletes only images
+carrying its own database's label, and never the base image. All runtime work
+(start, build, check, prune, run, stop) happens while holding the machine lock,
+which is one per machine because the runtime is.
+
+**Tests that use the runtime.** A `container`-marked test shares the machine
+lock and the runtime with every kernel on the machine and does its runtime work
+only while it holds the lock, stopping the system before it releases it. It
+keeps its image records in a directory of the test session's own and names its
+images under `valor-test-<label>`, the label being `container.owner` of the
+test database, so it never deletes, retags, or records an image a kernel built.
+At session end the session takes the machine lock, deletes every image recorded
+under its label, and drops the records.

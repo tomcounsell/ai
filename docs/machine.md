@@ -234,7 +234,8 @@ Two isolation mechanisms exist on macOS, and they cost memory differently.
 
 Both serve the constraint "bounded authority, metered spending" by least privilege
 [11]. On the Air, one verification runs at a time on the machine (a lock on
-the container runtime), and a review check holds the turn slot while it
+the container runtime, which kernels and `container`-marked tests all take
+before any runtime work), and a review check holds the turn slot while it
 does. Which work runs under which mechanism is
 [sandbox.md](sandbox.md)'s; this doc only fixes that a
 container costs its workload plus about 0.6 GB and sandbox-exec costs
