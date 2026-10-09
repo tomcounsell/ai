@@ -358,10 +358,12 @@ async def _feed(proc: asyncio.subprocess.Process, data: bytes | None) -> None:
 
 def _kill_group(pid: int) -> None:
     """SIGKILL the harness and everything it spawned. Nothing inside a turn
-    is trusted to honor a gentler signal."""
+    is trusted to honor a gentler signal. macOS answers EPERM when the
+    group's only member is its leader exiting or a zombie: nothing is left
+    to kill, as with ESRCH."""
     try:
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except ProcessLookupError, PermissionError:
         pass
 
 

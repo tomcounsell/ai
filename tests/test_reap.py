@@ -330,6 +330,57 @@ def test_a_turn_cancelled_again_during_its_cleanup_leaves_nothing_running_and_re
     assert rows_after[-1]["payload"]["reason"] == "kernel restarted"
 
 
+# A harness that writes its pid and exits at once.
+EXITER = """
+import os, sys
+open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))
+os.rename(sys.argv[1] + '.tmp', sys.argv[1])
+"""
+
+
+@pytest.mark.macos
+def test_a_cancel_landing_while_the_harness_exits_still_ends_the_turn(dsn, tmp_path):
+    """macOS refuses to signal a group whose only member is an exiting or
+    zombie leader (EPERM), and asyncio has not yet set the leader's
+    returncode. The loop is held until the kernel answers so, then the turn
+    is cancelled: the cleanup runs whole all the same."""
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
+        gateway = Gateway(dsn)
+        await gateway.start(port=listen())
+        pidfile = tmp_path / "harness.pid"
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", EXITER, str(pidfile)], env={}, cwd=str(tmp_path), harness="t"
+        )
+        turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
+        while not pidfile.exists():
+            await asyncio.sleep(0.001)
+        pid = int(pidfile.read_text())
+        answer = None
+        while answer is None:  # the loop is held: asyncio cannot reap the leader
+            try:
+                os.killpg(pid, 0)
+            except PermissionError, ProcessLookupError:
+                answer = sys.exc_info()[0]
+        turn.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+        finally:
+            await gateway.close()
+        async with await db.connect(dsn) as conn:
+            return answer, await ledger.read(conn, task), gateway
+
+    answer, rows, gateway = run(go())
+    assert answer is PermissionError
+    ended = rows[-1]["payload"]
+    assert rows[-1]["type"] == "turn.ended"
+    assert (ended["outcome"], ended["reason"]) == ("interrupted", "cancelled")
+    assert not gateway.grants and not any(gateway.calls.values())
+
+
 @pytest.mark.parametrize("code,outcome", [(0, "done"), (1, "failed")])
 def test_a_turn_that_ends_on_its_own_writes_only_its_end(dsn, tmp_path, code, outcome):
     async def go():

@@ -76,7 +76,11 @@ In `core/runs.py`, `_run_turn` and one new helper, `_cut_short`:
      id, and the unreaped leader holds that number. Once asyncio has
      reaped the leader, the number may be recycled for another session,
      so the group is not signalled; `reap` finds what is left by the
-     group, the turn's mark and its sandbox name.
+     group, the turn's mark and its sandbox name. macOS answers `killpg`
+     with EPERM when the group's only member is the leader exiting or a
+     zombie that asyncio has not reaped yet; `_kill_group` takes that as
+     it takes ESRCH, since no live process is left in the group. The
+     stop and preempt path calls the same `_kill_group`.
    - `gateway.retire(task_id)` and `gateway.cut(task_id)`, as the normal
      end does. Not `gateway.revoke`: `revoked` is never cleared, so it
      would refuse the task's next turn in this kernel, and a cancelled
@@ -185,7 +189,13 @@ real subprocesses and the test database
    the output directory cannot be made; the `OSError` is raised, the grant
    is gone, and `turn.ended` names the error type.
 
-1, 2 and 4 are red on the code before the fix; 3 pins what must not
+5. `test_a_cancel_landing_while_the_harness_exits_still_ends_the_turn`:
+   the harness writes its pid and exits; the test holds the loop until
+   `killpg(pid, 0)` answers EPERM (asyncio cannot reap the leader
+   meanwhile), then cancels, and asserts `CancelledError`, `turn.ended`
+   `interrupted`/`cancelled`, and no grant or call left.
+
+1, 2, 4 and 5 are red on the code before the fix; 3 pins what must not
 change. The existing stop, reap and exit tests run unchanged.
 
 ## Merge order
@@ -235,3 +245,17 @@ scripts, none in `core/runs.py` or the tests touched here) and reran
 run of the pair failed `test_a_turn_that_exits_cuts_its_silent_calls` on
 its 20 s wait for the upstream under a load average near 9 from
 concurrent suites; it passed three times alone and in the pair rerun.
+
+### Patch round 1 (2026-10-09)
+
+Test check verdict gaps (`~/src/valor-build-notes/test-c3.md`): a cancel
+landing while the harness exits made `killpg` answer EPERM, the
+`PermissionError` escaped `_cut_short`, and the grant, waiters, reap and
+`turn.ended` were all skipped. `_kill_group` now catches
+`(ProcessLookupError, PermissionError)`; the stop and preempt path shares
+it. Test 5 pins it: red before (`PermissionError` from `_kill_group`),
+green after, five runs out of five. Rebased onto
+`origin/valor-cori-rebuild` at aee005097 (A1 and C4) with no conflict.
+`tests/test_reap.py` `-m "not container"` on `valor_rebuild_test_c3build`,
+ports 6730-6739; ruff clean. Container runs: see the patch report
+(`~/src/valor-build-notes/patch-c3.md`).
