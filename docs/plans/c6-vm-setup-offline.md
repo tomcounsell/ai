@@ -129,3 +129,7 @@ None.
   build says "Using CPython 3.12.15" and installs setuptools for that
   interpreter; the VM's offline `uv sync --frozen --extra dev` exits 0 in
   0.8 s, building only the project, and `out/setup-0.out` is kept.
+- Suite (`-m "not container"`): 1805 passed, 24 skipped, 4 failed. The
+  four (three in `test_ports.py`, one in `test_targets.py` on "No space
+  left on device") pass alone: 4 passed in 3.78 s. Ruff check and format
+  clean.
