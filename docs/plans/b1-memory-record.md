@@ -108,3 +108,16 @@ The lead's decision on the review's residual: turn-written transcripts
 reach a later Brief in the same project, labelled, quoted and escaped,
 with no kernel decision reading them; that is accepted as the milestone's
 Done requires.
+
+## Rollout
+
+On the mini, with the kernel booted out: the ledger backed up to PINK
+(`valor_rebuild-20261009T190421Z.dump`, 3299 events) and a restore of it
+matched; `uv sync`; `migrate`, after which the schema `memory` is owned by
+`valor_memory`, the role logs in, and the pgpass holds its lines; `memory
+ingest` took 158 rows into 230 records. The installed plist was kept, since
+the generated one differs only by lacking the operator settings. The kernel
+was bootstrapped and recovered with nothing to charge or interrupt.
+`core.memory.recall` for task 8a4a8a6fe2f8, called as the kernel calls it
+against the ledger, returned a Remembered section holding Tom's instruction
+for task 8ed5902a54d4.

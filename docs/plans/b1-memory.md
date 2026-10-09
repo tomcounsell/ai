@@ -2,7 +2,7 @@
 tracking: none
 slug: b1-memory
 type: plan
-status: planned
+status: done
 critique_rounds: 2
 review_rounds: 2
 ---
