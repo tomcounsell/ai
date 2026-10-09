@@ -969,7 +969,9 @@ def test_a_stop_ends_a_send_whose_server_never_answers_at(dsn, mailbox, point):
     mailbox.smtp.behavior.mute_at = point
     cfg = mailbox.config()
     act = broker.Action("email.send", "tom@yuda.me", BIG if point == "BODY" else PAYLOAD)
-    ended(stopped(lambda: EmailBridge(cfg, dsn).perform(act, act.key("e1")), lambda: mailbox.smtp.connections))
+    ended(
+        stopped(lambda: EmailBridge(cfg, dsn).perform(act, act.key("e1")), lambda: mailbox.smtp.connections)
+    )
 
 
 def test_a_stop_ends_a_send_whose_server_never_greets(dsn, mailbox):
@@ -985,7 +987,9 @@ def test_a_stop_ends_an_imap_server_that_never_greets(dsn, mailbox):
     act = broker.Action("email.send", "tom@yuda.me", PAYLOAD)
     with silent_smtp(mailbox) as connected:
         cfg = mailbox.config(imap_port=mailbox.config().smtp_port)
-        ended(stopped(lambda: EmailBridge(cfg, dsn).lookup(act, act.key("e1"), LOOKUP_SINCE), connected.is_set))
+        ended(
+            stopped(lambda: EmailBridge(cfg, dsn).lookup(act, act.key("e1"), LOOKUP_SINCE), connected.is_set)
+        )
     with silent_smtp(mailbox) as connected:
         cfg = mailbox.config(imap_port=mailbox.config().smtp_port)
         ended(stopped(lambda: imap.watch(cfg, None, asyncio.Event()), connected.is_set))

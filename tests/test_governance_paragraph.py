@@ -32,7 +32,7 @@ def tracked_files() -> list[str]:
     under the root outside the directories no tree tracks."""
     try:
         listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except subprocess.CalledProcessError, FileNotFoundError:
         found = []
         for here, dirs, files in os.walk(ROOT):
             dirs[:] = [d for d in dirs if d not in SKIPPED_DIRS]
