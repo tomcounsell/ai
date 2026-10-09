@@ -69,7 +69,10 @@ async def transcript_turn(conn, task: str, lines: list[dict]) -> int:
         (transcripts.KIND, f"{turn_id}/s.jsonl/0", json.dumps(body)),
     )
     return await ledger.append(
-        conn, task, "turn.ended", {"turn_id": turn_id, "transcript": {"files": [{"name": "s.jsonl"}]}}
+        conn,
+        task,
+        "turn.ended",
+        {"turn_id": turn_id, "outcome": "done", "transcript": {"files": [{"name": "s.jsonl"}]}},
     )
 
 
@@ -277,14 +280,26 @@ def test_a_row_committed_below_a_taken_id_is_still_taken(dsn):
                 slow,
                 task,
                 "feedback.given",
-                {"text": "gecko late feedback", "provenance": ledger.provenance("tom", "t", False)},
+                {
+                    "feedback_id": ledger.new_id(),
+                    "on_delivery": None,
+                    "candidate": None,
+                    "text": "gecko late feedback",
+                    "provenance": ledger.provenance("tom", "t", False),
+                },
             )
             async with await db.connect(dsn) as conn:
                 high = await ledger.append(
                     conn,
                     task,
                     "feedback.given",
-                    {"text": "gecko early feedback", "provenance": ledger.provenance("tom", "t", False)},
+                    {
+                        "feedback_id": ledger.new_id(),
+                        "on_delivery": None,
+                        "candidate": None,
+                        "text": "gecko early feedback",
+                        "provenance": ledger.provenance("tom", "t", False),
+                    },
                 )
             await ingest(dsn)
         await slow.close()
