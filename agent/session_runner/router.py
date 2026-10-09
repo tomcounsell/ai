@@ -455,6 +455,23 @@ class ExitReason(StrEnum):
     HEADLESS_SUBPROCESS_ERROR = ("headless_subprocess_error", False, False, False)
     HEADLESS_BINARY_MISSING = ("headless_binary_missing", False, False, False)
     HEADLESS_NONZERO_EXIT_NO_RESULT = ("headless_nonzero_exit_no_result", False, False, False)
+    # Anthropic API failure reported on the `result` event (issue #3615).
+    # TRANSIENT (overloaded, rate-limited, 5xx, no status) is retried by the
+    # runner with backoff; API_ERROR (any other status) fails the run.
+    HEADLESS_API_TRANSIENT = ("headless_api_transient", False, False, False)
+    HEADLESS_API_ERROR = ("headless_api_error", False, False, False)
+
+
+# HTTP statuses on a `result`-event API failure that a later attempt can
+# outlive: request timeout, rate limit, and every server-side error (529 is
+# Anthropic's "overloaded"). A missing status (dropped connection) is also
+# transient -- see :func:`is_transient_api_status`.
+_TRANSIENT_API_STATUSES = frozenset({408, 429})
+
+
+def is_transient_api_status(status: int | None) -> bool:
+    """Whether an API failure with this HTTP status is worth retrying."""
+    return status is None or status in _TRANSIENT_API_STATUSES or status >= 500
 
 
 @dataclass(frozen=True)

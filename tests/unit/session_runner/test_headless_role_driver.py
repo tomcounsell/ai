@@ -613,3 +613,42 @@ def test_codex_prime_variant_file_exists():
     body = _read_prime_body("pm-codex", str(repo_root))
     assert body, "prime-pm-codex-role.md missing or empty"
     assert "codex_dev_run" in body
+
+
+# --------------------------------------------------------------------------
+# API failure (#3615) — the "API Error: ..." text is never a reply
+# --------------------------------------------------------------------------
+
+
+def _make_api_error_harness(status):
+    async def _fake(message, working_dir, **kwargs):
+        kwargs["on_api_error"](status)
+        return f'API Error: {status} {{"type":"error"}}'
+
+    return _fake
+
+
+async def test_transient_api_error_is_classified_transient(tmp_path):
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-api-1",
+        working_dir=str(tmp_path),
+        harness_fn=_make_api_error_harness(529),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_API_TRANSIENT
+    assert "status=529" in outcome.failure.detail
+    assert outcome.turn_ended is False
+
+
+async def test_client_api_error_is_classified_non_transient(tmp_path):
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-api-2",
+        working_dir=str(tmp_path),
+        harness_fn=_make_api_error_harness(400),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_API_ERROR

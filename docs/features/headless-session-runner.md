@@ -510,6 +510,34 @@ string itself (`f"headless_subprocess_error: {e}"`). They now carry a
 inspect `.reason` (an `ExitReason` member) and `.detail` (free text)
 separately instead of re-parsing a string.
 
+### API-failure retry (issue #3615)
+
+The `claude` CLI retries an Anthropic API failure internally. When it gives
+up, it still exits cleanly, emitting a `result` event with
+`subtype: "success"`, `is_error: true`, and `api_error_status: <int>`. The
+`result` text is `"API Error: 529 {...}"`. `_run_harness_subprocess` detects
+that shape and reports it through `on_api_error(is_error, status)`, and
+`ClaudeHarnessAdapter.run_turn` sets `TurnResult.api_error` /
+`api_error_status`. The role driver then turns the turn into a `TurnFailure`
+instead of a reply, so the error text never reaches a chat:
+
+- `HEADLESS_API_TRANSIENT` (`headless_api_transient`) for status 408, 429,
+  5xx (including 529 overloaded), or an unknown status
+  (`router.is_transient_api_status`).
+- `HEADLESS_API_ERROR` (`headless_api_error`) for any other 4xx.
+
+`SessionRunner.run` retries a transient failure after backoff. The delays come
+from `API_RETRY_DELAYS_S` (env `SESSION_RUNNER_API_RETRY_DELAYS_S`, default
+`30,120,300`), each with ±20% jitter, for about 7.5 minutes in total, which is
+well inside the 30-minute no-output health budget. If the failed turn had
+already established a claude session, the retry resumes it with
+`API_RETRY_CONTINUE_MESSAGE`; otherwise it re-sends the original message.
+Steering is drained between attempts as on any turn boundary, and each attempt
+writes an `api_error_retry` telemetry event. When the retries run out, or the
+failure was non-transient, the turn falls through to the generic turn-failure
+path: exit `error` and the persona-safe apology. The sleep holds the worker
+slot, so a multi-hour usage-limit 429 still ends in the apology.
+
 `ExitReason` (`router.py`) is a distinct, higher-level classification from
 `HarnessExitClass` (`agent/session_runner/harness/claude_diagnostics.py`):
 `ExitReason` labels how a whole turn ended for the role driver / wrap-up

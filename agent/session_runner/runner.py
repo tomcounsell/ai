@@ -47,6 +47,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import random
 import re
 import signal
 import subprocess
@@ -179,6 +180,27 @@ REAP_CONFIRM_POLL_S: float = float(os.environ.get("SESSION_RUNNER_REAP_CONFIRM_P
 # to the wrap-up guard. Provisional/tunable — override with
 # SESSION_RUNNER_MAX_COMPLIANCE_NUDGES.
 MAX_COMPLIANCE_NUDGES: int = int(os.environ.get("SESSION_RUNNER_MAX_COMPLIANCE_NUDGES", "1"))
+
+# Backoff before each retry of a turn that ended on a transient Anthropic API
+# failure (overloaded / rate-limited / 5xx; issue #3615). One retry per entry;
+# each delay gets +/-20% jitter. The CLI has already retried internally before
+# reporting the failure, so these are minutes, not seconds -- and their sum
+# stays far inside the 30-minute no-output budget (agent/session_health.py).
+# Provisional/tunable — override with SESSION_RUNNER_API_RETRY_DELAYS_S
+# (comma-separated seconds; an empty value disables the retry).
+API_RETRY_DELAYS_S: tuple[float, ...] = tuple(
+    float(d)
+    for d in os.environ.get("SESSION_RUNNER_API_RETRY_DELAYS_S", "30,120,300").split(",")
+    if d.strip()
+)
+
+# The message a retried turn resumes with when the failed turn already has a
+# claude session: the CLI recorded the original input in the transcript, so
+# re-sending it would duplicate the ask.
+API_RETRY_CONTINUE_MESSAGE = (
+    "Your previous turn was cut off by a temporary Anthropic API error before "
+    "it finished. Continue the task from where you left off."
+)
 
 # Margin added to the role timeout for the driver's own asyncio.wait_for
 # backstop, so the watcher's graceful timeout-preempt always fires FIRST and
@@ -1019,6 +1041,7 @@ class SessionRunner:
         if self._resume_active and self._dev_agent_id:
             message = DEV_CONTINUATION_PREFIX.format(dev_agent_id=self._dev_agent_id) + message
         nudges = 0
+        api_retries = 0
 
         try:
             for _turn_index in range(self._max_turns):
@@ -1075,6 +1098,35 @@ class SessionRunner:
 
                 # -- Turn-level failures -------------------------------------
                 failure = outcome.failure
+                if (
+                    failure is not None
+                    and failure.reason is ExitReason.HEADLESS_API_TRANSIENT
+                    and api_retries < len(API_RETRY_DELAYS_S)
+                ):
+                    # Transient API failure (issue #3615): back off, then
+                    # retry. `continue` re-enters the loop top, so steering
+                    # (including an abort) still drains between attempts.
+                    delay = API_RETRY_DELAYS_S[api_retries] * random.uniform(0.8, 1.2)
+                    api_retries += 1
+                    logger.warning(
+                        "[runner] transient API failure (%s); retry %d/%d in %.0fs",
+                        failure.detail,
+                        api_retries,
+                        len(API_RETRY_DELAYS_S),
+                        delay,
+                    )
+                    self._record_telemetry(
+                        {
+                            "type": "api_error_retry",
+                            "attempt": api_retries,
+                            "delay_s": round(delay, 1),
+                            "detail": truncate_exit_message(failure.detail),
+                        }
+                    )
+                    await asyncio.sleep(delay)
+                    if outcome.claude_session_id:
+                        message = API_RETRY_CONTINUE_MESSAGE
+                    continue
                 if failure is not None and failure.reason is not ExitReason.EMPTY_OUTPUT:
                     # Subprocess failure: never "completed" (the #1916 class).
                     # str(failure) reproduces the legacy "reason: detail" wire

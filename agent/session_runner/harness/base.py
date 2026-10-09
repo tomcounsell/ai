@@ -96,6 +96,13 @@ class TurnResult:
     # event to normalize into. ``None`` on success. Claude turns leave this
     # unset — the exit-shape contract there is unchanged.
     error_detail: str | None = None
+    # Anthropic API failure that outlived the CLI's own retries (issue
+    # #3615): the `result` event carried ``is_error`` on a ``success``
+    # subtype. ``final_text`` is then the raw ``API Error: ...`` string, never
+    # an answer. ``api_error_status`` is the HTTP status (``None`` when the
+    # CLI reported none, e.g. a dropped connection).
+    api_error: bool = False
+    api_error_status: int | None = None
 
 
 @runtime_checkable

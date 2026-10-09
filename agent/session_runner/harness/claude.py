@@ -299,6 +299,7 @@ async def get_response_via_harness(
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     on_usage: Callable[[dict | None, float | None], None] | None = None,
     on_structured_output: Callable[[dict | None], None] | None = None,
+    on_api_error: Callable[[int | None], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
 
@@ -381,6 +382,12 @@ async def get_response_via_harness(
             Task 2.2) -- purely observational, no behavior change for
             existing callers that omit it. Lets ``ClaudeHarnessAdapter``
             populate ``TurnResult.usage`` without re-parsing stdout.
+        on_api_error: Optional observer fired once, immediately before
+            return, ONLY when the LAST subprocess invocation's ``result``
+            event reported an Anthropic API failure (issue #3615), with that
+            event's ``api_error_status`` (``None`` when absent). The returned
+            text is then the CLI's raw ``API Error: ...`` string, which the
+            caller must not treat as an answer.
     """
     # Deferred import: agent.sdk_client owns token/cost/turn-count
     # bookkeeping (Popoto-backed, not CLI-specific); a module-level import
@@ -617,6 +624,16 @@ async def get_response_via_harness(
         except Exception as _tls_err:  # noqa: BLE001
             logger.warning("[harness] TLS-streak bookkeeping failed (non-fatal): %s", _tls_err)
 
+    # Last-invocation API-failure state (issue #3615). Every
+    # _run_harness_subprocess call that gets past spawn overwrites it, so a
+    # fallback retry's outcome supersedes the primary's -- mirroring how
+    # result_text and structured_output are reassigned.
+    _api_error_state: dict[str, Any] = {"is_error": False, "status": None}
+
+    def _capture_api_error(is_error: bool, status: int | None) -> None:
+        _api_error_state["is_error"] = is_error
+        _api_error_state["status"] = status
+
     # Call site 1 of 3 — primary harness invocation. 9-tuple unpack
     # (issue #1099 Mode 1 added stderr_snippet; issue #1245 added num_turns
     # and tool_call_count; plan #2000 Task 2.3 added structured_output).
@@ -643,6 +660,7 @@ async def get_response_via_harness(
         on_exit_status=_capture_primary_exit,
         on_early_exit_class=_handle_early_exit_class,
         on_tool_cost=_collect_tool_cost,
+        on_api_error=_capture_api_error,
         ttft_metadata=_ttft_meta,
         true_session_id=session_id,
     )
@@ -691,6 +709,7 @@ async def get_response_via_harness(
                 on_exit_status=on_exit_status,
                 on_early_exit_class=_handle_early_exit_class,
                 on_tool_cost=_collect_tool_cost,
+                on_api_error=_capture_api_error,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -793,6 +812,7 @@ async def get_response_via_harness(
                 on_exit_status=on_exit_status,
                 on_early_exit_class=_handle_early_exit_class,
                 on_tool_cost=_collect_tool_cost,
+                on_api_error=_capture_api_error,
                 true_session_id=session_id,
             )
             total_num_turns += this_num_turns
@@ -952,6 +972,12 @@ async def get_response_via_harness(
         except Exception as _cb_err:  # noqa: BLE001
             logger.warning("on_structured_output callback raised: %s", _cb_err)
 
+    if on_api_error is not None and _api_error_state["is_error"]:
+        try:
+            on_api_error(_api_error_state["status"])
+        except Exception as _cb_err:  # noqa: BLE001
+            logger.warning("on_api_error callback raised: %s", _cb_err)
+
     if result_text is not None:
         return result_text
     return ""
@@ -1019,6 +1045,7 @@ async def _run_harness_subprocess(
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     on_early_exit_class: Callable[[HarnessExitClass | None], None] | None = None,
     on_tool_cost: Callable[[dict], None] | None = None,
+    on_api_error: Callable[[bool, int | None], None] | None = None,
     ttft_metadata: dict | None = None,
     true_session_id: str | None = None,
 ) -> tuple[
@@ -1097,6 +1124,17 @@ async def _run_harness_subprocess(
             appended to the return tuple because the 9-tuple shape above is
             asserted verbatim across four test modules. Skipped only when the
             binary was never found. Callback exceptions are caught + logged.
+        on_api_error(is_api_error, status): fires ONCE per subprocess that
+            got past spawn, after the stream is drained (issue #3615). A
+            `result` event with ``is_error`` true and ``subtype == "success"``
+            is how ``claude -p`` reports an Anthropic API failure that
+            outlived the CLI's own internal retries (overloaded, rate limit,
+            5xx, auth): the ``result`` text is then the raw ``API Error: ...``
+            string, never an answer. ``status`` is the event's
+            ``api_error_status`` HTTP code (``None`` when the CLI reports
+            none, e.g. a dropped connection). Fires ``(False, None)`` for
+            every other turn so a caller tracking the LAST invocation resets.
+            Callback exceptions are caught + logged.
 
     Optional TTFT measurement (issue #1227):
         ttft_metadata: dict with keys {session_id, session_type, prompt_chars,
@@ -1177,6 +1215,9 @@ async def _run_harness_subprocess(
     # Schema-first routing (plan #2000 Task 2.3): the `result` event's
     # `structured_output` key, present only on a schema-validated success.
     structured_output: dict | None = None
+    # Anthropic API failure reported on the `result` event (issue #3615).
+    api_error = False
+    api_error_status: int | None = None
     _first_stdout_seen = False  # TTFT sentinel (issue #1227)
     # Token + cost fields extracted off the `result` event (issue #1128).
     # Mirrors the SDK path's `ResultMessage.usage` / `.total_cost_usd`
@@ -1269,6 +1310,16 @@ async def _run_harness_subprocess(
                 raw_structured = data.get("structured_output")
                 if isinstance(raw_structured, dict):
                     structured_output = raw_structured
+                # API failure (issue #3615): the CLI reports it as a
+                # `success`-subtype result with is_error set, the raw
+                # "API Error: ..." string as `result`, and the HTTP status in
+                # `api_error_status`. The error_* subtypes (max turns, budget)
+                # are a different shape and are not API failures.
+                if data.get("is_error") and data.get("subtype") == "success":
+                    api_error = True
+                    raw_status = data.get("api_error_status")
+                    if isinstance(raw_status, int):
+                        api_error_status = raw_status
                 # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
                 # the in-flight AgentSession so the dashboard can show how
                 # recently the SDK completed a turn. Best-effort, never raises.
@@ -1414,6 +1465,19 @@ async def _run_harness_subprocess(
             on_tool_cost(tool_cost.snapshot())
         except Exception as _cb_err:
             logger.warning("on_tool_cost callback raised: %s", _cb_err)
+
+    if api_error:
+        logger.warning(
+            "[harness] claude -p turn ended on an API error (status=%s, session_id=%s): %s",
+            api_error_status,
+            true_session_id,
+            (result_text or "")[:300],
+        )
+    if on_api_error is not None:
+        try:
+            on_api_error(api_error, api_error_status)
+        except Exception as _cb_err:
+            logger.warning("on_api_error callback raised: %s", _cb_err)
 
     # Capture first 2000 chars of stderr for Mode 1 sentinel checks (issue #1099).
     # Bound the snippet at 2000 chars: ~4x the 500-char log-only window already
@@ -1791,6 +1855,8 @@ class ClaudeHarnessAdapter:
         usage: dict | None = None
         cost_usd: float | None = None
         structured_output: dict[str, Any] | None = None
+        api_error = False
+        api_error_status: int | None = None
 
         def _emit(event_type: str, data: dict | None = None) -> None:
             evt = TurnEvent(type=event_type, data=data or {})
@@ -1830,6 +1896,11 @@ class ClaudeHarnessAdapter:
             nonlocal structured_output
             structured_output = so
 
+        def _on_api_error(status: int | None) -> None:
+            nonlocal api_error, api_error_status
+            api_error = True
+            api_error_status = status
+
         harness_fn = self._harness_fn
         if harness_fn is None:
             # Deferred import (not module-load-time): resolves whatever
@@ -1860,6 +1931,7 @@ class ClaudeHarnessAdapter:
             on_exit_status=_on_exit_status,
             on_usage=_on_usage,
             on_structured_output=_on_structured_output,
+            on_api_error=_on_api_error,
         )
 
         _emit(
@@ -1881,4 +1953,6 @@ class ClaudeHarnessAdapter:
             cost_usd=cost_usd,
             returncode=returncode,
             result_event_fired=result_event_fired,
+            api_error=api_error,
+            api_error_status=api_error_status,
         )

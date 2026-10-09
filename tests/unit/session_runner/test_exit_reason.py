@@ -84,6 +84,8 @@ EXPECTED_VALUES = {
     "headless_subprocess_error",
     "headless_binary_missing",
     "headless_nonzero_exit_no_result",
+    "headless_api_transient",
+    "headless_api_error",
 }
 
 

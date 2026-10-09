@@ -665,3 +665,74 @@ async def test_handoff_silent_with_subagent_in_flight_is_downgraded(monkeypatch)
     driver.claude_session_id = "claude-sid"
     summary = await runner.run("go")
     assert summary.exit_reason is ExitReason.PM_USER_SUBAGENT_LIVE
+
+
+# --------------------------------------------------------------------------
+# Transient API failure retry (#3615)
+# --------------------------------------------------------------------------
+
+
+def _api_transient(session_id=None):
+    outcome = HeadlessTurnOutcome(
+        reply_text="",
+        failure=TurnFailure(ExitReason.HEADLESS_API_TRANSIENT, "status=529 API Error: 529"),
+    )
+    outcome.claude_session_id = session_id
+    return outcome
+
+
+async def test_transient_api_error_retries_then_succeeds(monkeypatch):
+    """A 529 turn is retried after backoff; the raw "API Error" text is never
+    delivered and the recovered reply is."""
+    import agent.session_runner.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "API_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+    runner, deliveries, session, driver = make_runner(
+        [_api_transient(), "[/user]\nHere is the answer."]
+    )
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.PM_USER
+    assert deliveries == ["Here is the answer."]
+    # No claude session yet: the original message is re-sent verbatim.
+    assert driver.calls == ["go", "go"]
+    assert not any("API Error" in d for d in deliveries)
+
+
+async def test_transient_api_retry_resumes_with_continue_message(monkeypatch):
+    """Once the turn has a claude session, the retry resumes it with a
+    continue nudge instead of re-sending the original task."""
+    import agent.session_runner.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "API_RETRY_DELAYS_S", (0.0,))
+    runner, _, _, driver = make_runner(
+        [_api_transient(session_id="claude-uuid-1"), "[/user]\ndone"]
+    )
+    await runner.run("go")
+    assert driver.calls == ["go", runner_mod.API_RETRY_CONTINUE_MESSAGE]
+
+
+async def test_transient_api_retries_exhausted_is_error_with_apology(monkeypatch):
+    import agent.session_runner.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "API_RETRY_DELAYS_S", (0.0, 0.0))
+    runner, deliveries, session, driver = make_runner(
+        [_api_transient(), _api_transient(), _api_transient()]
+    )
+    summary = await runner.run("go")
+    assert len(driver.calls) == 3
+    assert summary.exit_reason is ExitReason.ERROR
+    assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
+
+
+async def test_non_transient_api_error_is_not_retried(monkeypatch):
+    import agent.session_runner.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "API_RETRY_DELAYS_S", (0.0, 0.0))
+    failing = HeadlessTurnOutcome(
+        reply_text="", failure=TurnFailure(ExitReason.HEADLESS_API_ERROR, "status=400")
+    )
+    runner, deliveries, _, driver = make_runner([failing])
+    summary = await runner.run("go")
+    assert driver.calls == ["go"]
+    assert summary.exit_reason is ExitReason.ERROR
+    assert deliveries == [RUNNER_ERROR_USER_MESSAGE]

@@ -39,7 +39,12 @@ from agent.session_runner.hook_edge import (
     HookEdge,
     HookEdgeConsumer,
 )
-from agent.session_runner.router import PM_TURN_JSON_SCHEMA, ExitReason, TurnFailure
+from agent.session_runner.router import (
+    PM_TURN_JSON_SCHEMA,
+    ExitReason,
+    TurnFailure,
+    is_transient_api_status,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -533,6 +538,29 @@ class HeadlessRoleDriver:
         if isinstance(reply, str) and reply.startswith("Error: CLI harness not found"):
             outcome.reply_text = reply
             outcome.failure = TurnFailure(ExitReason.HEADLESS_BINARY_MISSING)
+            return outcome
+
+        # Anthropic API failure (issue #3615): the reply is the CLI's raw
+        # "API Error: ..." string, never an answer -- it must not reach the
+        # router (which would relay or nudge on it). Capture the claude
+        # session id first: the CLI already recorded the turn's input in the
+        # transcript, so the runner's retry resumes it rather than re-priming.
+        if turn_result.api_error:
+            status = turn_result.api_error_status
+            reason = (
+                ExitReason.HEADLESS_API_TRANSIENT
+                if is_transient_api_status(status)
+                else ExitReason.HEADLESS_API_ERROR
+            )
+            if not self._claude_session_id:
+                captured = self._capture_claude_session_id()
+                if captured:
+                    self._claude_session_id = captured
+                    self._transcript_path = _headless_transcript_path(self.working_dir, captured)
+                    self._primed = True
+            outcome.claude_session_id = self._claude_session_id
+            outcome.transcript_path = self._transcript_path
+            outcome.failure = TurnFailure(reason, f"status={status} {(reply or '')[:200]}")
             return outcome
 
         # A turn that ends on the StructuredOutput tool call can carry an empty
