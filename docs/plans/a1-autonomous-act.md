@@ -102,8 +102,12 @@ task lock. After them:
 - A `merge` additionally evaluates the merge predicate in that
   transaction, with the git facts read from the mirror or workspace
   (moved from `_release`, unchanged), and a failing term is a refusal
-  (`effect.refused` naming the terms) instead of an exception. Its intent
+  (`effect.refused` naming the terms) instead of an exception. When the
+  facts cannot be read (`_git_facts` returns None on a `GitError`), the
+  request writes no row and returns `unknown`, so the next step asks
+  again: only a term that reads a fact about the work refuses. Its intent
   carries `landed` (`outcomes.landed`), as it does now at release.
+  `MergeRefused` goes: nothing raises it.
 - A declared type gets `effect.held` (the row carrying the action, held for
   its bridge) and `release.requested` (`effect_id`, `owner`) in the same
   transaction, and returns `released`. `effect.held` stays the row type so
@@ -118,7 +122,8 @@ branch go. Every refusal there is final: one `effect.refused` with
 `at: release`, so the outbox never yields it again. The `effect_refused`
 notice goes (decided by default below).
 
-Removed: `approve`, `NotApproved`, `pending`, `held_task`, `approval_id` in
+Removed: `approve`, `NotApproved`, `MergeRefused`, `pending`, `held_task`,
+`approval_id` in
 the intent row and in `release.requested`, and the module docstring's
 approval paragraphs, rewritten to what the broker does.
 
@@ -128,14 +133,32 @@ approval paragraphs, rewritten to what the broker does.
 ### The merge predicate (`core/machine.py`)
 
 Term 5 and the `approval_unused` argument go; four terms remain, each a
-check of the work that exists now. `ensure_merge` drops `held` from its
-skip list (no merge is held) and treats a refusal written by the migration
-below (`at: migrate`) as no refusal, so a task whose merge was held when
-this rolls out requests it again.
+check of the work that exists now.
+
+`ensure_merge` (`core/verdicts.py:525`):
+
+- skips `in_flight`, `done`, and `failed` (today a `failed` merge is asked
+  again only through a fresh tap; without the tap it would push again on
+  every later step of the task), and drops `held` (no merge is held);
+- passes `request_id = f"merge:{payload_sha256}:{len(f.granted)}"`, so
+  `broker._prior`, under the task lock, answers a second request for the
+  same payload and grants with the standing answer (in flight, done,
+  failed, refused). Two steps racing (the kernel's `_once` and `core
+  check`) make one intent. A new candidate or docs head is a new digest,
+  a new grant a new count: each makes a fresh request, as now;
+- treats a refusal written by the migration below (`at: migrate`) as no
+  refusal, so a task whose merge was held when this rolls out requests it
+  again with a fresh `request_id`.
 
 The fold (`_merge_effect`) registers a merge effect from its
 `effect.intent` when no `effect.held` came first (the new path); an old
-merge with both rows folds as it does now.
+merge with both rows folds as it does now. Its `merge_effect` carries the
+refusal's `at`, which `ensure_merge` reads.
+
+`router._once` (`core/router.py:361`) returns `moved` with the task's
+state when the merge it just asked for landed (the task is `merged`), and
+`delivered` otherwise, so `core run` and the replay driver read `merged`
+in the same step.
 
 ### Readers of a merge's action
 
@@ -154,7 +177,25 @@ starts from any channel runs at act"); `--ceiling` still asks for less, a
 child's ceiling is still its parent's or lower (`tasks.child_ceiling`), a
 routine's is its `routine.toml`'s, a calibration task's `read`. The
 `Brief` dataclass default stays `propose`: only the two entry points Tom
-starts from change.
+starts from change. A message-started task already open at `propose`
+keeps it: a Brief is written once (`core/tasks.py:55`) and a task's
+ceiling never changes. Its act requests stay refused for ceiling; Tom
+starts it again or it ends. The rollout record lists those tasks.
+
+### Replay tasks build kernel performers only (`core/__main__.py`)
+
+`_performers(b)` gives a `Brief.replay` task the kernel performers only
+(push to its own bare origin, merge to the Brief's origin) and no
+declared send. A replay's send then meets the existing `no performer`
+refusal. Today a replay is kept from real chats only by the tap; without
+it, a replayed request such as "email X about Y" would reach a real
+person from an emulator run. This is not a guard: per Tom's 2026-10-07
+ruling it makes the emulator's own wiring correct (an emulator never had
+a reason to reach real chats); it judges no work and adds no step. It
+chooses which performers the task is built with, as the Brief already
+chooses its workspace. The emulator routine's sweep task runs no turn
+(it runs the driver), and every replay it starts is a `Brief.replay`
+child.
 
 ### Reports instead of cards (`core/notices.py`, `core/broker.py`)
 
@@ -162,12 +203,24 @@ starts from change.
 `effect_text` go. When an `act` effect's outcome is `done` (written by
 `_perform` or `reconcile`, both through `_outcome`), the same transaction
 requests one notice, kind `report`, `about_key` `report:<effect_id>`,
-saying what left in kernel words, for a merge (task, branch, head, the
+to the operator channel and chat (`notices.request`'s defaults), saying
+what left in kernel words, for a merge (task, branch, head, the
 delivery's summary line, each check's outcome: `delivered_text`) and for a
-send (channel, recipients or chat, and the text or subject). A push gets
-no report: it is a step inside the task. A send whose target is the
-operator's own chat on the operator channel gets no report: the message is
-what reached Tom.
+send (channel, recipients or chat, and the text or subject).
+
+Who gets no report:
+
+- A push: it is a step inside the task.
+- A send that itself reached Tom: `telegram.send_message` to the operator
+  chat, `email.send` whose every recipient is one of Tom's addresses
+  (`settings.operator_email`), and every `local.send_message` (it always
+  lands on Tom's page, which shows it, `bridges/local/__init__.py:41-53`).
+- A replay task (`Brief.replay`): its merge goes to its own bare origin
+  and no person used it; the replay driver reads the outcome.
+- A child task (`Brief.parent_id` set): its act reports to its parent, not
+  Tom. The parent's prompt already carries each child's latest delivery
+  (`session._children_report`, `core/session.py:750`); the root's merge
+  is what Tom hears of.
 
 The `delivered` notice is owed in `merge` only when the delivery will not
 merge by itself: the delivery did not pass, a governance instance awaits a
@@ -177,13 +230,24 @@ is reported once, by the merge's report.
 ### Binding (`core/intake.py`)
 
 Removed: the `approve` row of the binding table, `_approve`, the `approve`
-near miss, and the "waiting on approval" notice. `stop` and its near miss
-stay exactly. A reply to a merge's `report` notice on a task in `merged`
-binds `feedback` (the fold already takes `feedback` in `merged`,
+near miss, and the "waiting on approval" notice, with the docstring lines
+that describe them (`core/intake.py` 6, 21-44, 97). `stop` and its near
+miss stay exactly as behavior; the email near-miss text (412) reads
+"Stops come by reply ...", since there is no approval to name.
+
+A reply to a merge's `report` notice on a task in `merged` binds
+`feedback` (the fold already takes `feedback` in `merged`,
 `core/machine.py:81`), the way a reply to the `delivered` notice in
 `merge` does now; without it Tom's only reply to a merged delivery would
-bind `none`. Any other reply to a merged or stopped task stays `none` with
-a notice. A reply to any other report steers, like any reply to a notice.
+bind `none`. The branch sits before the early return for merged and
+stopped tasks (`core/intake.py:364`), which today binds every such reply
+`none` before the notice is read. Any other reply to a merged or stopped
+task stays `none` with a notice. A reply to a send's report on a running
+task steers, like any reply to a notice.
+
+The steer notice in `merge` ("reply to the delivered notice to give
+feedback", 419-425) is owed only while a `delivered` notice stands for
+the task, since a passing delivery no longer gets one.
 
 ### The kernel loop (`core/serve.py`)
 
@@ -218,7 +282,8 @@ With the tap gone, the kernel must never: perform an effect above the
 task's ceiling; perform for a stopped task or after a stop lands between
 request and bridge release; let a turn request a `merge` (session refuses
 it, `core/session.py:447`); push the target branch through `push_branch`
-(its `refuse`); merge a candidate the predicate's four terms reject; merge
+(its `refuse`); merge a candidate the predicate's four terms reject, or one
+whose facts it could not read; merge
 a diff that adds governance without Tom's grant per instance; take a file
 a send names from outside the workspace or with other bytes than its
 digest (the declared checks and the bridges' sha256 reads). Each of these
@@ -226,7 +291,10 @@ is a check that runs now; this change moves the merge predicate from
 release to request and removes nothing else. A turn that is talked into a
 send by something it read can now send it; that is the authority the
 ruling gives an `act` task, bounded by the ceiling, and no new guard is
-added for it.
+added for it. A replay task cannot send at all (it has no send performer).
+The kernel's own merges, tasks that change Valor itself, now land with no
+tap and roll out through the existing `rollout.py` path, which stops at
+schema and dependencies as now; nothing is added there.
 
 ## What stays exactly
 
@@ -245,15 +313,19 @@ with no intent, outcome, or refusal, and no `release.requested` owned by a
 bridge (bridge-owned ones are released by the outbox as now, approval or
 not). `db.migrate` appends, for each, one `effect.refused` with reason
 "held for an approval the kernel no longer takes; request it again" and
-`at: migrate`, under the task's lock, idempotent through
-`events_one_effect_row`. A merge refused this way is requested again by
+`at: migrate`, under the task's lock. The selector excludes any effect
+that already has an intent, outcome, or refusal, so running it again
+selects nothing; `events_one_effect_row` stays the backstop it is. A merge refused this way is requested again by
 `ensure_merge` with a fresh payload and the predicate checked; a send is
 reported refused to the turn's next prompt. `migrate` also drops
 `events_approval_used_once`, which guards a field no row carries. Rows
 already written (`approval.granted`, old `release.requested`) stay; the
 ledger is append-only. The rollout record lists how many rows the
-migration refused. The real ledger holds one such row: a merge to `main`
-of task 75c0902b6e25 on a local test origin (f10a2751760c).
+migration refused and, for each merge, the outcome of its fresh
+request. The real ledger holds exactly one such row (the lead read it):
+effect f10a2751760c, a merge to `main` of task 75c0902b6e25 to
+`/Users/valorengels/valor-tasks/75c0902b6e25/origin.git`, a local test
+origin.
 
 ## Done, as evidence
 
@@ -265,20 +337,28 @@ of task 75c0902b6e25 on a local test origin (f10a2751760c).
    notice carrying the delivery, no `delivered` notice.
 3. A `telegram.send_message`, `email.send`, and `local.send_message` each
    go from request to `effect.outcome` through their outbox with no tap.
+   `core run` on the task of Done 2 prints status `moved`, state
+   `merged`.
 4. A message-started task's Brief reads ceiling `act`; `core start` with no
    `--ceiling` reads `act`.
 5. `python -m core approve`, `release`, `pending` are unknown commands;
-   `grep` finds no `approve(`, `NotApproved`, `pending(` in `core/`,
-   `bridges/`, `ui/`.
+   `grep -rn 'broker\.pending\|\bpending(\|broker\.approve\|\bapprove(\|NotApproved\|MergeRefused' core bridges ui tests`
+   finds nothing (the pattern does not match `tasks.spending(`).
 6. A governance-adding merge with no grant is refused at request with the
    same reason as now; after `core grant`, the next `run` merges it.
 7. Migrating a test ledger holding an orphan held send and an orphan held
    merge writes one `effect.refused` each; migrating again writes none; the
    merge is then requested again and performed.
-8. Every doc below reads in the status quo; the governance paragraph is
-   byte-identical in each file holding it (the existing test that checks
-   this passes).
-9. Full suite green on the test database, ruff check and format clean.
+8. Every doc below reads in the status quo, and a new test,
+   `tests/test_governance_paragraph.py`, compares the governance paragraph
+   in `CLAUDE.md` byte for byte against every tracked file that holds its
+   opening words (19 files today, all identical) and passes. It asserts a
+   documented invariant, so it is a test, not governance.
+9. A replay task's `telegram.send_message` is refused `no performer`, and
+   a replay run whose item merges ends `merged` with no report notice.
+10. A failed merge is not requested again for the same payload, and two
+    concurrent `ensure_merge` calls write one intent.
+11. Full suite green on the test database, ruff check and format clean.
 
 ## Tests
 
@@ -320,21 +400,41 @@ New or sharpened, the non-obvious cases:
 - **Predicate at request.** Each of the four terms failing refuses the
   merge with that term named and writes no intent; term 4's git facts are
   read in the same transaction that writes the intent (a docs head that
-  moved is refused).
+  moved is refused). A mirror whose git read fails writes no row, returns
+  `unknown`, and the next `ensure_merge` asks again.
+- **Merge requested once.** A `failed` merge is not requested again for
+  the same payload; a new candidate head is. Two concurrent
+  `ensure_merge` calls on one task make one intent and one push (`_prior`
+  under the task lock). A grant after a refusal makes a fresh request.
+- **Replay performers.** A replay task's `telegram.send_message`,
+  `email.send`, `local.send_message` are refused `no performer`; its push
+  and merge to its bare origin are performed.
 - **Reports.** A done merge or send writes one `report` notice; a failed
   or unknown one writes none; a reconciled `done` writes one; a done push
-  writes none; a send to the operator chat writes none; a `propose` effect
-  writes none. A reply to a merge's report on a merged task binds
-  `feedback` and sends the task to `patch`; a reply to a send's report on
-  a running task steers.
+  writes none; a Telegram send to the operator chat, an email only to
+  Tom's addresses, and any local send write none; a replay task's merge
+  and a child task's merge write none; a `propose` effect writes none. A
+  reply to a merge's report on a merged task binds `feedback` and sends
+  the task to `patch` (the branch runs before the merged early return); a
+  reply to a send's report on a running task steers; any other reply to a
+  merged task binds `none`.
+- **Steer notice.** A steer on a task in `merge` owes "reply to the
+  delivered notice" only while a delivered notice stands.
 - **Delivered notice.** Owed for a delivery that did not pass, one
   awaiting a grant, and a refused merge; not owed when the merge is done.
 - **Migration.** As in Done item 7, plus: a held send with a bridge-owned
   `release.requested` is left for its outbox; a held effect already
-  refused is untouched.
+  refused is not selected; the fold's `merge_effect` carries `at:
+  migrate`, and `ensure_merge` requests that merge again.
+- **Existing ceiling.** A message-started task whose Brief says `propose`
+  still has its push refused for ceiling after migrate.
 - **Fold.** A merge with only intent and outcome folds `merged`; an old
   ledger with held, approval, intent, outcome still folds `merged`; the
   readers of merges count each once.
+- **Emulator.** `tests/emulator/stand_in.py:123` and
+  `tests/emulator/common.py:301` read a merged task (state `merged` or
+  merge effect `done`) instead of `merge_effect.state == "held"`; the
+  stand-in reviews a merged delivery and its feedback runs the task on.
 
 ## Docs to update
 
@@ -349,7 +449,12 @@ counting questions and feedback and has no authority taps left to count),
 terms, lines 60, 102, 494-573), `docs/data.md` (row table: `effect.held`,
 `approval.granted` read only, `release.requested`, `message.bound` `as`
 values, the dropped index), `docs/judgement-layer.md` (line 50),
-`docs/routines.md` (effect-class table, held-in-pending lines, 244-253),
+`docs/routines.md` (effect-class table, held-in-pending lines, 244-253,
+and 238-240: a keep the lead asked for must land before the sweep's
+delivery passes, since a passing sweep merges itself),
+`docs/machine.md` (47-48, 259), `docs/harnesses.md` (13),
+`README.md` (68, 94, outside the governance paragraph),
+`tools/README.md` (15, 34), `routines/README.md` (22),
 `docs/tech-stack.md` (command list, approval surface, phone approvals,
 pending page), `docs/emulator.md` (outcomes, the driver's pushes),
 `docs/spending-and-attention.md`, `docs/bridges/telegram.md`,
@@ -366,20 +471,30 @@ send", is not touched anywhere.
 `core/broker.py`, `core/machine.py`, `core/verdicts.py`, `core/intake.py`,
 `core/notices.py`, `core/serve.py`, `core/__main__.py`, `core/tasks.py`,
 `core/session.py`, `core/outcomes.py`, `core/audit_sample.py`,
-`core/fresh.py`, `core/bridge.py` (usage lines, docstrings, outbox
-except clause), `core/db.py` and `core/schema.sql` (migration, index),
+`core/fresh.py`, `core/router.py` (status after a merge),
+`core/git.py` (37, "Tom's approval binds"), `core/bridge.py` (usage
+lines, docstrings, outbox except clause), `core/db.py` and
+`core/schema.sql` (migration, index),
 `tools/push_branch.py` (usage, docstring), `ui/app.py`,
 `bridges/email/__init__.py`, `bridges/email/smtp.py` and
 `bridges/telegram/send.py` (words "approved" become "requested"; the
 sha256 checks stay), `bridges/local/__init__.py` (docstring),
-`tests/emulator/replay.py`, the tests above, the docs above.
+`tests/emulator/replay.py`, `tests/emulator/stand_in.py`,
+`tests/emulator/common.py`, the new `tests/test_governance_paragraph.py`,
+the tests above, the docs above. `core/session.py` covers 29 (approval
+covering reply-all recipients) as well as `_effects_report`.
 
 ## Rollout on Valor's Mac
 
 Merges before A2, A3, B1. The rollout runs `migrate` (the held-row
 migration and the index drop) and restarts the kernel. The new Telegram
-and email bridge jobs stay disabled until the live window; the rollout
-record lists the migration's count.
+and email bridge jobs stay disabled until the live window. The rollout
+record lists the migration's count, the outcome of the fresh merge
+request for f10a2751760c, and the message-started tasks still open at
+`propose`. From this rollout on, the kernel's own merges (tasks that
+change Valor) land with no tap and roll out through the existing
+`rollout.py` path, which stops at schema and dependencies as now; nothing
+is added to it.
 
 Ports 6430-6439, test database `valor_rebuild_test_a1build`.
 
@@ -391,8 +506,11 @@ None.
 
 - Reports go for a merge and for a send to anyone other than Tom's own
   chat, not for a push: the ruling is "a report on what was done", and a
-  push per patch round is a step inside the task, noise to Tom.
-
+  push per patch round is a step inside the task, noise to Tom. A
+  replay's or a child's act reports to no one but its driver or parent.
+- A replay task is built without send performers (see its section): the
+  emulator's wiring, not a check.
+- A message-started task already open at `propose` keeps its ceiling.
 - `effect.held` stays the row type for a declared send, now always paired
   with `release.requested`: renaming it would change every bridge and
   reader of a send's action for no behavior.
@@ -409,3 +527,15 @@ None.
   (Mission evidence "Tom's feedback, both directions"), and it is the only
   way Tom answers a merged delivery once the merge no longer waits in
   `merge`.
+
+## Critique record
+
+Round 1 (`~/src/valor-build-notes/critic-a1-r1.md`), verdict revise.
+Answered: replay tasks build kernel performers only (B1); `ensure_merge`
+skips `failed` and passes a payload-and-grants `request_id` so `_prior`
+answers under the task lock (B2); an unreadable git fact writes no row
+and returns `unknown` (B3); Done 8 is a byte comparison test (B4); the
+Done 5 pattern, the missed files and docs, `MergeRefused`, the
+report-feedback branch's place, the steer notice, `core run`'s status,
+report recipients, the fold's `at`, the migration selector, existing
+`propose` tasks, and the kernel's own merges (should-fix 1-10).
