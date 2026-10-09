@@ -190,8 +190,8 @@ def test_each_setup_commands_output_is_kept_as_on_the_host(tmp_path):
     (out / "setup-1.out").write_text("x" * 5000 + "error: no network\n")
     got = container.read_result(lay, "vm-head-abc", 0, "head", {})
     first, failed = got["setup"]
-    assert first["tail"] == "fetched\n" and first["output"] == "setup-0.out"
-    assert failed["output"] == "setup-1.out" and len(failed["tail"]) == 1500
+    assert first["tail"] == "fetched\n" and first["output"] == "vm-head-abc/out/setup-0.out"
+    assert failed["output"] == "vm-head-abc/out/setup-1.out" and len(failed["tail"]) == 1500
     assert got["tail"] == failed["tail"] and failed["tail"].endswith("error: no network\n")
 
 
@@ -722,8 +722,10 @@ def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend)
     v = got["verify"]
     assert v["cause"] is None and v["setup"][0]["exit"] == 0, v
     assert "tests.test_dev::test_dev_extra" not in v["failures"] and v["counts"]["failed"] == 0, v
-    kept = kws.Layout(Path(b.mirror).parent).checks / f"vm-head-{candidate[:12]}" / "out" / "setup-0.out"
-    assert "msgpack" in kept.read_text()
+    assert (
+        v["setup"][0]["output"] == f"vm-head-{candidate[:12]}/out/setup-0.out" and "tail" not in v["setup"][0]
+    )
+    assert "msgpack" in (kws.Layout(Path(b.mirror).parent).checks / v["setup"][0]["output"]).read_text()
 
 
 @pytest.mark.container

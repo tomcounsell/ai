@@ -28,8 +28,9 @@ the candidate runs reaches either; `run.sh` (in the base image) runs the
 setup offline, the suite, and the lint as the user `valor`, then writes
 `out/result.json` and copies out the JUnit file, each setup command's
 output, and the lint's. A run's setup entries carry each command's output
-file and tail as the host's do; `verify.ran` records only their commands
-and exits.
+file (relative to the checks directory) and tail as the host's do;
+`verify.ran` records their commands, exits, and output files, never the
+text.
 
 One verification at a time on the machine: an `fcntl.flock` on `LOCK`,
 taken before `container system start` and held through the builds, the
@@ -572,7 +573,7 @@ def read_result(
         for n, s in enumerate((result or {}).get("setup") or ()):
             output, _ = workspace.read_turn_file(fd, f"{name}/out/setup-{n}.out")
             tail = (output or b"").decode(errors="replace")[-1500:]
-            setup.append({**s, "tail": tail, "output": f"setup-{n}.out"})
+            setup.append({**s, "tail": tail, "output": f"{name}/out/setup-{n}.out"})
     finally:
         os.close(fd)
     if result is None:
@@ -796,7 +797,10 @@ def verify_payload(candidate: str, base_sha: str, k: dict[str, str], images: dic
         "exit": head_run.get("exit"),
         "counts": {key: len(v) for key, v in tests.items()} if tests is not None else None,
         "lint": head_run.get("lint"),
-        "setup": [{"command": s.get("command"), "exit": s.get("exit")} for s in head_run.get("setup") or ()],
+        "setup": [
+            {"command": s.get("command"), "exit": s.get("exit"), "output": s.get("output")}
+            for s in head_run.get("setup") or ()
+        ],
         "failures": lists["failures"],
         "failing_at_base": lists["failing_at_base"],
         "deleted_at_head": lists["deleted_at_head"],
