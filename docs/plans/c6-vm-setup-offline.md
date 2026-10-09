@@ -2,7 +2,7 @@
 tracking: none
 slug: c6-vm-setup-offline
 type: build
-status: planned
+status: built
 stakes: low
 critique_rounds: 0
 review_rounds: 1
@@ -72,10 +72,16 @@ The host test check keeps each setup command's output in its own file and
 a `tail` (the last 1500 characters) and the file's name in the run record
 (`core/checks.py` `_setup`). The VM keeps neither. `run.sh` copies each
 `setup-N.log` out as `out/setup-N.out` (a plain file only, as the lint
-output), and `read_result` adds `tail` and `output` to each setup entry and
-`tail` to a failed setup's record, as the host does. `verify.ran` keeps
-recording only each setup command and exit: the documented field list says
-it holds no text the candidate printed, and that stays.
+output), and `read_result` adds `tail` and `output` (the file's path under
+the task's `checks/`) to each setup entry and `tail` to a failed setup's
+record, as the host does.
+
+`verify.ran` is the blind reviewer's input, and `docs/data.md` and
+`verify_payload` say it holds no text the candidate printed. So each of its
+setup entries gains the output file's path, never the tail: the ledger row
+now says where the reason is, and no candidate text reaches the reviewer.
+Putting the tail itself in `verify.ran` would change that contract and is
+left to the lead.
 
 ## Tests
 
@@ -91,3 +97,29 @@ it holds no text the candidate printed, and that stays.
 None.
 
 ## Build record
+
+### Build (branch `c6-vm-setup-offline`)
+
+- `core/images/base/deps.sh`: every command runs with HOME, USER, LOGNAME,
+  LANG and the spec's `env` less `UV_OFFLINE` and `npm_config_offline`;
+  the build requirements are installed for, and the backend's hooks run on,
+  `.venv/bin/python` when the sync made one, else Python 3.14.
+- `core/container.py`: `deps_key` hashes the spec's own `env`;
+  `read_result` reads `out/setup-N.out` per setup entry (`tail`, `output`)
+  and gives a failed setup's record its `tail`; `verify.ran`'s setup
+  entries carry `output`. The module docstring says so.
+- `core/images/base/run.sh`: copies each `setup-N.log` out as
+  `setup-N.out`.
+- `docs/data.md`: `verify.ran` lists the setup output files.
+- Tests: `test_each_setup_commands_output_is_kept_as_on_the_host`,
+  `test_the_dependency_key_covers_the_specs_environment`, and the
+  container test `test_a_popoto_shaped_spec_installs_offline_in_the_vm`
+  now with `UV_PYTHON = "3.12"`, `msgpack==1.1.2` in the dev extra, a test
+  that the suite ran on 3.12, and the kept setup output. Its fixture's
+  `.gitignore` also ignores `*.egg-info/`: with setuptools the host
+  provisioning's sync leaves `toy.egg-info/` untracked, and the scripted
+  build turn could never commit (833 turns before it was stopped).
+- Red, on unchanged `b832d10ec` scripts with the new test: the dependency
+  build "Using CPython 3.14.8"; the VM's `uv sync --frozen --extra dev`
+  exit 1 in 0.5 s at base and head, the popoto signature
+  (`~/src/valor-build-notes/c6/red-final.out`).
