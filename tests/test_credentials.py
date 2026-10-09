@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DBS = ["valor_rebuild", "valor_rebuild_test"]
 OWNER = settings.owner_role
 KERNEL = settings.kernel_role
+MEMORY = settings.memory_role
 
 
 def _is_scratch(cluster: backup.Cluster) -> None:
@@ -45,6 +46,7 @@ def _secure(cluster: backup.Cluster, passfile: Path) -> dict:
         databases=KERNEL_DBS,
         owner=OWNER,
         kernel_role=KERNEL,
+        memory_role=MEMORY,
     )
 
 
@@ -101,7 +103,7 @@ def test_the_first_run_makes_a_private_password_file_and_writes_the_rules(secure
 
 
 @pytest.mark.parametrize("host", ["socket", "127.0.0.1", "::1"])
-@pytest.mark.parametrize("user", [KERNEL, OWNER])
+@pytest.mark.parametrize("user", [KERNEL, OWNER, MEMORY])
 def test_without_the_credential_every_role_is_refused_on_the_kernel_databases(secured, host, user):
     cluster, passfile, _ = secured
     host = cluster.host if host == "socket" else host
@@ -155,10 +157,35 @@ def test_two_runs_at_once_leave_one_password_file_that_works(fresh):
     for t in threads:
         t.join()
     assert errors == []
-    assert len(passfile.read_text().splitlines()) == 2 * len(KERNEL_DBS)
+    assert len(passfile.read_text().splitlines()) == 3 * len(KERNEL_DBS)
     assert _hba(cluster).read_text().count(credentials.MARK_BEGIN) == 1
-    for user in (KERNEL, OWNER):
+    for user in (KERNEL, OWNER, MEMORY):
         _connect(cluster, cluster.host, KERNEL_DBS[0], user, passfile=str(passfile)).close()
+
+
+def test_a_password_file_made_before_memory_gains_its_role_and_keeps_the_rest(fresh):
+    cluster, passfile = fresh
+    _is_scratch(cluster)
+    credentials.secure_login(
+        host=cluster.host,
+        port=cluster.port,
+        passfile=passfile,
+        databases=KERNEL_DBS,
+        owner=OWNER,
+        kernel_role=KERNEL,
+    )
+    before = passfile.read_text()
+    assert f":{MEMORY}:" not in before
+    assert _secure(cluster, passfile)["passfile"] == "kept"
+    after = passfile.read_text()
+    assert after.startswith(before) and len(after.splitlines()) == 3 * len(KERNEL_DBS)
+    assert passfile.stat().st_mode & 0o777 == 0o600
+    assert not passfile.with_name(passfile.name + ".new").exists()
+    with _connect(cluster, cluster.host, KERNEL_DBS[0], MEMORY, passfile=str(passfile)) as conn:
+        assert conn.execute("SELECT current_user").fetchone()[0] == MEMORY
+    _refused_28p01(
+        cluster, cluster.host, KERNEL_DBS[0], MEMORY, password="not-the-password", passfile="/dev/null"
+    )
 
 
 def test_a_deleted_password_file_is_recovered_by_running_again(fresh):
@@ -217,8 +244,8 @@ def test_migrate_touches_no_credential_on_the_machine_cluster(dsn):
     def snapshot():
         with psycopg.connect(settings.dsn(owner=True, database="postgres"), autocommit=True) as conn:
             secrets = conn.execute(
-                "SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN (%s, %s) ORDER BY rolname",
-                (KERNEL, OWNER),
+                "SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN (%s, %s, %s) ORDER BY rolname",
+                (KERNEL, OWNER, MEMORY),
             ).fetchall()
             hba = Path(conn.execute("SHOW hba_file").fetchone()[0]).read_bytes()
         pf = Path(settings.pg_passfile)
@@ -252,7 +279,7 @@ def test_the_cli_secures_a_cluster_and_prints_no_password(tmp_path):
                 check=True,
             ).stdout
         passwords = {line.rsplit(":", 1)[1] for line in passfile.read_text().splitlines()}
-        assert len(passwords) == 2 and not any(p in out for p in passwords)
+        assert len(passwords) == 3 and not any(p in out for p in passwords)
         assert '"passfile": "created"' in out and '"passfile": "kept"' in out
         with pytest.raises(psycopg.OperationalError, match="no password supplied"):
             _connect(cluster, cluster.host, KERNEL_DBS[0], KERNEL, passfile="/dev/null")

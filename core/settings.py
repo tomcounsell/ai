@@ -247,6 +247,11 @@ class Settings:
     database: str = field(default_factory=lambda: _env("VALOR_DB", "valor_rebuild"))
     test_database: str = field(default_factory=lambda: _env("VALOR_TEST_DB", "valor_rebuild_test"))
     kernel_role: str = "valor_kernel"
+    # Memory's own role, which owns the schema `memory` and nothing else
+    # (docs/data.md, Roles), and whether memory runs: `on`, or `off` for the
+    # back-out (docs/plans/b1-memory.md).
+    memory_role: str = field(default_factory=lambda: _env("VALOR_MEMORY_ROLE", "valor_memory"))
+    memory: str = field(default_factory=lambda: _env("VALOR_MEMORY", "on"))
     owner_role: str = field(default_factory=lambda: _env("VALOR_PG_OWNER", getpass.getuser()))
     # Programs the kernel runs are named by fixed path, never looked up on
     # PATH: a turn can write to directories on the user's PATH, so a lookup
@@ -486,14 +491,15 @@ class Settings:
         self,
         *,
         owner: bool = False,
+        memory: bool = False,
         database: str | None = None,
         host: str | None = None,
         port: int | None = None,
         passfile: str | None = None,
     ) -> str:
-        """A connection string for the kernel role, or the owner's. It names
-        the password file and never holds a password."""
-        role = self.owner_role if owner else self.kernel_role
+        """A connection string for the kernel role, the owner's, or memory's.
+        It names the password file and never holds a password."""
+        role = self.owner_role if owner else self.memory_role if memory else self.kernel_role
         return (
             f"host={host or self.pghost} port={port or self.pgport} "
             f"dbname={database or self.database} user={role} "

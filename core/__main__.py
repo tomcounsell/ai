@@ -1,9 +1,12 @@
 """Kernel command line: `python -m core <command>`.
 
-migrate [--db NAME]            create the role, the database, the schema, and
+migrate [--db NAME]            create the roles, the database, the schema, and
                                correction 1, then secure-login
-secure-login                   the kernel databases' password file, both roles'
-                               passwords, and the pg_hba.conf rules; idempotent
+secure-login                   the kernel databases' password file, the kernel's,
+                               the owner's, and memory's passwords, and the
+                               pg_hba.conf rules; idempotent
+memory ingest                  take the ledger rows memory has not taken (run
+                               after every turn; by hand, the rollout's backfill)
 settings                       every setting, as shell assignments
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
@@ -145,6 +148,7 @@ from core import (
     judgement_sites,
     ledger,
     machine,
+    memory,
     outcomes,
     router,
     routines,
@@ -693,6 +697,8 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"granted {args.instance} as {guard_id}; continue with: python -m core run {args.task_id}")
+        elif args.command == "memory":
+            print(json.dumps(await memory.ingest(conn)))
         elif args.command == "status":
             state = await tasks.status(conn, args.task_id)
             state["metered_spending"] = _usd(state["spent_usd_micros"])
@@ -808,6 +814,7 @@ def _secure_login() -> dict:
         databases=[settings.database, settings.test_database],
         owner=settings.owner_role,
         kernel_role=settings.kernel_role,
+        memory_role=settings.memory_role,
     )
 
 
@@ -983,6 +990,7 @@ def main() -> None:
     label.add_argument("--role-played", action="store_true")
     audit_cmd.add_parser("scores")
     sub.add_parser("secure-login")
+    sub.add_parser("memory").add_subparsers(dest="memory_command", required=True).add_parser("ingest")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")

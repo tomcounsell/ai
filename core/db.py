@@ -36,9 +36,10 @@ def migrate(
     port: int | None = None,
     passfile: str | None = None,
 ) -> str:
-    """Create the kernel role and the database if missing, apply `schema`
-    as the owner, record correction 1 if the ledger has none, and refuse
-    every effect still held for an approval (`_refuse_held`). `fresh`
+    """Create the kernel and memory roles and the database if missing,
+    apply `schema` as the owner, record correction 1 if the ledger has
+    none, give the schema `memory` to memory's role, and refuse every
+    effect still held for an approval (`_refuse_held`). `fresh`
     drops the database first; tests use it, since the ledger itself can
     never be emptied. Touches no role password, no password file, and no
     `pg_hba.conf` (that is `credentials.secure_login`). Returns the kernel
@@ -46,9 +47,10 @@ def migrate(
     database = database or settings.database
     where = {"host": host, "port": port, "passfile": passfile}
     with psycopg.connect(settings.dsn(owner=True, database="postgres", **where), autocommit=True) as conn:
-        role = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (settings.kernel_role,)).fetchone()
-        if role is None:
-            conn.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(settings.kernel_role)))
+        for name in (settings.kernel_role, settings.memory_role):
+            role = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (name,)).fetchone()
+            if role is None:
+                conn.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(name)))
         if fresh:
             conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database)))
         exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone()
@@ -61,7 +63,25 @@ def migrate(
         _seed_correction_one(conn)
         guards.seed(conn)
         _refuse_held(conn)
+        memory_schema(conn)
     return settings.dsn(database=database, **where)
+
+
+def memory_schema(conn: psycopg.Connection) -> None:
+    """The schema `memory`, and every table in it, owned by memory's role:
+    it creates its own tables there and reaches nothing else. A schema or
+    table the owner holds (a restore made without `--no-owner` skipped, or
+    a table made before the role) is given back."""
+    role = sql.Identifier(settings.memory_role)
+    with conn.transaction():
+        conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS memory AUTHORIZATION {}").format(role))
+        conn.execute(sql.SQL("ALTER SCHEMA memory OWNER TO {}").format(role))
+        tables = conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'memory' AND tableowner <> %s",
+            (settings.memory_role,),
+        ).fetchall()
+        for (table,) in tables:
+            conn.execute(sql.SQL("ALTER TABLE memory.{} OWNER TO {}").format(sql.Identifier(table), role))
 
 
 def verdict_constraint(

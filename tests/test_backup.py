@@ -163,6 +163,48 @@ def test_restore_with_keep_leaves_its_cluster_running_and_names_it(populated, ba
     assert _mine(prefix) == []
 
 
+def test_a_restore_then_migrate_gives_memory_its_schema_and_records_back(populated, backups, prefix):
+    """The restore runs with `--no-owner`, so the schema `memory` comes back
+    owned by the restoring role; `migrate` gives it and its tables back to
+    memory's role, whose records are then readable as they were."""
+    from core import memory
+
+    async def go():
+        async with await db.connect(populated) as conn:
+            await memory.ingest(conn)
+
+    asyncio.run(go())
+    with psycopg.connect(settings.dsn(owner=True, database=TEST_DB)) as conn:
+        records = conn.execute("SELECT count(*) FROM memory.record").fetchone()[0]
+    path, _, _ = _dump(backups)
+    summary = backup.restore(path, prefix=prefix, keep=True)
+    (root,) = _mine(prefix)
+    cluster = backup.Cluster(
+        root=root,
+        data=Path(summary["cluster"]["data"]),
+        host=str(root),
+        port=summary["cluster"]["port"],
+        owner="",
+    )
+    try:
+        owners = (
+            "SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = 'memory' "
+            "UNION SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'memory'"
+        )
+        with psycopg.connect(f"host={root} port={cluster.port} dbname={TEST_DB}") as conn:
+            assert [r[0] for r in conn.execute(owners)] == [settings.owner_role]
+        db.migrate(TEST_DB, host=str(root), port=cluster.port)
+        with psycopg.connect(f"host={root} port={cluster.port} dbname={TEST_DB}") as conn:
+            assert [r[0] for r in conn.execute(owners)] == [settings.memory_role]
+        with psycopg.connect(
+            f"host={root} port={cluster.port} dbname={TEST_DB} user={settings.memory_role}"
+        ) as conn:
+            assert conn.execute("SELECT count(*) FROM memory.record").fetchone()[0] == records > 0
+    finally:
+        backup.stop_cluster(cluster)
+    assert _mine(prefix) == []
+
+
 def test_a_dump_without_its_manifest_is_refused(populated, backups, prefix):
     path, _, _ = _dump(backups)
     Path(f"{path}.json").unlink()

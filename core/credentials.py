@@ -107,21 +107,30 @@ def secure_login(
     databases: list[str],
     owner: str,
     kernel_role: str,
+    memory_role: str | None = None,
 ) -> dict[str, str]:
-    """Make the password file if missing, set both roles' passwords from
-    it, and put the rules first in the cluster's `pg_hba.conf`. Every
-    argument is explicit: this acts on whichever cluster `host` and `port`
-    name. Returns what it did."""
+    """Make the password file if missing, set every role's password from
+    it, and put the rules first in the cluster's `pg_hba.conf`. A password
+    file made before memory's role gains that role's lines
+    (`_add_role`). Every argument is explicit: this acts on whichever
+    cluster `host` and `port` name. Returns what it did."""
     passfile = Path(passfile)
     passfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    roles = [kernel_role, owner] + ([memory_role] if memory_role else [])
     with open(f"{passfile}.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        created = _ensure_passfile(passfile, databases, [kernel_role, owner])
-        passwords = _read_passfile(passfile, databases, [kernel_role, owner])
+        created = _ensure_passfile(passfile, databases, roles)
+        if memory_role and not created:
+            _add_role(passfile, databases, memory_role)
+        passwords = _read_passfile(passfile, databases, roles)
         dsn = f"host={host} port={port} dbname=postgres user={owner} passfile={passfile}"
         with psycopg.connect(dsn, autocommit=True) as conn:
-            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (kernel_role,)).fetchone() is None:
-                conn.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(kernel_role)))
+            for role in (kernel_role, memory_role):
+                if (
+                    role
+                    and conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None
+                ):
+                    conn.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(role)))
             for role, password in passwords.items():
                 conn.execute(
                     sql.SQL("ALTER ROLE {} PASSWORD {}").format(
@@ -144,6 +153,28 @@ def _ensure_passfile(passfile: Path, databases: list[str], roles: list[str]) -> 
                 f.write(f"*:*:{database}:{role}:{password}\n")
         f.flush()
         os.fsync(f.fileno())
+    return True
+
+
+def _add_role(passfile: Path, databases: list[str], role: str) -> bool:
+    """Add `role`'s lines, one password for every database, to a password
+    file that has none for it: written whole to a file beside it and
+    renamed over it, so a reader sees the old file or the new one. A file
+    with any line for the role is left as it is. Returns whether it wrote."""
+    text = passfile.read_text()
+    if any(len(p) == 5 and p[3] == role for p in (line.split(":") for line in text.splitlines())):
+        return False
+    password = secrets.token_urlsafe(32)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "".join(f"*:*:{database}:{role}:{password}\n" for database in databases)
+    staged = passfile.with_name(passfile.name + ".new")
+    fd = os.open(staged, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(staged, passfile)
     return True
 
 

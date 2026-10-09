@@ -55,7 +55,7 @@ if os.environ.get("VALOR_TEST_PORTS"):
 if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
     os.environ["VALOR_PG_BIN"] = "/usr/lib/postgresql/18/bin"
 
-from core import binaries, container, db  # settings read VALOR_WORK on import
+from core import binaries, container, db, memory  # settings read VALOR_WORK on import
 from core.settings import settings
 from tests import ports
 
@@ -123,7 +123,14 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture(scope="session")
 def dsn() -> str:
-    return db.migrate(TEST_DB, fresh=True)
+    """The fresh test database. Memory's popoto state (installed backend,
+    cached tables, pools) is forgotten on each side of it, so none outlives
+    the database it named."""
+    memory.reset()
+    made = db.migrate(TEST_DB, fresh=True)
+    memory.reset()
+    yield made
+    memory.reset()
 
 
 @pytest.fixture(scope="session")

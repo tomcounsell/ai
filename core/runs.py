@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, db, git, ledger, machine, slot, spending, tasks, transcripts
+from core import binaries, db, git, ledger, machine, memory, slot, spending, tasks, transcripts
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -108,9 +108,12 @@ async def run_turn(
     the working session's Brief lists. Returns the `turn.ended` payload.
 
     The turn holds the turn slot (`core/slot.py`) from before its Brief is
-    rendered until `turn.ended` is written."""
+    rendered until `turn.ended` is written. Memory ingests once the slot is
+    released, so no other turn waits on it."""
     async with slot.held(task_id, dsn or gateway.dsn):
-        return await _run_turn(gateway, task_id, build, dsn, state, fresh, offered)
+        ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered)
+    await memory.after_turn(dsn or gateway.dsn)
+    return ended
 
 
 # The kernel's checkout: its persona and stage files are read from it.
