@@ -212,3 +212,19 @@ the Done items name the two windows left to recovery. Tests moved to
 non-cancellation reason.
 
 ### Build
+
+Built on `origin/valor-cori-rebuild` at d46f115bb. `core/runs.py` gains
+`_cut_short` and one handler from the output files to the end of the pipe
+copy; the four tests in `tests/test_reap.py` (1, 2 and 4 red before the
+fix). Docs: `core/runs.py` docstring, `docs/data.md` `turn.ended` row,
+`docs/architecture.md` recovery paragraph.
+
+Suite `-m "not container"` on `valor_rebuild_test_c3build`, ports
+6490-6499: 1794 passed, 24 skipped, 2 failed; both failures
+(`test_the_suite_gets_fresh_services_and_the_tasks_come_back`, a task
+Postgres that did not start; `test_governance_judges_every_hunk_and_the_kernel_makes_the_instances`,
+a `git remote add` in setup) pass rerun alone (2 passed). Container tests
+were not run to the end: the container runtime was wedged under a
+concurrent container suite of another builder (`container system status`
+hung for minutes); none of them calls `run_turn`. Ruff check and format
+clean.
