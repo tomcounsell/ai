@@ -590,10 +590,10 @@ feedback line (N3); the rollout stops, migrates, then starts (N4); the
 failed merge as the major-blocker question, merge-target grants as
 standing authority, the queued-sends inspection, the stale texts.
 
-Build (`~/src/valor-build-notes/builder-a1.md`): as designed. A refused
-or failed merge stands per payload and grant count, a performer's config
-refusal included; `adds_governance` rides on the intent row; a refused
-release owes no notice; tests stop a task whose released sends no bridge
-of a later test should send.
-Patch, round 1: migration refuses a kernel-owned held release too; a send's
-report names `to` and `cc` together.
+Build (`~/src/valor-build-notes/builder-a1.md`): as designed. A refused or
+failed merge stands per payload and grant count, a performer's config refusal
+included; `adds_governance` rides on the intent row; a refused release owes
+no notice; tests stop a task whose released sends no later bridge should send.
+Patch 1: migration refuses a kernel-owned held release; reports name `to`
+and `cc`. Patch 2: the emulator test asserts the merge done; the ceiling
+test is committed; the grant notice names each instance and its command.

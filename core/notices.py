@@ -8,8 +8,9 @@ and has not requested, to `settings.operator_channel` and
 - `delivered` (`delivered:<sha>`, or `delivered:<sha>:<effect>` for a
   merge refused or failed): the candidate and each check's outcome, owed
   only for a delivery that will not merge by itself: it did not pass, a
-  governance instance awaits Tom's grant, or its merge was refused or
-  failed, with the reason. A merge refused or failed for its payload is
+  governance instance awaits Tom's grant (each named, with its
+  `path:line` and its `python -m core grant` command), or its merge was
+  refused or failed, with the reason. A merge refused or failed for its payload is
   not asked again for that payload, so this notice is the question Tom
   gets about it.
 
@@ -34,6 +35,7 @@ notice's short id, so a bridge's lookup matches the sent message exactly.
 The bridge sends notices as they come.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -133,16 +135,20 @@ async def owe(conn, task_id: str) -> list[str]:
         owed = _delivered_owed(f, rows)
         if owed is not None:
             about, why = owed
+            waiting = f.ungranted() if why == AWAITS_GRANT else []
             made.append(
                 await request(
                     conn,
                     task_id,
                     kind="delivered",
                     about_key=about,
-                    text=delivered_text(task_id, f.delivery, why),
+                    text=delivered_text(task_id, f.delivery, why, waiting),
                 )
             )
     return [m for m in made if m]
+
+
+AWAITS_GRANT = "a governance instance awaits Tom's grant"
 
 
 def _delivered_owed(f: machine.Fold, rows: list[dict[str, Any]]) -> tuple[str, str | None] | None:
@@ -154,10 +160,11 @@ def _delivered_owed(f: machine.Fold, rows: list[dict[str, Any]]) -> tuple[str, s
         "sha": f.candidate.sha,
         "turn_id": f.candidate.turn_id,
     }
-    if not current or f.delivery.get("outcome") not in ("passed", "gaps"):
+    outcome = f.delivery.get("outcome")
+    if current and outcome in ("passed", "gaps", "governance_refused") and f.ungranted():
+        return f"delivered:{sha}", AWAITS_GRANT
+    if not current or outcome not in ("passed", "gaps"):
         return f"delivered:{sha}", None
-    if f.ungranted():
-        return f"delivered:{sha}", "a governance instance awaits Tom's grant (`python -m core grant`)"
     effect = f.merge_effect
     if effect and effect["state"] in ("refused", "failed"):
         why = next(
@@ -241,7 +248,15 @@ def _unstorable(task_id: str, kind: str, about_key: str, why: str, notice_id: st
     )
 
 
-def delivered_text(task_id: str, delivery: dict[str, Any], why: str | None = None) -> str:
+def delivered_text(
+    task_id: str,
+    delivery: dict[str, Any],
+    why: str | None = None,
+    waiting: Sequence[machine.Instance] = (),
+) -> str:
+    """The `delivered` notice. When the merge waits on Tom's grant, it names
+    each instance, where it sits in the diff, and the command that grants
+    it: under autonomous act this is the one question about that merge."""
     candidate = delivery.get("candidate") or {}
     lines = [
         f"Task {task_id} delivered {candidate.get('sha', '')[:12]} ({delivery.get('outcome', 'delivered')}):",
@@ -250,6 +265,14 @@ def delivered_text(task_id: str, delivery: dict[str, Any], why: str | None = Non
     ]
     if why:
         lines += ["", f"It is not merged: {why}.", ""]
+    for i in waiting:
+        where = f"{i.path}:{i.line}" if i.line is not None else i.path
+        lines += [
+            f"- governance instance {i.id} at {where}" + (f" ({i.summary})" if i.summary else ""),
+            f'  grant with: python -m core grant {task_id} {i.id} --note "..."',
+        ]
+    if waiting:
+        lines.append("")
     for check, outcome in (delivery.get("checks") or {}).items():
         lines.append(f"- {check}: {outcome}")
     for finding in delivery.get("findings") or []:

@@ -175,6 +175,7 @@ class Instance:
     summary: str = ""
     incident: str | None = None
     mission_item: str | None = None
+    line: int | None = None  # where in the path's diff the reviewer named it
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,7 @@ def _instances(payload: dict[str, Any]) -> tuple[Instance, ...]:
             str(i.get("summary", "")),
             i.get("incident"),
             i.get("mission_item"),
+            i.get("line"),
         )
         for i in gov.get("instances") or []
     )

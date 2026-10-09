@@ -6,14 +6,17 @@ No model call. Live spend: none.
 """
 
 import asyncio
+import subprocess
 import uuid
 
 import pytest
 
 from core import broker, db, notices, tasks
-from tests import bridges
-from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, of_type
+from tests import bridges, scripted
+from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, of_type
 from tests.performers import OutboxAppend
+from tests.scripted import git
+from tools.push_branch import PushBranch
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -160,3 +163,38 @@ def test_an_email_report_names_who_was_on_cc(dsn, op):
         return notice
 
     assert "sent email.send to ann@example.com, bob@example.com:" in run(go())["text"]
+
+
+def test_an_act_above_the_ceiling_is_refused_with_nothing_performed(dsn, op, tmp_path):
+    """A `propose` task's push and its child's send (the child inherits the
+    ceiling) are refused at request: no intent, no release, no report, and
+    the branch never reaches origin."""
+    ws, origin = scripted.workspace(tmp_path)
+    head = git(ws, "rev-parse", "HEAD")
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            propose = await tasks.start(conn, tasks.Brief(instruction="p", max_effect_class="propose"))
+            child = await tasks.start_child(conn, propose, instruction="c")
+            pushed = await broker.request(
+                conn,
+                broker.Performers(PushBranch(ws)),
+                propose,
+                broker.Action("push_branch", "valor/x", {"head_sha": head}),
+            )
+            sent = await broker.request(
+                conn, declared(), child, broker.Action("telegram.send_message", "-1009", {"text": "x"})
+            )
+            return propose, child, pushed, sent, await tasks.brief(conn, child)
+
+    propose, child, pushed, sent, brief = run(go())
+    assert brief.max_effect_class == "propose"
+    for task, outcome in ((propose, pushed), (child, sent)):
+        assert outcome.kind == "refused" and outcome.error == "act is above the task's ceiling propose"
+        assert not run(of_type(dsn, "effect.intent", effect_id=outcome.effect_id))
+        assert not run(of_type(dsn, "release.requested", effect_id=outcome.effect_id))
+        assert run(reports(dsn, task)) == []
+    unpushed = subprocess.run(
+        ["git", "-C", str(origin), "rev-parse", "--verify", "-q", "valor/x"], capture_output=True, check=False
+    )
+    assert unpushed.returncode != 0

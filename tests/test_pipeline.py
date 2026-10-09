@@ -27,6 +27,7 @@ from core import (
     judgement_tasks,
     ledger,
     machine,
+    notices,
     performing,
     router,
     session,
@@ -37,7 +38,7 @@ from core import git as kgit
 from core.gateway import Gateway
 from core.machine import Check, State
 from core.settings import settings
-from tests import scripted
+from tests import bridges, scripted
 from tests.conftest import TEST_DB
 from tests.ports import listen
 from tests.scripted import commit, git
@@ -392,6 +393,41 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
     assert final.join.row == 1 and final.merge_effect["state"] == "done"
     intent = next(r["payload"] for r in written if r["type"] == "effect.intent")
     assert intent["action_type"] == "merge" and intent["adds_governance"] is True
+
+
+@pytest.mark.macos
+def test_a_merge_waiting_on_a_grant_asks_tom_once_naming_the_instance_and_the_command(dsn, tmp_path):
+    """Under autonomous act the delivered notice is the one question Tom gets
+    about a merge held for governance: it names the task, the instance and
+    where it sits in the diff, and the exact grant command."""
+    ws, _origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        _gate(ws)
+        scripted.steer(ws, build="reasons")
+        await drive(dsn, task)
+        spec = verdicts.InstanceSpec("hooks/gate.py", 1, "a gate on the push path", "incident X", "1")
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        await scripted.check(dsn, task, "review", "pass", governance=[spec])
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+        return task, await fold(dsn, task), await rows(dsn, task)
+
+    with bridges.operator(tmp_path):
+        task, f, written = run(go())
+    (instance,) = f.ungranted()
+    (asked,) = [
+        r["payload"]
+        for r in written
+        if r["type"] == "notice.requested" and r["payload"]["kind"] == "delivered"
+    ]
+    assert f"Task {task} delivered" in asked["text"]
+    assert f"governance instance {instance.id} at hooks/gate.py:1 (a gate on the push path)" in asked["text"]
+    assert f'python -m core grant {task} {instance.id} --note "..."' in asked["text"]
 
 
 @pytest.mark.macos

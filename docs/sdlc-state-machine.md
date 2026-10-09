@@ -507,7 +507,8 @@ the outcome first. It then requests the merge, and the broker performs it
 at request when the predicate below holds. A done merge owes Tom a `report`
 notice; a reply to it is `feedback.given`. The summary reaches Tom as the
 delivered notice only when the delivery did not pass, a governance instance
-waits for his grant, or the merge was refused or failed.
+waits for his grant (the notice names each instance, its `path:line`, and its
+`python -m core grant` command), or the merge was refused or failed.
 
 **Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done`
 for the merge. `feedback`: `feedback.given`, to `patch`.

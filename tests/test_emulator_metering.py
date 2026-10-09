@@ -672,4 +672,5 @@ def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_
     assert out.returncode == 0, out.stderr
     got = asyncio.run(_rows(dsn, task))
     assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["manual"]
-    assert machine.fold(got).state is machine.State.MERGE
+    merged = machine.fold(got)  # the verdict requests the merge, performed at request
+    assert merged.state is machine.State.MERGED and merged.merge_effect["state"] == "done"
