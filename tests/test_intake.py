@@ -13,7 +13,7 @@ from core.settings import resolve_model, resolve_seat
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
 from tests.ports import listen
-from tests.test_pipeline import drive, to_checks
+from tests.test_pipeline import checks_only, drive, to_checks
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -153,19 +153,16 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
         # A reply steers; not a reply starts.
         out["steer"] = await say(dsn, msg("make it shorter", reply_to=target))
         out["start"] = await say(dsn, msg("write a haiku"))
-        # By email, approve and stop steer (email verified for this case).
+        # By email, stop and any other word steer (email verified for this case).
         monkeypatch.setitem(intake.VERIFY, "email", lambda inbound: True)
         mail = {"channel": "email", "sender": OPERATOR_EMAIL, "chat": "thread-1"}
         mailed = await a_send(dsn, task, "email", "thread-1")
         out["email_stop"] = await say(dsn, msg("stop", reply_to=mailed, **mail))
         out["email_approve"] = await say(dsn, msg("approve", reply_to=mailed, **mail))
         monkeypatch.setitem(intake.VERIFY, "email", intake._verified_email)
-        # An effect notice: approve.
-        effect = await held_send(dsn, task)
-        await owed(dsn, task)
-        e_target = await mark_sent(dsn, task, f"effect:{effect}")
-        out["approve"] = await say(dsn, msg("Approve", reply_to=e_target))
-        out["approve_again"] = await say(dsn, msg("approve", reply_to=e_target))
+        # A reply `approve` to a send is plain steering: nothing waits on a tap.
+        sent = await held_send(dsn, task)
+        out["approve"] = await say(dsn, msg("approve", reply_to=await a_send(dsn, task)))
         # The open question: answer.
         waiting = await scripted.start(dsn, ws, judge="thin")
         await drive(dsn, waiting)
@@ -175,19 +172,17 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
         out["answer"] = await say(dsn, msg("a short one", reply_to=q_target))
         # Stop.
         out["stop"] = await say(dsn, msg(" STOP ", reply_to=target))
-        return out, task, waiting, effect
+        return out, task, waiting, sent
 
-    out, task, waiting, effect = run(go())
+    out, task, waiting, sent = run(go())
     assert out["unverified"]["as"] == "none" and out["stranger"]["as"] == "none"
     assert out["steer"]["as"] == "steer" and out["steer"]["task_id"] == task
     assert out["start"]["as"] == "start" and out["start"]["task_id"] not in (task, None)
     assert out["email_stop"]["as"] == "steer" and out["email_approve"]["as"] == "steer"
     assert run(binding_notices(dsn, out["email_stop"]["received_id"]))
-    assert out["approve"]["as"] == "approve"
-    assert out["approve_again"]["as"] == "none"
-    (release,) = run(of_type(dsn, "release.requested", effect_id=effect))
-    assert release["owner"] == "telegram"
-    assert len(run(of_type(dsn, "approval.granted", effect_id=effect))) == 1
+    assert out["approve"]["as"] == "steer"
+    (release,) = run(of_type(dsn, "release.requested", effect_id=sent))
+    assert release["owner"] == "telegram"  # released when it was requested
     assert out["answer"]["as"] == "answer"
     assert machine.fold(run(rows(dsn, waiting))).state is State.CLARIFY
     assert out["stop"]["as"] == "stop"
@@ -196,15 +191,23 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
 
 @pytest.mark.macos
 def test_feedback_on_the_delivered_notice(dsn, op, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
+    ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        f = machine.fold(await rows(dsn, task))
-        assert f.state is State.MERGE
+        await checks_only(dsn, task)
+        # The target moved on under the push: the merge fails, so a delivered notice is owed.
+        tree = scripted.git(ws, "rev-parse", "HEAD^{tree}")
+        moved = scripted.git(
+            ws, "commit-tree", tree, "-p", scripted.git(origin, "rev-parse", "main"), "-m", "moved"
+        )
+        scripted.git(ws, "push", "-q", str(origin), f"{moved}:refs/heads/main")
+        await drive(dsn, task)
+        written = await rows(dsn, task)
+        f = machine.fold(written)
+        assert f.state is State.MERGE and f.merge_effect["state"] == "failed"
         await owed(dsn, task)
-        target = await mark_sent(dsn, task, f"delivered:{f.delivery['candidate']['sha']}")
+        target = await mark_sent(dsn, task, notices._delivered_owed(f, written)[0])
         return task, await say(dsn, msg("rename the file", reply_to=target))
 
     task, bound = run(go())
@@ -236,84 +239,78 @@ def test_reply_to_stopped_task(dsn, op):
     assert "stopped" in n["text"] and n["chat_id"] == OPERATOR_CHAT and n["reply_to"]
 
 
-def test_near_approve(dsn, op):
+async def merged_report(dsn, ws) -> tuple[str, str]:
+    """A task merged by itself and the message id of its merge report."""
+    task = await to_checks(dsn, ws)
+    await scripted.checks(dsn, task)
+    f = machine.fold(await rows(dsn, task))
+    assert f.state is State.MERGED
+    return task, await mark_sent(dsn, task, f"report:{f.merge_effect['effect_id']}")
+
+
+@pytest.mark.macos
+def test_a_reply_to_the_merge_report_is_feedback_and_a_stop_binds_none(dsn, op, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task, target = await merged_report(dsn, ws)
+        out = {}
+        other = await say(dsn, msg("and this", reply_to=await a_notice(dsn, task)))
+        for text in ("stop", "Stop.", "rename the file"):
+            bound = await say(dsn, msg(text, reply_to=target))
+            out[text] = (bound, await binding_notices(dsn, bound["received_id"]))
+        return task, out, other, machine.fold(await rows(dsn, task))
+
+    task, out, other, f = run(go())
+    for text in ("stop", "Stop."):
+        bound, said = out[text]
+        assert bound["as"] == "none" and any("merged; nothing was done" in n["text"] for n in said)
+    bound, _ = out["rename the file"]
+    assert bound["as"] == "feedback" and bound["task_id"] == task
+    assert f.state is not State.STOPPED
+    assert other["as"] == "none"  # only the merge report takes feedback after the merge
+
+
+def test_near_stop(dsn, op):
     async def go():
         task = await new_task(dsn)
-        effect = await held_send(dsn, task)
-        await owed(dsn, task)
-        target = await mark_sent(dsn, task, f"effect:{effect}")
+        target = await a_notice(dsn, task)
         out = []
-        for text in ("Approve.", "approve it"):
+        for text in ("Stop.", "stop it"):
             bound = await say(dsn, msg(text, reply_to=target))
             out.append((bound, await binding_notices(dsn, bound["received_id"])))
-        return effect, out
+        return task, out
 
-    effect, out = run(go())
+    task, out = run(go())
     for bound, said in out:
         assert bound["as"] == "steer"
-        assert any("Not an approval" in n["text"] for n in said)
-        assert any(n["about_key"].endswith(":waiting") for n in said)
-    assert not run(of_type(dsn, "approval.granted", effect_id=effect))
+        assert any("Not a stop" in n["text"] for n in said)
+    assert machine.fold(run(rows(dsn, task))).state is not State.STOPPED
 
 
-def test_approve_crash(dsn, op, monkeypatch):
+@pytest.mark.macos
+def test_a_binding_that_fails_binds_none_and_the_next_reply_binds(dsn, op, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
     real = ledger.append
 
     async def dies(conn, task_id, type_, payload):
-        if type_ == "release.requested":
+        if type_ == "feedback.given":
             raise RuntimeError("killed")
         return await real(conn, task_id, type_, payload)
 
     async def go():
-        task = await new_task(dsn)
-        effect = await held_send(dsn, task)
-        await owed(dsn, task)
-        target = await mark_sent(dsn, task, f"effect:{effect}")
+        task, target = await merged_report(dsn, ws)
         monkeypatch.setattr(ledger, "append", dies)
-        first = await say(dsn, msg("approve", reply_to=target))
+        first = await say(dsn, msg("rename the file", reply_to=target))
         monkeypatch.setattr(ledger, "append", real)
-        neither = (
-            await of_type(dsn, "approval.granted", effect_id=effect),
-            await of_type(dsn, "release.requested", effect_id=effect),
-        )
-        second = await say(dsn, msg("approve", reply_to=target))
-        both = (
-            await of_type(dsn, "approval.granted", effect_id=effect),
-            await of_type(dsn, "release.requested", effect_id=effect),
-        )
-        return first, neither, second, both, await binding_notices(dsn, first["received_id"])
+        neither = [r for r in await rows(dsn, task) if r["type"] == "feedback.given"]
+        second = await say(dsn, msg("rename the file", reply_to=target))
+        return first, neither, second, await binding_notices(dsn, first["received_id"])
 
-    first, neither, second, both, said = run(go())
+    first, neither, second, said = run(go())
     assert first["as"] == "none" and "killed" in first["error"] and said
-    assert neither == ([], [])
-    assert second["as"] == "approve" and [len(x) for x in both] == [1, 1]
-
-
-def test_binding_error_binds_none(dsn, op):
-    async def go():
-        task = await new_task(dsn)
-        effect = await held_send(dsn, task)
-        await owed(dsn, task)
-        target = await mark_sent(dsn, task, f"effect:{effect}")
-        # Released from the command line before Tom's reply.
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="from the command line")
-            await broker.release(conn, declared(), effect)
-        late = await say(dsn, msg("approve", reply_to=target))
-        again = await say(dsn, msg("approve", reply_to=target))
-        after = await say(dsn, msg("and sign it", reply_to=target))
-        return (
-            late,
-            again,
-            after,
-            await binding_notices(dsn, late["received_id"]),
-            await binding_notices(dsn, again["received_id"]),
-        )
-
-    late, again, after, said_late, said_again = run(go())
-    assert late["as"] == "none" and again["as"] == "none"
-    assert "already released" in said_late[0]["text"] and said_again
-    assert after["as"] == "steer"
+    assert neither == []
+    assert second["as"] == "feedback"
 
 
 def test_email_unverified(dsn, op):
@@ -327,20 +324,6 @@ def test_email_unverified(dsn, op):
 
     row, bound = run(go())
     assert row["verified"] is False and bound["as"] == "none"
-
-
-def test_steer_while_awaiting_approval(dsn, op):
-    async def go():
-        task = await new_task(dsn)
-        await held_send(dsn, task)
-        target = await a_notice(dsn, task)
-        bound = await say(dsn, msg("is it ready?", reply_to=target))
-        return bound, await binding_notices(dsn, bound["received_id"])
-
-    bound, said = run(go())
-    assert bound["as"] == "steer"
-    (n,) = said
-    assert "waiting on approval" in n["text"]
 
 
 @pytest.mark.macos
@@ -698,30 +681,25 @@ def test_highest_and_lowest_skip_ids_past_a_bigint(dsn, op):
     assert run(go()) == (3, int(biggest))
 
 
-async def _held_row(dsn, task, payload) -> str:
-    """An effect held for Tom with `payload`, as the broker writes it, and
-    the notices owed."""
-    effect_id = ledger.new_id()
-    action = broker.Action("telegram.send_message", OPERATOR_CHAT, payload)
-    async with await bridges.connect(dsn) as conn:
-        await ledger.append(
-            conn, task, "effect.held", {"effect_id": effect_id, **action.describe("act", False, effect_id)}
-        )
-        await notices.owe(conn, task)
-    return effect_id
-
-
 def test_a_notice_whose_text_the_ledger_cannot_store_is_written_in_kernel_words(dsn, op):
-    """A held send's text the ledger stores once is rendered twice in its
-    notice, more than jsonb holds: the notice is written with kernel text
-    naming the effect and Postgres's reason, so Tom still hears of it."""
+    """A report whose text Postgres jsonb refuses (a NUL character) is
+    written with kernel text naming the effect and Postgres's reason, so
+    Tom still hears of it."""
 
     async def go():
         task = await new_task(dsn)
-        effect_id = await _held_row(dsn, task, {"text": "x" * (130 << 20)})
+        effect_id = ledger.new_id()
+        effect = {
+            "effect_id": effect_id,
+            **broker.Action("telegram.send_message", "-100777", {"text": "a\x00b"}).describe(
+                "act", False, effect_id
+            ),
+        }
+        async with await db.connect(dsn) as conn:
+            await notices.report(conn, task, effect, {})
         return task, effect_id, await of_type(dsn, "notice.requested")
 
     task, effect_id, written = run(go())
-    [notice] = [n for n in written if n["about_key"] == f"effect:{effect_id}"]
-    assert notice["text"].startswith(f"Task {task} has a notice (effect, effect:{effect_id}) whose text ")
-    assert "ProgramLimitExceeded" in notice["text"] and len(notice["text"]) < 1000
+    [notice] = [n for n in written if n["about_key"] == f"report:{effect_id}"]
+    assert notice["text"].startswith(f"Task {task} has a notice (report, report:{effect_id}) whose text ")
+    assert len(notice["text"]) < 1000
