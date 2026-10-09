@@ -357,7 +357,7 @@ The session file lives in a directory the turn must write to keep its
 session, so it is the turn's own account, as editable by the turn as
 `done.md`. It is evidence for a verifier and a debugger, never a ledger.
 Memory takes its text entries as records labelled as the turn's, never as
-Tom's (`docs/data.md`, Memory, last).
+Tom's (`docs/memory.md`).
 
 When a turn with its own config directory ends, stopped or not, the
 kernel copies the session file and its subagents' files into the store as

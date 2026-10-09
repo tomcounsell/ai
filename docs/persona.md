@@ -359,7 +359,11 @@ order:
    author, date, and channel (`core/corrections.py`). A correction recorded
    now reaches the next turn of every task, including tasks already
    running.
-4. **How the task reaches Tom.** The `.valor/` channel for asking,
+4. **Remembered.** For a working session, records from earlier tasks in
+   the same project that memory finds for the instruction, each quoted as
+   data under a label saying whose words it holds (`core/memory.py`;
+   `docs/memory.md`). Fresh sessions get none.
+5. **How the task reaches Tom.** The `.valor/` channel for asking,
    delivering, and requesting effects (`skills/sdlc/channel.md`), and the
    stage file for the state the turn runs in (`skills/sdlc/<state>.md`).
 

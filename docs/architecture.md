@@ -71,7 +71,8 @@ the task starts:
 
 The text a turn receives is **dispatched**: rendered as the turn starts, the
 persona first (`persona/`, from the kernel's checkout), then the Brief with
-the task's commitments, every correction in force, the signal channel (how
+the task's commitments, every correction in force, what memory recalls
+for a working session (`core/memory.py`), the signal channel (how
 the turn reaches Tom, with the task's own performers' effects), and the
 stage file for its state (`skills/sdlc/<state>.md`); a fresh session gets
 the verdict channel (`skills/sdlc/verdict.md`) instead. `turn.started`
@@ -295,8 +296,8 @@ constraint, rendered into every Brief of the first demonstration, and each
 Correction 1 rendering).
 
 Source classes are `direct` (a correction Tom gave) and `exemplar`. Both
-streams are the kernel's; `memory/` later reads and curates them and never
-owns them. The **exemplar ledger** is the same store with a distinct source
+streams are the kernel's; `memory/` takes them as records and never writes
+or owns them. The **exemplar ledger** is the same store with a distinct source
 class: work Tom loved and why. Without it the system learns to avoid
 mistakes and never what excellent looks like. Serves: Evidence, "Tom's
 feedback, both directions"; Mission item 2; and corrections that are

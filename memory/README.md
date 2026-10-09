@@ -10,7 +10,7 @@ What Valor remembers across sessions.
 
 Built on popoto 1.10.0's Postgres backend. `VALOR_MEMORY=off` means nothing here is imported.
 
-Governed by [docs/data.md](../docs/data.md) (Memory, last) and [docs/plans/b1-memory.md](../docs/plans/b1-memory.md).
+Governed by [docs/memory.md](../docs/memory.md) and [docs/plans/b1-memory.md](../docs/plans/b1-memory.md).
 
 ## Imports
 

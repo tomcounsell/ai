@@ -334,8 +334,9 @@ login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
 login to call the provider around the gateway is an accepted risk, because
 the gateway is for visibility and honest metering, not a hard wall.
 
-**The kernel key directory.** The passwords for `valor_kernel` and the
-owner role on the kernel databases live in a libpq password file,
+**The kernel key directory.** The passwords for `valor_kernel`,
+`valor_memory`, and the owner role on the kernel databases live in a libpq
+password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
 the judgement keys in `judgement-keys`, the mail credentials in `mail-keys`, the OpenAI key in `openai-key`, and the optional long-lived Claude
 token in `claude-token` beside it, paths derived from the password file's
@@ -345,8 +346,9 @@ and the vault `.env` syncs to iCloud and is loaded into the environment of
 the old system's unsandboxed sessions; this directory is neither, and every
 sandbox profile denies it. libpq reads the password file for every kernel
 connection, so no kernel process holds the password in a string or its
-environment. `python -m core secure-login` makes it and is the only code
-that writes it. Tom's own `psql` reaches the kernel databases by
+environment. `python -m core secure-login` makes it, adds `valor_memory`'s
+lines when it lacks them (written to a file beside it and renamed over it),
+and is the only code that writes it. Tom's own `psql` reaches the kernel databases by
 `export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which no
 turn inherits: `turn` drops every `PG*` variable, and `workspace_turn`
 copies only its allowlist.
@@ -357,7 +359,8 @@ Two kinds of cluster run on each machine, never one shared.
 
 - **The machine cluster**, resident, on the default port and a Unix
   socket. The kernel connects as `valor_kernel`, which can read and append
-  and never update or delete the ledger. Roles and grants are
+  and never update or delete the ledger; memory connects as `valor_memory`,
+  which owns the schema `memory` and reaches nothing else. Roles and grants are
   [data.md](data.md).
 - **A workspace cluster** per task the kernel provisions, on demand, on
   its own port (5440 to 5599; its Redis, 6400 to 6499) with password

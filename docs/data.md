@@ -5,11 +5,11 @@ JSONB documents written once, an append-only events table, and no foreign
 keys. Every call opened and charged, turn, effect, approval, question, answer,
 piece of feedback, correction, and stop is a row in the events table, and
 everything the kernel knows about a task is computed from those rows when it
-is needed. Postgres is the one store; memory joins it last.
+is needed. Postgres is the one store; memory lives there in its own schema.
 
 This doc owns the storage: tables, roles, the integrity mechanisms, how
 state is read, how a turn's Brief is rendered from the store, test
-databases, and where memory will live. `docs/architecture.md` owns what the
+databases, and where memory lives. `docs/architecture.md` owns what the
 kernel does with the rows (metered spending, the broker, stop, steering).
 
 ## What serves what
@@ -357,8 +357,8 @@ over from an earlier turn. `core/tasks.py`, `dispatch`, renders the
 persona from `persona/`, reads the task document and every correction in
 force from the `corrections` stream, and renders one text: the persona,
 the task's commitments, the
-corrections in the order Tom gave them with their provenance, and the
-`.valor/` protocol a turn uses to reach Tom. `core/runs.py` records that
+corrections in the order Tom gave them with their provenance, what memory
+recalls, and the `.valor/` protocol a turn uses to reach Tom. `core/runs.py` records that
 text whole in `turn.started`, with its SHA-256, the persona's SHA-256 and
 size, and the correction numbers it carried, under the task's lock, before the harness starts.
 
@@ -459,8 +459,8 @@ creates `valor_kernel` and `valor_memory` if missing, creates the
 database if missing, applies `core/schema.sql`, records correction 1 (the
 governance paragraph, from `CLAUDE.md`) if the ledger has no correction 1,
 and gives the schema `memory` and its tables to `valor_memory`; it then
-runs `secure-login` (below). Every other connection is `valor_kernel`
-(`core/settings.py`, `dsn`). Least privilege [11]: the role that runs the
+runs `secure-login` (below). Memory's backend connects as `valor_memory`;
+every other connection is `valor_kernel` (`core/settings.py`, `dsn`). Least privilege [11]: the role that runs the
 kernel holds exactly what appending and reading need. `LISTEN`,
 `pg_notify`, and advisory locks need no table privilege, so the stop
 channel and the per-task locks work under the same grant.
@@ -469,9 +469,10 @@ Connection settings come from one typed module, `core/settings.py`, each
 with a default for this Mac and an environment override: host
 (`VALOR_PGHOST`, default the `/tmp` socket), port (`VALOR_PGPORT`, 5432),
 database (`VALOR_DB`, `valor_rebuild`), test database (`VALOR_TEST_DB`,
-`valor_rebuild_test`), owner (`VALOR_PG_OWNER`), and the password file
-(`VALOR_PG_PASSFILE`). Every connection string names the password file and
-never holds a password.
+`valor_rebuild_test`), owner (`VALOR_PG_OWNER`), memory's role
+(`VALOR_MEMORY_ROLE`), memory `on` or `off` (`VALOR_MEMORY`), and the
+password file (`VALOR_PG_PASSFILE`). Every connection string names the
+password file and never holds a password.
 
 ## The kernel database is out of a turn's reach
 
@@ -537,8 +538,10 @@ effect ceiling keeps the damage survivable while that is discovered.
 with `fresh=True`, which drops the database as the owner and recreates it.
 The ledger cannot be emptied, so dropping the database is the only reset,
 and the owner is the only role that can do it. Tests connect as
-`valor_kernel` like the kernel does, plus an owner connection for the
-test that proves the trigger refuses the owner too. `db.migrate` touches no
+`valor_kernel` like the kernel does, memory as `valor_memory`, plus an
+owner connection for the test that proves the trigger refuses the owner
+too. The fixture forgets popoto's backend, pools, and cached tables on
+each side of the fresh database, so none outlives the database it named. `db.migrate` touches no
 role password, password file, or `pg_hba.conf`, so a test run leaves the
 machine cluster's credentials as it found them; the credential tests run
 `secure_login` only on scratch clusters.
@@ -554,34 +557,11 @@ gateway, declare their spend, and run only with `VALOR_LIVE=1`, so a plain
 test run spends nothing; `tests/test_gateway_meter.py` meters a successful
 call in every run by replaying a recorded provider response.
 
-## Memory, last
+## Memory
 
-Memory is popoto [20] 1.10.0's Postgres backend in the kernel database's
-schema `memory`, owned by `valor_memory` (docs/plans/b1-memory.md).
-`VALOR_MEMORY=off` means no import, no ingest, and no section.
-
-- **Memory grants nothing.** Retrieved content can act as instructions to
-  a model [7], so nothing read from memory changes a ceiling or a
-  grant. `core/memory.py` returns a string and nothing else, and
-  `valor_memory` holds no privilege on `events` or `documents`.
-- **Memory never writes the ledger.** After the turn slot is released,
-  `run_turn` ingests the rows memory has not taken (`task.started`,
-  answers, feedback, corrections, and each `turn.ended`'s transcript text
-  entries, the turn's prompt and every tool use and result left out), one
-  unit per row, keyed by ledger id, under an advisory lock.
-- **Raw entries**, no model call: raw turn ingestion beat LLM extraction
-  on judged accuracy in popoto's measurement [20].
-- **Recall.** A working session's Brief gains a Remembered section after
-  the corrections: BM25 over the task's instruction, among the project's
-  records from before the task began, ten records within 4000 estimated
-  tokens, in ledger order. Each record is quoted and escaped as data,
-  labelled by its row's provenance; a transcript entry is always the
-  turn's. Fresh sessions get none, and a failure renders `Memory:
-  unavailable: <reason>`.
-
-Tom's corrections and exemplars are the `corrections` stream
-(`core/corrections.py`), which `core/` owns and renders whole into every
-Brief; memory takes them as records and never writes them.
+Memory lives in the kernel database's schema `memory`, owned by
+`valor_memory` (Roles, above). What it takes from the ledger and what it
+recalls into a Brief is [memory.md](memory.md).
 
 ## Gaps
 

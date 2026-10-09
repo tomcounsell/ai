@@ -39,7 +39,7 @@ outside the model is AI Control [4].
 |---|---|---|
 | Language | Python 3.14, pinned in `.python-version` | in use |
 | Environments and lockfile | uv, `uv.lock` | in use |
-| Runtime dependencies | `psycopg[binary]` 3, `aiohttp` | in use |
+| Runtime dependencies | `psycopg[binary]` 3, `aiohttp`, `telethon`, `popoto[postgres]==1.10.0` | in use |
 | Tests | pytest, real Postgres, a `spend` marker on every live test | in use |
 | Property tests | Hypothesis: the state machine's fold; the effect ceiling down the tree next | in use |
 | Schemas | frozen dataclasses in `core/` | in use; Pydantic open |
@@ -48,7 +48,7 @@ outside the model is AI Control [4].
 | Driver and schema | psycopg 3 async, hand-written SQL, one idempotent `core/schema.sql` | in use |
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
 | Redis | none | in use (absent by decision) |
-| Memory | popoto over Postgres | chosen, not built |
+| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
@@ -192,22 +192,25 @@ correction": a ledger nobody can edit is still lost with the disk.
 
 **Queue.** Postgres is the only store and the only queue. A second queue
 next to the system of record would be a dual write. Redis is replaced by
-Postgres (Tom's decision); no Valor component runs Redis. An app under test
-may need Redis, in which case its workspace starts one of its own, the way
+Postgres (Tom's decision); no Valor component runs Redis, and every popoto
+model memory uses is on popoto's Postgres backend. An app under test may
+need Redis, in which case its workspace starts one of its own, the way
 the replays did (rebuild-baseline.md, Infrastructure fixed during the
 series, item 5). Status: **in use**.
 
 **pgvector.** Not used by the kernel. Built into one replay cluster only,
 because the app under test needed it. The verification VM's base has
-none. Whether memory needs it is decided with memory. Status: **open**.
+none. Memory searches by BM25 without it; the `pgvector` client arrives
+with popoto's extra and is unused. Status: **not used**.
 
 ### Memory
 
-popoto [20] over Postgres, built last. It waits on popoto's Postgres backend (the issue cited in
-[20]). Until then `memory/` holds its README and the port the kernel reads through. Status:
-**chosen, not built**. Serves the Evidence items "Tom's feedback, both directions": the corrections
-and exemplar ledgers live in the kernel's events table from the start, and episodic memory is what
-arrives last. Retrieved content carries no source class and grants nothing [7].
+popoto [20] 1.10.0's Postgres backend, pinned, in the kernel database's schema `memory` under the
+role `valor_memory`, with no Redis I/O and no model calls ([memory.md](memory.md)). The kernel reads
+it only through `core/memory.py`. Status: **in use**. Serves the Evidence item "Tom's feedback,
+both directions": the corrections and exemplar ledgers live in the kernel's events table, and
+episodic memory recalls Tom's earlier words into later Briefs of the same project. Retrieved
+content carries no source class and grants nothing [7].
 
 ## 4. The model gateway
 
