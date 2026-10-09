@@ -2,7 +2,7 @@
 tracking: none
 slug: c7-test-images
 type: build
-status: planned
+status: built
 stakes: low
 critique_rounds: 0
 review_rounds: 0
@@ -113,8 +113,8 @@ runtime stay shared, because the runtime is one per machine.
   lock is the machine's.
 - `test_an_image_another_database_recorded_survives_a_tests_prune_and_cleanup`
   (runs anywhere, a stand-in CLI): a record carrying another database's
-  label and a record of the session's own label; after `prune` and
-  `release_images` with the session's label, only the session's tag was
+  label and records of the session's own label; after `prune` and
+  `release_images` with the session's label, only the session's tags were
   deleted and the other record is unchanged.
 - Evidence (one container test run): the machine's `images.json` hash is
   unchanged by the run, and the run's images are gone after it.
@@ -124,3 +124,27 @@ runtime stay shared, because the runtime is one per machine.
 None.
 
 ## Records
+
+### Build, 2026-10-09
+
+- Built as planned. `base_image()` in `tests/test_container.py` now gives
+  the base build a real checks directory: with the session's own image
+  names the base image is built in every session that needs it, and the
+  old `/nonexistent` layout made that build fail on opening its output
+  file (`container-retagged.out`, the first evidence run).
+- Each session that runs container tests builds its own base image (the
+  tag no longer matches the kernel's) and deletes it at session end. This
+  costs one base build per such session.
+- Suite `-m "not container"`: 1808 passed, 24 skipped, 52 deselected.
+  ruff check and format clean.
+- Container evidence: `test_a_container_test_keeps_its_own_records_and_image_names`
+  passed under the marker. The rerun of
+  `test_an_image_retagged_by_hand_is_a_kernel_cause_and_dropped` after the
+  `base_image` fix did not run: free space on `/System/Volumes/Data` fell
+  to 3.6 GB, under the 6 GB the run needs. The live `images.json` holds no
+  `valor-test-` tag after the first evidence run, and the session's own
+  records were empty after its release.
+- Left as is, for the lead: `container.checked` reads a failed `image
+  inspect` (the runtime stopped, for one) as "not held" and drops the
+  record. With tests no longer stopping the runtime under a kernel this
+  path is not reached by tests.

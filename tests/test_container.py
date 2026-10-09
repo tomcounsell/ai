@@ -21,6 +21,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -138,7 +139,10 @@ async def base_image() -> str:
     caller holds the machine lock."""
     stop = never()
     await container.start(stop)
-    tag, _ = await container.ensure_base(kws.Layout(Path("/nonexistent")), stop, conftest.LABEL)
+    with tempfile.TemporaryDirectory() as tmp:
+        lay = kws.Layout(Path(tmp))
+        lay.checks.mkdir(parents=True)
+        tag, _ = await container.ensure_base(lay, stop, conftest.LABEL)
     return tag
 
 
