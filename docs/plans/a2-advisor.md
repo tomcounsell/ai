@@ -143,9 +143,14 @@ descriptor walk as `question.md`, filed under `.valor/handled/<turn_id>/`.
   signal that ends the stage; not asked", and the next prompt says so. On
   a turn that failed it goes to `errors` as "advice.md from a turn that
   did not finish; not asked". No new verdict: the machine is unchanged.
-- `_collected` carries `advice` (the text, or null) on `turn.collected`;
-  `_parts` lists it, so an oversized question is dropped with its reason
-  as every other part is (`_storable`).
+- `_verdict` returns the text in `extra["advice"]` only when it counted
+  (the verdict is `idle`), and `_collected` writes that, never
+  `found.advice`, so a turn whose `advice.md` did not count carries no
+  `advice`. A row `_reduce` cuts down to `idle` after dropping a
+  `done.md` or `plan.json` keeps no `advice` either: the extra was
+  computed for the verdict the turn earned, and the reduced row is
+  rebuilt without it. `_parts` lists the text, so an oversized question
+  is dropped with its reason as every other part is (`_storable`).
 
 ### The advisor run (`core/fresh.py`, `advise`)
 
@@ -189,14 +194,17 @@ died, appending nothing. It:
 ### Where it runs (`core/session.py`, `run`)
 
 `session.run` takes `advise` (default none, so tests and callers that
-pass nothing behave as today). After `record`, when the turn's collected
-row carries `advice` and the task is still in the same state, the loop
-calls `advise` before the next turn; `lock lost` and `stopped` from it
-return from `run` as a turn's do. At the top of each loop pass,
-`pending_advice(rows)` looks only at the fold's latest collected turn
-(`f.last_collected`): it names that turn's question when the turn ran in
-the task's current state, no `advice.given` names it, and no working
-turn has finished after it. An older question, from a state the task has
+pass nothing behave as today). There is one call site: at the top of
+each loop pass, `pending_advice(rows)` looks only at the fold's latest
+collected turn (`f.last_collected`): it names that turn's question when
+its verdict is `idle`, it carries `advice`, it ran in the task's current
+state, no `advice.given` names it, and no working turn has finished
+after it. When it names one, the loop calls `advise` before the next
+turn; `lock lost`, `stopped`, and `slot.PREEMPTED` from it return from
+`run` exactly as a turn's do (`core/session.py:93-94`), so a preempted
+advisor leaves the question pending for the next run rather than a
+working turn running past it. The git reads (`git.head`, `git.dirty`)
+and the mirror fetch run in a worker thread, as `record`'s do. An older question, from a state the task has
 left or overtaken by a later turn, is never asked. So a run killed or
 preempted between the two asks it on the next run, without any new wake
 or retry number, and only while it is still the last word.
@@ -257,6 +265,17 @@ places that state it, so the new line has nothing left to contradict:
   Tom" section (`docs/persona.md:245-257`) takes the same line and the
   same cut list, and its account of when a question is asked
   (`docs/persona.md:133`) takes the same test.
+- The stage files, which conduct says win where they are more specific
+  (`persona/conduct.md:3-4`), take the same test:
+  `skills/sdlc/clarify.md:3-5` says a question only Tom can answer (the
+  request's intent, vision, priorities, a tradeoff's cost and benefit)
+  reaches him and a second opinion goes to `.valor/advice.md`;
+  `build.md:11`, `plan.md:24`, and `patch.md:10` say "A question only Tom
+  can answer goes in `.valor/question.md`; for a second opinion,
+  `.valor/advice.md`". `persona/conduct.md:52` ("How to ask", item 2)
+  and its mirror `docs/persona.md:164-168` drop "or the authority
+  needed". A1 edits `docs/persona.md`'s effect table; A2 keeps to the
+  asking rule.
 - `docs/mission.md:31` (Mission item 3, "Ask only when the answer
   materially changes the outcome ...") is the mission's text and stays as
   written: the ruling narrows who is asked, and an answer that changes
@@ -345,8 +364,13 @@ none calls a model.
 - `tests/test_tasks.py` or `tests/test_persona.py`: `dispatch(fresh=
   "advice")` carries `advice.md` (with its line that the advisor asks no
   one) and not the verdict channel; the conduct line renders, and the
-  old test ("materially changes the outcome or the authority") appears in
-  neither the rendered persona nor `channel.md`.
+  old test ("materially changes the outcome or the authority", "the
+  authority needed", "A material question goes") appears in neither the
+  rendered persona, `channel.md`, nor any stage file.
+- `tests/test_session.py`, the reduced row: a `candidate` turn that also
+  wrote `advice.md`, whose row `_reduce` cuts to `idle`, carries no
+  `advice` and runs no advisor; a preempted advisor returns
+  `slot.PREEMPTED` from `run` and no working turn runs.
 - `tests/test_machine.py`: a fold over rows holding `advice.given` and an
   advisor's fresh turn equals the fold without them (state, session,
   entry, steering).
@@ -357,6 +381,7 @@ none calls a model.
 - `core/signals.py`, `core/session.py`, `core/fresh.py`, `core/tasks.py`,
   `core/__main__.py`.
 - `skills/sdlc/advice.md` (new), `skills/sdlc/channel.md`,
+  `skills/sdlc/clarify.md`, `build.md`, `plan.md`, `patch.md`,
   `skills/README.md`.
 - `persona/conduct.md`.
 - `docs/persona.md` ("Escalate only what needs Tom" and the question
@@ -368,14 +393,14 @@ none calls a model.
 
 ## Order with A1
 
-A1 (`docs/plans/a1-autonomous-act.md`, read once A1 commits it)
-removes the act hold and rewrites `skills/sdlc/channel.md`'s
+A1 (`docs/plans/a1-autonomous-act.md`) removes the act hold and rewrites `skills/sdlc/channel.md`'s
 "holds it for Tom's approval", `_effects_report`'s "held for Tom's
 approval", and the persona and mission docs on approvals. A2 touches the
 same `channel.md` and `core/session.py` and the same persona section.
 A2 merges after A1, rebases onto it, and reruns its checks; it takes no
-interface from A1. If A1's committed plan names a different shape for
-the conduct section, A2 takes A1's text and adds only its line.
+interface from A1. A1 edits `docs/persona.md`'s effect table and
+`channel.md`'s effect lines; A2 keeps its persona edits to the asking
+rule.
 
 ## Rollout
 
@@ -434,3 +459,24 @@ The mechanism held; six findings, each answered in this revision.
 
 Also: spending is named as the gateway's `gateway.charged` rows, and the
 answer is quoted with `tasks.quoted`.
+
+## Critique round 2 (of 2): revise
+
+Rounds are spent; the three findings ride into the build, each written
+into the design above.
+
+1. The row carried the raw `advice.md` text whatever the verdict.
+   `_verdict` returns it in `extra` only on `idle`; `_collected` writes
+   that; `pending_advice` requires `idle`. Test: a `candidate` row reduced
+   to `idle` runs no advisor.
+2. The stage files still held the old asking rule and win over conduct.
+   `clarify.md`, `build.md`, `plan.md`, `patch.md`, conduct's "How to
+   ask" item 2, and `docs/persona.md:164-168` take the ruling's test; the
+   persona test covers the stage files. `docs/mission.md` stays.
+3. A preempted advisor was not returned. `run` returns `slot.PREEMPTED`
+   from `advise` as from a preempted turn. Test added.
+
+Notes taken: git reads in a worker thread; one call site
+(`pending_advice` at the top of the loop); "supports" for the review
+runner at `reviewer_openai`; the A1 hedge dropped. Steering is not an
+advisor input; the working session holds it when it decides.
