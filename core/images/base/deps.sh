@@ -48,9 +48,13 @@ print(chr(10).join(tomllib.load(open(\"pyproject.toml\", \"rb\")).get(\"build-sy
 if [ -n "$requires" ]; then
   mapfile -t reqs <<<"$requires"
   uv pip install --python 3.14 --target /tmp/build-requires "${reqs[@]}" || exit
-  # hatchling, for one, adds editables for an editable build.
+  # hatchling, for one, adds editables for an editable build. The setuptools
+  # hooks log `running egg_info` on stdout, so file descriptor 1 is stderr
+  # while the backend runs and only the list goes to the original stdout.
   requires=$(PYTHONPATH=/tmp/build-requires uv run --no-project --python 3.14 python -c "
-import importlib, tomllib
+import importlib, os, tomllib
+out = os.fdopen(os.dup(1), \"w\")
+os.dup2(2, 1)
 system = tomllib.load(open(\"pyproject.toml\", \"rb\")).get(\"build-system\", {})
 module, _, attr = system.get(\"build-backend\", \"setuptools.build_meta:__legacy__\").partition(\":\")
 backend = importlib.import_module(module)
@@ -60,7 +64,7 @@ extra = set()
 for hook in (\"get_requires_for_build_editable\", \"get_requires_for_build_wheel\"):
     if hasattr(backend, hook):
         extra.update(getattr(backend, hook)())
-print(chr(10).join(sorted(extra)))
+out.write(chr(10).join(sorted(extra)))
 ") || requires=""  # a hook that needs the source: the offline sync says so
   if [ -n "$requires" ]; then
     mapfile -t reqs <<<"$requires"

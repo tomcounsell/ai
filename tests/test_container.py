@@ -649,17 +649,25 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
         container.stop_system()
 
 
+BACKENDS = {
+    "hatchling": '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+    '[tool.hatch.build.targets.wheel]\npackages = ["toy"]\n',
+    # Its hooks run egg_info, which logs `running egg_info` on stdout.
+    "setuptools": '[build-system]\nrequires = ["setuptools>=61"]\nbuild-backend = "setuptools.build_meta"\n'
+    '[tool.setuptools]\npackages = ["toy"]\n',
+}
+
+
 @pytest.mark.container
-def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path):
+@pytest.mark.parametrize("backend", sorted(BACKENDS))
+def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend):
     """`uv sync --frozen --extra dev` with a build system: the dependency
     image fetches it, and the VM installs the project offline."""
     project = tmp_path / "lock"
     project.mkdir()
     pyproject = (
         '[project]\nname = "toy"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n'
-        '[project.optional-dependencies]\ndev = ["iniconfig==2.1.0"]\n'
-        '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
-        '[tool.hatch.build.targets.wheel]\npackages = ["toy"]\n'
+        '[project.optional-dependencies]\ndev = ["iniconfig==2.1.0"]\n' + BACKENDS[backend]
     )
     (project / "pyproject.toml").write_text(pyproject)
     (project / "toy").mkdir()

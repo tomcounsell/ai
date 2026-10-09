@@ -2,7 +2,7 @@
 tracking: none
 slug: c5-vm-deps-redis
 type: build
-status: planned
+status: built
 stakes: low
 critique_rounds: 1
 review_rounds: 1
@@ -131,3 +131,40 @@ in the run, the tests after it error with the same `ConnectionError`; with
 None.
 
 ## Records
+
+### Build, round 1
+
+- `core/images/base/deps.sh`: the hook script writes the requirement list
+  to a duplicate of the original stdout and runs the backend with file
+  descriptor 1 on stderr.
+- `tests/test_container.py`: the popoto-shaped test runs for `hatchling`
+  and `setuptools`.
+- popoto spec: `--ignore=tests/test_connection.py` in
+  `docs/plans/cutover-data.md` and in the D1 spec
+  (`~/src/valor-build-notes/d1/popoto.toml`).
+
+Evidence:
+
+- `bash -n core/images/base/deps.sh` passes.
+- The hook step of `deps.sh`, run on this Mac: the `as_valor` argument is
+  captured by a stub `as_valor` that bash itself calls, then run with
+  bash 3's `read` in place of `mapfile` and the build requirements in a
+  scratch directory. Against a setuptools project with only
+  `pyproject.toml`, the base script exits 2 with "error: Failed to parse:
+  `running egg_info`" and the new one exits 0. Against a hatchling
+  project both exit 0 and the new one installs `editables`.
+- popoto at `e51903535669`, files `conftest.py`,
+  `test_confidence_modulated_decay.py`, `test_connection.py`,
+  `test_content_field.py`, with `REDIS_URL` at a scratch Redis on 6540 and
+  a sandbox profile denying `localhost:6379`: with `test_connection.py`,
+  1 failed, 47 passed, 20 errors, each "Error 1 connecting to
+  localhost:6379. Operation not permitted."; with
+  `--ignore=tests/test_connection.py`, 52 passed.
+- `tests/test_container.py -m "not container"`: 11 passed, 15 deselected.
+  Both container cases collect.
+- `uvx ruff check .`: all checks passed; `uvx ruff format --check .`: 325
+  files already formatted.
+
+Not run: the container test and the full suite. The Data volume had 739 MB
+free (the brief asks for 5 GB before a container run), and a full suite on
+that margin could fill the volume the resident kernel writes to.
