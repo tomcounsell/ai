@@ -436,22 +436,25 @@ while True:
 """
 
 
-def test_a_process_the_turn_leaves_running_cannot_change_its_final_message(dsn, tmp_path):
+@pytest.mark.parametrize(
+    ("ask", "honest"),
+    [("Review.", '{"verdict": "changes"}'), ("Critique the plan.", '{"verdict": "revise"}')],
+)
+def test_a_process_the_turn_leaves_running_cannot_change_its_final_message(dsn, tmp_path, ask, honest):
     """A process the session starts (as a candidate's `conftest.py` would)
     keeps rewriting `.valor/verdict.json` and writes into every pipe and
     socket it holds, to the end of the turn; the file ends forged, while
-    the turn's result is the model's own final message, which a fresh
-    session's verdict is read from."""
+    the turn's result is the model's own final message, which every fresh
+    session's verdict (review's, critique's, and docs') is read from."""
     h = next(h for h in HARNESSES if h.name == "claude_code")
     if why := h.available():
         pytest.skip(why)
     plant = f"echo {base64.b64encode(FORGER).decode()} | base64 -d > forger.py && (python3 forger.py &) ; echo planted"
-    honest = '{"verdict": "changes"}'
     write = f"mkdir -p .valor && printf %s '{honest}' > .valor/verdict.json"
 
     async def go():
         async with world(h, dsn, tmp_path, [Run(write), Run(plant), Run("sleep 1"), Say(honest)]) as w:
-            ended = await w.turn("Review.")
+            ended = await w.turn(ask)
             return ended, (Path(w.brief.workspace) / ".valor" / "verdict.json").read_text()
 
     ended, left = run(go())

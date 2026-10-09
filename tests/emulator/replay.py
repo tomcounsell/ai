@@ -353,9 +353,8 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
         log.append({"at": now(), "step": "waiting on the run lock"})
         wait_run_lock(task_id)
     elif not said.startswith(GOES_ON):
-        # NO RUNNER (a verdict recorded by hand, from a blind checkout of
-        # the mirror, lets the next invocation resume), FAILED, LOCK LOST,
-        # LEGACY, or an answer this driver does not know.
+        # NO RUNNER, FAILED, LOCK LOST, LEGACY, or an answer this driver
+        # does not know.
         result["paused"] = said or "core run said nothing"
 
 

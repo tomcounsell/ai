@@ -197,15 +197,20 @@ def test_a_head_the_kernel_cannot_take_keeps_nothing(dsn, tmp_path, how):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("bad", ["short_head", "symlink"])
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        ("short_head", "head"),
+        # A valid verdict left as a file is not the verdict: the final message is.
+        ("file_only", "the final message is not a JSON object"),
+    ],
+)
 @pytest.mark.macos
-def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(dsn, tmp_path, bad):
-    target = tmp_path / "elsewhere.json"
-    target.write_text('{"verdict": "no_change"}')
-    cfg = {"short_head": {"docs_head": "abc123"}, "symlink": {"fresh_acts": ["sound", "symlink"]}}[bad]
+def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(dsn, tmp_path, bad, why):
+    cfg = {"short_head": {"docs_head": "abc123"}, "file_only": {"fresh_acts": ["sound", "file_only"]}}[bad]
 
     async def go():
-        task, _b, ws = await at_checks(dsn, tmp_path, target=str(target), **cfg)
+        task, _b, ws = await at_checks(dsn, tmp_path, **cfg)
         first = await drive(dsn, task, docs_runners(ws))
         between = await rows(dsn, task)
         scripted.steer(ws, fresh_acts=["docs"], docs_verdict="no_change")
@@ -214,6 +219,7 @@ def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(d
 
     first, between, got = run(go())
     assert first["status"] == "failed" and decided(between) is None
+    assert why in str(first["turn"]["result"])
     assert not [r for r in between if r["type"] == fresh.DOCS_KEPT]
     assert decided(got)["verdict"] == "no_change"
     assert len([r for r in got if r["type"] == "test.decided"]) == 1

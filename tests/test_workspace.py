@@ -684,55 +684,6 @@ def git_repo(path) -> bool:
     return kgit.is_repo(str(path))
 
 
-def checks_with_verdict(tmp_path: Path, text: str = '{"verdict": "sound", "findings": []}') -> Path:
-    checks = tmp_path / "checks"
-    valor = checks / "critique-abc" / "repo" / ".valor"
-    valor.mkdir(parents=True)
-    (valor / "verdict.json").write_text(text)
-    return checks
-
-
-def test_a_verdict_is_moved_aside_then_read(tmp_path):
-    checks = checks_with_verdict(tmp_path)
-    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict == {"verdict": "sound", "findings": []} and why is None
-    valor = checks / "critique-abc" / "repo" / ".valor"
-    assert (valor / "handled" / "t1" / "verdict.json").is_file() and not (valor / "verdict.json").exists()
-    assert kws.read_verdict(checks, "critique-abc", "t2") == (None, "no .valor/verdict.json")
-
-
-def test_a_hard_linked_verdict_is_refused(tmp_path):
-    checks = checks_with_verdict(tmp_path)
-    outside = tmp_path / "outside.json"
-    outside.write_text('{"verdict": "sound", "findings": ["outside-marker"]}')
-    verdict_file = checks / "critique-abc" / "repo" / ".valor" / "verdict.json"
-    verdict_file.unlink()
-    os.link(outside, verdict_file)
-    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict is None and why == "verdict.json has 2 links"
-
-
-def test_a_sparse_verdict_is_refused_unread(tmp_path):
-    checks = checks_with_verdict(tmp_path)
-    with open(checks / "critique-abc" / "repo" / ".valor" / "verdict.json", "r+b") as f:
-        f.truncate(1 << 43)  # 8 TiB; ext4 holds up to 16 TiB
-    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict is None and why == f"verdict.json is sparse ({1 << 43} bytes claimed, 4096 on disk)"
-
-
-def test_a_check_directory_swapped_for_a_link_gives_no_verdict(tmp_path):
-    outside = tmp_path / "outside"
-    (outside / "repo" / ".valor").mkdir(parents=True)
-    (outside / "repo" / ".valor" / "verdict.json").write_text('{"verdict": "sound", "findings": []}')
-    before = sorted(str(p) for p in outside.rglob("*"))
-    checks = tmp_path / "checks"
-    checks.mkdir()
-    (checks / "critique-abc").symlink_to(outside)
-    verdict, why = kws.read_verdict(checks, "critique-abc", "t1")
-    assert verdict is None and why == "critique-abc is not a plain directory"
-    assert sorted(str(p) for p in outside.rglob("*")) == before
-
-
 @pytest.mark.macos
 def test_grafts_and_replace_refs_in_the_clone_do_not_reach_the_mirror(tmp_path):
     _task, made = provision(tmp_path)
@@ -1393,10 +1344,10 @@ def test_write_inputs_writes_nothing_through_what_it_finds(tmp_path):
     with pytest.raises(FileExistsError):
         kws.write_inputs(checkout, {"request.md": "x"})
     assert not (checkout / ".valor" / "inputs").exists()
-    # A verdict file placed where the kernel looks, bypassing its mkdir.
+    # A file placed where the kernel writes, bypassing its mkdir.
     planted = tmp_path / "planted"
     (planted / ".valor").mkdir(parents=True)
-    (planted / ".valor" / "verdict.json").write_text('{"verdict": "sound"}')
+    (planted / ".valor" / "plan.json").write_text('{"verdict": "sound"}')
     with pytest.raises(FileExistsError):
         kws.write_inputs(planted, {"request.md": "x"})
     target = tmp_path / "target.txt"
@@ -1455,19 +1406,6 @@ def test_an_orphan_directory_is_shown_and_removed_only_when_its_provisioning_is_
     assert removed.returncode == 0, removed.stderr
     assert not (work / orphan).exists()
     assert _cli(tmp_path, "workspace", "remove", orphan).returncode == 1
-
-
-def test_a_verdict_file_that_appears_after_the_kernels_mkdir_is_refused(tmp_path):
-    valor = tmp_path / ".valor"
-    valor.mkdir()
-    fd = os.open(valor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        kws.no_verdict_yet(fd)  # an empty .valor passes
-        (valor / "verdict.json").symlink_to(tmp_path / "nowhere")  # appeared after the kernel made .valor
-        with pytest.raises(FileExistsError, match="before the session's turn"):
-            kws.no_verdict_yet(fd)
-    finally:
-        os.close(fd)
 
 
 def _orphan_with_services(tmp_path):
@@ -1529,20 +1467,18 @@ def test_orphan_removal_refuses_a_directory_that_became_a_task(dsn, tmp_path, mo
         kws.stop_services(orphan, lay)
 
 
-def test_a_turn_file_is_read_whole_and_a_verdict_of_any_size_is_filed_away(tmp_path):
+def test_a_turn_file_is_read_whole_at_any_size(tmp_path):
     repo = tmp_path / "docs-abc" / "repo"
     valor = repo / ".valor"
     valor.mkdir(parents=True)
     big = {"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 400_000}]}
-    (valor / "verdict.json").write_text(json.dumps(big))
+    (valor / "plan.json").write_text(json.dumps(big))
     fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        body, why = kws.read_turn_file(fd, ".valor/verdict.json")
+        body, why = kws.read_turn_file(fd, ".valor/plan.json")
     finally:
         os.close(fd)
     assert why is None and json.loads(body) == big
-    assert kws.read_verdict(tmp_path, "docs-abc", "t1") == (big, None)
-    assert (valor / "handled" / "t1" / "verdict.json").exists() and not (valor / "verdict.json").exists()
 
 
 @pytest.mark.macos

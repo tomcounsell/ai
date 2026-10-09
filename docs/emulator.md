@@ -166,8 +166,7 @@ After each `core run` the driver reads the first word of its answer.
 `QUESTION`, `DELIVERED`, `STOPPED` and `MERGED` go on to the next step.
 `ALREADY RUNNING` waits on the task's run lock until it is free, then goes
 on. Every other answer exits the driver with the outcome unset and the
-answer recorded as the reason: `NO RUNNER` (a stage with no runner, whose
-verdict is recorded by hand from a blind checkout of the kernel mirror),
+answer recorded as the reason: `NO RUNNER` (a stage with no runner),
 `FAILED`, `LOCK LOST`, `LEGACY`, and any answer the driver does
 not know. A stage awaiting Tom's grant exits the same way. The next
 invocation resumes the same task.
@@ -305,7 +304,7 @@ gateway sets the kernel's login on the way out and writes a
 `gateway.opened` and a `gateway.charged` row per call. The driver drains
 the gateway before reading spend, since a charge lands after the response
 ends. A separate task keeps the item task's spending comparable with the
-baseline's kernel column. A check verdict recorded by hand is not metered.
+baseline's kernel column.
 
 ## What the first runs showed
 

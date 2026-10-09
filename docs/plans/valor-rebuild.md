@@ -274,9 +274,9 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   after the docs turn), and the test runner always passes `breadth`: `record_check`
   accepts neither as optional from a runner. The order of the breadth
   call and the suite is settled here.
-- Breadth and governance route on the entry check (both legs right on
-  every frozen case a human labelled, with a labelled `true` and a
-  labelled `false` present for every question) and log every row; floors are set from human labels
+- Breadth routes on its entry check (both legs right on each labelled
+  frozen case, a `true` and `false` per question); governance asks
+  all diffs, calibrated once a record passes; both log every row; floors are set from human labels
   once real tasks have produced thirty or more. No calibration-first
   machinery. Each re-checks Jev's worst-case overhead (`tools/jev.py`,
   sized from 35 single-question judge calls) against its own rows.

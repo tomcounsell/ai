@@ -69,19 +69,13 @@ feedback TASK_ID TEXT [--by B] [--role-played]
                                next run patches in the same session. `--by`
                                names who wrote it (default tom); `--role-played`
                                marks a stand-in speaking for Tom
-verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]...
-      [--governance PATH:LINE]... [--incident T]
-      [--mission-item N] [--head SHA] [--by B] [--via V] [--role-played]
-                               record by hand the verdict of a stage that has
-                               no runner (docs), `leg: manual`; every other
-                               stage has its runner
 grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
 status TASK_ID                 the task as a fold over its ledger: its state,
                                loops, candidate, checks, metered spending, and
                                the attention log (questions, answers, feedback,
-                               approvals, manual verdicts, grants) and its counts;
+                               approvals, grants) and its counts;
                                its parent, its children's reports, and the
                                metered spending of its whole subtree; and
                                what came after each merge (feedback after it,
@@ -121,7 +115,7 @@ backup [--plist]               dump the kernel database to the backup disk and
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
-This module is the composition root: `run`, `verdict`, and
+This module is the composition root: `run` and
 `calibrate` wire the Claude Code harness, the judgement legs, the runners,
 and the workspace performers into the kernel. Nothing else in `core/`
 imports outside it.
@@ -159,7 +153,6 @@ from core import (
     tasks,
     workspace,
 )
-from core import verdicts as verdicts_
 from core.machine import Check, State
 from core.settings import (
     JEV_KEY,
@@ -245,9 +238,8 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
     """The runner for each state and check this kernel can run.
-    Review asks governance through `judgement_port`, as test asks breadth.
-    Docs has none while governance's entry check fails: its verdict is
-    recorded by hand (`verdict`)."""
+    Review and docs ask governance through `judgement_port`, as test asks
+    breadth."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
@@ -257,11 +249,8 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         State.CRITIQUE: fresh.critique_runner(_fresh_for),
         Check.TEST: checks.test_runner(judgement_port),
         Check.REVIEW: fresh.review_runner(_fresh_for, judgement_port),
+        Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port),
     }
-
-
-# The stages that have a runner, for the manual verdict's refusal.
-RUNNERS: dict = runners(None)
 
 
 def _usd(micros: int) -> str:
@@ -296,8 +285,7 @@ def _status_line(task_id: str, out: dict) -> str:
     if status == "no runner":
         missing = out["missing"]
         stage = state.get("state")
-        how = "; ".join(f"python -m core verdict {task_id} {m} VERDICT" for m in missing)
-        return f"NO RUNNER (task {task_id}, in {stage}; {spent}): no runner for {', '.join(missing)} yet; record by hand: {how}"
+        return f"NO RUNNER (task {task_id}, in {stage}; {spent}): no runner for {', '.join(missing)}"
     turn = out.get("turn") or {}
     detail = {
         "stopped": "stopped",
@@ -593,36 +581,6 @@ async def _orphan(conn, args, *, after_lock=None) -> str:
     return f"removed {lay.root}, which no task row names"
 
 
-def _instance(spec: str, args) -> verdicts_.InstanceSpec:
-    path, _, line = spec.rpartition(":")
-    if not path or not line.isdigit():
-        raise SystemExit(f"--governance takes PATH:LINE, not {spec!r}")
-    return verdicts_.InstanceSpec(path, int(line), args.summary or "", args.incident, args.mission_item)
-
-
-async def _verdict(conn, args) -> str:
-    stage = verdicts_.MANUAL_STAGES.get(args.stage)
-    if stage is None and args.stage in {k.value for k in RUNNERS}:
-        raise SystemExit(f"{args.stage} has a runner; its verdict is the runner's to record")
-    if stage is None:
-        raise SystemExit(f"no manual verdict for {args.stage}; one of {', '.join(verdicts_.MANUAL_STAGES)}")
-    verdicts_.manual_allowed(stage, RUNNERS)
-    who = {"by": args.by, "via": args.via, "role_played": args.role_played}
-    performers = _performers(await tasks.brief(conn, args.task_id))
-    await verdicts_.record_check(
-        conn,
-        args.task_id,
-        stage,
-        args.verdict,
-        findings=args.finding,
-        governance=[_instance(g, args) for g in args.governance],
-        **who,
-    )
-    await verdicts_.ensure_merge(conn, performers, args.task_id)
-    state = await tasks.status(conn, args.task_id)
-    return f"recorded {args.stage} {args.verdict}; task {args.task_id} is in {state['state']}"
-
-
 async def _run(args) -> None:
     if args.command == "run":
         print(await _run_task(args.task_id))
@@ -715,11 +673,6 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"feedback {feedback_id} recorded; continue with: python -m core run {args.task_id}")
-        elif args.command == "verdict":
-            try:
-                print(await _verdict(conn, args))
-            except (LookupError, ValueError) as exc:
-                raise SystemExit(str(exc.args[0] if exc.args else exc)) from None
         elif args.command == "grant":
             try:
                 guard_id = await guards.grant(
@@ -977,18 +930,6 @@ def main() -> None:
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
-    verdict = sub.add_parser("verdict")
-    verdict.add_argument("task_id")
-    verdict.add_argument("stage")
-    verdict.add_argument("verdict")
-    verdict.add_argument("--finding", action="append", default=[])
-    verdict.add_argument("--governance", action="append", default=[])
-    verdict.add_argument("--summary")
-    verdict.add_argument("--incident")
-    verdict.add_argument("--mission-item")
-    verdict.add_argument("--by", default="tom")
-    verdict.add_argument("--via", default="the command line")
-    verdict.add_argument("--role-played", action="store_true")
     grant = sub.add_parser("grant")
     grant.add_argument("task_id")
     grant.add_argument("instance")

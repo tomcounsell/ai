@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 from core import db, fresh, ledger, machine, router, session, signals, tasks
-from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import State
 from tests import scripted
@@ -106,12 +105,11 @@ def test_turn_files_are_read_off_the_event_loop(dsn, tmp_path, monkeypatch):
 
         monkeypatch.setattr(owner, name, wrapped)
 
-    off_loop(kws, "read_verdict")
     off_loop(signals, "collect")
     off_loop(session, "_verdict")
     out = run(drive(dsn, task, scripted.fresh_runners(ws)))
     assert out["missing"] == ["test", "review", "docs"]
-    assert seen == {"read_verdict": [False], "collect": [False], "_verdict": [False]}
+    assert seen == {"collect": [False], "_verdict": [False]}
 
 
 @pytest.mark.macos
@@ -171,11 +169,9 @@ def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
     ("act", "why"),
     [
         ("fail", None),
-        ("none", "no .valor/verdict.json"),
-        ("malformed", "not JSON"),
-        ("symlink", "verdict.json is a link, not a plain file"),
-        ("fifo", "not a regular file"),
-        ("dir_symlink", ".valor is not a plain directory"),
+        ("malformed", "the final message is not a JSON object"),
+        # A valid verdict left as a file is not the verdict: the final message is.
+        ("file_only", "the final message is not a JSON object"),
         (
             "nul",
             "the critique.decided row: the ledger's JSON (Postgres jsonb) cannot store it: Untranslatable",

@@ -1077,9 +1077,21 @@ def test_a_leg_that_is_always_rate_limited_is_scored_failed_after_one_further_pa
         judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, "governance.adds", cases))
     )
     ow = record["cases"][1]["open_weight"]
-    assert (ow["answered"], ow["decision"], ow["verdict"], ow["correct"]) == (False, "failed", "caution", False)
+    assert (ow["answered"], ow["decision"], ow["verdict"], ow["correct"]) == (
+        False,
+        "failed",
+        "caution",
+        False,
+    )
     assert record["legs"]["open_weight"]["asked_again"] == 2 and record["entry_check"] is False
-    assert [x["leg"] for x in UP.seen(sid)] == ["jev", "open_weight", "jev", "open_weight", "open_weight", "open_weight"]
+    assert [x["leg"] for x in UP.seen(sid)] == [
+        "jev",
+        "open_weight",
+        "jev",
+        "open_weight",
+        "open_weight",
+        "open_weight",
+    ]
 
 
 def test_a_re_ask_waits_for_the_providers_retry_after(dsn, tmp_path, monkeypatch):

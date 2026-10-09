@@ -242,7 +242,9 @@ def test_the_emulator_task_is_a_calibration_task_every_writer_refuses(dsn, tmp_p
             with pytest.raises(guards.GrantRefused, match="calibration"):
                 await guards.grant(conn, task, "i1", note="x")
             with pytest.raises(verdicts.VerdictRefused, match="calibration"):
-                await verdicts.record_check(conn, task, Check.REVIEW, "pass", governance_from=[])
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "pass", governance_from=[], **scripted.SESSION_LEG
+                )
         gateway = Gateway(dsn)
         await gateway.start(port=listen())
         try:
@@ -613,33 +615,25 @@ def test_the_cli_runs_as_a_module():
     assert out.returncode == 0 and "--run" in out.stdout and "--stand-in-model" in out.stdout
 
 
-# The composition root's runners: every stage the state machine schedules has
-# one, except docs, which the plan leaves hand-played while governance's
-# calibration entry check fails (docs/plans/m1-5-emulator.md, m1-4b-records.md).
-
 # The router settles these itself (a question for Tom, the merge, an end); every
-# other state, and every check but docs, is run by a runner.
+# other state, and every check, is run by one of the composition root's runners.
 SETTLED = {machine.State.WAITING, machine.State.MERGE, machine.State.MERGED, machine.State.STOPPED}
-MANUAL = {Check.DOCS}
 
 
-def test_every_stage_the_state_machine_schedules_has_a_runner_but_docs():
-    from core.__main__ import RUNNERS, runners
+def test_every_stage_the_state_machine_schedules_has_a_runner():
+    from core.__main__ import runners
 
     scheduled = {s for s in machine.State if s not in SETTLED and s is not machine.State.CHECKS} | set(Check)
-    assert set(runners(None)) == scheduled - MANUAL == set(RUNNERS)
+    assert set(runners(None)) == scheduled
 
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_verdict(
-    monkeypatch, dsn, tmp_path
-):
+def test_review_and_docs_are_run_by_the_kernels_runners_in_one_driver_step(monkeypatch, dsn, tmp_path):
     """The kernel's own `runners()`, its fresh sessions played by the scripted
     session and its judgement port the local upstream answering `false`,
-    carry critique, build, test, and review in one `core run` the driver
-    makes; docs has no runner, so the driver pauses on `NO RUNNER` and the
-    docs verdict recorded by hand completes the delivery."""
+    carry critique, build, test, review, and docs in one `core run` the
+    driver makes, to the held merge."""
     import core.__main__ as kernel
     from tests import judgement_upstream, test_checks
 
@@ -647,7 +641,8 @@ def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_
         task, _b, ws = await test_checks.to_candidate(
             dsn, tmp_path, writes={"greeting.txt": "hi\n"}, suite=test_checks.VM_SUITE
         )
-        scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review"])
+        scripted.steer(ws, critique="sound", build="reasons", fresh_acts=["sound", "review", "docs"],
+                       docs_verdict="no_change")  # fmt: skip
         return task, ws
 
     task, ws = asyncio.run(at_critique())
@@ -658,19 +653,10 @@ def test_review_is_run_by_the_kernels_runner_and_docs_pauses_the_driver_for_its_
         **{s: r for s, r in scripted.RUNNERS.items() if s in machine.WORKING},
     }
     result = _step_real(monkeypatch, dsn, task, runners=everything)
-    assert result["outcome"] is None and result["paused"].startswith("NO RUNNER"), result
-    assert "no runner for docs yet" in result["paused"]
+    assert result["outcome"] is None and "paused" not in result, result
+    assert result["log"][-1]["said"].startswith("DELIVERED"), result
     got = asyncio.run(_rows(dsn, task))
     assert [r["payload"]["leg"] for r in got if r["type"] == "review.decided"] == ["session"]
-    assert machine.fold(got).state is machine.State.CHECKS
-
-    out = subprocess.run(
-        [sys.executable, "-m", "core", "verdict", task, "docs", "no_change", "--by", "test", "--role-played"],
-        cwd=Path(__file__).resolve().parent.parent, env={**os.environ, "VALOR_DB": TEST_DB},
-        capture_output=True, text=True, check=False,
-    )  # fmt: skip
-    assert out.returncode == 0, out.stderr
-    got = asyncio.run(_rows(dsn, task))
-    assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["manual"]
-    merged = machine.fold(got)  # the verdict requests the merge, performed at request
+    assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["session"]
+    merged = machine.fold(got)  # the docs verdict requests the merge, performed at request
     assert merged.state is machine.State.MERGED and merged.merge_effect["state"] == "done"

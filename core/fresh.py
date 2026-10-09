@@ -34,12 +34,10 @@ A fresh session gets:
   no effect;
 - one turn, recorded with `fresh: true`, whose session is never resumed.
 
-Critique's and docs' verdict is `.valor/verdict.json`, read without
-following links or blocking (`workspace.read_verdict`). Review's is the
-session's final message, read from the turn's result on the harness's
-stdout (`final_verdict`): the reviewer runs the candidate's code, and a
-process that code leaves running can rewrite any file in the checkout to
-the end of the turn, but cannot write that pipe. The kernel validates the
+Each stage's verdict is the session's final message, read from the turn's
+result on the harness's stdout (`final_verdict`): a process the session
+starts, such as the candidate's code the reviewer runs, can rewrite any
+file in the checkout to the end of the turn, but cannot write that pipe. The kernel validates the
 verdict and writes the verdict row. A turn that fails, is stopped, or leaves no valid verdict
 writes no verdict: the runner returns `failed` (or `stopped`), and the next
 run starts the stage again.
@@ -136,7 +134,7 @@ def prompt(files: list[str]) -> str:
 
 
 class Malformed(ValueError):
-    """A verdict file the kernel will not record."""
+    """A verdict the kernel will not record."""
 
 
 def _verdict_fields(data: dict[str, Any]) -> tuple[str, list, dict[str, int]]:
@@ -144,7 +142,7 @@ def _verdict_fields(data: dict[str, Any]) -> tuple[str, list, dict[str, int]]:
     findings = data.get("findings") or []
     raised = data.get("raise") or {}
     if not isinstance(verdict, str):
-        raise Malformed("verdict.json names no verdict")
+        raise Malformed("the verdict names no verdict")
     if not isinstance(findings, list) or not all(isinstance(x, (dict, str)) for x in findings):
         raise Malformed("findings is not a list of findings")
     for x in findings:
@@ -244,9 +242,7 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
             return {"status": "failed", "state": now, "turn": ended}
-        data, why = await asyncio.to_thread(
-            workspace.read_verdict, lay.checks, check_dir.name, ended["turn_id"]
-        )
+        data, why = final_verdict(ended["result"].get("text"))
         if data is None:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         if not await ctx.alive():
@@ -558,7 +554,7 @@ async def _docs_turn(
         return {"status": "stopped", "state": now, "turn": ended}
     if ended["outcome"] != "done" or ended["result"].get("is_error"):
         return {"status": "failed", "state": now, "turn": ended}
-    data, why = await asyncio.to_thread(workspace.read_verdict, lay.checks, check_dir.name, ended["turn_id"])
+    data, why = final_verdict(ended["result"].get("text"))
     if data is None:
         return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
     try:
@@ -733,7 +729,7 @@ def _fenced_bodies(text: str) -> list[str]:
 
 
 def final_verdict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
-    """The reviewer's verdict: its final message when that is a bare JSON
+    """A fresh session's verdict: its final message when that is a bare JSON
     object or one fenced block of one, else the last complete fenced block
     in it whose body is a JSON object, so prose may come before the
     verdict. The kernel reads it from the turn's result on the harness's

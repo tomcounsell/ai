@@ -227,14 +227,12 @@ verdict comes from the failures alone (`red` or `pass`, never `gaps`), so
 an uncalibrated breadth never routes a candidate to repair. A site whose
 record passes its entry check lands with `BREADTH.calibrated` or
 `GOVERNANCE.calibrated` set to the record's `task_sha256`; from then
-breadth's behaviors route as `gaps`, and the docs runner is registered in
-`core/__main__.runners`. The floors keep their values;
+breadth's behaviors route as `gaps`. The floors keep their values;
 the comment "provisional: set by 1.4's calibration record" becomes "set
 from human labels once real tasks have produced thirty or more rows",
-which is the Done item. If governance's entry check fails, the docs
-runner's code still lands, but it is not registered and `docs` stays on
-the manual `verdict` path until a record passes the entry check and a
-later commit registers it. The failure is recorded in the build record;
+which is the Done item. The docs runner is registered in
+`core/__main__.runners` without a passing record (`a3-docs-runner.md`).
+If governance's entry check fails, the failure is recorded in the build record;
 the build does not stop or ask Tom. Nothing in the kernel reads a record
 at run time.
 

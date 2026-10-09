@@ -24,8 +24,7 @@ add a check, gate, hook, round, or review step?
 **Exit evidence.** Your final message ends with the verdict object, bare
 or in a fenced json block; prose before it is read past. The kernel reads it from your session's result, which
 nothing the checks you run can write; a file in the checkout can be
-rewritten by the candidate's code to the end of your turn, so the kernel
-reads no verdict file here. The object:
+rewritten by the candidate's code to the end of your turn. The object:
 
 - `verdict`: `pass` or `changes`, your judgement of the work;
 - `findings`: each with a kind (`debt` for related tech debt worth

@@ -8,10 +8,8 @@ then requests the merge effect, and the router calls it again on every run
 that finds the task in `merge`, so a crash between the two strands nothing.
 
 The judge's verdict is the kernel's reading of a judgement row
-(`record_judge`); nobody records it by hand. A stage with no runner (docs,
-while governance's entry check fails) has its verdict recorded by hand
-(`python -m core verdict`), each row `leg: manual` with provenance.
-`manual_allowed` refuses a stage that has a runner. A test verdict given
+(`record_judge`). Every other verdict is its runner's: a fresh session's
+(`leg: session`) or the kernel's own (`leg: kernel`). A test verdict given
 a breadth judgement, and a review or docs verdict given governance
 judgements, read those rows themselves: the behaviors and instances come
 from the kernel's tables, never from the caller's text.
@@ -24,10 +22,6 @@ from typing import Any
 from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks
 from core.machine import Check, State
 
-MANUAL_STAGES: dict[str, State | Check] = {
-    "review": Check.REVIEW,
-    "docs": Check.DOCS,
-}
 # What a reviewer's session answers; the recorded review verdict is computed
 # from it (`review_verdict`).
 REVIEWER_VERDICTS = ("pass", "changes")
@@ -35,11 +29,6 @@ REVIEWER_VERDICTS = ("pass", "changes")
 
 class VerdictRefused(LookupError):
     pass
-
-
-def manual_allowed(stage: State | Check, runners: Mapping) -> None:
-    if stage in runners:
-        raise VerdictRefused(f"{stage} has a runner; its verdict is the runner's to record")
 
 
 @dataclass(frozen=True)
@@ -71,10 +60,6 @@ async def _fold(conn, task_id: str, *stages: State) -> tuple[list[dict], machine
     return rows, f
 
 
-def _manual(leg: str, by: str, via: str, role_played: bool) -> dict[str, Any]:
-    return {"provenance": ledger.provenance(by, via, role_played)} if leg == "manual" else {}
-
-
 def _session_leg(
     leg: str, turn_id: str | None, model: str | None, suites: list[int] | None = None
 ) -> dict[str, Any]:
@@ -82,8 +67,6 @@ def _session_leg(
     model; one with neither is refused. A `kernel` verdict (the test
     runner's, which runs no model turn) names the `suite.ran` rows it read
     in place of a turn."""
-    if leg == "manual":
-        return {}
     if leg == "kernel":
         if not suites:
             raise VerdictRefused("a kernel verdict names the suite.ran rows it read")
@@ -144,8 +127,7 @@ async def record_judge(conn, task_id: str, judgement_id: str) -> int:
 
 async def record_critique(
     conn, task_id: str, verdict: str, *, findings: Iterable = (), raised: Mapping[str, int] | None = None,
-    leg: str = "manual", model: str | None = None, usd_micros: int = 0, by: str = "tom",
-    via: str = "the command line", role_played: bool = False, turn_id: str | None = None,
+    leg: str, model: str | None = None, usd_micros: int = 0, turn_id: str | None = None,
     plan_sha256: str | None = None,
 ) -> int:  # fmt: skip
     """`plan_sha256`, when given, is the plan the session read; a verdict on
@@ -166,7 +148,6 @@ async def record_critique(
             "model": model,
             "usd_micros": usd_micros,
             **({} if leg == "kernel" else _session_leg(leg, turn_id, model)),
-            **_manual(leg, by, via, role_played),
         }
         sent_back = verdict == "revise" and _would(rows, "critique.decided", payload).state is State.PLAN
         payload["guard_id"] = machine.GUARD_CRITIQUE if sent_back else None
@@ -200,9 +181,9 @@ def _instances(workspace: str, older: str, newer: str, specs: Iterable[InstanceS
 async def record_check(
     conn, task_id: str, check: Check, verdict: str | None, *, findings: Iterable = (),
     governance: Iterable[InstanceSpec] = (), head: str | None = None, command: str | None = None,
-    failures: Iterable[str] = (), behaviors: Iterable[str] = (), leg: str = "manual",
-    model: str | None = None, usd_micros: int = 0, by: str = "tom", via: str = "the command line",
-    role_played: bool = False, breadth: str | None = None, governance_from: Iterable[str] | None = None,
+    failures: Iterable[str] = (), behaviors: Iterable[str] = (), leg: str,
+    model: str | None = None, usd_micros: int = 0,
+    breadth: str | None = None, governance_from: Iterable[str] | None = None,
     notes: Mapping[str, Mapping[str, Any]] | None = None, turn_id: str | None = None,
     deleted_at_head: Iterable[str] = (), failing_at_base: Iterable[str] = (),
     suites: Iterable[int] | None = None, dropped: Iterable[Mapping[str, Any]] = (),
@@ -219,12 +200,12 @@ async def record_check(
     `verdict` None and have it computed. While breadth has no calibration
     record (`judgement_tasks.BREADTH.calibrated` is None) its behaviors are
     information only: listed under `breadth.information` and in the
-    delivery, never `gaps`. A test, review, or docs verdict not recorded by
-    hand must name its judgements (`breadth`, `governance_from`), except
+    delivery, never `gaps`. A test, review, or docs verdict must name its
+    judgements (`breadth`, `governance_from`), except
     a `kernel` docs or review verdict, which names no turn (the docs and
     review runners record one, `changes`, on a candidate whose tree holds
     `.valor`; the docs runner's names no judgement either).
-    A docs head not recorded by hand must already sit in the mirror under
+    A docs head must already sit in the mirror under
     a `refs/valor/docs/` ref (the docs runner fetched it and cut it to the
     commits it keeps; `dropped` lists the rest); nothing is fetched here.
     `governance_from` (review and docs) names one
@@ -236,7 +217,7 @@ async def record_check(
     verdict as unanswered, so the branch has none and the next run asks
     again.
 
-    A review not recorded by hand gives the reviewer's own `verdict`,
+    A review gives the reviewer's own `verdict`,
     `pass` or `changes`; the recorded verdict is computed (`review_verdict`)
     and the reviewer's kept as `reviewer_verdict`, with `predicted_failure`,
     `requirements`, and `verify` (the `verify.ran` event the review read).
@@ -244,15 +225,15 @@ async def record_check(
     `verify` and the computed verdict, and no `reviewer_verdict`."""
     failures, behaviors = list(failures), list(behaviors)  # once: a generator is read one time
     suites = list(suites) if suites is not None else None
-    if leg != "manual" and check is Check.TEST and breadth is None:
-        raise VerdictRefused("a test verdict not recorded by hand names its breadth judgement")
-    if leg not in ("manual", "kernel") and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
-        raise VerdictRefused(f"a {check.value} verdict not recorded by hand names its governance judgements")
+    if check is Check.TEST and breadth is None:
+        raise VerdictRefused("a test verdict names its breadth judgement")
+    if leg != "kernel" and check in (Check.REVIEW, Check.DOCS) and governance_from is None:
+        raise VerdictRefused(f"a {check.value} verdict names its governance judgements")
     if leg == "kernel" and check is Check.REVIEW and verdict != "changes":
         raise VerdictRefused("a kernel-leg review is changes: no reviewer ran to pass it")
     if verdict is None and leg != "kernel":
-        raise VerdictRefused("a verdict recorded by hand or by a session names its verdict")
-    if leg != "manual" and check is Check.REVIEW and verdict not in REVIEWER_VERDICTS:
+        raise VerdictRefused("a session's verdict names its verdict")
+    if check is Check.REVIEW and verdict not in REVIEWER_VERDICTS:
         raise VerdictRefused(f"a reviewer's verdict is one of {', '.join(REVIEWER_VERDICTS)}")
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
@@ -271,7 +252,6 @@ async def record_check(
                 if leg == "kernel" and check is not Check.TEST
                 else _session_leg(leg, turn_id, model, suites)
             ),
-            **_manual(leg, by, via, role_played),
         }
         specs = list(governance)
         # A task the kernel provisioned keeps its commits in the kernel
@@ -350,8 +330,7 @@ async def record_check(
                         "unjudged_hunks": [h.id for h, _ in judged["unjudged"]],
                     }
                 )
-            ungranted = [i for i in instances if i["id"] not in f.granted]
-            if check is Check.REVIEW and leg != "manual":
+            if check is Check.REVIEW:
                 computed, added = review_verdict(verdict, instances, f.granted)
                 payload["verdict"] = computed
                 payload["findings"] += added
@@ -360,16 +339,6 @@ async def record_check(
                     payload["reviewer_verdict"] = verdict
                     payload["predicted_failure"] = predicted_failure
                     payload["requirements"] = list(requirements)
-            elif check is Check.REVIEW:
-                if verdict == "pass" and ungranted:
-                    raise VerdictRefused(
-                        "a review naming an ungranted governance instance is governance_refused"
-                    )
-                if verdict == "governance_refused" and not ungranted:
-                    raise VerdictRefused(
-                        "governance_refused names at least one instance not yet granted; "
-                        "with every instance granted, such a review is pass"
-                    )
         elif specs:
             raise VerdictRefused("only review and docs answer the governance boolean")
         kind = f"{check.value}.decided"
@@ -399,8 +368,8 @@ def governance_instances(
     notes: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:  # fmt: skip
     """The instances of a review or docs diff: the hunks the governance
-    judgements `ids` make instances (none when `ids` is None, a verdict
-    recorded by hand), `_union`ed with the reviewer's `specs`, the
+    judgements `ids` make instances (none when `ids` is None, a kernel
+    verdict), `_union`ed with the reviewer's `specs`, the
     unjudged-hunk instance when there is one, and `notes` attached.
     Returns (instances, `governance_outcome`'s reading or None). Raises
     `VerdictRefused` on unusable or unanswered judgements, and `git.GitError`

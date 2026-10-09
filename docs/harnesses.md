@@ -200,15 +200,15 @@ The kernel's support today: the working session for every row above, and
 critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
-verdict channel (`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
-`.valor/verdict.json`, read by the same walk as the signals. Docs runs the
+verdict channel (`skills/sdlc/verdict.md`) in its Brief, and its verdict
+as its final message. Docs runs the
 same way in its own clone (`fresh.docs_runner`). Review
 (`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
 Redis, the kernel's suite and lint run in VMs (`verify.ran`) among its
 inputs.
 The reviewer runs the candidate's code, and a process that code leaves
 running can rewrite any file in the checkout until the turn is reaped, so
-review's verdict is the session's final message, read from the turn's
+each stage's verdict is the session's final message, read from the turn's
 result on the harness's stdout, which no process the session starts holds
 (`fresh.final_verdict`).
 Its setup runs under a profile that writes the checkout, its caches,
@@ -216,8 +216,7 @@ and its own `setup-tmp/`, never a `.git` in the checkout or the checkout
 directory itself, and reads the services' password file, so the candidate's setup cannot write the session's Pi or
 Claude Code directory, its `TMPDIR`, or the repository whose config and
 commit subjects Claude Code reads at start.
-Review is registered in the kernel's `runners()`; docs is registered once
-governance's judgement passes its entry check.
+Review and docs are registered in the kernel's `runners()`.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its
 `turn.collected`) and what became of the effects it requested, read from the ledger now, so a push

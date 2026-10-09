@@ -1687,8 +1687,7 @@ def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     """Make `.valor/inputs/` in a checkout the kernel just made and write each
     input there, every step relative to a descriptor: `.valor` must not
     exist yet, nothing is followed through a link, and no file is
-    overwritten. So nothing committed in the tree can redirect a write, and
-    no verdict file exists before the session's turn."""
+    overwritten. So nothing committed in the tree can redirect a write."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     root = os.open(checkout, flags)
     fds = [root]
@@ -1700,20 +1699,9 @@ def write_inputs(checkout: Path, files: dict[str, str]) -> None:
         inputs = os.open("inputs", flags, dir_fd=valor)
         fds.append(inputs)
         write_files(inputs, files)
-        no_verdict_yet(valor)
     finally:
         for fd in reversed(fds):
             os.close(fd)
-
-
-def no_verdict_yet(valor_fd: int) -> None:
-    """Refuse a `.valor` that already holds a verdict file (or anything by
-    that name) before the session's turn."""
-    try:
-        os.stat("verdict.json", dir_fd=valor_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    raise FileExistsError("a verdict file exists before the session's turn")
 
 
 def write_files(dir_fd: int, files: dict[str, str]) -> None:
@@ -1912,44 +1900,6 @@ def _remove_unread(dir_fd: int, name: str, why: str) -> str:
     except OSError:
         return f"{why}; left in place unread"
     return f"{why}; removed unread"
-
-
-def read_verdict(checks: Path, name: str, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    """The verdict a fresh session left at `<checks>/<name>/repo/.valor/verdict.json`,
-    walked from the kernel's checks directory without following a link at
-    any component (the check directory included, which the session can
-    replace) and without blocking; moved to `.valor/handled/<turn_id>/`
-    first and read there. Returns (verdict, why not)."""
-    try:
-        root = os.open(checks, DIR_FLAGS)
-    except OSError as exc:
-        return None, f"the checks directory cannot be opened: {exc.strerror}"
-    try:
-        valor, why = open_turn_dir(root, f"{name}/repo/.valor")
-        if valor is None:
-            return None, why or "no .valor/verdict.json"
-        try:
-            dest, why = _file_away(valor, "verdict.json", valor, turn_id)
-            if dest is None:
-                return None, why or "no .valor/verdict.json"
-            try:
-                body, why = read_turn_file(dest, "verdict.json")
-            finally:
-                if dest != valor:
-                    os.close(dest)
-        finally:
-            os.close(valor)
-    finally:
-        os.close(root)
-    if body is None:
-        return None, why or "no .valor/verdict.json"
-    try:
-        data = json.loads(body)
-    except ValueError:
-        return None, "verdict.json is not JSON"
-    if not isinstance(data, dict):
-        return None, "verdict.json is not a JSON object"
-    return data, None
 
 
 # -- a check's own services and caches -------------------------------------------------------

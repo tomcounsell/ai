@@ -88,11 +88,9 @@ file for its state from `skills/sdlc/`.
 
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
 `build`, `patch`, `critique` (a fresh session, `core/fresh.py`, on a
-workspace the kernel provisioned), `checks.test` (`core/checks.py`), and `checks.review`
-(`fresh.review_runner`). `checks.docs` has none: the docs runner (`fresh.docs_runner`) is registered once governance's judgement has a calibration record on the real ledger that passes its entry check. Where a
-stage has no runner the router stops there and says so, and a person records the verdict with `python -m core verdict TASK
-STAGE VERDICT` (`leg: manual`, with provenance), which refuses a stage that
-has a runner.
+workspace the kernel provisioned), `checks.test` (`core/checks.py`), `checks.review`
+(`fresh.review_runner`), and `checks.docs` (`fresh.docs_runner`). Where a
+stage has no runner the router stops there and says so.
 
 **Tasks from before the machine.** A `task.started` without `sdlc: 1` is
 legacy and folds read-only by the old kernel's precedence (stopped; a

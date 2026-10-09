@@ -5,7 +5,7 @@ forces an arm); run until Valor asks Tom a question; answer; run through the
 plan, the fresh critique session, and the build until Valor builds a
 candidate and requests a push; the test runner over the spec's suite
 (`true`, so the suite was not run); the review runner's fresh session;
-docs by hand; the push and the merge are done at request; the
+the docs runner's fresh session; the push and the merge are done at request; the
 bare origin gets both; every turn's Brief carried the corrections and its
 stage.
 
@@ -13,7 +13,7 @@ Every turn runs under the kernel's sandbox profiles, with its own Claude Code
 config directory and the gateway supplying the credential.
 
 Live spend: metered by the gateway: Haiku working turns, one Opus
-critique, and the review session at its seat's model, a bound not yet
+critique, and the review and docs sessions at their seats' models, a bound not yet
 measured with review. Runs only when
 `VALOR_LIVE=1`.
 """
@@ -83,7 +83,6 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     )  # fmt: skip
     shown = json.loads(core("workspace", "show", task))
     origin = Path(shown["push_url"])
-    who = ["--by", "live test", "--role-played"]
 
     def rows(kind: str) -> list[dict]:
         async def read():
@@ -96,13 +95,10 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     core("answer", task, "Say exactly: Morning, Tom.")
     # The plan is written, the fresh critique session reads it (sending it
     # back at most as often as the plan's counts allow), and the build runs:
-    # the test and review runners record their verdicts, and the candidate
-    # waits on docs, recorded by hand.
-    assert core("run", task).startswith("NO RUNNER")
+    # the test, review and docs runners record their verdicts, and the merge is done.
+    assert core("run", task).startswith("MERGED")
     state = json.loads(core("status", task))
     candidate = state["candidate"]["sha"]
-    core("verdict", task, "docs", "no_change", *who)
-    state = json.loads(core("status", task))
     assert state["state"] == "merged" and state["merge_effect"]["state"] == "done"
     # The plan and the build stages may each push their own commits; every
     # push and the merge is done at request, with no tap.
@@ -124,7 +120,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     assert tested["leg"] == "kernel" and tested["command"] == "true" and tested["verdict"] == "pass"
     assert {r["leg"] for r in rows("review.decided")} == {"session"}
     documented = rows("docs.decided")[0]
-    assert documented["leg"] == "manual" and documented["verdict"] == "no_change"
+    assert documented["leg"] == "session"
     started = rows("turn.started")
     assert len(started) >= 3
     assert "# Stage: plan" in started[0]["brief"]

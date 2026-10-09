@@ -6,8 +6,8 @@ What it shows, live: the session runs under its own sandbox profile (the
 work directory, `/private/tmp`, `/private/var/folders`, and the user's
 Claude Code state denied), with its own `TMPDIR` and Claude Code config
 directory, carrying only a placeholder credential that the gateway replaces
-with the kernel's; it reads its inputs and gives its verdict (critique as
-`.valor/verdict.json`, review as its final message), and the kernel records the verdict with the turn's metered spend. Its
+with the kernel's; it reads its inputs and gives its verdict as its final message, and the
+kernel records the verdict with the turn's metered spend. Its
 transcript lands in its own config directory, not in the user's.
 
 The critique runs a light model to keep the spend small (the critique seat

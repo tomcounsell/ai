@@ -240,8 +240,7 @@ file claims a size the turn never wrote), and only up to the size it
 checked, in a worker thread off the router's event loop; anything else, and
 an entry that vanishes before it is read, is recorded as unreadable with
 its reason, never its contents, and an entry that cannot be moved is
-removed unread (`core/workspace.py`). The same walk reads a critique or docs session's verdict file from the
-kernel's checks directory; a review session's verdict is its final message,
+removed unread (`core/workspace.py`). A critique, docs, or review session's verdict is its final message,
 read from the turn's result on the harness's stdout. `turn.collected` records what the turn left, its
 state, its verdict, the screens `look` kept (name and size each, or the
 reason one was refused), and what was unreadable; `task.delivered` waits
@@ -319,7 +318,7 @@ already holds is read with the rest.
 Each carries provenance: `by`, `via`, `at`, and `role_played`, true when
 someone stood in for Tom. `tasks.status` folds these into the task's
 attention log, in ledger order, labelled by kind (`question`, `feedback`,
-`approval`, `verdict` for a verdict recorded by hand with `leg: manual`,
+`approval`, `verdict` for a `leg: manual` row already in a ledger,
 and `grant`), and counts each kind apart in
 `attention_counts`, with how many were role-played and how many are unknown
 (a field a row never recorded reads as null). `role_played` exists because
@@ -364,7 +363,7 @@ what a thing is, nothing about what it may do. The SDLC uses three:
    asked per hunk. A yes with no grant is a refused merge. **Built:** the
    judgement, review and docs verdicts that take their instances from it,
    and the broker's refusal of a merge with an instance lacking Tom's tap.
-   **Design:** the docs runner that calls it, once governance passes its entry check.
+   The docs runner calls it too.
 
 ## Verification
 
@@ -527,7 +526,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 |---|---|---|
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect beyond the task's authority | broker reads the class from the performer and refuses an `act` above the task's ceiling or on a stopped task; a replay task has no send performer; every `act` that leaves is reported | bounded authority |
-| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review runner calls it, and the docs runner is registered once governance passes its entry check) | governing constraint |
+| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review and docs runners call it) | governing constraint |
 | A merge on a model's say-so, or redirected by a turn | the merge predicate, four terms read from rows and git, read with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the merge's payload; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |

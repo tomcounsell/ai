@@ -350,33 +350,23 @@ if act == "hang":
     import time
     time.sleep(60)
 if act == "sound":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
+    result = json.dumps({"verdict": "sound", "findings": []})
 elif act == "revise":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "revise", "findings": [
-        {"kind": "premise", "text": "the plan reads the wrong module"}]}))
+    result = json.dumps({"verdict": "revise", "findings": [
+        {"kind": "premise", "text": "the plan reads the wrong module"}]})
 elif act == "raise":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 2}}))
+    result = json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 2}})
 elif act == "lower_raise":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 0}}))
+    result = json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 0}})
 elif act == "bad_raise":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 5}}))
+    result = json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 5}})
 elif act == "malformed":
-    (v / "verdict.json").write_text("not json")
-elif act == "symlink":
-    (v / "verdict.json").symlink_to(cfg["target"])
-elif act == "fifo":
-    os.mkfifo(v / "verdict.json")
-elif act == "dir_symlink":
-    real = pathlib.Path("real-valor")
-    real.mkdir()
-    (real / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
-    for p in v.rglob("*"):
-        if p.is_file():
-            p.unlink()
-    for p in sorted(v.rglob("*"), reverse=True):
-        p.rmdir()
-    v.rmdir()
-    v.symlink_to(real.resolve())
+    result = "not json"
+elif act == "file_only":
+    # A valid verdict left as a file, and a final message in prose.
+    (v / "verdict.json").write_text(json.dumps(
+        {"verdict": "updated" if stage == "docs" else "sound", "findings": []}))
+    result = "Done; the verdict is in .valor/verdict.json."
 elif act == "docs":
     # Docs commits as `docs_commits` says, then the verdict naming the head.
     def g(*a):
@@ -411,11 +401,11 @@ elif act == "docs":
         out["head"] = head
     if "docs_head" in cfg:
         out["head"] = cfg["docs_head"]
-    (v / "verdict.json").write_text(json.dumps(out))
+    result = json.dumps(out)
 elif act == "nul":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "a\x00b"}]}))
+    result = json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "a\x00b"}]})
 elif act == "big":
-    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
+    result = json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]})
 elif act == "review":
     # The reviewer: what it was given, each `review_probe` command run under
     # its own profile and environment, then `review_verdict` as its final

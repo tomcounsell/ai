@@ -209,7 +209,7 @@ def roles(got) -> list[str]:
 
 async def at_review(dsn, tmp_path, *, writes=None, test=True, **spec):
     """A provisioned task whose candidate adds `writes` (default a gate and a
-    plan rewrite), with the test verdict recorded by hand unless `test` is
+    plan rewrite), with a scripted test verdict unless `test` is
     false, left waiting on review. The suite runs on the host and in a
     verification VM alike."""
     task, b, ws = await test_checks.to_candidate(
