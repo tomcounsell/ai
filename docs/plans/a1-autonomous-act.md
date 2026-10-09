@@ -102,10 +102,17 @@ task lock. After them:
 - A `merge` additionally evaluates the merge predicate in that
   transaction, with the git facts read from the mirror or workspace
   (moved from `_release`, unchanged), and a failing term is a refusal
-  (`effect.refused` naming the terms) instead of an exception. When the
-  facts cannot be read (`_git_facts` returns None on a `GitError`), the
-  request writes no row and returns `unknown`, so the next step asks
-  again: only a term that reads a fact about the work refuses. Its intent
+  (`effect.refused` naming the terms) instead of an exception. When git
+  cannot say (`_git_facts` returns None on a `GitError`, or an ancestry
+  read exits other than 0 or 1, read the way `git.ancestry` reads it,
+  through the hardened `run` for a workspace task, where `git.is_ancestor`
+  today takes any nonzero exit as "not an ancestor"), the request writes
+  no row and returns `unknown`: only a term that reads a fact about the
+  work refuses. `ensure_merge` passes the `unknown` up and `router._once`
+  answers `parked`; the kernel's `_step` parks the task
+  (`self.parked[task_id] = latest`, `seen` cleared), so its merge step is
+  asked again on the next `serve_tick_s` wake or the next row, whichever
+  comes first, the path a job that cannot start takes now. Its intent
   carries `landed` (`outcomes.landed`), as it does now at release.
   `MergeRefused` goes: nothing raises it.
 - A declared type gets `effect.held` (the row carrying the action, held for
@@ -217,15 +224,25 @@ Who gets no report:
   lands on Tom's page, which shows it, `bridges/local/__init__.py:41-53`).
 - A replay task (`Brief.replay`): its merge goes to its own bare origin
   and no person used it; the replay driver reads the outcome.
-- A child task (`Brief.parent_id` set): its act reports to its parent, not
-  Tom. The parent's prompt already carries each child's latest delivery
-  (`session._children_report`, `core/session.py:750`); the root's merge
-  is what Tom hears of.
+
+A child task reports like any task: a child has its own origin and target
+(`tasks.start_child`), so the expiry sweep's merge into Valor's branch and
+a `core start --parent` child's merge or third-party send each get their
+report.
+
+A merge's report ends "Reply to this message to give feedback", as
+`delivered_text` does.
 
 The `delivered` notice is owed in `merge` only when the delivery will not
 merge by itself: the delivery did not pass, a governance instance awaits a
 grant, or the merge effect was refused or failed. A delivery that merges
-is reported once, by the merge's report.
+is reported once, by the merge's report. A refused or failed merge's
+delivered text carries the refusal's reason or the failure's error. A
+merge that failed for its payload (a target that moved, a remote whose
+HEAD could not be read) is not requested again for that payload; with no
+path forward the task waits on Tom's reply to that notice. That is the
+major-blocker case of the ruling, and the notice is the one question Tom
+gets. No retry count is added.
 
 ### Binding (`core/intake.py`)
 
@@ -241,7 +258,9 @@ A reply to a merge's `report` notice on a task in `merged` binds
 `merge` does now; without it Tom's only reply to a merged delivery would
 bind `none`. The branch sits before the early return for merged and
 stopped tasks (`core/intake.py:364`), which today binds every such reply
-`none` before the notice is read. Any other reply to a merged or stopped
+`none` before the notice is read, and after a check that an exact `stop`
+or its near miss on a merged task binds `none` with the notice it gets
+today: a `stop` to a report never reopens a merged task. Any other reply to a merged or stopped
 task stays `none` with a notice. A reply to a send's report on a running
 task steers, like any reply to a notice.
 
@@ -252,6 +271,8 @@ the task, since a passing delivery no longer gets one.
 ### The kernel loop (`core/serve.py`)
 
 `_kernel_release` and `_release` go: no row asks the kernel to release.
+`_step` parks a task whose step answered `parked` (above). The module
+docstring drops "a release Tom asked for" and "a release's outcome".
 
 ### Surfaces
 
@@ -305,6 +326,11 @@ schema and dependencies as now; nothing is added there.
   request and at release, the email bridge's cancel on stop, the reply
   `stop`.
 - Reconcile, dangling intents, the per-effect lock, intent before perform.
+- The merge-target grants (`core/targets.py`, `Merge.refuse` through
+  `targets.check`): a standing authority, Tom's grant per remote pair. A
+  merge to a pair not granted is refused as now. The lead confirms that
+  Valor's pair (its GitHub URL and its live branch) is granted before
+  the live window.
 
 ## Migration of held rows
 
@@ -334,18 +360,19 @@ origin.
    `approval.granted`, and no `report` notice.
 2. A task in `merge` with a passing delivery is merged by one `core run`:
    intent with `landed`, outcome `done`, state `merged`, one `report`
-   notice carrying the delivery, no `delivered` notice.
+   notice carrying the delivery, no `delivered` notice; `core run` prints
+   status `moved`, state `merged`.
 3. A `telegram.send_message`, `email.send`, and `local.send_message` each
    go from request to `effect.outcome` through their outbox with no tap.
-   `core run` on the task of Done 2 prints status `moved`, state
-   `merged`.
 4. A message-started task's Brief reads ceiling `act`; `core start` with no
    `--ceiling` reads `act`.
 5. `python -m core approve`, `release`, `pending` are unknown commands;
    `grep -rn 'broker\.pending\|\bpending(\|broker\.approve\|\bapprove(\|NotApproved\|MergeRefused' core bridges ui tests`
    finds nothing (the pattern does not match `tasks.spending(`).
-6. A governance-adding merge with no grant is refused at request with the
-   same reason as now; after `core grant`, the next `run` merges it.
+6. A governance-adding merge with no grant, requested directly through
+   `broker.request`, is refused with the same reason as now (`run` does not
+   request it while an instance is ungranted, `core/verdicts.py:539`);
+   after `core grant`, the next `run` merges it.
 7. Migrating a test ledger holding an orphan held send and an orphan held
    merge writes one `effect.refused` each; migrating again writes none; the
    merge is then requested again and performed.
@@ -400,8 +427,10 @@ New or sharpened, the non-obvious cases:
 - **Predicate at request.** Each of the four terms failing refuses the
   merge with that term named and writes no intent; term 4's git facts are
   read in the same transaction that writes the intent (a docs head that
-  moved is refused). A mirror whose git read fails writes no row, returns
-  `unknown`, and the next `ensure_merge` asks again.
+  moved is refused). A mirror whose git read fails, or whose ancestry
+  read exits 128 (a missing object), writes no row and returns `unknown`;
+  driven through `serve`, the task is parked and its merge is asked again
+  on the next tick.
 - **Merge requested once.** A `failed` merge is not requested again for
   the same payload; a new candidate head is. Two concurrent
   `ensure_merge` calls on one task make one intent and one push (`_prior`
@@ -413,11 +442,13 @@ New or sharpened, the non-obvious cases:
   or unknown one writes none; a reconciled `done` writes one; a done push
   writes none; a Telegram send to the operator chat, an email only to
   Tom's addresses, and any local send write none; a replay task's merge
-  and a child task's merge write none; a `propose` effect writes none. A
+  writes none; a child task's merge writes one; a `propose` effect writes
+  none. A merge's report ends "Reply to this message to give feedback". A
   reply to a merge's report on a merged task binds `feedback` and sends
   the task to `patch` (the branch runs before the merged early return); a
-  reply to a send's report on a running task steers; any other reply to a
-  merged task binds `none`.
+  reply of exact `stop`, or its near miss, to that report binds `none`
+  and the task stays merged; a reply to a send's report on a running task
+  steers; any other reply to a merged task binds `none`.
 - **Steer notice.** A steer on a task in `merge` owes "reply to the
   delivered notice" only while a delivered notice stands.
 - **Delivered notice.** Owed for a delivery that did not pass, one
@@ -426,6 +457,9 @@ New or sharpened, the non-obvious cases:
   `release.requested` is left for its outbox; a held effect already
   refused is not selected; the fold's `merge_effect` carries `at:
   migrate`, and `ensure_merge` requests that merge again.
+- **Migrate history.** `tests/test_migrate_history.py:110-119` allows
+  `effect.refused` rows with `at: migrate` among the rows migrate adds and
+  asserts a second migrate adds none.
 - **Existing ceiling.** A message-started task whose Brief says `propose`
   still has its push refused for ceiling after migrate.
 - **Fold.** A merge with only intent and outcome folds `merged`; an old
@@ -480,14 +514,26 @@ lines, docstrings, outbox except clause), `core/db.py` and
 `bridges/telegram/send.py` (words "approved" become "requested"; the
 sha256 checks stay), `bridges/local/__init__.py` (docstring),
 `tests/emulator/replay.py`, `tests/emulator/stand_in.py`,
-`tests/emulator/common.py`, the new `tests/test_governance_paragraph.py`,
+`tests/emulator/common.py`, `tests/test_migrate_history.py`,
+`tests/test_machine.py` (601-603), `tests/test_replay.py` (72, 165),
+`tests/test_emulator_metering.py` (313, 444-450, 604),
+`routines/expiry/routine.toml` (its instruction's "released like any
+merge"), the `broker.Refused` docstring, the new
+`tests/test_governance_paragraph.py`,
 the tests above, the docs above. `core/session.py` covers 29 (approval
 covering reply-all recipients) as well as `_effects_report`.
 
 ## Rollout on Valor's Mac
 
-Merges before A2, A3, B1. The rollout runs `migrate` (the held-row
-migration and the index drop) and restarts the kernel. The new Telegram
+Merges before A2, A3, B1. A1 changes `core/schema.sql`, so the kernel's
+own roll stops for the lead (`_rollout_text` "schema"). The rollout order:
+boot out the kernel and the bridges, run `migrate` (the held-row migration
+and the index drop), then start them. Migrating under the old kernel
+would let it write `effect.held` rows with no `release.requested` after
+the selector ran. Before the bridges are enabled for the live window, the
+rollout record lists bridge-owned `release.requested` rows with no
+outcome, sends that would go out stale; this is an inspection, not a
+gate. The new Telegram
 and email bridge jobs stay disabled until the live window. The rollout
 record lists the migration's count, the outcome of the fresh merge
 request for f10a2751760c, and the message-started tasks still open at
@@ -506,8 +552,8 @@ None.
 
 - Reports go for a merge and for a send to anyone other than Tom's own
   chat, not for a push: the ruling is "a report on what was done", and a
-  push per patch round is a step inside the task, noise to Tom. A
-  replay's or a child's act reports to no one but its driver or parent.
+  push per patch round is a step inside the task, noise to Tom. Only a
+  replay task is exempt; a child reports like any task.
 - A replay task is built without send performers (see its section): the
   emulator's wiring, not a check.
 - A message-started task already open at `propose` keeps its ceiling.
@@ -539,3 +585,14 @@ Done 5 pattern, the missed files and docs, `MergeRefused`, the
 report-feedback branch's place, the steer notice, `core run`'s status,
 report recipients, the fold's `at`, the migration selector, existing
 `propose` tasks, and the kernel's own merges (should-fix 1-10).
+
+Round 2 (`~/src/valor-build-notes/critic-a1-r2.md`), verdict revise;
+rounds spent, applied by the lead's decisions: only `Brief.replay` is
+exempt from reports (N1); an ancestry read git cannot answer is
+`unknown`, and the kernel parks the task so its merge is asked again on
+the next tick (N2); `stop` to a merge's report binds `none`, and the
+report ends with the feedback line (N3); the rollout stops the kernel and
+bridges, migrates, then starts, and the missed tests are listed (N4); the
+failed merge as the major-blocker question, the merge-target grants as
+standing authority, the queued-sends inspection, and the stale texts
+(should-fix 1-5). The replay wiring and the paragraph test stand.
