@@ -180,7 +180,10 @@ def test_no_result_or_failed_services_are_the_kernels_and_failed_setup_the_commi
 def test_each_setup_commands_output_is_kept_as_on_the_host(tmp_path):
     """The VM's `out/setup-N.out` gives each setup entry its file's name and
     its last 1500 characters, and a failed setup's record its tail."""
-    ran = [{"command": "make deps", "exit": 0, "duration_s": 0.1}, {"command": "make", "exit": 2, "duration_s": 0.1}]
+    ran = [
+        {"command": "make deps", "exit": 0, "duration_s": 0.1},
+        {"command": "make", "exit": 2, "duration_s": 0.1},
+    ]
     lay = _out(tmp_path, {**OK, "setup": ran})
     out = lay.checks / "vm-head-abc" / "out"
     (out / "setup-0.out").write_text("fetched\n")
