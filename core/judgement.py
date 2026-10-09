@@ -609,6 +609,12 @@ UNANSWERED_RUNS = 2
 _HELD: dict[str, float] = {}
 
 
+def held_until(url: str) -> float:
+    """The wall-clock time before which `url` is not asked again; 0 when it
+    is not held."""
+    return _HELD.get(url, 0.0)
+
+
 def retry_after(value: str | None, now: float) -> float | None:
     """The time a `Retry-After` names, as delta seconds or an HTTP date;
     None when it is absent or unreadable."""

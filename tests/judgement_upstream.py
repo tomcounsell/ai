@@ -5,7 +5,7 @@ Its 200 bodies have the shape of the responses recorded live in
 `tests/fixtures/judgement_jev.json` and `judgement_open_weight.json`
 (`record_judgement.py`), with the answers and usage put in per request. It
 runs on its own thread and event loop, so synchronous tests and each
-`asyncio.run` share one server. It records every request it gets.
+`asyncio.run` share one server. It records every request it gets, with the time it came.
 
 Two kinds of path, each ending in the leg (`jev` or `open_weight`):
 
@@ -41,6 +41,7 @@ import itertools
 import json
 import math
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +201,7 @@ class Upstream:
                 "leg": leg,
                 "body": body,
                 "authorization": request.headers.get("Authorization"),
+                "at": time.time(),
             }
         )
         if leg == "jev" and _over_jevs_limits(raw, body):

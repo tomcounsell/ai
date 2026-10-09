@@ -29,6 +29,7 @@ calibration record (`judgement.calibrated` on the `judgement` stream).
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -512,39 +513,29 @@ async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> di
         per_leg = {}
         for leg in judgement.route(task):
             j = await port.ask_leg(leg, task, inputs, task_id=task_id, ref={"case": c["id"]}, dsn=dsn)
-            questions = {}
-            for q in task.questions:
-                a = j.answers.get(q.id) if j.answered else None
-                action = j.action.get(q.id) if j.answered else "caution"
-                e = expected[q.id]
-                questions[q.id] = {
-                    "expected": e.label,
-                    "wants": e.action,
-                    "source": e.source,
-                    "label": a["label"] if a else None,
-                    "p_proceed": a["p_proceed"] if a else None,
-                    "decision": a["decision"] if a else "failed",
-                    "action": action,
-                    "correct": action == e.action,
-                }
-            first = questions[task.questions[0].id]
-            per_leg[leg] = {
-                "answered": j.answered,
-                "label": first["label"],
-                "p_proceed": first["p_proceed"],
-                "decision": first["decision"],
-                "verdict": _verdict_word(task, first["action"]),
-                "correct": all(q["correct"] for q in questions.values()),
-                "questions": questions,
-                "usd_micros": j.usd_micros,
-                "reason": None if j.answered else "; ".join(str(x.get("reason")) for x in j.attempts),
-                "judgement_id": j.judgement_id,
-            }
+            per_leg[leg] = _scored(task, j, expected, asked_again=0)
         label = c["label"] if site != BREADTH.site else {q: e.label for q, e in expected.items()}
         results.append(
             {"case": c["id"], "label": label, "sub_label": c.get("sub_label"), "source": c.get("source"),
              **per_leg}
         )  # fmt: skip
+    # A 429 is no answer: each (case, leg) refused that way is asked again,
+    # after the provider's own Retry-After when it named one, for as long as
+    # a pass answers at least one of them.
+    while True:
+        refused = [(c, r, leg) for c, r in zip(cases, results, strict=True)
+                   for leg in judgement.route(task) if r[leg]["rate_limited"]]  # fmt: skip
+        answered = 0
+        for c, r, leg in refused:
+            wait = judgement.held_until(port.legs[leg].endpoint) - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            inputs, expected = case_shape(site, c)
+            j = await port.ask_leg(leg, task, inputs, task_id=task_id, ref={"case": c["id"]}, dsn=dsn)
+            r[leg] = _scored(task, j, expected, asked_again=r[leg]["asked_again"] + 1)
+            answered += j.answered
+        if not answered:
+            break
     async with await db.connect(dsn) as conn:
         calls = await ledger.read(conn, task_id)
     record = _record(task, port, results, task_id, calls)
@@ -560,6 +551,42 @@ async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> di
         record["run"] = int(prior[0]) + 1
         record["event_id"] = await ledger.append(conn, STREAM, "judgement.calibrated", record)
     return record
+
+
+def _scored(task, j, expected, *, asked_again: int) -> dict[str, Any]:
+    """One leg's answer to one case, every question scored against its label;
+    a failed ask is `caution`."""
+    questions = {}
+    for q in task.questions:
+        a = j.answers.get(q.id) if j.answered else None
+        action = j.action.get(q.id) if j.answered else "caution"
+        e = expected[q.id]
+        questions[q.id] = {
+            "expected": e.label,
+            "wants": e.action,
+            "source": e.source,
+            "label": a["label"] if a else None,
+            "p_proceed": a["p_proceed"] if a else None,
+            "decision": a["decision"] if a else "failed",
+            "action": action,
+            "correct": action == e.action,
+        }
+    first = questions[task.questions[0].id]
+    return {
+        "answered": j.answered,
+        "label": first["label"],
+        "p_proceed": first["p_proceed"],
+        "decision": first["decision"],
+        "verdict": _verdict_word(task, first["action"]),
+        "correct": all(q["correct"] for q in questions.values()),
+        "questions": questions,
+        "usd_micros": j.usd_micros,
+        "reason": None if j.answered else "; ".join(str(x.get("reason")) for x in j.attempts),
+        "rate_limited": not j.answered
+        and all(x.get("reason") == "rate_limited" for x in j.attempts if x.get("outcome") != "unused"),
+        "asked_again": asked_again,
+        "judgement_id": j.judgement_id,
+    }
 
 
 def _verdict_word(task, action: str) -> str:
@@ -663,6 +690,7 @@ def _record(task, port, results, task_id, calls) -> dict[str, Any]:
             if decided
             else None,
             "error_rate": round(sum(errors.values()) / len(rs), 4) if rs else None,
+            "asked_again": sum(r["asked_again"] for r in rs),
             "errors": errors,
             "usd_micros_per_call": round(sum(r["usd_micros"] for r in rs) / len(rs), 2) if rs else None,
             "all_correct": all(c["wrong"] == 0 for c in per_question.values()),

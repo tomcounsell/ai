@@ -1045,6 +1045,70 @@ def test_the_record_rechecks_the_estimate_against_billed_input(dsn, tmp_path):
     assert ow["over_estimate"] == 0 and 0 < ow["median_ratio"] < 1
 
 
+RATE_LIMITED = {"status": 429, "text": "{}"}
+
+
+def _case_rows(dsn, task_id, case) -> list[dict]:
+    got = run(rows(dsn, task_id))
+    return [
+        r["payload"] for r in got
+        if r["type"] in ("judgement.answered", "judgement.failed") and r["payload"]["ref"] == {"case": case}
+    ]  # fmt: skip
+
+
+def test_a_rate_limited_case_is_asked_again_and_scored_on_its_answer(dsn, tmp_path):
+    cases = [_gov_case("guard", True), _gov_case("test", False)]
+    sid = UP.script(RATE_LIMITED, {"probs": YES}, {"probs": NO}, {"probs": NO}, {"probs": YES})
+    record = run(
+        judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, "governance.adds", cases))
+    )
+    guard = record["cases"][0]
+    assert guard["jev"]["answered"] and guard["jev"]["correct"]
+    assert record["legs"]["jev"]["asked_again"] == 1 and record["legs"]["open_weight"]["asked_again"] == 0
+    assert record["entry_check"] is True
+    asked = [r["attempts"][0]["leg"] for r in _case_rows(dsn, record["calibration_task"], "guard")]
+    assert asked == ["jev", "open_weight", "jev"]
+
+
+def test_a_leg_that_is_always_rate_limited_is_scored_failed_after_one_further_pass(dsn, tmp_path):
+    cases = [_gov_case("guard", True), _gov_case("test", False)]
+    sid = UP.script({"probs": YES}, RATE_LIMITED, {"probs": NO}, RATE_LIMITED, default=RATE_LIMITED)
+    record = run(
+        judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, "governance.adds", cases))
+    )
+    ow = record["cases"][1]["open_weight"]
+    assert (ow["answered"], ow["decision"], ow["verdict"], ow["correct"]) == (False, "failed", "caution", False)
+    assert record["legs"]["open_weight"]["asked_again"] == 2 and record["entry_check"] is False
+    assert [x["leg"] for x in UP.seen(sid)] == ["jev", "open_weight", "jev", "open_weight", "open_weight", "open_weight"]
+
+
+def test_a_re_ask_waits_for_the_providers_retry_after(dsn, tmp_path, monkeypatch):
+    import time as clock_module
+
+    now = [clock_module.time()]
+    monkeypatch.setattr(clock_module, "time", lambda: now[0])
+
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds, *args, **kwargs):
+        now[0] += seconds
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    held = {"status": 429, "text": "{}", "headers": {"Retry-After": "2"}}
+    cases = [_gov_case("guard", True), _gov_case("test", False)]
+    sid = UP.script({"probs": YES}, held, {"probs": NO}, {"probs": YES}, {"probs": NO})
+    start = now[0]
+    record = run(
+        judgement_sites.calibrate(UP.port(script=sid), dsn, _cases_file(tmp_path, "governance.adds", cases))
+    )
+    seen = [(x["leg"], x["at"] - start) for x in UP.seen(sid)]
+    # The second case's open-weight ask fell inside the hold and was not sent.
+    assert [leg for leg, _ in seen] == ["jev", "open_weight", "jev", "open_weight", "open_weight"]
+    assert all(at >= 2 for _, at in seen[3:]) and all(at < 2 for _, at in seen[:3])
+    assert record["legs"]["open_weight"]["asked_again"] == 2 and record["entry_check"] is True
+
+
 def test_calibrate_refuses_a_case_missing_a_question(tmp_path):
     case = _breadth_case("x", "tom")
     del case["labels"]["gap_enum"]
