@@ -536,19 +536,16 @@ kernel does not start (a broken import or dependency): `git reset --keep`
 to the head noted in step 1, `uv sync`, restart. The schema and role stay
 and hold nothing the kernel reads.
 
-## Questions for Tom
-
-1. **Transcripts in memory.** A turn's own text can reach a later task's
-   Brief in the same project, labelled as the turn's. Assumed: yes,
-   transcripts are ingested beside Tom's rows, since what Valor decided
-   and why is part of what it learned.
-2. **Memory on by default.** Assumed: on.
 ## Decided by default
 
 - One task's turn-written text reaching a later task's Brief is data:
   escaped so it cannot forge a heading or leave its section, scoped by
   project, kept out of fresh sessions; the effect ceiling bounds the rest,
   as with any input a turn reads. Decided by the lead, not Tom's.
+- Transcripts are ingested: their turn-written entries, as "What memory
+  holds" says, beside Tom's rows. Decided by the lead.
+- Memory is on by default once its rollout completes; `VALOR_MEMORY=off`
+  stays as the back-out. Decided by the lead.
 - The schema `memory` in the kernel database, for one backup and the
   existing login rules.
 - Memory ingests in-force corrections and does not repeat them in the
