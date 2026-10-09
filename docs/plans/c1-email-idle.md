@@ -147,3 +147,31 @@ suites (`test_checks.py`, `test_container.py`) were not run to the end:
 they drive Apple container VMs, stalled or failed on this Mac while other
 builders' suites ran, and touch nothing this change does. Ruff check and
 format clean.
+
+## Patch, round 1
+
+From the test and review checks (`test-c1.md`):
+
+1. **Only the default route's interface counts.** macOS emits interface
+   and address messages for container bridges (about three per container),
+   `awdl0`, `utun` and temporary IPv6 addresses. The format of the message
+   text differs by type and does not always name the interface, so the
+   filter does not parse it: on each interface message
+   `imap.path_state` reads `route -n get default` for the interface and
+   its `ifconfig` status and addresses ("none" when there is no default
+   route), and `network_changes` sets the event only when that differs
+   from the last read. A change on another interface leaves it equal. The
+   first read is taken when the monitor starts. No timer or number added.
+2. **A reconnect the network started waits for the tick if it fails
+   before IDLE.** `watch` remembers that the connection replaces one a
+   network change ended; if that connection fails or is ended again before
+   the server accepts IDLE, it waits for `retry` however many events come.
+3. **The monitor is not restarted when it ends.** A restart with no timer
+   would spin on a monitor that ends at once, and a timer or cap is a new
+   number. The log line says the re-issue is then the only probe.
+
+Tests: four cases for the state filter (changed, other interface,
+chatter, route gone), `path_state` stable and named, and a watch whose
+network-started reconnect is slow to fail while more events arrive (red
+when the rule is removed). Email and mail-server tests: 101 passed with
+`-m "not container"`.

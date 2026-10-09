@@ -38,9 +38,16 @@ minutes (`imap.IDLE_REISSUE_S`), as RFC 2177 advises. Gmail sends nothing
 while a client idles (measured: no line in 11 minutes), so a path that drops
 with no reset is silent to the client. A route monitor (`route -n monitor`,
 `imap.network_changes`) reads the kernel's interface and address changes
-(`RTM_IFINFO`, `RTM_NEWADDR`, `RTM_DELADDR`, from `net/route.h`); on one, the
+(`RTM_IFINFO`, `RTM_NEWADDR`, `RTM_DELADDR`, from `net/route.h`). Most of
+them do not touch the mail path (a container's bridge, `awdl0`, `utun`, a
+temporary IPv6 address), so on each the monitor reads the interface that
+carries the default route (`route -n get default`) and its `ifconfig` status
+and addresses, and acts only when that differs from the last read. Then the
 watch ends its connection and reconnects at once, and the new connection's
-first search finds mail the old path hid. Mail can still wait up to the
+first search finds mail the old path hid. A reconnect the network started
+that fails before IDLE is accepted waits for the next wake, whatever else
+changes meanwhile. The monitor is not started again if it ends; a line is
+logged and the re-issue is the only probe. Mail can still wait up to the
 re-issue when the path dies with no change on this Mac; the 29 minutes is
 RFC 2177's ceiling, and a shorter probe is a cost-benefit choice that is not
 made. A transport failure (`OSError`, an IMAP abort) after the server
