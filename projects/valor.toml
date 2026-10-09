@@ -10,7 +10,7 @@ branch = "valor-cori-rebuild"
 repo = "https://github.com/tomcounsell/ai.git"
 kind = "python-uv"
 services = ["postgres"]
-roles = ["valor_kernel"]
+roles = ["valor_kernel", "valor_memory"]
 setup = ["uv sync --frozen"]
 suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."

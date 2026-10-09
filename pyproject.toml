@@ -20,7 +20,7 @@ package = false
 testpaths = ["tests"]
 pythonpath = ["."]
 # tests/bridges.py would otherwise shadow the top-level bridges package
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib -p no:popoto"
 markers = [
     "spend(usd): the money one run of the test is expected to cost",
     "macos: needs macOS itself; skipped off Darwin",

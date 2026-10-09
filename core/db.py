@@ -71,9 +71,15 @@ def memory_schema(conn: psycopg.Connection) -> None:
     """The schema `memory`, and every table in it, owned by memory's role:
     it creates its own tables there and reaches nothing else. A schema or
     table the owner holds (a restore made without `--no-owner` skipped, or
-    a table made before the role) is given back."""
+    a table made before the role) is given back. An owner that is not a
+    superuser (a workspace's or the VM's `app`) holds no SET on a role it
+    created, which giving a schema to that role needs, so it grants the
+    role to itself first."""
     role = sql.Identifier(settings.memory_role)
     with conn.transaction():
+        can_set = conn.execute("SELECT pg_has_role(current_user, %s, 'SET')", (settings.memory_role,))
+        if not can_set.fetchone()[0]:
+            conn.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(role))
         conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS memory AUTHORIZATION {}").format(role))
         conn.execute(sql.SQL("ALTER SCHEMA memory OWNER TO {}").format(role))
         tables = conn.execute(

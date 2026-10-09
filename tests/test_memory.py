@@ -24,7 +24,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from core import db, ledger, memory, runs, tasks, transcripts
+from core import backup, db, ledger, memory, runs, tasks, transcripts
 from core.gateway import Gateway
 from core.settings import settings
 from harnesses import claude_code
@@ -482,3 +482,35 @@ def test_a_task_is_taken_once_it_has_a_turn_and_never_before(dsn):
 
     before, after = run(go())
     assert before == "" and "  > Pangolin idle." in after
+
+
+def test_a_nul_in_a_transcript_is_dropped_and_later_rows_are_still_taken(dsn):
+    repo = project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            first = await started(conn, "Okapi setup.", repo)
+            await transcript_turn(
+                conn, first, [say("user", "prompt"), say("assistant", "okapi\x00 pen built")]
+            )
+            await started(conn, "Okapi fence after the nul.", repo)
+            later = await started(conn, "okapi", repo)
+        await ingest(dsn)
+        return await recall(dsn, later)
+
+    found = run(go())
+    assert "  > okapi pen built" in found and "  > Okapi fence after the nul." in found
+
+
+def test_migrate_runs_for_an_owner_that_is_not_a_superuser(monkeypatch):
+    """The owner a workspace or the VM has: `LOGIN CREATEDB CREATEROLE`, no
+    superuser, so it holds no SET on a role it creates (Postgres 16 on)."""
+    with backup.scratch_cluster() as cluster:
+        with psycopg.connect(cluster.dsn(), autocommit=True) as conn:
+            conn.execute("CREATE ROLE app LOGIN CREATEDB CREATEROLE")
+        monkeypatch.setattr(db, "settings", dataclasses.replace(settings, owner_role="app"))
+        for _ in range(2):
+            db.migrate("ledger", host=cluster.host, port=cluster.port)
+        with psycopg.connect(cluster.dsn(database="ledger"), autocommit=True) as conn:
+            owner = conn.execute("SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'memory'")
+            assert owner.fetchone()[0] == settings.memory_role

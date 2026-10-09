@@ -944,7 +944,7 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
     head = subprocess.run(["git", "-C", str(mirror), "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "same tree"],
                           capture_output=True, text=True, check=True).stdout.strip()  # fmt: skip
     project = {
-        "name": "valor", "kind": "python-uv", "services": ["postgres"], "roles": ["valor_kernel"],
+        "name": "valor", "kind": "python-uv", "services": ["postgres"], "roles": ["valor_kernel", "valor_memory"],
         "setup": ["uv sync --frozen"], "suite": "uv run pytest -q -p no:cacheprovider --junitxml={junit} tests",
         "env": {"VALOR_PGHOST": "127.0.0.1", "VALOR_PGPORT": "5432", "VALOR_PG_OWNER": "app",
                 "VALOR_PG_PASSFILE": str(container.VM_PASSFILE), "VALOR_TEST_DB": "app_test"},

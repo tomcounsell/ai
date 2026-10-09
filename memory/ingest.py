@@ -31,7 +31,8 @@ def taken(dsn: str) -> set[int]:
 def entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
     """The records one row makes: its text and the meta its label is
     rendered from. A `turn.ended` row makes one record per text entry of
-    its transcript files, in file-name order."""
+    its transcript files, in file-name order. A NUL character is dropped:
+    Postgres text holds none."""
     payload = unit["payload"]
     origin = ORIGINS[unit["type"]]
     meta: dict[str, Any] = {"task_id": unit["task_id"]}
@@ -49,6 +50,7 @@ def entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
         if origin == "correction":
             meta.update(number=payload.get("number"), source_class=payload.get("source_class", ""))
         texts = [payload.get("instruction" if origin == "instruction" else "text") or ""]
+    texts = [t.replace("\x00", "") for t in texts]
     return [
         {"key": f"{unit['id']}.{n}", "origin": origin, "text": text, "meta": meta}
         for n, text in enumerate(t for t in texts if t.strip())
