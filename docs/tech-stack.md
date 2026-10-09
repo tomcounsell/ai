@@ -61,8 +61,7 @@ outside the model is AI Control [4].
 | Which sandbox for which work | owned by [sandbox.md](sandbox.md); containers for turns | open |
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
-| Approval surface | the `python -m core` CLI | in use |
-| Approval from a phone | Telegram or a web page | open |
+| Reports to Tom | `report` and `delivered` notices over the bridges, and `python -m core status` | in use |
 | Bridges | Telegram, email, and local chat modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`); local chat in use (`aiohttp`) |
 | Scheduling | launchd: the kernel's LaunchAgent, the email and local bridges', and the backup job; routines | in use |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |

@@ -6,7 +6,7 @@ the services its tests use. The harness side (the sandbox, the signal channel, r
 
 Serves Mission item 1 (delivering within authority) and the constraint
 **bounded authority**: a turn works on a real clone and every push is an
-`act` effect Tom releases.
+`act` effect the kernel performs at request, inside the task's ceiling.
 
 `core/workspace.py` provisions a task's workspace from a project spec
 (`projects/`) under `work_dir/<task id>/` before the task starts, cloning from

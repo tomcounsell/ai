@@ -44,9 +44,8 @@ The kernel turns a judgement into an action through a fixed table in kernel code
 supplies a label; the table supplies the consequence. Serves: constraint "Bounded authority, metered
 spending".
 
-- No judgement changes an effect ceiling, a `governance_grant`, or
-  an approval. Those are kernel facts, and Tom is the only source of the last
-  two [11].
+- No judgement changes an effect ceiling or a `governance_grant`. Those are
+  kernel facts, and Tom is the only source of the grant [11].
 - No judgement lets an `act` past the kernel. An `act` leaves only inside
   its task's ceiling, for a task not stopped, and a merge only when its
   predicate holds, whatever a judgement said about it.
