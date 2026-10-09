@@ -656,7 +656,8 @@ def test_review_and_docs_are_run_by_the_kernels_runners_in_one_driver_step(monke
         **{s: r for s, r in scripted.RUNNERS.items() if s in machine.WORKING},
     }
     result = _step_real(monkeypatch, dsn, task, runners=everything)
-    assert result["outcome"] == "merged" and "paused" not in result, result
+    assert result["outcome"] is None and "paused" not in result, result
+    assert result["log"][-1]["said"].startswith("MERGED"), result
     got = asyncio.run(_rows(dsn, task))
     assert [r["payload"]["leg"] for r in got if r["type"] == "review.decided"] == ["session"]
     assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["session"]

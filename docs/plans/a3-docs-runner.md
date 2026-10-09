@@ -416,6 +416,20 @@ database at the next suite run and their answers are kept in
 `~/src/valor-build-notes/a3/diag*.json`, and that docs is registered
 without a passing record (this plan).
 
+### Patch round 1 (2026-10-09)
+
+Test check verdict red (`~/src/valor-build-notes/test-a3.md`), one
+failure:
+`test_review_and_docs_are_run_by_the_kernels_runners_in_one_driver_step`
+stopped in `merge`, because `_step_real` in
+`tests/test_emulator_metering.py` called `router.run` with no performers,
+so the merge requested at docs' verdict had none to run it. The helper
+now passes `core.__main__._performers`, as `core run` does, and the test
+expects the step to answer `MERGED` with the merge `done`. Rebased onto
+the rebuild branch at daee94e81 (C3) with no conflict.
+`tests/test_emulator_metering.py` on `valor_rebuild_test_a3build`, ports
+6450-6459, container test included: 29 passed; ruff clean.
+
 ## Suites
 
 `tests/test_judgement_sites.py`, `tests/test_judgement.py`,
