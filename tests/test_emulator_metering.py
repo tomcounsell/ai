@@ -483,9 +483,10 @@ def test_an_answer_the_driver_does_not_know_pauses_it(monkeypatch):
 
 def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
     """One driver step against a ledger task, `core run` being the real
-    router with scripted runners and `core/__main__.py`'s answer line."""
+    router with scripted runners, the kernel's performers, and
+    `core/__main__.py`'s answer line."""
     from core import router
-    from core.__main__ import _status_line
+    from core.__main__ import _performers, _status_line
 
     calls = {"run": 0}
 
@@ -497,7 +498,9 @@ def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
         gateway = Gateway(dsn)
         await gateway.start(port=listen())
         try:
-            return await router.run(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
+            return await router.run(
+                gateway, task, runners or scripted.RUNNERS, dsn=dsn, performers=_performers
+            )
         finally:
             await gateway.close()
 
@@ -653,8 +656,7 @@ def test_review_and_docs_are_run_by_the_kernels_runners_in_one_driver_step(monke
         **{s: r for s, r in scripted.RUNNERS.items() if s in machine.WORKING},
     }
     result = _step_real(monkeypatch, dsn, task, runners=everything)
-    assert result["outcome"] is None and "paused" not in result, result
-    assert result["log"][-1]["said"].startswith("DELIVERED"), result
+    assert result["outcome"] == "merged" and "paused" not in result, result
     got = asyncio.run(_rows(dsn, task))
     assert [r["payload"]["leg"] for r in got if r["type"] == "review.decided"] == ["session"]
     assert [r["payload"]["leg"] for r in got if r["type"] == "docs.decided"] == ["session"]
