@@ -122,7 +122,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_every_default_model_is_a_priced_pinned_id_and_turn_holds_no_login(tmp_path):
+@pytest.mark.parametrize(
+    "builder",
+    [
+        "turn",
+        # The workspace turn's command starts with the sandbox launcher, which is checked on build.
+        pytest.param("workspace_turn", marks=pytest.mark.macos),
+    ],
+)
+def test_every_default_model_is_a_priced_pinned_id_and_turn_holds_no_login(tmp_path, builder):
     """A model alias is the CLI's to resolve, and a CLI update moved `haiku`
     to an id the gateway has no price for. Every default names the light
     seat's pinned id instead, and the test-only `turn`, like a workspace
@@ -130,14 +138,14 @@ def test_every_default_model_is_a_priced_pinned_id_and_turn_holds_no_login(tmp_p
     light = resolve_model("light")
     assert light != "light" and spending.prices(light) is not None
     assert tasks.Brief(instruction="t").model == light
-    built = [
-        claude_code.turn("hi", cwd=str(tmp_path)),
-        claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"}),
-    ]
-    for build in built:
-        command = build("http://127.0.0.1:1/t/x", "brief", "t1")
-        assert command.argv[command.argv.index("--model") + 1] == light
-    assert built[0]("http://127.0.0.1:1/t/x", "brief", "t1").env["CLAUDE_CODE_OAUTH_TOKEN"] == TURN_TOKEN
+    if builder == "turn":
+        build = claude_code.turn("hi", cwd=str(tmp_path))
+    else:
+        build = claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"})
+    command = build("http://127.0.0.1:1/t/x", "brief", "t1")
+    assert command.argv[command.argv.index("--model") + 1] == light
+    if builder == "turn":
+        assert command.env["CLAUDE_CODE_OAUTH_TOKEN"] == TURN_TOKEN
 
 
 def _signal_command(name: str, text: str) -> str:

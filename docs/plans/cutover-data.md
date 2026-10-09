@@ -183,7 +183,7 @@ branch = "main"
 merge_url = "https://github.com/tomcounsell/popoto.git"
 services = ["redis"]
 setup = ["uv sync --frozen --extra dev"]
-suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --junitxml={junit} tests"
+suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --ignore=tests/postgres --junitxml={junit} tests"
 chats = ["telegram:-5189826365"]
 machine = "Mac"
 [env]
@@ -193,7 +193,9 @@ UV_PYTHON = "3.12"
 popoto's `tests/test_connection.py` connects to `localhost:6379` by hand
 and leaves popoto's client pointed there, so every later test fails in the
 turn sandbox; the suite leaves that file out. The rest of the suite reads
-`REDIS_URL`, which the kernel sets to the task's Redis.
+`REDIS_URL`, which the kernel sets to the task's Redis. `tests/postgres` is left
+out too: its helpers import numpy at collection, which the suite's environment
+does not install, so collection fails there.
 
 ```toml
 # projects/psyoptimal.toml

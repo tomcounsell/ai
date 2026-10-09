@@ -373,13 +373,17 @@ async def inspect(tag: str, stop: asyncio.Task) -> str | None:
 
 async def checked(tag: str, stop: asyncio.Task) -> str | None:
     """The recorded digest of `tag` when the runtime holds that digest; None
-    when neither holds it. A tag held under another digest, or held with no
+    when neither holds it (the image is missing). A runtime that is down
+    holds nothing and says nothing: that is `Failed` (`kernel`), "the
+    container runtime is down", and the record stays. A tag held under another digest, or held with no
     record, is deleted and `Failed` (`kernel`) raised for a recorded one.
     Each CLI call is raced against the stop."""
     recorded = (await asyncio.to_thread(_images)).get(tag, {}).get("digest")
     held = await inspect(tag, stop)
     if recorded is not None and held == recorded:
         return recorded
+    if held is None and not await asyncio.to_thread(running):
+        raise Failed("kernel", f"the container runtime is down, so {tag} cannot be checked")
     if held is not None:
         await short(stop, "image", "delete", tag)
     if recorded is not None:

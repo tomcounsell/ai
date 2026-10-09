@@ -284,6 +284,9 @@ def never(_tid):
         # The commit broke its own run: red with the cause, whatever else holds.
         (_run(0, _tests(["m::a"])), _run(1, cause="commit", why="setup failed"), ["setup failed", "m::a"]),
         (_run(1, cause="commit", why="setup"), _run(0), []),
+        # A suite that collects no tests (pytest exits 5, writing an empty report) is not a pass.
+        (_run(0, _tests(["m::a"])), _run(5, _tests()), [checks.NO_TESTS, "m::a"]),
+        (_run(5, _tests()), _run(5, _tests()), [checks.NO_TESTS]),
     ],
 )
 def test_compare(base, head, failures):

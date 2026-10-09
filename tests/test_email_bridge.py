@@ -17,8 +17,8 @@ from tests.test_email_smtp import NOW, action
 pytestmark = pytest.mark.spend(usd=0)
 
 
-def test_the_bridge_offers_email_send_and_its_limits(mailbox):
-    b = EmailBridge(mailbox.config())
+def test_the_bridge_offers_email_send_and_its_limits(dsn, mailbox):
+    b = EmailBridge(mailbox.config(), dsn)
     assert b.channel == "email" and b.limits is bridge.LIMITS["email"]
     perform, lookup = b.performers()["email.send"]
     act = action()
@@ -34,6 +34,17 @@ def test_the_launchd_job_keeps_the_bridge_running():
     assert job["ProgramArguments"] == ["/usr/bin/python3", "-m", "bridges.email", "run"]
     assert job["KeepAlive"] is True and job["RunAtLoad"] is True
     assert job["StandardOutPath"].endswith("email.log")
+
+
+def test_the_launchd_job_carries_the_operator_settings_the_kernels_does(monkeypatch):
+    from core import serve
+
+    for name in ("VALOR_OPERATOR_TELEGRAM_ID", "VALOR_OPERATOR_CHANNEL", "VALOR_OPERATOR_CHAT"):
+        monkeypatch.setenv(name, "x")
+    kernel = plistlib.loads(serve.plist(python="/usr/bin/python3"))["EnvironmentVariables"]
+    email = plistlib.loads(cli.plist(python="/usr/bin/python3"))["EnvironmentVariables"]
+    operator = {k: v for k, v in kernel.items() if k.startswith("VALOR_OPERATOR_")}
+    assert operator and operator.items() <= email.items()
 
 
 def test_keys_copies_the_mail_logins_into_the_kernel_key_directory(tmp_path, monkeypatch, capsys):

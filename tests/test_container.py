@@ -393,6 +393,23 @@ def test_a_stop_ends_a_hung_short_cli_call(tmp_path, monkeypatch):
 # -- a test session's images -------------------------------------------------------------------
 
 
+def test_a_runtime_that_is_down_is_told_apart_from_a_missing_image(tmp_path, monkeypatch):
+    async def absent(tag, stop):
+        return None
+
+    monkeypatch.setattr(container, "IMAGES", tmp_path / "images.json")
+    monkeypatch.setattr(container, "inspect", absent)
+    container._record("valor/x:1", "sha256:a", "tests")
+    monkeypatch.setattr(container, "running", lambda: False)
+    with pytest.raises(container.Failed, match="runtime is down") as down:
+        unstopped(container.checked, "valor/x:1")
+    assert down.value.cause == "kernel"
+    assert container._images()["valor/x:1"]["digest"] == "sha256:a"
+    monkeypatch.setattr(container, "running", lambda: True)
+    assert unstopped(container.checked, "valor/x:1") is None
+    assert "valor/x:1" not in container._images()
+
+
 @pytest.mark.container
 def test_a_container_test_keeps_its_own_records_and_image_names():
     """A container test shares the machine lock with every kernel, and
