@@ -123,3 +123,9 @@ None.
   build "Using CPython 3.14.8"; the VM's `uv sync --frozen --extra dev`
   exit 1 in 0.5 s at base and head, the popoto signature
   (`~/src/valor-build-notes/c6/red-final.out`).
+- Green, on this branch: both parametrizations of
+  `test_a_popoto_shaped_spec_installs_offline_in_the_vm` pass in real VMs
+  (setuptools 18 s with the images built, hatchling 150 s). The dependency
+  build says "Using CPython 3.12.15" and installs setuptools for that
+  interpreter; the VM's offline `uv sync --frozen --extra dev` exits 0 in
+  0.8 s, building only the project, and `out/setup-0.out` is kept.
