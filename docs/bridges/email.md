@@ -30,12 +30,22 @@ certificates verified. The bridge signs in with an app password that
 with `written`, `kept`, or `missing` and never a value. Every message Valor
 sends leaves from this address, as Valor.
 
-**The watch.** The bridge holds one IMAP connection, with no socket
-timeout, and waits on it with IDLE (RFC 2177), so new mail arrives as an
-event: the server's `EXISTS` response ends the wait. RFC 3501 section 5.4
+**The watch.** The bridge holds one IMAP connection and waits on it with IDLE (RFC 2177), so new
+mail arrives as an event: the server's `EXISTS` response ends the wait. RFC 3501 section 5.4
 lets a server log out a client idle for 30 minutes, so the bridge ends
 IDLE and issues it again every 29 minutes (`imap.IDLE_REISSUE_S`), as RFC
-2177 advises; that is the only read bound while idling. Mail the server
+2177 advises. Gmail sends nothing while a client idles (measured: no line in
+11 minutes), so a path that drops with no reset is silent to the client. A
+route monitor (`route -n monitor`, `imap.network_changes`) reads the kernel's
+interface and address changes (`RTM_IFINFO`, `RTM_NEWADDR`, `RTM_DELADDR`,
+from `net/route.h`); on one, the watch ends its connection and reconnects at
+once, and the new connection's first search finds mail the old path hid. Mail
+can still wait up to the re-issue when the path dies with no change on this
+Mac; the 29 minutes is RFC 2177's ceiling, and a shorter probe is a
+cost-benefit choice that is not made. A transport failure (`OSError`, an IMAP abort) after the server
+accepted IDLE also reconnects at once; a server that does not offer IDLE,
+answers it `NO`, or ends the session as it begins waits for the next wake.
+Mail the server
 announces during another command (a search or a fetch) is not announced again
 in IDLE, so before idling the bridge reads those responses and, when it finds
 one, searches again instead of waiting. After each wait, and once on
@@ -58,7 +68,7 @@ save, or receive raises is logged with its UID and left unseen, and the
 search goes on; it is tried again after the next wait. A failed login or
 connection, or a dropped one, is one line in the log; the bridge connects
 again on the outbox's next wake (`Bridge.tick()`, every `serve_tick_s` or
-on a ledger row). Mail Gmail files as spam never reaches `INBOX`, and mail
+on a ledger row), or at once in the two cases below. Mail Gmail files as spam never reaches `INBOX`, and mail
 opened in webmail before the bridge searches is seen already and is not
 received until it is marked unread.
 

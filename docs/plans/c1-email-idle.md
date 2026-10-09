@@ -2,7 +2,7 @@
 tracking: none
 slug: c1-email-idle
 type: build
-status: planned
+status: building
 critique_rounds: 1
 review_rounds: 1
 governance_grant: none
@@ -21,121 +21,120 @@ watch") logged `TimeoutError` errno 60 three times in about two hours, each
 ending in `imap.idle` at `conn.idle(duration=IDLE_REISSUE_S)`. Mail that
 landed in those stretches waited.
 
+## Critique round 1
+
+Verdict: revise (`~/src/valor-build-notes/critic-c1-r1.md`). The rounds are
+spent, so the findings ride into the build, and the lead decided:
+
+- Drop the 29-minute socket read bound. The kernel's TCP ends the read
+  with errno 60 before it could fire, RFC 3501 section 5.4 is about server
+  patience, and `imap_connect` also serves the Sent Mail lookup, which
+  has no timer by design.
+- The failed watch already reconnects on the next tick (`serve_tick_s`,
+  60 s); the defect is that a dead path goes unnoticed until the DONE.
+- Detect the dead path with a sourced signal, chosen by measurement.
+- Immediate reconnect only for transport errors after IDLE was entered.
+- Test 4 corrected to what the existing test does.
+
 ## Cause
 
-Two things, both in the code.
+While idling, the client sends nothing. A path that drops the connection
+with no reset (a NAT or Wi-Fi mapping expiring, the network changing) is
+silent to the client: no `EXISTS` ever arrives and nothing on the client
+side changes. The first bytes the client sends are the `DONE` at the
+29-minute re-issue; they go unanswered, and the kernel's TCP ends the
+read with errno 60. Mail that landed in that stretch waits until then.
+The failed watch reconnects on the next tick (`serve_tick_s`, 60 s), so
+after the failure is noticed the wait is short; the defect is the time
+before it is noticed. The window ties each drop to a change of network
+reachability (powerd's summaries lack the `NetAcc` flag around them).
 
-1. **A silent path is not seen until the 29-minute re-issue.** While
-   idling, the client sends nothing. If the path drops the connection with
-   no reset (a NAT or Wi-Fi mapping expiring), the server's `EXISTS` never
-   arrives and nothing on the client side changes. The first bytes the
-   client sends are the `DONE` at the re-issue; they go unanswered, and
-   the read of the tagged reply blocks until the kernel's TCP gives up
-   (errno 60). `smtp.imap_connect` sets no socket timeout and no
-   `SO_KEEPALIVE`, so no read of the connection ever has a bound of the
-   bridge's own.
-2. **The failure is then not acted on.** `watch` logs it and waits for
-   `retry`, which only the bridge's `tick` (an outbox wake) sets. Until a
-   wake comes, no new connection is made, so the mail the dead path hid
-   stays unread even though a fresh connection's first `poll` would find it.
+## Measurement
+
+2026-10-09, a read-only session (`EXAMINE`, no message touched) against
+Valor's mailbox, opened apart from the bridge with the bridge's own key
+read, IDLE for 660 s, every untagged line logged. Result: the server
+advertises IDLE, accepted it, and sent **no untagged line at all in 11
+minutes**. At the `DONE` the read hit EOF (`IMAP4.abort: socket error:
+EOF`), so the connection had ended by then without the client being told.
+So Gmail gives no keepalive cadence to measure silence against, and the
+dead-path signal is the operating system's network-change event.
 
 ## Fix
 
-In `bridges/email/smtp.py` and `bridges/email/imap.py`:
+- **End the connection when the network changes.** `imap.network_changes`
+  runs `route -n monitor` and sets an event on each `RTM_IFINFO`,
+  `RTM_NEWADDR` or `RTM_DELADDR` line. Source: `net/route.h` defines
+  these as "iface going up/down etc." and "address being added to /
+  removed from iface"; the other messages the monitor prints (a failed
+  lookup, a route cached for one connection) are not a change of path and
+  are ignored. `watch` takes the event; when it is set, the connection is
+  ended through `Ends` (the existing stop path), the call blocked in IDLE
+  returns, and the watch reconnects at once: the new connection's first
+  `poll` finds what the old path hid. No timer is added. If the monitor
+  cannot start or ends, one line is logged and the re-issue remains the
+  only probe.
+- **Reconnect at once on a transport failure after IDLE was entered.**
+  `idle` takes `on_enter`, called when the server accepts IDLE. A failure
+  that is an `OSError` or an `IMAP4.abort`, on a connection that entered
+  IDLE, reconnects without waiting for the tick. A server without IDLE
+  (`IMAP4.error`), `NO` "idle denied", an immediate `BYE`, and any failure
+  before IDLE was entered wait for the tick as before, so no loop of
+  login, `SELECT`, `SEARCH` runs faster than the existing wake.
+- **No socket timeout, no `SO_KEEPALIVE`.** RFC 1122 section 4.2.3.6
+  defaults keepalive off with an idle of at least two hours; no sourced
+  value shortens detection. `smtp.imap_connect` is unchanged.
+- **What stays.** A path that dies with no interface change on this Mac
+  is still found at the 29-minute re-issue, so mail can wait that long.
+  RFC 2177's 29 minutes is a ceiling on the re-issue interval; a shorter
+  one is legal but its cost (more round trips to Gmail) against its
+  benefit is Tom's, and none is chosen.
 
-- **A read bound.** `imap_connect` passes `timeout=` to the connection, so
-  every read on it, including the reply to `DONE`, raises `TimeoutError`
-  (an `OSError`, already handled) instead of waiting on the kernel. The
-  value is `imap.IDLE_REISSUE_S`, 29 minutes. Source: RFC 3501 section 5.4
-  lets a server log a client out after 30 minutes of inactivity, and RFC
-  2177 has the client act within 29; a server that has said nothing to a
-  command for that long has already been entitled to drop the session, so
-  waiting longer buys nothing. Idling is unaffected: `imaplib`'s idle
-  waits on its own `duration`, and the read bound applies to the commands
-  and to the reply after `DONE`. The constant is one name used in both
-  places.
-- **Reconnect on the failure itself.** When a connection that had finished
-  at least one `poll` fails, `watch` makes one new connection at once,
-  without waiting for `retry`; the fresh `poll` reads what the dead path
-  hid. A connection that fails before finishing a poll (the network is
-  down, the credentials are refused, the server is unreachable) waits for
-  `retry` as now. This adds no timer and no retry count: the failure of a
-  working connection is the event, and the existing tick is the only
-  repeat. A path that dies again after a good poll gets another immediate
-  reconnect, which is again an event, not a schedule.
-- **No `SO_KEEPALIVE`.** RFC 1122 section 4.2.3.6 makes keepalive off by
-  default with a default idle of at least two hours, so no sourced value
-  would shorten detection below the re-issue. The `DONE` at the re-issue is
-  the probe RFC 2177 provides. Left out; if the 29-minute window proves too
-  long, a shorter probe interval is a question for Tom (cost: more
-  `DONE`/`IDLE` round trips against the server), assumed: keep 29 minutes.
-
-`docs/bridges/email.md` "The watch" says the connection has "no socket
-timeout"; it is rewritten to state the read bound and the immediate
-reconnect, in status-quo wording.
+`docs/bridges/email.md` "The watch" states the measurement, the monitor,
+and the two immediate reconnects.
 
 ## Done
 
-- [ ] A connection from `smtp.imap_connect` has its socket timeout set to
-  `IDLE_REISSUE_S`; a test reads `conn.sock.gettimeout()`.
-- [ ] An IDLE whose server stops answering raises within the bound instead
-  of blocking (test below, bound shrunk by monkeypatch).
-- [ ] After a failure of a connection that had polled, `watch` connects
-  again with `retry` unset, receives mail that landed during the dead
-  stretch, and logs one line per failure.
-- [ ] After a failure of a connection that never polled, `watch` waits for
-  `retry` (no spin).
-- [ ] `docs/bridges/email.md` states the bound and the reconnect; no other
-  doc still says "no socket timeout".
-- [ ] Suite, `uvx ruff check .`, `uvx ruff format --check .` clean.
+- [x] Measurement recorded above.
+- [x] `network_changes` sets its event for the three interface messages
+  and for nothing else; a monitor that cannot start ends quietly.
+- [x] A stand-in that stops forwarding with no reset (`Terminator.stall`)
+  during IDLE, then a network change: the watch replaces the connection and
+  receives mail delivered in the dead stretch with no tick. Red without the
+  event.
+- [x] A connection reset after IDLE began (`Terminator.cut`) is replaced
+  without a tick and the mail is received.
+- [x] Each of OSError and abort after IDLE reconnects at once; OSError
+  before IDLE, no IDLE support, `idle denied`, and an early `BYE` do not.
+- [x] `docs/bridges/email.md` updated; suite and ruff clean.
 
 ## Threat model
 
-- Inbound mail stays data; nothing here changes parsing or intake.
-- The read bound changes no authority and opens no new connection target;
-  `Ends` still registers every socket, so a stop still ends a blocked read.
-- Immediate reconnect could become a hot loop if a server accepts, polls
-  once, and drops every time. Each such cycle completes a real `poll`, so
-  it is bounded by the server's own behavior and logs one line per failure;
-  a server that fails before a poll is not retried without a tick. No cap
-  is added: the case is not seen, and the cost of one login per drop is
-  the server's rate to refuse (a refusal is a pre-poll failure and waits).
-- A stall mid-`FETCH` of a very large message: the bound is per read, not
-  per command, so a slow but moving transfer is not cut.
+- Inbound mail stays data; parsing and intake are unchanged.
+- The monitor is `route -n monitor`, a fixed command with no input from
+  mail; it needs no privilege and reads only the routing socket.
+- A flapping network reconnects once per interface event. Each is a real
+  event, not a schedule; a reconnect that fails waits for the tick.
+- The monitor process is the bridge's child and is killed by its handle
+  when the watch ends.
 
 ## Tests
 
-In `tests/test_email_imap.py` and `tests/test_email_kernel.py`, against
-the existing Dovecot behind `tests/mailserver.py`:
-
-1. `imap_connect` socket timeout equals `IDLE_REISSUE_S`.
-2. **The stand-in that stops answering mid-IDLE** (the non-obvious case):
-   `Terminator` in `tests/mailserver.py` gets a `stall()` that, once set,
-   keeps the TCP connection open but forwards nothing in either direction
-   (no reset, as a dropped NAT mapping behaves). With `IDLE_REISSUE_S`
-   shrunk to a few seconds, `imap.idle(conn)` is started, `stall()` is set
-   once `idling` is seen, and the call is expected to raise `OSError`
-   after the shrunk bound (the `DONE` goes out, no reply ever returns), not
-   hang. Without the read bound this test hangs, which is the red.
-3. **The watch end to end**: a kernel test starts `email.watches()`,
-   waits for `idling`, stalls the stand-in, delivers a message through
-   Dovecot directly, and does not call `tick`. With the bound shrunk, the
-   watch fails, reconnects on its own through a fresh `Terminator`
-   connection, and `received` shows the message. Red before the fix: it
-   waits for a tick forever.
-4. A watch whose first connection never polls (the login refused) is not
-   retried without `tick`: reuse `test_a_watch_that_cannot_connect_connects_again_on_the_next_tick`
-   and assert no second login before the tick.
-
-Overlapping tests are folded into existing ones where they cover the same
-path; no test is kept for the removed "no timeout" wording.
+`tests/test_email_imap.py`: `idle` reports entry; `network_changes` on a
+fake command (interface line sets the event, chatter does not, a missing
+command ends quietly). `tests/test_email_kernel.py`: the stalled path with
+a network change, the cut connection, and six parametrized failure kinds
+(which reconnect before the tick and which wait). `tests/mailserver.py`:
+`Terminator.stall` and `Terminator.cut`. The existing test that a watch
+which cannot connect connects again on the next tick stays and covers the
+tick path.
 
 ## Left out
 
-- Keepalive tuning and a faster probe cadence (see Fix).
-- Timestamps on the bridge's log lines (the finding noted their absence);
-  a separate small change if wanted.
+- Keepalive tuning and a shorter probe cadence (see Fix).
+- Timestamps on the bridge's log lines (the finding noted their absence).
 
 ## Questions for Tom
 
-None that block. Assumed: 29 minutes is the right bound and probe cadence.
+None that block. Assumed: the re-issue at 29 minutes stays the probe when
+no network change is seen.

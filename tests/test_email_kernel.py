@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import imaplib
 import json
 import os
 import signal
@@ -287,6 +288,111 @@ def test_a_watch_that_cannot_connect_connects_again_on_the_next_tick(dsn, op, ma
                     await watching
 
     assert len(run(go())) == 1
+
+
+def _watch_receives_without_a_tick(dsn, mailbox, *, cause, expect_idle_first=True):
+    """A watch idles, `cause` kills its path, mail lands, and no tick is
+    given: the watch must find the mail on its own."""
+    incoming = mid()
+
+    async def go():
+        retry = asyncio.Event()
+        changed = asyncio.Event()
+        async with await db.connect(dsn) as conn:
+            watching = asyncio.create_task(imap.watch(mailbox.config(), conn, retry, changed=changed))
+            try:
+                assert await asyncio.to_thread(mailbox.imap.idling.wait, 30)
+                mailbox.imap.idling.clear()
+                cause(mailbox, changed)
+                mailbox.dovecot.deliver(from_tom(message_id=incoming, body="in the dead window"))
+                for _ in range(300):
+                    if await received(dsn, incoming):
+                        break
+                    await asyncio.sleep(0.1)
+                return await received(dsn, incoming)
+            finally:
+                watching.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await watching
+
+    assert len(run(go())) == 1
+
+
+def test_a_path_that_dies_silently_is_replaced_when_the_network_changes(dsn, op, mailbox):
+    """The stand-in stops forwarding with no reset, so the client sees
+    nothing; the interface change ends the connection and the new one finds
+    the mail."""
+
+    def cause(mailbox, changed):
+        mailbox.imap.stall()
+        time.sleep(0.2)
+        changed.set()
+
+    _watch_receives_without_a_tick(dsn, mailbox, cause=cause)
+
+
+def test_a_connection_reset_after_idle_began_is_replaced_without_a_tick(dsn, op, mailbox):
+    def cause(mailbox, changed):
+        mailbox.imap.cut()
+
+    _watch_receives_without_a_tick(dsn, mailbox, cause=cause)
+
+
+class _Fake:
+    """Stands in for the IMAP connection and its steps, so a failure of one
+    kind can be played again and again."""
+
+    def __init__(self, monkeypatch, *, fails, entered):
+        self.connects = 0
+        self.fails, self.entered = fails, entered
+
+        def connect(cfg, ends=None):
+            self.connects += 1
+            return object()
+
+        async def poll(cfg, conn, db, ends=None):
+            return 0
+
+        def idle(conn, on_enter=None):
+            if self.entered and on_enter:
+                on_enter()
+            raise self.fails
+
+        monkeypatch.setattr(imap, "connect", connect)
+        monkeypatch.setattr(imap, "poll", poll)
+        monkeypatch.setattr(imap, "idle", idle)
+        monkeypatch.setattr(imap, "drop", lambda conn: None)
+
+    async def watch(self, seconds=0.5):
+        class Db:
+            closed = broken = False
+
+        retry = asyncio.Event()
+        task = asyncio.create_task(imap.watch(None, Db(), retry))
+        await asyncio.sleep(seconds)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return self.connects
+
+
+@pytest.mark.parametrize(
+    "fails, entered, again",
+    [
+        (OSError(60, "Operation timed out"), True, True),
+        (imaplib.IMAP4.abort("socket error: EOF"), True, True),
+        (OSError(60, "Operation timed out"), False, False),
+        (imaplib.IMAP4.error("Server does not support IMAP4 IDLE"), False, False),
+        (imaplib.IMAP4.error("idle denied: ['not now']"), False, False),
+        (imaplib.IMAP4.abort("unexpected status response: BYE"), False, False),
+    ],
+)
+def test_only_a_transport_failure_after_idle_began_reconnects_before_the_tick(
+    monkeypatch, fails, entered, again
+):
+    fake = _Fake(monkeypatch, fails=fails, entered=entered)
+    connects = run(fake.watch())
+    assert (connects > 1) is again and (again or connects == 1)
 
 
 def test_a_reply_all_is_filled_in_from_the_received_email_before_it_is_held(dsn, op, tmp_path):

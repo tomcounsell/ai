@@ -91,11 +91,18 @@ class Loop:
         self.thread.join(5)
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, watch=None) -> None:
+async def _pipe(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    watch=None,
+    silent: asyncio.Event | None = None,
+) -> None:
     try:
         while data := await reader.read(65536):
             if watch:
                 watch(data)
+            if silent is not None and silent.is_set():
+                continue  # the path has died: nothing is forwarded and nothing is reset
             writer.write(data)
             await writer.drain()
     except ConnectionError, OSError, ssl.SSLError:
@@ -109,12 +116,31 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, watc
 
 class Terminator:
     """TLS on `port`, plain to Dovecot's `backend` port. `idling` is set
-    each time Dovecot answers an IDLE with its continuation."""
+    each time Dovecot answers an IDLE with its continuation. `stall` makes
+    every open connection silent in both directions with no reset, as a path
+    whose NAT state expired behaves; `cut` closes them abruptly. Connections
+    made afterwards are unaffected."""
 
     def __init__(self, loop: Loop, port: int, backend: int, ctx: ssl.SSLContext):
         self.loop, self.port, self.backend, self.ctx = loop, port, backend, ctx
         self.server = None
         self.idling = threading.Event()
+        self._open: list[tuple[asyncio.Event, asyncio.StreamWriter, asyncio.StreamWriter]] = []
+
+    def stall(self) -> None:
+        async def go():
+            for silent, _, _ in self._open:
+                silent.set()
+
+        self.loop.call(go())
+
+    def cut(self) -> None:
+        async def go():
+            for _, client, backend in self._open:
+                client.transport.abort()
+                backend.transport.abort()
+
+        self.loop.call(go())
 
     def _from_dovecot(self, data: bytes) -> None:
         if b"+ idling" in data:
@@ -126,7 +152,9 @@ class Terminator:
         except OSError:
             writer.close()
             return
-        await asyncio.gather(_pipe(reader, w2), _pipe(r2, writer, self._from_dovecot))
+        silent = asyncio.Event()
+        self._open.append((silent, writer, w2))
+        await asyncio.gather(_pipe(reader, w2, silent=silent), _pipe(r2, writer, self._from_dovecot, silent))
 
     def start(self) -> None:
         async def go():

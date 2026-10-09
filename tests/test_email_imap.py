@@ -132,3 +132,51 @@ def test_mail_announced_during_another_command_is_found_before_idling(mailbox, m
         assert imap.idle(conn) is False
     finally:
         imap.logout(conn)
+
+
+def test_idle_reports_that_it_began(mailbox, monkeypatch):
+    monkeypatch.setattr(imap, "IDLE_REISSUE_S", 1)
+    conn = imap.connect(mailbox.config())
+    began = []
+    try:
+        imap.select_inbox(conn)
+        assert imap.idle(conn, lambda: began.append(1)) is False
+        assert began == [1]
+    finally:
+        imap.logout(conn)
+
+
+def test_an_interface_change_is_told_by_the_route_monitor_and_chatter_is_not():
+    import asyncio
+
+    lines = "RTM_MISS: Lookup failed\nRTM_ADD: Add Route\nRTM_NEWADDR: address being added to iface\n"
+    command = ["sh", "-c", f"printf '{lines}'; sleep 5"]
+
+    async def go():
+        changed = asyncio.Event()
+        watching = asyncio.create_task(imap.network_changes(changed, command))
+        await asyncio.wait_for(changed.wait(), 5)
+        watching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await watching
+
+    asyncio.run(go())
+
+
+def test_a_route_monitor_that_cannot_start_ends_quietly():
+    import asyncio
+
+    asyncio.run(imap.network_changes(asyncio.Event(), ["/nonexistent/route"]))
+
+
+def test_route_chatter_is_not_a_change():
+    import asyncio
+
+    command = ["sh", "-c", "printf 'RTM_MISS: Lookup failed\\nRTM_ADD: Add Route\\n'"]
+
+    async def go():
+        changed = asyncio.Event()
+        await imap.network_changes(changed, command)
+        return changed.is_set()
+
+    assert asyncio.run(go()) is False

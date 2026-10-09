@@ -69,12 +69,19 @@ class EmailBridge:
 
     async def watches(self) -> None:
         """The IMAP watch (`imap.watch`) on its own database connection,
-        replaced on the next wake when it drops."""
+        replaced on the next wake when it drops. A route monitor beside it
+        tells it when the network changes."""
 
         def connect():
             return db.connect(self.dsn, application_name="valor-email-watch")
 
-        await imap.watch(self.cfg, None, self._retry, connect)
+        changed = asyncio.Event()
+        monitor = asyncio.create_task(imap.network_changes(changed))
+        try:
+            await imap.watch(self.cfg, None, self._retry, connect, changed)
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
 
     async def run(self, outbox) -> None:
         """The watch beside the outbox. Each `Release` is performed as its

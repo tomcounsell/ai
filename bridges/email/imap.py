@@ -30,6 +30,15 @@ log = logging.getLogger("valor.email")
 # RFC 2177 has the client end IDLE and issue it again within 29.
 IDLE_REISSUE_S = 29 * 60
 
+# The kernel's route(4) messages for an interface or an address changing
+# (`net/route.h`: RTM_IFINFO "iface going up/down etc.", RTM_NEWADDR and
+# RTM_DELADDR "address being added to / removed from iface"). `route -n
+# monitor` prints each as a line that begins with its name; the other
+# messages it prints (a failed lookup, a route cached for one connection)
+# are not a change of the path.
+INTERFACE_CHANGES = ("RTM_IFINFO", "RTM_NEWADDR", "RTM_DELADDR")
+ROUTE_MONITOR = ("route", "-n", "monitor")
+
 _UID = re.compile(rb"UID (\d+)")
 _SAFE = re.compile(r"[^A-Za-z0-9@._+-]")
 
@@ -122,10 +131,12 @@ def logout(conn: imaplib.IMAP4) -> None:
         pass
 
 
-def idle(conn: imaplib.IMAP4) -> bool:
+def idle(conn: imaplib.IMAP4, on_enter=None) -> bool:
     """IDLE on the selected INBOX until the server reports a new message
-    (`EXISTS`, True) or `IDLE_REISSUE_S` passes (False). The re-issue
-    time is the only read bound while idling; the connection has none.
+    (`EXISTS`, True) or `IDLE_REISSUE_S` passes (False). `on_enter` is
+    called once the server has accepted IDLE. The connection has no read
+    bound of its own: a path that dies is ended by the network change
+    (`network_changes`) or by the `DONE` at the re-issue.
 
     Mail that arrived while the connection ran another command (a search,
     a fetch) was announced inside that command's responses, which IDLE
@@ -134,6 +145,8 @@ def idle(conn: imaplib.IMAP4) -> bool:
     if conn.untagged_responses.pop("EXISTS", None):
         return True
     with conn.idle(duration=IDLE_REISSUE_S) as idler:
+        if on_enter:
+            on_enter()
         for typ, data in idler:
             if typ == "BYE":
                 raise imaplib.IMAP4.abort(f"the server ended the session: {data}")
@@ -168,18 +181,77 @@ def _open(cfg: Config, ends: Ends, opened: list) -> imaplib.IMAP4_SSL:
     return opened[0]
 
 
-async def watch(cfg: Config, db, retry: asyncio.Event, connect=None) -> None:
+async def network_changes(changed: asyncio.Event, command=ROUTE_MONITOR) -> None:
+    """Sets `changed` each time the kernel reports an interface or address
+    change (`INTERFACE_CHANGES`), read from `route -n monitor`. A path that
+    drops with no reset sends the client nothing, so this is the signal that
+    the connection may be dead. If the monitor cannot start or ends, one
+    line is logged and the watch relies on the re-issue alone."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+    except OSError:
+        log.exception("email watch: the route monitor did not start; a dead path is found at the re-issue")
+        return
+    try:
+        async for line in proc.stdout:
+            if line.decode(errors="replace").startswith(INTERFACE_CHANGES):
+                changed.set()
+        log.warning("email watch: the route monitor ended; a dead path is found at the re-issue")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+
+
+async def _until_changed(work, ends: Ends, changed: asyncio.Event | None):
+    """Awaits `work`; if `changed` is set first, the connection is ended so
+    the call blocked on it returns, and `work` raises."""
+    if changed is None:
+        return await work
+    task, waiter = asyncio.ensure_future(work), asyncio.ensure_future(changed.wait())
+    try:
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if not task.done():
+            ends.end()
+        return await task
+    finally:
+        waiter.cancel()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def _session(cfg: Config, db, ends: Ends, opened: list, entered: list) -> None:
+    """One connection: receive, then wait, for as long as it holds.
+    `entered` gains an item each time the server accepts IDLE."""
+    conn = await ends.call(_open, cfg, ends, opened)
+    while True:
+        await poll(cfg, conn, db, ends)
+        await ends.call(idle, conn, lambda: entered.append(True))
+
+
+async def watch(
+    cfg: Config, db, retry: asyncio.Event, connect=None, changed: asyncio.Event | None = None
+) -> None:
     """Receives what is unseen, then IDLEs until new mail or the re-issue
     time, then again, on one IMAP connection. A failure is one line in the
     log; the watch reconnects when `retry` is next set (the bridge's
-    `tick`, on each outbox wake). `db` is the database connection intake
-    records into; when `connect` (a coroutine function) is given and `db`
-    has dropped, the same wake replaces it with `connect()`, and the
-    connection the watch made last is closed when it ends."""
+    `tick`, on each outbox wake). Two events reconnect at once, since each
+    says a working connection is gone: `changed` being set (the network
+    changed, see `network_changes`), and a transport failure (`OSError`, an
+    IMAP abort) after the server accepted IDLE. A server that refuses IDLE,
+    ends the session as it begins, or fails before it idled waits for the
+    tick. `db` is the database connection intake records into; when
+    `connect` (a coroutine function) is given and `db` has dropped, the
+    same wake replaces it with `connect()`, and the connection the watch
+    made last is closed when it ends."""
     made = None
+    again = False
     try:
         while True:
-            conn, ends, opened = None, Ends(), []
+            ends, opened, entered = Ends(), [], []
             if connect is not None and (db is None or db.closed or db.broken):
                 if made is not None:
                     await made.close()
@@ -191,18 +263,26 @@ async def watch(cfg: Config, db, retry: asyncio.Event, connect=None) -> None:
                     retry.clear()
                     await retry.wait()
                     continue
+            if changed is not None:
+                changed.clear()
+
+            again = False
             try:
-                conn = await ends.call(_open, cfg, ends, opened)
-                while True:
-                    await poll(cfg, conn, db, ends)
-                    await ends.call(idle, conn)
-            except Exception:
-                log.exception("email watch failed; it reconnects on the next tick")
+                await _until_changed(_session(cfg, db, ends, opened, entered), ends, changed)
+            except Exception as e:
+                if changed is not None and changed.is_set():
+                    log.warning("email watch: the network changed; it reconnects at once")
+                    again = True
+                else:
+                    log.exception("email watch failed")
+                    again = bool(entered) and isinstance(e, OSError | imaplib.IMAP4.abort)
             finally:
                 ends.end()
                 for c in opened:
                     drop(c)
                 ends.close()
+            if again:
+                continue
             retry.clear()
             await retry.wait()
     finally:
