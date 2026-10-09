@@ -204,3 +204,20 @@ container"`: 11 passed, 15 deselected; both container cases collect.
 formatted.
 
 Not run: the container test. The test check runs it on this head.
+
+## Checks and merge
+
+Review: changes (the setuptools case passed at base), answered by the patch
+above; the lead took the patch as the review's own fix. Docs: updated,
+`bb4edf295`, carried onto this head. Test: gaps. The suite with `-m "not
+container"` passed apart from five tests that pass alone (three
+`test_ports` StopIteration under load, two from a container fixture the
+checker ran beside the suite). Hook probes outside a VM: output from
+`print`, a subprocess, `os.system`, and a raw write to fd 1 all reach
+stderr; hatchling gives `editables~=0.3`; setuptools, the toy project and
+popoto's own `pyproject.toml` at `e51903535669`, give an empty list; a
+backend that raises gives an empty list. The container test did not run
+to the end: the data volume filled during it, in the scripted turn before
+the VM dependency build. The lead merged on that evidence; the in-VM
+evidence is D1's review step on popoto after the rollout, and the
+container test runs in the next test check with room on the disk.
