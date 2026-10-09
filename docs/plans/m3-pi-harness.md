@@ -338,7 +338,7 @@ come to about ten dollars, most of it the two long compaction sessions.
    `reviewer_openai` on the same candidate, both recorded, reported side
    by side.
 4. After 1.5 merges: popoto #633 started with `--harness pi --model
-   gpt-6.1`, carried to a held merge, its ledger summarized in the report.
+   gpt-6.1-sol`, carried to a held merge, its ledger summarized in the report.
 
 ## Questions for Tom
 

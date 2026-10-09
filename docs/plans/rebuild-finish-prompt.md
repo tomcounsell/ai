@@ -176,7 +176,7 @@ how the slot is keyed before starting two at once, and read
 `memory_pressure` before each start (16 GB is a platform fact, not a cap).
 
 **D1 Pi carries popoto #633.** `python -m core start ... --harness pi
---model gpt-6.1` (m3-pi-harness.md, Rollout 4), carried to its merge.
+--model gpt-6.1-sol` (m3-pi-harness.md, Rollout 4), carried to its merge.
 Once A1 has merged it merges by itself; before that, the lead releases it.
 Record its ledger summary and spending. This first real task after the
 1.4c part two rollout also gives its `verify.ran` read (m4-3-routines-record.md,

@@ -109,7 +109,10 @@ progress lines; the repository-suite test calls `never()` inside a
 coroutine; the npm test ignores the lock file the host's install writes.
 `core/images/base/deps.sh` fetches what the build backend adds for an
 editable build (hatchling adds `editables`), which the offline sync of a
-Python project with a build system needed.
+Python project with a build system needed. The hook script keeps file
+descriptor 1 on standard error while the backend runs, so a backend's log
+lines (setuptools prints `running egg_info`) never reach `uv pip install`
+as requirements; only the list goes to the original standard output.
 
 **Patch round 2:** the repository-suite test compared HEAD with its
 parent, whose suite predates the `macos` marks; in the VM that suite
