@@ -42,3 +42,12 @@ Four passes, through the judgement port, metered on
 next suite run; their answers are kept in
 `~/src/valor-build-notes/a3/diag*.json`, with the script (`diag.py`), the
 case ids, and the question variants asked.
+
+## Rollout
+
+Merged at `e2a0e6158` on top of C3 (`daee94e81`). The lead's focused run
+(pipeline, emulator metering, judgement, fresh; not container) gave 284
+passed. The kernel was restarted with `launchctl kickstart -k`; no schema
+change, so no migration. The docs runner now reports its verdict from the
+final message of its own session, and `python -m core verdict` no longer
+exists.

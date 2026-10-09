@@ -2,7 +2,7 @@
 tracking: none
 slug: a3-docs-runner
 type: plan
-status: planned
+status: done
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
