@@ -211,9 +211,12 @@ why a wording that passes a case once does not prove it passes in the next run.
      and the assertion expects `leg: session`.
    - One test that `python -m core verdict` exits as an unknown command
      (`m1-4c-outline.md`: "`verdict` is gone from the command line").
+   - `tests/test_emulator_metering.py:245`: a `record_check` that relied
+     on the `manual` default passes its leg.
    - A grep at build time for `MANUAL_STAGES`, `manual_allowed`,
-     `RUNNERS` from `core.__main__`, and `"verdict"` subprocess calls in
-     `tests/` catches any caller this list misses.
+     `RUNNERS` from `core.__main__`, `"verdict"` subprocess calls,
+     `read_verdict`, `no_verdict_yet`, and `verdict.json` in `tests/`
+     catches any caller this list misses.
 6. Docs, status quo only. Every sentence that says docs waits for a
    passing calibration, or that a person records a verdict by hand, says
    what is built:
@@ -232,10 +235,12 @@ why a wording that passes a case once does not prove it passes in the next run.
      the entry check" becomes: breadth routes on its entry check;
      governance answers the paragraph's boolean on every diff, review's
      and docs', from the start, and its entry check is a measurement that
-     lands `GOVERNANCE.calibrated` when a record passes.
+     lands `GOVERNANCE.calibrated` when a record passes. The file is at
+     599 lines, so the new text is no longer than the bullet it replaces.
    - `docs/plans/m1-4b-runners.md`, Landing: the sentence that keeps docs
      on the manual path until a record passes is replaced by one saying
-     docs is registered without it (this plan).
+     docs is registered without it (this plan), no longer than the
+     sentence it replaces (the file is at 599 lines).
    - Plans of merged work and records (`m1-4c-review.md`,
      `m1-4-checks.md`, `m1-5r-runners.md`, `m1-4b-records.md`, the
      verifier records, `m2-4-local.md`) are records of what was decided
@@ -273,8 +278,11 @@ What changes:
    the end of its final message, bare or in a fenced block; the sentence
    about the file goes. `skills/sdlc/docs.md`'s exit evidence says
    the same (`critique.md` does not name the file).
-   `docs/harnesses.md` (the paragraph around line 204), `fresh.py`'s module
-   docstring, and `tests/test_live_fresh.py`'s docstring say it as it is.
+   `docs/harnesses.md` (the paragraph around line 204),
+   `docs/architecture.md:242` ("reads a critique or docs session's verdict
+   file"), `core/README.md:50` (critique's "verdict file the kernel
+   validates"), `fresh.py`'s module docstring, and
+   `tests/test_live_fresh.py`'s docstring say it as it is.
 5. Tests. `tests/scripted.py`'s critique and docs acts print the verdict as
    the turn's final message instead of writing the file; the acts that
    tested the file's reading (`none`, `symlink`, `fifo`, `dir_symlink`, the
@@ -286,7 +294,13 @@ What changes:
    no verdict and returns `failed` with "the final message is not a JSON
    object". `test_a_process_the_turn_leaves_running_cannot_change_its_final_message`
    in `tests/test_harness_contract.py` already covers the channel for
-   review; it gains a critique case on the same forger.
+   review; it gains a critique case on the same forger. Other callers:
+   `tests/test_workspace.py`'s `read_verdict` tests (around lines 691-731
+   and 1544) and its `no_verdict_yet` test (around 1465) are deleted with
+   them; `tests/test_docs_runner.py:200-205`'s `symlink` bad case goes with
+   the act; `tests/test_fresh.py:109-114`, which asserts the blocking reads run
+   off the event loop, drops `read_verdict` from what it watches; `tests/test_fresh.py:175`'s `malformed` case expects
+   "not a JSON object".
 
 ### 3. A rate-limited case is asked again in calibration (`core/judgement_sites.py`, `calibrate`)
 
@@ -393,8 +407,8 @@ was (`JUDGE`, "Fitted over runs 1 to 5"); the comment above
 
 ## Records
 
-`docs/plans/m1-4b-records.md`, under "Governance recalibration
-(2026-10-09)", gains one entry: the diagnosis above in brief, the four
+A new records file, `docs/plans/a3-records.md` (`m1-4b-records.md` is at
+590 lines), holds one entry: the diagnosis above in brief, the four
 diagnostic passes (calibration tasks `52106d0c5b78`, `19b0ea8b835c`,
 `f95ad68cb45c`, `347c4cbec9f3`, $0.0605 metered on
 `valor_rebuild_test_a3build`), that their ledger rows went with the test
@@ -463,9 +477,9 @@ record passed) and the mission item is 1.
 3. The re-ask in `calibrate` with its three tests passing.
 4. The docs named in section 1, step 6 say what the code does; a grep of
    `docs/*.md`, `core/README.md`, and `skills/` for "by hand" next to
-   "verdict", "registered once", and `core verdict` finds nothing but
-   records.
-5. The m1-4b record entry.
+   "verdict", "registered once", `core verdict`, "verdict file", and
+   `verdict.json` finds nothing but records.
+5. The entry in `docs/plans/a3-records.md`.
 6. The full suite and ruff clean on `valor_rebuild_test_a3build`.
 
 ## Decided by default
