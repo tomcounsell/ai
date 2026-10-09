@@ -432,3 +432,37 @@ def test_a_paused_replay_is_resumed_by_the_next_firing_and_not_recorded_finished
     first, second = run(go())
     assert "running" in first and "finished" in second
     assert len(calls) == 6 and len({r for _, r in calls}) == 1  # the same run, resumed
+
+
+def test_a_failed_driver_leaves_its_output_beside_its_result_while_the_sweep_is_paused(
+    dsn, where, tmp_path, monkeypatch
+):
+    import json
+
+    from routines.emulator import runner
+
+    name = unique()
+    write_toml(where, name, runner="emulator")
+    demo = tmp_path / "demo"
+    (demo / "items").mkdir(parents=True)
+    (demo / "results").mkdir()
+    (demo / "items" / "it.json").write_text(json.dumps({"name": "it"}))
+    monkeypatch.setattr(runner, "settings", dataclasses.replace(settings, demo_dir=str(demo)))
+
+    async def drive(item, arm, run_, nm):
+        (demo / "results" / f"{nm}.json").write_text(json.dumps({"run": nm, "outcome": None}))
+        if arm == "bare":
+            return 1, "it-bare: MERGED\nTraceback (most recent call last):\nRuntimeError: boom\n"
+        return 0, ""  # the other arms pause, so the sweep writes no report
+
+    monkeypatch.setattr(runner, "_drive", drive)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return await routines.run(conn, name, {"emulator": runner.run}, dsn=dsn)
+
+    assert "running" in run(go())
+    (log,) = (demo / "results").glob("it-bare-*.driver.log")
+    text = log.read_text()
+    assert "exit 1" in text and "RuntimeError: boom" in text
+    assert not list((demo / "results").glob("it-clarify-*.driver.log"))

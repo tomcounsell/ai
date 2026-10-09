@@ -176,3 +176,27 @@ def test_a_replay_spec_carries_the_items_setup_suite_and_env(tmp_path, monkeypat
         ("uv sync --frozen --extra dev",),
         {"UV_PYTHON": "3.12"},
     )
+
+
+@pytest.mark.parametrize("fails", ["status", "stand_in"])
+def test_a_failed_status_read_or_stand_in_is_logged_and_pauses_the_driver(monkeypatch, fails):
+    """`step` records a status read or a stand-in that raises in the run's
+    log and pauses, as it does a failed `core run`; the next invocation
+    resumes (`docs/emulator.md`)."""
+    from tests.emulator import replay
+
+    def boom(*a, **kw):
+        raise RuntimeError("claude -p returned no JSON")
+
+    monkeypatch.setattr(replay, "status", boom if fails == "status" else lambda t: {"state": "merged"})
+    monkeypatch.setattr(replay, "stand_in", boom)
+    monkeypatch.setattr(replay, "core", lambda *a: pytest.fail("no run after a failed step"))
+    result = {"task_id": "t1", "log": [], "run": "r", "outcome": None}
+    item, ws = {"answer_key": "k"}, {"mirror": "m", "base": "b", "run_dir": "d"}
+    args = type("A", (), {"stand_in_model": "x", "max_feedback": 1})()
+    replay.step(result, item, ws, args, meter=None)
+    step = "status failed" if fails == "status" else "stand-in failed"
+    assert result["log"][-1]["step"] == step
+    assert result["log"][-1]["error"] == "RuntimeError: claude -p returned no JSON"
+    assert result["paused"] == f"{step}: RuntimeError: claude -p returned no JSON"
+    assert result["outcome"] is None

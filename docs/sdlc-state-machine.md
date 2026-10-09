@@ -475,18 +475,19 @@ The findings the join passes to `patch` are the next turn's prompt.
 **Goal.** Every finding the join sent back is resolved or answered with a
 reason, and the result is a new candidate.
 
-**Entry.** The join sent work back, or Tom gave feedback in `merge` or
-`merged`.
+**Entry.** The join sent work back, or Tom gave feedback in `merge` or `merged`.
 
-**What runs.** The working session, resumed, with all of the join's
-findings or Tom's feedback as one prompt. Never a new agent: the session
-that built carries why each line is there, and a send-back costs one more
-turn of it. When the session nears the model's context limit it is
-compacted in place and resumed ([harnesses.md](harnesses.md)).
+**What runs.** The working session, resumed, with all of the join's findings or Tom's
+feedback as one prompt. Never a new agent: the session that built carries why each line
+is there, and a send-back costs one more turn of it. When the session nears the model's
+context limit it is compacted in place and resumed ([harnesses.md](harnesses.md)). After
+a merge, before each turn the kernel fast-forwards the work branch to the merged head
+(the candidate and the docs check's commits, kept in its mirror), through the bare
+origin, under the turn's profile (`session.merged_into_work`), so the round's merge
+lands on top of the first; when it cannot, the prompt names the head and why.
 
-**Exit evidence.** Same as `build`: `candidate` goes to `checks`, all three
-branches again on the new candidate; `asked`, `idle`, and `failed` as in
-`build`.
+**Exit evidence.** Same as `build`: `candidate` goes to `checks`, all three branches
+again on the new candidate; `asked`, `idle`, and `failed` as in `build`.
 
 **Why.** Tom's decision of 2026-10-01; the demonstration's two send-backs
 were one resumed turn each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
@@ -496,8 +497,7 @@ were one resumed turn each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 **Goal.** A delivery that passed lands on the target branch, and Tom hears
 what landed; one that cannot land reaches Tom with what stands in its way.
 
-**Entry.** The join sent the task here, as a delivery that passed or one
-that did not.
+**Entry.** The join sent the task here, as a delivery that passed or one that did not.
 
 **What runs.** The kernel writes `task.delivered` with the delivery
 summary: what was delivered, how it was verified, the test, review, and
@@ -562,9 +562,8 @@ digests its path, the hunk header's function context, and its added lines,
 without line numbers, so the same hunk on a rerun or a later candidate
 keeps its id and its grant; a changed, moved, or split hunk needs a new
 tap, and identical added lines in one function context of one file share
-an id. After the merge the task is
-`merged`; a defect found in use comes back as `feedback.given` on the same
-task and goes to `patch` (Mission item 1, "resolving discovered defects").
+an id. After the merge the task is `merged`; a defect found in use comes back as
+`feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects").
 After a merge, `python -m core status` reads what came after it
 (`core/outcomes.py`): the feedback given after it and before the next
 delivery, the `delivery.used` marks, the later merges of other tasks to the

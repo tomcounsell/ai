@@ -16,7 +16,7 @@ its spec (`tests/emulator/workspace.py`).
 | Part | What it is |
 |---|---|
 | `repo/` | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
-| `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. No turn writes it; only the broker's `push_branch` and `merge`, from the kernel's process, after Tom releases the push |
+| `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. No turn writes it; only the broker's `push_branch` and `merge`, from the kernel's process, after Tom releases the push. After a merge the kernel also puts the merged head on the target branch from its mirror, and the clone's work branch is fast-forwarded to it before each `patch` turn (`workspace.bring_merged`) |
 | `kernel.git/` | the kernel mirror: seeded with the base, and fed each plan commit, candidate, and docs head (a docs session's kept head under `refs/valor/docs/`); the merge predicate and the merge read it. No turn reads or writes it |
 | `home/` | git config (Valor's identity, no credential helper), an empty gh config, `pgpass`, and the profiles: `turn.sb`, each fresh session's, and `service.sb` |
 | `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's `TMPDIR` and Claude Code config; each fresh session's checkout, `tmp/`, and `claude/`; each suite run's blind checkout and its own copy of the caches, cloned from `checks/seed/` (the base's setup output) |

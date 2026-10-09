@@ -43,7 +43,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from core import broker, db, git, ledger, machine, mail, runs, signals, slot, tasks, workspace
+from core import broker, db, git, ledger, machine, mail, outcomes, runs, signals, slot, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
@@ -78,7 +78,9 @@ async def run(
     `state` from `tasks.status`. Before each turn, a question for the
     advisor that is still pending (`pending_advice`) is put to `advise`
     (`fresh.advise`); its `lock lost`, `stopped`, or preemption ends the
-    run as a turn's does, so the question is asked on the next run."""
+    run as a turn's does, so the question is asked on the next run. Before
+    a `patch` turn of a task with a done merge, the merged head is brought
+    into the work branch (`merged_into_work`)."""
     dsn = dsn or gateway.dsn
     performers = performers or broker.Performers()
     async with await db.connect(dsn) as conn:
@@ -96,11 +98,15 @@ async def run(
             asked = pending_advice(await ledger.read(conn, task_id)) if advise else None
             if asked is None:
                 prompt, resume = await next_prompt(conn, task_id)
+            rows = await ledger.read(conn, task_id) if state is State.PATCH and asked is None else []
         if asked is not None:
             advised = await advise(gateway, task_id, dsn, alive, asked)
             if advised.get("status") in ("lock lost", "stopped") or advised.get("preempted"):
                 return advised
             continue
+        merged = await asyncio.to_thread(merged_into_work, b, rows) if rows else None
+        if merged:
+            prompt = f"{prompt}\n\n{merged}"
         try:
             ended = await runs.run_turn(
                 gateway,
@@ -203,6 +209,35 @@ def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | No
     if head is None:
         return None, "the workspace has no commit"
     return {"sha": head, "turn_id": turn_id}, None
+
+
+def merged_into_work(brief: tasks.Brief, rows: list[dict]) -> str | None:
+    """Bring the task's last done merge's head into its work branch
+    (`workspace.bring_merged`), so a feedback round builds on what the
+    merge landed and its own merge is a fast-forward of it. A task without
+    a mirror or a done merge has nothing to bring. When it cannot, a note
+    for the turn's prompt naming the head, how to bring it in, and why."""
+    done = outcomes.merges(rows)
+    if not done or not brief.mirror or not brief.workspace or not brief.push_url:
+        return None
+    head, target = done[-1]["head_sha"], done[-1]["target_branch"]
+    try:
+        workspace.bring_merged(
+            brief.workspace,
+            brief.mirror,
+            brief.push_url,
+            head,
+            target,
+            brief.harness["sandbox_profile"],
+            f"merged-{brief.id}",
+        )
+    except git.GitError as exc:
+        return (
+            f"# The merged head\n\nThe merge landed {head} on {target}; this round builds on it. "
+            f"The kernel could not bring it into the work branch: {exc}\n"
+            f"Bring it in before you commit: git fetch origin {target} && git merge --ff-only {head}"
+        )
+    return None
 
 
 def _keep(brief: tasks.Brief | None, sha: str, ref: str, turn_id: str) -> str | None:

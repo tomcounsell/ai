@@ -168,8 +168,10 @@ After each `core run` the driver reads the first word of its answer.
 on. Every other answer exits the driver with the outcome unset and the
 answer recorded as the reason: `NO RUNNER` (a stage with no runner),
 `FAILED`, `LOCK LOST`, `LEGACY`, and any answer the driver does
-not know. A stage awaiting Tom's grant exits the same way. The next
-invocation resumes the same task.
+not know. A stage awaiting Tom's grant exits the same way, and so does a
+status read or stand-in step that raises: the run's log gets a `status
+failed` or `stand-in failed` row with the error, and the traceback goes to
+stderr. The next invocation resumes the same task.
 
 Critique runs as the kernel's fresh session, metered and recorded on the run's task.
 

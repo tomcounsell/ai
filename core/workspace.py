@@ -1429,6 +1429,44 @@ def fetch_into_mirror(
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
 
 
+def bring_merged(
+    repo: str | Path,
+    mirror: str | Path,
+    origin: str | Path,
+    head: str,
+    target: str,
+    turn_profile_path: str | Path,
+    mark: str,
+) -> None:
+    """Bring a merged head into the task's work branch, so the next round
+    builds on what the merge landed: the candidate and the docs check's
+    commits, which the kernel keeps only in its mirror. The kernel pushes
+    the head from the mirror to the bare origin's `target` (already there
+    when the merge landed on that origin), then git in `repo` fetches it and
+    fast-forwards the work branch, under the turn's own profile. Raises
+    `git.GitError` with the reason when the clone's config is one the
+    kernel will not run git under, or the branch cannot fast-forward."""
+    git.trusted(mirror, "push", "-q", "--no-verify", str(origin), f"{head}:refs/heads/{target}")
+    found = git.hostile(repo, turn_profile_path, mark)
+    if found:
+        raise git.GitError("the clone's git config names what the kernel will not run: " + "; ".join(found))
+    prefix = [
+        binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
+        "-f", str(turn_profile_path),
+    ]  # fmt: skip
+    try:
+        for args in (
+            ("fetch", "-q", "--no-tags", "--no-recurse-submodules", str(origin),
+             f"+refs/heads/{target}:refs/remotes/origin/{target}"),
+            ("merge", "-q", "--ff-only", "--no-edit", head),
+        ):  # fmt: skip
+            done = git._git(repo, *args, prefix=prefix)
+            if done.returncode != 0:
+                raise git.GitError(f"git {args[0]}: {done.stderr.strip()}")
+    finally:
+        runs.reap(mark)
+
+
 def _no_borrowed_objects(source: Path) -> None:
     """Refuse a clone whose `.git` is not a plain directory, or that has
     alternates, a shallow file, or a common directory, every lookup relative

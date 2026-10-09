@@ -90,7 +90,9 @@ The two routines the kernel holds:
   second process says `already running`. A run with no report is continued.
   When a replay is paused before it has an outcome, the run writes no report
   and says `running` with the count of paused replays; the next firing
-  resumes the same run under the same names.
+  resumes the same run under the same names. A driver that exits nonzero
+  has its exit code and output appended at once to
+  `$VALOR_DEMO/results/<replay>.driver.log`, beside its result file.
 
 ## Metered spending and ceiling
 

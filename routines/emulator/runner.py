@@ -6,7 +6,9 @@ rollup is the sweep's spending. The runner holds the session lock
 `run:<run>` for the driver's life, as `core run` holds `run:<task>`, and
 runs the replay driver (`tests/emulator/replay.py`) as a subprocess, the
 same code that runs by hand. It requests no effect and writes no verdict on
-any task; an item that fails is recorded and the next one runs.
+any task; an item that fails is recorded and the next one runs. A driver
+that exits nonzero leaves its exit code and output in
+`results/<run>.driver.log` at once.
 """
 
 import asyncio
@@ -51,6 +53,16 @@ async def _drive(item: Path, arm: str, run: str, name: str) -> tuple[int, str]:
     )
     out, _ = await proc.communicate()
     return proc.returncode, out.decode(errors="replace")
+
+
+def _driver_log(demo: Path, name: str, code: int, out: str, at: str) -> None:
+    """Append a failed driver's exit code and output to
+    `results/<name>.driver.log`, written at once, so it outlives a sweep
+    that pauses or crashes before its report."""
+    path = demo / "results" / f"{name}.driver.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(f"--- {at} exit {code}\n{out}\n")
 
 
 async def _preempted(conn, task_id: str | None) -> int:
@@ -129,6 +141,7 @@ async def run(ctx: Context) -> Ran:
                     code, tail = await _drive(item, arm, run_id, run_name)
                     have = _result(demo, run_name)
                     if code != 0 or have is None:
+                        _driver_log(demo, run_name, code, tail, ctx.now.isoformat())
                         failed += 1
                         report["items"][name][arm] = {"failed": tail}
                         continue

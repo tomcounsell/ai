@@ -78,6 +78,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
@@ -305,11 +306,25 @@ def _replay(item: dict, arm: str, args) -> dict:
     return result
 
 
+def _failed(result: dict, step: str, exc: Exception) -> None:
+    """Record a failed step in the run's log and pause the driver, with its
+    traceback on stderr; the next invocation resumes."""
+    traceback.print_exc(file=sys.stderr)
+    error = f"{type(exc).__name__}: {exc}"
+    result["log"].append({"at": now(), "step": step, "error": error})
+    result["paused"] = f"{step}: {error}"
+
+
 def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     """One move of the run: answer the stand-in's part, end the run, pause
-    the driver, or run the task once."""
+    the driver, or run the task once. A status read, stand-in, or `core run`
+    that fails is logged and pauses the driver."""
     task_id, log, run_name = result["task_id"], result["log"], result["run"]
-    state = status(task_id)
+    try:
+        state = status(task_id)
+    except Exception as exc:  # noqa: BLE001  logged in the run's record, and the driver pauses
+        _failed(result, "status failed", exc)
+        return
     if state["state"] == "stopped":
         result["outcome"] = "stopped"
         return
@@ -321,16 +336,20 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
         result["paused"] = "awaiting a grant"
         return
     if state["state"] in ("waiting", "merged"):
-        reply = stand_in(
-            task_id,
-            item["answer_key"],
-            meter=meter,
-            mirror=ws["mirror"],
-            base=ws["base"],
-            model=args.stand_in_model,
-            max_feedback=args.max_feedback,
-            workdir=Path(ws["run_dir"]),
-        )
+        try:
+            reply = stand_in(
+                task_id,
+                item["answer_key"],
+                meter=meter,
+                mirror=ws["mirror"],
+                base=ws["base"],
+                model=args.stand_in_model,
+                max_feedback=args.max_feedback,
+                workdir=Path(ws["run_dir"]),
+            )
+        except Exception as exc:  # noqa: BLE001  logged in the run's record, and the driver pauses
+            _failed(result, "stand-in failed", exc)
+            return
         log.append({"at": now(), "step": "stand-in", **reply})
         print(
             f"{run_name}: stand-in {reply['kind']}: {(reply['text'] or reply['reason'] or '')[:200]}",
