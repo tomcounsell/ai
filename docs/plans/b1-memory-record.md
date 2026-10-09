@@ -11,7 +11,9 @@ with a recorded preference, then one item run with memory on and off.
 
 ## Setup
 
-- Branch `b1-memory` at 4ccc89074 plus this record.
+- Branch `b1-memory` at 4ccc89074 plus this record. The candidate
+  6a0a07fea is that commit and this record rebased onto
+  b832d10ec, with the same code diff.
 - Ledger: `VALOR_DB=valor_rebuild_test_b1emu`, a fresh database on the
   machine cluster (trust auth), migrated once by `db.migrate(...,
   fresh=True)`. `VALOR_WORK=~/valor-tasks-b1emu`. `VALOR_PG_PORTS` and
@@ -67,7 +69,8 @@ the Brief (0 is absent):
 | 3532d776aafe (on) | 102 | 11920 | first turn |
 | 3532d776aafe (on) | 118 | 0 | fresh session |
 | 3532d776aafe (on) | 131 | 11998 | later turn |
-| 3489aff706cb (off) | 175, 194, 211, 223, 238 | 0 | every turn |
+| 3532d776aafe (on) | 175 | 0 | fresh session |
+| 3489aff706cb (off) | 194, 211, 223, 238 | 0 | every turn |
 
 No Brief of either run holds `Memory: unavailable`.
 
@@ -76,9 +79,12 @@ ledger order: the seed's instruction, labelled `task 5dc38d1eedf4, Tom's
 instruction (by tom, via the command line, 2026-10-09T09:51:52...)` with
 the request quoted whole, then two transcript entries labelled `task
 5dc38d1eedf4, turn ..., from that turn's transcript, written by the
-turn`. Every record line was quoted `  > `. The seed was started by `core
-start` as Tom on the command line, not by a stand-in, so its label is
-Tom's instruction without the stand-in wording.
+turn`. Every record line was quoted `  > `. The seed's label reads "Tom's
+instruction" because of how the emulator records provenance: the replay
+driver starts each task with `core start`, which writes `by` tom, `via`
+the command line, and `role_played` false on its `task.started`. The
+kernel labels a record from the provenance its row carries, so a replayed
+request is labelled as Tom's.
 
 ## Verify
 
@@ -97,3 +103,8 @@ run's Briefs hold no section. The on run's final commit passes all three
 verify commands and the off run's fails the preference check. The off run
 did not meet the preference unprompted, so the fallback pair the plan
 names is not run.
+
+The lead's decision on the review's residual: turn-written transcripts
+reach a later Brief in the same project, labelled, quoted and escaped,
+with no kernel decision reading them; that is accepted as the milestone's
+Done requires.
