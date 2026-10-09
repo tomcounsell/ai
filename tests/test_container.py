@@ -11,7 +11,9 @@ Live spend: none.
 """
 
 import asyncio
+import contextlib
 import dataclasses
+import fcntl
 import json
 import os
 import shutil
@@ -28,7 +30,7 @@ from psycopg.conninfo import make_conninfo
 from core import binaries, checks, container, db, fresh, ledger, machine, tasks
 from core import workspace as kws
 from core.settings import settings
-from tests import test_checks, test_review
+from tests import conftest, test_checks, test_review
 
 pytestmark = [pytest.mark.spend(usd=0)]
 
@@ -113,13 +115,30 @@ def detached(name: str, label: str) -> None:
     assert code == 0, out
 
 
+@contextlib.contextmanager
+def held():
+    """The machine lock, held as a kernel holds it through a verification:
+    the system is stopped before it is released. A test's own work on the
+    runtime runs inside it, so it never starts, stops, or changes the
+    runtime under a kernel's verification."""
+    container.LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(container.LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            container.stop_system()
+        finally:
+            os.close(fd)
+
+
 async def base_image() -> str:
-    """The base image's tag, built under the lock when missing; the system
-    left running."""
+    """The base image's tag, built when missing, the system started; the
+    caller holds the machine lock."""
     stop = never()
     await container.start(stop)
-    async with container.machine_lock(stop):
-        tag, _ = await container.ensure_base(kws.Layout(Path("/nonexistent")), stop, "tests")
+    tag, _ = await container.ensure_base(kws.Layout(Path("/nonexistent")), stop, conftest.LABEL)
     return tag
 
 
@@ -367,6 +386,46 @@ def test_a_stop_ends_a_hung_short_cli_call(tmp_path, monkeypatch):
         os.close(heard_fd)
 
 
+# -- a test session's images -------------------------------------------------------------------
+
+
+@pytest.mark.container
+def test_a_container_test_keeps_its_own_records_and_image_names():
+    """A container test shares the machine lock with every kernel, and
+    keeps its image records and image names to its session."""
+    machine = Path.home() / container.STATE_DIR
+    assert container.LOCK == machine / "container.lock"
+    assert container.IMAGES.parent != machine
+    assert container.REPO == f"valor-test-{conftest.LABEL}" != "valor"
+    assert container.base_tag().startswith(f"{container.REPO}/base:")
+
+
+def test_an_image_another_database_recorded_survives_a_tests_prune_and_cleanup(tmp_path, monkeypatch):
+    """A record carrying another database's label, beside the session's
+    own: the session's prune and its end-of-session release delete and drop
+    only the session's image."""
+    calls = tmp_path / "calls"
+    cli = tmp_path / "container"
+    cli.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit 0\n')
+    cli.chmod(0o755)
+    monkeypatch.setattr(container, "require", lambda: str(cli))
+    monkeypatch.setattr(container, "IMAGES", tmp_path / "images.json")
+    kernels = "valor/popoto:91b2bbc3df11"
+    container._record(kernels, "sha256:k", container.owner("dbname=valor_rebuild"))
+    for tag in (f"{container.REPO}/toy:1", f"{container.REPO}/toy:2"):
+        container._record(tag, "sha256:t", conftest.LABEL)
+    other = container._images()[kernels]
+    assert unstopped(container.prune, {}, set(), conftest.LABEL) == [
+        f"{container.REPO}/toy:1",
+        f"{container.REPO}/toy:2",
+    ]
+    container._record(f"{container.REPO}/base:x", "sha256:b", conftest.LABEL)
+    conftest.release_images(conftest.LABEL)
+    assert container._images() == {kernels: other}
+    deleted = [line.split()[-1] for line in calls.read_text().splitlines() if line.startswith("image delete")]
+    assert kernels not in deleted and f"{container.REPO}/base:x" in deleted
+
+
 # -- the lock --------------------------------------------------------------------------------
 
 
@@ -542,28 +601,25 @@ def test_a_stop_during_a_build_leaves_no_builder(tmp_path):
         context.mkdir()
         (context / "Containerfile").write_text(f"FROM {base}\nRUN sleep 600\n")
         stop = asyncio.get_running_loop().create_future()
-        async with container.machine_lock(never()):
-            building = asyncio.ensure_future(
-                container.build("valor/stuck:test", context, tmp_path / "build.out", asyncio.ensure_future(stop),
-                                "tests")
-            )  # fmt: skip
-            out = tmp_path / "build.out"
-            up = await asyncio.to_thread(
-                test_checks._wait,
-                lambda: out.exists() and "sleep 600" in out.read_text(errors="replace"),
-                900,
-            )
-            stop.set_result(None)
-            with pytest.raises(checks._Stopped):
-                await building
+        building = asyncio.ensure_future(
+            container.build(f"{container.REPO}/stuck:test", context, tmp_path / "build.out",
+                            asyncio.ensure_future(stop), conftest.LABEL)
+        )  # fmt: skip
+        out = tmp_path / "build.out"
+        up = await asyncio.to_thread(
+            test_checks._wait,
+            lambda: out.exists() and "sleep 600" in out.read_text(errors="replace"),
+            900,
+        )
+        stop.set_result(None)
+        with pytest.raises(checks._Stopped):
+            await building
         return up
 
-    try:
+    with held():
         assert run(go())
         assert not builder_up() and not container.BUILDER_OWNER.exists()
-        assert unstopped(container.inspect, "valor/stuck:test") is None
-    finally:
-        container.stop_system()
+        assert unstopped(container.inspect, f"{container.REPO}/stuck:test") is None
 
 
 @pytest.mark.container
@@ -571,26 +627,25 @@ def test_a_build_leaves_no_builder_and_no_cache_the_next_build_reuses(tmp_path):
     async def go():
         base = await base_image()
         digests = []
-        async with container.machine_lock(never()):
-            for i, step in enumerate(("echo planted > /cache/marker", "test ! -e /cache/marker")):
-                context = tmp_path / f"ctx{i}"
-                context.mkdir()
-                (context / "Containerfile").write_text(
-                    f"FROM {base}\nRUN --mount=type=cache,target=/cache {step}\n"
-                )
-                digests.append(await container.build(f"valor/cache{i}:test", context, tmp_path / f"{i}.out",
-                                                     never(), "tests"))  # fmt: skip
-                assert not builder_up()
+        for i, step in enumerate(("echo planted > /cache/marker", "test ! -e /cache/marker")):
+            context = tmp_path / f"ctx{i}"
+            context.mkdir()
+            (context / "Containerfile").write_text(
+                f"FROM {base}\nRUN --mount=type=cache,target=/cache {step}\n"
+            )
+            digests.append(await container.build(f"{container.REPO}/cache{i}:test", context,
+                                                 tmp_path / f"{i}.out", never(), conftest.LABEL))  # fmt: skip
+            assert not builder_up()
         return digests
 
-    try:
-        first, second = run(go())
-        assert first and second, (tmp_path / "1.out").read_text()
-    finally:
-        for tag in ("valor/cache0:test", "valor/cache1:test"):
-            container.call("image", "delete", tag)
-            container._record(tag, None, "")
-        container.stop_system()
+    with held():
+        try:
+            first, second = run(go())
+            assert first and second, (tmp_path / "1.out").read_text()
+        finally:
+            for i in range(2):
+                container.call("image", "delete", f"{container.REPO}/cache{i}:test")
+                container._record(f"{container.REPO}/cache{i}:test", None, "")
 
 
 @pytest.mark.container
@@ -598,33 +653,30 @@ def test_an_image_retagged_by_hand_is_a_kernel_cause_and_dropped(tmp_path):
     async def go():
         base = await base_image()
         out = {}
-        async with container.machine_lock(never()):
-            for name in ("one", "two"):
-                context = tmp_path / name
-                context.mkdir()
-                (context / "Containerfile").write_text(f"FROM {base}\nRUN echo {name} > /name\n")
-                out[name] = await container.build(f"valor/{name}:test", context, tmp_path / f"{name}.out",
-                                                  never(), "tests")  # fmt: skip
+        for name in ("one", "two"):
+            context = tmp_path / name
+            context.mkdir()
+            (context / "Containerfile").write_text(f"FROM {base}\nRUN echo {name} > /name\n")
+            out[name] = await container.build(f"{container.REPO}/{name}:test", context, tmp_path / f"{name}.out",
+                                              never(), conftest.LABEL)  # fmt: skip
         return out
 
-    try:
-        digests = run(go())
-        assert unstopped(container.checked, "valor/one:test") == digests["one"]
-        # `image tag` leaves a built tag in place, so the swap deletes it first.
-        assert container.call("image", "delete", "valor/one:test")[0] == 0
-        assert container.call("image", "tag", "valor/two:test", "valor/one:test")[0] == 0
-        with pytest.raises(container.Failed) as raised:
-            unstopped(container.checked, "valor/one:test")
-        assert raised.value.cause == "kernel"
-        assert (
-            unstopped(container.inspect, "valor/one:test") is None
-            and "valor/one:test" not in container._images()
-        )
-    finally:
-        for tag in ("valor/one:test", "valor/two:test"):
-            container.call("image", "delete", tag)
-            container._record(tag, None, "")
-        container.stop_system()
+    one, two = f"{container.REPO}/one:test", f"{container.REPO}/two:test"
+    with held():
+        try:
+            digests = run(go())
+            assert unstopped(container.checked, one) == digests["one"]
+            # `image tag` leaves a built tag in place, so the swap deletes it first.
+            assert container.call("image", "delete", one)[0] == 0
+            assert container.call("image", "tag", two, one)[0] == 0
+            with pytest.raises(container.Failed) as raised:
+                unstopped(container.checked, one)
+            assert raised.value.cause == "kernel"
+            assert unstopped(container.inspect, one) is None and one not in container._images()
+        finally:
+            for tag in (one, two):
+                container.call("image", "delete", tag)
+                container._record(tag, None, "")
 
 
 PACKAGE = '{"name": "toy", "version": "1.0.0"}\n'
@@ -656,8 +708,8 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
     assert "tests.test_planted::test_not_planted" in v["base_run"]["tests"]["passed"]
     assert v["failures"] == ["tests.test_planted::test_not_planted"]
     tags = {v["image_tag"], v["base_image_tag"]}
-    unstopped(container.start)
-    try:
+    with held():
+        unstopped(container.start)
         assert all(unstopped(container.checked, t) for t in tags)
 
         async def again():
@@ -676,8 +728,6 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
         assert all(unstopped(container.checked, t) for t in tags)
         assert tags <= set(unstopped(container.prune, {}, set(), container.owner(dsn)))
         assert not any(unstopped(container.checked, t) for t in tags)
-    finally:
-        container.stop_system()
 
 
 BACKENDS = {
@@ -757,7 +807,7 @@ def test_no_network_as_root_in_a_run_vm():
     async def go():
         return await base_image()
 
-    try:
+    with held():
         base = run(go())
         probe = "; ".join(
             f"if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo open {h}; fi"
@@ -769,8 +819,6 @@ def test_no_network_as_root_in_a_run_vm():
         # The output less the CLI's progress lines.
         printed = [line for line in out.splitlines() if line.strip() and not line.startswith("[")]
         assert code == 0 and printed == ["0"], out
-    finally:
-        container.stop_system()
 
 
 @pytest.mark.container
@@ -791,18 +839,18 @@ def test_the_builder_cannot_reach_the_kernels_postgres_or_a_tasks_services(tmp_p
         (context / "Containerfile").write_text(
             f'FROM {base}\nSHELL ["/bin/bash", "-c"]\nRUN {probe} echo none\n'
         )
-        async with container.machine_lock(never()):
-            return await container.build(
-                "valor/reach:test", context, tmp_path / "reach.out", never(), "tests"
-            )
+        return await container.build(reach, context, tmp_path / "reach.out", never(), conftest.LABEL)
 
+    reach = f"{container.REPO}/reach:test"
     try:
-        assert run(go()), (tmp_path / "reach.out").read_text()
+        with held():
+            try:
+                assert run(go()), (tmp_path / "reach.out").read_text()
+            finally:
+                container.call("image", "delete", reach)
+                container._record(reach, None, "")
     finally:
         listener.close()
-        container.call("image", "delete", "valor/reach:test")
-        container._record("valor/reach:test", None, "")
-        container.stop_system()
 
 
 # -- reaping ---------------------------------------------------------------------------------
@@ -817,10 +865,11 @@ os.read(0, 1)
 """
 
 
-@pytest.mark.container
-def test_a_killed_kernels_vm_is_reaped_by_the_next_sweep_and_the_system_stopped(dsn):
-    run(base_image())
-    name = "valor-verify-killed-head"
+@contextlib.contextmanager
+def stand_in():
+    """A stand-in kernel holding the machine lock, killed by the test or at
+    the end. The test does the stand-in's work on the runtime while it holds
+    the lock."""
     kernel = subprocess.Popen(
         [sys.executable, "-c", KILLED, str(container.LOCK)],
         stdin=subprocess.PIPE,
@@ -829,40 +878,52 @@ def test_a_killed_kernels_vm_is_reaped_by_the_next_sweep_and_the_system_stopped(
     )
     try:
         assert kernel.stdout.readline() == "locked\n"
-        detached(name, container.owner(dsn))
-        assert container.reap(dsn) == []  # a live verification: nothing touched
-        os.kill(kernel.pid, signal.SIGKILL)
-        kernel.wait()
-        assert container.reap(dsn) == [name]
-        assert not container.running()
+        yield kernel
     finally:
         if kernel.poll() is None:
             kernel.kill()
             kernel.wait()
-        if container.running():
-            container.remove(name)
-            container.stop_system()
+
+
+def killed(kernel: subprocess.Popen) -> None:
+    os.kill(kernel.pid, signal.SIGKILL)
+    kernel.wait()
+
+
+@pytest.mark.container
+def test_a_killed_kernels_vm_is_reaped_by_the_next_sweep_and_the_system_stopped(dsn):
+    name = "valor-verify-killed-head"
+    try:
+        with stand_in() as kernel:
+            run(base_image())
+            detached(name, container.owner(dsn))
+            assert container.reap(dsn) == []  # a live verification: nothing touched
+            killed(kernel)
+            assert container.reap(dsn) == [name]
+            assert not container.running()
+    finally:
+        with held():
+            if container.running():
+                container.remove(name)
 
 
 @pytest.mark.container
 def test_a_sweep_touches_only_its_own_databases_vms(dsn):
     other = make_conninfo(dsn, dbname="valor_rebuild_test_other")
     assert container.owner(other) != container.owner(dsn)
-    run(base_image())
     name = "valor-verify-first-head"
     try:
-        detached(name, container.owner(dsn))
-        held = container.try_lock()
-        try:
+        with stand_in() as kernel:
+            run(base_image())
+            detached(name, container.owner(dsn))
             assert container.reap(other) == [] and name in names()
-        finally:
-            os.close(held)
-        assert container.reap(other) == [] and name in names() and container.running()
-        assert container.reap(dsn) == [name] and not container.running()
+            killed(kernel)
+            assert container.reap(other) == [] and name in names() and container.running()
+            assert container.reap(dsn) == [name] and not container.running()
     finally:
-        if container.running():
-            container.remove(name)
-            container.stop_system()
+        with held():
+            if container.running():
+                container.remove(name)
 
 
 # -- this repository ---------------------------------------------------------------------------

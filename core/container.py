@@ -88,6 +88,8 @@ STATE_DIR = "Library/Application Support/valor"
 LOCK = Path.home() / STATE_DIR / "container.lock"
 BUILDER_OWNER = LOCK.parent / "builder.owner"
 IMAGES = LOCK.parent / "images.json"
+# The repository every image the kernel builds is named under.
+REPO = "valor"
 
 IMAGES_DIR = Path(__file__).parent / "images"
 BASE_DIR = IMAGES_DIR / "base"
@@ -305,11 +307,11 @@ def try_lock() -> int | None:
 
 
 def base_tag() -> str:
-    """`valor/base:<sha256 of the files in core/images/base/>`."""
+    """`<REPO>/base:<sha256 of the files in core/images/base/>`."""
     h = hashlib.sha256()
     for p in sorted(BASE_DIR.iterdir()):
         h.update(p.name.encode() + b"\0" + p.read_bytes() + b"\0")
-    return f"valor/base:{h.hexdigest()}"
+    return f"{REPO}/base:{h.hexdigest()}"
 
 
 def installs(project: dict[str, Any]) -> bool:
@@ -336,7 +338,7 @@ def deps_key(base: str, project: dict[str, Any], listing: str) -> str:
 
 def deps_tag(project: dict[str, Any], key: str) -> str:
     name = re.sub(r"[^a-z0-9._-]", "-", (project.get("name") or "project").lower())
-    return f"valor/{name}:{key}"
+    return f"{REPO}/{name}:{key}"
 
 
 def _images() -> dict[str, dict[str, str]]:
@@ -468,7 +470,7 @@ async def prune(rows_by_task: dict[str, list[dict]], keep: set[str], db_label: s
                 break
     gone = []
     for tag, rec in (await asyncio.to_thread(_images)).items():
-        if rec.get("db") == db_label and not tag.startswith("valor/base:") and tag not in keep:
+        if rec.get("db") == db_label and not tag.startswith(f"{REPO}/base:") and tag not in keep:
             await short(stop, "image", "delete", tag)
             await asyncio.to_thread(_record, tag, None, "")
             gone.append(tag)

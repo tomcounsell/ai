@@ -17,11 +17,18 @@ A test marked `macos` needs macOS itself (`sandbox-exec`, `sandbox_check`,
 Darwin, so the verification VM runs the rest. A test marked `container`
 needs Apple's `container` and is skipped where it cannot be run: not
 installed, or denied by the sandbox the suite runs under (the check profile
-denies it). Every other test takes the machine lock and the image records
-in a directory of the session's own, never the machine's, which the check
-profile denies too.
+denies it). A `container` test shares the machine lock and the runtime with
+every kernel on the machine, as the runtime is one per machine; every other
+test takes the machine lock in a directory of the session's own, never the
+machine's, which the check profile denies too. Every test keeps its image
+records in the session's own directory and names its images under
+`valor-test-<label>`, the label being `container.owner` of the session's
+test database, so it never deletes, retags, or records an image a kernel
+built. At session end the session's images are deleted under the machine
+lock.
 """
 
+import asyncio
 import atexit
 import os
 import shutil
@@ -69,21 +76,49 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(reason=f"needs Apple's container at {binaries.CONTAINER}"))
 
 
+TEST_DB = settings.test_database
+# The `valor.db` label of every image and VM the session makes.
+LABEL = container.owner(f"dbname={TEST_DB}")
+
 _STATE = Path(tempfile.mkdtemp(prefix="valor-test-container-"))
 atexit.register(shutil.rmtree, _STATE, True)
+container.IMAGES = _STATE / "images.json"
+container.REPO = f"valor-test-{LABEL}"
 
 
 @pytest.fixture(autouse=True)
 def session_machine_lock(request, monkeypatch):
-    """Outside a `container` test, the machine lock and the kernel's image
-    records are the session's own."""
+    """Outside a `container` test, the machine lock and the builder's owner
+    file are the session's own."""
     if request.node.get_closest_marker("container") is None:
         monkeypatch.setattr(container, "LOCK", _STATE / "container.lock")
         monkeypatch.setattr(container, "BUILDER_OWNER", _STATE / "builder.owner")
-        monkeypatch.setattr(container, "IMAGES", _STATE / "images.json")
 
 
-TEST_DB = settings.test_database
+def release_images(label: str) -> None:
+    """Every image recorded under `label` deleted and its record dropped,
+    under the machine lock with the system started, then stopped, as
+    `container.verify` holds the runtime."""
+    tags = [tag for tag, rec in container._images().items() if rec.get("db") == label]
+    if not tags:
+        return
+
+    async def go():
+        stop = asyncio.ensure_future(asyncio.Event().wait())
+        async with container.machine_lock(stop):
+            try:
+                await container.start(stop)
+                for tag in tags:
+                    await container.short(stop, "image", "delete", tag)
+                    container._record(tag, None, "")
+            finally:
+                await container.system_stopped(stop)
+
+    asyncio.run(go())
+
+
+def pytest_sessionfinish(session, exitstatus):
+    release_images(LABEL)
 
 
 @pytest.fixture(scope="session")
