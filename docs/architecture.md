@@ -465,8 +465,9 @@ cancels the background turn, fast-forwards the checkout, runs the merged
 code's `db.migrate`, writes `rollout.restarting`, and exits; launchd
 starts it again on the merged code. A change to the dependencies or the
 schema stops before the checkout moves, and the lead rolls it by hand. A
-failed step lifts the hold, writes `rollout.failed` and a notice, and is
-tried again on the next `serve_tick_s` wake.
+failed step lifts the hold and writes `rollout.failed` and a notice. It is
+tried again on the next `serve_tick_s` wake, except a failed migrate, which
+the process does not try again: a fix reaches it with the next start.
 
 **Steering.** A message for a task mid-turn is a ledger row
 (`message.steered`), delivered as the opening of the next working turn

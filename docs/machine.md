@@ -318,6 +318,11 @@ key's name; launchd's `KeepAlive` starts it again, at most once every ten
 seconds (launchd's default throttle), and each start writes the same line
 to `kernel.log` until the key is installed.
 
+The kernel also exits with status 1 to run its own merged code
+(`rollout.restarting`, [architecture.md](architecture.md)); `KeepAlive`
+starts it again, so a rollout restart needs no `kickstart`, and it loads
+the judgement keys again too.
+
 A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
 more) with no tokens and no agent sockets, git's credential helper is
 blocked in the sandbox, and gh runs with an empty config.
