@@ -323,11 +323,12 @@ def manifests(mirror: str | Path, sha: str) -> str:
 
 def deps_key(base: str, project: dict[str, Any], listing: str) -> str:
     """What a dependency image depends on: the base image's tag, the
-    Containerfile that builds it, the spec's kind, setup, and env (which
-    `deps.sh` installs under), and the lockfiles."""
+    Containerfile that builds it, the spec's kind and setup, the
+    environment `deps.sh` installs under (`spec_json`'s env: the spec's own,
+    the VM's PATH and cache paths), and the lockfiles."""
     h = hashlib.sha256()
     h.update(DEPS_FILE.read_bytes() + b"\0")
-    env = json.dumps(project.get("env") or {}, sort_keys=True)
+    env = json.dumps(spec_json(project)["env"], sort_keys=True)
     for part in (base, project.get("kind") or "", repr(list(project.get("setup") or ())), env, listing):
         h.update(part.encode() + b"\0")
     return h.hexdigest()

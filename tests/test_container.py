@@ -260,10 +260,17 @@ def test_the_dependency_key_covers_the_containerfile_that_builds_it(tmp_path, mo
     assert container.deps_key("valor/base:x", project, "listing") != key
 
 
-def test_the_dependency_key_covers_the_specs_environment():
+def test_the_dependency_key_covers_the_environment_the_build_runs_under(monkeypatch):
+    """`deps.sh` installs under `spec_json`'s env: the spec's own env, the
+    VM's PATH and its cache paths."""
     project = {"kind": "python-uv", "setup": ["uv sync --frozen"]}
     key = container.deps_key("valor/base:x", project, "listing")
     assert container.deps_key("valor/base:x", {**project, "env": {"UV_PYTHON": "3.12"}}, "listing") != key
+    monkeypatch.setattr(container, "VM_PATH", container.VM_PATH + ":/opt/bin")
+    assert container.deps_key("valor/base:x", project, "listing") != key
+    monkeypatch.undo()
+    monkeypatch.setattr(container, "VM_CACHES", {**container.VM_CACHES, "UV_CACHE_DIR": "/home/valor/uv"})
+    assert container.deps_key("valor/base:x", project, "listing") != key
 
 
 # -- a stop ends a hung CLI call ---------------------------------------------------------------

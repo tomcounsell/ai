@@ -6,7 +6,7 @@ status: built
 stakes: low
 critique_rounds: 0
 review_rounds: 1
-patch_rounds: 0
+patch_rounds: 1
 governance_grant: none
 ---
 
@@ -90,7 +90,8 @@ left to the lead.
   offline in the VM. Red before the fix (setup exit 1), green after.
 - `read_result` returns each setup command's tail and output file, and a
   failed setup's tail.
-- `deps_key` changes with the spec's environment.
+- `deps_key` changes with the environment the build runs under: the
+  spec's `env`, the VM's PATH and its cache paths.
 
 ## Questions for Tom
 
@@ -104,7 +105,7 @@ None.
   LANG and the spec's `env` less `UV_OFFLINE` and `npm_config_offline`;
   the build requirements are installed for, and the backend's hooks run on,
   `.venv/bin/python` when the sync made one, else Python 3.14.
-- `core/container.py`: `deps_key` hashes the spec's own `env`;
+- `core/container.py`: `deps_key` hashes `spec_json`'s `env`;
   `read_result` reads `out/setup-N.out` per setup entry (`tail`, `output`)
   and gives a failed setup's record its `tail`; `verify.ran`'s setup
   entries carry `output`. The module docstring says so.
@@ -112,7 +113,7 @@ None.
   `setup-N.out`.
 - `docs/data.md`: `verify.ran` lists the setup output files.
 - Tests: `test_each_setup_commands_output_is_kept_as_on_the_host`,
-  `test_the_dependency_key_covers_the_specs_environment`, and the
+  `test_the_dependency_key_covers_the_environment_the_build_runs_under`, and the
   container test `test_a_popoto_shaped_spec_installs_offline_in_the_vm`
   now with `UV_PYTHON = "3.12"`, `msgpack==1.1.2` in the dev extra, a test
   that the suite ran on 3.12, and the kept setup output. Its fixture's
@@ -137,3 +138,17 @@ None.
   `test_container.py` (not container) 50 passed; both parametrizations of
   `test_a_popoto_shaped_spec_installs_offline_in_the_vm` 2 passed in
   402.73 s.
+
+### Patch round 1
+
+Review found `deps_key` hashed only the spec's own `env`, while `deps.sh`
+now reads PATH and the cache paths from `spec_json`'s `env` (`VM_PATH`,
+`VM_CACHES`), which no key covered: a moved cache path would reuse an old
+image and fail the offline setup as `commit`. `deps_key` now hashes
+`spec_json(project)["env"]`, which also holds the machine's
+`VALOR_BROWSER` path; images are per machine already. The key test now
+changes `VM_PATH` and `VM_CACHES` too (red before, green after). The docs
+commit for `core/README.md` and `docs/data.md` is carried, the README's key
+inputs worded to match.
+- Patch round 1 runs: `test_container.py` and `test_checks.py` (not
+  container) 79 passed, 15 deselected; ruff check and format clean.
