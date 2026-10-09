@@ -13,11 +13,13 @@ called by `core.serve.Kernel`); the rows are written on the loop.
   commit the process started from.
 - `prepare`: fetch the branch into `refs/valor-kernel/rollout`, supersede
   every due merge that is not on it, choose the one to roll, and tell
-  whether it restarts the kernel (its diff from `started` reaches past
-  `persona/`, `skills/`, `docs/`, `tests/` and top-level `*.md`). A
-  restart-class diff touching `uv.lock` or `pyproject.toml` stops at
-  `dependencies`, one touching `core/schema.sql` at `schema`: the kernel
-  runs no `uv` and no `pg_dump`. A checkout the fast-forward would refuse
+  whether it restarts the kernel. The diff classified runs from `started`
+  to the commit the restart runs (`runs_at`: the merged sha, or the
+  checkout's head when it is already past it); a restart is due when it
+  reaches past `persona/`, `skills/`, `docs/`, `tests/` and top-level
+  `*.md`. A restart whose diff or uncommitted paths touch `uv.lock` or
+  `pyproject.toml` stops at `dependencies`, one touching `core/schema.sql`
+  at `schema`: the kernel runs no `uv` and no `pg_dump`. A checkout the fast-forward would refuse
   stops at `fast-forward`, before anything holds.
 - `fast_forward`, `step_back`: `git merge --ff-only <sha>`, and the
   `reset --keep` back to where it started when the head is still `sha`.
@@ -152,18 +154,14 @@ def prepare(checkout: Path, started: str, due: list[Merge], credential: str | Pa
         sha = plan.target.sha
         plan.covered = [m for m in on if m is not plan.target and git.is_ancestor(checkout, m.sha, sha)]
         plan.steps.append("restart class")
-        paths = git.diff_paths(checkout, started, sha)
+        runs = runs_at(checkout, sha)
+        paths = git.diff_paths(checkout, started, runs)
         plan.restart = restarts(paths)
         if plan.restart:
-            changed = [p for p in DEPENDENCIES if p in paths]
-            if changed:
-                plan.failed = (
-                    "dependencies",
-                    f"the merge changes {' and '.join(changed)}; the kernel runs no uv",
-                )
-                return plan
-            if SCHEMA in paths:
-                plan.failed = ("schema", f"the merge changes {SCHEMA}; the kernel runs no backup")
+            dirty = {_path(line) for line in git.dirty(checkout)}
+            stop = _stop(paths, dirty, runs)
+            if stop:
+                plan.failed = stop
                 return plan
         said = refused(checkout, sha)
         if said:
@@ -171,6 +169,38 @@ def prepare(checkout: Path, started: str, due: list[Merge], credential: str | Pa
     except (git.GitError, credentials.CredentialError) as exc:
         plan.failed = (plan.steps[-1], str(exc))
     return plan
+
+
+def runs_at(checkout: Path, sha: str) -> str:
+    """The commit a restart for `sha` runs: the checkout's head when it is
+    `sha` or past it (the fast-forward is then a no-op), else `sha`."""
+    head = git.head(checkout)
+    if head is not None and (head == sha or git.is_ancestor(checkout, sha, head)):
+        return head
+    return sha
+
+
+def _stop(paths: list[str], dirty: set[str], runs: str) -> tuple[str, str] | None:
+    """The dependencies or schema stop for a restart into `runs`: `paths`
+    changed from `started` to it, or `dirty` in the checkout, which the
+    restart imports and migrate reads from the working tree."""
+
+    def why(names: list[str]) -> str:
+        said = []
+        committed = [n for n in names if n in paths]
+        uncommitted = [n for n in names if n in dirty and n not in paths]
+        if committed:
+            said.append(f"{runs} changes {' and '.join(committed)}")
+        if uncommitted:
+            said.append(f"the checkout has uncommitted {' and '.join(uncommitted)}")
+        return "; ".join(said)
+
+    changed = [p for p in DEPENDENCIES if p in paths or p in dirty]
+    if changed:
+        return "dependencies", f"{why(changed)}; the kernel runs no uv"
+    if SCHEMA in paths or SCHEMA in dirty:
+        return "schema", f"{why([SCHEMA])}; the kernel runs no backup"
+    return None
 
 
 def refused(checkout: Path, sha: str) -> str | None:

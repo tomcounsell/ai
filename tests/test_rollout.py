@@ -548,6 +548,68 @@ def test_a_dependency_or_schema_change_stops_and_is_not_retried(fresh, tmp_path,
     assert repo.head() == repo.base and k.migrated == []
 
 
+@pytest.mark.parametrize(("path", "step"), [("core/schema.sql", "schema"), ("uv.lock", "dependencies")])
+def test_a_change_beyond_the_sha_in_the_checkout_stops_the_restart(fresh, tmp_path, path, step):
+    """The checkout already holds a commit past the merged sha: the restart
+    would run that commit, so its diff from `started` is the one classified."""
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    beyond = repo.land(path)
+    scripted.git(repo.co, "pull", "-q", "--ff-only")
+
+    async def go():
+        task = await new_task(fresh)
+        effect = await landed(fresh, task, repo.url, sha)
+        k = kernel(fresh, repo, task)
+        return task, effect, k, await tick(k, fresh)
+
+    task, effect, k, restarted = run(go())
+    assert restarted is None and k.migrated == [] and repo.head() == beyond
+    (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
+    assert failed["step"] == step and failed["effect_id"] == effect
+    assert beyond in failed["reason"] and path in failed["reason"]
+
+
+@pytest.mark.parametrize(
+    ("path", "step"), [("core/schema.sql", "schema"), ("pyproject.toml", "dependencies")]
+)
+def test_an_uncommitted_schema_or_dependency_file_stops_the_restart(fresh, tmp_path, path, step):
+    """The restart imports, and migrate reads, the working tree."""
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    (repo.co / path).write_text("the lead's edit\n")
+
+    async def go():
+        task = await new_task(fresh)
+        effect = await landed(fresh, task, repo.url, sha)
+        k = kernel(fresh, repo, task)
+        return task, effect, k, await tick(k, fresh)
+
+    task, effect, k, restarted = run(go())
+    assert restarted is None and k.migrated == [] and repo.head() == repo.base
+    (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
+    assert (
+        failed["effect_id"] == effect and failed["step"] == step and f"uncommitted {path}" in failed["reason"]
+    )
+    assert (repo.co / path).read_text() == "the lead's edit\n"
+
+
+def test_a_dirty_schema_file_does_not_stop_a_rollout_with_no_restart(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("docs/z.md")
+    (repo.co / "core" / "schema.sql").write_text("the lead's edit\n")
+
+    async def go():
+        task = await new_task(fresh)
+        await landed(fresh, task, repo.url, sha)
+        k = kernel(fresh, repo, task)
+        return task, await tick(k, fresh)
+
+    task, restarted = run(go())
+    assert restarted is None and repo.head() == sha
+    assert [p["outcome"] for p in typed(run(rows(fresh, task)), "rollout.ended")] == ["done"]
+
+
 def test_a_diverged_checkout_is_retried_on_the_timer_and_rolls_once_rebased(fresh, tmp_path, monkeypatch):
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
@@ -773,6 +835,43 @@ def test_a_hostile_key_in_the_checkouts_config_fails_at_fetch(fresh, tmp_path):
     assert restarted is None and k.migrated == [] and repo.head() == repo.base
     (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
     assert failed["step"] == "fetch" and "core.hookspath" in failed["reason"].lower()
+
+
+def test_a_refused_config_fails_on_the_kernels_merge_not_the_newest_of_any_project(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    scripted.git(repo.co, "config", "core.hooksPath", str(tmp_path / "hooks"))
+
+    async def go():
+        ours, theirs = await new_task(fresh), await new_task(fresh)
+        effect = await landed(fresh, ours, repo.url, sha)
+        await landed(fresh, theirs, "/somewhere/else.git", sha, branch="feature")
+        k = kernel(fresh, repo, ours)
+        await tick(k, fresh)
+        return ours, theirs, effect
+
+    ours, theirs, effect = run(go())
+    (failed,) = typed(run(rows(fresh, ours)), "rollout.failed")
+    assert failed["effect_id"] == effect and failed["step"] == "fetch"
+    assert len(typed(run(rows(fresh, ours)), "notice.requested", about_key=f"rollout:{effect}")) == 1
+    other = run(rows(fresh, theirs))
+    assert rolls(other) == [] and typed(other, "notice.requested", kind="rollout") == []
+
+
+def test_a_refused_config_with_no_merge_of_its_own_writes_no_row(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    scripted.git(repo.co, "config", "core.hooksPath", str(tmp_path / "hooks"))
+
+    async def go():
+        theirs = await new_task(fresh)
+        await landed(fresh, theirs, "/somewhere/else.git", sha, branch="feature")
+        k = kernel(fresh, repo, theirs)
+        await tick(k, fresh)
+        return theirs
+
+    other = run(rows(fresh, run(go())))
+    assert rolls(other) == [] and typed(other, "notice.requested", kind="rollout") == []
 
 
 def test_the_fetch_carries_the_credential_only_to_a_remote_off_the_machine(tmp_path, monkeypatch):

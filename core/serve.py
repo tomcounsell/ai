@@ -453,7 +453,17 @@ class Kernel:
         try:
             due, judged = await git.threaded(rollout.judge, self.checkout, self.started, merges)
         except git.GitError as exc:
-            await self._failed(conn, merges[-1], ["fetch"], "fetch", str(exc))
+            # The failure is the newest merge's to the checkout's origin URL
+            # and branch, read from its files alone; no task's when unread.
+            try:
+                origin = await git.threaded(git.origin, self.checkout)
+            except git.GitError:
+                origin = None
+            ours = [m for m in merges if (m.remote, m.branch) == origin]
+            if ours:
+                await self._failed(conn, ours[-1], ["fetch"], "fetch", str(exc))
+            else:
+                _log(f"the kernel's checkout cannot be read; no merge rolled: {exc}")
             return
         self.judged.update(judged)
         if not due or (not retry and all(m.effect_id in self.waiting for m in due)):

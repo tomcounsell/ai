@@ -153,7 +153,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/serve.py` | `workspace.failed` | `reason`; a notice follows, and a steer tries again | A failure is the task's to report |
 | `core/serve.py` | `rollout.restarting` | `effect_id` of a kernel merge, `sha`, `from` (the commit the kernel started from), `steps`, `covers` (each older merge it carries: `effect_id`, `task_id`, `sha`); the kernel exits next and launchd starts it on the merged code | A merged kernel change reaches the running kernel |
 | `core/serve.py` | `rollout.failed` | `effect_id`, `sha`, `step` (`fetch`, `restart class`, `dependencies`, `schema`, `fast-forward`, `migrate`), `reason`, `steps`, `mixed` when the checkout could not be moved back; written when the step or reason changes, with a `rollout` notice | A rollout that did not happen is seen |
-| `core/serve.py` | `rollout.ended` | `effect_id`, `outcome` (`done`, `superseded`), `head` (the commit then running), `steps`; `rolled_by` (the merge whose rollout carried it) or `by: started` (found in the running commit with no restart of its own); `sha` and `reason` when superseded | The one terminal row of a rollout |
+| `core/serve.py` | `rollout.ended` | `effect_id`, `outcome` (`done`, `superseded`), `head` (the commit then running); `steps` only on the row of the merge a no-restart rollout fast-forwarded to; `rolled_by` (the merge whose rollout carried it) or `by: started` (found in the running commit with no restart of its own); `sha` and `reason` when superseded | The one terminal row of a rollout |
 
 One table holds every execution record. Gateway calls, turns, and effects
 are rows of the types above, with no separate log table for each. What a

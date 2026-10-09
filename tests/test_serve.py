@@ -325,7 +325,9 @@ def test_a_turn_that_cannot_be_collected_leaves_serve_running(fresh, op, tmp_pat
         gateway = await gateway_for(fresh)
         probe = await db.connect(fresh)
         with bridges.configure(serve_tick_s=3600):
-            kernel = asyncio.create_task(serve.serve({State.JUDGE: judging}, dsn=fresh, gateway=gateway))
+            kernel = asyncio.create_task(
+                serve.serve({State.JUDGE: judging}, dsn=fresh, gateway=gateway, checkout=None)
+            )
             try:
 
                 async def stepped():
@@ -728,7 +730,7 @@ def test_one_turn_slot(fresh, op, tmp_path):
             await core_run
             # A second kernel on this machine waits on `kernel:<machine>`.
             await probe.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (serve.kernel_key(),))
-            second = asyncio.create_task(serve.serve({}, dsn=fresh, gateway=gateway))
+            second = asyncio.create_task(serve.serve({}, dsn=fresh, gateway=gateway, checkout=None))
 
             async def waiting():
                 found = await (
@@ -1219,7 +1221,9 @@ def test_missed_notification(fresh, op):
         task = await new_task(fresh)
         gateway = await gateway_for(fresh)
         with bridges.configure(serve_tick_s=1.0):
-            kernel = asyncio.create_task(serve.serve({State.JUDGE: counting}, dsn=fresh, gateway=gateway))
+            kernel = asyncio.create_task(
+                serve.serve({State.JUDGE: counting}, dsn=fresh, gateway=gateway, checkout=None)
+            )
             probe = await db.connect(fresh)
             try:
 
@@ -1275,7 +1279,7 @@ def test_the_kernel_gateway_sends_the_installed_openai_key(fresh, tmp_path, monk
         url = await upstream.start()
         task = await new_task(fresh)
         with bridges.configure(openai_upstream=url):
-            kernel = asyncio.create_task(serve.serve({}, dsn=fresh))
+            kernel = asyncio.create_task(serve.serve({}, dsn=fresh, checkout=None))
             try:
 
                 async def started():
@@ -1574,6 +1578,6 @@ def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, c
     monkeypatch.setattr(core.gateway, "OpenAIKey", Stand)
     monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, serve_tick_s=0.05))
     with pytest.raises(rollout.Restart):
-        run(serve.serve({}, dsn=fresh))
+        run(serve.serve({}, dsn=fresh, checkout=None))
     assert len(ticks) == 2 and closed == ["kernel", "gateway"]
     assert "kernel wake failed: RuntimeError('one wake failed')" in capsys.readouterr().err

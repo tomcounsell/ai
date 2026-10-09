@@ -54,7 +54,8 @@ name drivers; a driver's program comes from config. So every call:
 
 Reading config (`git config --list`) runs nothing: it only reads files. A
 workspace whose config the kernel refuses gets no candidate, no instance,
-no git facts, and no push until the turn removes the key.
+no git facts beyond its origin URL and branch (`origin`, which names whose
+a failure is), and no push until the turn removes the key.
 
 Imports the standard library, `core.binaries`, `core.performing`, and
 `core.settings`.
@@ -606,10 +607,26 @@ def dirty(workspace: str | Path, path: str | None = None) -> list[str]:
 def push_url(workspace: str | Path, remote: str = "origin") -> str:
     """The remote's push URL, a local path made absolute (git reports a
     relative path as it was written)."""
-    url = out(workspace, "remote", "get-url", "--push", remote)
+    return _absolute(workspace, out(workspace, "remote", "get-url", "--push", remote))
+
+
+def _absolute(workspace: str | Path, url: str) -> str:
     if "://" not in url and not re.match(r"^[^/:]+@[^/:]+:", url):
         url = str((Path(workspace) / url).resolve())
     return url
+
+
+def origin(workspace: str | Path) -> tuple[str, str | None]:
+    """`remote.origin.url` as written (a local path made absolute) and the
+    checked-out branch, read with no hostile check: `config --get` and
+    `symbolic-ref` only read files and run nothing. For naming whose a
+    refused workspace is, never for running git in it. Raises `GitError`
+    when there is no origin URL."""
+    done = _git(workspace, "config", "--get", "remote.origin.url")
+    if done.returncode != 0 or not done.stdout.strip():
+        raise GitError(f"no origin URL: {_text(done.stderr).strip()}")
+    head = _git(workspace, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return _absolute(workspace, done.stdout.strip()), head.stdout.strip() or None
 
 
 def remote_head(workspace: str | Path, url: str, credential: Path | None = None) -> str | None:

@@ -592,8 +592,37 @@ Built on `i3610-kernel-rollout` from the plan and both critique rounds.
   three `rollout.*` rows), `docs/plans/valor-rebuild.md` (the takeover
   point), `.claude/skills/build/SKILL.md` (the merge bullet).
 - A judge step refused by the checkout's config fails at `fetch` on the
-  newest due merge; a failure with `mixed` always writes its row.
+  newest merge to the checkout's origin URL and branch (patch round 1); a
+  failure with `mixed` always writes its row.
 - Suite without `tests/test_container.py`: 1804 passed, 26 skipped, 3
   failed. The three (two in `test_pi.py`, one in `test_workspace.py`)
   pass with `--basetemp` outside `~/src`, which their sandbox profile
   treats as the checkout.
+
+### Patch round 1
+
+From the blind review (`review-3610`), all four findings accepted by the
+lead, on top of the docs check's commit.
+
+- The dependency and schema stops classify the diff from `started` to the
+  commit the restart runs (`rollout.runs_at`: the checkout's head when it
+  is at or past the merged sha, else the sha), and count the checkout's
+  uncommitted paths among `uv.lock`, `pyproject.toml` and
+  `core/schema.sql`. Uncommitted paths only stop a restart; a rollout with
+  no restart is unaffected. Tests: a schema and a `uv.lock` change beyond
+  the sha; an uncommitted `core/schema.sql` and `pyproject.toml`; a dirty
+  `core/schema.sql` under a docs-only merge still rolls.
+- A refused config fails the newest merge to the checkout's
+  `remote.origin.url` and branch, read by `git.origin` from the checkout's
+  files with no hostile check (`config --get` and `symbolic-ref` run
+  nothing). With no such merge, or no origin URL, it is logged and no row
+  is written. Tests: the failure lands on the kernel's merge, not another
+  project's newer one; another project's merge alone gets no row.
+- Every `serve.serve` call in `tests/test_serve.py` passes `checkout=None`
+  (five calls; the review named four, the fifth is the failed-wake test).
+- Docs: `docs/data.md` says `steps` is only on a no-restart target's
+  `rollout.ended`; `docs/architecture.md` and `core/README.md` name the
+  diff the stops read and the uncommitted paths. The cherry-picked docs
+  commit already says a failed migrate is not retried.
+- `test_rollout`, `test_serve`, `test_broker`: 80 passed. Six of the seven
+  new cases fail on `081981b5d`; the docs-only roll passes there too.
