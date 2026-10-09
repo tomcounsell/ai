@@ -8,7 +8,7 @@ status: draft
 
 How Valor's Cowboy moves from the old system to the new kernel: what is
 backed up, exported, disabled, imported, enabled, and verified, in order,
-how to go back, and what only Tom does. Data and gaps (G1 to G12, Q1 to
+how to go back, and what only Tom does. Data and gaps (G1 to G12, and
 Q3) are in [cutover-data.md](cutover-data.md); the machine's parts are in
 [../machine.md](../machine.md); setting up a Mac is
 [rebuild-handoff.md](rebuild-handoff.md); what only Tom does is
@@ -91,7 +91,7 @@ section 2.1, G1, G2, G3, G9). In `projects/`:
   [cutover-runbook-tom.md](cutover-runbook-tom.md)). Tasks for them start by `core start --project NAME` until the
   Captain's bridge is off; then a one-line edit adds the group
   (`telegram:-1003743854645` for psyoptimal, `telegram:-1003801797780` for
-  cuttlefish). `branch` for psyoptimal is `main` (Q1 assumed).
+  cuttlefish). `branch` for psyoptimal is `main`, its default branch.
 - No other spec. The teammate and customer-service groups, the thirteen
   other DM users, and the email contacts and domains stay out of every spec
   on purpose (G1): a chat in no spec is not read at all. Cyndra, royop,
@@ -343,7 +343,7 @@ Check: six lines ending `Valor the Cowboy`; the cutover date; `179144806`
 
 ## 8. Grants and the kernel
 
-**8.1 Merge grants** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md); Q2). Four pairs, one step: Tom runs the four
+**8.1 Merge grants** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md)). Four pairs, one step: Tom runs the four
 `merge-target add` commands listed in item 2 of that file, one per project's
 real remote and branch. Without a pair, a merge to that remote is refused.
 
@@ -532,4 +532,4 @@ so.
 | G8 Memory and upkeep | Steps 0.1 and 10.7 (the new memory); step 2.1 exports the old records, which nothing imports yet; no upkeep routine is added until an incident names the need |
 | G9 fields with no home, G10 third-party keys, G12 Google tokens | Left open on purpose: the spec carries only what the kernel acts on, a turn's sandbox denies the vault (one key is copied when a task needs it), the kernel does not read the Google files |
 | G11 the other three Macs | Open for the Captain, Bald, Pirate; Cowboy only; Tom's item 5 |
-| Q1, Q2, Q3 | `main` in step 0.2; grants in 8.1 and Tom's item 2; the operator group stays the operator chat (step 7 check) |
+| Q3 | the operator group stays the operator chat (step 7 check) |

@@ -212,8 +212,9 @@ UV_PYTHON = "3.12"
 DJANGO_SETTINGS_MODULE = "settings.test"
 ```
 
-The local psyoptimal checkout is on branch `prod`, the emulator spec used
-`main`. Which branch merges land on is Tom's to confirm (question Q1).
+Psyoptimal merges land on `main`: it is the repository's default branch and
+the base of nine of its last ten merged pull requests. `prod` is the deploy
+branch the local checkout is on.
 The cuttlefish spec follows the same shape: `kind = "django"`,
 `services = ["postgres", "redis"]` (its `pyproject.toml` lists
 `django-redis`), `chats = ["telegram:-1003801797780"]`, suite from the
@@ -277,7 +278,7 @@ and the key directory. Gap G10.
 | Item | Old system | New system | How |
 |---|---|---|---|
 | Where a merge may land | The old pipeline pushed with Valor's token to each repo's default branch; GitHub ruleset 24370170 on `tomcounsell/ai` `main` restricts updates but is disabled until takeover | One grant per (URL, branch) pair, written to the `merge_targets` stream; `start` refuses a pair without one | Existing: `python -m core merge-target add URL BRANCH --note TEXT`. List with `merge-target list` |
-| Pairs the day-one projects need | none | `https://github.com/tomcounsell/ai.git` branch `main` (at cutover), and for each spec with a `merge_url` its repo URL and branch | Existing command, once per pair (question Q2) |
+| Pairs the day-one projects need | none | `https://github.com/tomcounsell/ai.git` branch `main` (at cutover), and for each spec with a `merge_url` its repo URL and branch | Existing command, once per pair (`cutover-runbook-tom.md`, item 2) |
 | Valor's write access to each repo | `valorengels` is a collaborator with push on the repos it works | Same account, same token | By hand: check push access on each repo before its spec is added |
 | Ruleset 24370170 | Disabled | Set to active at cutover | By hand, Tom's `gh` login (admin only) |
 
@@ -416,13 +417,10 @@ tools. The new kernel does not read them. Recommendation: leave them in place.
 
 ## 9. Questions with assumed answers
 
-**Q1. Which branch does psyoptimal merge to: `main` or `prod`?** Assumed:
-`main`, as the emulator's spec used, because the local checkout's `prod` is
-the deploy branch.
-
-**Q2. May Valor add the merge-target grants for the day-one pairs (ai
-`main`, popoto `main`, psyoptimal, cuttlefish)?** The command is marked
-always Tom's. Assumed: Tom grants all four in one sitting at cutover.
+Psyoptimal's merge branch is `main` (section 8). The merge-target grants
+for the four day-one pairs (ai, popoto, psyoptimal and cuttlefish, each on
+`main`, the default branch of all four) are Tom's, granted in one sitting at
+cutover (`cutover-runbook-tom.md`, item 2).
 
 **Q3. Is the operator group "Valor rebuild" the permanent operator chat?**
 Assumed: yes. Notices keep going there; Tom's DM is added as an
@@ -433,7 +431,7 @@ ordinary listed chat (G2).
 1. Specs written and checked into `projects/` (popoto, psyoptimal,
    cuttlefish; valor edited). Edit a file.
 2. `VALOR_MACHINE` set in each launchd job and each spec's `machine` (G3).
-3. Merge-target grants added (section 5, Q2). Existing command.
+3. Merge-target grants added (section 5). Existing command.
 4. Old worker drained (G5), then the old bridge and email bridge disabled.
 5. `telegram-seen.json` seeded (G4); `VALOR_EMAIL_SINCE` set (G7).
 6. New bridges and routines enabled; one message from Tom in each listed

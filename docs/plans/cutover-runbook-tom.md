@@ -15,7 +15,7 @@ setup.
 The only places a person is in the path; none is a tap on work Valor started.
 
 1. **Writes the cutover date** at the top of this file.
-2. **Grants the merge targets** (Q2; the command is always his):
+2. **Grants the merge targets** (the command is always his):
 
    ```
    $PY -m core merge-target add https://github.com/tomcounsell/ai.git main --note "cutover"
