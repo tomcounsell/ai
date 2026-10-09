@@ -163,10 +163,10 @@ GOVERNANCE = JudgementTask(
     consumer={"proceed": "no instance", "caution": "a governance instance at the hunk, awaiting Tom's tap"},
     serves="the governance constraint",
     guard="the CLAUDE.md governance paragraph (correction 1)",
-    # The record on the real ledger (task 405d06d5bb53, task_sha256 e47a2161d4dd2cc3...)
-    # failed its entry check: the open-weight leg answered caution on one case Tom
-    # labelled false (docs/plans/m1-4b-records.md). A site lands calibrated only on a
-    # record that passes, so this stays None and the docs runner stays unregistered.
+    # Run 4 on this question (task_sha256 67f938745187e259...) failed its entry check:
+    # both legs answered caution on cases Tom labelled false (docs/plans/m1-4b-records.md).
+    # A site lands calibrated only on a record that passes, so this stays None and the
+    # docs runner stays unregistered.
     calibrated=None,
 )
 

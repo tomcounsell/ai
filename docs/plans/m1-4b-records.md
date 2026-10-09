@@ -544,3 +544,47 @@ events).
    --check` flags only the two known docs files.
 4. No resident kernel to restart: `com.valor.kernel` does not exist until
    task 2.1 merges.
+
+### Governance recalibration (2026-10-09)
+
+The question merged with 80e49c02 (`docs/plans/80e49c02-governance-adds.md`).
+Calibration ran against the test database `valor_rebuild_test_govcal`, never
+the real ledger, so the record numbers itself run 1 on that database; it is
+the site's run 4.
+
+1. **The two rerun tests.**
+   `test_a_reworded_governance_question_is_asked_fresh_then_reused` and
+   `test_reruns_spent_under_one_question_are_not_spent_under_a_reworded_one`
+   pass on this Mac.
+2. **Cases.** `governance.adds.json` backed up beside itself as
+   `governance.adds.json.20261009T043834Z` (SHA-256
+   `d3686c87a7ca4b58a298d258b45fe5f228fba089d7f9f2705e20d103906c476e`).
+   The eight cases of `docs/plans/80e49c02-calibration-cases.json` pass
+   `case_shape`, share no id or inputs with the 50, and are appended. They
+   include both incident hunks of task 09975a1c2e52 (`lock-in-expiry-runner`
+   and `lock-prose-in-routines-doc`, `false`, `tom`). The advisor's
+   `philosophy-governance.md` is on no disk of this Mac, so its other two
+   cases are not added.
+
+| case file | SHA-256 | cases |
+|---|---|---|
+| `governance.adds.json` | `15939e08cba89e4cc8a57a7ed7b10d5f40760054306b8d0162100b7e7a8007ba` | 58: 11 `true` and 29 `false` from `tom`, 18 `false` drafted |
+
+**Governance, run 4** (task digest
+`67f938745187e25996bce44dbeb100608ad30c21b9407add697551ee98722699`,
+calibration task `beea95a9fe88`, event 476): entry check false. Jev
+(`jev-1.13.0`) wrong on 6 of the 29 `tom` negatives:
+`fresh-verdict-parser-rewrite` caution (p_proceed 0.14),
+`signals-surrogate-refusal` caution (0.26), and abstains on
+`notice-text-rendering` (0.57), `oversized-turn-output-plan` (0.59),
+`276e7d79a:tests/test_fresh.py:269` (0.59) and
+`58b32cdd9:tests/test_workspace.py:906` (0.63); right on all 11 positives
+and all 18 drafted. The open-weight leg answered 36 cases; 22 calls were
+refused by the provider (HTTP 429, `rate_limited`), 16 of them on `false`
+cases (8 `tom`, 8 drafted), which count as wrong. On cases it answered it was wrong on 3 `tom`
+negatives: `lock-in-expiry-runner` caution (0.02),
+`fresh-verdict-parser-rewrite` caution (0.02), `signals-surrogate-refusal`
+caution (0.05). Brier 0.0391 (Jev, n 58) and 0.0792 (open-weight, n 36). No
+call over its estimate (largest ratio 0.83 and 0.87). Spend $0.01846 (Jev
+$0.00432, open weight $0.01414). `GOVERNANCE.calibrated` stays `None` and
+the docs runner stays unregistered.
