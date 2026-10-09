@@ -65,6 +65,7 @@ for hook in (\"get_requires_for_build_editable\", \"get_requires_for_build_wheel
     if hasattr(backend, hook):
         extra.update(getattr(backend, hook)())
 out.write(chr(10).join(sorted(extra)))
+out.close()
 ") || requires=""  # a hook that needs the source: the offline sync says so
   if [ -n "$requires" ]; then
     mapfile -t reqs <<<"$requires"

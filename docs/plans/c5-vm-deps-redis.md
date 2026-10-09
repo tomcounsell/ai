@@ -6,6 +6,7 @@ status: built
 stakes: low
 critique_rounds: 1
 review_rounds: 1
+patch_rounds: 1
 governance_grant: none
 ---
 
@@ -56,8 +57,12 @@ build's log; only the list reaches `uv pip install`.
 
 `tests/test_container.py::test_a_popoto_shaped_spec_installs_offline_in_the_vm`
 runs for a hatchling backend and a setuptools backend
-(`requires = ["setuptools>=61"]`, `build-backend = "setuptools.build_meta"`),
-whose hooks print `running egg_info` on stdout. It fails on the setuptools
+(`requires = ["setuptools>=61"]`, `build-backend = "setuptools.build_meta"`,
+packages by `[tool.setuptools.packages.find]`), whose hooks print `running
+egg_info` on stdout. With `find`, `egg_info` succeeds on the manifests alone,
+as popoto's does; with a fixed `packages = ["toy"]` it fails for want of
+`toy/`, the hook script exits non-zero, and the build goes on without the
+list at base too. It fails on the setuptools
 case before the fix (the dependency build does not install) and passes
 after. It is `container`-marked and runs alone.
 
@@ -168,3 +173,34 @@ Evidence:
 Not run: the container test and the full suite. The Data volume had 739 MB
 free (the brief asks for 5 GB before a container run), and a full suite on
 that margin could fill the volume the resident kernel writes to.
+
+### Patch, round 1
+
+Review round 1 asked for changes: the setuptools test case passed at base
+too, because `[tool.setuptools] packages = ["toy"]` makes `egg_info` fail on
+the manifests alone and `|| requires=""` takes over.
+
+- `tests/test_container.py`: the setuptools case finds its packages with
+  `[tool.setuptools.packages.find] include = ["toy*"]`.
+- `core/images/base/deps.sh`: the hook script closes the saved stdout after
+  writing the list.
+
+Evidence, outside any VM: the `as_valor` argument of base (`150f1f2ba`) and
+head `deps.sh`, captured by a stub `as_valor` that bash calls, run with a
+`mapfile` shim for bash 3 in project directories holding only
+`pyproject.toml`:
+
+| project | base | head |
+|---|---|---|
+| setuptools, `packages.find` (the test's case) | exit 2, "Failed to parse: `running egg_info`" | exit 0, installs setuptools |
+| setuptools, `packages = ["toy"]` (the old case) | exit 0 | exit 0 |
+| hatchling | exit 0, installs editables | exit 0, installs editables |
+
+The head run keeps `running egg_info` in the log. `uv lock` on the test's
+setuptools project with `toy/` present resolves. `bash -n` passes on
+`deps.sh` and on both extracted scripts. `tests/test_container.py -m "not
+container"`: 11 passed, 15 deselected; both container cases collect.
+`uvx ruff check .` passes; `uvx ruff format --check .`: 325 files already
+formatted.
+
+Not run: the container test. The test check runs it on this head.

@@ -652,9 +652,10 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
 BACKENDS = {
     "hatchling": '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
     '[tool.hatch.build.targets.wheel]\npackages = ["toy"]\n',
-    # Its hooks run egg_info, which logs `running egg_info` on stdout.
+    # Its hooks run egg_info, which logs `running egg_info` on stdout. With
+    # `find`, egg_info succeeds on the manifests alone, as popoto's does.
     "setuptools": '[build-system]\nrequires = ["setuptools>=61"]\nbuild-backend = "setuptools.build_meta"\n'
-    '[tool.setuptools]\npackages = ["toy"]\n',
+    '[tool.setuptools.packages.find]\ninclude = ["toy*"]\n',
 }
 
 
