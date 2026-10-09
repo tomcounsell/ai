@@ -449,7 +449,7 @@ and docs checks hold it throughout); the judge and the
 merge run beside it. The rendered context is the same bytes from the same
 store in any process. The kernel holds no state of its own: on restart it
 charges calls whose holder died at their estimate, ends turns with no end
-as `interrupted` and reaps their processes, records a turn that ended and
+as `interrupted` and reaps their processes (a turn the kernel cancels, at a rollout or a shutdown, kills, reaps and ends itself the same way), records a turn that ended and
 was never collected (a collection that fails is logged and retried as a
 job before the task's next step), settles kernel effects left between intent and
 outcome, stops services a killed kernel left up (not those a live kernel keeps), and ends the

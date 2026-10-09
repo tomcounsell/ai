@@ -15,7 +15,10 @@ The `task.stopped` row fences the task in the database; the notification
 wakes this runner, which revokes the gateway (cutting any stream), kills the
 harness's whole process group, waits for every in-flight call to be charged,
 and writes `turn.ended`. A turn's durable state is its ledger rows, and each
-of those lands whole or not at all.
+of those lands whole or not at all. A turn that is cancelled (a rollout or
+a shutdown cancels the running job), or that fails in the kernel after its
+`turn.started`, kills its harness's group, retires its grant, reaps, and
+ends `interrupted` with why.
 
 A turn's processes do not outlive it. The turn runs with `VALOR_TURN` set
 to its id, and a sandboxed turn's profile denies the mach name
@@ -45,6 +48,7 @@ so `turn.ended` records it in place of the one stdout names.
 """
 
 import asyncio
+import contextlib
 import ctypes
 import functools
 import os
@@ -173,27 +177,35 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
             gateway.retire(task_id)
             raise
         out_path, err_path = output_paths(task_id, turn_id)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("wb") as out, err_path.open("wb") as err:
-            proc = await asyncio.create_subprocess_exec(
-                *command.argv,
-                env={**command.env, TURN_ENV: turn_id},
-                cwd=command.cwd,
-                stdin=asyncio.subprocess.DEVNULL if command.stdin is None else asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            pumped = asyncio.gather(
-                _pump(proc.stdout, out), _pump(proc.stderr, err), _feed(proc, command.stdin)
-            )
+        proc = pumped = None
+        waiters: list[asyncio.Future] = []
+        # From here on the turn has a `turn.started` row and a grant; one
+        # handler ends it however it is cut short. The files close after it.
+        with contextlib.ExitStack() as files:
             try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out = files.enter_context(out_path.open("wb"))
+                err = files.enter_context(err_path.open("wb"))
+                proc = await asyncio.create_subprocess_exec(
+                    *command.argv,
+                    env={**command.env, TURN_ENV: turn_id},
+                    cwd=command.cwd,
+                    stdin=asyncio.subprocess.DEVNULL if command.stdin is None else asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
+                pumped = asyncio.gather(
+                    _pump(proc.stdout, out), _pump(proc.stderr, err), _feed(proc, command.stdin)
+                )
                 finished = asyncio.create_task(proc.wait())
                 stopped = asyncio.create_task(_stop_heard(listener, task_id))
+                waiters += [finished, stopped]
                 moved = slot.preempting()
                 preempted = asyncio.create_task(moved.wait()) if moved is not None else None
-                waits = {finished, stopped} | ({preempted} if preempted else set())
-                done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                if preempted is not None:
+                    waiters.append(preempted)
+                done, _ = await asyncio.wait(set(waiters), return_when=asyncio.FIRST_COMPLETED)
                 if preempted is not None:
                     preempted.cancel()
                 if stopped in done or preempted in done:
@@ -211,8 +223,8 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
                 reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
                 # Every process of the turn has ended, so both pipes are at EOF.
                 await pumped
-            except BaseException:
-                pumped.cancel()
+            except BaseException as exc:
+                await _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc)
                 raise
     finally:
         await listener.close()
@@ -264,6 +276,59 @@ async def _ended(conn, task_id: str, ended: dict[str, Any]) -> dict[str, Any]:
     bare = {**{k: ended[k] for k in KERNEL_FIELDS if k in ended}, "result": {"unrecorded": unrecorded}}
     await ledger.append(conn, task_id, "turn.ended", bare)
     return bare
+
+
+async def _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc: BaseException) -> None:
+    """End a turn cancelled, or failed in the kernel, after `turn.started`.
+
+    First, with no await, so a second cancellation cannot skip it: kill the
+    harness's group while its leader is unreaped (its pid is the group id;
+    once reaped, the number may be another's), retire the grant and cut its
+    calls, and drop the waiters. Then reap what left the group, wait for the
+    pipes, charge the calls, and write `turn.reaped` and `turn.ended`
+    (`interrupted`, with why). A second cancellation before the rows are
+    written leaves the turn with no end, which recovery ends at the next
+    start; the reap's thread still runs to its end. A failure to write the
+    rows is noted on `exc`, which the caller raises."""
+    if proc is not None and proc.returncode is None:
+        _kill_group(proc.pid)
+    gateway.retire(task_id)
+    gateway.cut(task_id)
+    for waiter in waiters:
+        waiter.cancel()
+    reaped = await asyncio.to_thread(reap, turn_id, proc.pid if proc is not None else None)
+    if proc is not None:
+        await proc.wait()
+    if pumped is not None and not pumped.done():
+        await pumped
+    out_path, err_path = output_paths(task_id, turn_id)
+    why = "cancelled" if isinstance(exc, asyncio.CancelledError) else f"{type(exc).__name__}: {exc}"
+    try:
+        await gateway.drain(task_id)
+        async with await db.connect(dsn) as conn:
+            metered = await spending.turn_spent(conn, task_id, turn_id)
+            async with conn.transaction():
+                if reaped:
+                    await ledger.append(
+                        conn, task_id, "turn.reaped", {"turn_id": turn_id, "processes": reaped}
+                    )
+                await ledger.append(
+                    conn,
+                    task_id,
+                    "turn.ended",
+                    {
+                        "turn_id": turn_id,
+                        "outcome": "interrupted",
+                        "reason": why,
+                        "returncode": proc.returncode if proc is not None else None,
+                        "result": {},
+                        "stdout": str(out_path),
+                        "stderr": str(err_path),
+                        "metered_usd_micros": metered,
+                    },
+                )
+    except Exception as failed:  # noqa: BLE001  the turn's own exception is the one raised; recovery ends it
+        exc.add_note(f"turn {turn_id} was not ended: {failed!r}")
 
 
 async def _stop_heard(listener, task_id: str) -> None:

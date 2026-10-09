@@ -21,9 +21,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import aiohttp
 import pytest
 
-from core import db, ledger, runs, tasks
+from core import db, ledger, runs, serve, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from tests.ports import listen
@@ -73,6 +74,10 @@ def _wait_for(path: Path) -> int:
             return int(path.read_text())
         time.sleep(0.05)
     raise AssertionError(f"{path} never written")
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 def _turn(dsn, build) -> tuple[dict, list[dict]]:
@@ -200,3 +205,185 @@ def test_a_reaped_processs_command_line_is_recorded_whole():
     finally:
         proc.kill()
         proc.wait()
+
+
+# -- a cancelled turn -------------------------------------------------------------
+
+# A harness that starts a child in its own group and a daemon that leaves the
+# group by setsid, writes the child's pid, then waits to be stopped.
+HARNESS = """
+import os, subprocess, sys, time
+d, daemon = sys.argv[1], sys.argv[2]
+child = subprocess.Popen(['sleep', '60'])
+subprocess.run([sys.executable, '-c', daemon, os.path.join(d, 'daemon.pid')], check=True)
+with open(os.path.join(d, 'harness.pid'), 'w') as f:
+    f.write(str(os.getpid()))
+with open(os.path.join(d, 'child.pid.tmp'), 'w') as f:
+    f.write(str(child.pid))
+os.rename(os.path.join(d, 'child.pid.tmp'), os.path.join(d, 'child.pid'))
+time.sleep(60)
+"""
+
+# The same daemon, deaf to SIGTERM, so the reap waits out its grace.
+DEAF_DAEMON = DAEMON.replace(
+    "os.setsid()\n", "os.setsid()\nimport signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+)
+
+
+async def _gone(*pids: int, within: float) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if not any(_alive(p) for p in pids):
+            return True
+        await asyncio.sleep(0.05)
+    return not any(_alive(p) for p in pids)
+
+
+async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
+    """Start a turn of the children harness, cancel it once its processes
+    are up (and, with `cancel_again`, again once its harness is gone and
+    the cleanup is waiting on the reap). Returns what the test checks."""
+    async with await db.connect(dsn) as conn:
+        task = await tasks.start(conn, tasks.Brief(instruction="test"))
+    gateway = Gateway(dsn)
+    await gateway.start(port=listen())
+    seen: dict = {}
+
+    def build(url, brief, turn_id):
+        seen.update(url=url, turn_id=turn_id)
+        return runs.TurnCommand(
+            argv=[sys.executable, "-c", HARNESS, str(tmp_path), daemon],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            harness="children",
+        )
+
+    turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
+    child = await asyncio.to_thread(_wait_for, tmp_path / "child.pid")
+    daemon_pid = int((tmp_path / "daemon.pid").read_text())
+    harness_pid = int((tmp_path / "harness.pid").read_text())
+    turn.cancel()
+    if cancel_again:
+        assert await _gone(harness_pid, child, within=5)
+        await asyncio.sleep(0.2)
+        assert _alive(daemon_pid)  # the reap is still in its grace
+        turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    killed = await _gone(harness_pid, child, daemon_pid, within=runs.settings.reap_grace_s + 3)
+    async with aiohttp.ClientSession() as http, http.post(seen["url"] + "/v1/messages", json={}) as resp:
+        refused = resp.status
+    async with await db.connect(dsn) as conn:
+        rows = await ledger.read(conn, task)
+        recovered = await serve.recover(conn)
+        rows_after = await ledger.read(conn, task)
+    return task, gateway, build, seen, daemon_pid, killed, refused, rows, recovered, rows_after
+
+
+@pytest.mark.macos
+def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(dsn, tmp_path):
+    bystander = subprocess.Popen(["sleep", "30"])
+
+    async def go():
+        task, gateway, _, seen, daemon, killed, refused, rows, recovered, _ = await _cancelled_turn(
+            dsn, tmp_path, DAEMON, cancel_again=False
+        )
+        # The task's next turn on the same gateway runs: no fence, the slot is free.
+        try:
+            done = lambda url, brief, turn_id: runs.TurnCommand(
+                argv=[sys.executable, "-c", "pass"], env={}, cwd=str(tmp_path), harness="t"
+            )
+            nxt = await runs.run_turn(gateway, task, done, dsn=dsn)
+        finally:
+            await gateway.close()
+        return seen, daemon, killed, refused, rows, recovered, nxt, gateway
+
+    try:
+        seen, daemon, killed, refused, rows, recovered, nxt, gateway = run(go())
+        assert killed and bystander.poll() is None
+        assert refused == 403
+        assert seen["turn_id"] not in recovered["interrupted"]
+        assert [r["type"] for r in rows][-2:] == ["turn.reaped", "turn.ended"]
+        reaped, ended = rows[-2]["payload"], rows[-1]["payload"]
+        assert daemon in [p["pid"] for p in reaped["processes"]]
+        assert ended["turn_id"] == seen["turn_id"]
+        assert ended["outcome"] == "interrupted" and ended["reason"] == "cancelled"
+        assert ended["result"] == {} and "metered_usd_micros" in ended
+        assert nxt["outcome"] == "done"
+        assert not gateway.grants and not any(gateway.calls.values())
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+@pytest.mark.macos
+def test_a_turn_cancelled_again_during_its_cleanup_leaves_nothing_running_and_recovery_ends_it(dsn, tmp_path):
+    async def go():
+        out = await _cancelled_turn(dsn, tmp_path, DEAF_DAEMON, cancel_again=True)
+        await out[1].close()
+        return out
+
+    _, _, _, seen, _, killed, _, rows, recovered, rows_after = run(go())
+    assert killed
+    assert "turn.ended" not in [r["type"] for r in rows]
+    assert seen["turn_id"] in recovered["interrupted"]
+    assert rows_after[-1]["payload"]["reason"] == "kernel restarted"
+
+
+@pytest.mark.parametrize("code,outcome", [(0, "done"), (1, "failed")])
+def test_a_turn_that_ends_on_its_own_writes_only_its_end(dsn, tmp_path, code, outcome):
+    async def go():
+        gateway = Gateway(dsn)
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
+        await gateway.start(port=listen())
+        try:
+            build = lambda url, brief, turn_id: runs.TurnCommand(
+                argv=[sys.executable, "-c", f"raise SystemExit({code})"],
+                env={},
+                cwd=str(tmp_path),
+                harness="t",
+            )
+            ended = await runs.run_turn(gateway, task, build, dsn=dsn)
+        finally:
+            await gateway.close()
+        async with await db.connect(dsn) as conn:
+            return ended, await ledger.read(conn, task), gateway
+
+    ended, rows, gateway = run(go())
+    types = [r["type"] for r in rows]
+    assert types[types.index("turn.started") + 1 :] == ["turn.ended"]
+    assert ended["outcome"] == outcome and "reason" not in ended
+    assert not gateway.grants
+
+
+def test_a_turn_the_kernel_fails_after_its_start_ends_with_the_failure_named(dsn, tmp_path, monkeypatch):
+    """Not a cancellation: the turn's output directory cannot be made. The
+    error is raised, the grant is gone, and `turn.ended` names the error."""
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    monkeypatch.setattr(runs, "output_paths", lambda task, turn: (blocker / "t.stdout", blocker / "t.stderr"))
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
+        gateway = Gateway(dsn)
+        await gateway.start(port=listen())
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", "pass"], env={}, cwd=str(tmp_path), harness="t"
+        )
+        try:
+            with pytest.raises(OSError):
+                await runs.run_turn(gateway, task, build, dsn=dsn)
+        finally:
+            await gateway.close()
+        async with await db.connect(dsn) as conn:
+            return await ledger.read(conn, task), gateway
+
+    rows, gateway = run(go())
+    ended = rows[-1]["payload"]
+    assert rows[-1]["type"] == "turn.ended" and ended["outcome"] == "interrupted"
+    assert (
+        ended["reason"].startswith(("FileExistsError", "NotADirectoryError")) and ended["returncode"] is None
+    )
+    assert not gateway.grants

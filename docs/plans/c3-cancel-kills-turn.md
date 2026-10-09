@@ -2,7 +2,7 @@
 tracking: none
 slug: c3-cancel-kills-turn
 type: build
-status: planned
+status: built
 critique_rounds: 1
 review_rounds: 2
 governance_grant: none
@@ -58,47 +58,47 @@ already spawned has no handle.
 
 ## Fix
 
-In `core/runs.py`, `_run_turn` only:
+In `core/runs.py`, `_run_turn` and one new helper, `_cut_short`:
 
-1. **One cleanup covers the whole turn after `turn.started`.** `proc`,
-   `finished`, `stopped` and `preempted` start as None. The `try` that
-   today begins after the subprocess starts begins before
-   `create_subprocess_exec`, so a cancellation at any point after the
-   `turn.started` commit runs the same handler.
-2. **Kill first, with no await before it.** The handler's first acts are
-   synchronous, so a second cancellation cannot skip them:
-   - `_kill_group(proc.pid)` when the harness started. The harness runs
-     with `start_new_session=True`, so its pid is its process group id;
-     the kernel kills only that group, by number, never by pattern.
+1. **One handler covers the turn from its output files on.** `proc` and
+   `pumped` start as None and the waiters as an empty list. The `try`
+   begins before the output directory is made and the files are opened
+   (through an `ExitStack`, so they close only after the handler), so a
+   cancellation or a kernel error from there to the end of the pipe copy
+   runs `_cut_short`. A cancellation that lands while the dispatch
+   connection closes, or during the normal recording after the files
+   close (`transcripts.copy`, `turn_spent`), is outside it and leaves
+   today's state for recovery.
+2. **Kill first, with no await before it.** So a second cancellation
+   cannot skip them:
+   - `_kill_group(proc.pid)` only while `proc.returncode is None`. The
+     harness runs with `start_new_session=True`, so its pid is its group
+     id, and the unreaped leader holds that number. Once asyncio has
+     reaped the leader, the number may be recycled for another session,
+     so the group is not signalled; `reap` finds what is left by the
+     group, the turn's mark and its sandbox name.
    - `gateway.retire(task_id)` and `gateway.cut(task_id)`, as the normal
-     end does. Not `gateway.revoke`: revoke adds the task to `revoked`
-     for the rest of the process, which would refuse the task's next turn
-     in this kernel, and a cancelled turn is not a stopped task.
-   - cancel the `finished`, `stopped` and `preempted` waiters that exist.
-3. **Then reap and record, as the other ends do.**
-   `reaped = await asyncio.to_thread(reap, turn_id, proc.pid if proc else None)`
-   finds what left the group (a `setsid` daemon, a process under the
-   turn's sandbox mark) by the turn's marker and sandbox name, the same
-   rule as every other end. In a thread, a second cancellation stops only
-   the wait: the reap itself runs to its end. Then `await proc.wait()`,
-   `await pumped` (both pipes are at EOF once every process of the turn
-   has ended), `await gateway.drain(task_id)`, and in one transaction
-   `turn.reaped` (when anything was reaped) and `turn.ended` with
-   `outcome: "interrupted"`, `reason: "cancelled"`, `returncode`,
-   `result: {}`, the two output paths, and `metered_usd_micros`. These are
-   the fields recovery writes for a turn with no end, plus the files, so
-   the fold, `recollect` and `LAST_WORKING_ENDED` read it exactly as they
-   read recovery's row. If the job is cancelled again during this second
-   part, or the database is gone, the turn is left with no end and
-   recovery ends it at the next start, as it does today.
-4. **The original exception is re-raised.** A failure inside the cleanup's
-   recording part does not replace it: the recording runs in its own
-   `try`, and its exception is dropped in favour of the one being handled
-   (recovery covers the missing row). The kill and the reap are not
-   inside that `try`.
+     end does. Not `gateway.revoke`: `revoked` is never cleared, so it
+     would refuse the task's next turn in this kernel, and a cancelled
+     turn is not a stopped task.
+   - cancel every waiter (`finished`, `stopped`, `preempted`).
+3. **Then reap and record.** `reap(turn_id, pgid)` in a thread: a second
+   cancellation stops only the wait, and the reap runs to its end. Then
+   `await proc.wait()`, and `await pumped` only when it is not already
+   done (a cancellation that landed on the gather has cancelled it, and a
+   pump that failed holds the error being handled). Then
+   `gateway.drain`, and in one transaction `turn.reaped` (when anything
+   was reaped) and `turn.ended` with `outcome: "interrupted"`, `reason`,
+   `returncode`, `result: {}`, the two output paths and
+   `metered_usd_micros`: the fields recovery writes, plus the files.
+   `reason` is `"cancelled"` for a `CancelledError` and
+   `"<type>: <message>"` for anything else.
+4. **The original exception is re-raised.** A failure to write the rows
+   is attached to it as a note and recovery ends the turn; the kill and
+   the reap are outside that `try`.
 
-The stop, preempt, done and failed paths are untouched; a turn that ends
-on its own runs the same lines in the same order as now.
+The stop, preempt, done and failed paths run the same lines in the same
+order as before.
 
 Docs, status quo only:
 
@@ -113,22 +113,25 @@ Docs, status quo only:
 
 ## Done
 
-- [ ] Cancelling `run_turn` while its harness runs kills the harness and
+- [x] Cancelling `run_turn` while its harness runs kills the harness and
   every process in its group before the cancellation propagates, and
   reaps processes that left the group but carry the turn's marker.
-- [ ] After the cancellation the turn's grant is gone: a call on its base
+- [x] After the cancellation the turn's grant is gone: a call on its base
   URL is refused, and no call of the task is left in flight.
-- [ ] The cancelled turn's last rows are `turn.reaped` (when a process was
-  reaped) and `turn.ended` with `outcome: "interrupted"`,
-  `reason: "cancelled"`; recovery at the next start finds no turn of it
-  to end.
-- [ ] The task's next turn in the same kernel runs (grant not fenced, turn
+- [x] For a cancellation inside the handler's span, the turn's last rows
+  are `turn.reaped` (when a process was reaped) and `turn.ended` with
+  `outcome: "interrupted"`, `reason: "cancelled"`; recovery at the next
+  start finds no turn of it to end. A kernel error in the same span is
+  recorded with its own type and message.
+- [x] The task's next turn in the same kernel runs (grant not fenced, turn
   slot released).
-- [ ] A cancellation during the cleanup still leaves no process of the turn
-  alive; the turn then has no end and recovery ends it.
-- [ ] A turn that finishes, fails, is stopped or is preempted writes the
+- [x] A second cancellation during the cleanup still leaves no process of
+  the turn alive; the turn then has no end and recovery ends it. The two
+  windows outside the handler (the dispatch connection's close, the
+  normal recording) are left to recovery as before.
+- [x] A turn that finishes, fails, is stopped or is preempted writes the
   same rows as before; the existing tests for those paths pass unchanged.
-- [ ] Docs above updated; suite and ruff clean.
+- [x] Docs above updated; suite and ruff clean.
 
 ## Threat model
 
@@ -137,10 +140,9 @@ Docs, status quo only:
   as a session leader; the reap uses `_turn_processes`, which matches only
   this user's processes in that group, with the turn's `VALOR_TURN` mark,
   or under a sandbox denying `valor.turn.<turn_id>`. No pattern, no name.
-  A group id cannot be handed to a new process while any member of the
-  group lives, so the kill cannot reach another group while the turn's
-  processes exist; once they are all gone the kill finds nothing, as on
-  the stop path today.
+  The group is signalled only while the leader is unreaped, when the
+  number is still the turn's; after that, a recycled pid could lead a
+  stranger's session, so only `reap`'s matching applies.
 - **A harness that resists.** SIGKILL to the group is not catchable. A
   process that escaped the group by `setsid` is found by its environment
   mark or sandbox mark, the same rule the normal end relies on
@@ -158,36 +160,33 @@ Docs, status quo only:
 
 ## Tests
 
-In `tests/test_kernel.py`, next to the stop test, real subprocesses and
-the test database (`VALOR_TEST_DB=valor_rebuild_test_c3build`, ports
-6490-6499):
+In `tests/test_reap.py`, beside the reap tests whose helpers they share,
+real subprocesses and the test database
+(`VALOR_TEST_DB=valor_rebuild_test_c3build`, ports 6490-6499):
 
-1. **A cancelled turn whose harness spawned children.** The harness is
-   `python -c` that starts a child in its group (`sleep 60`) and a
-   daemon that calls `setsid` and writes its pid to a file, then sleeps.
-   The test waits for the pidfile, cancels the `run_turn` task, and
-   asserts: `CancelledError` is raised; the harness, the child and the
-   daemon are all gone within `reap_grace_s` plus a margin; a bystander
-   `sleep` the test started itself is alive; a request to the turn's base
-   URL gets 403; the task's last rows are `turn.reaped` (naming the
-   daemon) and `turn.ended` with `outcome: "interrupted"`,
-   `reason: "cancelled"`. Then a second `run_turn` on the same task with a
-   harness that exits 0 ends `done` (grant not fenced, slot released), and
-   `serve.recover` ends no turn of the task.
-2. **A cancellation during the cleanup.** As above, but the test cancels
-   the task twice in a row. Asserts the harness group and the daemon are
-   gone, and that recovery then ends the turn `interrupted` with
-   `reason: "kernel restarted"`.
-3. **A finished turn is unchanged.** Parametrized over a harness that
-   exits 0 and one that exits 1: the rows after `turn.started` are
-   `turn.ended` with `done` or `failed`, no `reason`, and the grant is
-   retired. The existing
-   `test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_ledger`,
-   `test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered` and
-   `test_a_turn_that_exits_cuts_its_silent_calls` run unchanged and pass.
+1. `test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted`:
+   the harness starts a `sleep` in its group and a `setsid` daemon, writes
+   their pids, and sleeps. The test cancels the `run_turn` task and
+   asserts `CancelledError`; harness, child and daemon gone; a bystander
+   alive; the base URL refused 403; the last rows `turn.reaped` (naming
+   the daemon) and `turn.ended` `interrupted`/`cancelled`; `serve.recover`
+   ends no turn of it; the task's next turn on the same gateway ends
+   `done`.
+2. `test_a_turn_cancelled_again_during_its_cleanup_leaves_nothing_running_and_recovery_ends_it`:
+   the daemon ignores SIGTERM, so the reap sits in its grace. The test
+   cancels once, waits until harness and child are gone and the daemon is
+   still alive (the cleanup is inside the reap), cancels again, and
+   asserts everything is gone, no `turn.ended`, and recovery ends the
+   turn with `reason: "kernel restarted"`.
+3. `test_a_turn_that_ends_on_its_own_writes_only_its_end`, exit 0 and 1:
+   the only row after `turn.started` is `turn.ended` `done` or `failed`
+   with no `reason`, and no grant is left.
+4. `test_a_turn_the_kernel_fails_after_its_start_ends_with_the_failure_named`:
+   the output directory cannot be made; the `OSError` is raised, the grant
+   is gone, and `turn.ended` names the error type.
 
-Each test is red on the current code except 3, which pins behaviour the
-fix must not change.
+1, 2 and 4 are red on the code before the fix; 3 pins what must not
+change. The existing stop, reap and exit tests run unchanged.
 
 ## Merge order
 
@@ -199,3 +198,17 @@ bug fix it may go before A3, A2 and B1; the lead decides.
 None.
 
 ## Records
+
+### Critique round 1 (2026-10-09)
+
+Verdict revise (`~/src/valor-build-notes/critic-c3-r1.md`); rounds spent,
+so the findings rode into the build. Applied: the group is killed only
+while the leader is unreaped (pid reuse); `pumped` starts None and is
+awaited only when not done; `reason` is `cancelled` only for a
+`CancelledError`, else the error's type and message; test 2 cancels
+once, waits until the cleanup is inside the reap, then cancels again;
+the Done items name the two windows left to recovery. Tests moved to
+`tests/test_reap.py` for its daemon helpers, and test 4 added for the
+non-cancellation reason.
+
+### Build
