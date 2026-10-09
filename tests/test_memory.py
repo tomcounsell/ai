@@ -422,7 +422,10 @@ def test_a_memory_that_cannot_log_in_is_named_and_the_turn_still_starts(dsn, mon
         return next(r["payload"] for r in rows if r["type"] == "turn.started")
 
     brief = run(go())["brief"]
-    assert "Memory: unavailable: " in brief and 'role "valor_no_such_role" does not exist' in brief
+    # The reason is libpq's, which differs by connection: over a socket with
+    # trust it names the role, over TCP with a password file it does not.
+    reason = brief.split("Memory: unavailable: ", 1)[1].split("\n", 1)[0]
+    assert reason.strip()
 
 
 def _child(env: dict, code: str) -> str:
@@ -504,11 +507,13 @@ def test_a_nul_in_a_transcript_is_dropped_and_later_rows_are_still_taken(dsn):
 
 def test_migrate_runs_for_an_owner_that_is_not_a_superuser(monkeypatch):
     """The owner a workspace or the VM has: `LOGIN CREATEDB CREATEROLE`, no
-    superuser, so it holds no SET on a role it creates (Postgres 16 on)."""
+    superuser, so it holds no SET on a role it creates (Postgres 16 on). Its
+    name is the test database's, never the cluster's bootstrap owner."""
+    owner = f"{TEST_DB}_owner"
     with backup.scratch_cluster() as cluster:
         with psycopg.connect(cluster.dsn(), autocommit=True) as conn:
-            conn.execute("CREATE ROLE app LOGIN CREATEDB CREATEROLE")
-        monkeypatch.setattr(db, "settings", dataclasses.replace(settings, owner_role="app"))
+            conn.execute(f"CREATE ROLE {owner} LOGIN CREATEDB CREATEROLE")
+        monkeypatch.setattr(db, "settings", dataclasses.replace(settings, owner_role=owner))
         for _ in range(2):
             db.migrate("ledger", host=cluster.host, port=cluster.port)
         with psycopg.connect(cluster.dsn(database="ledger"), autocommit=True) as conn:
