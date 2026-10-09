@@ -49,9 +49,10 @@ existence; this plan names its shape.
   on Claude Code at `claude-opus-5-5`, `reviewer_openai` on Pi at
   `gpt-6.1-sol`. Pi reaches OpenAI only through the gateway's OpenAI
   route, so its spending is metered like any turn (`docs/pi.md`,
-  "Provider"). The review runner already runs a fresh session at
-  `reviewer_openai` and records `review.compared`, which the fold never
-  reads (`core/fresh.py:846-858`, `docs/data.md:130`).
+  "Provider"). The review runner supports a fresh session at
+  `reviewer_openai` (its `seat` parameter; it is registered at `reviewer`
+  and run on Pi by tests) and there records `review.compared`, which the
+  fold never reads (`core/fresh.py:846-858`, `docs/data.md:130`).
 - A working turn's committed head reaches the kernel mirror through
   `session._keep` (`core/session.py:189`), which refuses a tree holding
   `.valor`.
