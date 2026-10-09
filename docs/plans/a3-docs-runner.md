@@ -219,6 +219,74 @@ Suites: `tests/test_judgement_sites.py`, `tests/test_judgement.py`,
 `tests/test_pipeline.py`, then the full suite on
 `VALOR_TEST_DB=valor_rebuild_test_a3build`; ruff check and format.
 
+## Critique's and docs' verdicts reach the kernel the way review's does
+
+Folded in by the lead (`~/src/valor-build-notes/triage-followups.md`,
+"critique/docs read .valor/verdict.json"). Critique and docs end their turn
+by writing `.valor/verdict.json` in their checkout, and the kernel reads that
+file (`fresh.py` critique runner and `_docs_turn`, both through
+`workspace.read_verdict`). That is the kernel reading state the turn owns:
+any process the session starts can rewrite the file until the turn is
+reaped, which is why review already takes its verdict from the turn's final
+message on the harness's stdout (`final_verdict`), a pipe no process the
+session starts can write. Critique runs today with this opening; docs
+has it as soon as its runner is registered.
+
+What changes, landing on either outcome of run 5 (critique uses it today):
+
+1. The critique runner and `_docs_turn` read the verdict with
+   `final_verdict(ended["result"].get("text"))`, as `review_runner` does,
+   and pass the object to `_verdict_fields` and `_docs_fields` unchanged.
+   The "no verdict" result names `final_verdict`'s reason.
+2. `workspace.read_verdict` and `workspace.no_verdict_yet` are deleted, and
+   `write_inputs` stops calling `no_verdict_yet`: with no verdict file read,
+   a file planted before the turn has nothing to plant into. `_file_away`
+   and `read_turn_file` stay if the signals walk still calls them (a grep
+   at build time decides). `.valor/` stays the inputs directory, a tree
+   holding `.valor` is still refused, and `.valor/` stays in
+   `.git/info/exclude`.
+3. `_verdict_fields`' message "verdict.json names no verdict" becomes "the
+   verdict names no verdict".
+4. `skills/sdlc/verdict.md`: every stage ends the turn with the object at
+   the end of its final message, bare or in a fenced block; the sentence
+   about the file goes. `skills/sdlc/docs.md`'s exit evidence says
+   the same (`critique.md` does not name the file).
+   `docs/harnesses.md` (the paragraph around line 204), `fresh.py`'s module
+   docstring, and `tests/test_live_fresh.py`'s docstring say it as it is.
+5. Tests. `tests/scripted.py`'s critique and docs acts print the verdict as
+   the turn's final message instead of writing the file; the acts that
+   tested the file's reading (`none`, `symlink`, `fifo`, `dir_symlink`, the
+   forger that rewrites `.valor/verdict.json`) are deleted with
+   `read_verdict`, and their parametrized cases in `tests/test_fresh.py`
+   with them; `malformed` and `nul` stay, as a final message. One test
+   each for critique and docs: a turn that writes a valid
+   `.valor/verdict.json` and ends with prose holding no JSON object records
+   no verdict and returns `failed` with "the final message is not a JSON
+   object". `test_a_process_the_turn_leaves_running_cannot_change_its_final_message`
+   in `tests/test_harness_contract.py` already covers the channel for
+   review; it gains a critique case on the same forger.
+
+### The Pi seat's `.pi/settings.json` in critique and docs checkouts
+
+Checked. Pi reads `<cwd>/.pi/settings.json` whatever flags it is given
+(`harnesses/pi.py`, docstring). Review's and critique's checkouts are both
+`workspace.blind_checkout`, which leaves `BLIND_LEFT_OUT` (`.pi`) out of the
+working tree, so neither exposes it. Docs uses `fresh.docs_clone`, a real
+clone with every path checked out, `.pi/` included. Today docs runs at the
+`frontier` seat, Claude Code with `--setting-sources ""`, which reads no
+project settings file, so nothing reads it; a docs seat moved to Pi (a
+one-line `SEATS` edit) would read the candidate's `.pi/settings.json`.
+`BLIND_LEFT_OUT`'s comment states the invariant as "for every harness ... a
+candidate must not set what the verifier's session runs with", and the docs
+session is a fresh session judging the candidate, so `docs_clone` meets it
+the same way: the same sparse checkout leaving `BLIND_LEFT_OUT` out
+(`core.sparseCheckout`, a `!/.pi` line), applied after the clone. A docs
+commit cannot touch `.pi/` (`machine.is_doc_path` takes Markdown outside
+instruction directories), and a sparse checkout keeps the paths in the
+index, so the docs session's commits carry them unchanged. Test: a
+candidate whose tree holds `.pi/settings.json` gives a docs checkout with no
+`.pi` in the working tree and the file still in `HEAD`'s tree.
+
 ## Calibration run 5
 
 On the build branch's commit with sections 1 to 3, never on the real
@@ -304,7 +372,7 @@ The question's wording narrows what an existing check counts; the re-ask
 fixes a calibration bug; registering the docs runner gives the docs stage,
 granted with the pipeline on 2026-10-01 (`core/guards.py`), the runner it
 was granted with; deleting the `verdict` command removes a by-hand step.
-None adds a check, gate, hook, round, review step, or guard, so the plan
+Moving critique's and docs' verdict to the final message changes which channel an existing verdict arrives on and deletes a check (`no_verdict_yet`); the docs clone leaving `.pi` out applies the invariant `BLIND_LEFT_OUT` already states for every fresh verifier session, and refuses nothing. None adds a check, gate, hook, round, review step, or guard, so the plan
 asks for no grant. If review answers `governance.adds` true on a hunk, the
 incident is run 4 (`docs/plans/m1-4b-records.md`: docs verdicts recorded by
 hand because no record passed) and the mission item is 1.
@@ -329,6 +397,12 @@ hand because no record passed) and the mission item is 1.
   progress, so a provider that refuses everything costs one extra pass of
   free refusals.
 
+- **A turn's process forging a verdict.** After this plan no fresh
+  session's verdict is a file in its checkout; every one is the final
+  message on the harness's stdout, which a process the session leaves
+  running cannot write. A candidate's `.pi/settings.json` reaches no fresh
+  session's working tree.
+
 ## Done, as evidence
 
 1. The revised question and rubrics in `core/judgement_tasks.py`; the
@@ -343,7 +417,11 @@ hand because no record passed) and the mission item is 1.
    `python -m core verdict` is refused by argparse as an unknown command;
    `MANUAL_STAGES` and `manual_allowed` appear nowhere in `core/`; the docs
    named in "On a pass" say what the code does.
-4. On a fail: the record, `calibrated` `None`, and the lead's advisor
+4. Critique and docs take their verdict from the final message:
+   `read_verdict` appears nowhere in `core/`; the scripted runners pass;
+   the docs checkout of a candidate holding `.pi/` has none in its working
+   tree.
+5. On a fail: the record, `calibrated` `None`, and the lead's advisor
    started on the failing legs.
 
 ## Questions for Tom (answer assumed; work carries on)
