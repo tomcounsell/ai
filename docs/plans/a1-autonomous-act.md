@@ -597,5 +597,3 @@ no notice; tests stop a task whose released sends no later bridge should send.
 Patch 1: migration refuses a kernel-owned held release; reports name `to`
 and `cc`. Patch 2: the emulator test asserts the merge done; the ceiling
 test is committed; the grant notice names each instance and its command.
-
-The rollout is recorded in `a1-autonomous-act-record.md`.
