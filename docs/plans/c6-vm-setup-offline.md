@@ -2,7 +2,7 @@
 tracking: none
 slug: c6-vm-setup-offline
 type: build
-status: built
+status: done
 stakes: low
 critique_rounds: 0
 review_rounds: 1
@@ -152,3 +152,7 @@ commit for `core/README.md` and `docs/data.md` is carried, the README's key
 inputs worded to match.
 - Patch round 1 runs: `test_container.py` and `test_checks.py` (not
   container) 79 passed, 15 deselected; ruff check and format clean.
+
+## Rollout
+
+Merged at `9ceb937f1` on top of A3 (`95a10cff3`); the lead resolved the `docs/data.md` and `core/README.md` conflicts with A3 by keeping A3's wording and adding C6's. Focused run (`tests/test_container.py`, `tests/test_checks.py`, not container): 79 passed; test-c6 ran the popoto-shaped container test green for both build backends. The kernel was restarted with `launchctl kickstart -k`; every project's dependency image builds once more on its next review because the key changed.
