@@ -11,7 +11,7 @@ review_rounds: 2
 
 Task A1 of `docs/plans/rebuild-finish-prompt.md` ("Track A"), under Tom's
 ruling on autonomy of 2026-10-09 (`docs/plans/valor-rebuild-feedback.md`,
-last section). Every citation is to `valor-cori-rebuild` at 1b9cde3ed.
+last section). Every citation is to the rebuild branch at 1b9cde3ed.
 
 **Goal.** An `act` effect inside its task's ceiling leaves when the kernel
 decides: the broker writes its intent and performs it, or, for a bridge's
