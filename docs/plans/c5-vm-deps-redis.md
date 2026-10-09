@@ -1,0 +1,133 @@
+---
+tracking: none
+slug: c5-vm-deps-redis
+type: build
+status: planned
+stakes: low
+critique_rounds: 1
+review_rounds: 1
+governance_grant: none
+---
+
+# setuptools build requirements reach the VM; popoto's suite gets its Redis
+
+Track C5 of `rebuild-finish-prompt.md`: two bugs that task D1 (task
+`8ed5902a54d4`, the kernel carrying popoto #633 under the Pi harness) hit.
+Both are bug fixes. Neither adds a check, gate, hook, round, review step or
+guard, so no `governance_grant` is needed. Stakes are low: one changed line
+of the dependency build script, one project spec line, and a container test.
+
+## 1. The dependency build reads a setuptools backend's log as requirements
+
+### Incident
+
+Review's VM dependency build for popoto at `e51903535669` failed (ledger
+row 2491, `step.failed`, "the dependencies at e51903535669 did not
+install"). The log `checks/vm-deps-b2e740595704.out` in the task's
+workspace ends with `uv pip install` refusing "Failed to parse: `running
+egg_info`".
+
+### Cause
+
+`core/images/base/deps.sh` imports the project's build backend, calls
+`get_requires_for_build_editable` and `get_requires_for_build_wheel`, and
+takes everything the script prints on stdout as one requirement per line.
+setuptools' hooks run `egg_info` and log `running egg_info`, `creating
+toy.egg-info`, `writing ...` on stdout, so those lines reach `uv pip
+install` as requirements. A setuptools project with `pyproject.toml` alone
+shows it outside any container:
+
+```
+running egg_info
+creating toy.egg-info
+...
+R []
+```
+
+### Fix
+
+The script that calls the hooks points file descriptor 1 at standard error
+while the hooks run (`os.dup2`, so a subprocess the backend starts is
+covered too, not only Python's `sys.stdout`) and writes the requirement list
+to the saved original stdout. The backend's log stays in the dependency
+build's log; only the list reaches `uv pip install`.
+
+### Test
+
+`tests/test_container.py::test_a_popoto_shaped_spec_installs_offline_in_the_vm`
+runs for a hatchling backend and a setuptools backend
+(`requires = ["setuptools>=61"]`, `build-backend = "setuptools.build_meta"`),
+whose hooks print `running egg_info` on stdout. It fails on the setuptools
+case before the fix (the dependency build does not install) and passes
+after. It is `container`-marked and runs alone.
+
+## 2. popoto's suite fails at base and head with Redis on 6379
+
+### Incident
+
+The test check for task `8ed5902a54d4` was red at base and head alike:
+base 2259 failing, head 2318 errors, every error a redis `ConnectionError`
+to `localhost:6379`, "Operation not permitted".
+
+### Cause
+
+The kernel gives the suite the task's Redis as documented: the turn and
+check environment (`core/workspace.py`, `_env`) carries `REDIS_URL`,
+`REDIS_HOST` and `REDIS_PORT` for the task's own Redis (6402 in that task),
+and popoto's `src/popoto/redis_db.py` reads `REDIS_URL`. The suite's output
+shows every test passing until `tests/test_connection.py`:
+
+```
+tests/test_confidence_modulated_decay.py ....  [ 33%]
+tests/test_connection.py .......FEEEEEEEE      [ 33%]
+tests/test_content_field.py EEEEEEEEEEEE       [ 34%]
+```
+
+`tests/test_connection.py` connects to `localhost:6379` by hand in five
+tests (`set_REDIS_DB_settings(host="localhost", port=6379)` and the async
+and pool variants). The first,
+`TestConnectionReconfiguration::test_set_redis_db_settings_with_valid_url`,
+rebinds popoto's global client to `localhost:6379` and never restores it.
+Port 6379 is the machine's live Redis, which the turn sandbox denies, so
+that test fails, and every later test inherits the rebound client: the
+plugin's database switch keeps the client's host and port and sets db 15,
+hence `Connection(host=localhost,port=6379,db=15)` in every error.
+
+The suite would flush db 15 of the machine's live Redis if the sandbox let
+it through. The test file needs a Redis at a fixed address the kernel does
+not promise.
+
+### Fix
+
+The project spec, not the kernel. The popoto spec's suite leaves the file
+out with `--ignore=tests/test_connection.py`, the form the emulator's later
+popoto run specs already carry (`~/src/valor-demo/runs/pop-a-gate-b` and
+`pop-a-1-5r`):
+
+```toml
+suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --junitxml={junit} tests"
+```
+
+It is applied to the spec task D1 used
+(`~/src/valor-build-notes/d1/popoto.toml`) and to the popoto spec in
+`docs/plans/cutover-data.md`. The valor-demo specs `pop-a-gate` and
+`pop-b-gate` keep the old suite line; they are emulator records of runs
+already made and are not edited.
+
+popoto's own fix is upstream: `tests/test_connection.py` should take its
+host and port from `REDIS_URL` and restore the client it rebinds. Filing
+that is a popoto issue, outside this task.
+
+### Test
+
+A reproduction outside the kernel: the popoto checkout at `e51903535669`,
+a scratch Redis on a port in this task's block with `REDIS_URL` set, and a
+sandbox profile that denies `localhost:6379`. With `tests/test_connection.py`
+in the run, the tests after it error with the same `ConnectionError`; with
+`--ignore=tests/test_connection.py`, they pass. The result is recorded below.
+
+## Question for Tom
+
+None.
+
+## Records
