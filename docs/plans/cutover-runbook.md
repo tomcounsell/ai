@@ -18,7 +18,8 @@ Q3) are in [cutover-data.md](cutover-data.md); the machine's parts are in
 Captain, the Bald, and the Pirate are not touched (G11).
 
 Rules for every step: the old system is read only except for its own
-services (its Redis is never written, `~/src/ai` is never edited or
+services (its Redis is never written, except by the old code itself in
+step B3 of the way back; `~/src/ai` is never edited or
 switched, no old job is uninstalled; disabled means `launchctl disable`
 plus `launchctl bootout`, which `enable` and `bootstrap` undo). No secret
 is printed; the archive in step 1 holds copies of files that carry secrets,
@@ -273,8 +274,8 @@ mail stays unseen. The new bridge receives only mail on or after
 
 ## 6. Tom's step: the branch becomes `main` (G6)
 
-Tom does this (section 12, item 3); Valor waits. Every old service is off,
-so nothing pulls the old `main`.
+Tom does this (section 12, item 3); Valor waits. Every old service is off
+on the Cowboy, so nothing here pulls the old `main`.
 
 Check:
 
@@ -377,6 +378,7 @@ from `VALOR_MACHINE` and prints `Valor the Cowboy`.
 ```
 launchctl enable $D/com.valor.kernel.telegram; launchctl bootstrap $D $LA/com.valor.kernel.telegram.plist
 launchctl enable $D/com.valor.email; launchctl bootstrap $D $LA/com.valor.email.plist
+date -u +%FT%TZ > $CUT/cutover-at.txt
 sleep 20
 ```
 
@@ -470,65 +472,13 @@ runs at 04:00) and a new dump appears.
 
 ## 11. The way back
 
-Use it if a check in steps 8 to 10 fails and cannot be fixed in place, or
-when Tom says so. In a new shell, run the shell setup with `DAY` set to the
-cutover date and `REB=$(cat $CUT/rebuild-branch.txt)`. The old Redis was
-never written, so the old system finds its state where it left it.
-
-**B1. Stop the new readers first**, so two systems do not answer one chat.
-
-```
-for L in com.valor.kernel.telegram com.valor.email; do
-  launchctl disable $D/$L; launchctl bootout $D/$L; done
-```
-
-Check: `launchctl list | grep -E "com.valor.(kernel.telegram|email)\b"` prints
-nothing. The kernel and routines may keep running; with no bridge they
-receive nothing. To stop the kernel too, disable and boot it out like the
-bridges, after `$PY -m core stop TASK_ID` for any task mid turn.
-
-**B2. Put the old branch back, if step 6 ran.** Tom sets `main` of
-`tomcounsell/ai` back to the commit in `$CUT/old-main.txt` (the tag
-`old-system` names it) and the ruleset 24370170 back to disabled. In the
-kernel checkout: `git switch $REB`, and the `branch` line of
-`projects/valor.toml` back to `$REB`'s name.
-
-Check: `git ls-remote https://github.com/tomcounsell/ai.git refs/heads/main`
-prints the hash in `old-main.txt`, and `git -C ~/src/ai rev-parse HEAD`
-prints the one in `old-ai-head.txt` (the old checkout was never touched).
-
-**B3. Re-enable the old jobs, in the reverse of step 4.** The worker comes
-before the bridge, so a message the bridge catches has a worker waiting.
-
-```
-for L in com.valor.worker com.valor.reflection-worker com.valor.bridge \
-         com.valor.bridge-watchdog com.valor.update; do
-  launchctl enable $D/$L; launchctl bootstrap $D $LA/$L.plist; done
-```
-
-Bootstrap the old email bridge (`com.valor.email-bridge`) only if
-`$CUT/launchd-before.txt` lists it; otherwise only `launchctl enable` it.
-
-Check:
-
-```
-launchctl list | grep -E "com.valor.(worker|reflection-worker|bridge|bridge-watchdog|update)\b"
-tail -n 20 ~/src/ai/logs/bridge.log | cut -c1-160
-```
-
-Check: five jobs listed, the bridge with a pid; its log shows a connection
-and its catch-up. The catch-up reads each chat's recent thread and judges
-what is unanswered, so a message the new system answered shows as answered.
-A reply that both systems sent is the only double; write it down.
-
-**B4. Undo the new jobs' edits** (only if they are not just paused):
-`cp $CUT/launchagents/com.valor.*.plist $LA/` (do not bootstrap them).
-The telegram-seen marks stay: they only move forward, and the new bridge
-needs them when it returns.
-
-**To cut over again** after a way back: the new bridges are enabled with
-`launchctl enable` and `bootstrap`, and step 5 is run again first, since
-the old bridge handled messages in the meantime.
+It is in [cutover-runbook-back.md](cutover-runbook-back.md): stop the new
+system (grants off, tasks stopped, kernel stopped), keep the new `main` tip
+under a tag before Tom rewinds `main`, write the messages the new system
+handled into the old dedup, re-enable the old jobs with the update job
+last, and settle unsent notices before cutting over again. Use it if a
+check in steps 8 to 10 fails and cannot be fixed in place, or when Tom says
+so.
 
 ## 12. What Tom alone does
 
@@ -548,7 +498,10 @@ The only places a person is in the path; none is a tap on work Valor started.
    the spec and the grant carry that one. This is a grant of authority, not
    a tap on a held action; the lead decides whether the A1 ruling covers it.
 3. **Makes the rebuild branch `main`** (G6), after step 4 has printed its
-   checks. The old tip is kept under a tag first:
+   checks. First, the four open pull requests against `main` (#3607, #3598,
+   #3596, #3593) are closed or relabeled as aimed at the old system, since
+   they are Tom's and would show diverged diffs. Then the old tip is kept
+   under a tag:
 
    ```
    git push origin $(cat $CUT/old-main.txt):refs/tags/old-system
@@ -557,8 +510,16 @@ The only places a person is in the path; none is a tap on work Valor started.
 
    The first line tags the old `main` commit; the second makes `main` the
    rebuild branch's tip (the histories differ, so it is a forced update)
-   and fails if `main` moved since. His `gh`
-   login, not Valor's, since the ruleset restricts updates to `main`.
+   and fails if `main` moved since. It is not a merge commit: a merge
+   would let every old Mac fast-forward onto the rebuild and lose its
+   bridge. As a forced update it is inert there: the old cron update does
+   `merge --ff-only`, which fails on diverged history and logs "continuing
+   with current code". His `gh` login, not Valor's, since the ruleset
+   restricts updates to `main`. Afterwards no old Mac may run `/update
+   --full`, whose pull falls back to a rebase and leaves that checkout
+   mid-rebase. Tom tells whoever holds each of the Captain, the Bald, and
+   the Pirate (by message, one line: "do not run /update --full"). Their
+   update jobs stay enabled, since the cron path is safe.
 4. **Sets ruleset 24370170 to active** (admin only), after item 3:
 
    ```
@@ -567,6 +528,10 @@ The only places a person is in the path; none is a tap on work Valor started.
 
    After this, pushes to `main` go only through the kernel's merge
    performer, under the grant in item 2. To undo, `enforcement=disabled`.
+   Valor's account is not a bypass actor: `gh api
+   repos/tomcounsell/ai/rulesets/24370170` reports `current_user_can_bypass:
+   never` for it (the ruleset's actor list itself is hidden from Valor's
+   token, so Tom can confirm it in the ruleset's page).
 5. **Stops the Captain's old bridge, worker, and email bridge** (G11), or
    says which person or session holds that Mac, so psyoptimal and
    cuttlefish chats can be added to their specs. On the Captain, as
@@ -594,6 +559,26 @@ The only places a person is in the path; none is a tap on work Valor started.
 | G9 fields with no home, G10 third-party keys, G12 Google tokens | Left open on purpose: the spec carries only what the kernel acts on, a turn's sandbox denies the vault (one key is copied when a task needs it), the kernel does not read the Google files |
 | G11 the other three Macs | Open for the Captain, Bald, Pirate; Cowboy only; Tom's item 5 |
 | Q1, Q2, Q3 | `main` in step 0.2; grants in 8.1 and Tom's item 2; the operator group stays the operator chat (step 7 check) |
+
+## Decided by default
+
+The way back's decisions are in the back file. For the move of `main`:
+
+- **A forced update with the `old-system` tag, not a merge commit or a new
+  default branch.** Reason: a merge commit lets every old Mac fast-forward
+  onto the rebuild, whose tree has no old bridge or update script, so the
+  old system dies on every Mac; a new default branch buys nothing, since
+  the ruleset, the grants, and the specs all name `main` and the old Macs
+  keep pulling it.
+- **Open pull requests closed or relabeled before the force.** Reason: they
+  would show diverged diffs against the rebuild.
+- **No `/update --full` on an old Mac after the force.** Reason: its pull
+  falls back to a rebase on divergence and never aborts it. The note goes
+  to each old Mac's holder by message; the cron update path is safe and
+  stays on.
+- **The ruleset's bypass list was read.** Valor's account is not on it
+  (`current_user_can_bypass: never`), so the ruleset tells an old Mac's
+  push from the kernel's push.
 
 The old Redis, its data, and `~/Desktop/Valor` stay running and in place;
 Tom removes them on a later day, once the way back is not wanted.
