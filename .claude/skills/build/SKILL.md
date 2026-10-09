@@ -85,43 +85,34 @@ this session. Run every ready task's next stage in one message of Agent
 calls, so they run together. There is no cap on how many run; spending is
 metered, never a reason to wait.
 
-**Waves.** A task's plan can be written as soon as its milestone is named.
-Building waits only on what the task's code needs:
+**Waves.** Milestones 1 to 4 are merged. The run that finishes the
+rebuild (`docs/plans/rebuild-finish-prompt.md`, Tom's ruling of 2026-10-09
+in `valor-rebuild-feedback.md`) carries these:
 
-| Task | Plan | Build starts when | Merges after |
-|---|---|---|---|
-| 1.4b runners | written | now | 1.4a |
-| 1.4d credential, transcripts, performers | now | now | 1.4b |
-| 1.5 emulator and takeover gate | now | now (the scripts' move); the gate runs once 1.4b, 1.4s, 1.4c part one, and 1.4d merge | 1.4d |
-| 1.4s kernel reads of turn-owned files (bug fix) | now | now | 1.4b |
-| 1.4c part one: review runner, host rerun | now | on 1.4b's docs tip; rebases when 1.4b is patched | 1.4b and 1.4s, before the 1.5 gate runs |
-| 1.4u invented caps out of the merged code (cap-audit-code) | now | now | 1.4b and 1.4s; later of 1.4u, 3a, 3b rebases |
-| 1.4v programs by fixed path, denied paths' ancestors denied (bug fix) | now | now | 1.4b; 3b's patch follows it |
-| 1.4c part two: the rerun in a container | now | now (`container` is installed on Valor's Mac and Tom's Mac) | 1.5 |
-| 2.1 resident kernel, bridge port | now | now, on current code; rebases onto 1.4b, 1.4d, 1.4s | 1.5 |
-| 2.2 Telegram | now | 2.1's critique rounds are done (it builds to the port the plan names) | 2.1 |
-| 2.3 email | now | 2.1's critique rounds are done | 2.1 |
-| 3a the gateway's OpenAI route | now | now | 1.5 |
-| 3b Pi and the harness contract suite | now | now | 3a |
-| 3c headless browser in the workspace | now | now | 1.5 |
-| 4.1 objective tree | now | 1.4d and 2.1 merge | 2.1 |
-| 4.2 persona | now | now | 1.5 |
-| 4.3 routines and status page | now | 4.1's build lands | 4.1 |
-| 5 tools on demand | none: built when a task needs a tool twice | | |
-| 6 memory | when popoto #631 ships | | |
+| Task | Starts | Merges after |
+|---|---|---|
+| A1 autonomous act (stakes 2) | now | first of the core changes |
+| A2 the advisor (stakes 2) | now | A1 |
+| A3 the docs stage's runner (stakes 2) | now, calibration on a test database | A1 |
+| B1 memory, milestone 6 (stakes 2) | now, on popoto 1.10.0's Postgres backend | A1; hand rollout |
+| C1 email idle drop (stakes 1) | now | any time (bridge code only) |
+| C2 plan housekeeping | now, by the lead | n/a |
+| D1, D2 Pi carries popoto #633, one review per harness | now (D2 on D1's candidate) | n/a |
+| D3 persona evidence (pso-c, #894) | now | n/a |
+| E1 the old system's data, E2 the cutover runbook | now (E2 after E1) | n/a |
+| The live window | A1 and A3 rolled out | n/a |
+| D4 the cutover sweep | A1, A2, A3 merged | n/a |
 
-Real-account Done items (2.2, 2.3) and live rollouts wait on Tom's test
-window or credential; everything before them is built and tested on
-emulators and local servers, and the delivery says what the window will
-show.
+A1, A2, A3, and B1 all touch `core/`: build in parallel, merge one at a
+time in that order, each later one rebasing and rerunning its checks.
 
 **Models.** Pass `model` on every Agent call:
 
 | Role | Model |
 |---|---|
 | plan, critique, review | `opus` |
-| build, patch, stakes 2 (the kernel, money, stored data, migrations, auth; 1.4b, 1.4d, 1.5, 2.1, the OpenAI route, 4.1) | `opus` |
-| build, patch, stakes 0 or 1 (2.2, 2.3, Pi, 4.2, 4.3) | `sonnet` |
+| build, patch, stakes 2 (the kernel, money, stored data, migrations, auth; 1.4b, 1.4d, 1.5, 2.1, the OpenAI route, 4.1, A1, A2, A3, B1) | `opus` |
+| build, patch, stakes 0 or 1 (2.2, 2.3, Pi, 4.2, 4.3, C1) | `sonnet` |
 | test, docs | `sonnet` |
 
 A builder keeps its model across stages when resumed, since its context
@@ -238,9 +229,8 @@ Once 1.5's takeover gate is merged, new tasks start through the kernel
 where it can carry them; tasks already running with subagents finish
 there. Start a kernel task with:
 `.venv/bin/python -m core start "<instruction>" --project valor --branch valor-cori-rebuild`,
-then `.venv/bin/python -m core run <task>` until it stops on a question, a
-held merge, or a stop. Valor decides held merges and stops itself against
-the task's objective; relay to Tom only a question in Tom's queue below,
+then `.venv/bin/python -m core run <task>` until it stops on a question or
+a stop. Valor decides stops itself against the task's objective; relay to Tom only a question in Tom's queue below,
 and record his answers with `core answer`. Step in with subagents only to repair the kernel when it
 cannot run its pipeline, and record that repair as a task.
 
@@ -278,7 +268,9 @@ benefit of tradeoffs in how the company works; things only he holds (a
 password, an account, a disk); and governance grants, one per new check,
 gate, hook, review step or guard, each with its incident and mission item.
 Never raise a technical decision, a merge, or an extra round; decide them
-and record why. Decide every other call too, record it under
+and record why. For a second opinion, spawn an advisor subagent (Opus,
+read-only, fresh context, the question and the evidence), take its answer
+as input, then decide and act yourself (Tom, 2026-10-09). Decide every other call too, record it under
 "Decided by default" in the plan file, and keep going. Ask one question at
 a time, in plain language, with a concrete example and the recommendation
 first.

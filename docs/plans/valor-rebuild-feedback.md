@@ -7,7 +7,7 @@ status: draft
 
 # Valor rebuild: Tom's feedback
 
-Tom's rulings on [the rebuild plan](valor-rebuild.md) (2026-10-03) and on the governance classifier (2026-10-07), and what each changes.
+Tom's rulings on [the rebuild plan](valor-rebuild.md) (2026-10-03), on the governance classifier (2026-10-07), and on autonomy (2026-10-09), and what each changes.
 
 ## Tom's feedback (2026-10-03)
 
@@ -76,3 +76,30 @@ What this changes ([the plan](80e49c02-governance-adds.md)):
   `governance.adds`, answered by a classifier change, never by a grant
   (`docs/judgement-layer.md`, note 6).
 - Unchanged: the governance paragraph in `CLAUDE.md`.
+
+## Tom's ruling on autonomy (2026-10-09)
+
+Asked what ceiling a task started from Telegram should get, Tom said:
+
+> Not only should the agent act, but it should employ agents to act and
+> only come back to the user for a report on what was done, or a question
+> that must be asked to resolve a major blocker. Valor, this agent, is
+> using its own accounts so it is expected to act independently to send,
+> build, merge without asking any human for approval. In cases where the
+> agent does seek a 2nd opinion, it should spawn an advisor agent to help
+> it decide then act.
+
+What this changes, beyond the 2026-10-03 ruling that merges are Valor's:
+
+- No `act` effect waits for a human. Sends, pushes, and merges inside a
+  task's ceiling leave when the kernel decides, not on a tap.
+- A task Tom starts from any channel runs at `act`.
+- Tom receives reports of what was done and questions that resolve a major
+  blocker. Nothing else reaches him.
+- A second opinion comes from an advisor agent Valor spawns, never from
+  Tom. The advisor informs; Valor decides and acts. An advisor is never a
+  step work must pass, so it adds no governance.
+- Unchanged: the governance paragraph in `CLAUDE.md`. A new check, gate,
+  hook, round, review step, or guard still needs its incident, mission
+  item, and Tom's grant (`python -m core grant`). Removing an approval step
+  is not adding one and needs no grant.
