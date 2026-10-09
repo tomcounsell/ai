@@ -177,6 +177,21 @@ def test_no_result_or_failed_services_are_the_kernels_and_failed_setup_the_commi
     assert container.read_result(crashed, "vm-head-abc", 0, "head", {})["cause"] == "commit"
 
 
+def test_each_setup_commands_output_is_kept_as_on_the_host(tmp_path):
+    """The VM's `out/setup-N.out` gives each setup entry its file's name and
+    its last 1500 characters, and a failed setup's record its tail."""
+    ran = [{"command": "make deps", "exit": 0, "duration_s": 0.1}, {"command": "make", "exit": 2, "duration_s": 0.1}]
+    lay = _out(tmp_path, {**OK, "setup": ran})
+    out = lay.checks / "vm-head-abc" / "out"
+    (out / "setup-0.out").write_text("fetched\n")
+    (out / "setup-1.out").write_text("x" * 5000 + "error: no network\n")
+    got = container.read_result(lay, "vm-head-abc", 0, "head", {})
+    first, failed = got["setup"]
+    assert first["tail"] == "fetched\n" and first["output"] == "setup-0.out"
+    assert failed["output"] == "setup-1.out" and len(failed["tail"]) == 1500
+    assert got["tail"] == failed["tail"] and failed["tail"].endswith("error: no network\n")
+
+
 def test_tests_lint_and_the_macos_skips_are_read_from_the_output(tmp_path):
     lay = _out(tmp_path, {**OK, "lint": {"exit": 1, "duration_s": 0.1}}, JUNIT, "a.py:3:1: E501 too long\n")
     got = container.read_result(lay, "vm-head-abc", 0, "head", {"kind": "python-uv", "lint": "ruff check ."})
@@ -240,6 +255,12 @@ def test_the_dependency_key_covers_the_containerfile_that_builds_it(tmp_path, mo
     edited.write_bytes(container.DEPS_FILE.read_bytes() + b"RUN true\n")
     monkeypatch.setattr(container, "DEPS_FILE", edited)
     assert container.deps_key("valor/base:x", project, "listing") != key
+
+
+def test_the_dependency_key_covers_the_specs_environment():
+    project = {"kind": "python-uv", "setup": ["uv sync --frozen"]}
+    key = container.deps_key("valor/base:x", project, "listing")
+    assert container.deps_key("valor/base:x", {**project, "env": {"UV_PYTHON": "3.12"}}, "listing") != key
 
 
 # -- a stop ends a hung CLI call ---------------------------------------------------------------
@@ -662,13 +683,15 @@ BACKENDS = {
 @pytest.mark.container
 @pytest.mark.parametrize("backend", sorted(BACKENDS))
 def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend):
-    """`uv sync --frozen --extra dev` with a build system: the dependency
-    image fetches it, and the VM installs the project offline."""
+    """`uv sync --frozen --extra dev` with a build system and popoto's
+    `UV_PYTHON = "3.12"`: the dependency image fetches the build system and
+    the 3.12 wheels of a binary dependency, and the VM installs the project
+    offline, each setup command's output kept."""
     project = tmp_path / "lock"
     project.mkdir()
     pyproject = (
         '[project]\nname = "toy"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n'
-        '[project.optional-dependencies]\ndev = ["iniconfig==2.1.0"]\n' + BACKENDS[backend]
+        '[project.optional-dependencies]\ndev = ["iniconfig==2.1.0", "msgpack==1.1.2"]\n' + BACKENDS[backend]
     )
     (project / "pyproject.toml").write_text(pyproject)
     (project / "toy").mkdir()
@@ -681,19 +704,23 @@ def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend)
         "pyproject.toml": pyproject,
         "uv.lock": (project / "uv.lock").read_text(),
         "toy/__init__.py": "",
-        "tests/test_dev.py": "def test_dev_extra():\n    import iniconfig, toy  # noqa: F401\n",
+        "tests/test_dev.py": "import sys\n\n\ndef test_dev_extra():\n    import iniconfig, msgpack, toy  # noqa: F401\n"
+        "    assert sys.version_info[:2] == (3, 12)\n",
     }
 
     async def go():
         task, b, rows, candidate = await at_candidate(
             dsn, tmp_path, files=files, writes={"greeting.txt": "hi\n"}, setup=["uv sync --frozen --extra dev"],
-            suite=".venv/bin/python -B run.py {junit}",
+            suite=".venv/bin/python -B run.py {junit}", env={"UV_PYTHON": "3.12"},
         )  # fmt: skip
-        return await verified(dsn, task, b, rows, candidate)
+        return b, candidate, await verified(dsn, task, b, rows, candidate)
 
-    v = run(go())["verify"]
+    b, candidate, got = run(go())
+    v = got["verify"]
     assert v["cause"] is None and v["setup"][0]["exit"] == 0, v
     assert "tests.test_dev::test_dev_extra" not in v["failures"] and v["counts"]["failed"] == 0, v
+    kept = kws.Layout(Path(b.mirror).parent).checks / f"vm-head-{candidate[:12]}" / "out" / "setup-0.out"
+    assert "msgpack" in kept.read_text()
 
 
 @pytest.mark.container

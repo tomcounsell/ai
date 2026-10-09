@@ -8,7 +8,9 @@ candidate each run in a VM started from a kernel-built image:
 - a dependency image per project and manifest key (`deps_key`): the base
   image with the commit's lockfiles (`checks.LOCKFILES`) installed by the
   spec's own installing setup commands (`uv sync`, `npm ci`, `npm
-  install`) with the network open. A spec with none runs in the base image.
+  install`) with the network open, under the environment the VM's setup
+  gets less its two offline variables, so they fetch what the offline
+  setup asks for. A spec with none runs in the base image.
 
 The base runs in the image of the base's own manifests, the candidate in
 the image of its own, so a candidate never chooses its base's environment.
@@ -24,7 +26,10 @@ kernel-written `spec.json`) read-only at `/valor/src`, and its `out/` at
 `/valor/out`. `/valor` is root's with mode 700 inside the VM, so nothing
 the candidate runs reaches either; `run.sh` (in the base image) runs the
 setup offline, the suite, and the lint as the user `valor`, then writes
-`out/result.json`.
+`out/result.json` and copies out the JUnit file, each setup command's
+output, and the lint's. A run's setup entries carry each command's output
+file and tail as the host's do; `verify.ran` records only their commands
+and exits.
 
 One verification at a time on the machine: an `fcntl.flock` on `LOCK`,
 taken before `container system start` and held through the builds, the
@@ -317,11 +322,12 @@ def manifests(mirror: str | Path, sha: str) -> str:
 
 def deps_key(base: str, project: dict[str, Any], listing: str) -> str:
     """What a dependency image depends on: the base image's tag, the
-    Containerfile that builds it, the spec's kind and setup, and the
-    lockfiles."""
+    Containerfile that builds it, the spec's kind, setup, and env (which
+    `deps.sh` installs under), and the lockfiles."""
     h = hashlib.sha256()
     h.update(DEPS_FILE.read_bytes() + b"\0")
-    for part in (base, project.get("kind") or "", repr(list(project.get("setup") or ())), listing):
+    env = json.dumps(project.get("env") or {}, sort_keys=True)
+    for part in (base, project.get("kind") or "", repr(list(project.get("setup") or ())), env, listing):
         h.update(part.encode() + b"\0")
     return h.hexdigest()
 
@@ -548,31 +554,38 @@ async def run(ctx, lay: workspace.Layout, b, sha: str, role: str, image: str, st
 def read_result(
     lay: workspace.Layout, name: str, code: int, role: str, project: dict[str, Any]
 ) -> dict[str, Any]:
-    """The run's fields from `out/result.json`, `out/junit.xml`, and
-    `out/lint.out`, each read through `workspace.read_turn_file`; the lint's
-    ruff locations for kind `python-uv` only, as on the host."""
+    """The run's fields from `out/result.json`, `out/junit.xml`,
+    `out/lint.out`, and each setup command's `out/setup-N.out`, each read
+    through `workspace.read_turn_file`; the lint's ruff locations for kind
+    `python-uv` only, and each setup command's output file and tail, as on
+    the host."""
     fd = os.open(lay.checks, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY)
     try:
         body, why = workspace.read_turn_file(fd, f"{name}/out/result.json")
         lint_out, _ = workspace.read_turn_file(fd, f"{name}/out/lint.out")
         junit, _ = workspace.read_turn_file(fd, f"{name}/out/junit.xml")
+        try:
+            result = json.loads(body) if body is not None else None
+        except ValueError as exc:
+            return {"cause": "kernel", "why": f"the VM's result is not JSON ({exc})"}
+        setup = []
+        for n, s in enumerate((result or {}).get("setup") or ()):
+            output, _ = workspace.read_turn_file(fd, f"{name}/out/setup-{n}.out")
+            tail = (output or b"").decode(errors="replace")[-1500:]
+            setup.append({**s, "tail": tail, "output": f"setup-{n}.out"})
     finally:
         os.close(fd)
-    if body is None:
+    if result is None:
         return {"cause": "kernel", "why": f"the VM exited {code} with no result ({why})"}
-    try:
-        result = json.loads(body)
-    except ValueError as exc:
-        return {"cause": "kernel", "why": f"the VM's result is not JSON ({exc})"}
     if result.get("services") == "failed":
         return {"cause": "kernel", "why": f"the VM's services did not start: {result.get('why')}"}
     out: dict[str, Any] = {
-        "setup": result.get("setup"), "peak_mb": result.get("peak_mb"), "oom_kill": result.get("oom_kill"),
+        "setup": setup, "peak_mb": result.get("peak_mb"), "oom_kill": result.get("oom_kill"),
     }  # fmt: skip
-    failed = [s for s in result.get("setup") or () if s.get("exit") != 0]
+    failed = [s for s in setup if s.get("exit") != 0]
     if failed:
         s = failed[0]
-        return {**out, "exit": s["exit"], "cause": "commit",
+        return {**out, "exit": s["exit"], "tail": s["tail"], "cause": "commit",
                 "why": f"setup failed at {role}: {s['command']} exited {s['exit']}"}  # fmt: skip
     suite = result.get("suite") or {}
     out["exit"] = suite.get("exit")

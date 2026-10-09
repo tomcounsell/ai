@@ -14,8 +14,8 @@
 #    under /var/log/valor, is waited on by its exit, never by end of file,
 #    and the rest of its group is killed after it;
 # 5. every `valor` process killed, then /valor/out/result.json (exit codes,
-#    durations, memory.peak, oom_kill) and the JUnit file and lint output
-#    copied out, as root.
+#    durations, memory.peak, oom_kill) and the JUnit file, each setup
+#    command's output, and the lint output copied out, as root.
 #
 # No command has a time limit: a stop kills the VM.
 set -uo pipefail
@@ -170,6 +170,7 @@ if [ "$cgroup" = 0 ] && dmesg 2>/dev/null | grep -q "Out of memory"; then oom=1;
 # Only a plain file is copied out; a link or anything else stays behind.
 copy_out() { [ -f "$1" ] && [ ! -L "$1" ] && cp "$1" "$OUT/$2"; }
 copy_out "$JUNIT" junit.xml
+for ((i = 0; i < n; i++)); do copy_out "$LOGS/setup-$i.log" "setup-$i.out"; done
 copy_out "$LOGS/lint.log" lint.out
 
 jq -n --argjson setup "$setup" --argjson suite "$suite" --argjson lint "$lint" \
