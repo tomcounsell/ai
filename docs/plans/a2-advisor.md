@@ -99,10 +99,11 @@ reads `SEATS` and invents no model.
 The advisor is metered like any turn, is optional, and never holds,
 refuses, or redirects work.
 
-- **Metered like any turn.** It runs through `runs.run_turn`, so its
-  `turn.started` and `turn.ended` carry the gateway's metered spending,
-  which rolls into the task's and its tree's (`tasks.status`). No budget,
-  cap, or count limits how often a turn asks; spending is metered only.
+- **Metered like any turn.** It runs through `runs.run_turn` on the
+  task's own gateway token, so every model call it makes is a
+  `gateway.charged` row on the task, which `tasks.spending` and the tree's
+  rollup already count (`core/tasks.py:595-613`). No budget, cap, or count
+  limits how often a turn asks; spending is metered only.
 - **Optional.** No stage file requires it, no state waits on it, and a
   turn that never writes `advice.md` runs exactly as it does today.
 - **Never holds.** The kernel runs it at once when the asking turn ends,
@@ -148,8 +149,12 @@ descriptor walk as `question.md`, filed under `.valor/handled/<turn_id>/`.
 
 ### The advisor run (`core/fresh.py`, `advise`)
 
-`advise(fresh_for)` returns `async def (gateway, task_id, dsn, asked)`
-where `asked` is the `turn.collected` row that carried the question. It:
+`advise(fresh_for)` returns `async def (gateway, task_id, dsn, alive,
+asked)` where `alive` is `session.run`'s run-lock check and `asked` is the
+`turn.collected` row that carried the question. It checks `alive()` where
+the critique runner does (`core/fresh.py:168-287`): before the turn and
+again before the append, and returns `lock lost` when the run lock has
+died, appending nothing. It:
 
 1. Reads the Brief and the fold. A stopped task returns `stopped`. A task
    with no mirror records the "fresh session runs only in a workspace the
@@ -175,23 +180,33 @@ where `asked` is the `turn.collected` row that carried the question. It:
    plant it. An empty message is a failure with that reason.
 6. Appends `advice.given` under the task lock, refusing nothing but a
    stopped task: `asked_turn_id`, `advisor_turn_id`, `seat`, `model`,
-   `head`, `answer` or `error`, `usd_micros`.
+   `head`, `answer` or `error`, `usd_micros`. The row is first asked of
+   Postgres (`ledger.unstorable`, as `_storable` does). When Postgres
+   refuses it (a NUL character, a value past jsonb's size), the row is
+   written with no `answer` and `error` set to Postgres's reason, so the
+   question is answered once and `pending_advice` never asks it again.
 
 ### Where it runs (`core/session.py`, `run`)
 
 `session.run` takes `advise` (default none, so tests and callers that
 pass nothing behave as today). After `record`, when the turn's collected
 row carries `advice` and the task is still in the same state, the loop
-calls `advise` before the next turn. At the top of each loop pass,
-`pending_advice(rows)` names a collected question with no
-`advice.given` naming its turn, so a run killed or preempted between the
-two asks it on the next run without any new wake or retry number.
+calls `advise` before the next turn; `lock lost` and `stopped` from it
+return from `run` as a turn's do. At the top of each loop pass,
+`pending_advice(rows)` looks only at the fold's latest collected turn
+(`f.last_collected`): it names that turn's question when the turn ran in
+the task's current state, no `advice.given` names it, and no working
+turn has finished after it. An older question, from a state the task has
+left or overtaken by a later turn, is never asked. So a run killed or
+preempted between the two asks it on the next run, without any new wake
+or retry number, and only while it is still the last word.
 `core/__main__.py` wires `fresh.advise(_fresh_for)` into `_working`.
 
 ### The answer reaching the turn (`core/session.py`, `next_prompt`)
 
 `_advice_report(rows)`: the latest `advice.given` that no finished
-working turn has followed, quoted under `# The advisor's answer` (with
+working turn has followed, quoted line by line with `tasks.quoted` (the
+function `_children_report` uses) under `# The advisor's answer` (with
 the seat, model, and the commit it read), or under `# The advisor did not
 answer` with the reason. It is spent only by a turn that finishes, as an
 answer or findings are. It sits after the entry prompt and before the
@@ -205,24 +220,47 @@ channel, since the advisor answers in prose and writes no verdict. The
 stage file says: you are the advisor; a working session asked the
 question in `question.md`; read the inputs and the checkout; answer in
 your final message with your recommendation, the evidence, and what
-would change your mind; you decide nothing, run nothing that writes, and
-nobody answers a question here.
+would change your mind; you decide nothing and run nothing that writes.
+It also says the advisor asks no one: there is no advice channel and no
+question channel in a fresh session, so the persona's line "when unsure,
+ask the advisor" (rendered into every turn, the advisor's own included)
+has nothing to act on here, and the advisor answers from what it has.
 
 ### The channel and the persona
+
+The ruling's test for reaching Tom replaces the old one in all three
+places that state it, so the new line has nothing left to contradict:
 
 - `skills/sdlc/channel.md` gains one bullet: "A second opinion: write
   your question and the evidence in `.valor/advice.md` and end your turn.
   An advisor on another vendor's model reads it with a checkout of your
   committed work, and your next turn opens with its answer. The advisor
-  informs; you decide. Commit what it should see."
+  informs; you decide. Commit what it should see." Its question bullet,
+  "Ask only when the answer materially changes the outcome or the
+  authority the work needs", becomes "Ask only for vision, priorities,
+  the cost and benefit of a tradeoff in how the company works, or
+  something only Tom holds; for anything else, ask the advisor."
+- `persona/conduct.md`, "Absorb ambiguity, and ask well", second
+  sentence: "Ask only when the answer materially changes the outcome or
+  the authority required" becomes "Ask Tom only for vision, priorities,
+  the cost and benefit of a tradeoff in how the company works, or
+  something only he holds." "Ask before building" stays: a request's
+  intent that is not on the page is something only Tom holds.
 - `persona/conduct.md`, "Escalate only what needs Tom", opens with the
   line: "When unsure, ask the advisor, then act. Ask Tom only for vision,
   priorities, the cost and benefit of a tradeoff in how the company
   works, or something only he holds." The section's "Reach out for" list
   is cut to what that line allows (a critical discovery is a priority; a
   missing credential is something only he holds; completed work is a
-  report), so the persona does not contradict itself. "Absorb ambiguity"
-  keeps its rules for how to ask.
+  report). "How to ask" keeps its rules for the questions that remain.
+- `docs/persona.md` mirrors all three: its "Escalate only what needs
+  Tom" section (`docs/persona.md:245-257`) takes the same line and the
+  same cut list, and its account of when a question is asked
+  (`docs/persona.md:133`) takes the same test.
+- `docs/mission.md:31` (Mission item 3, "Ask only when the answer
+  materially changes the outcome ...") is the mission's text and stays as
+  written: the ruling narrows who is asked, and an answer that changes
+  the outcome still comes from Tom when it is his to give.
 
 ## Threat model
 
@@ -233,8 +271,11 @@ nobody answers a question here.
 | The working session plants a file for the advisor to read as the kernel's | The checkout is blind (two kernel-made commits); inputs are written by the kernel relative to a descriptor, no link followed, no overwrite, and `.valor` in the head's tree is refused before the checkout |
 | The advisor plants an answer through the checkout | The answer is read from the turn's final message on the harness's stdout, never a file |
 | The advisor reads the builder's private state | Same denials as critique: the work directory, the temporary directories, and the builder's Claude Code state are denied |
-| A turn asks in a loop and spends money | Metered: every advisor turn is a metered turn in the task's spending, visible in `status`. No cap is invented; Tom's stop and the spending report are the controls that exist |
-| A kill between the asking turn and the answer | `pending_advice` asks again on the next run; `advice.given` is appended once, under the task lock |
+| A turn asks in a loop and spends money | Metered: every advisor call is a `gateway.charged` row in the task's spending, visible in `status`. No cap is invented; Tom's stop and the spending report are the controls that exist |
+| An answer the ledger cannot store makes the kernel ask again forever | The append is asked of Postgres first; a refused answer is recorded as `advice.given` with Postgres's reason and no answer, so the question is closed |
+| A kill between the asking turn and the answer | `pending_advice` asks again on the next run, only while that turn is the latest collected in the current state; `advice.given` is appended once, under the task lock |
+| A stale question asked after the task moved on | `pending_advice` reads only `f.last_collected`, in the current state, with no finished working turn after it |
+| The run lock dies while the advisor runs | `advise` checks `alive()` before the turn and before the append and returns `lock lost`, as critique does |
 | A stop during the advisor's turn | `run_turn` raises `TaskStopped`; the run returns `stopped` and nothing is appended |
 | Secrets | Pi's per-turn gateway token and placeholder key, as for review at `reviewer_openai`; no key reaches the advisor's environment |
 
@@ -286,16 +327,26 @@ none calls a model.
 - `tests/test_session.py`: the loop runs `advise` once after an asking
   turn; the next prompt holds the quoted answer; a finished turn spends
   it; a failed turn does not; `pending_advice` reruns after a kill and
-  not after an `advice.given`.
+  not after an `advice.given`; it never names a question from a turn that
+  is not the latest collected, from a state the task has left, or with a
+  finished working turn after it; an `advise` that returns `lock lost`
+  ends `run` with `lock lost`.
 - `tests/test_fresh.py`: `advise` makes a blind checkout of the kept
   head, writes the six inputs, runs at `advisor_seat` (Claude Code task
   to `reviewer_openai`, Pi task to `reviewer`), reads the final message,
   and appends `advice.given` with `usd_micros`; each failure path (no
   mirror, `.valor` in the head, a failed turn, an empty message) appends
-  the reason and no answer; a stop appends nothing.
+  the reason and no answer; a stop appends nothing; a dead run lock
+  before the turn or before the append returns `lock lost` and appends
+  nothing.
+- `tests/test_fresh.py`, the storable row: an advisor whose final message
+  holds a NUL character records `advice.given` with Postgres's reason and
+  no answer, and a second run asks nothing (one advisor turn in all).
 - `tests/test_tasks.py` or `tests/test_persona.py`: `dispatch(fresh=
-  "advice")` carries `advice.md` and not the verdict channel; the conduct
-  line renders.
+  "advice")` carries `advice.md` (with its line that the advisor asks no
+  one) and not the verdict channel; the conduct line renders, and the
+  old test ("materially changes the outcome or the authority") appears in
+  neither the rendered persona nor `channel.md`.
 - `tests/test_machine.py`: a fold over rows holding `advice.given` and an
   advisor's fresh turn equals the fold without them (state, session,
   entry, steering).
@@ -308,7 +359,8 @@ none calls a model.
 - `skills/sdlc/advice.md` (new), `skills/sdlc/channel.md`,
   `skills/README.md`.
 - `persona/conduct.md`.
-- `docs/persona.md` ("Escalate only what needs Tom"), `docs/data.md`
+- `docs/persona.md` ("Escalate only what needs Tom" and the question
+  test at line 133), `docs/data.md`
   (`advice.given`), `docs/architecture.md` (fresh sessions),
   `docs/sdlc-state-machine.md` (an idle turn with `advice.md`),
   `core/README.md` (the fresh-session sentence).
@@ -333,16 +385,18 @@ migration: `advice.given` is a ledger row type like `review.compared`.
 
 ## Questions for Tom
 
-1. Should the advisor always be the other vendor's model, rather than a
-   second Opus? Assumed: yes, the other vendor, since the ruling asks for
-   a second opinion and the same model asked twice is not one.
-2. Does the conduct section's list of reasons to reach Tom narrow to the
+1. Does the conduct section's list of reasons to reach Tom narrow to the
    ruling's four (vision, priorities, the cost and benefit of a tradeoff
    in how the company works, something only he holds), plus reports?
-   Assumed: yes.
+   Assumed: yes. The edit is in three places (the conduct list,
+   "Absorb ambiguity", `channel.md`'s question bullet), mirrored in
+   `docs/persona.md`.
 
 ## Decided by default
 
+- The advisor is always the other vendor's model. Settled by the finish
+  prompt (`docs/plans/rebuild-finish-prompt.md`, A2: "the second vendor
+  makes it a real second opinion").
 - The mechanism is a fresh session, not a child task or a judgement site,
   for the reasons under "The mechanism, and why".
 - The advisor reads committed work only; uncommitted paths are named,
@@ -356,3 +410,27 @@ migration: `advice.given` is a ledger row type like `review.compared`.
 - A failed advisor is reported and not retried; the turn may ask again.
 - The seat rule picks by harness, not by a new seat: `SEATS` already
   names a pinned model on each vendor.
+
+## Critique round 1 (of 2): revise
+
+The mechanism held; six findings, each answered in this revision.
+
+1. An answer the ledger cannot store would loop at cost. The append is
+   asked of Postgres first (`ledger.unstorable`); a refused answer is
+   recorded with Postgres's reason and no answer. Test added.
+2. `pending_advice` could fire stale. It reads only `f.last_collected`, in
+   the current state, with no finished working turn after it. Tests
+   added.
+3. No run-lock check. `advise` takes `alive` and checks it before the turn
+   and before the append, returning `lock lost`, as critique does.
+4. The persona still held the old test in two more places. The edit
+   covers the conduct list, "Absorb ambiguity", and `channel.md`'s
+   question bullet, with `docs/persona.md` mirroring all three; Question
+   2 stays assumed yes.
+5. Question 1 was settled by the finish prompt; moved to "Decided by
+   default".
+6. `skills/sdlc/advice.md` says the advisor asks no one, so the persona
+   line rendered into its own Brief has nothing to act on.
+
+Also: spending is named as the gateway's `gateway.charged` rows, and the
+answer is quoted with `tasks.quoted`.
