@@ -652,3 +652,10 @@ From the lead, after `review-3610-p1` passed on `4bc39d828`.
     and a dirty non-ASCII file falls back to the ff-only failure and a
     retry.
 - Backup `valor_rebuild-20261009T054048Z.dump` was taken before the merge.
+- Rolled out by hand on Valor's Mac, the last time:
+  - no `uv sync` or `migrate` was needed;
+  - the kernel restarted on `783fd74c1`, and `kernel.log` shows
+    `kernel recovered` with `"rolled": 0`;
+  - the status page was restarted by its PID; `/`, `/audit` and
+    `/audit/scores` return 200.
+- Done 4 waits on the next kernel merge, which the kernel rolls itself.
