@@ -115,7 +115,12 @@ def test_the_session_brings_the_merged_head_in_and_tells_the_turn_when_it_cannot
     assert kgit.trusted(lay.repo, "rev-parse", "HEAD") == cand
     (lay.repo / "docs.md").write_text("an edit the head would overwrite\n")
     note = session.merged_into_work(b, merged_rows(head))
-    assert note.startswith("# The merged head") and head in note and "git merge --ff-only" in note
+    assert (
+        note.startswith("# The merged head")
+        and head in note
+        and "git merge --ff-only" in note
+        and f"rebase the branch onto {head}" in note
+    )
     assert kgit.trusted(lay.repo, "rev-parse", "HEAD") == cand
     (lay.repo / "docs.md").unlink()
     assert session.merged_into_work(b, merged_rows(head)) is None

@@ -235,7 +235,8 @@ def merged_into_work(brief: tasks.Brief, rows: list[dict]) -> str | None:
         return (
             f"# The merged head\n\nThe merge landed {head} on {target}; this round builds on it. "
             f"The kernel could not bring it into the work branch: {exc}\n"
-            f"Bring it in before you commit: git fetch origin {target} && git merge --ff-only {head}"
+            f"Bring it in before you commit: git fetch origin {target}, then git merge --ff-only {head}, "
+            f"or, when the branch has diverged from it, rebase the branch onto {head}"
         )
     return None
 
