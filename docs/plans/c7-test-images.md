@@ -162,3 +162,12 @@ None.
   the live file.
 - The container evidence rerun is still owed: free space is 6.0 GB, not
   more than 6.
+
+### Container evidence, 2026-10-09
+
+- Rebased onto `daee94e81`. The head is the commit that adds this entry.
+- `test_an_image_retagged_by_hand_is_a_kernel_cause_and_dropped`, run
+  alone with 7.4 GB free: 1 passed in 5 min 55 s
+  (`container-retagged-2.out`). The session's own records were empty after
+  its release. The live `images.json` sha256 was the same before and after
+  the run (`dc7fbf02...`), and it holds no `valor-test-` tag.
