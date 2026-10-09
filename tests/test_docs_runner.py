@@ -404,7 +404,9 @@ def test_every_join_row_through_the_router(
     if row in (3, 5):
         assert f.state is State.PATCH and f.join.row == row, f.join
     else:
-        assert f.state is State.MERGE and joined and joined[-1]["join_row"] == row, joined
+        # A delivery that passed (rows 1 and 7) merges at request; the rest wait in merge.
+        merged = State.MERGED if row in (1, 7) else State.MERGE
+        assert f.state is merged and joined and joined[-1]["join_row"] == row, joined
 
 
 @pytest.mark.macos

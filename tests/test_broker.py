@@ -10,7 +10,7 @@ Live spend: none.
 
 import pytest
 
-from core import broker, db, git, ledger, machine, outcomes
+from core import broker, db, git, ledger, machine, outcomes, tasks
 from core.machine import State
 from tests import scripted
 from tests.test_fresh import drive, planned, rows, run
@@ -89,7 +89,6 @@ class Merged:
 def test_a_reconciled_merge_keeps_its_intents_landed(dsn):
     landed = {"before": "0" * 40, "commits": ["1" * 40], "paths": ["a.py"], "why": None}
     effect_id = ledger.new_id()
-    task = ledger.new_id()
     described = {
         "action_type": "merge",
         "target": "/toy.git",
@@ -101,12 +100,13 @@ def test_a_reconciled_merge_keeps_its_intents_landed(dsn):
 
     async def go():
         async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
             await ledger.append(conn, task, "effect.held", {"effect_id": effect_id, **described})
             await ledger.append(
                 conn,
                 task,
                 "effect.intent",
-                {"effect_id": effect_id, "approval_id": None, **described, "landed": landed},
+                {"effect_id": effect_id, **described, "landed": landed},
             )
             out = await broker.reconcile(conn, broker.Performers(Merged()), effect_id)
             return out, outcomes.merges(await ledger.read(conn, task))
