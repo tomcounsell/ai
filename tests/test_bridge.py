@@ -41,27 +41,18 @@ def send(text="hi", **more) -> broker.Action:
 
 
 async def held(dsn, task, action) -> str:
+    """The request: the effect is held for its bridge and its release is
+    requested at once."""
     async with await db.connect(dsn) as conn:
         out = await broker.request(conn, declared(), task, action)
-    assert out.kind == "pending", out
+    assert out.kind == "released", out
     return out.effect_id
-
-
-async def approved(dsn, task, effect_id) -> str:
-    """Tom's approval and the kernel's release: the release is requested of
-    the bridge."""
-    async with await db.connect(dsn) as conn:
-        approval = await broker.approve(conn, effect_id, note="approve")
-        out = await broker.release(conn, declared(), effect_id)
-    assert out.kind == "released"
-    return approval
 
 
 def test_release_requested_then_performed(dsn, op):
     async def go():
         task = await new_task(dsn)
         effect = await held(dsn, task, send())
-        approval = await approved(dsn, task, effect)
         assert await of_type(dsn, "release.requested", effect_id=effect)
         assert not await of_type(dsn, "effect.intent", effect_id=effect)
         bridge = FakeBridge()
@@ -73,7 +64,7 @@ def test_release_requested_then_performed(dsn, op):
         assert out.kind == "done" and len(bridge.performed) == 1 and again == []
         (intent,) = await of_type(dsn, "effect.intent", effect_id=effect)
         (outcome,) = await of_type(dsn, "effect.outcome", effect_id=effect)
-        assert intent["approval_id"] == approval and intent["action_type"] == "telegram.send_message"
+        assert "approval_id" not in intent and intent["action_type"] == "telegram.send_message"
         assert outcome["kind"] == "done" and outcome["result"]["sent"][0]["chat_id"] == bridges.OPERATOR_CHAT
 
     run(go())
@@ -83,7 +74,6 @@ def test_refused_release_yielded_once(dsn, op):
     async def go():
         task = await new_task(dsn)
         effect = await held(dsn, task, send())
-        await approved(dsn, task, effect)
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, task, reason="test")
         bridge = FakeBridge()
@@ -95,8 +85,8 @@ def test_refused_release_yielded_once(dsn, op):
         assert first.kind == "refused" and second.kind == "refused" and left == []
         assert bridge.performed == []
         assert len(await of_type(dsn, "effect.refused", effect_id=effect)) == 1
-        owed = await of_type(dsn, "notice.requested", about_key=f"effect-refused:{effect}")
-        assert len(owed) == 1
+        # The refusal reaches the task's next turn; Tom gets no notice of it.
+        assert not await of_type(dsn, "notice.requested", about_key=f"effect-refused:{effect}")
 
     run(go())
 
@@ -105,7 +95,6 @@ def test_bridge_crash_between_intent_and_outcome(dsn, op):
     async def go():
         task = await new_task(dsn)
         effect = await held(dsn, task, send())
-        await approved(dsn, task, effect)
         bridge = FakeBridge()
         bridge.hang = asyncio.Event()
         async with bridges.outbox(dsn, bridge) as box, bridges.outbox(dsn, bridge) as other:
@@ -136,7 +125,6 @@ def test_unknown_leaves_intent(dsn, op, how):
     async def go():
         task = await new_task(dsn)
         effect = await held(dsn, task, send())
-        await approved(dsn, task, effect)
         bridge = FakeBridge()
         if how == "perform":
             bridge.fail = broker.Unknown("no answer")
@@ -165,7 +153,6 @@ def test_a_definite_failure_is_failed_and_asks_no_lookup(dsn, op):
     async def go():
         task = await new_task(dsn)
         effect = await held(dsn, task, send())
-        await approved(dsn, task, effect)
         bridge = FakeBridge()
         bridge.fail = broker.Failed("refused")
         bridge.lookup_fail = AssertionError("a definite failure asks no lookup")
@@ -190,7 +177,7 @@ def test_two_identical_sends(dsn, op):
 
     a, b, a2 = run(go())
     assert a.effect_id != b.effect_id
-    assert a2.effect_id == a.effect_id and a2.kind == "pending"
+    assert a2.effect_id == a.effect_id and a2.kind == "released"
 
 
 def test_notice_crash_before_sent(dsn, op):
@@ -336,7 +323,7 @@ def test_well_formed_files_pass_to_sizing(dsn, op, tmp_path, files):
             return await broker.request(conn, declared(str(tmp_path)), task, send(files=files))
 
     out = run(go())
-    assert out.kind == "pending", out
+    assert out.kind == "released", out
 
 
 def test_a_nul_in_a_file_path_gets_the_file_answer(op, tmp_path):
@@ -396,11 +383,11 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
 
     over_file, at_file, measured, over, under, nobody = run(go())
     assert over_file.kind == "refused" and f"over telegram's limit of {limit} bytes" in over_file.error
-    assert at_file.kind == "pending"
+    assert at_file.kind == "released"
     assert LIMITS["email"].max_message_bytes == 25_000_000
     assert measured.kind == "refused" and "over email's limit of 25000000 bytes" in measured.error
     assert over.kind == "refused" and "over email's limit of 25000000 bytes" in over.error
-    assert under.kind == "pending"
+    assert under.kind == "released"
     assert nobody.kind == "refused" and "no recipient" in nobody.error
 
 
@@ -474,7 +461,6 @@ def test_a_killed_send_the_server_never_got_reconciles_failed(dsn, tmp_path):
         to = bridges.OPERATOR_EMAIL
         mail = broker.Action("email.send", to, {"to": [to], "subject": "s", "body": "hello"})
         effect = await held(dsn, task, mail)
-        await approved(dsn, task, effect)
         bridge = FakeBridge("email")
         bridge.hang = asyncio.Event()
         async with bridges.outbox(dsn, bridge) as box:

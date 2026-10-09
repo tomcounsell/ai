@@ -286,7 +286,7 @@ def _push(ws: Path, mirror: Path) -> None:
     scripted.git(ws, "push", "-q", str(mirror), "+HEAD:refs/heads/candidate")
 
 
-async def _held(dsn, task, head) -> str:
+async def _intent(dsn, task, head) -> str:
     effect_id = ledger.new_id()
     payload = {
         "url": "x",
@@ -298,7 +298,7 @@ async def _held(dsn, task, head) -> str:
         await ledger.append(
             conn,
             task,
-            "effect.held",
+            "effect.intent",
             {"effect_id": effect_id, "action_type": "merge", "effect_class": "act", "target": "main",
              "payload": payload, "payload_sha256": ledger.digest(payload), "idempotency_key": ledger.new_id(),
              "adds_governance": False},
@@ -306,15 +306,15 @@ async def _held(dsn, task, head) -> str:
     return effect_id
 
 
-def test_the_rev_read_is_the_held_merge_head_else_the_candidate(dsn, tmp_path, monkeypatch):
+def test_the_rev_read_is_the_done_merge_head_else_the_candidate(dsn, tmp_path, monkeypatch):
     monkeypatch.setenv("VALOR_DB", TEST_DB)
     task = asyncio.run(_start(dsn))
-    head = asyncio.run(_held(dsn, task, "h" * 40))
-    held = {"merge_effect": {"effect_id": head, "state": "held"}, "candidate": {"sha": "c" * 40}}
-    assert common.review_rev(task, held, dsn=dsn) == "h" * 40
-    # A later refused effect does not change which held row is read.
-    later = asyncio.run(_held(dsn, task, "r" * 40))
-    assert later != head and common.review_rev(task, held, dsn=dsn) == "h" * 40
+    head = asyncio.run(_intent(dsn, task, "h" * 40))
+    done = {"merge_effect": {"effect_id": head, "state": "done"}, "candidate": {"sha": "c" * 40}}
+    assert common.review_rev(task, done, dsn=dsn) == "h" * 40
+    # A later effect does not change which intent row is read.
+    later = asyncio.run(_intent(dsn, task, "r" * 40))
+    assert later != head and common.review_rev(task, done, dsn=dsn) == "h" * 40
     assert (
         common.review_rev(task, {"merge_effect": None, "candidate": {"sha": "c" * 40}}, dsn=dsn) == "c" * 40
     )
@@ -379,7 +379,7 @@ class Args:
     max_feedback = 2
 
 
-def _drive(monkeypatch, state: dict, *, said: str | Exception = "ran", reply: dict | None = None, left=()):
+def _drive(monkeypatch, state: dict, *, said: str | Exception = "ran", reply: dict | None = None):
     """One driver step against a task whose status is `state`; `core run`
     answers `said`, or raises it."""
     calls = {"stand_in": 0, "run": 0}
@@ -398,7 +398,6 @@ def _drive(monkeypatch, state: dict, *, said: str | Exception = "ran", reply: di
     monkeypatch.setattr(replay, "status", lambda task: state)
     monkeypatch.setattr(replay, "stand_in", fake_stand_in)
     monkeypatch.setattr(replay, "core", fake_core)
-    monkeypatch.setattr(replay, "release_pushes", lambda task, ws, log: list(left))
     result = {"task_id": "t", "run": "toy", "log": [], "outcome": None}
     ws = {"mirror": "m", "base": "b", "run_dir": "/nonexistent"}
     replay.step(result, {"answer_key": "k"}, ws, Args, meter=None)
@@ -421,8 +420,9 @@ def test_a_delivery_that_did_not_pass_ends_to_tom(monkeypatch):
     assert result["outcome"] == "to tom" and calls == {"stand_in": 0, "run": 0}
 
 
-def test_a_refused_merge_ends_to_tom(monkeypatch):
-    result, calls = _drive(monkeypatch, _merge(merge_effect={"effect_id": "e", "state": "refused"}))
+@pytest.mark.parametrize("kind", ["refused", "failed"])
+def test_a_refused_or_failed_merge_ends_to_tom(monkeypatch, kind):
+    result, calls = _drive(monkeypatch, _merge(merge_effect={"effect_id": "e", "state": kind}))
     assert result["outcome"] == "to tom" and calls["stand_in"] == 0
 
 
@@ -440,14 +440,14 @@ def test_an_awaited_grant_pauses_without_the_stand_in(monkeypatch, state):
 
 
 @pytest.mark.parametrize("kind", ["accept", "cap"])
-def test_a_held_merge_the_stand_in_accepts_or_has_spent_its_rounds_on_ends_held(monkeypatch, kind):
-    state = _merge(merge_effect={"effect_id": "e", "state": "held"})
+def test_a_merged_task_the_stand_in_accepts_or_has_spent_its_rounds_on_ends_merged(monkeypatch, kind):
+    state = {"state": "merged", "merge_effect": {"effect_id": "e", "state": "done"}}
     result, calls = _drive(monkeypatch, state, reply={"kind": kind, "text": None, "reason": "r"})
-    assert result["outcome"] == "held" and calls == {"stand_in": 1, "run": 0}
+    assert result["outcome"] == "merged" and calls == {"stand_in": 1, "run": 0}
 
 
-def test_feedback_at_a_held_merge_goes_on_without_an_outcome(monkeypatch):
-    state = _merge(merge_effect={"effect_id": "e", "state": "held"})
+def test_feedback_on_a_merged_task_goes_on_without_an_outcome(monkeypatch):
+    state = {"state": "merged", "merge_effect": {"effect_id": "e", "state": "done"}}
     result, calls = _drive(monkeypatch, state, reply={"kind": "feedback", "text": "fix", "reason": "r"})
     assert result["outcome"] is None and not result.get("paused") and calls == {"stand_in": 1, "run": 0}
 
@@ -510,7 +510,6 @@ def _step_real(monkeypatch, dsn, task, runners=None) -> dict:
     monkeypatch.setattr(replay, "status", lambda t: asyncio.run(fold()))
     monkeypatch.setattr(replay, "core", fake_core)
     monkeypatch.setattr(replay, "stand_in", no_stand_in)
-    monkeypatch.setattr(replay, "release_pushes", lambda t, ws, log: [])
     monkeypatch.setattr(replay, "wait_run_lock", lambda t: common.wait_run_lock(t, dsn=dsn))
     result = {"task_id": task, "run": "toy", "log": [], "outcome": None}
     replay.step(
@@ -588,11 +587,6 @@ def test_already_running_waits_on_the_run_lock_then_steps_on(monkeypatch, dsn, t
     assert scripted.turns(ws) == []
 
 
-def test_a_held_effect_of_another_action_ends_the_run(monkeypatch):
-    result, _ = _drive(monkeypatch, {"state": "build"}, left=["e1"])
-    assert result["outcome"] == "an effect other than a local push is held for Tom"
-
-
 def test_a_stopped_task_ends_stopped(monkeypatch):
     result, calls = _drive(monkeypatch, {"state": "stopped"})
     assert result["outcome"] == "stopped" and calls == {"stand_in": 0, "run": 0}
@@ -601,7 +595,7 @@ def test_a_stopped_task_ends_stopped(monkeypatch):
 def test_run_names_the_result_and_a_finished_one_is_refused_without_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(replay, "DEMO", tmp_path)
     (tmp_path / "results").mkdir()
-    (tmp_path / "results" / "pop-b-gate.json").write_text(json.dumps({"outcome": "held"}))
+    (tmp_path / "results" / "pop-b-gate.json").write_text(json.dumps({"outcome": "merged"}))
 
     class A:
         run, rebuild = "pop-b-gate", False

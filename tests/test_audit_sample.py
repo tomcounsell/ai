@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from core import audit_sample, broker, db, ledger, machine, outcomes, tasks
+from core import audit_sample, db, ledger, machine, outcomes, tasks
 from core.machine import State
 from tests import scripted
 from tests import test_outcomes as to
@@ -708,10 +708,7 @@ def test_labels_change_no_task_row_merge_effect_notice_or_review_brief(dsn, tmp_
 
     async def finish(t):
         async with await db.connect(dsn) as conn:
-            f = machine.fold(await ledger.read(conn, t))
-            effect = f.merge_effect["effect_id"]
-            await broker.approve(conn, effect, note="merge it")
-            done = await scripted.release(conn, effect)
+            done = await scripted.merged(conn, t)
         await drive(dsn, t)
         return done
 

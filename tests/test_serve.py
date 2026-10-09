@@ -403,19 +403,14 @@ class Hanging:
         return found
 
 
-async def _killed(dsn, task, fake: Hanging, *, approve: bool) -> str:
+async def _killed(dsn, task, fake: Hanging) -> str:
     """Perform one push with `fake` and kill it after its intent: the
     perform's session closes, freeing its lock. Returns the effect."""
     conn = await db.connect(dsn)
     fakes = broker.Performers(fake)
     action = broker.Action("push_branch", "valor/feature", {"head_sha": "a" * 40})
     fake.started.clear()
-    if approve:
-        held = await broker.request(conn, fakes, task, action)
-        await broker.approve(conn, held.effect_id, note="push it")
-        job = asyncio.create_task(broker.release(conn, fakes, held.effect_id))
-    else:
-        job = asyncio.create_task(broker.request(conn, fakes, task, action))
+    job = asyncio.create_task(broker.request(conn, fakes, task, action))
     await fake.started.wait()
     job.cancel()
     await asyncio.gather(job, return_exceptions=True)
@@ -427,8 +422,8 @@ def test_kill_between_intent_and_outcome(fresh, op):
     async def go():
         task = await new_task(fresh)
         fake = Hanging()
-        landed = await _killed(fresh, task, fake, approve=True)
-        missing = await _killed(fresh, task, fake, approve=True)
+        landed = await _killed(fresh, task, fake)
+        missing = await _killed(fresh, task, fake)
         built = lambda b: broker.Performers(fake)
         out = []
         async with await db.connect(fresh) as conn:
@@ -467,7 +462,7 @@ def test_dangling_propose_intent(fresh, op):
     async def go():
         task = await new_task(fresh)
         fake = Hanging(effect_class="propose")
-        effect = await _killed(fresh, task, fake, approve=False)
+        effect = await _killed(fresh, task, fake)
         fake.otherwise = {"sha": "a" * 40}
         async with await db.connect(fresh) as conn:
             done = await serve.recover(conn, lambda b: broker.Performers(fake))
@@ -478,7 +473,7 @@ def test_dangling_propose_intent(fresh, op):
     assert typed(written, "effect.held", effect_id=effect) == []
     (intent,) = typed(written, "effect.intent", effect_id=effect)
     assert intent["action_type"] == "push_branch" and intent["target"] == "valor/feature"
-    assert intent["effect_class"] == "propose" and intent["approval_id"] is None
+    assert intent["effect_class"] == "propose" and "approval_id" not in intent
     assert done["reconciled"] == [effect]
     assert [o["kind"] for o in typed(written, "effect.outcome", effect_id=effect)] == ["done"]
 
@@ -519,71 +514,6 @@ def test_recollect_mid_move(fresh, op, tmp_path):
     assert machine.fold(written).state is State.CHECKS
     left = signals.collect(ws, ledger.new_id())  # what the next turn would read
     assert left.done is None and left.effects == []
-
-
-class RefusedAtRelease:
-    action_type = "push_branch"
-    effect_class = "act"
-    usage = None
-
-    def __init__(self):
-        self.releasing = False
-
-    async def refuse(self, conn, action):
-        return "the remote is gone" if self.releasing else None
-
-    async def perform(self, action, key):
-        raise AssertionError("never performed")
-
-    async def lookup(self, action, key):
-        return None
-
-
-async def _asked(dsn, task, fakes) -> str:
-    """A held push Tom approved by message: `release.requested`, owner the kernel."""
-    async with await db.connect(dsn) as conn:
-        held = await broker.request(
-            conn, fakes, task, broker.Action("push_branch", "valor/feature", {"head_sha": "b" * 40})
-        )
-        approval = await broker.approve(conn, held.effect_id, note="approve")
-        await ledger.append(
-            conn,
-            task,
-            "release.requested",
-            {"effect_id": held.effect_id, "approval_id": approval, "owner": "kernel"},
-        )
-    return held.effect_id
-
-
-def test_refused_kernel_release(fresh, op):
-    async def go():
-        task = await new_task(fresh)
-        fake = RefusedAtRelease()
-        fakes = broker.Performers(fake)
-        effect = await _asked(fresh, task, fakes)
-        fake.releasing = True
-        kernel = only(serve.Kernel(None, {}, lambda b: fakes, fresh), task)
-        await tick(kernel, fresh)
-        await settled(kernel)
-        async with await db.connect(fresh) as conn:
-            retried = await kernel._kernel_release(conn, task)
-        # A stopped task's release, asked for before the stop.
-        stopped = await new_task(fresh)
-        other = await _asked(fresh, stopped, broker.Performers(RefusedAtRelease()))
-        async with await db.connect(fresh) as conn:
-            await tasks.stop(conn, stopped, reason="test")
-            with pytest.raises(tasks.TaskStopped):
-                await broker.release(conn, fakes, other)
-            second = await broker.release(conn, fakes, other)
-        return task, effect, retried, stopped, other, second
-
-    task, effect, retried, stopped, other, second = run(go())
-    assert retried is None and second.kind == "refused"
-    for t, e in ((task, effect), (stopped, other)):
-        written = run(rows(fresh, t))
-        (refused,) = typed(written, "effect.refused", effect_id=e)
-        assert refused["at"] == "release"
-        assert len(typed(written, "notice.requested", about_key=f"effect-refused:{e}")) == 1
 
 
 # -- the turn slot ------------------------------------------------------------------------
@@ -939,13 +869,9 @@ def test_core_run_refuses_while_services_are_held(fresh, op):
 
 
 def test_a_failed_job_parks_the_task(fresh, op, monkeypatch):
-    """A release that fails for a reason other than a refusal, and services
-    that cannot be opened: each tried once, then again on the next tick."""
-    built, opened = [], []
-
-    def broken(brief):
-        built.append(brief.id)
-        raise RuntimeError("no performers")
+    """Services that cannot be opened: tried once, then again on the next
+    tick."""
+    opened = []
 
     async def no_services(dsn, task_id):
         opened.append(task_id)
@@ -955,31 +881,25 @@ def test_a_failed_job_parks_the_task(fresh, op, monkeypatch):
         raise AssertionError("never stepped")
 
     async def go():
-        task = await new_task(fresh)
-        await _asked(fresh, task, broker.Performers(RefusedAtRelease()))
         other = await new_task(fresh)
-        releasing = only(serve.Kernel(None, {}, broken, fresh), task)
         stepping = only(serve.Kernel(None, {State.JUDGE: judging}, None, fresh), other)
         monkeypatch.setattr(router._Services, "open", no_services)
         try:
             with bridges.configure(serve_tick_s=3600):
                 for _ in range(10):
-                    for kernel in (releasing, stepping):
-                        await tick(kernel, fresh)
-                        await settled(kernel)
-                parked = (len(built), len(opened), task in releasing.parked, other in stepping.parked)
-                for kernel in (releasing, stepping):
-                    kernel.parked_at -= 3600
-                    await tick(kernel, fresh)
-                    await settled(kernel)
+                    await tick(stepping, fresh)
+                    await settled(stepping)
+                parked = (len(opened), other in stepping.parked)
+                stepping.parked_at -= 3600
+                await tick(stepping, fresh)
+                await settled(stepping)
         finally:
-            await releasing.close()
             await stepping.close()
-        return parked, (len(built), len(opened))
+        return parked, len(opened)
 
     parked, retried = run(go())
-    assert parked == (1, 1, True, True)
-    assert retried == (2, 2)
+    assert parked == (1, True)
+    assert retried == 2
 
 
 def test_a_failure_in_one_task_leaves_the_others(fresh, op, monkeypatch, capsys):

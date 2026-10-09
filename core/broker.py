@@ -511,6 +511,7 @@ def _intent_row(effect_id: str, described: dict[str, Any]) -> dict[str, Any]:
         "effect_id": effect_id,
         "idempotency_key": described["idempotency_key"],
         **{f: described[f] for f in INTENT_FIELDS},
+        "adds_governance": described.get("adds_governance", False),
         **({"request_id": described["request_id"]} if described.get("request_id") else {}),
     }
 

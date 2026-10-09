@@ -85,7 +85,7 @@ def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, 
 
 
 @pytest.mark.macos
-def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(dsn, tmp_path):
+def test_a_candidate_merges_by_itself_and_feedback_after_the_merge_patches(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
     scripted.steer(ws, push="valor/greeting")
 
@@ -96,16 +96,8 @@ def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(d
         built = await drive(dsn, task)
         await scripted.checks(dsn, task)
         delivered = await drive(dsn, task)
-        st = delivered["state"]
-        merge = next(
-            e for e, s in st["effects"].items() if s == "pending" and e == st["merge_effect"]["effect_id"]
-        )
-        push = next(e for e, s in st["effects"].items() if s == "pending" and e != merge)
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, push, note="push it")
-            await scripted.release(conn, push)
-            await broker.approve(conn, merge, note="merge it")
-            merged = await scripted.release(conn, merge)
+            merged = await scripted.merged(conn, task)
             await session.feedback(conn, task, "Greet him by name.")
         patched = await drive(dsn, task)
         return task, planned, built, delivered, merged, patched
@@ -114,7 +106,7 @@ def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(d
     assert planned["status"] == "no runner" and built["missing"] == ["test", "review", "docs"]
     cand = built["state"]["candidate"]
     assert cand["sha"] == git(ws, "rev-parse", "HEAD~1")  # the patch committed on top since
-    assert delivered["status"] == "delivered" and delivered["state"]["delivery"]["outcome"] == "passed"
+    assert delivered["status"] == "merged" and delivered["state"]["delivery"]["outcome"] == "passed"
     assert "greeting.txt" in delivered["state"]["delivered"]
     assert merged.kind == "done" and git(origin, "rev-parse", "main") == cand["sha"]
     assert git(origin, "rev-parse", "valor/greeting") == cand["sha"]
@@ -335,7 +327,7 @@ def test_a_request_file_never_stops_the_turn_being_collected(dsn, tmp_path):
         assert (by_file[name]["kind"], by_file[name]["error"]) == ("refused", why), by_file[name]
     assert (by_file["s_deep_stored.json"]["kind"], by_file["s_deep_stored.json"]["error"]) == (
         "refused", "no performer for this action type")  # fmt: skip
-    assert by_file["e_ok.json"]["kind"] == "pending"
+    assert by_file["e_ok.json"]["kind"] == "released"
     [effect] = [r["payload"] for r in rows if r["type"] == "effect.held"]
     assert (effect["action_type"], effect["payload"]["text"]) == ("telegram.send_message", "hi \U0001f600")
 
@@ -442,7 +434,7 @@ def test_parts_storable_alone_and_not_together(dsn, tmp_path, left):
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     refused = "the ledger's JSON (Postgres jsonb) cannot store it beside the turn's other parts: ProgramLimitExceeded"
     by_file = {e["file"]: e for e in collected["effects"]}
-    assert by_file["ok.json"]["kind"] == "pending"
+    assert by_file["ok.json"]["kind"] == "released"
     [held] = [r["payload"] for r in rows if r["type"] == "effect.held"]
     assert held["request_id"] == f"{turn}/ok.json"
     if left == "requests":
@@ -478,7 +470,7 @@ def assert_large_turn(field: str, turn: str, rows: list) -> None:
         r["payload"] for r in rows if r["type"] == "turn.collected" and r["payload"]["turn_id"] == turn
     ]
     by_file = {e["file"]: e for e in collected["effects"]}
-    assert by_file["ok.json"]["kind"] == "pending"
+    assert by_file["ok.json"]["kind"] == "released"
     [held] = [r["payload"] for r in rows if r["type"] == "effect.held"]
     assert held["request_id"] == f"{turn}/ok.json"
     if field == "action_type":
@@ -535,7 +527,7 @@ def test_a_signal_postgres_refuses_is_unreadable(dsn, tmp_path):
     assert any(e.startswith(f"question.md {store}UntranslatableCharacter") for e in collected["errors"])
     assert any(e.startswith(f"plan.json {store}") for e in collected["errors"])
     [entry] = collected["effects"]
-    assert entry["kind"] == "pending" and entry["request"] == send
+    assert entry["kind"] == "released" and entry["request"] == send
     assert not [r for r in rows if r["type"] == "question.asked"]
 
 
@@ -948,7 +940,7 @@ def test_a_refusal_the_ledger_cannot_store_is_refused_in_kernel_words(dsn, tmp_p
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     by_file = {e["file"]: e for e in collected["effects"]}
     assert (by_file["big.json"]["kind"], by_file["big.json"]["error"]) == ("refused", refused["reason"])
-    assert by_file["ok.json"]["kind"] == "pending" and verdict == "idle"
+    assert by_file["ok.json"]["kind"] == "released" and verdict == "idle"
 
 
 def _reduced(collected: dict) -> tuple[list[dict], list[dict]]:
@@ -977,7 +969,7 @@ def test_a_turn_collected_row_past_what_jsonb_holds_is_written_reduced(dsn, tmp_
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     by_file = {e["file"]: e for e in collected["effects"]}
     assert verdict == "idle" and collected["candidate"] is None
-    assert by_file["ok.json"]["kind"] == "pending" and "request" in by_file["ok.json"]
+    assert by_file["ok.json"]["kind"] == "released" and "request" in by_file["ok.json"]
     [kept], [dropped] = _reduced(collected)
     assert kept["kind"] == "refused" and kept["error"] == "r" * BIG
     [why] = collected["errors"]
@@ -998,7 +990,7 @@ def test_drops_are_cumulative_until_the_row_is_stored(dsn, tmp_path):
         verdict, rows = run(_record_ended(dsn, ws, ledger.new_id(), tasks.machine.State.PLAN, performers))
     [collected] = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     by_file = {e["file"]: e for e in collected["effects"]}
-    assert verdict == "idle" and by_file["ok.json"]["kind"] == "pending"
+    assert verdict == "idle" and by_file["ok.json"]["kind"] == "released"
     [kept], dropped = _reduced(collected)
     assert kept["kind"] == "refused" and len(dropped) == 2
     [why] = collected["errors"]

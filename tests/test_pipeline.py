@@ -95,6 +95,42 @@ async def merge_effect(dsn, task) -> str:
     return (await fold(dsn, task)).merge_effect["effect_id"]
 
 
+async def merged(dsn, task) -> broker.Outcome:
+    async with await db.connect(dsn) as conn:
+        return await scripted.merged(conn, task)
+
+
+def terms(out: broker.Outcome) -> list[str]:
+    """The predicate terms a refused merge names."""
+    assert out.kind == "refused" and out.error.startswith(PREDICATE), out
+    return [t[0] for t in out.error.removeprefix(PREDICATE).split("; ")]
+
+
+PREDICATE = "the merge predicate does not hold: "
+
+
+async def intent_only(dsn, task) -> str:
+    """The merge's intent row with no outcome, as `ensure_merge` writes it
+    before the push: the state a request that died mid-push leaves."""
+    async with await db.connect(dsn) as conn:
+        action = verdicts.merge_action(await fold(dsn, task), await tasks.brief(conn, task))
+        effect = ledger.new_id()
+        described = action.describe("act", False, effect)
+        described["request_id"] = f"merge:{ledger.digest(action.payload)}:0"
+        await ledger.append(conn, task, "effect.intent", broker._intent_row(effect, described))
+    return effect
+
+
+async def checks_only(dsn, task) -> None:
+    """The three passing verdicts, written as a writer stopped before
+    `ensure_merge` would write them: no merge is asked for."""
+    async with await db.connect(dsn) as conn:
+        for check in (Check.TEST, Check.REVIEW, Check.DOCS):
+            verdict = "no_change" if check is Check.DOCS else "pass"
+            kw = await scripted.judgements(dsn, task, check)
+            await verdicts.record_check(conn, task, check, verdict, **kw, **scripted.SESSION_LEG)
+
+
 # -- the verdict enum is the database's -------------------------------------------------
 
 
@@ -247,9 +283,8 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
-        # After the merge is held, the turn's config is rewritten.
+        await checks_only(dsn, task)
+        # After the checks and before the merge is asked for, the turn's config is rewritten.
         if rewrite == "url":
             git(ws, "remote", "set-url", "origin", str(stranger))
         elif rewrite == "pushurl":
@@ -262,13 +297,7 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
             inc = tmp_path / "inc.gitconfig"
             inc.write_text(f'[url "{stranger}"]\n\tpushInsteadOf = {origin}\n')
             git(ws, "config", "include.path", str(inc))
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge it")
-            try:
-                out = await scripted.release(conn, effect)
-            except broker.Refused as exc:
-                out = exc
-        return out, await rows(dsn, task)
+        return await merged(dsn, task), await rows(dsn, task)
 
     out, written = run(go())
     assert (
@@ -280,8 +309,8 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
     if rewrite == "url":  # the remote's name is not used: the recorded URL is
         assert out.kind == "done" and git(origin, "rev-parse", "main") == out.result["sha"]
     else:
-        assert isinstance(out, broker.Refused) and "redirect" in str(out)
-        assert not [r for r in written if r["type"] == "effect.intent"]  # the approval stays unused
+        assert out.kind == "refused" and "redirect" in out.error
+        assert not [r for r in written if r["type"] == "effect.intent"]
 
 
 @pytest.mark.macos
@@ -360,9 +389,9 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
     assert grant["provenance"]["by"] == "tom" and grant["provenance"]["role_played"] is False
     assert grant["incident"] == "incident X" and grant["expires"]
     assert after_grant["status"] == "no runner" and after_grant["missing"] == ["review"]
-    assert final.state is State.MERGE and final.join.row == 1 and final.merge_effect["state"] == "held"
-    held_row = next(r["payload"] for r in written if r["type"] == "effect.held")
-    assert held_row["action_type"] == "merge" and held_row["adds_governance"] is True
+    assert final.join.row == 1 and final.merge_effect["state"] == "done"
+    intent = next(r["payload"] for r in written if r["type"] == "effect.intent")
+    assert intent["action_type"] == "merge" and intent["adds_governance"] is True
 
 
 @pytest.mark.macos
@@ -399,28 +428,21 @@ def test_a_grant_without_an_incident_is_refused(dsn, tmp_path):
 
 
 @pytest.mark.macos
-def test_all_five_terms_hold_and_the_merge_lands_on_the_recorded_origin(dsn, tmp_path):
+def test_all_four_terms_hold_and_the_merge_lands_on_the_recorded_origin_with_no_tap(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
         await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(broker.MergeRefused) as no_approval:
-                await scripted.release(conn, effect)
-            await broker.approve(conn, effect, note="merge it")
-            done = await scripted.release(conn, effect)
-        return task, no_approval.value, done, await fold(dsn, task)
+        return task, await merged(dsn, task), await fold(dsn, task)
 
-    _task, no_approval, done, f = run(go())
-    assert [t[0] for t in no_approval.terms] == ["5"]
+    _task, done, f = run(go())
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
     assert f.state is State.MERGED
 
 
 @pytest.mark.macos
-def test_a_red_test_refuses_the_merge_even_when_one_is_requested_and_approved(dsn, tmp_path):
+def test_a_red_test_refuses_the_merge_even_when_one_is_requested(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
@@ -435,15 +457,14 @@ def test_a_red_test_refuses_the_merge_even_when_one_is_requested_and_approved(ds
         await scripted.check(dsn, task, "docs", "no_change")
         f = await fold(dsn, task)
         async with await db.connect(dsn) as conn:
-            held = await scripted.request(conn, task, verdicts.merge_action(f, await tasks.brief(conn, task)))
-            await broker.approve(conn, held.effect_id, note="merge anyway")
-            with pytest.raises(broker.MergeRefused) as refused:
-                await scripted.release(conn, held.effect_id)
-        return f, refused.value, await rows(dsn, task)
+            refused = await scripted.request(
+                conn, task, verdicts.merge_action(f, await tasks.brief(conn, task))
+            )
+        return f, refused, await rows(dsn, task)
 
     f, refused, written = run(go())
     assert f.state is State.MERGE and f.join.outcome == "did_not_pass" and f.merge_effect is None
-    assert [t[0] for t in refused.terms] == ["3"]
+    assert terms(refused) == ["3"]
     assert not [r for r in written if r["type"] == "effect.intent"]
 
 
@@ -486,19 +507,13 @@ def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_p
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "review", "pass")
         await scripted.check(dsn, task, "docs", "updated", head=head)
-        effect = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
-            try:
-                return await scripted.release(conn, effect)
-            except broker.MergeRefused as exc:
-                return exc
+        return await merged(dsn, task)
 
     out = run(go())
     if holds:
         assert out.kind == "done"
     else:
-        assert isinstance(out, broker.MergeRefused) and [t[0] for t in out.terms] == ["4"]
+        assert terms(out) == ["4"]
 
 
 @pytest.mark.macos
@@ -515,16 +530,11 @@ def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "review", "pass")
         await scripted.check(dsn, task, "docs", "updated", head=head)
-        effect = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
-            with pytest.raises(broker.MergeRefused) as refused:
-                await scripted.release(conn, effect)
         f = await fold(dsn, task)
-        return refused.value, f.checks[Check.DOCS].payload["paths"]
+        return await merged(dsn, task), f.checks[Check.DOCS].payload["paths"]
 
     refused, paths = run(go())
-    assert [t[0] for t in refused.terms] == ["4"] and "core/x.py" in paths
+    assert terms(refused) == ["4"] and "core/x.py" in paths
 
 
 @pytest.mark.macos
@@ -550,33 +560,6 @@ def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
     run(go())
 
 
-@pytest.mark.macos
-def test_an_approval_for_another_digest_releases_nothing(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-
-    async def go():
-        task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        first = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, first, note="merge the first")
-            await session.feedback(conn, task, "one more change")
-        await drive(dsn, task)
-        await scripted.checks(dsn, task)
-        second = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(broker.MergeRefused) as on_first_approval:
-                await scripted.release(conn, second)
-            with pytest.raises(broker.MergeRefused) as stale:
-                await scripted.release(conn, first)
-        return first, second, on_first_approval.value, stale.value
-
-    first, second, on_first_approval, stale = run(go())
-    assert first != second
-    assert [t[0] for t in on_first_approval.terms] == ["5"]
-    assert "1" in [t[0] for t in stale.terms]
-
-
 def test_the_predicate_terms_that_need_no_workspace():
     led_rows = []
 
@@ -599,12 +582,12 @@ def test_the_predicate_terms_that_need_no_workspace():
     f.state = State.MERGE  # as if it had: the predicate still refuses it
     facts = machine.GitFacts(True, (), ())
     payload = {"candidate": c, "head_sha": "c"}
-    terms = machine.merge_predicate(f, payload, approval_unused=True, facts=facts)
+    terms = machine.merge_predicate(f, payload, facts=facts)
     assert [t[0] for t in terms] == ["3"]
-    terms = machine.merge_predicate(f, {**payload, "head_sha": "other"}, approval_unused=True, facts=facts)
+    terms = machine.merge_predicate(f, {**payload, "head_sha": "other"}, facts=facts)
     assert "4" in [t[0] for t in terms]
     merges = machine.GitFacts(True, ("m",), ())
-    assert "4" in [t[0] for t in machine.merge_predicate(f, payload, approval_unused=True, facts=merges)]
+    assert "4" in [t[0] for t in machine.merge_predicate(f, payload, facts=merges)]
 
 
 # -- recovery, one run at a time ------------------------------------------------------------
@@ -616,11 +599,7 @@ def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_
 
     async def go():
         task = await to_checks(dsn, ws)
-        async with await db.connect(dsn) as conn:  # the writer, stopped before ensure_merge
-            for check in (Check.TEST, Check.REVIEW, Check.DOCS):
-                verdict = "no_change" if check is Check.DOCS else "pass"
-                kw = await scripted.judgements(dsn, task, check)
-                await verdicts.record_check(conn, task, check, verdict, **kw, **scripted.SESSION_LEG)
+        await checks_only(dsn, task)
         before = await fold(dsn, task)
         await drive(dsn, task)
         await drive(dsn, task)
@@ -628,7 +607,8 @@ def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_
 
     before, written = run(go())
     assert before.state is State.MERGE and before.merge_effect is None
-    assert len([r for r in written if r["type"] == "effect.held"]) == 1
+    intents = [r for r in written if r["type"] == "effect.intent" and r["payload"]["action_type"] == "merge"]
+    assert len(intents) == 1 and machine.fold(written).state is State.MERGED
 
 
 @pytest.mark.macos
@@ -637,10 +617,9 @@ def test_feedback_waits_while_the_merge_is_in_flight(dsn, tmp_path):
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
+        await checks_only(dsn, task)
+        await intent_only(dsn, task)
         async with await db.connect(dsn) as conn:
-            await ledger.append(conn, task, "effect.intent", {"effect_id": effect, "idempotency_key": "k"})
             with pytest.raises(LookupError, match="in flight"):
                 await session.feedback(conn, task, "wait")
 
@@ -775,7 +754,7 @@ def test_the_verdict_command_records_docs_by_hand_and_requests_the_merge(dsn, tm
     run(scripted.check(dsn, task, "review", "pass"))
     assert cli("verdict", task, "docs", "no_change", *who).returncode == 0
     f = run(fold(dsn, task))
-    assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
+    assert f.state is State.MERGED and f.merge_effect["state"] == "done"  # the CLI registered the performer
     refused = cli("verdict", task, "docs", "no_change", *who)
     assert refused.returncode == 1 and "not checks" in refused.stderr
     assert "no manual verdict" in cli("verdict", task, "merge", "released").stderr
@@ -802,7 +781,7 @@ def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
             await scripted.critique(dsn, task)
             await drive(dsn, task)
         if where == "merge":
-            await scripted.checks(dsn, task)
+            await checks_only(dsn, task)
         f = await fold(dsn, task)
         assert f.state.value == where
         async with await db.connect(dsn) as conn:
@@ -873,7 +852,7 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
             await ledger.append(conn, b.id, "task.delivered", {"turn_id": "t", "summary": "done"})
         perf = broker.Performers(PushBranch(ws))
         async with await db.connect(dsn) as conn:
-            held = await broker.request(
+            pushed = await broker.request(
                 conn, perf, b.id, broker.Action("push_branch", "valor/old", {"head_sha": head})
             )
             st = await tasks.status(conn, b.id)
@@ -889,8 +868,6 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
                 )
             with pytest.raises(LookupError, match="predates"):
                 await guards.grant(conn, b.id, "i", note="x", incident="i", mission_item="1")
-            await broker.approve(conn, held.effect_id, note="push it")
-            pushed = await broker.release(conn, perf, held.effect_id)
         return st, pushed, await drive(dsn, b.id)
 
     st, pushed, out = run(go())
@@ -982,21 +959,18 @@ def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_p
         _gate(ws)
         scripted.steer(ws, build="reasons")
         await drive(dsn, task)
-        await scripted.checks(dsn, task)  # a merge held, all three passing
+        await checks_only(dsn, task)  # all three passing, no merge asked for yet
         f = await fold(dsn, task)
-        effect = f.merge_effect["effect_id"]
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
         b = tasks.Brief(**await tasks_doc(dsn, task))
         marker = _plant(tmp_path, ws)
         (ws / "hooks" / "gate.py").write_text("def gate():\n    return 'touched'\n")  # stat-dirty
         results = {}
         async with await db.connect(dsn) as conn:
+            results["release"] = (await scripted.merged(conn, task)).error
             try:
-                await scripted.release(conn, effect)
-            except broker.Refused as exc:
-                results["release"] = str(exc)
-            results["facts"] = broker._git_facts(str(ws), f, {"head_sha": f.candidate.sha})
+                results["facts"] = broker._git_facts(str(ws), f, {"head_sha": f.candidate.sha})
+            except broker._Unreadable:
+                results["facts"] = "unreadable"
             try:
                 verdicts._instances(
                     str(ws), b.base_sha, f.candidate.sha, [verdicts.InstanceSpec("hooks/gate.py", 1)]
@@ -1023,7 +997,7 @@ def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_p
     assert before_control is False  # no kernel call ran a planted program
     assert after_control is True  # the plants are live: plain git ran one
     assert "will not run" in results["release"] or "run a program" in results["release"]
-    assert results["facts"] is None and results["instances"] == "GitError"
+    assert results["facts"] == "unreadable" and results["instances"] == "GitError"
     assert results["collected"] == "idle"
     collected = next(
         r["payload"]
@@ -1053,7 +1027,7 @@ def scripted_signals(ws):
 
 
 @pytest.mark.macos
-def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(dsn, tmp_path, monkeypatch):
+def test_a_delivery_with_gaps_after_the_repair_round_merges(dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(
         judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
     )
@@ -1066,11 +1040,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(d
         await scripted.check(dsn, task, "test", "gaps", answer="true")  # every breadth question a gap
         await scripted.check(dsn, task, "review", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
-        f = await fold(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, f.merge_effect["effect_id"], note="merge with the gap")
-            done = await scripted.release(conn, f.merge_effect["effect_id"])
-        return f, done
+        return await fold(dsn, task), await merged(dsn, task)
 
     f, done = run(go())
     assert f.join.row == 7 and f.delivery["outcome"] == "gaps" and len(f.delivery["gaps"]) == 3
@@ -1095,11 +1065,8 @@ def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp
             await guards.grant(conn, task, held_back.instances()[0].id, note="yes, that rule")
             with pytest.raises(guards.GrantRefused, match="already granted"):
                 await guards.grant(conn, task, held_back.instances()[0].id, note="again")
-        delivered = await drive(dsn, task)
-        effect = delivered["state"]["merge_effect"]["effect_id"]
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
-            done = await scripted.release(conn, effect)
+        await drive(dsn, task)
+        done = await merged(dsn, task)
         return held_back, done, head, await rows(dsn, task)
 
     held_back, done, head, written = run(go())
@@ -1134,29 +1101,46 @@ def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tm
 
 
 @pytest.mark.macos
-def test_a_failed_merge_stays_in_merge_and_the_next_run_requests_it_again(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
+def test_a_failed_merge_stays_in_merge_and_is_not_requested_again_for_the_same_payload(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        first = await merge_effect(dsn, task)
-        key = next(
-            r["payload"]["idempotency_key"] for r in await rows(dsn, task) if r["type"] == "effect.held"
-        )
-        async with await db.connect(dsn) as conn:  # a push the remote refused, as the broker records it
-            await ledger.append(conn, task, "effect.intent", {"effect_id": first, "idempotency_key": key})
-            await ledger.append(conn, task, "effect.outcome",
-                                {"effect_id": first, "idempotency_key": key, "kind": "failed"})  # fmt: skip
-        failed = await fold(dsn, task)
+        await checks_only(dsn, task)
+        # The target moved on under the push: a non-fast-forward the remote refuses.
+        tree = git(ws, "rev-parse", "HEAD^{tree}")
+        moved = git(ws, "commit-tree", tree, "-p", git(origin, "rev-parse", "main"), "-m", "moved")
+        git(ws, "push", "-q", str(origin), f"{moved}:refs/heads/main")
+        first = await drive(dsn, task)
         again = await drive(dsn, task)
-        return first, failed, again
+        return first, again, await rows(dsn, task)
 
-    first, failed, again = run(go())
-    assert failed.state is State.MERGE and failed.merge_effect["state"] == "failed"
-    assert again["status"] == "delivered"
-    effect = again["state"]["merge_effect"]
-    assert effect["state"] == "held" and effect["effect_id"] != first
+    first, again, written = run(go())
+    assert first["state"]["merge_effect"]["state"] == "failed"
+    assert again["state"]["state"] == "merge" and again["state"]["merge_effect"] == first["state"]["merge_effect"]
+    assert len([r for r in written if r["type"] == "effect.intent"]) == 1
+
+
+@pytest.mark.macos
+def test_a_merge_whose_facts_git_cannot_read_writes_no_row_and_parks(dsn, tmp_path, monkeypatch):
+    ws, _ = scripted.workspace(tmp_path)
+
+    def unreadable(*a, **k):
+        raise broker._Unreadable("no git")
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        monkeypatch.setattr(broker, "_git_facts", unreadable)
+        out = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            asked = await scripted.ensure_merge(conn, task)
+        return out, asked, await rows(dsn, task)
+
+    out, asked, written = run(go())
+    assert out["status"] == "parked" and out["state"]["merge_effect"] is None
+    assert asked.kind == "unknown" and "git could not read" in asked.error
+    assert not [r for r in written if r["type"].startswith("effect.")]
 
 
 @pytest.mark.macos
@@ -1168,10 +1152,6 @@ def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_p
         judge = await drive(dsn, waiting, {k: v for k, v in scripted.RUNNERS.items() if k is not State.JUDGE})
         task = await to_checks(dsn, ws)
         await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
-            await scripted.release(conn, effect)
         return judge, await drive(dsn, task)
 
     judge, merged = run(go())
@@ -1215,7 +1195,7 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
 
     out = run(go())
     assert ran == [Check.TEST]
-    assert out["status"] == "delivered" and out["state"]["checks"]["test"]["verdict"] == "pass"
+    assert out["status"] == "merged" and out["state"]["checks"]["test"]["verdict"] == "pass"
 
 
 # -- races ---------------------------------------------------------------------------------
@@ -1223,26 +1203,23 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
 
 @pytest.mark.parametrize("order", ["feedback first", "release first", "together"])
 @pytest.mark.macos
-def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn, tmp_path, order):
-    """Release checks the predicate and writes its intent under the task's
-    lock in one transaction; feedback takes the same lock. Each order is
-    forced, then both are raced, and the test names the interleaving that
-    happened: no merge intent ever lands after a feedback row."""
+def test_feedback_and_the_merge_request_in_either_order_never_merge_after_feedback(dsn, tmp_path, order):
+    """The merge request checks the predicate and writes its intent under
+    the task's lock in one transaction; feedback takes the same lock. Each
+    order is forced, then both are raced, and the test names the
+    interleaving that happened: no merge intent ever lands after a
+    feedback row."""
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
+        await checks_only(dsn, task)
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
+            action = verdicts.merge_action(await fold(dsn, task), await tasks.brief(conn, task))
 
         async def release():
             async with await db.connect(dsn) as conn:
-                try:
-                    return await scripted.release(conn, effect)
-                except broker.Refused as exc:
-                    return exc
+                return await scripted.request(conn, task, action)
 
         async def give():
             async with await db.connect(dsn) as conn:
@@ -1269,7 +1246,7 @@ def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn
         assert isinstance(fed, LookupError) and "in flight" in str(fed)
     else:
         happened = "feedback, then the release refused"
-        assert isinstance(released, broker.MergeRefused) and [t[0] for t in released.terms] == ["1"]
+        assert terms(released) == ["1"]
         assert not [r for r in written if r["type"] == "effect.outcome"]  # nothing pushed
     expected = {
         "feedback first": "feedback, then the release refused",
@@ -1281,22 +1258,16 @@ def test_feedback_and_the_release_in_either_order_never_merge_after_feedback(dsn
 
 
 @pytest.mark.macos
-def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
+def test_two_concurrent_merge_requests_make_one_intent_and_push_once(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
-        async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
+        await checks_only(dsn, task)
 
         async def release():
             async with await db.connect(dsn) as conn:
-                try:
-                    return await scripted.release(conn, effect)
-                except (broker.Refused, broker.NotApproved) as exc:
-                    return exc
+                return await scripted.ensure_merge(conn, task)
 
         outs = await asyncio.gather(release(), release())
         return outs, await rows(dsn, task), (await fold(dsn, task)).candidate.sha
@@ -1421,37 +1392,26 @@ def test_a_tag_the_turn_made_is_not_pushed_and_push_settings_refuse(dsn, tmp_pat
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task)
-        effect = await merge_effect(dsn, task)
+        await checks_only(dsn, task)
         sha = (await fold(dsn, task)).candidate.sha
         git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "tag", "-a", "v9", "-m", "turn's tag", sha)
+        git(ws, "config", "push.followTags", "true")
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge")
-            git(ws, "config", "push.followTags", "true")
-            with pytest.raises(broker.Refused, match="push.followtags"):
-                await scripted.release(conn, effect)
-            git(ws, "config", "--unset", "push.followTags")
-            return await scripted.release(conn, effect), sha
+            return await scripted.merged(conn, task), sha
 
-    done, sha = run(go())
-    assert done.kind == "done" and git(origin, "rev-parse", "main") == sha
-    assert git(origin, "tag", "--list") == ""
+    refused, sha = run(go())
+    assert refused.kind == "refused" and "push.followtags" in refused.error
+    assert git(origin, "rev-parse", "main") != sha and git(origin, "tag", "--list") == ""
 
 
 async def _dangling(dsn, ws) -> tuple[str, str, str]:
-    """A task whose approved merge has an intent and no outcome, as a release
-    that died after writing its intent leaves it. Returns the task, the
+    """A task whose merge has an intent and no outcome, as a request that
+    died after writing its intent leaves it. Returns the task, the
     effect, and the candidate's sha."""
     task = await to_checks(dsn, ws)
-    await scripted.checks(dsn, task)
-    effect = await merge_effect(dsn, task)
-    sha = (await fold(dsn, task)).candidate.sha
-    held = next(r["payload"] for r in await rows(dsn, task) if r["type"] == "effect.held")
-    async with await db.connect(dsn) as conn:
-        await broker.approve(conn, effect, note="merge")
-        await ledger.append(conn, task, "effect.intent",
-                            {"effect_id": effect, "idempotency_key": held["idempotency_key"]})  # fmt: skip
-    return task, effect, sha
+    await checks_only(dsn, task)
+    effect = await intent_only(dsn, task)
+    return task, effect, (await fold(dsn, task)).candidate.sha
 
 
 def _outcomes(written, effect) -> list[dict]:
@@ -1516,7 +1476,7 @@ def test_an_unreachable_target_concludes_nothing(dsn, tmp_path):
 
     effect, out, written = run(go())
     assert _outcomes(written, effect) == []
-    assert out["status"] == "delivered" and out["state"]["merge_effect"]["state"] == "in_flight"
+    assert out["status"] == "parked" and out["state"]["merge_effect"]["state"] == "in_flight"
 
 
 @pytest.mark.macos
@@ -1544,9 +1504,9 @@ def test_a_missing_merge_is_failed_only_once_no_process_holds_it(dsn, tmp_path):
     assert held["state"]["merge_effect"]["state"] == "in_flight"
     (outcome,) = _outcomes(written, effect)
     assert outcome["kind"] == "failed" and outcome["reconciled"] is True
-    assert (
-        freed["status"] == "delivered" and freed["state"]["merge_effect"]["effect_id"] != effect
-    )  # a new merge
+    # A failed merge stands for its payload: no new merge is asked for.
+    assert freed["state"]["merge_effect"]["effect_id"] == effect
+    assert freed["state"]["merge_effect"]["state"] == "failed"
 
 
 def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_performer(dsn, tmp_path):
@@ -1557,13 +1517,11 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
         other = await scripted.start(dsn, ws)
         head = git(ws, "rev-parse", "HEAD")
         async with await db.connect(dsn) as conn:
-            held = await scripted.request(
-                conn, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
-            )
-            await broker.approve(conn, held.effect_id, note="push")
             git(ws, "remote", "set-url", "origin", str(tmp_path / "nowhere.git"))
             nowhere = broker.Performers(PushBranch(ws, url=str(tmp_path / "nowhere.git")))
-            failed = await broker.release(conn, nowhere, held.effect_id)
+            failed = held = await broker.request(
+                conn, nowhere, task, broker.Action("push_branch", "valor/x", {"head_sha": head})
+            )
         probe = await db.connect(dsn)
         got = await (
             await probe.execute(
@@ -1573,13 +1531,12 @@ def test_a_failing_push_branch_frees_its_effect_lock_and_reconcile_needs_a_perfo
         await probe.close()
         # A dangling intent whose performer is not registered is left alone.
         async with await db.connect(dsn) as conn:
-            parked = await scripted.request(
-                conn, other, broker.Action("push_branch", "valor/y", {"head_sha": head})
-            )
-            await ledger.append(
-                conn, other, "effect.intent", {"effect_id": parked.effect_id, "idempotency_key": "k"}
-            )
-            none = await broker.reconcile(conn, broker.Performers(), parked.effect_id)
+            parked = ledger.new_id()
+            await ledger.append(conn, other, "effect.intent", {
+                "effect_id": parked, "idempotency_key": "k", "action_type": "push_branch",
+                "target": "valor/y", "payload": {"head_sha": head},
+            })  # fmt: skip
+            none = await broker.reconcile(conn, broker.Performers(), parked)
         return failed, got[0], none
 
     failed, lock_free, none = run(go())
@@ -1718,9 +1675,7 @@ def test_an_outcome_reconcile_wrote_first_stands_over_the_performers(dsn, owner_
     async def go():
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="x", max_effect_class="act"))
-            held = await broker.request(conn, perf, task, broker.Action("raced", "t", {"n": 1}))
-            await broker.approve(conn, held.effect_id, note="go")
-            out = await broker.release(conn, perf, held.effect_id)
+            out = await broker.request(conn, perf, task, broker.Action("raced", "t", {"n": 1}))
             return out, await ledger.read(conn, task)
 
     out, written = run(go())

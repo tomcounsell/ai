@@ -598,9 +598,9 @@ def test_the_predicate_refuses_when_the_docs_head_does_not_descend_or_git_facts_
     f = led.fold()
     payload = {"candidate": led.candidate, "head_sha": "d1"}
     ok = machine.GitFacts(True, (), ("docs/a.md",))
-    assert machine.merge_predicate(f, payload, approval_unused=True, facts=ok) == []
+    assert machine.merge_predicate(f, payload, facts=ok) == []
     for facts in (machine.GitFacts(False, (), ()), None, machine.GitFacts(True, (), ("core/x.py",))):
-        assert [t[0] for t in machine.merge_predicate(f, payload, approval_unused=True, facts=facts)] == ["4"]
+        assert [t[0] for t in machine.merge_predicate(f, payload, facts=facts)] == ["4"]
 
 
 @pytest.mark.parametrize(

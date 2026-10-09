@@ -532,14 +532,31 @@ async def request(conn, task: str, action: broker.Action) -> broker.Outcome:
     return await broker.request(conn, await _of(conn, task), task, action)
 
 
-async def release(conn, effect_id: str) -> broker.Outcome:
-    return await broker.release(conn, await _of(conn, await broker.held_task(conn, effect_id)), effect_id)
+async def task_of(conn, effect_id: str) -> str:
+    """The task an effect is of, from its first ledger row."""
+    row = await (
+        await conn.execute(
+            "SELECT task_id FROM events WHERE type LIKE 'effect.%%' AND payload->>'effect_id' = %s ORDER BY id LIMIT 1",
+            (effect_id,),
+        )
+    ).fetchone()
+    return row[0]
 
 
 async def reconcile(conn, effect_id: str, **kw) -> broker.Outcome | None:
-    task = await broker.held_task(conn, effect_id)
+    task = await task_of(conn, effect_id)
     return await broker.reconcile(conn, await _of(conn, task), effect_id, **kw)
 
 
 async def ensure_merge(conn, task: str) -> broker.Outcome | None:
     return await verdicts.ensure_merge(conn, await _of(conn, task), task)
+
+
+async def merged(conn, task: str) -> broker.Outcome:
+    """Where the task's merge stands: the step that wrote its last verdict
+    asked for it at once, so this only asks when nothing has."""
+    asked = await ensure_merge(conn, task)
+    if asked is not None:
+        return asked
+    effect = machine.fold(await ledger.read(conn, task)).merge_effect
+    return await broker._standing(conn, effect["effect_id"])

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, fresh, ledger, machine, router, session, signals, tasks
+from core import db, fresh, ledger, machine, router, session, signals, tasks
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import State
@@ -290,12 +290,10 @@ def test_the_merge_of_a_provisioned_task_reads_the_mirror_and_lands_on_its_own_o
         # still has the kept head.
         scripted.git(ws, "reset", "-q", "--hard", f.candidate.sha)
         scripted.git(ws, "reflog", "expire", "--expire=now", "--all")
-        await scripted.check(dsn, task, "docs", "updated", head=docs)
-        effect = (machine.fold(await rows(dsn, task))).merge_effect["effect_id"]
         scripted.git(ws, "gc", "-q", "--prune=now")  # the builder's clone no longer holds the docs commit
+        await scripted.check(dsn, task, "docs", "updated", head=docs)
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge it")
-            done = await scripted.release(conn, effect)
+            done = await scripted.merged(conn, task)
         return done, docs, machine.fold(await rows(dsn, task))
 
     done, docs, f = run(go())
@@ -518,10 +516,8 @@ def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line
         await drive(dsn, task, scripted.RUNNERS)
         await drive(dsn, task, scripted.fresh_runners(ws))
         await scripted.checks(dsn, task)
-        effect = machine.fold(await rows(dsn, task)).merge_effect["effect_id"]
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge it")
-            await scripted.release(conn, effect)
+            await scripted.merged(conn, task)
         return task, b
 
     task, b = run(go())

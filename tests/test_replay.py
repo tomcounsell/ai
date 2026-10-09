@@ -1,8 +1,6 @@
-"""The replay driver's push rule, on real Postgres and real git: a held
-`push_branch` is approved and released when the workspace pushes to the
-run's own bare origin, and left held for Tom when its push URL points
-anywhere else. The URL is the one in the kernel's record of the task. Every merge effect is skipped: the driver never answers a
-merge, and a held merge is not an effect left for Tom.
+"""The replay driver's wiring, on real Postgres and real git: a replay
+task's push leaves when requested and a send it asks for has no performer;
+the replay workspace and spec.
 
 The driver reaches the kernel through `python -m core`, pointed here at the
 test database with `VALOR_DB`.
@@ -20,7 +18,6 @@ import pytest
 from core import broker, db, tasks
 from tests.conftest import TEST_DB
 from tests.emulator import common as replay_common
-from tests.emulator import replay
 from tests.emulator import workspace as replay_workspace
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -53,49 +50,36 @@ def _run(tmp_path: Path, name: str) -> dict:
     return {"workdir": str(workdir), "origin": str(origin), "task_dir": str(run)}
 
 
-async def _held_push(dsn: str, ws: dict) -> str:
-    from tools.push_branch import PushBranch
+def test_a_replay_task_pushes_at_request_and_has_no_send_performer(dsn, tmp_path):
+    """A replay task is built with the kernel performers only: its push
+    leaves when requested, and a send it asks for meets `no performer`."""
+    from core.__main__ import _performers
 
-    async with await db.connect(dsn) as conn:
-        task = await tasks.start(
-            conn,
-            tasks.Brief(
-                instruction="push", max_effect_class="act", workspace=ws["workdir"], push_url=ws["origin"]
-            ),
-        )
-        held = await broker.request(
-            conn,
-            broker.Performers(PushBranch(ws["workdir"], url=ws["origin"])),
-            task,
-            broker.Action("push_branch", "valor/work", {"head_sha": git(ws["workdir"], "rev-parse", "HEAD")}),
-        )
-        assert held.kind == "pending"
-        return task
+    ws = _run(tmp_path, "local")
 
+    async def go():
+        async with await db.connect(dsn) as conn:
+            brief = tasks.Brief(
+                instruction="push",
+                max_effect_class="act",
+                workspace=ws["workdir"],
+                push_url=ws["origin"],
+                replay=True,
+            )
+            task = await tasks.start(conn, brief)
+            performers = _performers(brief)
+            head = git(ws["workdir"], "rev-parse", "HEAD")
+            pushed = await broker.request(
+                conn, performers, task, broker.Action("push_branch", "valor/work", {"head_sha": head})
+            )
+            sent = await broker.request(
+                conn, performers, task, broker.Action("telegram.send_message", "1", {"text": "hi"})
+            )
+            return pushed, sent, head
 
-def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_path, monkeypatch):
-    """The rule reads the kernel's record of the task, never the workdir's
-    git config, which a turn can rewrite."""
-    monkeypatch.setenv("VALOR_DB", TEST_DB)
-    stranger = tmp_path / "stranger.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(stranger)], check=True)
-    local, elsewhere = _run(tmp_path, "local"), _run(tmp_path, "elsewhere")
-    # The record pushes somewhere else; the workdir's own config still names
-    # the run's origin, and is not what the rule reads.
-    elsewhere["origin"] = str(stranger)
-    local_task = asyncio.run(_held_push(dsn, local))
-    other_task = asyncio.run(_held_push(dsn, elsewhere))
-
-    log: list = []
-    assert replay.release_pushes(local_task, local, log) == []
-    assert git(local["origin"], "rev-parse", "valor/work") == git(local["workdir"], "rev-parse", "HEAD")
-    assert [entry["step"] for entry in log] == ["push released"]
-
-    left = replay.release_pushes(other_task, elsewhere, log)
-    assert len(left) == 1 and log[-1]["push_url"] == str(stranger)
-    assert subprocess.run(
-        ["git", "-C", str(stranger), "rev-parse", "valor/work"], capture_output=True, check=False
-    ).returncode
+    pushed, sent, head = asyncio.run(go())
+    assert pushed.kind == "done" and git(ws["origin"], "rev-parse", "valor/work") == head
+    assert sent.kind == "refused" and sent.error == broker.NO_PERFORMER
 
 
 def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
@@ -120,72 +104,6 @@ def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
         released = time.monotonic()
     t.join(timeout=15)
     assert entered and entered[0] >= released
-
-
-async def _held_merge(conn, task: str, url: str, head: str = "x") -> str:
-    from core import ledger
-
-    effect_id = ledger.new_id()
-    payload = {
-        "url": url,
-        "target_branch": "main",
-        "head_sha": head,
-        "candidate": {"sha": head, "turn_id": "t"},
-    }
-    await ledger.append(
-        conn,
-        task,
-        "effect.held",
-        {"effect_id": effect_id, "action_type": "merge", "effect_class": "act", "target": "main",
-         "payload": payload, "payload_sha256": ledger.digest(payload), "idempotency_key": ledger.new_id(),
-         "adds_governance": False},
-    )  # fmt: skip
-    return effect_id
-
-
-def test_the_driver_skips_every_merge_and_leaves_any_other_held_effect(dsn, tmp_path, monkeypatch):
-    """A held merge, whatever URL it carries, is neither answered nor an
-    effect left for Tom; neither is an earlier one a second held merge
-    superseded. A held effect of another action is left, and ends the run."""
-    monkeypatch.setenv("VALOR_DB", TEST_DB)
-    ws = _run(tmp_path, "merge")
-
-    async def held() -> tuple[str, str]:
-        async with await db.connect(dsn) as conn:
-            task = await tasks.start(
-                conn, tasks.Brief(instruction="merge", max_effect_class="act", workspace=ws["workdir"])
-            )
-            await _held_merge(conn, task, str(tmp_path / "stranger.git"), head="a" * 40)
-            await _held_merge(conn, task, ws["origin"], head="b" * 40)
-            return task
-
-    task = asyncio.run(held())
-    log: list = []
-    assert replay.release_pushes(task, ws, log) == [] and log == []
-    pending = [line for line in replay.core("pending").splitlines() if task in line]
-    assert len(pending) == 2  # both still held: nothing answered them
-
-    async def other() -> str:
-        from core import ledger
-
-        async with await db.connect(dsn) as conn:
-            payload = {"text": "hi"}
-            await ledger.append(
-                conn,
-                task,
-                "effect.held",
-                {"effect_id": ledger.new_id(), "action_type": "send_message", "effect_class": "act",
-                 "target": "tom", "payload": payload, "payload_sha256": ledger.digest(payload),
-                 "idempotency_key": ledger.new_id(), "adds_governance": False},
-            )  # fmt: skip
-
-    asyncio.run(other())
-    left = replay.release_pushes(task, ws, log)
-    assert (
-        len(left) == 1
-        and log[-1]["step"] == "held effect left for Tom"
-        and "send_message" in log[-1]["effect"]
-    )
 
 
 @pytest.mark.macos

@@ -1,6 +1,6 @@
 """The broker records what a merge landed on its `effect.intent`
 (`outcomes.landed`), on a workspace the kernel provisioned, through the
-real pipeline with scripted sessions (`tests/scripted.py`): a released
+real pipeline with scripted sessions (`tests/scripted.py`): a performed
 merge's intent carries it; a failed read or a value Postgres refuses
 records nulls and the merge still lands; a reconciled merge keeps the
 intent's `landed`.
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.spend(usd=0)
 
 
 def released(dsn, tmp_path):
-    """A provisioned task through its checks, approved and released."""
+    """A provisioned task through its checks, its merge performed."""
     task, b, ws = planned(dsn, tmp_path)
 
     async def go():
@@ -27,8 +27,7 @@ def released(dsn, tmp_path):
         await scripted.checks(dsn, task)
         effect = machine.fold(await rows(dsn, task)).merge_effect["effect_id"]
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="merge it")
-            done = await scripted.release(conn, effect)
+            done = await scripted.merged(conn, task)
         written = await rows(dsn, task)
         intent = next(
             r["payload"]

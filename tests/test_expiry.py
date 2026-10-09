@@ -16,7 +16,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import broker, db, guards, ledger, machine, routines, targets, tasks, workspace
+from core import db, guards, ledger, machine, routines, targets, tasks, workspace
 from core.machine import State
 from core.settings import settings
 from tests import scripted
@@ -542,19 +542,17 @@ def test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge(tmp
         async with await db.connect(dsn) as conn:
             return machine.fold(await ledger.read(conn, task)), await ledger.read(conn, task)
 
+    # The merge leaves like any merge: once its predicate holds, with no tap.
     f, written = run(drive())
-    assert f.state is State.MERGE and f.merge_effect["state"] == "held"
-    assert not [r for r in written if r["type"] in ("effect.intent", "effect.outcome")]
-    # The merge is released like any merge: the lead's approval, no other.
-    effect = f.merge_effect["effect_id"]
+    assert f.merge_effect["state"] == "done"
+    assert [r["payload"]["kind"] for r in written if r["type"] == "effect.outcome"] == ["done"]
 
-    async def release():
+    async def settled():
         async with await db.connect(dsn) as conn:
-            await broker.approve(conn, effect, note="released", by="build lead")
-            done = await scripted.release(conn, effect)
+            done = await scripted.merged(conn, task)
             return done, machine.fold(await ledger.read(conn, task))
 
-    done, merged = run(release())
+    done, merged = run(settled())
     assert done.kind == "done" and merged.state is State.MERGED
 
 

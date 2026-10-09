@@ -12,6 +12,11 @@ rewriting any row.
 - a database holding a row of every type the kernel writes, both approval
   shapes included, always run.
 
+An effect still held for an approval (no intent, outcome, or refusal, and
+no `release.requested` naming a bridge) gets one `effect.refused` with
+`at: migrate`; those and the seeded guards are the only rows migrate adds,
+and a second migrate adds none.
+
 Each is checked row for row (`id`, `xmin`, and a digest of the rest),
 table by table (`pg_relation_filenode`), and fold by fold: every task's
 metered spending and open calls through `tasks.status` against the same
@@ -108,15 +113,21 @@ def _migrate_with_change(database: str, tmp_path: Path) -> None:
 def _check(database: str, before: dict) -> None:
     after = _snapshot(database)
     # No row rewritten: same xmin, same content. The only rows added are the
-    # seeded guards, once each, on their own stream.
+    # seeded guards, once each, on their own stream, and the refusals of
+    # effects held for an approval.
     assert after["events"][: len(before["events"])] == before["events"]
     added = [r[0] for r in after["events"][len(before["events"]) :]]
     with _owner(database) as conn:
-        kinds = conn.execute("SELECT task_id, type FROM events WHERE id = ANY(%s)", (added,)).fetchall()
+        kinds = conn.execute(
+            "SELECT task_id, type, payload->>'at' FROM events WHERE id = ANY(%s)", (added,)
+        ).fetchall()
         guards_held = conn.execute(
             "SELECT payload->>'guard_id' FROM events WHERE task_id = 'guards' AND type = 'guard.granted'"
         ).fetchall()
-    assert set(kinds) <= {("guards", "guard.granted")}
+    assert all(
+        (t, kind) == ("guards", "guard.granted") or (kind, at) == ("effect.refused", "migrate")
+        for t, kind, at in kinds
+    ), kinds
     assert sorted(g for (g,) in guards_held) == sorted(g["guard_id"] for g in guards.SEEDED)
     assert after["documents"] == before["documents"]
     assert after["filenodes"] == before["filenodes"]  # no table rewritten
@@ -295,6 +306,9 @@ EVERY_TYPE = [
     ),
     ("effect.held", {"effect_id": "e1", "idempotency_key": "k1", "payload_sha256": "s"}),
     ("effect.refused", {"effect_id": "e2", "idempotency_key": "k2", "reason": "ceiling"}),
+    ("effect.held", {"effect_id": "e3", "idempotency_key": "k3", "action_type": "merge", "payload": {}}),
+    ("effect.held", {"effect_id": "e4", "idempotency_key": "k4", "action_type": "telegram.send_message"}),
+    ("release.requested", {"effect_id": "e4", "approval_id": "a3", "owner": "telegram"}),
     (
         "approval.granted",
         {"approval_id": "a1", "effect_id": "e1", "payload_sha256": "s", "note": "ok", "by": "tom"},
@@ -353,6 +367,15 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
         assert before["spending"][task] == (120 + 90, 200 + 70)  # raises read as nothing
         _migrate_with_change(database, tmp_path)
         _check(database, before)
+        with _owner(database) as conn:
+            refused = conn.execute(
+                "SELECT payload->>'effect_id', payload->>'reason', payload->>'action_type' FROM events "
+                "WHERE type = 'effect.refused' AND payload->>'at' = 'migrate'"
+            ).fetchall()
+        assert refused == [("e3", db.HELD_REASON, "merge")]  # e1 went on, e4 is its bridge's
+        again = _snapshot(database)["events"]
+        _migrate_with_change(database, tmp_path)
+        assert _snapshot(database)["events"] == again
     finally:
         _drop(database)
 
