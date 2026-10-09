@@ -148,3 +148,17 @@ None.
   inspect` (the runtime stopped, for one) as "not held" and drops the
   record. With tests no longer stopping the runtime under a kernel this
   path is not reached by tests.
+
+### Lead's fact, 2026-10-09
+
+- The popoto image is still in the store. Only its record was lost. This
+  matches cause 1: `checked` deletes an image only when inspect returns a
+  different digest. When inspect fails because the runtime is stopped,
+  `checked` drops the record and leaves the image.
+- No test or kernel code copies or restores `images.json`. A search of the
+  `tests/` and `core/` directories in this worktree, `valor-rebuild` and
+  `valor-rebuild-a1` finds only `_images` reading it and `_record` writing it.
+- The fix closes the read-modify-write path as well: tests no longer write
+  the live file.
+- The container evidence rerun is still owed: free space is 6.0 GB, not
+  more than 6.
