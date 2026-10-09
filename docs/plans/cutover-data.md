@@ -229,12 +229,12 @@ together.
 |---|---|---|---|
 | Tom's Telegram user id, 179144806 | `dms.whitelist` in `projects.json`; hard-coded as the default DM target in `tools/agent_session_scheduler.py` | Setting `operator_telegram_id`, env `VALOR_OPERATOR_TELEGRAM_ID` | Already set in the Cowboy's `com.valor.kernel` and `com.valor.kernel.telegram` launchd jobs |
 | Tom's email, tom@yuda.me | Listed as a cuttlefish contact in `projects.json`; no operator field | Setting `operator_email`, env `VALOR_OPERATOR_EMAIL` (comma list) | Already set in the Cowboy's `com.valor.kernel` and `com.valor.email` jobs |
-| Operator chat (where notices and approvals go) | None. The old system answered where it was asked | Setting `operator_chat`, env `VALOR_OPERATOR_CHAT`, with `operator_channel` `telegram` | Already set to `-1003890616618` in the Cowboy's jobs |
+| Operator chat (where notices go) | None. The old system answered where it was asked | Setting `operator_chat`, env `VALOR_OPERATOR_CHAT`, with `operator_channel` `telegram` | Already set to `-1003890616618` in the Cowboy's jobs |
 | Valor's own identity (name, email, timezone, handles) | `config/identity.json` in the repo: Valor Engels, valor@yuda.me, UTC+7, @valorengels | `persona/identity.toml` (same fields, plus supervisor Tom Counsell) | Exists in the repo; nothing to move |
 | Valor's Telegram account | `valor_bridge.session` in `~/src/ai/data`, API id and hash in the vault `.env` | `~/.config/valor-kernel/telegram.session` and `telegram-keys` | Exists on the Cowboy. A second login for the same account, never a copy of the old session file (the old data directory keeps a `.dead-authkeydup` session, the failure a copy causes). Other Macs: `python -m bridges.telegram keys` then `login` |
 | Valor's mailbox, valor@yuda.me | Vault `.env`: `IMAP_USER`, `IMAP_PASSWORD`, `SMTP_USER`, `SMTP_PASSWORD`, hosts and ports | `~/.config/valor-kernel/mail-keys`; settings `email_address`, `imap_host`, `smtp_host` | Exists on the Cowboy. Other Macs: `python -m bridges.email keys` |
 | Mailbox start date | None | Setting `email_since`, env `VALOR_EMAIL_SINCE` (set to 2026-10-08 in the email job) | Edit the job at cutover (G7) |
-| Principal context (`config/PRINCIPAL.md`) | The file does not exist in the old checkout or the vault | The operator record in `memory/` (milestone 6, not built) | Nothing to import. Tom's preferences the old system learned sit in its Memory records (section 7) |
+| Principal context (`config/PRINCIPAL.md`) | The file does not exist in the old checkout or the vault | `memory/` takes Tom's rows from the ledger (docs/memory.md); no operator record file | Nothing to import. Tom's preferences the old system learned sit in its Memory records (section 7) |
 
 Who Tom is in the new system is exactly two things: a verified Telegram
 sender whose id equals `operator_telegram_id`, and the local chat page. His
@@ -291,7 +291,7 @@ runs inside the old worker. The new system runs routines
 |---|---|
 | Session and Redis housekeeping: stall-advisory, agent-session-cleanup, redis-index-cleanup, redis-ttl-cleanup, redis-quality-audit, circuit-health-gate, session-count-throttle, session-recovery-drip, crash-recovery, side-effect-drain, dead-letter-replay, expectation-reconciler, failure-loop-detector | None needed: the ledger has no Redis indexes, and the kernel recovers a stopped turn itself |
 | Improvement loop: improvement-evidence-collect, controller-tick, intent-reconcile, planner-tick, assumption-digest, session-intelligence | None. The `emulator` routine is the new system's measurement |
-| Memory upkeep: memory-dedup, decay-prune, quality-audit, embedding-backfill, outcome-resolve, distill-backfill, embedding-orphan-sweep | Wait for milestone 6 (memory). Gap G8 |
+| Memory upkeep: memory-dedup, decay-prune, quality-audit, embedding-backfill, outcome-resolve, distill-backfill, embedding-orphan-sweep | None built; `memory/` has no upkeep job. Gap G8 |
 | Repo upkeep: stale-branch-cleanup, merged-branch-cleanup, do-docs-branch-sweeper, tech-debt-scan, docs-auditor, skills-audit, hooks-audit, principal-staleness | None. The `expiry` routine ends guards; branch cleanup is a gap (G8) |
 | sdlc-progress-check, sdlc-upvote-pickup (autonomous start from `upvote`-labelled issues) | None. A new task starts only from a message or `core start` |
 | pm-briefings (daily briefings for a project with `pm_briefing` set) | None; no project in `projects.json` sets it today |
@@ -306,7 +306,7 @@ Other Macs have their own Redis that this Mac cannot read.
 
 | Records | Count | Where it goes | How |
 |---|---|---|---|
-| Memory (human-ingested and extracted facts, by project: valor 1,454; company 783; cyndra 572; satsol 360; psyoptimal 116; gato-os about 100; popoto 45; cuttlefish 12) | about 3,450 | `memory/` over popoto on Postgres, milestone 6 | Import task after memory exists (G8). Not needed on day one |
+| Memory (human-ingested and extracted facts, by project: valor 1,454; company 783; cyndra 572; satsol 360; psyoptimal 116; gato-os about 100; popoto 45; cuttlefish 12) | about 3,450 | `memory/` over popoto on Postgres, which takes records from the ledger only | An import task (G8) reads the JSON export; nothing imports it yet. Not needed on day one |
 | KnowledgeDocument and DocumentChunk (indexed work-vault notes) | 758 documents, 4,646 chunks | None. The new system reads files from the workspace | None. The `~/work-vault` folders stay where they are |
 | RefusalMemory, GenMemory, Link, Chat, Room | about 6,000 | None | Left behind |
 | TelegramMessage | 1,161 | None. The ledger records messages from the first one the new bridge receives | Left behind; see Telegram history below |
@@ -380,11 +380,11 @@ the new bridge never receives old backlog, and disable the old email bridge
 first.
 
 **G8. Memory and upkeep jobs.** About 3,450 old Memory records have no
-destination until milestone 6. Branch cleanup, disk-space warning, and a
+destination: `memory/` takes records only from the ledger (`python -m core memory ingest`). Branch cleanup, disk-space warning, and a
 health digest have no routine. Recommendation: before the old Redis is
 stopped, export every Memory record to JSON in an archive folder, read only
 (an import task over popoto's Redis backend; no live write). Import by
-project after milestone 6, starting with `valor` and `company` (about 2,200).
+project once an import task exists, starting with `valor` and `company` (about 2,200).
 Do not block cutover on it. For upkeep, add nothing; add a routine when an
 incident names the need.
 
@@ -425,7 +425,7 @@ the deploy branch.
 always Tom's. Assumed: Tom grants all four in one sitting at cutover.
 
 **Q3. Is the operator group "Valor rebuild" the permanent operator chat?**
-Assumed: yes. Notices and approvals keep going there; Tom's DM is added as an
+Assumed: yes. Notices keep going there; Tom's DM is added as an
 ordinary listed chat (G2).
 
 ## 10. Day-one checklist, in the order the data needs it

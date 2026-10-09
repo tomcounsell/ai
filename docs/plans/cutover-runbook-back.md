@@ -26,10 +26,10 @@ for R in "https://github.com/tomcounsell/ai.git main" "https://github.com/tomcou
          "https://github.com/yudame/psyoptimal.git main" "https://github.com/yudame/cuttlefish.git main"; do
   $PY -m core merge-target remove $R --note "go back" --by valor; done
 $PY -m core merge-target list
-$SQL "select distinct task_id from events where at > now() - interval '1 day' and task_id not in ('telegram','email','local') and task_id not like 'routine%'"
+$SQL "select distinct task_id from events where type = 'task.started' and task_id not in (select task_id from events where type = 'task.stopped')"
 ```
 
-Check: the list is empty. (If the cuttlefish grant names another branch, use
+Check: the list prints `no merge targets`. (If the cuttlefish grant names another branch, use
 that branch.) For each task id printed, `$PY -m core status TASK_ID`; every
 one not `merged` or `stopped` is stopped with `$PY -m core stop TASK_ID
 --reason "go back"`. Then stop the kernel, the bridges, and the routines:
@@ -78,8 +78,9 @@ old dedup (the old email bridge was never loaded on the Cowboy).
 
 `scripts/cutover_goback_dedup.py` is go-back only. It reads `chat_id`,
 `message_id`, `sent_at` lines on stdin and calls the two old functions for
-each, oldest first, with the old interpreter. The lines come from a
-read-only query on the new ledger:
+each, oldest first, with the old interpreter, then reads each id back, because the old functions log
+a Redis failure and carry on. The lines come from a read-only query on the
+new ledger:
 
 ```
 $SQL "select payload->>'chat_id', payload->>'message_id', payload->>'sent_at' from events where type='message.received' and task_id='telegram' and at >= '$(cat $CUT/cutover-at.txt)' order by id" \
@@ -88,8 +89,8 @@ wc -l < $CUT/goback-ids.tsv
 cd /tmp && PYTHONDONTWRITEBYTECODE=1 $OLDPY -I ~/src/valor-rebuild/scripts/cutover_goback_dedup.py < $CUT/goback-ids.tsv; cd ~/src/valor-rebuild
 ```
 
-Check: the script prints `recorded N messages` with N equal to the line
-count above. Spot check one id with the old code: `cd ~/src/ai &&
+Check: the script prints `recorded N messages, N read back` with N equal to
+the line count above, and exits 0 (it exits 1 when a read-back fails). Spot check one id with the old code: `cd ~/src/ai &&
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c "import asyncio; from
 bridge.dedup import is_duplicate_message as d; print(asyncio.run(d(CHAT,
 ID)))"` prints `True` (substitute one chat and id from the file).
@@ -138,25 +139,18 @@ forward, and the new bridge needs them when it returns.
    since. List them:
 
    ```
-   $SQL "select n.id, n.task_id, left(n.payload->>'text',60) from events n where n.type='notice.requested' and not exists (select 1 from events s where s.type='notice.sent' and s.payload->>'notice_id' = n.payload->>'notice_id') order by n.id"
+   $SQL "select n.id, n.task_id, n.payload->>'notice_id', left(replace(n.payload->>'text', chr(10), ' '),60) from events n where n.type='notice.requested' and not exists (select 1 from events s where s.type='notice.sent' and s.payload->>'notice_id' = n.payload->>'notice_id') order by n.id"
    ```
 
    A notice still wanted stays and goes out. A stale one is closed with the
-   row the bridge itself writes, with nothing sent:
+   row the bridge itself writes, with nothing sent (`TASK_ID` and
+   `NOTICE_ID` come from the listing):
 
    ```
-   $PY - <<'PYEOF'
-   import asyncio
-   from core import db, ledger
-   async def main():
-       async with await db.connect() as c:
-           await ledger.append(c, "TASK_ID", "notice.sent", {"notice_id": "NOTICE_ID", "sent": []})
-   asyncio.run(main())
-   PYEOF
+   PYTHONPATH=. $PY scripts/cutover_close_notice.py TASK_ID NOTICE_ID
    ```
 
-   (`TASK_ID` and `NOTICE_ID` come from the listing; the notice id is the
-   `notice_id` in the row's payload.)
+   It prints `closed NOTICE_ID`, and the listing no longer shows the notice.
 2. Run step 5 again, since the old bridge handled messages in the meantime.
 3. Grant the four merge targets again (Tom's item 2), enable the kernel,
    routines, and bridges as in steps 8 and 9, and write a new
