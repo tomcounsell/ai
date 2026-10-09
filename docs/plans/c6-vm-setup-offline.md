@@ -133,3 +133,7 @@ None.
   four (three in `test_ports.py`, one in `test_targets.py` on "No space
   left on device") pass alone: 4 passed in 3.78 s. Ruff check and format
   clean.
+- Rebased onto `daee94e81`: `test_ports.py`, `test_targets.py` and
+  `test_container.py` (not container) 50 passed; both parametrizations of
+  `test_a_popoto_shaped_spec_installs_offline_in_the_vm` 2 passed in
+  402.73 s.
