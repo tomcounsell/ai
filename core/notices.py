@@ -222,7 +222,7 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
         text = "\n".join(lines)
     else:
         body = payload.get("text") or payload.get("subject") or payload.get("body") or ""
-        to = ", ".join(payload.get("to") or []) or effect.get("target")
+        to = ", ".join([*(payload.get("to") or []), *(payload.get("cc") or [])]) or effect.get("target")
         if kind == "email.send" and payload.get("reply_to"):
             to = f"all of {payload['reply_to']}"
         files = [Path(f.get("path", "")).name for f in payload.get("files") or []]

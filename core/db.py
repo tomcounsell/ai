@@ -131,7 +131,8 @@ HELD_REASON = "held for an approval the kernel no longer takes; request it again
 def _refuse_held(conn: psycopg.Connection) -> int:
     """One `effect.refused`, `at: migrate`, for each `effect.held` with no
     intent, outcome, or refusal and no `release.requested` naming a bridge
-    `owner` (a bridge's outbox releases that one). It carries the held row's
+    `owner` (a bridge's outbox releases that one; a kernel-owned release
+    is one the kernel no longer performs, so that row is refused). It carries the held row's
     action, so a refused merge is still the task's merge effect and
     `verdicts.ensure_merge` requests it again. Each is written under its
     task's lock, the selector read again inside it, so a second run writes
@@ -141,7 +142,7 @@ def _refuse_held(conn: psycopg.Connection) -> int:
         "SELECT 1 FROM events e WHERE e.payload->>'effect_id' = h.payload->>'effect_id' "
         "AND e.type IN ('effect.intent', 'effect.outcome', 'effect.refused')) AND NOT EXISTS ("
         "SELECT 1 FROM events r WHERE r.type = 'release.requested' "
-        "AND r.payload->>'effect_id' = h.payload->>'effect_id' AND r.payload->>'owner' IS NOT NULL) "
+        "AND r.payload->>'effect_id' = h.payload->>'effect_id' AND r.payload->>'owner' <> 'kernel') "
         "ORDER BY h.id"
     )
     written = 0

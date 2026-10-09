@@ -309,6 +309,8 @@ EVERY_TYPE = [
     ("effect.held", {"effect_id": "e3", "idempotency_key": "k3", "action_type": "merge", "payload": {}}),
     ("effect.held", {"effect_id": "e4", "idempotency_key": "k4", "action_type": "telegram.send_message"}),
     ("release.requested", {"effect_id": "e4", "approval_id": "a3", "owner": "telegram"}),
+    ("effect.held", {"effect_id": "e5", "idempotency_key": "k5", "action_type": "outbox_send"}),
+    ("release.requested", {"effect_id": "e5", "approval_id": "a4", "owner": "kernel"}),
     (
         "approval.granted",
         {"approval_id": "a1", "effect_id": "e1", "payload_sha256": "s", "note": "ok", "by": "tom"},
@@ -372,7 +374,8 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
                 "SELECT payload->>'effect_id', payload->>'reason', payload->>'action_type' FROM events "
                 "WHERE type = 'effect.refused' AND payload->>'at' = 'migrate'"
             ).fetchall()
-        assert refused == [("e3", db.HELD_REASON, "merge")]  # e1 went on, e4 is its bridge's
+        # e1 went on, e4 is its bridge's; e5's release was the kernel's, which never came
+        assert refused == [("e3", db.HELD_REASON, "merge"), ("e5", db.HELD_REASON, "outbox_send")]
         again = _snapshot(database)["events"]
         _migrate_with_change(database, tmp_path)
         assert _snapshot(database)["events"] == again

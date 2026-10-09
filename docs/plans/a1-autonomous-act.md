@@ -595,3 +595,5 @@ or failed merge stands per payload and grant count, a performer's config
 refusal included; `adds_governance` rides on the intent row; a refused
 release owes no notice; tests stop a task whose released sends no bridge
 of a later test should send.
+Patch, round 1: migration refuses a kernel-owned held release too; a send's
+report names `to` and `cc` together.

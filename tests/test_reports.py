@@ -142,3 +142,21 @@ def test_a_merge_reports_with_a_feedback_line_and_a_replay_merge_does_not(dsn, o
     assert made is not None and none is None
     assert f"merged {'a' * 12} into main" in notice["text"]
     assert notice["text"].endswith("Reply to this message to give feedback.\n\n" + notices.tag(made))
+
+
+def test_an_email_report_names_who_was_on_cc(dsn, op):
+    email = {
+        "action_type": "email.send",
+        "effect_class": "act",
+        "target": "ann@example.com",
+        "payload": {"to": ["ann@example.com"], "cc": ["bob@example.com"], "subject": "s", "body": "b"},
+    }
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
+            await notices.report(conn, task, {**email, "effect_id": uuid.uuid4().hex[:12]}, {})
+        (notice,) = await reports(dsn, task)
+        return notice
+
+    assert "sent email.send to ann@example.com, bob@example.com:" in run(go())["text"]
