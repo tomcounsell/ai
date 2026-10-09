@@ -611,3 +611,16 @@ Run 2026-10-09 on the resident kernel and the real ledger, popoto at base e51903
 - **Review pass missed a contract violation.** At candidate 9f62a4f780c2 the review (ledger row 2755, seat `reviewer`, no VM suite behind it) passed `src/popoto/models/query.py` where `__len__` (line 1926) answers from the snapshot that `_materialize` (lines 1802 to 1806) returns whenever `_result_cache` is set. A for loop parks it through `__iter__` (line 1920) and `all()` (line 1799), so a later bare `len()` read stale after writes. `__getitem__`, `__bool__` and `__contains__` read the same snapshot. Tom's contract says a bare `len()` still executes and re-iterating re-queries. The candidate's doc said "Database writes do not refresh that snapshot". This is evidence for the paired reviews.
 - **Patch round.** Tom's recorded review of a first fix went in verbatim as feedback (role-played). The patch (candidate d79ab98635fa) removes the persistent cache; only `list(builder)` reuses one hydration through its length hint. The test check passes at it. The review step then failed because the VM deps image was no longer held; the task waits on the kernel.
 - **Final state.** After the kernel restarted, review passed at d79ab98635fa (row 2908). The reviewer ran the 40 unit tests itself, because the kernel's own run has no per-test results (uv sync failed at base and head) and Redis was unreachable from its checkout. Docs was recorded `no_change` by hand. The merge then ran without a release (effect bc63ccc24b59, 0 grants) into the task's local origin, so the task is merged. Total spend $2.8914.
+
+## Rollout 3: paired reviews on #633
+
+Run 2026-10-10 on the real ledger, task f917b77bfdd3, through a driver outside the repo that calls `review_runner` at each seat. Each candidate had one VM `verify.ran` that both seats read (C6's dependency key differed from the earlier digest, so the first seat reran the VM). The Claude Code seat ran as the model id `claude-opus-5-5`, the `reviewer` seat's own harness and model, because the registered seat name on a merged task does nothing. Both results are `review.compared` rows and move nothing.
+
+| Candidate | VM suite | `reviewer` (claude-opus-5-5) | `reviewer_openai` (gpt-6.1-sol) |
+| --- | --- | --- | --- |
+| d79ab98635fa (patched) | 3394 passed, 17 errored as at base | pass, $0.4797 | pass, $0.1208 |
+| 9f62a4f780c2 (original) | 3369 passed, 17 errored as at base | changes, $0.3633 | pass, $0.1099 |
+
+On the original candidate, `reviewer` reproduced the stale `len()` (a for loop saw 3 rows, the database held 4, `len()` said 3, and the empty case said 0 where 1 was fresh) and called the snapshot documentation a changed contract. `reviewer_openai` described the same snapshot as the plan's deliberate semantics and passed it. The earlier registered review of that candidate (row 2755) also passed it.
+
+Both seats had Tom's recorded review of the stale `len()` in the task's feedback by the time they ran; the original review did not. The pair therefore shows one seat catching it and one not, given that feedback, not what either would catch without it. Total spend for the four reviews: $1.0737.
