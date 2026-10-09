@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-3-routines-record
 type: plan
-status: built
+status: merged (record of a merged task; see m4-3-routines.md)
 ---
 
 # 4.3 Routines and the status page: record

@@ -533,8 +533,9 @@ leg for images is built when the first judgement site needs images.
 
 ## Milestone 6: memory
 
-Self-built. Stakes: stored data, critique 2 and review 2. Starts when
-popoto ships its Postgres backend (popoto #631).
+Self-built. Stakes: stored data, critique 2 and review 2. Built on
+popoto 1.10.0's Postgres backend (popoto #759); plan in
+[b1-memory.md](b1-memory.md).
 
 **Goal.** Valor carries what it learned about Tom's preferences across
 tasks (Mission item 5; Evidence "Tom's feedback, both directions").
@@ -582,15 +583,15 @@ Tom can overturn any of these; each is reversible.
 - Polls are dropped from the Telegram bridge, per Tom's ruling on `main`
   (#3550).
 - The inbound Telegram record carries the forum topic id.
+- The rebuild runs on Valor's Mac, where the old system also runs.
+- The answer keys for cuttlefish #646, popoto #191, and popoto #188 stand
+  as written ([m1-5-emulator-records.md](m1-5-emulator-records.md)).
 - The old system's spend on the replayed PRs is not needed: every
   milestone's evidence compares against the bare baseline and the emulator,
   not against the old system's cost.
 
 ## Open items
 
-- Which of Valor's Macs hosts the rebuild from milestone 2.
-- Tom's confirmation of the answer keys for cuttlefish #646, popoto #191,
-  and popoto #188 (needed in 1.5).
 - Skill system requirements (before `skills/` grows past `skills/sdlc/`).
 
 ## Tom's feedback

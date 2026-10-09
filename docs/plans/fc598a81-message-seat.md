@@ -2,7 +2,7 @@
 tracking: none
 slug: fc598a81-message-seat
 type: plan
-status: planned
+status: merged (81b4d2864, patch 74489521a)
 critique_rounds: 1
 review_rounds: 1
 ---

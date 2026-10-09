@@ -2,7 +2,7 @@
 tracking: none
 slug: 13fe23bd-local-markdown
 type: plan
-status: planned
+status: merged (327167d5e)
 critique_rounds: 1
 review_rounds: 2
 ---

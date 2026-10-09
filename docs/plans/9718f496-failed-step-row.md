@@ -1,3 +1,10 @@
+---
+tracking: none
+slug: 9718f496-failed-step-row
+type: plan
+status: merged (a328d0a16)
+---
+
 # Plan: a failed step leaves a row, and a verdict after prose is read
 
 Task 9718f496dee7. A kernel bug fix. Revised after critique round 1.
