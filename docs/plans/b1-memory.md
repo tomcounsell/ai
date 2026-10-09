@@ -219,8 +219,10 @@ bridges. Every call into `memory/` runs in `asyncio.to_thread`.
 - **`ingest(conn)`** reads, as `valor_kernel`, the ledger rows memory has
   not taken: rows of type `task.started`, `question.answered`,
   `feedback.given`, `correction.recorded`, and `turn.ended`, whose ids are
-  not in memory's `Ingested` set (read through `memory/`). A calibration
-  task's `task.started` is marked taken with no record: it runs no turn. It takes
+  not in memory's `Ingested` set (read through `memory/`). A task's rows
+  are taken once it has a `turn.started`, so its project is settled (a
+  task started by message gets its project when provisioned); a calibration
+  task runs no turn and is never taken. It takes
   transcripts through `transcripts.joined` for each `turn.ended` that names
   them. Work is found by set difference, not by a high-water mark, so a
   row that commits after a higher id was taken is still taken.
