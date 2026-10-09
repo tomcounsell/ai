@@ -2,7 +2,7 @@
 tracking: none
 slug: c9-feedback-merge
 type: plan
-status: building
+status: built
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -72,13 +72,16 @@ exception is lost.
 **Change.** `step` records a failed status read or stand-in in the run's
 log as `{"step": "stand-in failed", "error": ...}` and pauses, as a failed
 `core run` does; the next invocation resumes. The runner appends a failed
-driver's exit code and output tail to the run's result file
-(`driver_failures`) at once.
+driver's exit code and output to `results/<run>.driver.log`, beside the
+run's result file, at once. A separate file, because a driver that dies
+before its first save has no result file, and the driver resumes from a
+result file only when it holds a whole run.
 
-**Test.** A stand-in that raises leaves a log row and a paused result; a
-failed driver's tail is in the result file.
+**Test.** A status read or stand-in that raises leaves a log row and a
+paused result; a failed driver's output is in its `.driver.log` while the
+sweep is paused.
 
-**Docs.** `docs/emulator.md`.
+**Docs.** `docs/emulator.md`, `docs/routines.md`.
 
 ## Questions for Tom
 
