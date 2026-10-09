@@ -162,11 +162,12 @@ starts from change.
 `effect_text` go. When an `act` effect's outcome is `done` (written by
 `_perform` or `reconcile`, both through `_outcome`), the same transaction
 requests one notice, kind `report`, `about_key` `report:<effect_id>`,
-saying what left in kernel words: a merge (task, branch, head, the
-delivery's summary line, each check's outcome: `delivered_text`), a push
-(branch and commit), a send (channel, recipients or chat, and the text or
-subject). A send whose target is the operator's own chat on the operator
-channel gets no report: the message is what reached Tom.
+saying what left in kernel words, for a merge (task, branch, head, the
+delivery's summary line, each check's outcome: `delivered_text`) and for a
+send (channel, recipients or chat, and the text or subject). A push gets
+no report: it is a step inside the task. A send whose target is the
+operator's own chat on the operator channel gets no report: the message is
+what reached Tom.
 
 The `delivered` notice is owed in `merge` only when the delivery will not
 merge by itself: the delivery did not pass, a governance instance awaits a
@@ -251,13 +252,14 @@ reported refused to the turn's next prompt. `migrate` also drops
 `events_approval_used_once`, which guards a field no row carries. Rows
 already written (`approval.granted`, old `release.requested`) stay; the
 ledger is append-only. The rollout record lists how many rows the
-migration refused.
+migration refused. The real ledger holds one such row: a merge to `main`
+of task 75c0902b6e25 on a local test origin (f10a2751760c).
 
 ## Done, as evidence
 
 1. A test task at ceiling `act` requests a `push_branch`; the ledger shows
    `effect.intent` then `effect.outcome` `done`, no `effect.held`, no
-   `approval.granted`, and one `report` notice.
+   `approval.granted`, and no `report` notice.
 2. A task in `merge` with a passing delivery is merged by one `core run`:
    intent with `landed`, outcome `done`, state `merged`, one `report`
    notice carrying the delivery, no `delivered` notice.
@@ -319,11 +321,12 @@ New or sharpened, the non-obvious cases:
   merge with that term named and writes no intent; term 4's git facts are
   read in the same transaction that writes the intent (a docs head that
   moved is refused).
-- **Reports.** A done `act` writes one `report` notice; a failed or
-  unknown one writes none; a reconciled `done` writes one; a send to the
-  operator chat writes none; a `propose` effect writes none. A reply to a
-  merge's report on a merged task binds `feedback` and sends the task to
-  `patch`; a reply to a push's report steers.
+- **Reports.** A done merge or send writes one `report` notice; a failed
+  or unknown one writes none; a reconciled `done` writes one; a done push
+  writes none; a send to the operator chat writes none; a `propose` effect
+  writes none. A reply to a merge's report on a merged task binds
+  `feedback` and sends the task to `patch`; a reply to a send's report on
+  a running task steers.
 - **Delivered notice.** Owed for a delivery that did not pass, one
   awaiting a grant, and a refused merge; not owed when the merge is done.
 - **Migration.** As in Done item 7, plus: a held send with a bridge-owned
@@ -382,12 +385,13 @@ Ports 6430-6439, test database `valor_rebuild_test_a1build`.
 
 ## Questions for Tom
 
-1. Which effects get a report? Assumed: every `act` effect that left
-   (merges, pushes, sends), except a message sent to Tom's own chat, which
-   is its own report. If pushes to a task's branch are too many, the
-   report could cover merges and sends only.
+None.
 
 ## Decided by default
+
+- Reports go for a merge and for a send to anyone other than Tom's own
+  chat, not for a push: the ruling is "a report on what was done", and a
+  push per patch round is a step inside the task, noise to Tom.
 
 - `effect.held` stays the row type for a declared send, now always paired
   with `release.requested`: renaming it would change every bridge and
@@ -397,8 +401,11 @@ Ports 6430-6439, test database `valor_rebuild_test_a1build`.
   the task's ledger.
 - `core start` defaults to `act`, reading "any channel" to include the
   command line.
-- Orphan held effects are refused rather than performed: a held send may
-  be days old, and a held merge is requested again fresh, with the
-  predicate checked on the current head.
-- Feedback by reply to a merge's report: the only way Tom answers a merged
-  delivery once the merge no longer waits in `merge`.
+- Orphan held effects are refused rather than performed: performing an
+  old hold would send stale work; the refusal reaches the task's next
+  turn, and a held merge is requested again fresh, with the predicate
+  checked on the current head.
+- Feedback by reply to a merge's report: it feeds the feedback stream
+  (Mission evidence "Tom's feedback, both directions"), and it is the only
+  way Tom answers a merged delivery once the merge no longer waits in
+  `merge`.
