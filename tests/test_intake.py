@@ -208,10 +208,14 @@ def test_feedback_on_the_delivered_notice(dsn, op, tmp_path):
         assert f.state is State.MERGE and f.merge_effect["state"] == "failed"
         await owed(dsn, task)
         target = await mark_sent(dsn, task, notices._delivered_owed(f, written)[0])
-        return task, await say(dsn, msg("rename the file", reply_to=target))
+        steered = await say(dsn, msg("one more thing", reply_to=await a_notice(dsn, task)))
+        said = await binding_notices(dsn, steered["received_id"])
+        return task, await say(dsn, msg("rename the file", reply_to=target)), steered, said
 
-    task, bound = run(go())
+    task, bound, steered, said = run(go())
     assert bound["as"] == "feedback" and bound["task_id"] == task
+    # A steer while the delivered notice stands points Tom at it.
+    assert steered["as"] == "steer" and any("reply to the delivered notice" in n["text"] for n in said)
 
 
 def test_reply_to_bridge_send_binds(dsn, op):
@@ -245,6 +249,9 @@ async def merged_report(dsn, ws) -> tuple[str, str]:
     await scripted.checks(dsn, task)
     f = machine.fold(await rows(dsn, task))
     assert f.state is State.MERGED
+    await owed(dsn, task)
+    # A delivery that merged by itself is told once, by the merge's report.
+    assert not [n for n in await of_type(dsn, "notice.requested", kind="delivered") if n["task_id"] == task]
     return task, await mark_sent(dsn, task, f"report:{f.merge_effect['effect_id']}")
 
 
@@ -487,6 +494,7 @@ def test_start_rule(dsn, op, tmp_path, monkeypatch):
                                 ("unknown_reply", unknown_reply)):  # fmt: skip
                 brief = await tasks.brief(conn, bound["task_id"])
                 out[name] = (bound["as"], brief.project)
+                assert brief.max_effect_class == "act"  # a task Tom starts from any channel runs at act
                 seats[name] = (brief.harness_name, brief.model)
         return out, seats, empty
 
