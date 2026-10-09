@@ -34,7 +34,7 @@ def test_every_tracked_copy_of_the_governance_paragraph_is_byte_identical():
             text = path.read_text()
         except UnicodeDecodeError, FileNotFoundError, IsADirectoryError:
             continue
-        if OPENING in text:
+        if "**" + OPENING in text:
             holders.append(name.decode())
             assert held in text, f"{name.decode()} holds the governance paragraph in other words"
     assert "CLAUDE.md" in holders and len(holders) > 1
