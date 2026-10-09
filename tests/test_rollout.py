@@ -858,20 +858,25 @@ def test_a_refused_config_fails_on_the_kernels_merge_not_the_newest_of_any_proje
     assert rolls(other) == [] and typed(other, "notice.requested", kind="rollout") == []
 
 
-def test_a_refused_config_with_no_merge_of_its_own_writes_no_row(fresh, tmp_path):
+def test_a_refused_config_with_no_merge_of_its_own_writes_no_row(fresh, tmp_path, monkeypatch):
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
     scripted.git(repo.co, "config", "core.hooksPath", str(tmp_path / "hooks"))
+    judged = []
+    judge = rollout.judge
+    monkeypatch.setattr(rollout, "judge", lambda *a: judged.append(1) or judge(*a))
 
     async def go():
         theirs = await new_task(fresh)
         await landed(fresh, theirs, "/somewhere/else.git", sha, branch="feature")
         k = kernel(fresh, repo, theirs)
         await tick(k, fresh)
+        await tick(k, fresh)  # a wake with nothing new runs no git
         return theirs
 
     other = run(rows(fresh, run(go())))
     assert rolls(other) == [] and typed(other, "notice.requested", kind="rollout") == []
+    assert len(judged) == 1
 
 
 def test_the_fetch_carries_the_credential_only_to_a_remote_off_the_machine(tmp_path, monkeypatch):

@@ -463,6 +463,7 @@ class Kernel:
             if ours:
                 await self._failed(conn, ours[-1], ["fetch"], "fetch", str(exc))
             else:
+                self.waiting.update(m.effect_id for m in merges)  # tried again on the next tick
                 _log(f"the kernel's checkout cannot be read; no merge rolled: {exc}")
             return
         self.judged.update(judged)
