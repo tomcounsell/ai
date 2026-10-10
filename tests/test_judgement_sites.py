@@ -532,9 +532,9 @@ def test_lines_whose_text_starts_with_two_signs_are_lines_not_file_headers(tmp_p
     assert h.added == ("++i",) and h.removed == ("--flag",)
 
 
-def test_a_hunk_with_added_lines_keeps_its_id_over_path_context_and_added_lines(tmp_path):
+def test_a_hunk_that_only_adds_lines_keeps_its_id_over_path_context_and_added_lines(tmp_path):
     """The id an instance and its grant are recorded under does not move
-    for a hunk with added lines (docs/sdlc-state-machine.md)."""
+    for a hunk that only adds lines (docs/sdlc-state-machine.md)."""
     import hashlib
 
     from core import git as git_
@@ -542,11 +542,33 @@ def test_a_hunk_with_added_lines_keeps_its_id_over_path_context_and_added_lines(
     ws, _ = scripted.workspace(tmp_path)
     commit(ws, "core/merge.py", MERGE, "base")
     older = git(ws, "rev-parse", "HEAD")
-    commit(ws, "core/merge.py", MERGE.replace("require_review", "require_two_reviews"), "changed")
+    commit(ws, "core/merge.py", MERGE.replace("    return", "    log(change)\n    return"), "added")
     (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/merge.py")
-    assert h.removed == ("    require_review(change)",)
+    assert h.added and h.removed == ()
     body = json.dumps([h.path, h.context, list(h.added)], separators=(",", ":"))
     assert h.id() == hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def test_a_mixed_hunk_id_digests_its_removed_lines(tmp_path):
+    """Two hunks that add the same line in the same context but remove
+    different lines get distinct ids, so a grant on one does not cover the
+    other (docs/plans/c13-removal-hunks.md)."""
+    from core import git as git_
+
+    body = "def steps(change):\n" + "".join(f"    step_{i}(change)\n" for i in range(30))
+
+    def mixed(name: str, removed: str) -> git_.Hunk:
+        ws, _ = scripted.workspace(tmp_path / name)
+        commit(ws, "core/steps.py", body, "base")
+        older = git(ws, "rev-parse", "HEAD")
+        commit(ws, "core/steps.py", body.replace(removed, "    # every step runs\n"), "mixed")
+        (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/steps.py")
+        return h
+
+    exemption = mixed("a", "    step_20(change)\n")
+    other = mixed("b", "    step_21(change)\n")
+    assert exemption.added == other.added and exemption.context == other.context == "def steps(change):"
+    assert exemption.removed != other.removed and exemption.id() != other.id()
 
 
 @pytest.mark.macos

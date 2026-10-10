@@ -47,11 +47,14 @@ removal is the case this fixes: the removal is now judged.
 
 ## The fix
 
-- `git.Hunk` carries its removed lines. A hunk with added lines keeps the
-  id it had (path, function context, added lines), so every recorded
-  instance id and grant stands. A hunk with no added lines has an id over
-  its path, function context and removed lines, so two removals in one
-  function context get distinct ids.
+- `git.Hunk` carries its removed lines. A hunk that only adds lines keeps
+  the id it had (path, function context, added lines), so its recorded
+  instance id and grant stand. A hunk with removed lines, mixed or
+  removal-only, has an id over its path, function context, added lines
+  and removed lines, so two hunks that add the same lines but remove
+  different ones, or two removals in one function context, get distinct
+  ids. A grant on a mixed hunk recorded before this change no longer
+  matches, and that hunk is asked again.
 - `git.hunk_at` returns the hunk whose new range holds the line, whether it
   adds or only removes lines. A removal-only hunk's new range is its
   context lines (`+0,0` for a deleted or emptied file, read at line 0). A
@@ -113,7 +116,8 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
   granted.
 - A removal-only hunk that deletes an approval step is asked, and its
   proceed answer makes no instance.
-- An added hunk's id is unchanged.
+- A hunk that only adds lines keeps its id; a mixed hunk's id digests its
+  removed lines.
 - An exemption removed with a comment or a log line added in its place
   ends caution at the site, and a file replaced by a symlink reads no
   header as a line.
@@ -146,8 +150,7 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
   - The build's question told the leg to read a mixed hunk's added lines
     only, so an exemption removed and a comment or a log line added in its
     place got Jev proceed and the site proceeded. The question now judges
-    every hunk's removed lines; ids of hunks with added lines are
-    unchanged. Measured on the review's 4 probes (q1 to q3 label `true`,
+    every hunk's removed lines. Measured on the review's 4 probes (q1 to q3 label `true`,
     q4 the removed `require_review`, label `false`); the open-weight leg
     answered caution 0.05 on q1 to q3 and proceed 1.0 on q4 in every run:
 
@@ -179,6 +182,16 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
     so both hunks share a function context and get distinct ids. The id
     sentence in `docs/sdlc-state-machine.md` names removed lines; long
     lines are rewrapped.
+  - From the test report (`~/src/valor-build-notes/test-c13.md`, G1): a
+    mixed hunk's id ignored its removed lines, so a grant on one covered a
+    hunk with the same context and added lines that removed something
+    else. A hunk with removed lines now digests them into its id; a test
+    pins two such hunks with distinct ids, and one that only adds lines
+    keeps the base formula. The report's id probe (`test-c13-ids.py`,
+    the last 400 non-merge commits) on this head: 1376 hunks that only
+    add lines keep their base ids and 0 differ; 2900 mixed hunks get new
+    ids; 146 removal-only hunks are new. Identical hunks in one function
+    context of one file share an id, as identical added lines always did.
 
 ## Questions for Tom
 

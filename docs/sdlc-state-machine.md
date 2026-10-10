@@ -558,11 +558,11 @@ merge, and its `push_branch` cannot target the target branch.
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the
 candidate's real diff and refuses one it does not find. An instance's id
-digests its path, the hunk header's function context, and its added lines,
-or its removed lines in a hunk that only removes lines, without line
-numbers, so the same hunk on a rerun or a later candidate keeps its id and
-its grant; a changed, moved, or split hunk needs a new tap, and identical
-added lines, or identical removed lines in removal-only hunks, in one
+digests its path, the hunk header's function context, its added lines,
+and its removed lines when it has any, without line numbers, so the same
+hunk on a rerun or a later candidate keeps its id and its grant; a hunk
+that removes other lines, or a changed, moved, or split hunk, needs a new
+tap, and identical hunks (the same added and removed lines) in one
 function context of one file share an id. After the merge the task is `merged`; a defect found in use comes back as
 `feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects").
 After a merge, `python -m core status` reads what came after it

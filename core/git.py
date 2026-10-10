@@ -735,11 +735,12 @@ class Hunk:
     removed: tuple[str, ...] = ()
 
     def id(self) -> str:
-        """The instance id: the path, the hunk header's function context, and
-        the added lines, without line numbers, so the same hunk on a later
-        candidate keeps its id and a changed one gets a new id. A hunk that
-        only removes lines digests its removed lines in their place."""
-        lines = [list(self.added)] if self.added else [[], list(self.removed)]
+        """The instance id: the path, the hunk header's function context, the
+        added lines, and the removed lines when there are any, without line
+        numbers, so the same hunk on a later candidate keeps its id and a
+        changed one gets a new id. A hunk that only adds lines digests
+        [path, context, added]."""
+        lines = [list(self.added), list(self.removed)] if self.removed else [list(self.added)]
         body = json.dumps([self.path, self.context, *lines], separators=(",", ":"))
         return hashlib.sha256(body.encode()).hexdigest()[:16]
 
