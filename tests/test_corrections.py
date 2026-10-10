@@ -50,7 +50,11 @@ def test_a_fresh_migrate_holds_correction_one_the_restraint_paragraph(first):
     assert first["scope"] == "global" and first["source_class"] == "direct"
     assert first["text"] == RESTRAINT
     p = first["provenance"]
-    assert p["by"] == "tom" and p["via"] == "CLAUDE.md, seeded by migrate" and p["role_played"] is False
+    assert (
+        p["by"] == "tom"
+        and p["via"] == "persona/governance.md, seeded by migrate"
+        and p["role_played"] is False
+    )
 
 
 def test_migrating_again_adds_no_second_correction_one_and_the_next_is_two(dsn, first):
@@ -171,16 +175,29 @@ def test_the_cli_records_and_lists_corrections(dsn, first):
     assert listed.index(RESTRAINT) < listed.index("Ask before widening scope.")
 
 
-def test_migrate_names_the_file_when_the_governance_paragraph_is_missing(tmp_path, monkeypatch):
-    source = tmp_path / "CLAUDE.md"
-    source.write_text("# CLAUDE.md\n\nNo paragraph here.\n")
+def test_a_missing_governance_source_halts_no_migrate_and_a_later_one_records_it(tmp_path, monkeypatch):
+    source = tmp_path / "governance.md"
+    source.write_text("## Governance\n\nNo paragraph here.\n")
     monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", source)
-    with pytest.raises(ValueError, match=f"{source} has no line starting"):
-        corrections.governance_paragraph()
+    assert corrections.governance_paragraph() is None
+    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", tmp_path / "absent.md")
+    assert corrections.governance_paragraph() is None
     database = f"{TEST_DB}_nogov_{os.getpid()}"
+
+    def numbers():
+        with psycopg.connect(settings.dsn(owner=True, database=database)) as conn:
+            rows = conn.execute(
+                "SELECT payload->>'number' FROM events WHERE task_id = %s AND type = 'correction.recorded'",
+                (corrections.STREAM,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     try:
-        with pytest.raises(ValueError, match="correction 1 is that paragraph"):
-            db.migrate(database, fresh=True)
+        db.migrate(database, fresh=True)
+        assert numbers() == []
+        monkeypatch.undo()
+        db.migrate(database)
+        assert numbers() == ["1"]
     finally:
         with psycopg.connect(settings.dsn(owner=True, database="postgres"), autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')

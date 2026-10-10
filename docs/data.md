@@ -457,7 +457,8 @@ REFERENCES.md sense.
 `python -m core migrate` (`core/db.py`, `migrate`) connects as the owner,
 creates `valor_kernel` and `valor_memory` if missing, creates the
 database if missing, applies `core/schema.sql`, records correction 1 (the
-governance paragraph, from `CLAUDE.md`) if the ledger has no correction 1,
+governance paragraph, from `persona/governance.md`, when that file holds
+it) if the ledger has no correction 1,
 and gives the schema `memory` and its tables to `valor_memory`; it then
 runs `secure-login` (below). Memory's backend connects as `valor_memory`;
 every other connection is `valor_kernel` (`core/settings.py`, `dsn`). Least privilege [11]: the role that runs the

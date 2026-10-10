@@ -28,16 +28,21 @@ STREAM = "corrections"
 SCOPES = ("global",)
 SOURCE_CLASSES = ("direct", "exemplar")
 
-# Correction 1 is the governance paragraph, which opens `CLAUDE.md`; a fresh
-# `migrate` records it from there (`core/db.py`).
-GOVERNANCE_SOURCE = Path(__file__).resolve().parent.parent / "CLAUDE.md"
+# Correction 1 is the governance paragraph, which the persona carries in
+# `persona/governance.md` of the kernel's own checkout; a fresh `migrate`
+# records it from there (`core/db.py`).
+GOVERNANCE_SOURCE = Path(__file__).resolve().parent.parent / "persona" / "governance.md"
 
 
-def governance_paragraph() -> str:
-    for line in GOVERNANCE_SOURCE.read_text().splitlines():
-        if line.startswith("**Governance"):
-            return line
-    raise ValueError(f"{GOVERNANCE_SOURCE} has no line starting **Governance; correction 1 is that paragraph")
+def governance_paragraph() -> str | None:
+    """The governance paragraph from `GOVERNANCE_SOURCE`, or None when the
+    file is unreadable or holds no line starting `**Governance`: the persona
+    still carries it into every turn, so nothing waits on correction 1."""
+    try:
+        lines = GOVERNANCE_SOURCE.read_text().splitlines()
+    except OSError:
+        return None
+    return next((line for line in lines if line.startswith("**Governance")), None)
 
 
 def payload(

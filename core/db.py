@@ -126,7 +126,12 @@ def verdict_constraint(
 
 def _seed_correction_one(conn: psycopg.Connection) -> None:
     """Correction 1, the governance paragraph, global and direct, unless the
-    ledger already holds a correction numbered 1."""
+    ledger already holds a correction numbered 1 or the persona's copy
+    cannot be read (`corrections.governance_paragraph`), which a later
+    `migrate` records."""
+    paragraph = corrections.governance_paragraph()
+    if paragraph is None:
+        return
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (corrections.STREAM,))
         found = conn.execute(
@@ -142,9 +147,9 @@ def _seed_correction_one(conn: psycopg.Connection) -> None:
                     Jsonb(
                         corrections.payload(
                             1,
-                            corrections.governance_paragraph(),
+                            paragraph,
                             by="tom",
-                            via="CLAUDE.md, seeded by migrate",
+                            via="persona/governance.md, seeded by migrate",
                         )
                     ),
                 ),
