@@ -138,7 +138,8 @@ def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
     assert [o["status"] for o in outs] == ["waiting", "failed", "no runner"]
     prompts = [x["prompt"] for x in scripted.turns(ws)]
     answered = "# Tom's answer\n\nMorning, Tom."
-    assert prompts[1] == answered and prompts[2] == answered  # sent again after the failed turn
+    assert prompts[1] == answered  # sent again after the failed turn, with why it failed
+    assert prompts[2].startswith(answered + "\n\n# The last try failed\n\n")
     question = outs[2]["state"]["attention"][0]
     assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
 

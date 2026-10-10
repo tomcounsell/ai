@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from core import broker, db, notices, tasks
+from core import broker, db, ledger, notices, tasks
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, of_type
 from tests.performers import OutboxAppend
@@ -122,29 +122,42 @@ def test_who_gets_a_report(dsn, op, effect, owed):
     assert (run(go()) is not None) == owed
 
 
-def test_a_merge_reports_with_a_feedback_line_and_a_replay_merge_does_not(dsn, op):
+def test_a_merge_reports_what_shipped_in_the_turns_note_and_a_replay_merge_does_not(dsn, op):
+    """The report names the request and the branch, carries the note the
+    delivering turn wrote above `---` in done.md and never the report under
+    it, and links the status page for the checks; no check verdicts."""
     merge = {
         "action_type": "merge",
         "effect_class": "act",
         "target": "origin",
         "payload": {"head_sha": "a" * 40, "target_branch": "main", "url": "/repo.git"},
     }
+    summary = "The greeting page now says hello.\n---\n## Delivered\nhello.py, 3 tests"
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="t", max_effect_class="act"))
+            task = await tasks.start(conn, tasks.Brief(instruction="Say hello\nmore", max_effect_class="act"))
+            async with conn.transaction():
+                await ledger.append(
+                    conn,
+                    task,
+                    "task.delivered",
+                    {"summary": summary, "verdicts": {"test": {"verdict": "pass"}}},
+                )
             replay = await tasks.start(
                 conn, tasks.Brief(instruction="t", max_effect_class="act", replay=True)
             )
             made = await notices.report(conn, task, {**merge, "effect_id": uuid.uuid4().hex[:12]}, {})
             none = await notices.report(conn, replay, {**merge, "effect_id": uuid.uuid4().hex[:12]}, {})
         (notice,) = await reports(dsn, task)
-        return made, none, notice
+        return task, made, none, notice
 
-    made, none, notice = run(go())
+    task, made, none, notice = run(go())
     assert made is not None and none is None
-    assert f"merged {'a' * 12} into main" in notice["text"]
-    assert notice["text"].endswith("Reply to this message to give feedback.\n\n" + notices.tag(made))
+    text = notice["text"]
+    assert text.startswith('On "Say hello": it is done and merged into main.')
+    assert "The greeting page now says hello." in text and "## Delivered" not in text
+    assert notices.report_link(task) in text and "test:" not in text and "verdict" not in text
 
 
 def test_an_email_report_names_who_was_on_cc(dsn, op):

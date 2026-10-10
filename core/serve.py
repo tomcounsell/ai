@@ -32,10 +32,14 @@ holds the machine's turn slot (`core/slot.py`), which `python -m core run`
 shares.
 
 A task is stepped again when it moved, or when a row it did not write
-lands on its stream (an answer, a steer, a stop, an effect's outcome); a
-step that ends anywhere else waits for such a row, so a failing turn is
-not retried in a loop. A step that answers `parked` (a merge whose facts
-git could not read, or whose push has no answer yet) parks the task.
+lands on its stream (an answer, a steer, a stop, an effect's outcome). A
+step that failed is stepped again by the kernel once `router.retry_due`
+says the delay after it has passed, and the task ends with a report at
+`router.STEP_TRIES` failures in a row. A step that answers `parked` (a
+merge whose facts git could not read, whose push has no answer yet, or
+whose try again is not due) parks the task. A provisioning that failed is
+tried again after `PROVISION_BACKOFF_S`, doubling, and at
+`PROVISION_TRIES` failures the task ends with a report.
 
 A job that cannot start its work (another process holds the task's
 services, or the job raises before the task's own rows record why) parks
@@ -66,6 +70,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -86,12 +91,15 @@ from core import (
     signals,
     spending,
     tasks,
+    verdicts,
     workspace,
 )
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
 
+PROVISION_TRIES = 3
+PROVISION_BACKOFF_S = 60.0
 HARNESS = {State.CLARIFY, State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 AT_ONCE = {State.JUDGE, State.MERGE}
 QUIET = ledger.QUIET
@@ -639,7 +647,7 @@ class Kernel:
         background, then the oldest."""
         rows = await ledger.read(conn, task_id)
         f = machine.fold(rows)
-        if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
+        if f.legacy or f.calibration or f.state in (State.MERGED, State.ENDED, State.STOPPED):
             await self.settle(task_id)
             return None
         latest = max((r["id"] for r in rows if r["type"] not in QUIET), default=0)
@@ -655,7 +663,9 @@ class Kernel:
             if _provision_due(rows):
                 self._start(task_id, self._provision(task_id, b.project.get("name")), latest)
             return None
-        if latest <= self.seen.get(task_id, 0) or f.state is State.WAITING:
+        if f.state is State.WAITING:
+            return None
+        if latest <= self.seen.get(task_id, 0) and not router.retry_due(rows):
             return None
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)
@@ -688,12 +698,14 @@ class Kernel:
 
     async def _provision(self, task_id: str, name: str | None) -> None:
         """Provision a task started by message, off the loop. A failure is a
-        `workspace.failed` row and a notice.
+        `workspace.failed` row, tried again when `_provision_due`; the one
+        that makes `PROVISION_TRIES` ends the task (`task.ended`, kind
+        `provision`), and Tom gets a report.
 
         Under `provision:<task>`, the lock the only writer of
         `workspace.provisioned` holds, the condition `_ready` scheduled this
         on is read again: a job that waited on the lock does nothing once the
-        task was stopped, provisioned, or failed with no steer since. A task
+        task was stopped, ended, provisioned, or failed with no try due. A task
         directory found then is a provisioning that died (a killed kernel):
         it is removed, with what it left running, and made again; its ports
         are free to choose again."""
@@ -703,7 +715,7 @@ class Kernel:
             try:
                 rows = await ledger.read(conn, task_id)
                 f = machine.fold(rows)
-                if f.legacy or f.calibration or f.state in (State.MERGED, State.STOPPED):
+                if f.legacy or f.calibration or f.state in (State.MERGED, State.ENDED, State.STOPPED):
                     return
                 b = await tasks.brief(conn, task_id)
                 if not b.project or b.workspace or not _provision_due(rows):
@@ -729,15 +741,10 @@ class Kernel:
                 except Exception as exc:  # noqa: BLE001  any failure is the task's to report, not the kernel's
                     async with conn.transaction():
                         await ledger.lock(conn, f"task:{task_id}")
-                        row = await ledger.append(conn, task_id, "workspace.failed", {"reason": str(exc)})
-                        await notices.request(
-                            conn,
-                            task_id,
-                            kind="workspace_failed",
-                            about_key=f"workspace-failed:{row}",
-                            text=f"Task {task_id}'s workspace could not be made: {exc}\n\n"
-                            "Reply to steer it and it is tried again, or reply `stop`.",
-                        )
+                        await ledger.append(conn, task_id, "workspace.failed", {"reason": str(exc)})
+                    tries = _provision_failures(await ledger.read(conn, task_id))
+                    if tries >= PROVISION_TRIES:
+                        await verdicts.end(conn, task_id, "provision", str(exc), tries=tries)
                     return
                 async with conn.transaction():
                     await ledger.append(
@@ -826,12 +833,31 @@ def _rollout_text(m: rollout.Merge, step: str, reason: str) -> str:
     return f"{head}: {step} failed: {reason}. It is tried again every {settings.serve_tick_s:g} seconds."
 
 
-def _provision_due(rows: list[dict[str, Any]]) -> bool:
-    """No provisioning failed, or Tom steered the task since the last did."""
-    failed = max((r["id"] for r in rows if r["type"] == "workspace.failed"), default=None)
-    if failed is None:
+def _provision_failures(rows: list[dict[str, Any]]) -> int:
+    """The provisionings that failed since Tom last steered the task or gave
+    feedback on it."""
+    count = 0
+    for r in reversed(rows):
+        if r["type"] in ("message.steered", "feedback.given"):
+            break
+        count += r["type"] == "workspace.failed"
+    return count
+
+
+def _provision_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
+    """No provisioning failed, or the delay after the last failure, doubling
+    from `PROVISION_BACKOFF_S`, has passed while fewer than
+    `PROVISION_TRIES` have failed. A steer or feedback starts the count
+    again."""
+    tries = _provision_failures(rows)
+    if tries == 0:
         return True
-    return any(r["type"] == "message.steered" and r["id"] > failed for r in rows)
+    if tries >= PROVISION_TRIES:
+        return False
+    last = next(r for r in reversed(rows) if r["type"] == "workspace.failed")
+    at = last.get("at")
+    now = now or datetime.now(UTC)
+    return at is None or now >= at + timedelta(seconds=PROVISION_BACKOFF_S * 2 ** (tries - 1))
 
 
 async def _listen(listener, wake: asyncio.Event) -> None:

@@ -45,16 +45,17 @@ directory and leave when requested; as a replay, it has no send performer,
 so a send it asks for is refused. Nothing is read from the turn's workdir,
 whose git config the turn can rewrite.
 
-A task in `merge` is read from its status, in this order: a delivery that
-did not pass ends the run `to tom`; a governance instance not granted, or
-a join of `governance_refused`, exits the driver to await Tom's grant; a
-refused or failed merge ends the run `to tom`; otherwise the task runs on.
-A merged task goes to the stand-in, whose accept or spent feedback rounds
-end the run `merged` and whose feedback runs the task on. A stopped task
-ends the run `stopped`.
+A task in `merge` is read from its status: a governance instance not
+granted, or a join of `governance_refused`, exits the driver to await
+Tom's grant; otherwise the task runs on, and the kernel tries a failed
+merge again itself. A merged task goes to the stand-in, whose accept or
+spent feedback rounds end the run `merged` and whose feedback runs the
+task on. A task Valor ended (it did not pass after its last round, or its
+merge cannot land) ends the run `ended`; a stopped task ends it
+`stopped`.
 
 Each answer of `core run` ends the step one way. `QUESTION`, `DELIVERED`,
-`STOPPED` and `MERGED` go back to the task's status. `ALREADY RUNNING`
+`STOPPED`, `MERGED` and `ENDED` go back to the task's status. `ALREADY RUNNING`
 (another run of the task holds its run lock) waits on that lock until it is
 free, then steps again. `NO RUNNER` (a check stage with no runner),
 `FAILED`, `LOCK LOST` and `LEGACY`, and any other answer, exit the driver with the outcome
@@ -101,7 +102,7 @@ from tests.emulator.stand_in import MODEL as STAND_IN_MODEL
 from tests.emulator.stand_in import stand_in
 
 # The answers of `core run` after which the next step reads the task's status.
-GOES_ON = ("QUESTION", "DELIVERED", "STOPPED", "MERGED")
+GOES_ON = ("QUESTION", "DELIVERED", "STOPPED", "MERGED", "ENDED")
 
 
 def load_item(path: str) -> dict:
@@ -131,19 +132,14 @@ def _save(result: dict) -> None:
 
 
 def merge_case(state: dict) -> str:
-    """What a task in `merge` waits on: `to tom`, `awaiting a grant`, or
-    `run`."""
-    if (state.get("delivery") or {}).get("outcome") == "did_not_pass":
-        return "to tom"
+    """What a task in `merge` waits on: `awaiting a grant`, or `run` (the
+    kernel requests the merge, and tries a failed one again itself)."""
     join = state.get("join") or {}
     if (
         any(not g["granted"] for g in state.get("governance") or [])
         or join.get("outcome") == "governance_refused"
     ):
         return "awaiting a grant"
-    effect = state.get("merge_effect") or {}
-    if effect.get("state") in ("refused", "failed"):
-        return "to tom"
     return "run"
 
 
@@ -325,13 +321,10 @@ def step(result: dict, item: dict, ws: dict, args, meter: Meter) -> None:
     except Exception as exc:  # noqa: BLE001  logged in the run's record, and the driver pauses
         _failed(result, "status failed", exc)
         return
-    if state["state"] == "stopped":
-        result["outcome"] = "stopped"
+    if state["state"] in ("stopped", "ended"):
+        result["outcome"] = state["state"]
         return
     case = merge_case(state) if state["state"] == "merge" else None
-    if case == "to tom":
-        result["outcome"] = "to tom"
-        return
     if case == "awaiting a grant":
         result["paused"] = "awaiting a grant"
         return

@@ -1,26 +1,36 @@
 """Operator notices: what the kernel tells Tom, as rows a bridge sends.
 
+Tom hears reports of what was done and questions only he can answer
+(Tom's rulings of 2026-10-03 and 2026-10-09). Each kernel-written text
+speaks to Tom as Valor, the way a project manager writes to the CEO: it
+names the task by the first line of its request (`headline`, `lead`), says
+what was done in outcome terms, and links the task's status page
+(`report_link`) for the checks and findings behind it. Where a turn wrote
+a note to Tom (the text of `done.md` above its first `---` line, or
+`stop.md`), the note is the message.
+
 `owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
 and has not requested, to `settings.operator_channel` and
 `settings.operator_chat`:
 
 - `question` (`about_key` `question:<id>`): the open question.
-- `delivered` (`delivered:<sha>`, or `delivered:<sha>:<effect>` for a
-  merge refused or failed): the candidate and each check's outcome, owed
-  only for a delivery that will not merge by itself: it did not pass, a
-  governance instance awaits Tom's grant (each named, with its
-  `path:line` and its `python -m core grant` command), or its merge was
-  refused or failed, with the reason. A merge refused or failed for its payload is
-  not asked again for that payload, so this notice is the question Tom
-  gets about it.
+- `delivered` (`delivered:<sha>`): a delivery whose merge waits on Tom's
+  grant of a governance instance: each named, with its `path:line` and its
+  `python -m core grant` command.
+- `ended` (`ended:<row>`): the task ended without merging: what was built,
+  what did not pass, and why it stopped. It asks for nothing; a reply to
+  it is feedback.
+
+`credential(conn, task_id, sha, why)` asks Tom for the push credential a
+merge needs (`credential:<sha>`), the one merge failure that reaches him.
 
 `report(conn, task_id, effect, result)` writes the `report` notice
 (`report:<effect>`) an `act` effect owes once its outcome is `done`: what
-left. A merge's carries the delivery and ends with how to give feedback; a
-send's carries its channel, recipients, and text. A push owes none (a step
-inside the task), nor does a send that itself reached Tom (to the operator
-chat or Tom's Telegram id, an email only to Tom's addresses, any local
-send), nor any act of a replay task (`Brief.replay`).
+left. A merge's says what shipped; a send's carries its channel,
+recipients, and text. A push owes none (a step inside the task), nor does
+a send that itself reached Tom (to the operator chat or Tom's Telegram id,
+an email only to Tom's addresses, any local send), nor any act of a
+replay task (`Brief.replay`). A reply to a merge's report is feedback.
 
 A notice with no channel or chat (the operator's unset) is written with a
 `notice.undeliverable` row beside it, so the ledger shows it was never
@@ -28,8 +38,7 @@ sent. `request` writes one notice; binding (`core/intake.py`) uses it for
 its own. A notice is requested once
 per task and `about_key` (`events_one_notice`): a second request, from
 another kernel or a retry, is skipped in a savepoint. A notice whose text
-Postgres jsonb refuses (a held send's text, as large as the ledger stores
-once, rendered twice) is written with kernel text in its place, naming
+Postgres jsonb refuses is written with kernel text in its place, naming
 what it is about and Postgres's reason. Each text carries the
 notice's short id, so a bridge's lookup matches the sent message exactly.
 The bridge sends notices as they come.
@@ -132,52 +141,162 @@ async def owe(conn, task_id: str) -> list[str]:
                 )
             )
     if f.delivery and f.state is State.MERGE:
-        owed = _delivered_owed(f, rows)
+        owed = _delivered_owed(f)
         if owed is not None:
-            about, why = owed
-            waiting = f.ungranted() if why == AWAITS_GRANT else []
             made.append(
                 await request(
                     conn,
                     task_id,
                     kind="delivered",
-                    about_key=about,
-                    text=delivered_text(task_id, f.delivery, why, waiting),
+                    about_key=owed,
+                    text=delivered_text(task_id, f.delivery, f.ungranted(), await headline(conn, task_id)),
                 )
             )
+    if f.state is State.ENDED and f.entry is not None:
+        made.append(
+            await request(
+                conn,
+                task_id,
+                kind="ended",
+                about_key=f"ended:{f.entry.get('id')}",
+                text=ended_text(task_id, f, await headline(conn, task_id)),
+            )
+        )
     return [m for m in made if m]
 
 
-AWAITS_GRANT = "a governance instance awaits Tom's grant"
-
-
-def _delivered_owed(f: machine.Fold, rows: list[dict[str, Any]]) -> tuple[str, str | None] | None:
-    """The `delivered` notice's `about_key` and the reason the delivery will
-    not merge by itself, or None when it will (its merge's report says what
-    left)."""
+def _delivered_owed(f: machine.Fold) -> str | None:
+    """The `delivered` notice's `about_key` while the current delivery's
+    merge waits on Tom's grant of a governance instance, else None (a merge
+    that lands has its report; one that cannot ends the task)."""
     sha = ((f.delivery.get("candidate") or {}).get("sha")) or ""
     current = f.candidate is not None and (f.delivery.get("candidate") or {}) == {
         "sha": f.candidate.sha,
         "turn_id": f.candidate.turn_id,
     }
-    outcome = f.delivery.get("outcome")
-    if current and outcome in ("passed", "gaps", "governance_refused") and f.ungranted():
-        return f"delivered:{sha}", AWAITS_GRANT
-    if not current or outcome not in ("passed", "gaps"):
-        return f"delivered:{sha}", None
-    effect = f.merge_effect
-    if effect and effect["state"] in ("refused", "failed"):
-        why = next(
-            (
-                r["payload"].get("reason") or r["payload"].get("error")
-                for r in reversed(rows)
-                if r["type"] in ("effect.refused", "effect.outcome")
-                and r["payload"].get("effect_id") == effect["effect_id"]
-            ),
-            None,
-        )
-        return f"delivered:{sha}:{effect['effect_id']}", f"its merge {effect['state']}: {why}"
+    if current and f.delivery.get("outcome") in ("passed", "gaps", "governance_refused") and f.ungranted():
+        return f"delivered:{sha}"
     return None
+
+
+def report_link(task_id: str) -> str:
+    """The task's page on the status page (`ui/`), where its checks,
+    findings, and ledger are."""
+    return f"http://127.0.0.1:{settings.ui_port}/task/{task_id}"
+
+
+def short(instruction: str | None, limit: int = 80) -> str | None:
+    """A task's request as a notice names it: the first line with words on
+    it, cut on a word at `limit` characters with `...`."""
+    line = next((s.strip() for s in (instruction or "").splitlines() if s.strip()), "")
+    if not line:
+        return None
+    if len(line) <= limit:
+        return line
+    cut = line[: limit - 3].rsplit(" ", 1)[0].rstrip(" ,;:.") or line[: limit - 3]
+    return cut + "..."
+
+
+async def headline(conn, task_id: str) -> str | None:
+    """The task's request, shortened; None for a task with no Brief."""
+    from core import tasks
+
+    try:
+        return short((await tasks.brief(conn, task_id)).instruction)
+    except KeyError:
+        return None
+
+
+def lead(head: str | None, sentence: str) -> str:
+    """`sentence` opened with the task's request, so Tom knows which work it
+    is about without an id; capitalised when there is no request to name."""
+    if head:
+        return f'On "{head}": {sentence}'
+    return sentence[:1].upper() + sentence[1:]
+
+
+def note(summary: str | None) -> str | None:
+    """The note to Tom a turn wrote at the top of `done.md`: its text above
+    its first line that is exactly `---`. None when there is no such line or
+    nothing above it; the report below is never the note."""
+    lines = str(summary or "").splitlines()
+    at = next((i for i, line in enumerate(lines) if line.rstrip() == "---"), None)
+    if at is None:
+        return None
+    return "\n".join(lines[:at]).strip() or None
+
+
+def _reason(text: Any, limit: int = 300) -> str:
+    line = next((s.strip() for s in str(text or "").splitlines() if s.strip()), "")
+    return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+def ended_text(task_id: str, f: machine.Fold, head: str | None) -> str:
+    """The report owed when a task ends without merging: why it stopped,
+    in Valor's words when the working session decided it, and what was
+    built, with the status page for the rest. It asks for nothing."""
+    entry = f.entry or {}
+    p = entry.get("payload") or {}
+    built = note((f.delivery or {}).get("summary"))
+    kind = p.get("kind") if entry.get("type") == "task.ended" else "rounds"
+    parts: list[str | None]
+    if kind == "decided":
+        parts = [lead(head, "I stopped this work without merging it."), str(p.get("text") or "")]
+    elif kind == "rounds":
+        parts = [
+            lead(
+                head,
+                "I stopped this work without merging it: after its last round it still did not "
+                "pass its checks.",
+            ),
+            built and f"What was built: {built}",
+        ]
+    elif kind == "step":
+        what = p.get("check") or p.get("state") or "a step"
+        parts = [
+            lead(
+                head,
+                f"I stopped this work: its {what} step failed {p.get('tries')} times in a row. "
+                f"The last failure: {_reason(p.get('reason'))}",
+            ),
+            built and f"What was built before it: {built}",
+        ]
+    elif kind == "provision":
+        parts = [
+            lead(
+                head,
+                f"I stopped this work before it began: I could not set up its workspace after "
+                f"{p.get('tries')} tries. The last failure: {_reason(p.get('reason'))}",
+            ),
+        ]
+    elif kind == "merge":
+        parts = [
+            lead(
+                head,
+                f"I stopped this work: it passed its checks, but I could not merge it: "
+                f"{_reason(p.get('reason'))}. The work stays on its branch.",
+            ),
+            built and f"What was built: {built}",
+        ]
+    else:
+        parts = [lead(head, f"I stopped this work: {_reason(p.get('reason'))}")]
+    parts.append(f"The details are on its status page: {report_link(task_id)}")
+    return "\n\n".join(x for x in parts if x)
+
+
+async def credential(conn, task_id: str, sha: str, why: str) -> str | None:
+    """Ask Tom for the push credential a merge needs, once per candidate:
+    the one merge failure only he can resolve. The merge is tried again on
+    its own once the credential is in place."""
+    head = await headline(conn, task_id)
+    text = "\n\n".join(
+        [
+            lead(head, "it is ready to merge, and I need a working GitHub push token to merge it."),
+            _reason(why),
+            "Once the token is in place I merge it on my own.",
+        ]
+    )
+    return await request(conn, task_id, kind="credential", about_key=f"credential:{sha}", text=text)
 
 
 def _to_tom(effect: dict[str, Any]) -> bool:
@@ -214,19 +333,17 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
     payload = effect.get("payload") or {}
     if kind == "merge":
         f = machine.fold(await ledger.read(conn, task_id))
-        lines = [
-            (
-                f"Task {task_id} merged {str(payload.get('head_sha') or '')[:12]} into "
-                f"{payload.get('target_branch') or effect.get('target')} ({payload.get('url') or ''})."
-            ),
-            "",
-        ]
-        if f.delivery:
-            lines += [str(f.delivery.get("summary") or ""), ""]
-            lines += [f"- {c}: {o}" for c, o in (f.delivery.get("checks") or {}).items()]
-            lines.append("")
-        lines.append("Reply to this message to give feedback.")
-        text = "\n".join(lines)
+        branch = payload.get("target_branch") or effect.get("target")
+        built = note((f.delivery or {}).get("summary"))
+        text = "\n\n".join(
+            x
+            for x in (
+                lead(await headline(conn, task_id), f"it is done and merged into {branch}."),
+                built,
+                f"The details are on its status page: {report_link(task_id)}",
+            )
+            if x
+        )
     else:
         body = payload.get("text") or payload.get("subject") or payload.get("body") or ""
         to = ", ".join([*(payload.get("to") or []), *(payload.get("cc") or [])]) or effect.get("target")
@@ -251,31 +368,28 @@ def _unstorable(task_id: str, kind: str, about_key: str, why: str, notice_id: st
 def delivered_text(
     task_id: str,
     delivery: dict[str, Any],
-    why: str | None = None,
     waiting: Sequence[machine.Instance] = (),
+    head: str | None = None,
 ) -> str:
-    """The `delivered` notice. When the merge waits on Tom's grant, it names
-    each instance, where it sits in the diff, and the command that grants
-    it: under autonomous act this is the one question about that merge."""
-    candidate = delivery.get("candidate") or {}
+    """The `delivered` notice: the merge waits on Tom's grant of each
+    governance instance named, where it sits in the diff, and the command
+    that grants it. Under autonomous act this is the one question about
+    that merge."""
     lines = [
-        f"Task {task_id} delivered {candidate.get('sha', '')[:12]} ({delivery.get('outcome', 'delivered')}):",
-        "",
-        str(delivery.get("summary") or ""),
+        lead(
+            head,
+            "it is ready, and it adds a check or approval step, which needs your grant before it can merge.",
+        ),
     ]
-    if why:
-        lines += ["", f"It is not merged: {why}.", ""]
+    built = note(delivery.get("summary"))
+    if built:
+        lines += ["", built]
+    lines.append("")
     for i in waiting:
         where = f"{i.path}:{i.line}" if i.line is not None else i.path
         lines += [
             f"- governance instance {i.id} at {where}" + (f" ({i.summary})" if i.summary else ""),
             f'  grant with: python -m core grant {task_id} {i.id} --note "..."',
         ]
-    if waiting:
-        lines.append("")
-    for check, outcome in (delivery.get("checks") or {}).items():
-        lines.append(f"- {check}: {outcome}")
-    for finding in delivery.get("findings") or []:
-        lines.append(f"- [{finding.get('source')}, {finding.get('kind')}] {finding.get('text')}")
-    lines += ["", "Reply to this message to give feedback."]
+    lines += ["", f"The details are on its status page: {report_link(task_id)}"]
     return "\n".join(lines)

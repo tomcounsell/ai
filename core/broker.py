@@ -259,9 +259,7 @@ async def _request(
         elif EFFECT_RANK[effect_class] > EFFECT_RANK[brief.max_effect_class]:
             reason = f"{effect_class} is above the task's ceiling {brief.max_effect_class}"
         elif ungranted:
-            reason = "adds governance with no grant from Tom for instance " + ", ".join(
-                f"{i.id} ({i.path})" for i in ungranted
-            )
+            reason = UNGRANTED + ", ".join(f"{i.id} ({i.path})" for i in ungranted)
         elif refuse is not None and (said := await refuse(conn, action)):
             reason = said
         landed = None
@@ -304,6 +302,7 @@ async def _request(
 
 
 NO_PERFORMER = "no performer for this action type"
+UNGRANTED = "adds governance with no grant from Tom for instance "
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store the request"
 # The fields of an effect row the kernel made, none of them the turn's.
 BARE_FIELDS = ("effect_class", "adds_governance", "payload_sha256", "request_id")

@@ -27,7 +27,11 @@ the factory the composition root passes in (a task started by message is
 provisioned after it starts, so its Brief grows); every runner gets them in
 its `Context`, and the merge and its reconcile use them. A step whose
 runner returns `failed`, or raises, writes `step.failed` before it returns
-or the error goes on, so a stalled task's record says why.
+or the error goes on, so the task's record says why. The resident kernel
+steps it again itself once `retry_due` says so, and the next turn opens
+with the reason (`session.next_prompt`); at `STEP_TRIES` failures in a row
+of the same state and check, `task.ended` is written with the last one and
+Tom gets a report of what failed (`notices.owe`).
 
 A task's services (its Postgres, its Redis) are held under the session lock
 `services:<task>` while up, on the services handle's own connection. `run`
@@ -40,6 +44,7 @@ import sys
 import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +64,13 @@ class Context:
 
 
 Runner = Callable[[Context], Awaitable[dict[str, Any]]]
-SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.STOPPED: "stopped"}
+SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.ENDED: "ended", State.STOPPED: "stopped"}
+# A failed step is tried again by the kernel itself (`retry_due`), after a
+# delay that doubles from `STEP_BACKOFF_S`; at `STEP_TRIES` failures in a row
+# of the same state and check, the task ends with a report to Tom.
+STEP_TRIES = 4
+STEP_BACKOFF_S = 60.0
+STEP_BACKOFF_MAX_S = 900.0
 PerformersFactory = Callable[[tasks.Brief], broker.Performers]
 
 
@@ -70,14 +81,14 @@ async def run(
     dsn: str | None = None,
     performers: PerformersFactory | None = None,
 ) -> dict[str, Any]:
-    """Run the task until it needs Tom or a runner that does not exist.
+    """Run the task until it settles, or a runner that does not exist.
     `performers` builds the task's own from its Brief (the composition
     root's factory); without it the task has none.
-    Returns `status` (`waiting`, `delivered`, `merged`, `stopped`, `no
+    Returns `status` (`waiting`, `delivered`, `merged`, `ended`, `stopped`, `no
     runner`, `legacy`, `calibration task`, `already running`, `lock lost`,
-    `parked` (a merge whose facts git could not read, or whose push has no
-    answer yet), or what a runner returned: `failed`) and the task's
-    state."""
+    `parked` (a merge whose facts git could not read, whose push has no
+    answer yet, or whose try again is not due), or what a runner returned:
+    `failed`) and the task's state."""
     dsn = dsn or gateway.dsn
     services = await _Services.open(dsn, task_id)
     try:
@@ -198,7 +209,79 @@ async def _failed(
         if why is not None:
             payload["reason"] = f"the reason: {ledger.UNSTORABLE}: {why}"
         await ledger.append(conn, task_id, "step.failed", payload)
+        rows = await ledger.read(conn, task_id)
+        tries = failures(rows)
+        f = machine.fold(rows)
+        if tries >= STEP_TRIES and not (f.legacy or f.calibration) and f.state not in SETTLED:
+            await ledger.append(
+                conn,
+                task_id,
+                "task.ended",
+                {
+                    "kind": "step",
+                    "by": "kernel",
+                    "tries": tries,
+                    **{k: payload[k] for k in ("state", "check", "reason")},
+                },
+            )
     return None
+
+
+def failures(rows: list[dict[str, Any]]) -> int:
+    """How many times in a row the task's latest step failed in the same
+    state and check: the `step.failed` rows since the last row that shows
+    the work moving (`PROGRESS`, or a collected turn that did not fail)."""
+    last = None
+    count = 0
+    for r in reversed(rows):
+        kind, p = r["type"], r["payload"]
+        if kind == "step.failed":
+            key = (p.get("state"), p.get("check"))
+            if last is not None and key != last:
+                break
+            last = key
+            count += 1
+        elif kind in PROGRESS or (kind == "turn.collected" and p.get("verdict") != "failed"):
+            break
+    return count
+
+
+# Rows that show a task's work moved, after which a failure counts from one.
+PROGRESS = frozenset(
+    {
+        "task.started",
+        "judge.decided",
+        "critique.decided",
+        "test.decided",
+        "review.decided",
+        "docs.decided",
+        "plan.written",
+        "question.asked",
+        "question.answered",
+        "feedback.given",
+        "message.steered",
+        "guard.granted",
+        "task.delivered",
+        "rebase.requested",
+        "workspace.provisioned",
+        "task.ended",
+    }
+)
+
+
+def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
+    """Whether the kernel should step a task again whose latest step failed:
+    its latest row (but for notices and gateway rows) is `step.failed`, and
+    the delay after it, doubling from `STEP_BACKOFF_S` with each failure in
+    a row, has passed. The task ends at `STEP_TRIES` failures (`_failed`)."""
+    last = next((r for r in reversed(rows) if r["type"] not in ledger.QUIET), None)
+    if last is None or last["type"] != "step.failed":
+        return False
+    tries = failures(rows)
+    delay = min(STEP_BACKOFF_MAX_S, STEP_BACKOFF_S * 2 ** max(tries - 1, 0))
+    at = last.get("at")
+    now = now or datetime.now(UTC)
+    return at is None or now >= at + timedelta(seconds=delay)
 
 
 class _Services:
@@ -361,11 +444,16 @@ async def _once(
             if dangling and await broker.reconcile(conn, performers, f.merge_effect["effect_id"]) is not None:
                 return {"status": "moved"}
             asked = await verdicts.ensure_merge(conn, performers, task_id)
-            if asked is not None and asked.kind == "done":
-                return {"status": "moved"}  # merged: the next step settles it
+            if asked is not None and asked.kind in ("done", "failed", "refused"):
+                # Merged: the next step settles it. Did not land: the next
+                # step acts on why (`verdicts.ensure_merge`).
+                return {"status": "moved"}
+            if machine.fold(await ledger.read(conn, task_id)).state is not State.MERGE:
+                return {"status": "moved"}  # sent back to rebase, or ended
             if dangling or (asked is not None and asked.kind == "unknown"):
-                # Git could not say, or the merge is in flight with no
-                # answer yet: asked again on the next row or tick.
+                # Git could not say, the merge is in flight with no answer
+                # yet, or a try again is not due: asked again on the next
+                # row or tick.
                 return {"status": "parked", "state": await tasks.status(conn, task_id)}
             return {"status": "delivered", "state": await tasks.status(conn, task_id)}
     ran["state"] = f.state.value

@@ -7,11 +7,12 @@ Live spend: none.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
 
-from core import db, ledger, notices, router, tasks
+from core import db, ledger, notices, router, serve, session, tasks
 from core.__main__ import _status_line
 from core.machine import State
 from tests.bridges import new_task, rows
@@ -198,3 +199,105 @@ def test_failed_step_holds_across_quiet_rows_and_clears_on_any_other(dsn):
     held, cleared = run(go())
     assert held is not None and held["reason"] == "x"
     assert cleared is None
+
+
+# -- the kernel tries a failed step again, then ends the task ------------------------------
+
+
+def test_the_same_step_failing_step_tries_times_in_a_row_ends_the_task_with_a_report(dsn):
+    """No wait on Tom's steer: at `STEP_TRIES` failures in a row of the same
+    state the task ends with the last reason, and Tom gets one report
+    saying what failed."""
+
+    async def failing(ctx):
+        return {"status": "failed", "turn": {"result": "the harness exited 1"}}
+
+    async def go():
+        task = await new_task(dsn)
+        for _ in range(router.STEP_TRIES):
+            await step(dsn, task, failing)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+            state = await tasks.status(conn, task)
+        return state, await rows(dsn, task)
+
+    state, got = run(go())
+    assert len(failed_rows(got)) == router.STEP_TRIES and state["state"] == "ended"
+    (ended,) = [r["payload"] for r in got if r["type"] == "task.ended"]
+    assert ended["kind"] == "step" and ended["tries"] == router.STEP_TRIES and ended["state"] == "judge"
+    (report,) = [r["payload"] for r in got if r["type"] == "notice.requested"]
+    assert report["kind"] == "ended" and "the harness exited 1" in report["text"]
+    assert f"failed {router.STEP_TRIES} times in a row" in report["text"]
+
+
+def test_failures_count_in_a_row_and_progress_or_another_state_starts_the_count_again():
+    def failed(i, state="build", check=None):
+        return {"id": i, "type": "step.failed", "payload": {"state": state, "check": check}}
+
+    assert router.failures([]) == 0
+    assert router.failures([failed(1), failed(2)]) == 2
+    collected = {"id": 3, "type": "turn.collected", "payload": {"verdict": "failed"}}
+    assert router.failures([failed(1), collected, failed(4)]) == 2  # a failed turn is no progress
+    idle = {"id": 3, "type": "turn.collected", "payload": {"verdict": "idle"}}
+    assert router.failures([failed(1), idle, failed(4)]) == 1
+    assert router.failures([failed(1, "checks", "review"), failed(2, "checks", "test")]) == 1
+    steered = {"id": 3, "type": "message.steered", "payload": {}}
+    assert router.failures([failed(1), steered, failed(4)]) == 1
+
+
+def test_a_failed_step_is_due_again_after_a_doubling_delay():
+    t0 = datetime(2026, 10, 10, tzinfo=UTC)
+    one = [{"id": 1, "type": "step.failed", "payload": {"state": "build"}, "at": t0}]
+    two = [*one, {"id": 2, "type": "step.failed", "payload": {"state": "build"}, "at": t0}]
+    base = timedelta(seconds=router.STEP_BACKOFF_S)
+    assert not router.retry_due(one, t0 + base - timedelta(seconds=1)) and router.retry_due(one, t0 + base)
+    assert not router.retry_due(two, t0 + 2 * base - timedelta(seconds=1)) and router.retry_due(
+        two, t0 + 2 * base
+    )
+    quiet = [*one, {"id": 3, "type": "notice.requested", "payload": {}, "at": t0}]
+    assert router.retry_due(quiet, t0 + base)  # a notice is no newer row
+    moved = [*one, {"id": 3, "type": "judge.decided", "payload": {}, "at": t0}]
+    assert not router.retry_due(moved, t0 + base)  # the latest step did not fail
+
+
+def test_the_resident_kernel_steps_a_failed_task_again_without_a_new_row(dsn, monkeypatch):
+    """The kernel schedules the failed task again once the delay passed
+    (none here), until the task ends."""
+    monkeypatch.setattr(router, "STEP_BACKOFF_S", 0.0)
+
+    async def failing(ctx):
+        return {"status": "failed", "turn": {"result": "boom"}}
+
+    async def go():
+        task = await new_task(dsn)
+        kernel = serve.Kernel(None, {State.JUDGE: failing}, None, dsn)
+
+        async def active(conn):
+            return [task]
+
+        kernel.active = active
+        async with await db.connect(dsn) as conn:
+            for _ in range(router.STEP_TRIES + 2):
+                await kernel.schedule(conn)
+                await asyncio.gather(*kernel.jobs.values())
+        return await rows(dsn, task)
+
+    got = run(go())
+    assert len(failed_rows(got)) == router.STEP_TRIES
+    assert [r["type"] for r in got].count("task.ended") == 1
+
+
+def test_the_next_working_turn_opens_with_why_the_last_try_failed(dsn):
+    async def go():
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "step.failed", {"state": "judge", "reason": "rate limited"})
+            failed = await session.next_prompt(conn, task)
+            await ledger.append(
+                conn, task, "turn.collected", {"turn_id": "t", "state": None, "verdict": None}
+            )
+            later = await session.next_prompt(conn, task)
+        return failed[0], later[0]
+
+    failed, later = run(go())
+    assert "rate limited" in failed and "rate limited" not in later

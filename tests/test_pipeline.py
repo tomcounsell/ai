@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import psycopg
@@ -22,6 +23,7 @@ from psycopg.types.json import Jsonb
 
 from core import (
     broker,
+    credentials,
     db,
     guards,
     judgement_tasks,
@@ -42,6 +44,7 @@ from tests import bridges, scripted
 from tests.conftest import TEST_DB
 from tests.ports import listen
 from tests.scripted import commit, git
+from tools import push_branch
 from tools.push_branch import PushBranch
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -117,7 +120,7 @@ async def intent_only(dsn, task) -> str:
         action = verdicts.merge_action(await fold(dsn, task), await tasks.brief(conn, task))
         effect = ledger.new_id()
         described = action.describe("act", False, effect)
-        described["request_id"] = f"merge:{ledger.digest(action.payload)}:0"
+        described["request_id"] = f"merge:{ledger.digest(action.payload)}:0:0"
         await ledger.append(conn, task, "effect.intent", broker._intent_row(effect, described))
     return effect
 
@@ -425,7 +428,7 @@ def test_a_merge_waiting_on_a_grant_asks_tom_once_naming_the_instance_and_the_co
         for r in written
         if r["type"] == "notice.requested" and r["payload"]["kind"] == "delivered"
     ]
-    assert f"Task {task} delivered" in asked["text"]
+    assert "needs your grant" in asked["text"] and notices.report_link(task) in asked["text"]
     assert f"governance instance {instance.id} at hooks/gate.py:1 (a gate on the push path)" in asked["text"]
     assert f'python -m core grant {task} {instance.id} --note "..."' in asked["text"]
 
@@ -486,11 +489,12 @@ def test_a_red_test_refuses_the_merge_even_when_one_is_requested(dsn, tmp_path):
         await scripted.check(dsn, task, "test", "red", failures=["test_x"])
         await scripted.check(dsn, task, "review", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
-        # The repair round sends it to patch once; a second red goes to Tom.
-        await drive(dsn, task)
-        await scripted.check(dsn, task, "test", "red", failures=["test_x"])
-        await scripted.check(dsn, task, "review", "pass")
-        await scripted.check(dsn, task, "docs", "no_change")
+        # The plan's round and the last round send it to patch; a third red ends the task.
+        for _ in range(2):
+            await drive(dsn, task)
+            await scripted.check(dsn, task, "test", "red", failures=["test_x"])
+            await scripted.check(dsn, task, "review", "pass")
+            await scripted.check(dsn, task, "docs", "no_change")
         f = await fold(dsn, task)
         async with await db.connect(dsn) as conn:
             refused = await scripted.request(
@@ -499,8 +503,8 @@ def test_a_red_test_refuses_the_merge_even_when_one_is_requested(dsn, tmp_path):
         return f, refused, await rows(dsn, task)
 
     f, refused, written = run(go())
-    assert f.state is State.MERGE and f.join.outcome == "did_not_pass" and f.merge_effect is None
-    assert terms(refused) == ["3"]
+    assert f.state is State.ENDED and f.join.outcome == "did_not_pass" and f.merge_effect is None
+    assert terms(refused) == ["1", "3"]
     assert not [r for r in written if r["type"] == "effect.intent"]
 
 
@@ -607,14 +611,14 @@ def test_the_predicate_terms_that_need_no_workspace():
     add("judge.decided", {"verdict": "precise"})
     add("turn.started", {"turn_id": "t0", "state": "plan"})
     add("turn.collected", {"turn_id": "t0", "state": "plan", "verdict": "planned"})
-    add("plan.written", {"sha256": "p", "critique_rounds": 0, "review_rounds": 0})
+    add("plan.written", {"sha256": "p", "critique_rounds": 0, "review_rounds": 1})
     add("critique.decided", {"plan_sha256": "p", "verdict": "sound"})
     add("turn.collected", {"turn_id": "t1", "state": "build", "verdict": "candidate", "candidate": c})
     add("test.decided", {"candidate": c, "verdict": "gaps", "behaviors": ["b"]})
     add("review.decided", {"candidate": c, "verdict": "pass"})
     add("docs.decided", {"candidate": c, "verdict": "no_change", "head": "c"})
     f = machine.fold(led_rows)
-    assert f.state is State.PATCH  # gaps with the repair round unspent go to patch, never to merge
+    assert f.state is State.PATCH  # gaps with the plan's round unspent go to patch, never to merge
     f.state = State.MERGE  # as if it had: the predicate still refuses it
     facts = machine.GitFacts(True, (), ())
     payload = {"candidate": c, "head_sha": "c"}
@@ -1032,7 +1036,7 @@ def scripted_signals(ws):
 
 
 @pytest.mark.macos
-def test_a_delivery_with_gaps_after_the_repair_round_merges(dsn, tmp_path, monkeypatch):
+def test_a_delivery_with_gaps_after_the_plans_rounds_merges(dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(
         judgement_tasks, "BREADTH", dataclasses.replace(judgement_tasks.BREADTH, calibrated="0" * 64)
     )
@@ -1040,7 +1044,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_merges(dsn, tmp_path, monke
 
     async def go():
         task = await to_checks(dsn, ws)
-        await scripted.checks(dsn, task, test="red")  # join row 5: the repair round
+        await scripted.checks(dsn, task, test="red")  # join row 3: the plan's round
         await drive(dsn, task)
         await scripted.check(dsn, task, "test", "gaps", answer="true")  # every breadth question a gap
         await scripted.check(dsn, task, "review", "pass")
@@ -1048,7 +1052,7 @@ def test_a_delivery_with_gaps_after_the_repair_round_merges(dsn, tmp_path, monke
         return await fold(dsn, task), await merged(dsn, task)
 
     f, done = run(go())
-    assert f.join.row == 7 and f.delivery["outcome"] == "gaps" and len(f.delivery["gaps"]) == 3
+    assert f.join.row == 4 and f.delivery["outcome"] == "gaps" and len(f.delivery["gaps"]) == 3
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
 
 
@@ -1106,27 +1110,184 @@ def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tm
 
 
 @pytest.mark.macos
-def test_a_failed_merge_stays_in_merge_and_is_not_requested_again_for_the_same_payload(dsn, tmp_path):
+def test_after_the_plans_rounds_valor_decides_in_one_last_round_and_stopping_ends_the_task(dsn, tmp_path):
+    """Spent rounds never wait on Tom: the join gives the working session one
+    last round with the findings, it writes `stop.md`, the task ends, and
+    Tom gets its note as a report that asks for nothing."""
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)  # the scripted plan sets review_rounds 1
+        await scripted.checks(dsn, task, review="changes")  # join row 3: the plan's round
+        await drive(dsn, task)
+        await scripted.checks(dsn, task, test="red")  # join row 5: the last round
+        last = await fold(dsn, task)
+        scripted.steer(ws, patch="stop")
+        out = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+        return task, last, out, await rows(dsn, task)
+
+    _task, last, out, written = run(go())
+    assert last.state is State.PATCH and last.join.row == 5 and last.join.spends == "last"
+    assert out["status"] == "ended"
+    f = machine.fold(written)
+    assert f.state is State.ENDED and f.entry["payload"]["kind"] == "decided"
+    (report,) = [r["payload"] for r in written if r["type"] == "notice.requested"]
+    assert report["kind"] == "ended" and "I stopped rather than patch again" in report["text"]
+    assert "Reply to" not in report["text"]
+
+
+def _move_target(ws, origin) -> str:
+    """The target moves on under the push: a commit on origin's main that
+    the candidate does not descend from."""
+    tree = git(ws, "rev-parse", "HEAD^{tree}")
+    moved = git(ws, "commit-tree", tree, "-p", git(origin, "rev-parse", "main"), "-m", "moved")
+    git(ws, "push", "-q", str(origin), f"{moved}:refs/heads/main")
+    return moved
+
+
+@pytest.mark.macos
+def test_a_merge_the_moved_target_rejects_goes_back_to_rebase_spending_no_round_then_ends(dsn, tmp_path):
+    """A push rejected because the target moved sends the work to patch
+    with the target's new tip, spending no review round; after
+    `machine.REBASES` such rebases the next one ends the task with a
+    report."""
     ws, origin = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
         await checks_only(dsn, task)
-        # The target moved on under the push: a non-fast-forward the remote refuses.
-        tree = git(ws, "rev-parse", "HEAD^{tree}")
-        moved = git(ws, "commit-tree", tree, "-p", git(origin, "rev-parse", "main"), "-m", "moved")
-        git(ws, "push", "-q", str(origin), f"{moved}:refs/heads/main")
-        first = await drive(dsn, task)
-        again = await drive(dsn, task)
-        return first, again, await rows(dsn, task)
+        moved = _move_target(ws, origin)
+        # The push is rejected, the work goes back to rebase, and the patch
+        # turn makes a new candidate, in one run.
+        out = await drive(dsn, task)
+        after_one = await fold(dsn, task)
+        for _ in range(machine.REBASES):
+            await checks_only(dsn, task)
+            _move_target(ws, origin)
+            await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+        return moved, out, after_one, await rows(dsn, task)
 
-    first, again, written = run(go())
-    assert first["state"]["merge_effect"]["state"] == "failed"
+    moved, out, after_one, written = run(go())
+    assert out["status"] == "no runner"
+    outcomes = [r["payload"] for r in written if r["type"] == "effect.outcome"]
+    assert outcomes[0]["kind"] == "failed" and "rejected" in outcomes[0]["error"]
+    rebases = [r["payload"] for r in written if r["type"] == "rebase.requested"]
+    assert len(rebases) == machine.REBASES and rebases[0]["tip"] == moved
+    assert after_one.state is State.CHECKS and after_one.counts["review_rounds"] == 0
+    f = machine.fold(written)
+    assert f.state is State.ENDED and f.entry["payload"]["kind"] == "merge"
+    (report,) = [
+        r["payload"] for r in written if r["type"] == "notice.requested" and r["payload"]["kind"] == "ended"
+    ]
+    assert "could not merge it" in report["text"]
+
+
+async def _failed_merge(dsn, task, error: str) -> dict:
+    """A merge effect for the current candidate that failed with `error`,
+    as the broker records one; its outcome row."""
+    async with await db.connect(dsn) as conn:
+        action = verdicts.merge_action(await fold(dsn, task), await tasks.brief(conn, task))
+        effect = ledger.new_id()
+        described = action.describe("act", False, effect)
+        await ledger.append(conn, task, "effect.intent", broker._intent_row(effect, described))
+        await ledger.append(
+            conn, task, "effect.outcome",
+            {"effect_id": effect, "idempotency_key": described["idempotency_key"], "kind": "failed",
+             "result": {}, "error": error},
+        )  # fmt: skip
+    return (await rows(dsn, task))[-1]
+
+
+@pytest.mark.macos
+def test_a_merge_that_failed_is_requested_again_after_its_delay_and_lands(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        failed = await _failed_merge(dsn, task, "GitError('git push: Connection reset by peer')")
+        async with await db.connect(dsn) as conn:
+            soon = await verdicts.ensure_merge(
+                conn, await scripted._of(conn, task), task, now=failed["at"] + timedelta(seconds=1)
+            )
+            due = failed["at"] + timedelta(seconds=verdicts.MERGE_BACKOFF_S)
+            landed = await verdicts.ensure_merge(conn, await scripted._of(conn, task), task, now=due)
+        return soon, landed, await fold(dsn, task)
+
+    soon, landed, f = run(go())
+    assert soon.kind == "unknown" and "tried again at" in soon.error
+    assert landed.kind == "done" and f.state is State.MERGED
+    assert git(origin, "rev-parse", "main") == f.checks[Check.DOCS].payload["head"]
+
+
+@pytest.mark.macos
+def test_a_merge_failing_merge_tries_times_ends_the_task_with_a_report(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        for _ in range(verdicts.MERGE_TRIES):
+            failed = await _failed_merge(dsn, task, "GitError('git push: Could not resolve host')")
+        async with await db.connect(dsn) as conn:
+            out = await verdicts.ensure_merge(conn, await scripted._of(conn, task), task, now=failed["at"])
+            await notices.owe(conn, task)
+        return out, await rows(dsn, task)
+
+    out, written = run(go())
+    f = machine.fold(written)
+    assert out is None and f.state is State.ENDED and f.entry["payload"]["kind"] == "merge"
+    (report,) = [r["payload"] for r in written if r["type"] == "notice.requested"]
+    assert report["kind"] == "ended" and "Could not resolve host" in report["text"]
+
+
+@pytest.mark.macos
+def test_a_merge_needing_the_push_credential_asks_tom_for_it_once_and_requests_nothing(dsn, tmp_path):
+    """The one merge failure Tom hears of: a credential only he holds. The
+    merge is not requested while the token is missing, and the question is
+    asked once for the candidate."""
+    ws, _ = scripted.workspace(tmp_path)
+    keyfile = tmp_path / "keys.env"
+    keyfile.write_text("OTHER=1\n")
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, task)
+            with_key = broker.Performers(
+                push_branch.Merge(
+                    b.workspace, url="https://example.com/x.git", branch="main", credential=keyfile
+                )
+            )
+            first = await verdicts.ensure_merge(conn, with_key, task)
+            second = await verdicts.ensure_merge(conn, with_key, task)
+        return first, second, await rows(dsn, task)
+
+    first, second, written = run(go())
+    assert first.kind == second.kind == "unknown" and credentials.GITHUB_KEY in first.error
+    assert not [r for r in written if r["type"].startswith("effect.")]
+    (asked,) = [r["payload"] for r in written if r["type"] == "notice.requested"]
+    assert asked["kind"] == "credential" and credentials.GITHUB_KEY in asked["text"]
+
+
+def test_a_refused_credential_is_read_as_the_credential_and_a_rejected_push_as_a_moved_target():
+    at = None
     assert (
-        again["state"]["state"] == "merge"
-        and again["state"]["merge_effect"] == first["state"]["merge_effect"]
+        verdicts.merge_failure(verdicts.MergeTry("e", "failed", f"GitError('{push_branch.ROTATE}: x')", at))
+        == "credential"
     )
-    assert len([r for r in written if r["type"] == "effect.intent"]) == 1
+    rejected = "GitError('git push: ! [rejected] abc -> main (fetch first)')"
+    assert verdicts.merge_failure(verdicts.MergeTry("e", "failed", rejected, at)) == "moved"
+    assert (
+        verdicts.merge_failure(verdicts.MergeTry("e", "refused", "the merge predicate does not hold", at))
+        == "refused"
+    )
+    assert verdicts.merge_failure(verdicts.MergeTry("e", "failed", "Connection reset", at)) == "transient"
 
 
 @pytest.mark.macos
@@ -1512,8 +1673,8 @@ def test_a_missing_merge_is_failed_only_once_no_process_holds_it(dsn, tmp_path):
     assert held["state"]["merge_effect"]["state"] == "in_flight"
     (outcome,) = _outcomes(written, effect)
     assert outcome["kind"] == "failed" and outcome["reconciled"] is True
-    # A failed merge stands for its payload: no new merge is asked for.
-    assert freed["state"]["merge_effect"]["effect_id"] == effect
+    # A failed merge is asked for again only once its delay has passed.
+    assert freed["status"] == "parked" and freed["state"]["merge_effect"]["effect_id"] == effect
     assert freed["state"]["merge_effect"]["state"] == "failed"
 
 

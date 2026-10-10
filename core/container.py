@@ -468,7 +468,7 @@ async def prune(rows_by_task: dict[str, list[dict]], keep: set[str], db_label: s
     VM `verify.ran` and not in `keep`, deleted, each delete raced against the
     stop. Returns the tags deleted; raises `_Stopped` on a stop."""
     for rows in rows_by_task.values():
-        if machine.fold(rows).state in (machine.State.MERGED, machine.State.STOPPED):
+        if machine.fold(rows).state in (machine.State.MERGED, machine.State.ENDED, machine.State.STOPPED):
             continue
         for r in reversed(rows):
             p = r["payload"]

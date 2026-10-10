@@ -702,8 +702,8 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     provenance it was recorded with (see `provenance`). `attention_counts`
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet
-    answered is listed and not counted. `failed_step` is the `step.failed`
-    the task waits on, or None. `delivered` is the latest delivery's
+    answered is listed and not counted. `failed_step` is the latest `step.failed`,
+    which the kernel tries again, or None. `delivered` is the latest delivery's
     summary.
 
     The tree: `parent_id`, `fenced_by` (the nearest stopped node on the
@@ -731,8 +731,9 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 
 
 def failed_step(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The `step.failed` the task waits on: its payload, row id and time,
-    while it is the latest row but for notices and gateway rows; else None."""
+    """The task's latest failed step, which the kernel tries again
+    (`router.retry_due`): its payload, row id and time, while it is the
+    latest row but for notices and gateway rows; else None."""
     last = next((r for r in reversed(rows) if r["type"] not in ledger.QUIET), None)
     if last is None or last["type"] != "step.failed":
         return None

@@ -171,31 +171,37 @@ def test_a_question_id_that_is_not_a_string_is_malformed(question_id):
 
 # -- the join table ----------------------------------------------------------------
 
-# (review rounds in the plan, rounds already spent setup, repair spent, test, review, docs) -> row, goes to
+# (review rounds in the plan, what is already spent, test, review, docs) -> row, goes to, outcome
 JOIN_ROWS = [
-    (1, False, "pass", "pass", "updated", 1, State.MERGE, "passed"),
-    (1, False, "pass", "pass", "no_change", 1, State.MERGE, "passed"),
-    (1, False, "red", "governance_refused", "changes", 2, State.MERGE, "governance_refused"),
-    (1, False, "red", "changes", "changes", 3, State.PATCH, None),
-    (0, False, "pass", "changes", "no_change", 4, State.MERGE, "did_not_pass"),
-    (1, False, "red", "pass", "no_change", 5, State.PATCH, None),
-    (1, False, "gaps", "pass", "no_change", 5, State.PATCH, None),
-    (1, False, "pass", "pass", "changes", 5, State.PATCH, None),
-    (1, True, "red", "pass", "no_change", 6, State.MERGE, "did_not_pass"),
-    (1, True, "pass", "pass", "changes", 6, State.MERGE, "did_not_pass"),
-    (1, True, "gaps", "pass", "changes", 6, State.MERGE, "did_not_pass"),
-    (1, True, "gaps", "pass", "updated", 7, State.MERGE, "gaps"),
+    (1, None, "pass", "pass", "updated", 1, State.MERGE, "passed"),
+    (1, None, "pass", "pass", "no_change", 1, State.MERGE, "passed"),
+    (1, None, "red", "governance_refused", "changes", 2, State.MERGE, "governance_refused"),
+    (1, None, "red", "changes", "changes", 3, State.PATCH, None),
+    (1, None, "red", "pass", "no_change", 3, State.PATCH, None),
+    (1, None, "gaps", "pass", "no_change", 3, State.PATCH, None),
+    (1, None, "pass", "pass", "changes", 3, State.PATCH, None),
+    (1, "rounds", "gaps", "pass", "updated", 4, State.MERGE, "gaps"),
+    (0, None, "gaps", "pass", "no_change", 4, State.MERGE, "gaps"),
+    (0, None, "pass", "changes", "no_change", 5, State.PATCH, None),
+    (1, "rounds", "red", "pass", "no_change", 5, State.PATCH, None),
+    (1, "rounds", "gaps", "pass", "changes", 5, State.PATCH, None),
+    (0, "last", "pass", "changes", "no_change", 6, State.ENDED, "did_not_pass"),
+    (0, "last", "red", "pass", "no_change", 6, State.ENDED, "did_not_pass"),
+    (1, "last", "pass", "pass", "changes", 6, State.ENDED, "did_not_pass"),
 ]
 
 
-@pytest.mark.parametrize(
-    ("rounds", "repair_spent", "test", "review", "docs", "row", "goes", "outcome"), JOIN_ROWS
-)
-def test_every_row_of_the_join_table(rounds, repair_spent, test, review, docs, row, goes, outcome):
+@pytest.mark.parametrize(("rounds", "spent", "test", "review", "docs", "row", "goes", "outcome"), JOIN_ROWS)
+def test_every_row_of_the_join_table(rounds, spent, test, review, docs, row, goes, outcome):
     led = Ledger(review_rounds=rounds).to_checks()
-    if repair_spent:
-        led.checks("red", "pass", "no_change").build()
-        assert led.fold().counts["repair_rounds"] == 1
+    if spent:
+        for _ in range(rounds):
+            led.checks("red", "pass", "no_change").build()
+        assert led.fold().counts["review_rounds"] == rounds
+    if spent == "last":
+        led.checks("red", "pass", "no_change")
+        assert led.fold().join.spends == "last"
+        led.build()
     led.checks(test, review, docs, instances=("i1",) if review == "governance_refused" else ())
     f = led.fold()
     assert (f.join.row, f.state, f.join.outcome) == (row, goes, outcome)
@@ -259,7 +265,7 @@ def test_a_critique_of_an_older_plan_is_ignored():
 
 
 @pytest.mark.parametrize("rounds", [0, 1, 2])
-def test_review_rounds_bound_the_patches_before_merge(rounds):
+def test_the_plans_rounds_then_one_last_round_bound_the_patches_and_the_task_ends(rounds):
     led = Ledger(review_rounds=rounds).to_checks()
     patches = 0
     while True:
@@ -270,25 +276,60 @@ def test_review_rounds_bound_the_patches_before_merge(rounds):
         else:
             break
     f = led.fold()
-    assert patches == rounds and f.state is State.MERGE and f.join.outcome == "did_not_pass"
-    assert patches <= rounds + 1
+    assert patches == rounds + machine.LAST_ROUNDS
+    assert f.state is State.ENDED and f.join.row == 6 and f.join.outcome == "did_not_pass"
 
 
-def test_the_repair_round_is_spent_once_per_window_and_feedback_opens_a_new_window():
-    led = Ledger(review_rounds=1).to_checks()
+def test_a_red_test_and_docs_changes_spend_the_plans_rounds_like_a_review_changes():
+    led = Ledger(review_rounds=2).to_checks()
+    led.checks("red", "pass", "no_change").build()
+    led.checks("pass", "pass", "changes").build()
+    f = led.fold()
+    assert f.counts["review_rounds"] == 2 and f.counts["last_rounds"] == 0
     led.checks("red", "pass", "no_change")
-    assert led.state is State.PATCH
+    assert led.fold().join.spends == "last"
+
+
+def test_the_last_round_is_spent_once_per_window_and_feedback_on_an_ended_task_opens_a_new_window():
+    led = Ledger(review_rounds=0).to_checks()
+    led.checks("red", "pass", "no_change")
+    assert led.state is State.PATCH and led.fold().join.row == 5
     led.build().checks("red", "pass", "no_change")
-    assert led.fold().join.outcome == "did_not_pass"
+    assert led.state is State.ENDED
     led.add("feedback.given", {"feedback_id": "f", "text": "fix the test"})
     f = led.fold()
-    assert f.state is State.PATCH and f.counts == {
-        "critique_revisions": 0,
-        "review_rounds": 0,
-        "repair_rounds": 0,
-    }
+    assert f.state is State.PATCH and f.counts == machine.FRESH_COUNTS
     led.build().checks("red", "pass", "no_change")
-    assert led.state is State.PATCH  # the repair round is available again
+    assert led.state is State.PATCH  # the last round is available again
+
+
+def test_valor_stopping_in_a_patch_ends_the_task_and_task_ended_never_ends_a_merged_one():
+    led = Ledger(review_rounds=0).to_checks()
+    led.checks("pass", "changes", "no_change")
+    led.turn("ended")
+    assert led.state is State.PATCH  # the verdict moves on its own row
+    led.add("task.ended", {"kind": "decided", "by": "valor", "text": "not worth it"})
+    f = led.fold()
+    assert f.state is State.ENDED and f.entry["type"] == "task.ended"
+    merged = Ledger().to_checks().checks("pass", "pass", "no_change")
+    merged.add("effect.intent", {"effect_id": "e", "action_type": "merge",
+                                 "payload": {"candidate": merged.candidate}})  # fmt: skip
+    merged.add("effect.outcome", {"effect_id": "e", "kind": "done"})
+    merged.add("task.ended", {"kind": "step", "by": "kernel"})
+    assert merged.state is State.MERGED and "task ended in merged" in merged.fold().ignored[-1]["why"]
+
+
+def test_a_rebase_sends_a_merge_back_to_patch_spending_no_round():
+    led = Ledger(review_rounds=1).to_checks().checks("pass", "pass", "no_change")
+    assert led.state is State.MERGE
+    led.add("rebase.requested", {"effect_id": "e", "target_branch": "main", "tip": "abc"})
+    f = led.fold()
+    assert f.state is State.PATCH and f.counts["rebases"] == 1 and f.counts["review_rounds"] == 0
+    led.build().checks("pass", "pass", "no_change")
+    assert led.state is State.MERGE
+    led.add("rebase.requested", {"effect_id": "e2"}).build()
+    led.add("rebase.requested", {"effect_id": "e3"})
+    assert "rebase requested in checks" in led.fold().ignored[-1]["why"]
 
 
 def test_feedback_after_merged_patches_and_review_rounds_are_available_again():
@@ -385,6 +426,8 @@ def _reach(state: State) -> Ledger:
             "effect.held", {"effect_id": "e", "action_type": "merge", "payload": {"candidate": led.candidate}}
         )
         led.add("effect.outcome", {"effect_id": "e", "kind": "done"})
+    if state is State.ENDED:
+        led.add("task.ended", {"kind": "merge", "by": "kernel", "reason": "x"})
     if state is State.STOPPED:
         led.add("task.stopped", {"reason": "x"})
     return led
@@ -431,7 +474,7 @@ def test_the_constraint_names_every_verdict_value_and_its_name_tracks_its_text()
     sql = machine.constraint_sql()
     for values in machine.VERDICTS.values():
         for v in values:
-            if v not in ("answered", "released", "feedback", "governance_granted"):
+            if v not in ("answered", "released", "feedback", "governance_granted", "rebase"):
                 assert f"'{v}'" in sql
     assert machine.constraint_name().startswith("events_verdict_in_enum_")
 
@@ -472,7 +515,7 @@ TYPES = [
     "task.started", "task.stopped", "judge.decided", "turn.started", "turn.ended", "turn.collected",
     "question.asked", "question.answered", "plan.written", "critique.decided", "test.decided",
     "review.decided", "docs.decided", "task.delivered", "feedback.given", "guard.granted",
-    "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
+    "task.ended", "rebase.requested", "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
 ]  # fmt: skip
 MISSING = object()  # a row with no payload key at all
 RAISED = st.sampled_from(
@@ -546,7 +589,7 @@ def test_every_prefix_folds_to_exactly_one_state(start, generated):
         if f.candidate is not None:
             assert all(v.candidate == f.candidate for v in f.checks.values())
         assert f.counts["review_rounds"] <= f.loops.review_rounds
-        assert f.counts["repair_rounds"] <= 1
+        assert f.counts["last_rounds"] <= machine.LAST_ROUNDS
         # A row the fold ignored changed nothing that decides anything.
         if previous is not None and not f.legacy and f.ignored and f.ignored[-1]["id"] == n:
             assert _material(f) == _material(previous)
@@ -561,20 +604,6 @@ def test_a_task_started_without_a_payload_folds_and_a_bad_raise_applies_nothing(
     f = led.fold()
     assert f.raised == {"critique_rounds": 0, "review_rounds": 0}  # neither count applied
     assert f.state is State.CRITIQUE and "raised counts" in f.ignored[-1]["why"]
-
-
-def test_review_rounds_and_the_repair_round_together_bound_the_patches():
-    led = Ledger(review_rounds=1).to_checks()
-    patches = 0
-    for test, review in (("pass", "changes"), ("red", "pass"), ("red", "pass")):
-        led.checks(test, review, "no_change")
-        if led.state is State.PATCH:
-            patches += 1
-            led.build()
-    f = led.fold()
-    assert f.state is State.MERGE and f.join.row == 6 and f.join.outcome == "did_not_pass"
-    assert f.counts == {"critique_revisions": 0, "review_rounds": 1, "repair_rounds": 1}
-    assert patches == f.loops.review_rounds + 1  # the most a task patches before Tom sees it
 
 
 def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate_is_ignored():

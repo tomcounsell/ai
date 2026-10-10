@@ -4,16 +4,17 @@ the binding table, steering, and a task started by message."""
 import asyncio
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from core import broker, db, intake, ledger, machine, notices, serve, tasks
+from core import broker, db, intake, ledger, machine, notices, serve, tasks, verdicts
 from core.machine import State
 from core.settings import resolve_model, resolve_seat
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, OPERATOR_EMAIL, declared, new_task, of_type, rows
 from tests.ports import listen
-from tests.test_pipeline import checks_only, drive, to_checks
+from tests.test_pipeline import drive, to_checks
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -190,32 +191,26 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
 
 
 @pytest.mark.macos
-def test_feedback_on_the_delivered_notice(dsn, op, tmp_path):
-    ws, origin = scripted.workspace(tmp_path)
+def test_a_reply_to_the_ended_report_is_feedback_and_reopens_the_work(dsn, op):
+    """A task Valor ended owes Tom one report that asks for nothing; a reply
+    to it is feedback, which sends the work back to patch."""
 
     async def go():
-        task = await to_checks(dsn, ws)
-        await checks_only(dsn, task)
-        # The target moved on under the push: the merge fails, so a delivered notice is owed.
-        tree = scripted.git(ws, "rev-parse", "HEAD^{tree}")
-        moved = scripted.git(
-            ws, "commit-tree", tree, "-p", scripted.git(origin, "rev-parse", "main"), "-m", "moved"
-        )
-        scripted.git(ws, "push", "-q", str(origin), f"{moved}:refs/heads/main")
-        await drive(dsn, task)
-        written = await rows(dsn, task)
-        f = machine.fold(written)
-        assert f.state is State.MERGE and f.merge_effect["state"] == "failed"
-        await owed(dsn, task)
-        target = await mark_sent(dsn, task, notices._delivered_owed(f, written)[0])
-        steered = await say(dsn, msg("one more thing", reply_to=await a_notice(dsn, task)))
-        said = await binding_notices(dsn, steered["received_id"])
-        return task, await say(dsn, msg("rename the file", reply_to=target)), steered, said
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            assert await verdicts.end(conn, task, "merge", "the merge-target list does not name the remote")
+            await notices.owe(conn, task)
+            await notices.owe(conn, task)  # owed once
+        (n,) = [r for r in await of_type(dsn, "notice.requested", kind="ended") if r["task_id"] == task]
+        target = await mark_sent(dsn, task, n["about_key"])
+        bound = await say(dsn, msg("try it on the other branch", reply_to=target))
+        return task, n, bound, machine.fold(await rows(dsn, task))
 
-    task, bound, steered, said = run(go())
+    task, n, bound, f = run(go())
+    assert "the merge-target list does not name the remote" in n["text"]
+    assert notices.report_link(task) in n["text"] and "Reply to" not in n["text"]
     assert bound["as"] == "feedback" and bound["task_id"] == task
-    # A steer while the delivered notice stands points Tom at it.
-    assert steered["as"] == "steer" and any("reply to the delivered notice" in n["text"] for n in said)
+    assert f.state is State.PATCH and f.entry["type"] == "feedback.given"
 
 
 def test_reply_to_bridge_send_binds(dsn, op):
@@ -439,25 +434,52 @@ def test_start_provisions(dsn, op, tmp_path):
     assert "workspace.provisioned" in types and "turn.ended" in types
 
 
-def test_a_failed_provision_owes_a_notice(dsn, op, tmp_path):
+def test_a_failed_provision_is_tried_again_and_then_the_task_ends(dsn, op, tmp_path, monkeypatch):
+    """No notice per failure and no wait on a steer: the kernel provisions
+    again once the delay after the last failure has passed (none here),
+    and at `PROVISION_TRIES` failures the task ends and Tom gets one
+    report."""
     toy_spec(tmp_path, tmp_path / "no-such-repo")
+    monkeypatch.setattr(serve, "PROVISION_BACKOFF_S", 0.0)
 
     async def go():
         bound = await say(dsn, msg("Write Tom a greeting.", chat="-100555"))
         task = bound["task_id"]
         kernel = only(serve.Kernel(None, {}, None, dsn), task)
         async with await db.connect(dsn) as conn:
-            await kernel.schedule(conn)
-            await asyncio.gather(*kernel.jobs.values())
-            await kernel.schedule(conn)  # failed, and not steered since: not tried again
-            again = dict(kernel.jobs)
-        return task, again, await rows(dsn, task)
+            for _ in range(serve.PROVISION_TRIES + 1):
+                await kernel.schedule(conn)
+                await asyncio.gather(*kernel.jobs.values())
+            await notices.owe(conn, task)
+        return await rows(dsn, task)
 
-    _task, again, written = run(go())
-    assert again == {}
-    assert [r["type"] for r in written].count("workspace.failed") == 1
-    (n,) = [r["payload"] for r in written if r["type"] == "notice.requested"]
-    assert n["kind"] == "workspace_failed"
+    written = run(go())
+    types = [r["type"] for r in written]
+    assert types.count("workspace.failed") == serve.PROVISION_TRIES and "task.ended" in types
+    assert machine.fold(written).state is State.ENDED
+    owed_ = [r["payload"] for r in written if r["type"] == "notice.requested"]
+    assert [n["kind"] for n in owed_] == ["ended"]
+    assert "could not set up its workspace" in owed_[0]["text"]
+
+
+def test_a_provision_is_due_after_a_doubling_delay_and_a_steer_counts_again():
+    t0 = datetime(2026, 10, 10, tzinfo=UTC)
+
+    def failed(i, minutes):
+        return {"id": i, "type": "workspace.failed", "payload": {}, "at": t0 + timedelta(minutes=minutes)}
+
+    one = [failed(1, 0)]
+    two = [*one, failed(2, 5)]
+    assert serve._provision_due([]) is True
+    assert not serve._provision_due(one, t0 + timedelta(seconds=serve.PROVISION_BACKOFF_S - 1))
+    assert serve._provision_due(one, t0 + timedelta(seconds=serve.PROVISION_BACKOFF_S))
+    later = t0 + timedelta(minutes=5)
+    assert not serve._provision_due(two, later + timedelta(seconds=2 * serve.PROVISION_BACKOFF_S - 1))
+    assert serve._provision_due(two, later + timedelta(seconds=2 * serve.PROVISION_BACKOFF_S))
+    spent = [failed(i, i) for i in range(serve.PROVISION_TRIES)]
+    assert not serve._provision_due(spent, t0 + timedelta(days=1))
+    steered = [*spent, {"id": 99, "type": "message.steered", "payload": {}, "at": t0}]
+    assert serve._provision_due(steered, t0)
 
 
 def only(kernel: serve.Kernel, task: str) -> serve.Kernel:

@@ -57,6 +57,7 @@ Advise = Callable[[Gateway, str, str, Alive, dict[str, Any]], Awaitable[dict[str
 ADVICE_GIVEN = "advice.given"
 ADVICE_BESIDE = "advice.md beside a signal that ends the stage; not asked"
 ADVICE_UNFINISHED = "advice.md from a turn that did not finish; not asked"
+STOP_BESIDE = "stop.md beside question.md or done.md; the other signal counts"
 
 
 async def _always() -> bool:
@@ -80,7 +81,9 @@ async def run(
     (`fresh.advise`); its `lock lost`, `stopped`, or preemption ends the
     run as a turn's does, so the question is asked on the next run. Before
     a `patch` turn of a task with a done merge, the merged head is brought
-    into the work branch (`merged_into_work`)."""
+    into the work branch (`merged_into_work`), and before the rebase a
+    moved target asks for, its new tip is put on the task's origin
+    (`target_into_origin`)."""
     dsn = dsn or gateway.dsn
     performers = performers or broker.Performers()
     async with await db.connect(dsn) as conn:
@@ -105,6 +108,8 @@ async def run(
                 return advised
             continue
         merged = await asyncio.to_thread(merged_into_work, b, rows) if rows else None
+        moved = await asyncio.to_thread(target_into_origin, b, rows) if rows else None
+        merged = "\n\n".join(x for x in (merged, moved) if x)
         if merged:
             prompt = f"{prompt}\n\n{merged}"
         try:
@@ -241,6 +246,28 @@ def merged_into_work(brief: tasks.Brief, rows: list[dict]) -> str | None:
     return None
 
 
+def target_into_origin(brief: tasks.Brief, rows: list[dict]) -> str | None:
+    """Before the rebase a moved target asks for (`rebase.requested`), put
+    the target's new tip, which the merge's lookup fetched into the kernel
+    mirror, on the task's bare origin, so the working session fetches it
+    from there. Nothing to do for a task without a mirror, or whose origin
+    is the target itself. When it cannot, a note for the turn's prompt."""
+    f = machine.fold(rows)
+    entry = f.entry or {}
+    if entry.get("type") != "rebase.requested" or f.entry_finished:
+        return None
+    p = entry["payload"]
+    tip, target = p.get("tip"), p.get("target_branch")
+    if not tip or not target or not brief.mirror or not brief.push_url or brief.push_url == brief.origin_url:
+        return None
+    try:
+        git.trusted(brief.mirror, "push", "-q", "--no-verify", "--force", brief.push_url,
+                    f"{tip}:refs/heads/{target}")  # fmt: skip
+    except git.GitError as exc:
+        return f"The kernel could not put {target}'s new tip {tip} on the task's origin: {exc}"
+    return None
+
+
 def _keep(brief: tasks.Brief | None, sha: str, ref: str, turn_id: str) -> str | None:
     """Fetch a plan commit or a candidate into the kernel mirror of a task
     the kernel provisioned; why not, or None. A task without a mirror keeps
@@ -275,7 +302,9 @@ def _verdict(
     goes with the verdict as `advice`."""
     verdict, extra, errors = _stage_verdict(state, found, workspace, turn_id, finished, brief)
     if found.advice is not None:
-        ended = any(getattr(found, name) is not None for name in ("question", "no_question", "plan", "done"))
+        ended = any(
+            getattr(found, name) is not None for name in ("question", "no_question", "plan", "done", "stop")
+        )
         if ended:
             errors.append(ADVICE_BESIDE)
         elif verdict != "idle":
@@ -300,11 +329,17 @@ def _stage_verdict(
         State.CLARIFY: ("question", "no_question"),
         State.PLAN: ("question", "plan"),
         State.BUILD: ("question", "done"),
-        State.PATCH: ("question", "done"),
+        State.PATCH: ("question", "done", "stop"),
     }[state]
-    for name in ("no_question", "plan", "done"):
+    for name in ("no_question", "plan", "done", "stop"):
         if name not in meant and getattr(found, name) is not None:
             errors.append(f"{name} means nothing in {state}; ignored")
+    if (
+        state is State.PATCH
+        and found.stop is not None
+        and (found.question is not None or found.done is not None)
+    ):
+        errors.append(STOP_BESIDE)
     if found.plan_error:
         errors.append(found.plan_error)
     if found.question is not None:
@@ -321,6 +356,8 @@ def _stage_verdict(
         else:
             extra["plan"] = plan
             return "planned", extra, errors
+    if state is State.PATCH and found.stop is not None and found.done is None:
+        return "ended", extra, errors
     if state in (State.BUILD, State.PATCH) and found.done is not None:
         candidate, why = _candidate(workspace, turn_id)
         if candidate is not None:
@@ -357,6 +394,7 @@ def _collected(
         "no_question": found.no_question,
         "done": found.done,
         "advice": advice,
+        "stop": found.stop,
         "plan": found.plan,
         "candidate": candidate,
         "errors": errors,
@@ -567,6 +605,8 @@ async def record(
             )
         elif current is state and verdict == "planned":
             follow = "plan.written", {"turn_id": turn_id, **extra["plan"]}
+        elif current is state and verdict == "ended":
+            follow = "task.ended", {"kind": "decided", "by": "valor", "turn_id": turn_id, "text": found.stop}
         why = await _written(conn, task_id, collected, follow)
         if why is not None:
             collected = await _answered(conn, collected, why)
@@ -745,8 +785,8 @@ async def feedback(
     via: str = "the command line",
     role_played: bool = False,
 ) -> str:
-    """Record Tom's feedback on the task's delivery, in `merge` or `merged`,
-    which sends the work to `patch` and opens a new loop window. Refused
+    """Record Tom's feedback on the task's delivery, in `merge`, `merged`,
+    or `ended`, which sends the work to `patch` and opens a new loop window. Refused
     while the merge's intent has no outcome, and on a task stopped or under
     a stopped ancestor, under the tree's lock so a stop's walk sees the
     reopened task or the feedback sees the stop. Returns the feedback's
@@ -771,7 +811,7 @@ async def feedback(
             )
         if f.state is State.WAITING:
             raise LookupError(f"task {task_id} has an open question; answer it with `answer`")
-        if f.state not in (State.MERGE, State.MERGED):
+        if f.state not in (State.MERGE, State.MERGED, State.ENDED):
             raise LookupError(f"task {task_id} is in {f.state}; feedback is on a delivery")
         if f.merge_effect and f.merge_effect["state"] == "in_flight":
             raise LookupError(f"task {task_id}'s merge is in flight; wait for its outcome")
@@ -813,7 +853,22 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
     if kind == "join":
         found = machine.fold(rows).join
         lines = [f"- [{x.source}, {x.kind}] {x.text}" for x in (found.findings if found else ())]
-        return "# Findings from the checks\n\n" + ("\n".join(lines) or "No findings were written.")
+        head = "# Findings from the checks\n\n"
+        if found is not None and found.spends == "last":
+            head = (
+                "# Findings from the checks, with the plan's rounds spent\n\n"
+                "This is the last round: patch once more (`done.md`), or stop (`stop.md`).\n\n"
+            )
+        return head + ("\n".join(lines) or "No findings were written.")
+    if kind == "rebase.requested":
+        tip = f" to {p['tip']}" if p.get("tip") else ""
+        return (
+            f"# The target branch moved\n\nThe merge into {p.get('target_branch')} was refused: "
+            f"{p.get('target_branch')} moved on{tip} since this work was based on it. Rebase the work "
+            f"onto it (git fetch origin {p.get('target_branch')}, then git rebase "
+            f"origin/{p.get('target_branch')}), resolve any conflicts, run the tests, commit, and write "
+            f"done.md.\n\nWhat git said: {p.get('reason') or ''}".strip()
+        )
     if kind == "turn.collected" and p.get("verdict") == "no_material_question":
         return f"# No material question; on to the plan\n\n{p.get('no_question') or ''}".strip()
     return None
@@ -830,9 +885,10 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     advice = _advice_report(rows)
     steering = _steering(f.steering)
     notes = _errors_report(f.last_collected)
+    failed = _failure_report(rows)
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
     children = _children_report(await tasks.reports(conn, task_id))
-    parts = (prompt, advice, steering, notes, report, children)
+    parts = (prompt, failed, advice, steering, notes, report, children)
     return "\n\n".join(x for x in parts if x), f.session
 
 
@@ -910,6 +966,18 @@ def _steering(steered: list[dict[str, Any]]) -> str:
         paths = [a["path"] for a in p.get("attachments") or [] if a.get("path")]
         lines.append(f"- {p.get('text', '')}" + (f" (attachments: {', '.join(paths)})" if paths else ""))
     return "\n".join(lines)
+
+
+def _failure_report(rows: list[dict]) -> str:
+    """Why the last try failed, when a step failed after the last turn the
+    kernel collected: the kernel retries a failed step itself
+    (`router.retry_due`), and the next turn opens with the reason."""
+    for r in reversed(rows):
+        if r["type"] == "turn.collected":
+            return ""
+        if r["type"] == "step.failed":
+            return "# The last try failed\n\n" + str(r["payload"].get("reason") or "no reason was recorded")
+    return ""
 
 
 def _errors_report(collected: dict[str, Any] | None) -> str:
