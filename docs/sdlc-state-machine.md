@@ -369,18 +369,25 @@ asked, correctly, and adds no ungranted governance.
 **What runs.** The registered runner is
 `fresh.review_runner`, the blind verifier
 ([architecture.md](architecture.md)). The kernel first asks the governance
-boolean per hunk (use shape 6), then runs the suite and the lint itself at
+boolean per hunk (use shape 6; prose under `docs/` and READMEs is not
+asked), then runs the suite and the lint itself at
 base and candidate, each in a fresh `container` VM with no network (`verify.ran`, on a Mac with `container` installed), then sets up a checkout of the candidate
 with fresh services and runs one fresh session there: the builder's Opus
 model, or an Opus-class model from another vendor through another harness,
 never a cheaper class. It reads the request, Tom's answers and feedback,
-the plan, the diff, the kernel's run, and the instances, never the
+the plan, the diff, the kernel's run, the instances, and the undecided
+hunks, never the
 executor's narration, reruns any test itself, and answers `pass` or
 `changes` as its final message (the object bare, or the fenced block that
 ends the message, prose before it ignored), which the kernel reads from
 the turn's result, not from a file in the checkout; it adds instances, never removes one, and a line it names in a
-flagged hunk merges into it. Both legs failing leaves no verdict; after two
-such runs the unjudged hunks become one instance. The kernel computes the
+flagged hunk merges into it. An instance is a hunk the judgement answered
+yes without an abstain. A hunk it abstained on, one too large for both
+legs, and one both legs failed on in two runs are undecided (both legs
+failing on a run before that leaves no verdict, and the next run asks
+again): the reviewer answers the same boolean for each in its verdict's
+`undecided`, its yes an instance and its no none, and a verdict that leaves
+one unanswered is refused. The kernel computes the
 recorded verdict: a `pass` with an ungranted instance is
 `governance_refused`; a `changes` lists each such instance as a finding.
 The spec's setup runs in that checkout under a profile that writes the
@@ -430,12 +437,17 @@ candidate that touch doc paths alone, with regular file modes (`100644`,
 `100755`, read from `git diff-tree -r`); a merge, a commit off the
 candidate, or a tree holding `.valor` keeps nothing. It records
 `docs.kept`, so a rerun asks only governance again, then judges governance
-over the kept diff (a doc can add a rule) and records `docs.decided`: the
+over the kept diff, less prose under `docs/` and READMEs (a Markdown file
+elsewhere can add a rule), and records `docs.decided`: the
 candidate, the kept head, the dropped commits and their paths, the
-governance answer, and the verdict it computes. `updated` or `no_change`
-passes. `changes` means a doc states something the code should still honor
-and the candidate breaks it, a doc cannot be made true without a code
-change, the kernel dropped a commit, or the candidate's tree holds `.valor`
+governance answer, and the verdict it computes. This cut is the one place
+docs commits are read; the verdict and the merge take its head as kept. No
+reviewer reads the docs diff, so a hunk the judgement leaves undecided is
+no instance there. `updated` or `no_change` passes, at the kept head: a
+dropped commit is a `dropped` finding, noted on the delivery, and the merge
+goes on at what was kept. `changes` means a doc states something the code
+should still honor and the candidate breaks it, a doc cannot be made true
+without a code change, or the candidate's tree holds `.valor`
 (no clone or session; the kernel records it, leg `kernel`). Docs commits
 belong to their candidate: after a send-back they are not merged, and the
 next docs session reads them as `previous-docs.patch`, keeping what holds.
@@ -527,18 +539,18 @@ these are facts in the task's ledger:
    does not stand in for a tap;
 3. the test verdict `pass`, or `gaps` with the repair round spent and the
    gaps on the delivery; never `red`;
-4. the docs verdict `updated` or `no_change`, its commits running from `C`
-   to the head being merged with no merge commit between, every path `git
-   diff --no-renames` names between them a doc path (so a rename out of a
-   code path counts the old path), read from git at request, and its
-   governance boolean answered no or each instance granted.
+4. the docs verdict `updated` or `no_change`, its head the one being
+   merged, and its governance boolean answered no or each instance
+   granted. What that head holds was read once, when the docs runner cut
+   the docs commits to the doc-path prefix it keeps (`fresh.kept_prefix`:
+   doc paths only, `git diff-tree --no-renames` so a rename out of a code
+   path counts the old path, regular file modes, no merge commit, and
+   descending from `C`).
 
-Each term is deterministic: a row exists or a git fact holds, or not. No
+Each term is deterministic: a row exists, or not. No
 model call decides whether a merge may happen. The broker checks all four
 and writes the merge's intent in one transaction under the task's lock. A
-term that does not hold is an `effect.refused` naming it. When git cannot
-be read, no row is written, the task is parked, and the next step asks
-again. The kernel requests a merge once for each payload and grant count,
+term that does not hold is an `effect.refused` naming it. The kernel requests a merge once for each payload and grant count,
 so a refused or failed merge stands until a new candidate, a new docs head,
 or a new grant changes the request. A
 merge whose performing process died leaves an intent with no outcome; a
@@ -551,8 +563,8 @@ candidate, so the request binds them, and the push goes to that URL
 whatever the workspace's config says later; a workspace whose own config
 names a program, redirects a push, or includes other config is refused
 (`core/git.py`, `HOSTILE`). For a task the kernel provisioned, the origin
-is its own bare one, and the predicate's git facts and the merge's push
-come from the kernel mirror, which no turn writes. A turn cannot request a
+is its own bare one, and the docs cut and the merge's push read the
+kernel mirror, which no turn writes. A turn cannot request a
 merge, and its `push_branch` cannot target the target branch.
 
 **Governance instances.** A review or docs verdict names each instance by
