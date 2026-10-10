@@ -388,7 +388,7 @@ def test_a_verify_command_ending_in_a_pipe_reports_the_tests_own_exit(tmp_path, 
     monkeypatch.setattr(kws, "start_services", lambda *a: None)
     monkeypatch.setattr(kws, "stop_services", lambda *a: None)
     result = {
-        "run": "r", "final_rev": "x", "item": {"verify": ["echo FAILED; false | grep -E 'FAILED'", "true | cat"]},
+        "run": "r", "final_rev": "x", "item": {"verify": ["{ echo FAILED; false; } | grep -E 'FAILED'", "true | cat"]},
         "workspace": {"task_dir": str(task_dir), "project": {}, "harness_config": str(harness), "task_id": "t"},
     }  # fmt: skip
     assert [c["exit"] for c in judge.verify(result)] == [1, 0]

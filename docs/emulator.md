@@ -217,8 +217,10 @@ Runs the item's verification on the final commit (the merge's head,
 else the candidate) and nothing else. The commit is exported with `git
 archive` from the task's kernel mirror into a fresh tree at
 `<task_dir>/checks/verify-<run>/`, which only the kernel writes, so no turn
-can write it. Each command runs there in `bash -o pipefail` under the working turn's profile as
-the baseline ran it (the temp directories shared, the verification
+can write it. Each command runs there in `bash -o pipefail`, so a pipeline into `grep`
+or `tail` exits with the tests' own failure (the baseline ran plain `bash -c`,
+where such a pipeline read 0). It runs under the working turn's profile as
+the baseline did (the temp directories shared, the verification
 directory added read-write, `TMPDIR` inside it), with the task's
 environment and services, and whatever a command leaves running is reaped
 and listed. Uncommitted work,

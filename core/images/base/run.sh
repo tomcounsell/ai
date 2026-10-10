@@ -98,7 +98,7 @@ if jq -e '.services | index("postgres")' "$SPEC" >/dev/null; then
     done
     echo "ALTER ROLE postgres PASSWORD NULL;"
   } | PGPASSWORD="$super" "$PGBIN/psql" -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 -q \
-    >"$LOGS/roles.log" 2>&1 || services_failed "the roles were not created"
+    >"$LOGS/roles.log" 2>&1 || services_failed "the roles or extensions were not created"
   chown valor:valor "$pgpass" && chmod 0600 "$pgpass"
 fi
 if jq -e '.services | index("redis")' "$SPEC" >/dev/null; then
