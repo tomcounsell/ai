@@ -343,19 +343,12 @@ Check: six lines ending `Valor the Cowboy`; the cutover date; `179144806`
 
 ## 8. Grants and the kernel
 
-**8.1 Merge grants** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md)). Four pairs, one step: Tom runs the four
-`merge-target add` commands listed in item 2 of that file, one per project's
-real remote and branch. Without a pair, a merge to that remote is refused.
+**8.1 Where merges land** (Tom's, item 2 of [cutover-runbook-tom.md](cutover-runbook-tom.md)). Each
+project spec's `merge_url` and branch are recorded in a task's Brief at
+start, and its merge lands there. The token's reach bounds the rest.
 
-```
-$PY -m core merge-target list
-```
-
-Check: the list holds `https://github.com/tomcounsell/ai.git main`,
-`https://github.com/tomcounsell/popoto.git main`,
-`https://github.com/yudame/psyoptimal.git main`, and
-`https://github.com/yudame/cuttlefish.git <its branch>`. Without a pair,
-`core start --project NAME` refuses; the refusal names the pair.
+Check: on GitHub, the repositories `valorengels` can write are the four
+day-one repositories and no others.
 
 **8.2 Check Valor's push access to each repo** before its first task.
 
@@ -465,7 +458,7 @@ $SQL "select count(*) from events where type='message.received' and payload->>'c
 Check: the log shows the poll reaching the mailbox and no old backlog
 received (every received message is dated on or after the cutover date).
 
-**10.5 A task reaches a merge under each granted pair.** One small task
+**10.5 A task reaches a merge on each project's merge URL.** One small task
 per project, started by a message in its group (`core start ... --project
 NAME` for psyoptimal and cuttlefish until their chats are added). The
 live window records the first run; at cutover one real task from Tom's
@@ -476,7 +469,7 @@ $PY -m core start "TEXT" --project popoto
 $PY -m core status TASK_ID
 ```
 
-Check: the task reaches `merge` and `merged` on the granted URL and branch,
+Check: the task reaches `merge` and `merged` on the spec's URL and branch,
 its merge effect has an `effect.outcome` of kind `done` and no
 `effect.refused`, and nothing waited for Tom except a question the task
 itself asked.

@@ -99,9 +99,11 @@ a merge pushes to the rebuild branch on GitHub. The running kernel runs
 from the lead's checkout, and after its own merge lands it rolls that
 checkout forward (`core/rollout.py`): a merge that changes only persona,
 skills, docs or tests is fast-forwarded at once; any other waits for the
-running jobs, fast-forwards, runs the merged migrate, and restarts the
-kernel through launchd. A merge that changes the dependencies or the
-schema stops before the checkout moves and is rolled out by hand.
+running jobs, backs up the database when the schema changes,
+fast-forwards, syncs the dependencies when they change, runs the merged
+migrate, and restarts the kernel through launchd. A failed step is tried
+again on later ticks, and Tom gets a report once it has failed three
+times.
 
 **Fan-out (Tom's decision of 2026-10-03).** Every remaining task is
 planned at once, and every task whose code does not wait on another is

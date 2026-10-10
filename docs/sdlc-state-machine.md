@@ -551,8 +551,9 @@ candidate, so the request binds them, and the push goes to that URL
 whatever the workspace's config says later; a workspace whose own config
 names a program, redirects a push, or includes other config is refused
 (`core/git.py`, `HOSTILE`). For a task the kernel provisioned, the origin
-is its own bare one, and the predicate's git facts and the merge's push
-come from the kernel mirror, which no turn writes. A turn cannot request a
+is the project spec's `merge_url`, else its own bare one, and the target
+branch the spec's; any branch may be the target. The predicate's git
+facts and the merge's push come from the kernel mirror, which no turn writes. A turn cannot request a
 merge, and its `push_branch` cannot target the target branch.
 
 **Governance instances.** A review or docs verdict names each instance by

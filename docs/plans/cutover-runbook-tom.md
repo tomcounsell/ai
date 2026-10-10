@@ -15,19 +15,13 @@ setup.
 The only places a person is in the path; none is a tap on work Valor started.
 
 1. **Writes the cutover date** at the top of this file.
-2. **Grants the merge targets** (the command is always his):
-
-   ```
-   $PY -m core merge-target add https://github.com/tomcounsell/ai.git main --note "cutover"
-   $PY -m core merge-target add https://github.com/tomcounsell/popoto.git main --note "cutover"
-   $PY -m core merge-target add https://github.com/yudame/psyoptimal.git main --note "cutover"
-   $PY -m core merge-target add https://github.com/yudame/cuttlefish.git main --note "cutover"
-   ```
-
-   The cuttlefish branch is assumed `main`; if its deploy branch differs,
-   the spec and the grant carry that one. This is a grant of authority, not
-   a tap on a held action: `merge-target add` is always Tom's, and no
-   task waits on it once it is written.
+2. **Keeps the push token's reach to Valor's repositories** (the account
+   is his): `valorengels`, whose token is `GITHUB_PUSH_TOKEN`, is a
+   collaborator with write access on `tomcounsell/ai`, `tomcounsell/popoto`,
+   `yudame/psyoptimal`, and `yudame/cuttlefish`, and on no repository Valor
+   must not write. Each project spec's `merge_url` and branch are where its
+   merges land (the cuttlefish branch is assumed `main`; if its deploy
+   branch differs, the spec carries that one). No task waits on this.
 3. **Makes the rebuild branch `main`** (G6), after step 4 has printed its
    checks. First, the four open pull requests against `main` (#3607, #3598,
    #3596, #3593) are closed or relabeled as aimed at the old system, since

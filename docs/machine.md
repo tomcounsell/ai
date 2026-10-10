@@ -289,17 +289,25 @@ authority, and a turn holds none.
 | The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on the OpenAI route's listed calls (`POST v1/responses`, `GET` or `HEAD` on `v1/models` and one model by id; any other method is a 403) and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge, at start | `telegram-keys` (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, mode 600) in the kernel key directory, written only by `python -m bridges.telegram keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`; the session is `telegram.session` beside it, mode 600, written by `python -m bridges.telegram login`, which Tom runs and types the code and password into. No output holds any part of the hash |
 | Mail credentials, `IMAP_USER`, `IMAP_PASSWORD`, `SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password) | The email bridge, at start | `mail-keys` in the kernel key directory (mode 600), written only by `python -m bridges.email keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the bridge's `Config` only, never in `os.environ`, a ledger row, or a log line |
-| The GitHub push token, `GITHUB_PUSH_TOKEN` | The merge performer of a task the kernel provisioned, for a merge to a granted remote, never the turn and never `push_branch` | `github-keys` in the kernel key directory (mode 600), written only by `python -m core github-key`, which copies it from the vault `.env` and prints `written`, `kept`, or `missing`. For each git call against the remote the kernel writes a config file of its own, mode 600, in the same directory, holding one header (`Authorization: Basic`, user `x-access-token`) scoped to that exact URL, with `http.followRedirects=false` so the header never follows a redirect, gives git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits; the call also pins no redirect and no proxy on its command line, which outranks the repository's config; the file is named by the PID of the process writing it, and a file a crash left is removed by the next merge once that process no longer exists. GitHub's refusal of the token fails the merge saying to rotate it |
+| The GitHub push token, `GITHUB_PUSH_TOKEN` | The merge performer of a task the kernel provisioned, for a merge to a remote, never the turn and never `push_branch` | `github-keys` in the kernel key directory (mode 600), written only by `python -m core github-key`, which copies it from the vault `.env` and prints `written`, `kept`, or `missing`. For each git call against the remote the kernel writes a config file of its own, mode 600, in the same directory, holding one header (`Authorization: Basic`, user `x-access-token`) scoped to that exact URL, with `http.followRedirects=false` so the header never follows a redirect, gives git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits; the call also pins no redirect and no proxy on its command line, which outranks the repository's config; the file is named by the PID of the process writing it, and a file a crash left is removed by the next merge once that process no longer exists. GitHub's refusal of the token fails the merge saying to rotate it |
 
-**Where a merge lands.** A merge to a remote lands only on a (URL,
-branch) pair on the merge-target list, which Tom grants with `python -m
-core merge-target add URL BRANCH --note TEXT` and anyone removes with
-`merge-target remove`; `merge-target list` shows it. The URL is plain
-`https://host/path`, with no user, port, query, or quoting. `start
---project` refuses a spec whose `merge_url` and branch are not granted,
-and refuses the branch the remote's HEAD names (its default branch), read
-at start and again before each push. A merge to a local origin needs no
-grant and no token; a `--workspace` task merges with no token.
+**Where a merge lands.** A merge lands on the URL and target branch the
+kernel recorded in the task's Brief at start: the project spec's
+`merge_url`, else the task's own bare origin, and the spec's
+`target_branch` or `branch`, else the branch the source's HEAD names. No
+turn changes either, and the broker refuses a merge naming any other. Any
+branch may be the target, the remote's default branch included. The URL
+the header is written for is plain `https://host/path`, with no user,
+port, query, or quoting. A merge to a local origin needs no token; a
+`--workspace` task merges with no token.
+
+What a merge can reach beyond its Brief is bounded by the token alone.
+`GITHUB_PUSH_TOKEN` belongs to Valor's own GitHub account, `valorengels`,
+and that account is a collaborator only on the repositories Valor builds,
+so the token writes nothing else; a repository Valor must not write is one
+the account is not a collaborator on. Choosing that list, or replacing the
+token with a fine-grained one limited to those repositories, is Tom's,
+since he holds the account.
 
 **Reading what a turn wrote.** A file or directory under a turn's own
 state is the turn's to change, so the kernel opens it component by

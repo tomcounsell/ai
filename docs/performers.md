@@ -39,11 +39,9 @@ Status: **in use**.
 - **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
   passed candidate onto the target branch, released only when the merge
   predicate holds; no turn is offered it. It is built from the task's Brief
-  and refuses a payload naming any other URL or branch. A local origin
-  needs no grant and no token. A remote must be a (URL, branch) pair Tom
-  granted (`python -m core merge-target add`), is never the branch the
-  remote's `HEAD` names (read again just before the push), and is pushed
-  from the kernel mirror with the GitHub token, which only a task the
+  and refuses a payload naming any other URL or branch: the URL and target
+  branch the kernel recorded at start from the project spec. A local
+  origin needs no token. A remote is pushed from the kernel mirror with the GitHub token, which only a task the
   kernel provisioned has. Each git call against the remote gets a config
   file of its own holding one `Authorization` header scoped to that URL,
   removed when git exits, with redirects and proxies pinned off in the file

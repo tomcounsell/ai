@@ -17,20 +17,14 @@ document that writes it.
 
 ## B1. Stop the new system, in this order
 
-Nothing else runs first. A merge grant is re-checked before each push, so
-the grants come off before anything is stopped, and a task cannot land on a
-branch that step B2 is about to move.
+Nothing else runs first. Every running task is stopped before anything
+else, so no task's merge lands on a branch that step B2 is about to move.
 
 ```
-for R in "https://github.com/tomcounsell/ai.git main" "https://github.com/tomcounsell/popoto.git main" \
-         "https://github.com/yudame/psyoptimal.git main" "https://github.com/yudame/cuttlefish.git main"; do
-  $PY -m core merge-target remove $R --note "go back" --by valor; done
-$PY -m core merge-target list
 $SQL "select distinct task_id from events where type = 'task.started' and task_id not in (select task_id from events where type = 'task.stopped')"
 ```
 
-Check: the list prints `no merge targets`. (If the cuttlefish grant names another branch, use
-that branch.) For each task id printed, `$PY -m core status TASK_ID`; every
+Check: for each task id printed, `$PY -m core status TASK_ID`; every
 one not `merged` or `stopped` is stopped with `$PY -m core stop TASK_ID
 --reason "go back"`. Then stop the kernel, the bridges, and the routines:
 
@@ -152,7 +146,7 @@ forward, and the new bridge needs them when it returns.
 
    It prints `closed NOTICE_ID`, and the listing no longer shows the notice.
 2. Run step 5 again, since the old bridge handled messages in the meantime.
-3. Grant the four merge targets again (Tom's item 2), enable the kernel,
+3. Enable the kernel,
    routines, and bridges as in steps 8 and 9, and write a new
    `$CUT/cutover-at.txt`.
 
@@ -168,11 +162,10 @@ Each is the lead's decision, with its reason.
    The rule that the old Redis is never written gives way for this one step,
    because at go-back the old system is being restored and its own function
    writes its own record.
-2. **B1 first.** The four grants are removed, running tasks stopped with
-   `core stop`, then the kernel stopped, before anything else. Reason: a
-   grant is re-checked before each push, so a still-running kernel could
-   push to the old `main` after B2, and popoto would be merged by both
-   systems.
+2. **B1 first.** Running tasks are stopped with `core stop`, then the
+   kernel stopped, before anything else. Reason: a still-running task
+   could push to the old `main` after B2, and popoto would be merged by
+   both systems.
 3. **B2 tags the new tip** (`new-system-<date>`) before rewinding. Reason:
    after step 6 the kernel's merges land on `main`, and a forced reset
    would orphan them.

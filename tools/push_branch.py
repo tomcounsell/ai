@@ -21,9 +21,8 @@ branch, the head, and the candidate, so the request binds all four, and
 `Merge` is built from the task's Brief, so it refuses a payload naming any
 other URL or branch: the URL and target branch the kernel recorded at start
 from the project spec, which no turn changes. What the push can reach
-beyond that is bounded by the GitHub credential's own scope (docs/tech-stack.md,
-GitHub). A task with a kernel
-mirror pushes from the mirror with the GitHub credential, a per-call config
+beyond that is bounded by the GitHub credential's own reach (docs/machine.md,
+Where a merge lands). A task with a kernel mirror pushes from the mirror with the GitHub credential, a per-call config
 file (`core.credentials.header_file`); no other push carries it.
 
 Every method is a coroutine; git runs in a worker thread

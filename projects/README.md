@@ -12,14 +12,13 @@ workspaces for (`python -m core start ... --project NAME`).
 - The suite command is the kernel's, never the candidate's: a command the
   candidate chose could be `true`. A spec is read once at start and copied
   into the task's Brief, so editing it never changes a running task.
-- A spec never decides by itself where a merge may land. Without
-  `merge_url` the merge lands on the task's own bare origin. With it, the
-  merge lands on that URL only when Tom has granted the (URL, branch) pair
-  (`python -m core merge-target add`), and never on the remote's default
-  branch; `start` refuses otherwise.
+- Without `merge_url` the merge lands on the task's own bare origin. With
+  it, the merge lands on that URL; the kernel records it, and the target
+  branch, in the task's Brief at start, and no turn changes either. The
+  GitHub token's own reach bounds which repositories that can be
+  ([machine.md](../docs/machine.md), Where a merge lands).
 - `branch` is the branch a task's clone, bare origin, and merge target use;
-  without it the remote's default branch is used, which a merge to a
-  remote refuses. A
+  without it the remote's default branch is used. A
   task started by a message has no `--branch`, so a project whose messages
   start tasks names it (`valor` names the rebuild's branch); `start
   --branch` overrides it for one task.
