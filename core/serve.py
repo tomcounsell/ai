@@ -49,12 +49,15 @@ URL and branch) rolls the running kernel forward. One that changes only
 `persona/`, `skills/`, `docs/`, `tests/` or top-level `*.md` is
 fast-forwarded at once. Any other first holds `schedule` until every job
 but the background turn's has ended, then cancels the background turn,
-fast-forwards the checkout, runs the merged code's migrate, writes
-`rollout.restarting`, and raises `rollout.Restart`, which leaves `serve`;
-launchd starts the kernel again. A failed step writes `rollout.failed` and
-a notice, lifts the hold, and is tried again on the next `serve_tick_s`
-wake; a change to the dependencies or the schema stops before the checkout
-moves and is the lead's.
+backs up the database when the merge changes `core/schema.sql` (`python -m
+core backup`'s dump), fast-forwards the checkout, runs `uv sync --frozen`
+when it changes `uv.lock` or `pyproject.toml`, runs the merged code's
+migrate, writes `rollout.restarting`, and raises `rollout.Restart`, which
+leaves `serve`; launchd starts the kernel again. A failed step writes
+`rollout.failed`, steps the checkout (and its dependencies) back when it
+had moved, lifts the hold, and is tried again on the next `serve_tick_s`
+wake; after `rollout.NOTICE_AFTER` failures of one merge, Tom gets one
+notice saying what failed.
 """
 
 import asyncio
@@ -72,6 +75,7 @@ from typing import Any
 import psycopg
 
 from core import (
+    backup,
     broker,
     db,
     git,
@@ -379,16 +383,21 @@ class Kernel:
         started: str | None = None,
         migrate: Callable[[str], None] | None = None,
         credential: str | Path | None = None,
+        sync: Callable[[], None] | None = None,
+        backup: Callable[[str], None] | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
         # The checkout this process runs from and its commit then; with no
         # checkout, nothing is rolled.
         self.checkout, self.started, self.credential = checkout, started, credential
         self.migrate = migrate or (functools.partial(rollout.migrate, checkout) if checkout else None)
+        self.sync = sync or (functools.partial(rollout.sync, checkout, settings.uv) if checkout else None)
+        self.backup = backup or _backup
         self.restart_due: rollout.Merge | None = None  # holds `schedule` until the jobs end
         self.judged: set[str] = set()  # merge effects contained in `started`, or not the kernel's
         self.waiting: set[str] = set()  # failed since the last `serve_tick_s` wake
-        self.final: set[str] = set()  # failed at a step that repeats: not tried again by this process
+        self.failures: dict[str, int] = {}  # failed tries of each merge's rollout in this process
+        self.backed_up: set[str] = set()  # merges whose database backup this process took
         # Tasks whose ended turn recover could not collect: collected by a
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
@@ -440,7 +449,7 @@ class Kernel:
             return
         merges = []
         for row, task_id, effect_id, result in await (await conn.execute(MERGE_OUTCOMES)).fetchall():
-            if effect_id in self.judged or effect_id in self.final:
+            if effect_id in self.judged:
                 continue
             m = rollout.Merge.of(row, task_id, effect_id, result)
             if m is None:
@@ -500,30 +509,39 @@ class Kernel:
         _log(f"rolled out {m.sha} with no restart")
 
     async def _apply(self, conn, plan: rollout.Plan) -> None:
-        """Cancel the background turn, fast-forward, migrate, and raise
-        `Restart`; every other job has ended."""
+        """Cancel the background turn, back up, fast-forward, sync, migrate,
+        and raise `Restart`; every other job has ended."""
         m = plan.target
         job = self.jobs.get(self.background) if self.background else None
         if job is not None:
             job.cancel()
             await asyncio.gather(job, return_exceptions=True)
-        steps = [*plan.steps, "fast-forward"]
+        steps = list(plan.steps)
+        database = psycopg.conninfo.conninfo_to_dict(self.dsn).get("dbname") or settings.database
+        if plan.backup and m.effect_id not in self.backed_up:
+            steps.append("backup")
+            try:
+                await git.threaded(self.backup, database)
+            except Exception as exc:  # noqa: BLE001  any failure of the backup is the rollout's
+                await self._failed(conn, m, steps, "backup", str(exc))
+                return
+            self.backed_up.add(m.effect_id)
+        steps.append("fast-forward")
         try:
             before, _ = await git.threaded(rollout.fast_forward, self.checkout, m.sha)
         except git.GitError as exc:
             await self._failed(conn, m, steps, "fast-forward", str(exc))
             return
-        steps.append("migrate")
-        database = psycopg.conninfo.conninfo_to_dict(self.dsn).get("dbname") or settings.database
-        try:
-            await git.threaded(self.migrate, database)
-        except Exception as exc:  # noqa: BLE001  any failure of the merged migrate is the rollout's
+        for step, run in (("dependencies", self.sync if plan.sync else None), ("migrate", self.migrate)):
+            if run is None:
+                continue
+            steps.append(step)
             try:
-                mixed = await git.threaded(rollout.step_back, self.checkout, before, m.sha)
-            except git.GitError:
-                mixed = True
-            await self._failed(conn, m, steps, "migrate", str(exc), mixed=mixed)
-            return
+                await git.threaded(run, *([database] if step == "migrate" else []))
+            except Exception as exc:  # noqa: BLE001  any failure of the merged code's step is the rollout's
+                mixed = await self._step_back(before, m.sha, plan.sync)
+                await self._failed(conn, m, steps, step, str(exc), mixed=mixed)
+                return
         covers = [{"effect_id": c.effect_id, "task_id": c.task_id, "sha": c.sha} for c in plan.covered]
         async with conn.transaction():
             await ledger.append(
@@ -541,6 +559,20 @@ class Kernel:
         _log(f"rollout of {m.sha}: restarting")
         raise rollout.Restart(m.sha)
 
+    async def _step_back(self, before: str | None, sha: str, synced: bool) -> bool:
+        """The checkout back to `before`, and its dependencies synced to it
+        again when the rollout synced them; whether it is left mixed."""
+        try:
+            mixed = await git.threaded(rollout.step_back, self.checkout, before, sha)
+        except git.GitError:
+            return True
+        if synced and not mixed:
+            try:
+                await git.threaded(self.sync)
+            except Exception:  # noqa: BLE001  a failed sync back leaves the environment mixed
+                return True
+        return mixed
+
     async def _ended(self, conn, m: rollout.Merge, **payload) -> None:
         async with conn.transaction():
             await ledger.append(conn, m.task_id, "rollout.ended", {"effect_id": m.effect_id, **payload})
@@ -548,13 +580,12 @@ class Kernel:
     async def _failed(
         self, conn, m: rollout.Merge, steps: list[str], step: str, reason: str, *, mixed: bool = False
     ) -> None:
-        """A `rollout.failed` row when the step or reason changed, and the
-        merge's one notice (and one more when the kernel is left on mixed
-        code). Tried again on the next `serve_tick_s` wake, or, for a step
-        that repeats, not by this process."""
+        """A `rollout.failed` row when the step or reason changed; the
+        merge's one notice once it has failed `rollout.NOTICE_AFTER` times,
+        and one more when the kernel is left on mixed code. Tried again on
+        the next `serve_tick_s` wake."""
         self.waiting.add(m.effect_id)
-        if step in rollout.FINAL:
-            self.final.add(m.effect_id)
+        self.failures[m.effect_id] = tries = self.failures.get(m.effect_id, 0) + 1
         _log(f"rollout of {m.sha} (effect {m.effect_id}) failed at {step}: {reason}")
         latest = await (
             await conn.execute(
@@ -572,13 +603,14 @@ class Kernel:
                     {"effect_id": m.effect_id, "sha": m.sha, "step": step, "reason": reason, "steps": steps}
                     | ({"mixed": True} if mixed else {}),
                 )
-            await notices.request(
-                conn,
-                m.task_id,
-                kind="rollout",
-                about_key=f"rollout:{m.effect_id}",
-                text=_rollout_text(m, step, reason),
-            )
+            if tries >= rollout.NOTICE_AFTER:
+                await notices.request(
+                    conn,
+                    m.task_id,
+                    kind="rollout",
+                    about_key=f"rollout:{m.effect_id}",
+                    text=_rollout_text(m, step, reason, tries),
+                )
             if mixed:
                 await notices.request(
                     conn,
@@ -586,8 +618,9 @@ class Kernel:
                     kind="rollout",
                     about_key=f"rollout:{m.effect_id}:mixed",
                     text=f"The kernel's checkout could not be moved back after task {m.task_id}'s merge {m.sha} "
-                    "failed to migrate: the running kernel's checkout holds code it did not start from (mixed "
-                    "code) until it restarts. Fix the migrate or the checkout by hand.",
+                    f"failed at {step}: the running kernel's checkout holds code or dependencies it did not "
+                    "start from (mixed code). The rollout is tried again every "
+                    f"{settings.serve_tick_s:g} seconds.",
                 )
 
     async def active(self, conn) -> list[str]:
@@ -815,15 +848,17 @@ def _log(text: str) -> None:
     print(text, file=sys.stderr, flush=True)
 
 
-def _rollout_text(m: rollout.Merge, step: str, reason: str) -> str:
-    head = f"Task {m.task_id}'s merge {m.sha} did not roll out to the running kernel"
-    if step == "dependencies":
-        return f"{head}: it changes the kernel's dependencies. Run `uv sync` and the rollout by hand."
-    if step == "schema":
-        return f"{head}: it changes core/schema.sql. Back up, migrate, and restart the kernel by hand."
-    if step == "migrate":
-        return f"{head}: the merged migrate failed: {reason}. The kernel does not try it again until it restarts."
-    return f"{head}: {step} failed: {reason}. It is tried again every {settings.serve_tick_s:g} seconds."
+def _rollout_text(m: rollout.Merge, step: str, reason: str, tries: int) -> str:
+    return (
+        f"Task {m.task_id}'s merge {m.sha} has not rolled out to the running kernel: {step} failed "
+        f"{tries} times, last with: {reason}. It is tried again every {settings.serve_tick_s:g} seconds."
+    )
+
+
+def _backup(database: str) -> None:
+    """The rollout's backup before a schema change: `python -m core
+    backup`'s dump of the kernel database."""
+    backup.dump(database=database)
 
 
 def _provision_due(rows: list[dict[str, Any]]) -> bool:

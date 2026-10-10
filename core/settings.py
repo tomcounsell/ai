@@ -290,6 +290,10 @@ class Settings:
     # turn profile denies writing, and is never looked up on a PATH.
     pi: str = field(default_factory=lambda: _env("VALOR_PI", _pi()))
     node: str = field(default_factory=lambda: _env("VALOR_NODE", "/opt/homebrew/bin/node"))
+    # The uv a rollout runs outside the sandbox to sync the kernel's own
+    # checkout (`core/rollout.py`), named the same way: inside Homebrew's
+    # prefix, never looked up on a PATH.
+    uv: str = field(default_factory=lambda: _env("VALOR_UV", "/opt/homebrew/bin/uv"))
 
     # -- the headless browser `look` runs: one fixed Playwright build, never
     # the newest in the cache (a turn cannot write that cache) ---------------

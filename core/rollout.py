@@ -17,14 +17,25 @@ called by `core.serve.Kernel`); the rows are written on the loop.
   to the commit the restart runs (`runs_at`: the merged sha, or the
   checkout's head when it is already past it); a restart is due when it
   reaches past `persona/`, `skills/`, `docs/`, `tests/` and top-level
-  `*.md`. A restart whose diff or uncommitted paths touch `uv.lock` or
-  `pyproject.toml` stops at `dependencies`, one touching `core/schema.sql`
-  at `schema`: the kernel runs no `uv` and no `pg_dump`. A checkout the fast-forward would refuse
+  `*.md`. A restart whose diff touches `uv.lock` or `pyproject.toml` also
+  syncs the dependencies (`plan.sync`), and one touching `core/schema.sql`
+  backs up the database first (`plan.backup`). A restart while the
+  checkout holds an uncommitted `uv.lock`, `pyproject.toml`, or
+  `core/schema.sql` stops at `uncommitted`: the restart would run that
+  edit, which nothing merged. A checkout the fast-forward would refuse
   stops at `fast-forward`, before anything holds.
 - `fast_forward`, `step_back`: `git merge --ff-only <sha>`, and the
   `reset --keep` back to where it started when the head is still `sha`.
+- `sync_argv`, `sync`: `uv sync --frozen` in the checkout, with a PATH of
+  system directories only and no Python download, so it keeps the
+  checkout's `.venv` interpreter and finds none a turn could leave on a
+  PATH; started through the watch.
 - `migrate_argv`, `migrate`: the merged code's own `db.migrate`, through
   the kernel's interpreter in the checkout, started through the watch.
+
+Every failed step is tried again on a later `serve_tick_s` wake; the
+merge's notice, a report of what failed, goes out once it has failed
+`NOTICE_AFTER` times in one process.
 
 `Restart` leaves `serve` once `rollout.restarting` is written; `python -m
 core serve` then exits with status 1 and launchd starts it again.
@@ -47,8 +58,8 @@ REF = "refs/valor-kernel/rollout"
 QUIET_DIRS = ("persona/", "skills/", "docs/", "tests/")
 DEPENDENCIES = ("uv.lock", "pyproject.toml")
 SCHEMA = "core/schema.sql"
-# The steps a failure at which repeats on every try: not retried by the process.
-FINAL = ("dependencies", "schema", "migrate")
+# Failures of one merge's rollout, in one process, before its notice.
+NOTICE_AFTER = 3
 _SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 
@@ -85,12 +96,16 @@ class Merge:
 
 @dataclass
 class Plan:
-    """What prepare found. `failed` is `(step, reason)` for `target`."""
+    """What prepare found. `failed` is `(step, reason)` for `target`;
+    `sync` and `backup` say the restart syncs the dependencies and backs up
+    the database first."""
 
     target: Merge | None = None
     covered: list[Merge] = field(default_factory=list)
     superseded: list[Merge] = field(default_factory=list)
     restart: bool = False
+    sync: bool = False
+    backup: bool = False
     steps: list[str] = field(default_factory=list)
     failed: tuple[str, str] | None = None
 
@@ -158,11 +173,17 @@ def prepare(checkout: Path, started: str, due: list[Merge], credential: str | Pa
         paths = git.diff_paths(checkout, started, runs)
         plan.restart = restarts(paths)
         if plan.restart:
-            dirty = {_path(line) for line in git.dirty(checkout)}
-            stop = _stop(paths, dirty, runs)
-            if stop:
-                plan.failed = stop
+            dirty = sorted(
+                p for p in (_path(line) for line in git.dirty(checkout)) if p in (*DEPENDENCIES, SCHEMA)
+            )
+            if dirty:
+                plan.failed = (
+                    "uncommitted",
+                    f"the checkout has uncommitted {' and '.join(dirty)}, which the restart would run",
+                )
                 return plan
+            plan.sync = any(p in paths for p in DEPENDENCIES)
+            plan.backup = SCHEMA in paths
         said = refused(checkout, sha)
         if said:
             plan.failed = ("fast-forward", said)
@@ -178,29 +199,6 @@ def runs_at(checkout: Path, sha: str) -> str:
     if head is not None and (head == sha or git.is_ancestor(checkout, sha, head)):
         return head
     return sha
-
-
-def _stop(paths: list[str], dirty: set[str], runs: str) -> tuple[str, str] | None:
-    """The dependencies or schema stop for a restart into `runs`: `paths`
-    changed from `started` to it, or `dirty` in the checkout, which the
-    restart imports and migrate reads from the working tree."""
-
-    def why(names: list[str]) -> str:
-        said = []
-        committed = [n for n in names if n in paths]
-        uncommitted = [n for n in names if n in dirty and n not in paths]
-        if committed:
-            said.append(f"{runs} changes {' and '.join(committed)}")
-        if uncommitted:
-            said.append(f"the checkout has uncommitted {' and '.join(uncommitted)}")
-        return "; ".join(said)
-
-    changed = [p for p in DEPENDENCIES if p in paths or p in dirty]
-    if changed:
-        return "dependencies", f"{why(changed)}; the kernel runs no uv"
-    if SCHEMA in paths or SCHEMA in dirty:
-        return "schema", f"{why([SCHEMA])}; the kernel runs no backup"
-    return None
 
 
 def refused(checkout: Path, sha: str) -> str | None:
@@ -258,11 +256,27 @@ def migrate_argv(checkout: Path, database: str) -> list[str]:
 def migrate(checkout: Path, database: str) -> None:
     """Run `migrate_argv` in the checkout through the watch (`git.start`),
     so cancelling the caller kills it; raises with its stderr on failure."""
+    _run(checkout, migrate_argv(checkout, database), dict(os.environ), "migrate")
+
+
+def sync_argv(uv: str | Path) -> list[str]:
+    return [str(uv), "sync", "--frozen"]
+
+
+def sync_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PYTHON")}
+    return env | {"PATH": git.PATH, "UV_PYTHON_DOWNLOADS": "never"}
+
+
+def sync(checkout: Path, uv: str | Path) -> None:
+    """Run `sync_argv` in the checkout through the watch, as `migrate` runs."""
+    _run(checkout, sync_argv(uv), sync_env(), "uv sync")
+
+
+def _run(checkout: Path, argv: list[str], env: dict[str, str], name: str) -> None:
     held = git.watch()
     with git.output_file() as out, git.output_file() as err:
-        proc = git.start(
-            migrate_argv(checkout, database), cwd=checkout, stdout=out, stderr=err, env=dict(os.environ)
-        )
+        proc = git.start(argv, cwd=checkout, stdout=out, stderr=err, env=env)
         try:
             proc.wait()
         except BaseException:
@@ -277,4 +291,4 @@ def migrate(checkout: Path, database: str) -> None:
             raise git.Interrupted()
         if proc.returncode != 0:
             tail = git.read_output(err, True).strip().splitlines()[-5:]
-            raise RuntimeError(f"migrate exited with status {proc.returncode}: {' / '.join(tail)}")
+            raise RuntimeError(f"{name} exited with status {proc.returncode}: {' / '.join(tail)}")
