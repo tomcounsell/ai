@@ -2,7 +2,7 @@
 tracking: none
 slug: c11-governance-precision
 type: plan
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 0
 ---
