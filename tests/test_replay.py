@@ -167,14 +167,15 @@ def test_a_replay_spec_carries_the_items_setup_suite_and_env(tmp_path, monkeypat
     bare = spec_of("bare")
     assert (bare.kind, bare.suite, bare.setup, bare.env) == ("plain", "true", (), {})
     suite = "uv run pytest -q --junitxml={junit} tests"
-    replay_workspace.build(str(src), base, "full", [], kind="python-uv", setup=["uv sync --frozen --extra dev"],
-                           suite=suite, env={"UV_PYTHON": "3.12"})  # fmt: skip
+    replay_workspace.build(str(src), base, "full", ["postgres"], kind="python-uv", setup=["uv sync --frozen --extra dev"],
+                           suite=suite, env={"UV_PYTHON": "3.12"}, extensions=["vector"])  # fmt: skip
     full = spec_of("full")
-    assert (full.kind, full.suite, full.setup, full.env) == (
+    assert (full.kind, full.suite, full.setup, full.env, full.extensions) == (
         "python-uv",
         suite,
         ("uv sync --frozen --extra dev",),
         {"UV_PYTHON": "3.12"},
+        ("vector",),
     )
 
 

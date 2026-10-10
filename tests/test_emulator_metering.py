@@ -373,6 +373,27 @@ def test_the_hidden_test_tree_is_made_under_checks_from_the_mirror(tmp_path):
     assert str(root) in judge.verify_profile(lay, [], root)
 
 
+@pytest.mark.macos
+def test_a_verify_command_ending_in_a_pipe_reports_the_tests_own_exit(tmp_path, monkeypatch):
+    from core import workspace as kws
+
+    task_dir = tmp_path / "task"
+    (task_dir / "checks").mkdir(parents=True)
+    root, tree = task_dir / "checks" / "verify-r", task_dir / "checks" / "verify-r" / "repo"
+    tree.mkdir(parents=True)
+    (root / "tmp").mkdir()
+    harness = tmp_path / "harness.json"
+    harness.write_text(json.dumps({"env": {}, "gitconfig": "/dev/null", "gh_config_dir": str(tmp_path)}))
+    monkeypatch.setattr(judge, "export_final", lambda result: (root, tree))
+    monkeypatch.setattr(kws, "start_services", lambda *a: None)
+    monkeypatch.setattr(kws, "stop_services", lambda *a: None)
+    result = {
+        "run": "r", "final_rev": "x", "item": {"verify": ["echo FAILED; false | grep -E 'FAILED'", "true | cat"]},
+        "workspace": {"task_dir": str(task_dir), "project": {}, "harness_config": str(harness), "task_id": "t"},
+    }  # fmt: skip
+    assert [c["exit"] for c in judge.verify(result)] == [1, 0]
+
+
 # -- the driver's ends -------------------------------------------------------------
 
 

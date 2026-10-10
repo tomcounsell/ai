@@ -504,6 +504,7 @@ def spec_json(project: dict[str, Any]) -> dict[str, Any]:
         "kind": project.get("kind") or "plain",
         "services": list(project.get("services") or ()),
         "roles": list(project.get("roles") or ()),
+        "extensions": list(project.get("extensions") or ()),
         "setup": list(project.get("setup") or ()),
         "suite": (project.get("suite") or "true").replace("{junit}", str(VM_JUNIT)),
         "lint": checks.lint_command(project),

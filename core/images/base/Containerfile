@@ -27,6 +27,7 @@ RUN echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/
  && echo "create_main_cluster = false" >> /etc/postgresql-common/createcluster.conf \
  && apt-get install -y --no-install-recommends \
       postgresql-18=18.6-1.pgdg12+2 postgresql-client-18=18.6-1.pgdg12+2 libpq5=18.6-1.pgdg12+2 libpq-dev=18.6-1.pgdg12+2 \
+      postgresql-18-pgvector=0.8.7-1.pgdg12+1 \
  && rm -rf /var/lib/apt/lists/*
 
 # uv, by checksum.

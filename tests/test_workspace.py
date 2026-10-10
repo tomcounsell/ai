@@ -173,6 +173,8 @@ def test_spec_refusals(tmp_path):
         ({"roles": ["valor_kernel"]}, "need the postgres service"),
         ({"suite": ""}, "suite"),
         ({"surprise": 1}, "unknown project spec keys"),
+        ({"extensions": ["vector"]}, "need the postgres service"),
+        ({"extensions": ["a;b"], "services": ["postgres"]}, "not allowed"),
     ]:
         with pytest.raises(kws.Refused, match=why):
             kws.Spec.from_dict({"name": "x", "repo": "r", "kind": "plain", "suite": "true", **bad})
@@ -182,6 +184,56 @@ def test_spec_refusals(tmp_path):
 
 
 # -- the task's Postgres --------------------------------------------------------------------
+
+
+def test_the_turn_path_holds_the_postgres_programs_only_for_a_project_with_postgres(tmp_path):
+    """`pg_config`, which a driver such as psycopg2 builds against, is in
+    Postgres's own bin directory (Homebrew links only `pg_config-18`)."""
+    lay = kws.Layout(tmp_path / "task")
+
+    def path(*services):
+        env = kws.harness_env(
+            lay, spec(tmp_path, services=list(services)), dict.fromkeys(services, 5540),
+            {"app": "pw"}, bin_dir=tmp_path / "bin", passfile=tmp_path / "pgpass",
+        )  # fmt: skip
+        return env["PATH"].split(":")
+
+    assert kws.settings.pg_bin in path("postgres")
+    assert kws.settings.pg_bin not in path()
+
+
+def test_a_projects_extensions_reach_its_copy_and_a_checks_spec(tmp_path):
+    made = spec(tmp_path, services=["postgres"], extensions=["vector"])
+    assert made.extensions == ("vector",)
+    assert kws.spec_of({"services": ["postgres"], "extensions": ["vector"]}).extensions == ("vector",)
+
+
+@pytest.mark.macos
+def test_an_extension_the_project_names_is_in_the_app_database_and_its_new_ones(tmp_path):
+    """`file_fdw` is not a trusted extension, so the `app` role cannot create
+    it; it is there because the superuser made it in `template1`, and `app`
+    gained no superuser rights for it."""
+    task, made = provision(tmp_path, services=["postgres"], extensions=["file_fdw"])
+    lay = kws.Layout(Path(made.mirror).parent)
+    port = made.project["ports"]["postgres"]
+    assert made.project["extensions"] == ["file_fdw"]
+    password = next(
+        line.split(":")[4] for line in (lay.home / "pgpass").read_text().splitlines() if ":app:" in line
+    )
+    kws.start_services(task, lay, ["postgres"], {"postgres": port})
+    try:
+        with psycopg.connect(host="127.0.0.1", port=port, dbname="app", user="app", password=password,
+                             autocommit=True) as conn:  # fmt: skip
+            query = "SELECT count(*) FROM pg_extension WHERE extname = 'file_fdw'"
+            assert conn.execute(query).fetchone()[0] == 1
+            conn.execute("CREATE DATABASE app_test")
+            assert conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'app'").fetchone()[0] is False
+        with psycopg.connect(
+            host="127.0.0.1", port=port, dbname="app_test", user="app", password=password
+        ) as conn:
+            assert conn.execute(query).fetchone()[0] == 1
+    finally:
+        kws.stop_services(task, lay)
 
 
 @pytest.mark.macos

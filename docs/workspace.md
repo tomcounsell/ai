@@ -96,6 +96,9 @@ returns. A program's output goes to a file in that same `output/` directory. A p
   socket), port 5440 to 5599, scram-sha-256 on every login; the superuser
   password is random and removed once the roles exist. `app` owns database
   `app` and may create databases (and manage only the spec's extra roles); the
+  spec's `extensions` (such as `vector`, which `app` could not create, not
+  being a superuser) are made by the superuser in `template1`, so database
+  `app` and the databases `app` creates hold them; the
   passwords are in `home/pgpass`, and `PG*`, `DATABASE_URL`, and `TEST_DB_*`
   point the app at it. Separate clusters answer the demonstration's first
   incident, a machine cluster that trusted loopback (`docs/data.md`).

@@ -85,7 +85,8 @@ under its `work_dir` setting (`~/valor-tasks`).
 `repo` is `OWNER/NAME` or a local repository path. `pr` names the reference
 on GitHub; `reference_diff` is a file in its place, required when the clean
 base is a rebuilt commit the PR does not descend from. `services` is any of
-`postgres` and `redis`. Relative paths resolve against the item file. Items
+`postgres` and `redis`. An item's `project` key may also list `extensions`
+the task's Postgres holds for the app's tests (`vector`). Relative paths resolve against the item file. Items
 and answer keys stay outside every run directory, where no turn's sandbox can
 read them.
 
@@ -216,7 +217,7 @@ Runs the item's verification on the final commit (the merge's head,
 else the candidate) and nothing else. The commit is exported with `git
 archive` from the task's kernel mirror into a fresh tree at
 `<task_dir>/checks/verify-<run>/`, which only the kernel writes, so no turn
-can write it. Each command runs there under the working turn's profile as
+can write it. Each command runs there in `bash -o pipefail` under the working turn's profile as
 the baseline ran it (the temp directories shared, the verification
 directory added read-write, `TMPDIR` inside it), with the task's
 environment and services, and whatever a command leaves running is reaped
@@ -288,8 +289,9 @@ Each run writes `results/<run>.json`, atomically, after every step:
 - `final_rev`, the merge's head or the candidate, `merge_effect_id`,
   and the diff stat against the base, from the mirror;
 - `judge_model`, and `judge`: scores, divergences, rationale, the diff's
-  size and truncation, every verification command's exit code
-  and output tail, and reaped processes;
+  size and truncation, every verification command's exit code (a pipeline's is its last
+  failing stage's, so a test run piped through `grep` reports the test run's
+  own) and output tail, and reaped processes;
 - the leak check's fields.
 
 ### Metering

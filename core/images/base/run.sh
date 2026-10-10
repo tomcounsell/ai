@@ -77,6 +77,13 @@ if jq -e '.services | index("postgres")' "$SPEC" >/dev/null; then
   : >"$pgpass"
   printf '127.0.0.1:5432:*:app:%s\n' "$app_password" >>"$pgpass"
   {
+    # The spec's extensions, made by the superuser in template1, so the
+    # `app` database and the databases `app` creates hold them.
+    echo '\connect template1'
+    for e in $(jq -r '.extensions[]?' "$SPEC"); do
+      echo "CREATE EXTENSION IF NOT EXISTS \"$e\";"
+    done
+    echo '\connect postgres'
     roles=$(jq -r '.roles[]?' "$SPEC")
     create=""
     [ -n "$roles" ] && create=" CREATEROLE"

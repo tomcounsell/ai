@@ -451,4 +451,4 @@ Each estimate above is a gap until measured on the Air:
 - A connected Telegram bridge after a week of traffic.
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
-- A Django suite's peak in the VM with every test reaching its database (the measured suite's vector tests failed at setup because the VM's base image has no pgvector).
+- A Django suite's peak in the VM with every test reaching its database (the base image holds pgvector, and a project's `extensions` make it in the task's Postgres).

@@ -217,6 +217,7 @@ class Spec:
     branch: str | None = None
     services: tuple[str, ...] = ()
     roles: tuple[str, ...] = ()
+    extensions: tuple[str, ...] = ()
     setup: tuple[str, ...] = ()
     lint: str | None = None
     merge_url: str | None = None
@@ -247,6 +248,12 @@ class Spec:
                 raise Refused(f"role name {r!r} is not allowed")
         if roles and "postgres" not in services:
             raise Refused("roles need the postgres service")
+        extensions = tuple(raw.get("extensions") or ())
+        for e in extensions:
+            if not isinstance(e, str) or not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", e):
+                raise Refused(f"extension name {e!r} is not allowed")
+        if extensions and "postgres" not in services:
+            raise Refused("extensions need the postgres service")
         cap = raw.get("max_output_tokens")
         if cap is not None and (not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0):
             raise Refused("max_output_tokens is a positive integer")
@@ -269,6 +276,7 @@ class Spec:
             branch=raw.get("branch"),
             services=services,
             roles=roles,
+            extensions=extensions,
             setup=tuple(raw.get("setup") or ()),
             lint=raw.get("lint"),
             merge_url=raw.get("merge_url"),
@@ -841,6 +849,9 @@ def harness_env(
     }
     if "postgres" in spec.services:
         port = ports["postgres"]
+        # Postgres's own programs, `pg_config` among them: Homebrew links
+        # only `pg_config-18`, and a driver such as psycopg2 builds with it.
+        env["PATH"] += f":{settings.pg_bin}"
         env.update(
             {
                 "PGHOST": "127.0.0.1",
@@ -987,6 +998,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "setup_result": setup,
         "services": list(spec.services),
         "roles": list(spec.roles),
+        "extensions": list(spec.extensions),
         "ports": ports,
         "repo": spec.repo,
         "merge_url": spec.merge_url,
@@ -1129,7 +1141,10 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
     superuser password lives in a file only until the roles exist, then is
     removed from the role and the file deleted. `app` is `CREATEDB` (and
     `CREATEROLE` with the spec's roles) and a member of `pg_signal_backend`
-    and `pg_read_all_settings`, nothing more."""
+    and `pg_read_all_settings`, nothing more. The spec's extensions are
+    created by the superuser in `template1`, so `app`'s database and every
+    database it creates (Django's test database) hold them: `app` is not a
+    superuser and cannot create an untrusted extension such as `vector`."""
     data = lay.pg / "data"
     lay.pg.mkdir(parents=True, exist_ok=True)
     super_pw = secrets.token_urlsafe(24)
@@ -1156,6 +1171,13 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
         import psycopg
         from psycopg import sql
 
+        if spec.extensions:
+            with psycopg.connect(
+                host="127.0.0.1", port=port, dbname="template1", user="postgres", password=super_pw,
+                autocommit=True,
+            ) as conn:  # fmt: skip
+                for e in spec.extensions:
+                    conn.execute(sql.SQL("CREATE EXTENSION IF NOT EXISTS {}").format(sql.Identifier(e)))
         with psycopg.connect(
             host="127.0.0.1", port=port, dbname="postgres", user="postgres", password=super_pw,
             autocommit=True,
@@ -1968,6 +1990,7 @@ def spec_of(project: dict[str, Any]) -> Spec:
         suite=project.get("suite") or "true",
         services=tuple(project.get("services") or ()),
         roles=tuple(project.get("roles") or ()),
+        extensions=tuple(project.get("extensions") or ()),
         setup=tuple(project.get("setup") or ()),
         env=dict(project.get("env") or {}),
     )
