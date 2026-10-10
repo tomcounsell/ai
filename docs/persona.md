@@ -148,14 +148,19 @@ asking first raised fidelity on the one-line asks (popoto #191 from 1 to 3,
 #188 from 4 to 5) and changed nothing on the precise requests
 (rebuild-baseline.md, "Clarify").
 
-An example always has a wider reading: it may be the whole requirement or
-one case of a rule it does not state. Unless the request or the code
-settles which, the persona sends the question to Tom, since what a request
-means is something only he holds, in the first turn that can ask and
-before that turn's own work, batched with every other material question.
-On a task the judge sends straight to plan, that turn is the plan turn,
-whose channel offers `.valor/question.md`. Neither reversibility nor
-naming the reading in the delivery is a reason to build first. In the
+When a request leans on an example, one reading is always that the
+example is one case of a wider rule it does not state, and the persona
+weighs that reading against the example as the whole requirement, not
+against a narrower build of the same example. When the two would build
+something materially different and neither the request nor the code
+settles which, the question goes to Tom, since what a request means is
+something only he holds, in the first turn that can ask and before that
+turn's own work, batched with every other material question. On a task
+the judge sends straight to plan, that turn is the plan turn, whose
+channel offers `.valor/question.md`. Once the reading is material,
+neither reversibility nor naming the reading in the delivery is a reason
+to build first; an example whose readings build the same thing is still
+inferred, prototyped, and shown (Mission item 3). In the
 emulator's pso-c bare runs (#894 with the judge forced precise), the plan
 turn saw the example, chose a reading, and named it among the delivery's
 decisions instead of asking, and the stand-in's two feedback rounds

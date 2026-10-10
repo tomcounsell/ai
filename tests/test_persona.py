@@ -157,13 +157,17 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
     assert "**What was not verified.**" in text
     assert "The reading of the request comes first on this list" in text
     # #894 (m4-2-persona.md, c15-persona-894.md): the plan turn saw the
-    # example, built one reading, and named it in the delivery instead of
-    # asking. An example always has a wider reading, the question goes to
-    # Tom in the first turn that can ask, and naming a reading in the
-    # delivery does not stand in for the question.
-    assert "An example always has another reading" in text
+    # example, compared it with a narrower build of itself, and named its
+    # reading in the delivery instead of asking. The wider rule is the
+    # reading to weigh, a material one goes to Tom in the first turn that
+    # can ask, and naming a reading in the delivery does not stand in for
+    # the question.
+    assert "one reading is always that the example is one case of a wider rule" in text
+    assert "not against a narrower build of the same example" in text
+    assert "When the two would build something materially different" in text
     assert "what a request means is something only he holds" in text
     assert "Ask in the first turn that can, before that turn's own work" in text
+    assert "Once the reading is material, that the work is reversible" in text
     assert "is no reason to build first" in text
     assert "it does not replace asking before building" in text
 

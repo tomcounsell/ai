@@ -103,27 +103,32 @@ Persona text only: `persona/conduct.md` gains one paragraph under "Ask
 before building", and `persona/delivery.md` one sentence.
 
 ```
-An example always has another reading: it may be the whole requirement,
-or one case of a wider rule it does not state, and the wider rule builds
-more. Unless the request or the code settles which, ask Tom: what a
-request means is something only he holds. Ask in the first turn that can,
-before that turn's own work, with every other material question in the
-same batch. That the work is reversible, or that the delivery would name
-the reading you chose, is no reason to build first: a wrong reading costs
-Tom a feedback round, and a question costs him one answer.
+When a request leans on an example, one reading is always that the
+example is one case of a wider rule it does not state; weigh that reading
+against the example as the whole requirement, not against a narrower
+build of the same example. When the two would build something materially
+different and neither the request nor the code settles which, ask Tom:
+what a request means is something only he holds. Ask in the first turn
+that can, before that turn's own work, in one batch with every other
+material question. Once the reading is material, that the work is
+reversible, or that the delivery would name the reading you chose, is no
+reason to build first.
 ```
 
 Delivery, after "say which reading and what the others would have
 built.": "Naming the reading here follows the question; it does not
 replace asking before building."
 
-Each sentence answers one cause above: the wider reading is named, so the
-comparison is fixed (1); reversibility and disclosure are named as no
-reason (2, 3); "something only he holds" sends it to Tom, not the advisor
-(the head's wording); "first turn that can, before that turn's own work"
-puts it in the plan turn on the bare path; "every other material
-question in the same batch" keeps it one message per "How to ask". No
-term from the item appears in the persona. No stage text changes: no
+Each sentence answers one cause above: the wider rule is named as the
+reading to weigh, against the example as the whole requirement and not a
+narrower build of it (1); reversibility and disclosure are no reason once
+the reading is material (2, 3); "something only he holds" sends it to
+Tom, not the advisor (the head's wording); "first turn that can, before
+that turn's own work" puts it in the plan turn on the bare path; "one
+batch with every other material question" keeps it one message per "How
+to ask". Materiality is still judged, per Mission item 3: an example
+whose two readings build the same thing is inferred and shown, not asked.
+No term from the item appears in the persona. No stage text changes: no
 stage rules the question out.
 
 `tests/test_persona.py` asserts the new sentences are rendered;
@@ -132,8 +137,8 @@ says the same. No test pins the digest or size; the existing ones
 compare `turn.started` against a fresh render.
 
 Rendered at this branch: `persona_sha256`
-`d03bde6ad3f9b5c0ece8e2431dde943b25eec0bc2a5eb4aff95f75159d9df1b9`,
-11,231 bytes.
+`d3d7a14f1ea751d8661ca0a0348c75383ed0ed33e229f79f9546033056849b3d`,
+11,323 bytes.
 
 ## How it is measured
 
@@ -154,8 +159,8 @@ scratch worktree there, and that tree's `tests/test_persona.py` passes, 20
 of 20). A cherry-pick of this branch's commit does not fit: the head's
 `conduct.md` carries A2's advisor text, which 968e7aa05's channel lacks.
 Rendered there, the after arm's `persona_sha256` is
-`95e33c0ae2c44bb96dffc55e96879a1e745b35183ae417310647a6882447eb23`,
-11,049 bytes; each `turn.started` of the after-p1 run shows it.
+`61f4517ee877e71f9499101c07c2d370caf49f4d2433a70c7d0eab06b6ed427b`,
+11,141 bytes; each `turn.started` of the after-p1 run shows it.
 
 The bar is m4-2's, unchanged: at most one feedback round, and the judge's
 divergences name none of Tom's six answers. Whether the run asked, and how
@@ -163,16 +168,20 @@ many questions, is recorded beside it.
 
 **Probe.** One live plan turn, outside the kernel: `claude -p` with
 row 82's argv flags and its dispatched text, the persona swapped for the
-968e7aa05 render with this patch (11,049 bytes), in a scratch clone of the
+968e7aa05 render with this patch (11,141 bytes), in a scratch clone of the
 pso-c base 953713a3 under `sandbox-exec` denying writes outside the clone
-and `~/.claude`. It wrote `.valor/question.md` and no plan: three numbered
-questions, one message, each with a default (scope: "Is the sports-dates
-rule the whole requirement, or one example of a wider 'profile complete'
-rule?"; audience; what is replaced), then the approach. 10 turns, 38 s,
-$0.26 as Claude Code reported it (not through the gateway). n = 1 and no
-control turn on the old text, so it shows the text can lead to the
-question, not how often. Evidence in `~/src/valor-build-notes/c15/`
-(`probe-question.md`, `probe-out.json`, `probe-brief.txt`, `probe.sb`).
+and `~/.claude`. It wrote `.valor/question.md` and no plan: one message,
+three numbered questions, each with a default ("Is the sports-dates rule
+the whole requirement, or one example of a wider 'profile incomplete'
+check?"; who sees it; the "(Optional)" label), the premise from the code,
+and the approach. 10 turns, 47 s, $0.25 as Claude Code reported it (not
+through the gateway). n = 1 and no control turn on the old text, so it
+shows the text can lead to the question, not how often; nothing here
+reruns a precise request to measure over-asking. Evidence in
+`~/src/valor-build-notes/c15/` (`probe-p1-question.md`,
+`probe-p1-out.json`, `probe-p1-brief.txt`, `probe.sb`; the build's probe,
+on the text patch 1 replaced, is `probe-question.md` and its siblings,
+$0.26).
 
 ## Build
 
@@ -181,3 +190,32 @@ At `mc15-persona-894`, from 6f3d5da64. Suite alone (`-m "not container"`):
 `tests/test_provision_restart_gaps.py::test_the_redo_frees_the_dead_attempts_ports`,
 a port assertion untouched by this change; its file rerun alone passed 13
 of 13. `uvx ruff check .` and `uvx ruff format --check .` clean.
+
+## Patch round 1
+
+The review (`~/src/valor-build-notes/review-c15.md`, addendum) returned
+changes: the build's paragraph overreached Mission item 3 ("For
+reversible decisions: inspect, infer, prototype, show. Ask only when the
+answer materially changes the outcome"). It declared every example
+material ("An example always has another reading ... the wider rule
+builds more"), made reversibility no reason to build first
+unconditionally, and closed on a cost argument that always favours
+asking ("a wrong reading costs Tom a feedback round, and a question costs
+him one answer").
+
+- The paragraph is the lead's text, quoted under "The fix": the wider rule
+  is the reading weighed, materiality is judged, and the reversibility
+  clause holds only once the reading is material. The cost sentence is
+  gone. The delivery sentence stays.
+- `tests/test_persona.py` asserts the new sentences; `docs/persona.md`
+  carries the same scope.
+- `~/src/valor-build-notes/c15/c15.patch` regenerated from this branch's
+  persona diff against 6f3d5da64; `git apply --check` and the apply pass
+  at 968e7aa05, and that tree's `tests/test_persona.py` passes 20 of 20.
+- Digests rerendered: head `d3d7a14f…`, 11,323 bytes; after arm
+  `61f4517e…`, 11,141 bytes.
+- The probe was rerun on the new after-arm render: it asked, one batch,
+  $0.25 (above).
+- Suite alone (`-m "not container"`): 1907 passed, 24 skipped, 53
+  deselected, 0 failed. `uvx ruff check .` and `uvx ruff format --check .`
+  clean.

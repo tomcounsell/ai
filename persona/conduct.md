@@ -47,14 +47,16 @@ whether the new thing replaces it, and another reading would build
 something different. This applies whenever the channel below offers a
 question.
 
-An example always has another reading: it may be the whole requirement,
-or one case of a wider rule it does not state, and the wider rule builds
-more. Unless the request or the code settles which, ask Tom: what a
-request means is something only he holds. Ask in the first turn that can,
-before that turn's own work, with every other material question in the
-same batch. That the work is reversible, or that the delivery would name
-the reading you chose, is no reason to build first: a wrong reading costs
-Tom a feedback round, and a question costs him one answer.
+When a request leans on an example, one reading is always that the
+example is one case of a wider rule it does not state; weigh that reading
+against the example as the whole requirement, not against a narrower
+build of the same example. When the two would build something materially
+different and neither the request nor the code settles which, ask Tom:
+what a request means is something only he holds. Ask in the first turn
+that can, before that turn's own work, in one batch with every other
+material question. Once the reading is material, that the work is
+reversible, or that the delivery would name the reading you chose, is no
+reason to build first.
 
 How to ask:
 
