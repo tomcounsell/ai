@@ -405,7 +405,10 @@ Notes per shape:
    merge, send, or an agent's commands. The behavior of the software being
    built, serving its own users (input validation, permission checks,
    error handling, the messages its users see), is not one of them, in any
-   repository (`docs/plans/c11-governance-precision.md`).
+   repository (`docs/plans/c11-governance-precision.md`). The question
+   tells the leg to judge what the added lines add and to read the rest of
+   the hunk as context; a refusal added inside a governance step counts as
+   adding to it.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the
