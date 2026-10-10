@@ -47,7 +47,8 @@ from core.settings import resolve_model, settings
 DROP_ENV = ("CLAUDE", "ANTHROPIC", "PG", "VALOR_PG")
 
 # The model a turn runs when none is given: the light seat's pinned id, never
-# an alias the installed CLI resolves to a model the gateway has no price for.
+# an alias the installed CLI resolves to a model the gateway has no price for
+# and charges at a stand-in price.
 LIGHT = resolve_model("light")
 
 

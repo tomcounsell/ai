@@ -94,7 +94,7 @@ kernel's password file included; it must not be given tools without one.
 Both builders default to the light seat's pinned model id
 (`claude-haiku-4-5`), as does a Brief, never an alias: the installed CLI
 resolves an alias, and may resolve it to a model the gateway has no price
-for, which the gateway refuses.
+for, which the gateway charges at a stand-in price marked `unpriced`.
 
 **`workspace_turn`** is one turn of a task that works in a directory, and is
 what a real task runs. Its arguments:

@@ -9,7 +9,7 @@ routes: Anthropic's Messages API (`route: gateway`) and OpenAI's Responses
 API under `openai/` (`route: openai`). For every call it:
 
 1. prices the model from the table in `core/settings.py`, each price
-   carrying the day it was checked (`price_checked` on the charge row); an unpriced model is refused. An Anthropic dated id matches its undated entry; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix. Per-million charges round up to whole micro-dollars in integers;
+   carrying the day it was checked (`price_checked` on the charge row). A model the table lacks is still forwarded, priced at the highest rate, field by field, of its family's entries (the first two parts of the id, `claude-haiku` or `gpt-6.1`), or of every entry when its family has none, and its rows marked `unpriced: true`. An Anthropic dated id matches its undated entry; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix. Per-million charges round up to whole micro-dollars in integers;
 2. opens the call with a `gateway.opened` row (call id, turn id, model, route, estimate), refusing with a `gateway.refused` row of reason
    `stopped` if the task is stopped; nothing else refuses a call;
 3. forwards the call with the kernel's own credential (harnesses.md, Metering
@@ -27,14 +27,19 @@ turn`) when the kernel holds none, only as `POST v1/responses` and `GET` or
 It drops the turn's `proxy-authorization` and answers an upstream 401 with its
 own body naming the key refused. It charges at the reported tier (one the
 table lacks, at the highest, `tier_unpriced`) with cached, cache-write,
-long-context, and per-search rates; an unpriced model, tool, or stored prompt
-is a 400 with no row. Content referenced by id or URL, or a hosted tool
+long-context, and per-search rates. A tool the table cannot price or a
+stored prompt is forwarded too, its rows marked `unpriced: true` and naming
+it as `unpriced_item`; that tool's own fees are not counted, and the
+estimate counts a stored prompt as referenced content and that tool as
+unbounded. Content referenced by id or URL, or a hosted tool
 without `max_tool_calls`, can leave a cut call short of the bill
 (`referenced`, `bounded: false`). Anthropic searches are charged per search; its code execution is unmetered.
 
 Metered spending is always derived from the ledger, by one fold
 (`tasks.spending`) that `status` shows as `Metered spending: $X`: the sum of
-the task's charges, with the calls still open (`core/spending.py`).
+the task's charges, with the calls still open and, as `unpriced_calls`,
+each call charged at a stand-in price (`core/spending.py`), which `status`
+lists and the line `python -m core run` prints counts beside the spending.
 
 Because the harness's base URL points at the gateway, every call the turn
 makes passes through it, Claude Code's own side calls and any subagents it

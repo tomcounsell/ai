@@ -58,7 +58,15 @@ async def _upstream(body: bytes, *, status: int = 200, content_type: str, chunk:
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
 
-def _call(dsn, body: bytes, *, status: int = 200, content_type: str, chunk: int | None = None):
+def _call(
+    dsn,
+    body: bytes,
+    *,
+    status: int = 200,
+    content_type: str,
+    chunk: int | None = None,
+    model: str | None = None,
+):
     async def go():
         runner, url = await _upstream(body, status=status, content_type=content_type, chunk=chunk)
         async with await db.connect(dsn) as conn:
@@ -66,7 +74,8 @@ def _call(dsn, body: bytes, *, status: int = 200, content_type: str, chunk: int 
         gateway = Gateway(dsn, upstream=url)
         await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
-        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+        sent = {**BODY, "model": model or BODY["model"]}
+        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=sent) as r:
             got = (r.status, await r.read())
         await gateway.drain(task)
         await gateway.close()
@@ -90,6 +99,7 @@ def _check(result, *, body: bytes, status: int, usd: int, complete: bool):
     assert charged["complete"] is complete
     assert charged["price_checked"] == "2026-10-01"
     assert not state["open_calls"] and tasks.audit(state) == []
+    assert charged["unpriced"] is False and state["unpriced_calls"] == []
 
 
 def test_a_recorded_stream_is_charged_what_the_provider_reported(dsn):
@@ -133,6 +143,25 @@ def test_a_call_on_a_task_with_any_spend_is_never_refused_for_money(dsn):
     assert kinds.count("gateway.opened") == 2 and kinds.count("gateway.charged") == 2
     assert state["spent_usd_micros"] == 10**9 + COMPLETE
     assert list(state["open_calls"]) == [f"{state['task_id']}-old"]
+
+
+def test_a_model_the_table_lacks_is_forwarded_and_charged_at_its_familys_highest_price(dsn):
+    # `claude-haiku-5-5` has no entry; its family's one entry is Haiku 4.5,
+    # so the charge is the priced call's, marked as a stand in.
+    (status, got), state, charged = _call(
+        dsn, WHOLE, content_type="application/json", model="claude-haiku-5-5"
+    )
+    assert status == 200 and got == WHOLE
+    assert charged["usd_micros"] == COMPLETE and charged["unpriced"] is True
+    assert state["unpriced_calls"] == [charged["call_id"]] and state["spent_usd_micros"] == COMPLETE
+
+
+def test_a_model_of_no_known_family_is_charged_at_the_highest_price_of_any(dsn):
+    # Highest input $5 and output $25 per million (Opus 5, Opus 4.8):
+    # 14 x 5 + 4 x 25 micro-dollars.
+    (status, _), state, charged = _call(dsn, WHOLE, content_type="application/json", model="mystery-1")
+    assert status == 200 and charged["usd_micros"] == 14 * 5 + 4 * 25 and charged["unpriced"] is True
+    assert state["unpriced_calls"] == [charged["call_id"]]
 
 
 def test_a_recorded_whole_response_is_charged_the_same(dsn):

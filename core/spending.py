@@ -59,6 +59,31 @@ def prices(model: str) -> dict | None:
     }
 
 
+def _family(model: str) -> str:
+    """A model id's family: its first two dash-separated parts
+    (`claude-haiku`, `gpt-6.1`)."""
+    return "-".join(OPENAI_DATED.sub("", model).split("-")[:2])
+
+
+def _stand_in(model: str, table: dict) -> list[str]:
+    """The table entries an unpriced model is charged as: those of its
+    family, or every entry when the family has none."""
+    return [n for n in table if _family(n) == _family(model)] or list(table)
+
+
+def charge_prices(model: str) -> tuple[dict, bool]:
+    """The price a call to `model` is charged at, and whether it is a stand
+    in: a model the table lacks is charged at the highest rate, field by
+    field, of its family's entries (every entry's when the family has none),
+    so its charge is shown as `unpriced` rather than the call refused."""
+    price = prices(model)
+    if price is not None:
+        return price, False
+    every = [prices(n) for n in _stand_in(model, PRICES)]
+    highest = {k: max(p[k] for p in every) for k in every[0] if k != "checked"}
+    return {**highest, "checked": min(p["checked"] for p in every)}, True
+
+
 def judgement_price(model: str) -> dict | None:
     """Micro-dollars per million tokens for a judgement leg's pinned model
     (exact id only: a judgement model is pinned, never matched by prefix),
@@ -173,6 +198,31 @@ def openai_prices(model: str) -> dict | None:
     }
 
 
+def openai_charge_prices(model: str) -> tuple[dict, bool]:
+    """As `charge_prices`, for an OpenAI model: a model the table lacks is
+    charged at its family's highest rates (every entry's when the family
+    has none), tier by tier and field by field, with the lowest long-context
+    threshold and the largest context window and output."""
+    price = openai_prices(model)
+    if price is not None:
+        return price, False
+    every = [openai_prices(n) for n in _stand_in(model, OPENAI_PRICES)]
+    tiers = {}
+    for t in {t for p in every for t in p["tiers"]}:
+        have = [p["tiers"][t] for p in every if t in p["tiers"]]
+        tiers[t] = {
+            length: {k: max(h[length][k] for h in have) for k in have[0][length]}
+            for length in ("base", "long")
+        }
+    return {
+        "tiers": tiers,
+        "long_above": min(p["long_above"] for p in every),
+        "context_window": max(p["context_window"] for p in every),
+        "max_output": max(p["max_output"] for p in every),
+        "checked": min(p["checked"] for p in every),
+    }, True
+
+
 def openai_tier(price: dict, tier: str | None) -> str | None:
     """The table's name for a tier the API names, or None when unpriced."""
     tier = OPENAI_TIER_ALIASES.get(tier, tier)
@@ -211,8 +261,11 @@ def fee_item(item_type: str) -> str | None:
 def openai_unpriced(body: dict) -> str | None:
     """What in a Responses body the table cannot price, named, or None:
     a tool with neither a fee line nor a token-only type, or a stored
-    prompt reference. A tier the entry lacks is not one: the charge prices
-    it at the highest tier, marked `tier_unpriced`."""
+    prompt reference. The call is still forwarded: its charge carries the
+    name as `unpriced_item`, and its estimate counts the stored prompt as
+    referenced content and the tool as unbounded. A tier the entry lacks is
+    not one: the charge prices it at the highest tier, marked
+    `tier_unpriced`."""
     if body.get("prompt") is not None:
         return "a stored prompt reference"
     for tool in body.get("tools") or []:
@@ -225,6 +278,11 @@ def openai_unpriced(body: dict) -> str | None:
             continue
         return f"the {kind} tool" + (" with a hosted environment" if kind == "shell" else "")
     return None
+
+
+def _unpriced_tool(body: dict) -> bool:
+    unpriced = openai_unpriced({**body, "prompt": None})
+    return unpriced is not None
 
 
 def _referenced(node) -> bool:
@@ -252,18 +310,22 @@ def openai_estimate(body: dict, price: dict) -> dict:
 
     Input is the body's bytes at `bytes_per_token`; the context window when
     the body brings in content it does not carry (`previous_response_id`,
-    `conversation`, a file or image by id or URL, an item reference),
-    marked `referenced`; and `max_tool_calls + 1` windows when a hosted tool
-    that samples the model more than once is set with `max_tool_calls`.
-    Without that bound the input past one window is not counted, and
-    `bounded` is false. Priced at the highest input or cache write rate
+    `conversation`, a stored prompt, a file or image by id or URL, an item
+    reference), marked `referenced`; and `max_tool_calls + 1` windows when
+    a hosted tool that samples the model more than once is set with
+    `max_tool_calls`. Without that bound, or with a tool the table cannot
+    price, the input past one window is not counted, and `bounded` is
+    false. Priced at the highest input or cache write rate
     of any tier or length, output at `max_output_tokens` (or the model's
     maximum) at the highest output rate, plus `max_tool_calls` times the
     highest fee among the body's fee-bearing tools."""
     window = price["context_window"]
     estimated = estimate_input(body)
     referenced = bool(
-        body.get("previous_response_id") or body.get("conversation") or _referenced(body.get("input"))
+        body.get("previous_response_id")
+        or body.get("conversation")
+        or body.get("prompt") is not None
+        or _referenced(body.get("input"))
     )
     if referenced:
         estimated = max(estimated, window)
@@ -289,7 +351,7 @@ def openai_estimate(body: dict, price: dict) -> dict:
         "fee_cap_usd_micros": fee_cap,
         "estimate_usd_micros": tokens + fee_cap,
         "referenced": referenced,
-        "bounded": not looping or max_calls is not None,
+        "bounded": (not looping or max_calls is not None) and not _unpriced_tool(body),
     }
 
 

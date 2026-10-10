@@ -518,10 +518,30 @@ def test_the_request_id_is_on_the_charge_not_the_opening(dsn, tmp_path):
         body(prompt={"id": "pmpt_1"}),
     ],
 )
-def test_a_request_the_table_cannot_price_is_a_400_with_no_row_and_nothing_sent(dsn, tmp_path, sent):
+def test_a_request_the_table_cannot_price_is_forwarded_and_its_charge_marked_unpriced(dsn, tmp_path, sent):
+    # The only entry is the family's and the table's highest: the call costs
+    # what a priced one does, marked as a stand in.
     out = exchange(dsn, Upstream(data=fixture("whole.json")), sent, tmp_path=tmp_path)
-    assert out.status == 400 and "has no price" in json.loads(out.body)["error"]["message"]
-    assert not out.seen and out.opened is None and out.charged is None
+    assert out.status == 200 and len(out.seen) == 1 and out.charged["usd_micros"] == 76
+    assert out.opened["unpriced"] is True and out.charged["unpriced"] is True
+
+
+def test_an_unpriced_tool_or_stored_prompt_is_named_on_the_charge(dsn, tmp_path):
+    tool = exchange(
+        dsn,
+        Upstream(data=fixture("whole.json")),
+        body(tools=[{"type": "image_generation"}]),
+        tmp_path=tmp_path,
+    )
+    assert tool.charged["unpriced_item"] == "the image_generation tool" and tool.charged["bounded"] is True
+    assert tool.opened["unpriced_item"] == "the image_generation tool"
+    prompt = exchange(
+        dsn, Upstream(data=fixture("whole.json")), body(prompt={"id": "pmpt_1"}), tmp_path=tmp_path
+    )
+    assert (
+        prompt.charged["unpriced_item"] == "a stored prompt reference"
+        and prompt.charged["referenced"] is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -592,10 +612,10 @@ def test_only_the_exact_id_or_a_dated_one_is_priced(model, priced):
     assert (spending.openai_prices(model) is not None) is priced
 
 
-def test_a_variant_of_a_priced_id_is_a_400_with_nothing_sent(dsn, tmp_path):
+def test_a_variant_of_a_priced_id_is_forwarded_at_its_familys_highest_price(dsn, tmp_path):
     out = exchange(dsn, Upstream(data=fixture("whole.json")), body(model=f"{MODEL}-pro"), tmp_path=tmp_path)
-    assert out.status == 400 and json.loads(out.body)["error"]["message"] == f"model {MODEL}-pro has no price"
-    assert not out.seen and out.opened is None
+    assert out.status == 200 and len(out.seen) == 1 and out.charged["usd_micros"] == 76
+    assert out.charged["unpriced"] is True and out.charged["model"] == f"{MODEL}-pro"
 
 
 def test_a_dated_id_is_forwarded_and_charged_at_its_rates(dsn, tmp_path):

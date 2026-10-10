@@ -15,8 +15,8 @@ calls, passes through here.
 For each metered call the gateway:
 
 1. prices the request and opens the call with a ledger row (refused, with
-   a ledger row, only when the task is stopped; a request the tables cannot
-   price is a 400 with no row and nothing sent);
+   a ledger row, only when the task is stopped; a model the tables lack is
+   priced at its family's highest rates and its charge marked `unpriced`);
 2. forwards the request upstream and streams the response back unchanged,
    reading the usage the provider reports as it passes;
 3. charges what the provider reported when the call closes.
@@ -612,9 +612,7 @@ class Gateway:
             max_tokens = int(message.get("max_tokens") or 0)
         except ValueError, KeyError, TypeError:
             return _error(400, "invalid_request_error", "gateway could not read the request")
-        price = spending.prices(model)
-        if price is None:
-            return _error(400, "invalid_request_error", f"model {model} has no price")
+        price, unpriced = spending.charge_prices(model)
         estimated = spending.estimate_input(message)
         call_id = new_id()
         call = {
@@ -625,6 +623,7 @@ class Gateway:
             "estimated_input": estimated,
             "max_tokens": max_tokens,
             "estimate_usd_micros": spending.worst_case(estimated, max_tokens, price),
+            "unpriced": unpriced,
             # The turn runs inside the task's run, which holds this lock.
             "holder": f"run:{grant.task_id}",
         }
@@ -653,12 +652,8 @@ class Gateway:
                 raise TypeError
         except ValueError, KeyError, TypeError:
             return _openai_error(400, "invalid_request_error", "gateway could not read the request")
-        price = spending.openai_prices(model)
-        if price is None:
-            return _openai_error(400, "invalid_request_error", f"model {model} has no price")
-        unpriced = spending.openai_unpriced(message)
-        if unpriced is not None:
-            return _openai_error(400, "invalid_request_error", f"{unpriced} has no price")
+        price, unpriced = spending.openai_charge_prices(model)
+        unpriced_item = spending.openai_unpriced(message)
         estimate = spending.openai_estimate(message, price)
         call_id = new_id()
         call = {
@@ -670,6 +665,8 @@ class Gateway:
             "estimated_input": estimate["estimated_input"],
             "max_tokens": estimate["max_tokens"],
             "estimate_usd_micros": estimate["estimate_usd_micros"],
+            "unpriced": unpriced or unpriced_item is not None,
+            "unpriced_item": unpriced_item,
             # The turn runs inside the task's run, which holds this lock.
             "holder": f"run:{grant.task_id}",
         }
@@ -773,6 +770,7 @@ class Gateway:
             "turn_id": grant.turn_id,
             "model": call["model"],
             "price_checked": price["checked"],
+            "unpriced": call["unpriced"],
             "status": status,
             "cut": cut,
             "unsent": unsent,
@@ -801,6 +799,8 @@ class Gateway:
             "model": call["model"],
             "route": "openai",
             "price_checked": price["checked"],
+            "unpriced": call["unpriced"],
+            "unpriced_item": call["unpriced_item"],
             "status": status,
             "cut": cut,
             "unsent": unsent,

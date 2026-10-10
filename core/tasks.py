@@ -367,8 +367,7 @@ async def dispatch(
     (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
     offered, and the persona's digest and size. A persona that cannot be
-    read (a missing persona file or identity field, or a `CLAUDE.md` that
-    is missing or lacks the governance or tests paragraph) raises
+    read (a missing persona file or identity field) raises
     `persona.PersonaUnreadable`; there is no fallback text."""
 
     b = await brief(conn, task_id)
@@ -590,9 +589,12 @@ def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """A task's metered spending, over its rows in id order (rows of other
     types are ignored): `spent_usd_micros` is every charge summed, and
     `open_calls` each call opened and not yet charged, with its worst-case
-    estimate. Information only: nothing refuses on it."""
+    estimate; `unpriced_calls` each call charged at a stand-in price because
+    the table lacks its model, tool, or stored prompt. Information only:
+    nothing refuses on it."""
     spent = 0
     open_calls: dict[str, int] = {}
+    unpriced: list[str] = []
     for row in rows:
         kind, p = row["type"], row["payload"]
         if kind in ("gateway.opened", LEGACY_OPENED):
@@ -601,7 +603,9 @@ def spending(rows: list[dict[str, Any]]) -> dict[str, Any]:
         elif kind == "gateway.charged":
             open_calls.pop(p["call_id"], None)
             spent += p["usd_micros"]
-    return {"spent_usd_micros": spent, "open_calls": open_calls}
+            if p.get("unpriced"):
+                unpriced.append(p["call_id"])
+    return {"spent_usd_micros": spent, "open_calls": open_calls, "unpriced_calls": unpriced}
 
 
 async def tree_spending(conn, task_id: str) -> dict[str, Any]:
