@@ -768,7 +768,9 @@ def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk
                 "removed": [],
             }
             found.append(current)  # type: ignore[arg-type]
-        elif current is not None and line.startswith("+") and not line.startswith("+++"):
+        # The `---` and `+++` file headers come before the first `@@`, so a
+        # line inside a hunk is a line, whatever its text starts with.
+        elif current is not None and line.startswith("+"):
             current["added"].append(line[1:])
         elif current is not None and line.startswith("-"):
             current["removed"].append(line[1:])

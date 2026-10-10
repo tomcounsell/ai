@@ -483,6 +483,19 @@ def test_a_deleted_file_is_one_removal_only_hunk_read_at_line_0(tmp_path):
     assert git_.hunk_at(ws, older, newer, "core/merge.py", 0).id() == h.id
 
 
+def test_lines_whose_text_starts_with_two_signs_are_lines_not_file_headers(tmp_path):
+    """Git renders an added `++i` as `+++i` and a removed `--flag` as
+    `---flag`; only the lines before the first `@@` are file headers."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "notes/signs.txt", "a\n--flag\nb\n", "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(ws, "notes/signs.txt", "a\n++i\nb\n", "signs")
+    (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "notes/signs.txt")
+    assert h.added == ("++i",) and h.removed == ("--flag",)
+
+
 def test_a_hunk_with_added_lines_keeps_its_id_over_path_context_and_added_lines(tmp_path):
     """The id an instance and its grant are recorded under does not move
     for a hunk with added lines (docs/sdlc-state-machine.md)."""

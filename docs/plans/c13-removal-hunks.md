@@ -122,6 +122,12 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
   exemption" alone was dropped: the open-weight leg answered the removed
   review step caution.
 
+- Patch 1, from the lead: `git.hunks` read an added line whose text
+  starts with `++` as a `+++` file header and dropped it. Headers come
+  only before the first `@@`, so every `+` and `-` line inside a hunk is
+  read as a line; a test pins an added `++i` and a removed `--flag`. A
+  hunk holding such an added line gets a new id.
+
 ## Questions for Tom
 
 None.
