@@ -589,10 +589,11 @@ call over its estimate (largest ratio 0.83 and 0.87). Spend $0.01846 (Jev
 $0.00432, open weight $0.01414). `GOVERNANCE.calibrated` stays `None` and
 the docs runner stays unregistered.
 
-### Governance, runs 5 to 8 (2026-10-10)
+### Governance, runs 5 to 10 (2026-10-10)
 
-On the test database `valor_rebuild_test_c11`, over 67 cases (case file
-SHA-256 `919a92bd…`): run 5 the run 4 question, runs 6 to 8 the reworded
-ones, task digests `ebffabc54915`, `c90e46687683`, `ca8231d8b95d`. Every
-entry check false; `GOVERNANCE.calibrated` stays `None`. Each run's numbers
-are in `docs/plans/c11-governance-precision.md`.
+On `valor_rebuild_test_c11`, 67 cases (SHA-256 `919a92bd…`): run 5 the run
+4 question, runs 6 to 10 reworded (`ebffabc54915`, `c90e46687683`,
+`ca8231d8b95d`, `eda026ef59e4`, `f9034dc3cf49`). Every entry check false; on
+run 10 Jev is right on all 67, the open-weight leg wrong on 2 `tom`
+negatives. `GOVERNANCE.calibrated` stays `None`. Numbers are in
+`docs/plans/c11-governance-precision.md`.
