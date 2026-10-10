@@ -400,6 +400,12 @@ Notes per shape:
    answered by a classifier change, never a grant. An ungranted `true` is a
    refused merge: it flags the action from the diff, and the broker refuses it.
    Its guard is the governance paragraph itself, so it carries no expiry.
+   The question counts steps over how work is done and approved: a step
+   that can stop, send back, or redirect a request, plan, change, commit,
+   merge, send, or an agent's commands. The behavior of the software being
+   built, serving its own users (input validation, permission checks,
+   error handling, the messages its users see), is not one of them, in any
+   repository (`docs/plans/c11-governance-precision.md`).
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the

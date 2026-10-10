@@ -551,7 +551,26 @@ def test_the_governance_question_excludes_correctness_code_and_descriptive_prose
     (q,) = GOVERNANCE.questions
     for words in ("makes the work itself correct", "only describes what code does"):
         assert words in q.text and words in q.labels["false"]
-    assert "judges work, a request, or an action" in q.text
+
+
+def test_the_governance_question_counts_steps_over_the_work_and_not_the_products_own_behavior():
+    """The paragraph governs steps over how work is done and approved; the
+    behavior of the software being built, serving its own users, is none of
+    them, even where it refuses (docs/plans/c11-governance-precision.md)."""
+    (q,) = GOVERNANCE.questions
+    for words in ("over how work is done and approved", "serving its own users"):
+        assert words in q.text and words in q.labels["true" if "approved" in words else "false"]
+    for step in (
+        "a pre-commit or CI gate",
+        "a hook",
+        "a review or approval step",
+        "a merge check",
+        "a guard row",
+    ):
+        assert step in q.text
+    for behavior in ("input validation", "permission and visibility checks", "error handling"):
+        assert behavior in q.text
+    assert "Judge what the added lines add" in q.text
 
 
 @pytest.mark.macos
