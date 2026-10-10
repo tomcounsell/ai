@@ -50,7 +50,7 @@ SUITE = "suite.ran"
 JUNIT = "tmp/junit.xml"
 SEED = "seed"
 NO_TESTS = "the suite ran no tests at head"
-BOTH_FAIL = "the suite fails at base too, and without per-test results no failure at head can be told apart"
+BOTH_FAIL = "the whole suite fails at base and at head, with no per-test results to tell them apart"
 # Files at a commit's top level that pin what setup installs.
 LOCKFILES = (
     "uv.lock",
@@ -448,11 +448,13 @@ def compare(
       unless the diff removes its definition; a head run the commit broke
       (`cause: commit`) is a failure itself, and so is a head whose report
       has no passed, failed or skipped test (`NO_TESTS`: nothing ran, or collection errored); with no per-test result on
-      either side, a head that fails while the base passes, or the note
-      `BOTH_FAIL` when both fail;
+      either side, a head that fails while the base passes;
     - `deleted_at_head`: ids passing at base, absent at head, whose
       definition the diff removes;
-    - `failing_at_base`: ids failing or erroring at base and at head."""
+    - `failing_at_base`: ids failing or erroring at base and at head, or,
+      with no per-test result on either side, the note `BOTH_FAIL` when the
+      suite fails at both: a base already red is not the candidate's
+      failure."""
     failures: list[str] = []
     deleted_at_head: list[str] = []
     failing_at_base: list[str] = []
@@ -460,15 +462,10 @@ def compare(
     if head.get("cause") == "commit":
         failures.append(head.get("why") or "the suite could not run at head")
     if bt is None and ht is None:
-        if _fails(head) and not failures:
-            failures.append(
-                BOTH_FAIL
-                if _fails(base)
-                else f"the suite exited {head.get('exit')} at head and {base.get('exit')} at base"
-            )
-        elif _fails(head) and _fails(base):
-            failures.append(BOTH_FAIL)
-        return {"failures": failures, "deleted_at_head": [], "failing_at_base": []}
+        both = _fails(head) and _fails(base)
+        if _fails(head) and not failures and not both:
+            failures.append(f"the suite exited {head.get('exit')} at head and {base.get('exit')} at base")
+        return {"failures": failures, "deleted_at_head": [], "failing_at_base": [BOTH_FAIL] if both else []}
     bt = bt or {"passed": [], "failed": [], "errored": [], "skipped": []}
     base_pass = set(bt["passed"])
     base_fail = set(bt["failed"]) | set(bt["errored"])

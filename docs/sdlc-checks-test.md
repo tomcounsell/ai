@@ -31,7 +31,10 @@ base and are gone at head), `failing_at_base` (shown, never counted), the
 behaviors, the breadth judgement (id, actions, model, cost, guard id, and
 `information` while uncalibrated), and the verdict the kernel computes: any
 failure `red`, else any behavior `gaps`, else `pass`. Per-test results at
-base and none at head is `red`. A head whose report has no passed, failed or skipped test (the
+base and none at head is `red`. With no per-test results on either side,
+a suite that fails at head and passes at base is `red`; one that fails at
+both is not counted against the candidate and is listed under
+`failing_at_base` as the whole suite failing at base and at head. A head whose report has no passed, failed or skipped test (the
 suite collected nothing, pytest exits 5, or collection errored, exit 2) is
 `red` too, never `pass`.
 
