@@ -1,5 +1,5 @@
 ---
-status: build
+status: merged
 stakes: 1
 governance_grant: none
 ---
