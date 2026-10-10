@@ -19,9 +19,10 @@ branch: the only way onto that branch is the merge and its predicate.
 `merge` is offered to no turn; its payload carries the URL, the target
 branch, the head, and the candidate, so the request binds all four, and
 `Merge` is built from the task's Brief, so it refuses a payload naming any
-other URL or branch. A merge to a remote (not a local path) lands only on a
-pair in the merge-target list (`core.targets`), never on the branch the
-remote's `HEAD` names, read just before the push. A task with a kernel
+other URL or branch: the URL and target branch the kernel recorded at start
+from the project spec, which no turn changes. What the push can reach
+beyond that is bounded by the GitHub credential's own scope (docs/tech-stack.md,
+GitHub). A task with a kernel
 mirror pushes from the mirror with the GitHub credential, a per-call config
 file (`core.credentials.header_file`); no other push carries it.
 
@@ -148,9 +149,6 @@ class Merge(PushBranch):
                 f"the merge names {p['url']} {p['target_branch']}; the task's Brief names "
                 f"{self.url} {self.branch}"
             )
-        said = await targets.check(conn, p["url"], p["target_branch"])
-        if said:
-            return said
         return await git.threaded(self._rewrites)
 
     def destination(self, action) -> tuple[str, str]:
@@ -175,25 +173,12 @@ class Merge(PushBranch):
             )
         sha = action.payload["head_sha"]
         try:
-            if not targets.local(url):
-                self._with_credential(url, lambda c: self._not_default(url, branch, c))
             self._with_credential(url, lambda c: git.push(self.workspace, url, sha, branch, c))
         except git.GitError as exc:
             if self.credential is not None and any(m in str(exc) for m in _REFUSED):
                 raise git.GitError(f"{ROTATE}: {exc}") from None
             raise
         return {"remote": url, "branch": branch, "sha": sha}
-
-    def _not_default(self, url: str, branch: str, credential: Path | None) -> None:
-        """Refuse the branch the remote's HEAD names, read now."""
-        try:
-            named = git.remote_head(self.workspace, url, credential)
-        except git.GitError as exc:
-            raise ValueError(f"cannot read the remote's HEAD: {exc}") from None
-        if named is None:
-            raise ValueError("the remote's HEAD names no branch")
-        if named == branch:
-            raise ValueError(f"{branch} is the default branch of {url}; a merge never lands there")
 
     def _lookup(self, action) -> dict | None:
         try:

@@ -25,8 +25,8 @@ start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] ...
                                spec (clone at the base, bare origin, kernel
                                mirror, its own Postgres and Redis, setup), then
                                start it; the merge lands on the spec's
-                               merge_url when Tom granted the pair (never the
-                               remote's default branch), else on its own origin
+                               merge_url, else on its own origin, at the
+                               target branch recorded at start
 start ... --replay             background work: a foreground task's step takes
                                the turn slot first
 routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
@@ -54,12 +54,6 @@ openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
 github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
                                the kernel's github-keys file (mode 600), the
                                same way
-merge-target add URL BRANCH --note TEXT
-                               Tom's grant of a (URL, branch) pair a merge
-                               may land on; https only; always his
-merge-target remove URL BRANCH --note TEXT --by B
-                               revoke a pair
-merge-target list              the granted pairs
 calibrate CASES.json
                                both judgement legs alone on every labelled
                                case (at most 50), one
@@ -153,7 +147,6 @@ from core import (
     router,
     routines,
     session,
-    targets,
     tasks,
     workspace,
 )
@@ -410,10 +403,6 @@ async def _start_project(conn, args) -> str:
             spec = dataclasses.replace(spec, branch=args.branch, target_branch=args.branch)
     except workspace.Refused as exc:
         raise SystemExit(f"start refused: {exc}") from None
-    if spec.merge_url and (spec.target_branch or spec.branch):
-        said = await targets.check(conn, spec.merge_url, spec.target_branch or spec.branch)
-        if said:
-            raise SystemExit(f"start refused: {said}")
     task_id = ledger.new_id()
     lock = f"provision:{task_id}"
     await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
@@ -436,10 +425,6 @@ async def _start_project(conn, args) -> str:
         except workspace.Refused as exc:
             raise SystemExit(f"start refused: {exc}") from None
         try:
-            # The target branch is known here when the spec named none.
-            said = await targets.check(conn, made.origin_url, made.target_branch)
-            if said:
-                raise ValueError(said)
             return await _start_task(
                 conn,
                 args,
@@ -734,8 +719,6 @@ async def _run(args) -> None:
                 print("already stopped")
             else:
                 print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
-        elif args.command == "merge-target":
-            print(await _merge_target(conn, args))
         elif args.command == "correct":
             c = await corrections.record(conn, args.text, by=args.by, via=args.via)
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
@@ -771,39 +754,6 @@ async def _audit(conn, args) -> str:
         role_played=args.role_played,
     )
     return f"labelled {args.task_id} {args.sha} {args.label}, ledger row {row['event_id']}"
-
-
-async def _merge_target(conn, args) -> str:
-    """`add` (always Tom's), `remove` (anyone's), `list`."""
-    if args.target_command == "list":
-        rows = await targets.granted(conn)
-        return "\n".join(f"{r['url']}  {r['branch']}  {r['note']}" for r in rows) or "no merge targets"
-    if args.target_command == "add":
-        if not targets.url_ok(args.url):
-            raise SystemExit(
-                f"merge-target refused: {args.url} is not https://host/path (letters, digits, . _ / -; "
-                "no port, user, query, fragment, or dot segment)"
-            )
-        if not _branch_ok(args.branch):
-            raise SystemExit(f"merge-target refused: {args.branch!r} is not a branch name")
-        await targets.grant(conn, args.url, args.branch, args.note, via=args.via)
-        return f"granted {args.url} {args.branch}"
-    await targets.revoke(conn, args.url, args.branch, args.note, by=args.by, via=args.via)
-    return f"revoked {args.url} {args.branch}"
-
-
-def _branch_ok(branch: str) -> bool:
-    import subprocess
-
-    from core import git
-
-    done = subprocess.run(
-        [git.binary(), "check-ref-format", "--branch", branch],
-        env=git.env(),
-        capture_output=True,
-        check=False,
-    )
-    return done.returncode == 0 and not branch.startswith("-")
 
 
 def _secure_login() -> dict:
@@ -995,19 +945,6 @@ def main() -> None:
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
     sub.add_parser("github-key")
-    target_cmd = sub.add_parser("merge-target").add_subparsers(dest="target_command", required=True)
-    add_target = target_cmd.add_parser("add")
-    add_target.add_argument("url")
-    add_target.add_argument("branch")
-    add_target.add_argument("--note", required=True)
-    add_target.add_argument("--via", default="the command line")
-    remove_target = target_cmd.add_parser("remove")
-    remove_target.add_argument("url")
-    remove_target.add_argument("branch")
-    remove_target.add_argument("--note", required=True)
-    remove_target.add_argument("--by", required=True)
-    remove_target.add_argument("--via", default="the command line")
-    target_cmd.add_parser("list")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     routine = sub.add_parser("routine")

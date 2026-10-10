@@ -273,7 +273,7 @@ def read_key(keyfile: str | Path, name: str, command: str = "judgement-keys") ->
 
 
 # The merge's GitHub credential. The token sits in `settings.github_keyfile`;
-# for each git call the merge performer makes against a granted remote, the
+# for each git call the merge performer makes against a remote, the
 # kernel writes a config file holding one pinned header scoped to that URL,
 # hands git its path as `GIT_CONFIG_GLOBAL`, and removes it when git exits.
 
