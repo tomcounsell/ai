@@ -1,6 +1,6 @@
 # 4.3 follow-up N4: one expiry sweep per moment
 
-Review N4 (`m4-3-routines-record.md`, Merged section): two expiry firings at
+Review N4 of 4.3: two expiry firings at
 the same moment can each start a sweep. This is a bug fix. The lock it adds
 is concurrency control, not a check, gate, hook, round, or review step.
 
@@ -63,9 +63,6 @@ N4 asks for: the second firing has to see the first one's open sweep.
   objective until it has recorded `routine.ran`, so a firing at the same
   moment waits, with no transaction open, and then continues the open
   sweep.
-- `docs/plans/m4-3-routines-record.md`: in the Merged section's follow-up
-  list and the "Follow-ups, not planned" line, mark N4 as fixed and point to
-  this plan.
 
 ## Tests (`tests/test_expiry.py`, the `world` fixture's own database)
 

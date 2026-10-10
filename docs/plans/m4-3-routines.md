@@ -2,7 +2,7 @@
 tracking: none
 slug: m4-3-routines
 type: plan
-status: merged and rolled out on Tom's Mac (record in m4-3-routines-record.md, Merged)
+status: merged and rolled out on Tom's Mac
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -591,7 +591,7 @@ is `.venv/bin/python -m ui`, at `http://127.0.0.1:8790/`.
 ## Decisions and records
 
 The decided-by-default lists, the build record, and the patch round are in
-[m4-3-routines-record.md](m4-3-routines-record.md).
+git history.
 
 ## Questions for Tom
 

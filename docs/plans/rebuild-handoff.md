@@ -29,7 +29,7 @@ Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
 `VALOR_BACKUP_DIR=/Volumes/PINK/valor_temp`, and
 `PGPASSFILE=~/.config/valor-kernel/pgpass` set. On 2026-10-08 Valor's Mac
 took milestones 1 to 4 as merged: the kernel on the branch tip, both routine
-jobs loaded, the status page up (m4-3-routines-record.md). The new Telegram
+jobs loaded, the status page up. The new Telegram
 (`com.valor.kernel.telegram`) and email (`com.valor.email`) bridge jobs are
 in `~/Library/LaunchAgents` but `launchctl disable`d, since the old bridge
 still owns Valor's Telegram account on that Mac; a test window or cutover

@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-4c-verifier
 type: build
-status: merged and rolled out on Tom's Mac (record in m1-4c-verifier-records.md, Merged; step 5 read 2026-10-07)
+status: merged and rolled out on Tom's Mac
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -534,5 +534,5 @@ Installing Apple's `container` from its signed package needs the Mac's admin pas
 
 ## Records
 
-The critique rounds, the build record, and any patch rounds are in
-[m1-4c-verifier-records.md](m1-4c-verifier-records.md).
+The critique rounds, the build record, and any patch rounds are in git
+history.

@@ -572,4 +572,4 @@ outline.
 ## Records
 
 The critique rounds, the 1.4a build and patch rounds, its deliveries, and
-the popoto #191 trial run: see [m1-4-checks-record.md](m1-4-checks-record.md).
+the popoto #191 trial run are in git history.

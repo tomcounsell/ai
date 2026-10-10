@@ -367,4 +367,4 @@ come to about ten dollars, most of it the two long compaction sessions.
 ## Build record
 
 The build record, patch rounds, merge, and the records of Rollout 3 and 4
-are in [m3-pi-harness-record.md](m3-pi-harness-record.md).
+are in git history.

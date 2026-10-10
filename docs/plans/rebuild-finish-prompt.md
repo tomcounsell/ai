@@ -162,7 +162,7 @@ dead path is noticed and reconnected. A bug fix, so no guard.
 
 **C2 Lead housekeeping** (you, no pipeline). Correct stale frontmatter
 (`m2-1-port.md` planned; `13fe23bd`, `fc598a81`, `9718f496` planned but
-merged; `m4-3-routines-record.md` built). Close `valor-rebuild.md` "Open
+merged). Close `valor-rebuild.md` "Open
 items" that are settled (the host Mac is Valor's Mac; the answer keys
 stand as written, m1-5-emulator-records.md). Carry the follow-ups worth a
 task into this list; drop the rest with a line saying why.
@@ -179,8 +179,7 @@ how the slot is keyed before starting two at once, and read
 --model gpt-6.1-sol` (m3-pi-harness.md, Rollout 4), carried to its merge.
 Once A1 has merged it merges by itself; before that, the lead releases it.
 Record its ledger summary and spending. This first real task after the
-1.4c part two rollout also gives its `verify.ran` read (m4-3-routines-record.md,
-end).
+1.4c part two rollout also gives its `verify.ran` read.
 
 **D2 One review per harness.** On D1's candidate: one review at
 `reviewer`, one at `reviewer_openai`, recorded side by side (Rollout 3).
@@ -255,8 +254,8 @@ time in that order, each later one rebasing and rerunning its checks.
 - The skill's rules, unchanged: own worktree, test database, port block,
   `.venv`, `unset VIRTUAL_ENV`; never the real ledger outside a rollout;
   kill by PID only; never print a secret; never touch `~/src/ai` beyond
-  reading it; no invented caps or safeguards; docs in plain language with
-  no em or en dashes and no history words, under 600 lines.
+  reading it; governance is the `CLAUDE.md` paragraph; docs in plain
+  language with no em or en dashes and no history words.
 - Report only to the lead through the final result, full report in
   `~/src/valor-build-notes/<agent name>.md`, summary under 300 words.
 - `git fetch` and fast-forward before orienting, cutting worktrees, and
