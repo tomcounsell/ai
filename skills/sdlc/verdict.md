@@ -13,8 +13,8 @@ of your final message, bare or in a fenced block. The object holds:
 - `findings`: a list of `{"kind": "...", "text": "..."}`, every finding
   your verdict rests on;
 - for critique, optionally `raise`: `{"critique_rounds": n,
-  "review_rounds": n}` with n 0 to 2, when the stakes call for more loops
-  than the plan set.
+  "review_rounds": n}` with n 0 to 2 (review's most is 1; a 2 is read as
+  1), when the stakes call for more loops than the plan set.
 
 Nothing else you write reaches anyone. No effect is available to you, and
 the kernel ignores any other file under `.valor/`. A turn that ends without

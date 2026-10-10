@@ -155,14 +155,17 @@ def test_revise_with_a_round_left_goes_back_to_plan_and_without_one_to_build_wit
 
 @pytest.mark.macos
 def test_a_raise_applies_and_an_out_of_range_raise_is_no_verdict(dsn, tmp_path):
-    task, _b, ws = planned(dsn, tmp_path, fresh_acts=["bad_raise", "raise"])
+    task, _b, ws = planned(
+        dsn, tmp_path, fresh_acts=["bad_raise", "raise"], counts={"critique_rounds": 0, "review_rounds": 0}
+    )
     runners = scripted.fresh_runners(ws)
     first = run(drive(dsn, task, runners))
     assert first["status"] == "failed" and "each count raised is" in str(first["turn"]["result"])
     assert not [r for r in run(rows(dsn, task)) if r["type"] == "critique.decided"]
     run(drive(dsn, task, runners))
     f = machine.fold(run(rows(dsn, task)))
-    assert f.loops.review_rounds == 2
+    # The raise to 2 applies, read as review's most, 1.
+    assert f.raised["review_rounds"] == 2 and f.loops.review_rounds == 1
 
 
 @pytest.mark.parametrize(
@@ -496,10 +499,10 @@ def test_a_lower_raise_changes_nothing():
         _row(2, "judge.decided", verdict="precise"),
         _row(3, "turn.started", turn_id="w", state="plan"),
         _row(4, "turn.collected", turn_id="w", state="plan", verdict="planned"),
-        _row(5, "plan.written", critique_rounds=1, review_rounds=2, sha256="p", path="p", commit="c"),
+        _row(5, "plan.written", critique_rounds=1, review_rounds=1, sha256="p", path="p", commit="c"),
         _row(6, "critique.decided", plan_sha256="p", verdict="sound", raised={"review_rounds": 0}),
     ]
-    assert machine.fold(rows).loops.review_rounds == 2
+    assert machine.fold(rows).loops.review_rounds == 1
 
 
 @pytest.mark.macos

@@ -19,8 +19,8 @@ STREAM = "guards"
 GRANTED = date(2026, 10, 1)
 EXPIRES = GRANTED + timedelta(days=90)  # 2026-12-30
 NOTE = (
-    "Every stage is a checkpoint. The plan sets the loops (0, 1, or 2 critique and review rounds, "
-    "from the stakes). Test, review, and docs run in parallel on every candidate. "
+    "Every stage is a checkpoint. The plan sets the loops (0, 1, or 2 critique rounds and 0 or 1 "
+    "review round, from the stakes). Test, review, and docs run in parallel on every candidate. "
     "(Tom's pipeline decision of 2026-10-01, docs/sdlc-state-machine.md, The pipeline Tom set.)"
 )
 
@@ -66,8 +66,7 @@ SEEDED: tuple[dict[str, Any], ...] = (
         ),
         "incident": (
             "popoto #633: the stale-cache bug was moved, not removed, and a lenient Sonnet stand-in "
-            "accepted it (rebuild-baseline.md, Review rounds). The second round has no incident of its "
-            "own and falls to expiry on 2026-12-30 unless one occurs"
+            "accepted it (rebuild-baseline.md, Review rounds). Review sends work back at most once"
         ),
         "mission_items": [1],
         "source": "docs/sdlc-state-machine.md, checks.review, Why; rebuild-baseline.md, Review rounds",

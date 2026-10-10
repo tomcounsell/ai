@@ -270,8 +270,16 @@ def test_review_rounds_bound_the_patches_before_merge(rounds):
         else:
             break
     f = led.fold()
-    assert patches == rounds and f.state is State.MERGE and f.join.outcome == "did_not_pass"
-    assert patches <= rounds + 1
+    # A plan's 2 is read as 1: review sends work back at most once.
+    assert patches == min(rounds, machine.REVIEW_MAX) and f.state is State.MERGE
+    assert f.join.outcome == "did_not_pass"
+
+
+def test_a_critique_raise_of_review_rounds_to_2_is_accepted_and_read_as_1():
+    led = Ledger(review_rounds=0).plan()
+    led.critique("sound", review_rounds=2)
+    f = led.fold()
+    assert f.raised["review_rounds"] == 2 and f.loops.review_rounds == 1
 
 
 def test_the_repair_round_is_spent_once_per_window_and_feedback_opens_a_new_window():
