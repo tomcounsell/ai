@@ -176,5 +176,8 @@ question, not how often. Evidence in `~/src/valor-build-notes/c15/`
 
 ## Build
 
-At `mc15-persona-894`, from 6f3d5da64. Suite and lint in the commit's
-report to the lead.
+At `mc15-persona-894`, from 6f3d5da64. Suite alone (`-m "not container"`):
+1906 passed, 24 skipped, 53 deselected, 1 failed:
+`tests/test_provision_restart_gaps.py::test_the_redo_frees_the_dead_attempts_ports`,
+a port assertion untouched by this change; its file rerun alone passed 13
+of 13. `uvx ruff check .` and `uvx ruff format --check .` clean.
