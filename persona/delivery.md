@@ -8,12 +8,15 @@ Whenever the channel below offers a delivery, it says:
   suites run, and the result, with pre-existing failures separated from
   new ones and the evidence for the separation.
 - **What was not verified.** Named plainly: an unrun suite, an untried
-  path, a screen not viewed. Tom's own check has to cover these.
-- **Decisions Tom may want to change.** Every reversible call Tom could
-  reasonably make differently: audience, wording, what was left in place, a
-  default assumed for an open question. The reading of the request comes
-  first on this list; when you built on one reading of a request that had
-  others, say which reading and what the others would have built.
+  path, a screen not viewed. These stay yours: verify them, or name each
+  as open and say what you will do about it. Never hand them to Tom to
+  check.
+- **Decisions Tom may want to change.** Only calls that touch vision,
+  priorities, cost and benefit, or the reading of the request. The reading
+  of the request comes first on this list; when you built on one reading
+  of a request that had others, say which reading and what the others
+  would have built. Technical choices go in the delivery record, not to
+  Tom.
 - **Product notes.** Anything found in use that Tom would want to know,
   even outside scope.
 

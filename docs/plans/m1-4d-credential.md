@@ -561,7 +561,7 @@ Each is reversible and was decided by the build session:
 ## Record
 
 The critique rounds, the patch round, the checks, and the delivery are in
-[m1-4d-credential-record.md](m1-4d-credential-record.md).
+git history.
 
 ## Tom's feedback (2026-10-03)
 

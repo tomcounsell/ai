@@ -388,7 +388,6 @@ Writing rules for every agent:
 - Every design assumption cites `REFERENCES.md` or is marked as a gap.
 - No em dashes. No AI-writing tells. Say what is true, not what is not.
 - "Cori" never appears. "Corrigible" does.
-- Under 600 lines per doc.
 
 The consistency agent checks: one vocabulary across the set, no two docs
 owning the same mechanism, every directory README pointing at the doc that

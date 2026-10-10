@@ -24,8 +24,9 @@ doc disagree, the milestone that builds the mechanism fixes the doc.
 Every milestone goes through the pipeline in
 [sdlc-state-machine.md](../sdlc-state-machine.md): judge, clarify if thin,
 plan, critique, build, then test, review, and docs in parallel on each
-candidate, patch in the builder's own resumed session, and a merge held for
-Tom's tap. Each stage gets its goal and its exit evidence, not steps.
+candidate, patch in the builder's own resumed session, and a merge
+performed when the merge predicate holds and reported to Tom. Each stage
+gets its goal and its exit evidence, not steps.
 
 Each milestone below states:
 
@@ -43,25 +44,24 @@ A milestone may be split into several tasks, each through the pipeline on
 its own. The milestone is done when all of its evidence holds on the merged
 branch.
 
-How the loops end (Tom, delegated decision of 2026-10-02):
+How the loops end (Tom's rulings in [valor-rebuild-feedback.md](valor-rebuild-feedback.md)):
 
-Superseded in part by Tom's feedback of 2026-10-03 (valor-rebuild-feedback.md):
-Valor decides stops, extra rounds, and merges; Tom is asked about vision,
-business priorities, and cost-benefit tradeoffs only.
-
-- **Stop means stop.** When a task's critique or review rounds are spent,
-  its delivery goes to Tom with the findings and a recommendation, and
-  nothing more is built on it until he answers.
+- **Stop means stop**, for Valor's subagents. When a task's critique or
+  review rounds are spent, Valor decides against the task's objective:
+  merge, one more patch round with a named scope, or stop, and records
+  why. It does not go to Tom.
 - **Each plan states its threat model** in a few lines: what the turn
   controls, and what the kernel must never do with it. Review checks the
   Done items against that model. A finding that the kernel reads
   turn-owned state is one finding, "remove the read", not a list of
   vectors to refuse one by one.
 - **Done is the plan's Done items, a green suite, and a review pass or
-  Tom's tap.** "No findings left" is not the bar.
-- **Tom's queue holds three kinds of item:** deliveries to accept,
-  identity and credential choices, and questions about intent. Every
-  other call is recorded under "Decided by default" and not asked.
+  Valor's merge decision.** "No findings left" is not the bar.
+- **Tom's queue holds** questions about vision, business priorities, and
+  the cost and benefit of tradeoffs; things only he holds (a password, an
+  account); and governance grants. Tom gets a report of each merge and
+  send. Every other call is Valor's, recorded under "Decided by default"
+  and not asked.
 
 Governance binds every milestone. A milestone that needs a new check, gate,
 hook, or review step names the incident and mission item and waits for
@@ -239,8 +239,8 @@ images yet); use shapes 2 to 5 and 10.
 ### 1.4 The checks and the merge
 
 **Goal.** Delivery counts only after an independent check, and a merge
-reaches the real branch only on Tom's tap (Mission item 1, Evidence
-"Independent checks").
+reaches the real branch only when the merge predicate holds (Mission item
+1, Evidence "Independent checks").
 
 **Done.**
 - The kernel provisions each task's workspace (lifted from
@@ -280,7 +280,7 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   machinery. Each re-checks Jev's worst-case overhead (`tools/jev.py`,
   sized from 35 single-question judge calls) against its own rows.
 - Before task 1.4b starts, popoto #191 runs end to end through the
-  kernel, judge to held merge, with `python -m core verdict` playing the
+  kernel, judge to merge, with `python -m core verdict` playing the
   runners not yet built. Its record says what the pipeline
   did and what Tom would have had to do.
 
@@ -310,10 +310,10 @@ it builds anything real (Evidence "Independent checks").
 - The replay scripts move from `scripts/` to `tests/emulator/`; stand-in
   and judge calls go through the gateway and meter onto one task's spending (no
   `costs.jsonl`). The stand-in moves to an Opus-class model.
-- **The takeover gate.** The full pipeline, judge to held merge, carries
+- **The takeover gate.** The full pipeline, judge to merge, carries
   three baseline items: popoto #191 (thin), psyoptimal #872 (precise), and
   popoto #633 (stateful). Scored by the same Sonnet judge as the baseline
-  so results compare. Each reaches a held merge with hidden tests no worse
+  so results compare. Each reaches the merge with hidden tests no worse
   than its bare baseline run and fidelity within one point of it; #191 is
   held to its clarify run (fidelity 3, 7 of 11 hidden tests), since its
   bare run set no bar. One rerun per item is allowed before the gate
@@ -332,7 +332,7 @@ in milestone 4).
 Self-built. Stakes: 2.1 changes the kernel, critique 2 and review 2; 2.2
 and 2.3 send to real people under Valor's name, critique 1 and review 2.
 
-**Goal.** Tom gives Valor work and taps approvals where he already is
+**Goal.** Tom gives Valor work and gets reports where he already is
 (Mission items 1 and 6), and nothing leaves under Valor's name without
 passing the broker (**Bounded authority, metered spending**; the one identity in
 [persona.md](../persona.md)).
@@ -385,7 +385,7 @@ lines) not carried.
 
 **Done.** On Valor's real account during a test window: an inbound message
 starts a task with its spending metered and shown; a question reaches Tom and his
-reply binds to it; a delivery card's tap releases a held push; a forced
+reply binds to it; a merge leaves at request and its report reaches Tom; a forced
 crash between intent and outcome does not send twice; the bridge's RSS
 after a day connected is measured.
 
@@ -393,7 +393,7 @@ after a day connected is measured.
 telegram doc's poll sections removed); #2652 (the inbound record carries
 the forum topic id); #3269 (gap fill on reconnect); #3589 (all sends pass
 the broker); `flood_sleep_threshold` set to 0 so Telethon never retries on
-its own; plain text sends, so what Tom approves is what renders.
+its own; plain text sends, so what the broker records is what renders.
 
 ### 2.3 Email, adapted from `main`
 
@@ -411,11 +411,11 @@ About 450 lines kept, 350 adapted, 1,700 not carried.
 - **Not carried:** subject coalescing, the vault mirror, Redis history and
   dead letters, the email relay's retries, per-sender project routing.
 
-**Done.** On Valor's real mailbox during a test window: a reply-all is held and released once; a crash
+**Done.** On Valor's real mailbox during a test window: a reply-all leaves once; a crash
 between SMTP and outcome does not double-send; a 9 MB attachment sends.
 
 **Absorbs.** #3601 (SMTP timeout scaled for large uploads; the other three
-items go with the dropped code); #3124 and #2160 (moot: sends are held,
+items go with the dropped code); #3124 and #2160 (moot: sends pass the broker,
 steering is in `core/`).
 
 ### 2.4 A local chat bridge
@@ -430,11 +430,9 @@ carried the token in the kernel key directory, and no turn can reach the
 bridge's port.
 
 **Done.** On Tom's Mac: a message typed on the page starts a task, a
-notice comes back, and a held send is approved from the page by an
-`approve` reply and shown once.
+notice comes back, and a send leaves at request and is shown once.
 
-**Leaves out (milestone 2).** Standing grants for any chat (Tom's default:
-tap each one); other channels.
+**Leaves out (milestone 2).** Other channels.
 
 ## Milestone 3: the harnesses
 
@@ -451,7 +449,7 @@ vendor, and a reviewer seat from another vendor (Mission item 1; Evidence
 - A contract test suite for the harness port that Claude Code and Pi both
   pass: resume, signals, stop and reap, metering through the gateway.
 - Pi running GPT-6.1 on OpenAI, metered by the gateway's OpenAI route.
-- Pi carries popoto #633 end to end through the pipeline to a held merge.
+- Pi carries popoto #633 end to end through the pipeline to the merge.
 - Pi with GPT-6.1 is a seat for the blind verifier; one review on each
   harness of the same candidate is recorded.
 - The harness and its version recorded on `turn.started`.

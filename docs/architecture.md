@@ -413,13 +413,11 @@ failures, is the ground truth [4, 17]. The sample is built (`core/audit_sample.p
 weighted random order and never shows the verdict, `audit label` records his
 label, and `audit scores` prints the verifier's stratified false accept, false
 reject, and Brier score with each `n`, Tom's labels and, apart, labels read
-from reverted merges. Nothing reads a label or a score to hold or send
-anything; lowering the autonomy class on a degrading series is design. Calibration is false accept, false
+from reverted merges. Labelling is available on Tom's lead, when he
+chooses to get technical; nothing waits on it, and nothing reads a label
+or a score to hold or send anything. Calibration is false accept, false
 reject, and Brier score [12] with sample size; raw pass rate is never
-reported alone [14]. A degrading series lowers the highest class the system
-may commit without Tom; raising it is only Tom's decision, recorded as a
-grant. Serves: autonomy shrinks automatically on evidence and grows only by
-Tom's decision.
+reported alone [14].
 
 **Verify by use.** No run in either experiment looked at a UI result in a
 browser (rebuild-baseline.md, Browser use). A headless browser in the

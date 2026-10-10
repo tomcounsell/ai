@@ -491,8 +491,8 @@ questions are answered by the docs above.
 
 ## Records
 
-The critique rounds, the build record, and the patch rounds are in
-[m1-4c-review-records.md](m1-4c-review-records.md).
+The critique rounds, the build record, and the patch rounds are in git
+history.
 
 ## Tom's feedback (2026-10-03)
 

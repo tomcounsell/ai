@@ -582,8 +582,7 @@ The test window, on the build Mac:
 
 ## Record
 
-The checks of review round 2 and the delivery are in
-`m2-2-telegram-record.md`.
+The checks of review round 2 and the delivery are in git history.
 
 ## Questions for Tom
 
@@ -594,6 +593,6 @@ step 5.
 
 Tom, on one more patch round for nine deliveries with the scopes and order put to him: "All as recommended". The order: 1.4v, 2.1, 1.4b, 1.4s, 2.2, 2.3, 3b, 1.4u, 1.5. Valor decides any further round and the merge (valor-rebuild-feedback.md, Tom's feedback of 2026-10-03).
 
-Scope: the six findings in m2-2-telegram-record.md. Merges after 2.1.
+Scope: the six findings of review round 2. Merges after 2.1.
 
 Rollout step 5, signing the session in: Valor does it; the code arrives in Valor's other sessions and the account's password is in the vault (`TELEGRAM_PASSWORD`). The test window is Valor's to schedule, by the 2026-10-03 feedback.

@@ -338,9 +338,9 @@ kind each run made.
 
 **Shrinking on evidence.** Design. Each task's live judgements are scored
 as their labels arrive. A rolling Brier score past the record's ceiling
-sends the task to its abstain route on every call until Tom restores it.
-The kernel does this, with a ledger row; nothing about it waits for a
-review. Growing back is Tom's decision.
+sends the task to its abstain route on every call until Valor restores it
+on new evidence, a record that passes. The kernel does this, with a ledger
+row; nothing about it waits for a review or for Tom.
 
 ## Which uses are gates
 

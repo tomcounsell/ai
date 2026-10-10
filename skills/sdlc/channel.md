@@ -26,8 +26,8 @@ and your next turn says so.
 {effects}
 
   Nothing else is available to you that way, and pushing any other way is
-  not available at all. Merging is the kernel's: when the checks pass, the
-  kernel holds the merge for Tom.
+  not available at all. Merging is the kernel's: when the merge predicate
+  holds, the kernel merges and Tom gets a report.
 
 A turn that ends with none of the files its stage names is resumed with
 "Continue."
