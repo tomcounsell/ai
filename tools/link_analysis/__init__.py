@@ -756,6 +756,7 @@ async def summarize_url_content(url: str, timeout: float = 30.0) -> str | None:
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
+                    "X-Pplx-Integration": "valor",
                 },
                 json={
                     "model": DEFAULT_MODEL,
@@ -832,6 +833,7 @@ def analyze_url(
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "X-Pplx-Integration": "valor",
             },
             json={
                 "model": DEFAULT_MODEL,
