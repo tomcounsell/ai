@@ -107,4 +107,9 @@ None.
 - `docs/sandbox.md`: what a dependency image holds.
 - `tests/test_container.py`: the tests above.
 - Host suite: 1898 passed, 24 skipped, 53 deselected; ruff check and
-  format clean. Container case: waiting on the lead's window.
+  format clean.
+- Container, in the lead's window: `-m container -k popoto_shaped`,
+  3 passed in 561.7 s (hatchling, setuptools, setuptools-mac-prefix). The
+  session's images, its base included (named under `valor-test-<label>`),
+  were deleted at session end; the machine's `images.json` is unchanged and
+  the data disk went from 16 GB free before to 18 GB after.
