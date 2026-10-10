@@ -72,8 +72,8 @@ keeps its image records in a directory of the test session's own and names its
 images under `valor-test-<label>`, the label being `container.owner` of the
 test database, so it never deletes, retags, or records an image a kernel built.
 At session end the session takes the machine lock, deletes every image recorded
-under its label, and drops the records. Every other test takes the machine lock in a
-directory of the session's own, and the runtime reads as absent to it, as it
+under its label, and drops the records. Every other test takes the machine lock
+in a directory of the session's own, and the runtime reads as absent to it, as it
 does under the check profile: its lock does not hold the machine's runtime, so
 the sweep at the start of every run it makes never stops that runtime under a
 kernel's verification.
