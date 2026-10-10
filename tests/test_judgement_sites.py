@@ -465,8 +465,44 @@ def test_a_hunk_that_only_removes_lines_is_judged_on_its_removed_lines(tmp_path)
     (plain,) = git_.hunks(ws, older, newer, "core/tap.py")
     assert plain.added == () and plain.removed == ("    if is_docs(path):", "        return False")
     assert tap.id == plain.id() == git_.hunk_at(ws, older, newer, "core/tap.py", tap.start).id()
-    # Two removals in one function context are two hunks, not one id.
-    assert tap.id != by_path["core/merge.py"].id
+
+
+def test_two_removals_in_one_function_context_get_two_ids(tmp_path):
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    body = "def steps(change):\n" + "".join(f"    step_{i}(change)\n" for i in range(30))
+    commit(ws, "core/steps.py", body, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(
+        ws,
+        "core/steps.py",
+        body.replace("    step_5(change)\n", "").replace("    step_25(change)\n", ""),
+        "two",
+    )
+    first, second = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/steps.py")
+    assert first.context == second.context == "def steps(change):"
+    assert first.added == second.added == () and first.id() != second.id()
+
+
+def test_a_file_replaced_by_a_symlink_is_two_hunks_with_no_header_lines(tmp_path):
+    """With `--no-renames` a typechange is two diff sections for one path;
+    each section's `---` and `+++` headers are headers, not hunk lines."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "f", "a\nb\n", "a file")
+    older = git(ws, "rev-parse", "HEAD")
+    (ws / "f").unlink()
+    (ws / "f").symlink_to("target")
+    git(ws, "add", "f")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "a symlink")
+    gone, link = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "f")
+    assert (gone.added, gone.removed) == ((), ("a", "b"))
+    assert (link.added, link.removed) == (("target",), ())
+    assert gone.id() != link.id()
+    texts = [h.text for h in judgement_sites.diff_hunks(ws, older, git(ws, "rev-parse", "HEAD"))]
+    assert len(texts) == 2 and not any("/dev/null" in t or "+++ b/f" in t for t in texts)
 
 
 def test_a_deleted_file_is_one_removal_only_hunk_read_at_line_0(tmp_path):
@@ -695,13 +731,17 @@ def test_the_governance_question_counts_steps_over_the_work_and_not_the_products
     assert "Judge what the added lines add" in q.text
 
 
-def test_the_governance_question_says_what_a_hunk_that_only_removes_lines_adds():
-    """Removing a step adds none; removing an exemption from one adds to it
-    (docs/plans/c13-removal-hunks.md)."""
+def test_the_governance_question_judges_the_removed_lines_of_every_hunk():
+    """Every hunk's removed lines are judged, beside its added lines:
+    removing a step adds none, and removing an exemption from one adds to
+    it whatever replaces it (docs/plans/c13-removal-hunks.md)."""
     (q,) = GOVERNANCE.questions
     for words in (
-        "or for a hunk that only removes lines, what removing them adds",
-        "removing such a step adds none; removing an exemption from one adds to it",
+        "Judge what the added lines add and what removing the removed lines adds:",
+        (
+            "removing such a step adds none, and removing an exemption from one adds to it, "
+            "whatever lines are added in its place"
+        ),
     ):
         assert words in q.text
 
@@ -714,7 +754,10 @@ def test_the_governance_question_counts_wiring_instructions_and_the_agents_own_s
     work is not (docs/plans/c11-governance-precision.md, patch round 4)."""
     (q,) = GOVERNANCE.questions
     for words in (
-        "calling, registering, or wiring an existing such step at a new place, or narrowing an exemption",
+        (
+            "calling, registering, or wiring an existing such step at a new place, or narrowing or "
+            "removing an exemption"
+        ),
         "in instructions a turn follows (a skill, brief, persona, or prompt)",
         "in any repository, the agent's own (Valor's) included",
         "never covers a step over the work in the agent's own pipeline, kernel, skills, persona, or guards",

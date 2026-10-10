@@ -61,14 +61,20 @@ removal is the case this fixes: the removal is now judged.
 - `diff_hunks` returns every hunk, its text the `git diff -W` hunk holding
   it, as before. A deleted file is one removal-only hunk.
 - `governance.json` lists each instance's `removed` lines beside `added`.
-- The question's one sentence on what to read becomes "Judge what the
-  added lines add, or for a hunk that only removes lines, what removing
-  them adds (removing such a step adds none; removing an exemption from
-  one adds to it); the other lines are context." The input shape is
-  unchanged. The task digest moves from `183b1eac42cc` to
-  `f595d1d25c4dc0e0a061a36362485d4189ea7f2a346900a92c60540f5b7e00cf`, so
+- The question judges every hunk's removed lines beside its added lines.
+  Its sentence on what to read is "Judge what the added lines add and what
+  removing the removed lines adds: removing such a step adds none, and
+  removing an exemption from one adds to it, whatever lines are added in
+  its place; the other lines are context.", and the sentence before it
+  counts "narrowing or removing an exemption from one (a line that lets
+  some work skip the step)". The input shape is unchanged. The task digest
+  moves from `183b1eac42cc` to
+  `6ea08e1a0b425c391f4773af90980ee757e953bcc19229f98e9eb570079e9177`, so
   every hunk is asked fresh under the new question; reuse stays keyed on
   hunk id, input digest and task digest.
+- `git.hunks` starts each file section afresh at its `diff --git` line, so
+  a path git gives two sections (a file replaced by a symlink) reads its
+  second section's `---` and `+++` headers as headers.
 
 ## Measurement
 
@@ -86,7 +92,7 @@ its floor of 0.65 Jev abstains and the open-weight leg answers.
 | plus "narrowing or removing an exemption" | `094fad71542b` | `375368b84fac` | abstain 0.51; caution 0.05 | proceed 0.87; caution 0.05 | both right |
 | built: plus the parenthesis | `f595d1d25c4d` | `be6286d9d243`, `1f1a34037a89` | abstain 0.47, 0.61; caution 0.05 twice | proceed 0.92 twice; proceed 1.0 twice | both right |
 
-On the built question, the 67 cases of
+The build's question (`f595d1d25c4d`), the 67 cases of
 `~/src/valor-demo/items/judgement/governance.adds.json` (SHA-256
 `919a92bd…`, calibration task `0b47030050ab`, event 5166): Jev wrong on 1,
 an abstain (0.64) on Tom's `notice-text-rendering` negative; the
@@ -108,6 +114,9 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
 - A removal-only hunk that deletes an approval step is asked, and its
   proceed answer makes no instance.
 - An added hunk's id is unchanged.
+- An exemption removed with a comment or a log line added in its place
+  ends caution at the site, and a file replaced by a symlink reads no
+  header as a line.
 - A deleted file is one removal-only hunk, read at line 0.
 - The two examples asked on the real providers end right at the site.
 - Focused tests, the host suite, ruff check and format.
@@ -127,6 +136,49 @@ runs, all calls answered. `GOVERNANCE.calibrated` stays `None`.
   only before the first `@@`, so every `+` and `-` line inside a hunk is
   read as a line; a test pins an added `++i` and a removed `--flag`. A
   hunk holding such an added line gets a new id.
+
+- Patch 2, from the blind review (`~/src/valor-build-notes/review-c13.md`,
+  probes `review-c13-probes.json` beside it):
+  - A file replaced by a symlink is two diff sections for one path, so
+    headers do not come only before a path's first `@@`. `git.hunks` and
+    `_hunk_texts` reset at every `diff --git` line; a test pins two hunks
+    with no header text and distinct ids.
+  - The build's question told the leg to read a mixed hunk's added lines
+    only, so an exemption removed and a comment or a log line added in its
+    place got Jev proceed and the site proceeded. The question now judges
+    every hunk's removed lines; ids of hunks with added lines are
+    unchanged. Measured on the review's 4 probes (q1 to q3 label `true`,
+    q4 the removed `require_review`, label `false`); the open-weight leg
+    answered caution 0.05 on q1 to q3 and proceed 1.0 on q4 in every run:
+
+    | question | task digest | calibration task | Jev q1, q2, q3, q4 | at the site |
+    |---|---|---|---|---|
+    | build (the review's run) | `f595d1d25c4d` | `99d9a7b520cb` | 0.73, 0.89, 0.63, 0.93 | q1 and q2 wrong |
+    | "and what removing the removed lines adds" plus the build's parenthesis | `48507e650bba` | `885e22a45ad6`, `b5c9fe827702` | 0.87, 0.84, 0.69, 0.91; 0.86, 0.87, 0.71, 0.93 | q1 to q3 wrong |
+    | "in every hunk, one that also adds lines included" | `afdea13a3501` | `2e7e4a6d886a` | 0.80, 0.85, 0.67, 0.92 | q1 to q3 wrong |
+    | "whether or not it also adds lines" | `ee38e29d36f5` | `7e74791a9982` | 0.86, 0.92, 0.86, 0.93 | q1 to q3 wrong |
+    | the last plus "narrowing or removing an exemption" | `e09be9156eec` | `4a14e532d252` | 0.67, 0.83, 0.51, 0.93 | q1 and q2 wrong |
+    | "whatever lines are added in its place" plus "narrowing or removing" | `4e711ae441bc` | `c0b572cf84c6` | 0.53, 0.65, 0.53, 0.93 | right, q2 at the floor |
+    | built: the last plus "(a line that lets some work skip the step)" | `6ea08e1a0b42` | `ac8d6f97197e`, `17c8220e6041` | 0.49, 0.49, 0.36, 0.93; 0.42, 0.49, 0.34, 0.93 | all right |
+    | the last with "so that work it let skip the step must now pass it" | `0255f074d846` | `2883b23a28c3` | 0.49, 0.58, 0.40, 0.93 | all right |
+
+    On the built question: the two examples (task `cd7b9c136e1c`) end
+    right, Jev abstaining at 0.33 on the docs exemption and the
+    open-weight leg answering caution 0.05, the review step proceed 0.93
+    and 1.0. The 67 cases (task `38a62eb3e1d2`, event 771): Jev wrong on
+    1, an abstain (0.61) on `notice-text-rendering`; the open-weight leg
+    wrong on 5, the two Tom negatives above and 3 drafted D4 inputs, all
+    caution 0.05. Brier 0.0103 (Jev) and 0.0683 (open weight). Every case
+    ends right at the site; entry check false, so `calibrated` stays
+    `None`. C11's 11 probes (task `fe786107e059`) all end right; Jev
+    abstains on `p1-new-call-to-existing-gate` (0.32) and
+    `p3-narrowed-exemption` (0.44), the open-weight leg answers both
+    caution, and `p9-product-permission` is Jev proceed 0.94. Spend
+    $0.0519 over 12 runs, all calls answered.
+  - The two-removals test now removes two steps from one 30-step function,
+    so both hunks share a function context and get distinct ids. The id
+    sentence in `docs/sdlc-state-machine.md` names removed lines; long
+    lines are rewrapped.
 
 ## Questions for Tom
 

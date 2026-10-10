@@ -235,22 +235,26 @@ class DiffHunk:
 def _hunk_texts(diff: str) -> list[tuple[int, int, str]]:
     """Each hunk of one path's diff: its new start, new length, and lines."""
     out: list[list] = []
+    inside = False  # past a section's headers, as `git.hunks` reads them
     for line in diff.splitlines():
         m = HUNK_HEADER.match(line)
-        if m:
+        if line.startswith("diff --git "):
+            inside = False
+        elif m:
+            inside = True
             out.append([int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1), [line]])
-        elif out:
+        elif inside:
             out[-1][2].append(line)
     return [(s, n, "\n".join(lines)) for s, n, lines in out]
 
 
 def diff_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
     """Every hunk between two commits, one that only removes lines
-    included, once per hunk id. The hunks and their ids are `git.hunks`'s (three lines of context), the
-    ones `git.hunk_at` and the instance ids read. The text the judgement
-    reads is the `git diff -W` hunk holding it, so the enclosing function
-    comes with it: an unchanged hunk in a changed function keeps its id
-    while its input changes."""
+    included, once per hunk id. The hunks and their ids are `git.hunks`'s
+    (three lines of context), the ones `git.hunk_at` and the instance ids
+    read. The text the judgement reads is the `git diff -W` hunk holding
+    it, so the enclosing function comes with it: an unchanged hunk in a
+    changed function keeps its id while its input changes."""
     seen: dict[str, DiffHunk] = {}
     for path in git.diff_paths(workspace, older, newer):
         hunks = git.hunks(workspace, older, newer, path)

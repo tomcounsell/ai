@@ -759,7 +759,11 @@ def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk
     current = None
     for line in text.splitlines():
         m = HUNK.match(line)
-        if m:
+        if line.startswith("diff --git "):
+            # A typechange (a file to a symlink) is two sections for one
+            # path; each opens with its own `---` and `+++` headers.
+            current = None
+        elif m:
             current = {
                 "start": int(m.group(1)),
                 "length": int(m.group(2) if m.group(2) is not None else 1),
@@ -768,8 +772,8 @@ def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk
                 "removed": [],
             }
             found.append(current)  # type: ignore[arg-type]
-        # The `---` and `+++` file headers come before the first `@@`, so a
-        # line inside a hunk is a line, whatever its text starts with.
+        # A section's `---` and `+++` headers come before its first `@@`, so
+        # a line inside a hunk is a line, whatever its text starts with.
         elif current is not None and line.startswith("+"):
             current["added"].append(line[1:])
         elif current is not None and line.startswith("-"):

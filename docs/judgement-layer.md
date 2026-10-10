@@ -409,13 +409,14 @@ Notes per shape:
    error handling, the messages its users see), is not one of them, and
    that never covers a step over the work in Valor's own pipeline, kernel,
    skills, persona, or guards (`docs/plans/c11-governance-precision.md`).
-   The question tells the leg to judge what the added lines add, or for a
-   hunk that only removes lines what removing them adds (removing a step
-   adds none, removing an exemption from one adds to it), and to read the
-   rest of the hunk as context. Every hunk is asked, one that only removes
-   lines included (`docs/plans/c13-removal-hunks.md`). A refusal added inside a governance
+   The question tells the leg to judge what the added lines add and what
+   removing the removed lines adds, in every hunk: removing a step adds
+   none, and removing an exemption from one adds to it, whatever lines are
+   added in its place. The rest of the hunk is context. Every hunk is
+   asked, one that only removes lines included
+   (`docs/plans/c13-removal-hunks.md`). A refusal added inside a governance
    step adds to it, and so does calling, registering, or wiring an existing
-   one at a new place, or narrowing an exemption from one. The wording of a
+   one at a new place, or narrowing or removing an exemption from one. The wording of a
    message whose sending is already decided is not a step. A lock or
    transaction that makes a second run of the same work wait, or answers it
    that one is already running, is correctness code; a step that refuses
