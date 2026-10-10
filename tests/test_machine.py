@@ -290,13 +290,13 @@ def test_a_critique_raise_of_review_rounds_to_2_is_accepted_and_read_as_1():
 
 
 def test_a_red_test_and_docs_changes_spend_the_plans_rounds_like_a_review_changes():
-    led = Ledger(review_rounds=2).to_checks()
-    led.checks("red", "pass", "no_change").build()
-    led.checks("pass", "pass", "changes").build()
-    f = led.fold()
-    assert f.counts["review_rounds"] == 2 and f.counts["last_rounds"] == 0
-    led.checks("red", "pass", "no_change")
-    assert led.fold().join.spends == "last"
+    for test, docs in (("red", "no_change"), ("pass", "changes")):
+        led = Ledger(review_rounds=1).to_checks()
+        led.checks(test, "pass", docs).build()
+        f = led.fold()
+        assert f.counts["review_rounds"] == 1 and f.counts["last_rounds"] == 0
+        led.checks(test, "pass", docs)
+        assert led.fold().join.spends == "last"
 
 
 def test_the_last_round_is_spent_once_per_window_and_feedback_on_an_ended_task_opens_a_new_window():
