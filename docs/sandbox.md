@@ -58,7 +58,12 @@ router's sweep run there leaves containers alone. The runtime is in
 
 **Images and their record.** Every image the kernel builds is named
 `<REPO>/<name>:<key>` (`container.REPO`, `valor`): `valor/base:<digest of
-core/images/base/>` and `valor/<project>:<dependency key>`. Each build is
+core/images/base/>` and `valor/<project>:<dependency key>`. A project's
+dependency image holds what its installing setup commands fetch with the
+network open: each `uv sync`, `npm ci` or `npm install` in its setup, also
+behind leading `NAME=value` assignments such as a Mac `PATH` or `SDKROOT`,
+which run as written (a Mac path is absent in the VM and changes nothing).
+The VM then runs the whole setup offline. Each build is
 recorded in `images.json` beside the machine lock, with the digest and the
 `valor.db` label of the database that built it. A prune deletes only images
 carrying its own database's label, and never the base image. All runtime work

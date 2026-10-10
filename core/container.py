@@ -8,9 +8,10 @@ candidate each run in a VM started from a kernel-built image:
 - a dependency image per project and manifest key (`deps_key`): the base
   image with the commit's lockfiles (`checks.LOCKFILES`) installed by the
   spec's own installing setup commands (`uv sync`, `npm ci`, `npm
-  install`) with the network open, under the environment the VM's setup
-  gets less its two offline variables, so they fetch what the offline
-  setup asks for. A spec with none runs in the base image.
+  install`, each also after leading `NAME=value` assignments) with the
+  network open, under the environment the VM's setup gets less its two
+  offline variables, so they fetch what the offline setup asks for. A spec
+  with none runs in the base image.
 
 The base runs in the image of the base's own manifests, the candidate in
 the image of its own, so a candidate never chooses its base's environment.
@@ -110,8 +111,12 @@ VM_CACHES = {
 }
 VM_OFFLINE = {"UV_OFFLINE": "1", "npm_config_offline": "true"}
 # The setup commands the dependency build runs with the network open
-# (`core/images/base/deps.sh`); every other runs offline in the VM.
-INSTALLING = re.compile(r"^(uv sync|npm ci|npm install)\b")
+# (`core/images/base/deps.sh`), after any leading `NAME=value` assignments
+# (the value bare or quoted): `uv sync`, `npm ci`, `npm install`. Every
+# other runs offline in the VM.
+INSTALLING = re.compile(
+    r"""^((?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"'])*\s+)*)(uv sync|npm ci|npm install)\b"""
+)
 # The skip reason of a test marked `macos` (tests/conftest.py).
 MACOS_ONLY = "macOS only"
 
@@ -318,7 +323,22 @@ def base_tag() -> str:
 
 
 def installs(project: dict[str, Any]) -> bool:
-    return any(INSTALLING.match(c) for c in project.get("setup") or ())
+    return bool(install_commands(project))
+
+
+def install_commands(project: dict[str, Any]) -> list[str]:
+    """The spec's installing setup commands as the dependency build runs
+    them: each with its leading assignments, `uv sync` given
+    `--no-install-project` (the build has the manifests only)."""
+    out = []
+    for command in project.get("setup") or ():
+        m = INSTALLING.match(command)
+        if m is None:
+            continue
+        rest = command[m.end() :]
+        tool = "uv sync --no-install-project" if m.group(2) == "uv sync" else m.group(2)
+        out.append(m.group(1) + tool + rest)
+    return out
 
 
 def manifests(mirror: str | Path, sha: str) -> str:
@@ -489,6 +509,7 @@ async def prune(rows_by_task: dict[str, list[dict]], keep: set[str], db_label: s
 
 def spec_json(project: dict[str, Any]) -> dict[str, Any]:
     """The spec as `run.sh` and `deps.sh` read it: services, roles, setup,
+    the installing commands as `deps.sh` runs them (`install_commands`),
     suite with `{junit}` filled in, the lint as the kernel runs it, and the
     environment, the Postgres app password left as `{app_password}` for
     `run.sh` to fill."""
@@ -506,6 +527,7 @@ def spec_json(project: dict[str, Any]) -> dict[str, Any]:
         "roles": list(project.get("roles") or ()),
         "extensions": list(project.get("extensions") or ()),
         "setup": list(project.get("setup") or ()),
+        "install": install_commands(project),
         "suite": (project.get("suite") or "true").replace("{junit}", str(VM_JUNIT)),
         "lint": checks.lint_command(project),
         "env": env,

@@ -241,6 +241,37 @@ def test_the_vm_spec_names_the_vms_paths_and_runs_offline():
     assert container.installs(project) and not container.installs({"setup": ["make"]})
 
 
+PSYOPTIMAL_SETUP = (
+    'PATH="$PATH:/opt/homebrew/opt/postgresql@18/bin" '
+    "SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen"
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "built"),
+    [
+        ("uv sync --frozen --extra dev", "uv sync --no-install-project --frozen --extra dev"),
+        (
+            PSYOPTIMAL_SETUP,
+            PSYOPTIMAL_SETUP.replace("uv sync --frozen", "uv sync --no-install-project --frozen"),
+        ),
+        ("A='x y' B=1 npm ci", "A='x y' B=1 npm ci"),
+        ("npm install", "npm install"),
+        ("make", None),
+        ("uv syncer", None),
+        ("echo uv sync", None),
+        ("A=1 make && uv sync", None),
+    ],
+)
+def test_an_installing_command_is_told_apart_behind_leading_assignments(command, built):
+    """An installing setup command (`uv sync`, `npm ci`, `npm install`) is
+    one even after leading `NAME=value` assignments, and the dependency
+    build runs it with them, `uv sync` given `--no-install-project`."""
+    project = {"setup": ["true", command]}
+    assert container.installs(project) is (built is not None)
+    assert container.spec_json(project)["install"] == ([built] if built else [])
+
+
 # -- reuse -----------------------------------------------------------------------------------
 
 
@@ -788,13 +819,22 @@ BACKENDS = {
 }
 
 
+# psyoptimal's setup prefix: the Mac's paths, which mean nothing in the VM.
+MAC_PREFIX = PSYOPTIMAL_SETUP.removesuffix("uv sync --frozen")
+
+
 @pytest.mark.container
-@pytest.mark.parametrize("backend", sorted(BACKENDS))
-def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend):
+@pytest.mark.parametrize(
+    ("backend", "prefix"),
+    [("hatchling", ""), ("setuptools", ""), ("setuptools", MAC_PREFIX)],
+    ids=["hatchling", "setuptools", "setuptools-mac-prefix"],
+)
+def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend, prefix):
     """`uv sync --frozen --extra dev` with a build system and popoto's
     `UV_PYTHON = "3.12"`: the dependency image fetches the build system and
     the 3.12 wheels of a binary dependency, and the VM installs the project
-    offline, each setup command's output kept."""
+    offline, each setup command's output kept. Behind psyoptimal's leading
+    assignments too."""
     project = tmp_path / "lock"
     project.mkdir()
     pyproject = (
@@ -818,7 +858,7 @@ def test_a_popoto_shaped_spec_installs_offline_in_the_vm(dsn, tmp_path, backend)
 
     async def go():
         task, b, rows, candidate = await at_candidate(
-            dsn, tmp_path, files=files, writes={"greeting.txt": "hi\n"}, setup=["uv sync --frozen --extra dev"],
+            dsn, tmp_path, files=files, writes={"greeting.txt": "hi\n"}, setup=[prefix + "uv sync --frozen --extra dev"],
             suite=".venv/bin/python -B run.py {junit}", env={"UV_PYTHON": "3.12"},
         )  # fmt: skip
         return b, candidate, await verified(dsn, task, b, rows, candidate)
