@@ -141,8 +141,8 @@ tap (`guard.granted`), and the Brief's `governance_grant` does not stand in.
 This is the governing constraint as a kernel fact. A `merge` is performed
 only when the merge predicate holds, read in the transaction that writes
 its intent ([sdlc-state-machine.md](sdlc-state-machine.md)); a term that
-does not hold is an `effect.refused` naming it, and a merge whose git facts
-cannot be read writes no row and is asked again on the task's next step.
+does not hold is an `effect.refused` naming it. Every term reads a row:
+what a docs head holds was read once, when the docs runner kept it.
 
 Two performers run in the kernel's process, never forcing: `push_branch`
 (`act`) pushes one commit to one branch, never the target branch, to `push_url`
@@ -382,10 +382,14 @@ what a thing is, nothing about what it may do. The SDLC uses three:
    the test verdict read from it. **Design:** the test runner (1.4).
 3. **Over every diff: does this add governance?** The blind verifier's one
    boolean, "does this add a check, gate, hook, round, or review step",
-   asked per hunk. A yes with no grant is a refused merge. **Built:** the
-   judgement, review and docs verdicts that take their instances from it,
-   and the broker's refusal of a merge with an instance lacking Tom's tap.
-   The docs runner calls it too.
+   asked per hunk, less prose under `docs/` and READMEs, which only
+   describe code. A yes with no grant is a refused merge, and only a yes:
+   a hunk the judgement abstains on, too large for both legs, or both legs
+   failed on is answered by the blind verifier, whose yes is an instance
+   and whose no is none, so Tom never adjudicates the classifier.
+   **Built:** the judgement, called by the review and docs runners; the
+   review and docs verdicts that take their instances from it; and the
+   broker's refusal of a merge with an instance lacking Tom's tap.
 
 ## Verification
 
@@ -399,7 +403,8 @@ emulator's judge (`tests/emulator/judge.py`) runs outside the kernel,
 metered through the gateway. The verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
-  deterministic check results, the governance instances, and the task's
+  deterministic check results, the governance instances and the hunks the
+  judgement left undecided, which it answers, and the task's
   requested and refused effects, as files the kernel writes. It never reads the
   agent's narrative (`done.md`, the transcript), so it judges what happened
   and not what Valor said happened.
@@ -557,7 +562,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect beyond the task's authority | broker reads the class from the performer and refuses an `act` above the task's ceiling or on a stopped task; a replay task has no send performer; every `act` that leaves is reported | bounded authority |
 | Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review and docs runners call it) | governing constraint |
-| A merge on a model's say-so, or redirected by a turn | the merge predicate, four terms read from rows and git, read with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the merge's payload; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
+| A merge on a model's say-so, or redirected by a turn | the merge predicate, four terms read from rows, read with the intent in one transaction; docs commits cut to doc paths once, when the docs runner keeps them; origin's URL and the target branch recorded at start and bound into the merge's payload; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling merge intent reconciled from the target | lossless stop |

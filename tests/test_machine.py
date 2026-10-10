@@ -630,15 +630,13 @@ def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate
     assert f.merge_effect["effect_id"] == "e1" and "not the current one" in f.ignored[-1]["why"]
 
 
-def test_the_predicate_refuses_when_the_docs_head_does_not_descend_or_git_facts_are_missing():
+def test_the_predicate_docs_term_reads_the_docs_verdict_and_its_head():
     led = Ledger().to_checks()
     led.check("test", "pass").check("review", "pass").check("docs", "updated", head="d1")
     f = led.fold()
     payload = {"candidate": led.candidate, "head_sha": "d1"}
-    ok = machine.GitFacts(True, (), ("docs/a.md",))
-    assert machine.merge_predicate(f, payload, facts=ok) == []
-    for facts in (machine.GitFacts(False, (), ()), None, machine.GitFacts(True, (), ("core/x.py",))):
-        assert [t[0] for t in machine.merge_predicate(f, payload, facts=facts)] == ["4"]
+    assert machine.merge_predicate(f, payload) == []
+    assert [t[0] for t in machine.merge_predicate(f, {**payload, "head_sha": "d2"})] == ["4"]
 
 
 @pytest.mark.parametrize(

@@ -69,8 +69,9 @@ computes a merge's `adds_governance` from the review and docs verdicts,
 never from the requester, treats such a merge as `act`, and refuses it while
 any instance lacks Tom's tap. The other half is use shape 6:
 `judgement_sites.governance` asks the governance boolean once per hunk of
-the diff, and `record_check` takes the instances from those rows. The
-review and docs runners call it.
+the diff, less prose under `docs/` and any directory's `README.md`, and
+`record_check` takes the instances from those rows. The review and docs
+runners call it.
 
 ## Task taxonomy
 
@@ -266,8 +267,9 @@ money, so every abstain route names what it costs Tom:
   calls a product defect.
 
 Counting each abstain and failure that reaches Tom in the attention
-ledger by site (`docs/mission.md`) is design; a governance verdict's
-`abstain_instances` is the count built.
+ledger by site (`docs/mission.md`) is design. Governance's never reaches
+him: its abstain route is the blind reviewer (use shape 6), and a review or
+docs verdict lists each such hunk under `governance.undecided`.
 
 ## Calibration discipline
 
@@ -395,10 +397,18 @@ Notes per shape:
 6. The blind verifier's one boolean per hunk (all hunks at once on one shared
    database connection, so provider calls overlap and the task's advisory
    lock orders the rows), with the hunk's enclosing function as input. Each
-   hunk at caution is an instance; a reviewer can add one, not remove one,
-   and a note contesting one is an incident against `governance.adds`,
-   answered by a classifier change, never a grant. An ungranted `true` is a
-   refused merge: it flags the action from the diff, and the broker refuses it.
+   hunk answered caution without an abstain is an instance. A hunk the
+   judgement abstains on, one too large for both legs, and one both legs
+   failed on after its reruns are undecided: the blind reviewer, which
+   reads the diff anyway, answers the same boolean for each, and its yes is
+   an instance and its no is none. On a docs diff, which no reviewer reads,
+   an undecided hunk is no instance. Prose under `docs/` and any
+   directory's `README.md` only describe code and are not asked;
+   `CLAUDE.md`, `persona/`, and `skills/` can add a rule and are. A reviewer
+   can add an instance, not remove one the judgement answered, and a note
+   contesting one is an incident against `governance.adds`, answered by a
+   classifier change, never a grant. An ungranted instance is a refused
+   merge: it flags the action from the diff, and the broker refuses it.
    Its guard is the governance paragraph itself, so it carries no expiry.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.

@@ -110,9 +110,16 @@ on its candidate, each of which names every instance by its hunk. A merge
 with an instance Tom has not granted by his own tap (`python -m core
 grant`) is refused; the Brief's field does not stand in for the tap. The
 boolean is a judgement asked over every hunk of a diff
-(`core/judgement_sites.py`), and a review or docs verdict given those
-answers takes its instances from them; the blind verifier, the review
-runner (`fresh.review_runner`), asks it before its session reads anything.
+(`core/judgement_sites.py`), except prose under `docs/` and any directory's
+`README.md`, which only describe what code does; `CLAUDE.md`, the persona,
+and skills are asked, since prompt text can add a rule. A review or docs
+verdict given those answers takes its instances from them; the blind
+verifier, the review runner (`fresh.review_runner`), asks it before its
+session reads anything. Only a yes reaches Tom: a hunk the judgement
+abstains on, too large for both legs, or both legs failed on goes to the
+blind verifier's session, which answers the same boolean, and its yes is
+an instance and its no is none. Tom never adjudicates the classifier
+(Mission item 6).
 
 A guard Tom grants is ledgered with three things: the incident, the mission
 item, and the expiry date ninety days out; a grant missing the incident or

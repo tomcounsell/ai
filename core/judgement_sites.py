@@ -18,9 +18,10 @@ read git in the kernel mirror when the task has one, so a builder's clone
 that lost a commit, and a docs head that lives only in the mirror, are
 read the same way. A
 judgement both legs failed leaves its branch without a verdict, to be asked
-again on the next run; after `judgement.UNANSWERED_RUNS` such failures, or
-when the inputs were too large for both legs, the consumer applies caution
-instead, so no branch waits on a provider for good.
+again on the next run; after `judgement.UNANSWERED_RUNS` such failures,
+breadth applies caution, and a governance hunk, like one too large for
+both legs or one a judgement abstained on, is undecided and goes to the
+blind reviewer, so no branch waits on a provider for good.
 
 `calibrate` runs both legs alone on a labelled case set and writes the
 calibration record (`judgement.calibrated` on the `judgement` stream).
@@ -268,6 +269,24 @@ def diff_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
     return list(seen.values())
 
 
+def governance_exempt(path: str) -> bool:
+    """Whether the governance question skips a path: Markdown under `docs/`
+    and any directory's `README.md`, prose that describes what code does. A
+    file that instructs a turn (`CLAUDE.md`, anything under `persona/` or
+    `skills/`, `machine.is_doc_path`'s exclusions) is asked, since prompt
+    text can add a rule."""
+    if not machine.is_doc_path(path):
+        return False
+    parts = PurePosixPath(path).parts
+    return parts[0] == "docs" or parts[-1].casefold() == "readme.md"
+
+
+def governance_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
+    """The hunks the governance question is asked over: `diff_hunks` less
+    those at a `governance_exempt` path."""
+    return [h for h in diff_hunks(workspace, older, newer) if not governance_exempt(h.path)]
+
+
 def _governance_inputs(h: DiffHunk, paths: list[str]) -> dict[str, str]:
     return {"path": h.path, "hunk": h.text, "paths": "\n".join(paths)}
 
@@ -309,7 +328,7 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
         rows = await ledger.read(conn, task_id)
         b = await tasks.brief(conn, task_id)
         repo = b.mirror or b.workspace
-        hunks = diff_hunks(repo, older, newer)
+        hunks = governance_hunks(repo, older, newer)
         paths = git.diff_paths(repo, older, newer)
         shared = judgement.Shared(conn)
         # Every hunk runs to its end while the connection is open, so a stop
@@ -322,12 +341,13 @@ async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, ne
 
 
 def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) -> dict[str, Any]:
-    """What a set of governance rows means for a review or docs verdict:
-    the hunks that are instances (caution, abstain, or too large for both
-    legs), how many came from an abstain and which, and the hunks left unjudged after
-    their reruns. Refuses a set that skips a hunk, names one twice, or
-    names a hunk the diff does not hold; raises `Unanswered` while any
-    failed hunk has reruns left."""
+    """What a set of governance rows means for a review or docs verdict.
+    An instance is a hunk the judgement answered caution without an
+    abstain. A hunk it abstained on, one too large for both legs, and one
+    both legs failed after its reruns are `undecided`, each as (hunk, why):
+    the blind reviewer answers the same boolean for those. Refuses a set
+    that skips a hunk, names one twice, or names a hunk the diff does not
+    hold; raises `Unanswered` while any failed hunk has reruns left."""
     by_hunk: dict[str, dict] = {}
     for jid in ids:
         row = judgement.find(rows, jid)
@@ -344,18 +364,20 @@ def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) 
     missing = set(wanted) - set(by_hunk)
     if missing:
         raise Unusable(f"no governance judgement for hunks {sorted(missing)}")
-    instances, unjudged, abstained, abstained_ids = [], [], 0, []
+    instances: list[DiffHunk] = []
+    undecided: list[tuple[DiffHunk, str]] = []
     for h in hunks:
         row = by_hunk[h.id]
         p = row["payload"]
         if row["type"] == "judgement.answered":
-            if p["action"].get("adds") == "caution":
+            if p["action"].get("adds") != "caution":
+                continue
+            if "adds" in (p.get("abstained") or []):
+                undecided.append((h, "the judgement abstained"))
+            else:
                 instances.append(h)
-                if "adds" in (p.get("abstained") or []):
-                    abstained += 1
-                    abstained_ids.append(h.id)
         elif p.get("too_large"):
-            instances.append(h)
+            undecided.append((h, "too large for both judgement legs"))
         else:
             spent = judgement.unanswered_count(
                 rows,
@@ -370,34 +392,8 @@ def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) 
                 raise Unanswered(
                     f"governance unanswered for {h.path} ({_reasons(p)}); the next run asks again"
                 )
-            unjudged.append((h, _reasons(p)))
-    return {
-        "instances": instances,
-        "abstain_instances": abstained,
-        "abstained": abstained_ids,
-        "unjudged": unjudged,
-    }
-
-
-def unjudged_instance(unjudged: list[tuple[DiffHunk, str]]) -> dict[str, Any]:
-    """One instance for the whole diff, standing for every hunk the
-    judgement could not answer after its reruns: Tom taps once, not once
-    per hunk."""
-    ids = sorted(h.id for h, _ in unjudged)
-    paths = sorted({h.path for h, _ in unjudged})
-    return {
-        "id": "unjudged-" + ledger.digest(ids)[:16],
-        "path": "(diff)",
-        "line": 0,
-        "context": "",
-        "summary": (
-            f"governance not judged for {len(ids)} hunk(s) in {', '.join(paths)}: both judgement legs failed "
-            f"({unjudged[0][1]})"
-        ),
-        "incident": None,
-        "mission_item": None,
-        "hunks": ids,
-    }
+            undecided.append((h, f"both judgement legs failed ({_reasons(p)})"))
+    return {"instances": instances, "undecided": undecided}
 
 
 # -- calibration -----------------------------------------------------------------

@@ -25,6 +25,7 @@ from core import (
     broker,
     credentials,
     db,
+    fresh,
     guards,
     judgement_tasks,
     ledger,
@@ -534,70 +535,27 @@ def _docs_head(ws, *paths) -> str:
         (["docs/guide.md", "core/x.py"], False),
     ],
 )
-@pytest.mark.macos
-def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_path, paths, holds):
+def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(tmp_path, paths, holds):
     """Doc paths are Markdown only, never a file that instructs a turn, and a
     plan cannot widen them: anything else in a docs commit would merge with
-    no review keyed to it."""
+    no review keyed to it. The docs runner's cut (`fresh.kept_prefix`) is
+    where this is read."""
     ws, _ = scripted.workspace(tmp_path)
-
-    async def go():
-        task = await to_checks(dsn, ws)
-        head = _docs_head(ws, *paths)
-        await scripted.check(dsn, task, "test", "pass")
-        await scripted.check(dsn, task, "review", "pass")
-        await scripted.check(dsn, task, "docs", "updated", head=head)
-        return await merged(dsn, task)
-
-    out = run(go())
-    if holds:
-        assert out.kind == "done"
-    else:
-        assert terms(out) == ["4"]
+    cand = git(ws, "rev-parse", "HEAD")
+    head = _docs_head(ws, *paths)
+    kept, dropped, _ = fresh.kept_prefix(ws, cand, head)
+    assert (kept == head) is holds and bool(dropped) is not holds
 
 
-@pytest.mark.macos
-def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
+def test_a_rename_out_of_a_code_path_counts_the_old_path(tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     commit(ws, "core/x.py", "x = 1\n", "code")
-    git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
-
-    async def go():
-        task = await to_checks(dsn, ws)
-        git(ws, "mv", "core/x.py", "docs/x.md")
-        git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "move")
-        head = git(ws, "rev-parse", "HEAD")
-        await scripted.check(dsn, task, "test", "pass")
-        await scripted.check(dsn, task, "review", "pass")
-        await scripted.check(dsn, task, "docs", "updated", head=head)
-        f = await fold(dsn, task)
-        return await merged(dsn, task), f.checks[Check.DOCS].payload["paths"]
-
-    refused, paths = run(go())
-    assert terms(refused) == ["4"] and "core/x.py" in paths
-
-
-@pytest.mark.macos
-def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
-    ws, _ = scripted.workspace(tmp_path)
-
-    async def go():
-        task = await to_checks(dsn, ws)
-        cand = git(ws, "rev-parse", "HEAD")
-        git(ws, "checkout", "-q", "-b", "side")
-        commit(ws, "docs/a.md", "a\n")
-        git(ws, "checkout", "-q", "valor/work")
-        commit(ws, "docs/b.md", "b\n")
-        git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "merge", "-q", "--no-edit", "side")
-        async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="merge commit"):
-                await verdicts.record_check(
-                    conn, task, Check.DOCS, "updated", head=git(ws, "rev-parse", "HEAD"), governance_from=[],
-                    **scripted.SESSION_LEG,
-                )  # fmt: skip
-        return cand
-
-    run(go())
+    cand = git(ws, "rev-parse", "HEAD")
+    (ws / "docs").mkdir(exist_ok=True)
+    git(ws, "mv", "core/x.py", "docs/x.md")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "move")
+    kept, dropped, _ = fresh.kept_prefix(ws, cand, git(ws, "rev-parse", "HEAD"))
+    assert kept == cand and "core/x.py (not a docs path)" in dropped[0]["paths"]
 
 
 def test_the_predicate_terms_that_need_no_workspace():
@@ -620,14 +578,11 @@ def test_the_predicate_terms_that_need_no_workspace():
     f = machine.fold(led_rows)
     assert f.state is State.PATCH  # gaps with the plan's round unspent go to patch, never to merge
     f.state = State.MERGE  # as if it had: the predicate still refuses it
-    facts = machine.GitFacts(True, (), ())
     payload = {"candidate": c, "head_sha": "c"}
-    terms = machine.merge_predicate(f, payload, facts=facts)
+    terms = machine.merge_predicate(f, payload)
     assert [t[0] for t in terms] == ["3"]
-    terms = machine.merge_predicate(f, {**payload, "head_sha": "other"}, facts=facts)
+    terms = machine.merge_predicate(f, {**payload, "head_sha": "other"})
     assert "4" in [t[0] for t in terms]
-    merges = machine.GitFacts(True, ("m",), ())
-    assert "4" in [t[0] for t in machine.merge_predicate(f, payload, facts=merges)]
 
 
 # -- recovery, one run at a time ------------------------------------------------------------
@@ -977,10 +932,6 @@ def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_p
         async with await db.connect(dsn) as conn:
             results["release"] = (await scripted.merged(conn, task)).error
             try:
-                results["facts"] = broker._git_facts(str(ws), f, {"head_sha": f.candidate.sha})
-            except broker._Unreadable:
-                results["facts"] = "unreadable"
-            try:
                 verdicts._instances(
                     str(ws), b.base_sha, f.candidate.sha, [verdicts.InstanceSpec("hooks/gate.py", 1)]
                 )
@@ -1006,7 +957,7 @@ def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_p
     assert before_control is False  # no kernel call ran a planted program
     assert after_control is True  # the plants are live: plain git ran one
     assert "will not run" in results["release"] or "run a program" in results["release"]
-    assert results["facts"] == "unreadable" and results["instances"] == "GitError"
+    assert results["instances"] == "GitError"
     assert results["collected"] == "idle"
     collected = next(
         r["payload"]
@@ -1085,19 +1036,12 @@ def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp
 
 
 @pytest.mark.macos
-def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tmp_path):
+def test_a_test_verdict_names_no_governance_and_a_task_in_checks_takes_no_grant(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
         task = await to_checks(dsn, ws)
-        git(ws, "checkout", "-q", "-b", "elsewhere", "HEAD~2")
-        side = commit(ws, "docs/side.md", "side\n")
-        git(ws, "checkout", "-q", "valor/work")
         async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="does not descend"):
-                await verdicts.record_check(
-                    conn, task, Check.DOCS, "updated", head=side, governance_from=[], **scripted.SESSION_LEG
-                )
             with pytest.raises(verdicts.VerdictRefused, match="only review and docs"):
                 await verdicts.record_check(
                     conn, task, Check.TEST, "pass", governance=[verdicts.InstanceSpec("README.md", 1)],
@@ -1288,28 +1232,6 @@ def test_a_refused_credential_is_read_as_the_credential_and_a_rejected_push_as_a
         == "refused"
     )
     assert verdicts.merge_failure(verdicts.MergeTry("e", "failed", "Connection reset", at)) == "transient"
-
-
-@pytest.mark.macos
-def test_a_merge_whose_facts_git_cannot_read_writes_no_row_and_parks(dsn, tmp_path, monkeypatch):
-    ws, _ = scripted.workspace(tmp_path)
-
-    def unreadable(*a, **k):
-        raise broker._Unreadable("no git")
-
-    async def go():
-        task = await to_checks(dsn, ws)
-        await checks_only(dsn, task)
-        monkeypatch.setattr(broker, "_git_facts", unreadable)
-        out = await drive(dsn, task)
-        async with await db.connect(dsn) as conn:
-            asked = await scripted.ensure_merge(conn, task)
-        return out, asked, await rows(dsn, task)
-
-    out, asked, written = run(go())
-    assert out["status"] == "parked" and out["state"]["merge_effect"] is None
-    assert asked.kind == "unknown" and "git could not read" in asked.error
-    assert not [r for r in written if r["type"].startswith("effect.")]
 
 
 @pytest.mark.macos

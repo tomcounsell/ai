@@ -197,6 +197,7 @@ async def record_check(
     model: str | None = None, usd_micros: int = 0,
     breadth: str | None = None, governance_from: Iterable[str] | None = None,
     notes: Mapping[str, Mapping[str, Any]] | None = None, turn_id: str | None = None,
+    undecided: Mapping[str, bool] | None = None,
     deleted_at_head: Iterable[str] = (), failing_at_base: Iterable[str] = (),
     suites: Iterable[int] | None = None, dropped: Iterable[Mapping[str, Any]] = (),
     predicted_failure: float | None = None, requirements: Iterable[Any] = (), verify: int | None = None,
@@ -217,17 +218,22 @@ async def record_check(
     a `kernel` docs or review verdict, which names no turn (the docs and
     review runners record one, `changes`, on a candidate whose tree holds
     `.valor`; the docs runner's names no judgement either).
-    A docs head must already sit in the mirror under
-    a `refs/valor/docs/` ref (the docs runner fetched it and cut it to the
-    commits it keeps; `dropped` lists the rest); nothing is fetched here.
+    A docs `head` is the one the docs runner kept (`fresh.kept_prefix`, the
+    one place docs commits are read); `dropped` lists the rest.
     `governance_from` (review and docs) names one
-    governance judgement per hunk of the check's diff: the instances are the
-    hunks the kernel's table makes instances, together with any `governance`
-    the reviewer named (a reviewer adds caution, never removes it), and
-    `notes` attach a summary, incident, and mission item to an instance by
-    its id. A judgement both legs failed, with reruns left, refuses the
-    verdict as unanswered, so the branch has none and the next run asks
-    again.
+    governance judgement per hunk of the check's diff
+    (`judgement_sites.governance_hunks`): the instances are the hunks the
+    judgement answered yes without an abstain, together with any
+    `governance` the reviewer named (a reviewer adds caution, never removes
+    it), and `notes` attach a summary, incident, and mission item to an
+    instance by its id. The hunks the judgement left undecided (an abstain,
+    too large for both legs, or both legs failed after their reruns) are
+    answered by a session review's `undecided`, the reviewer's boolean by
+    hunk id: true is an instance, false is none, and a session review that
+    leaves one unanswered is refused. On a docs or `kernel` verdict an
+    undecided hunk is no instance. A judgement both legs failed, with reruns
+    left, refuses the verdict as unanswered, so the branch has none and the
+    next run asks again.
 
     A review gives the reviewer's own `verdict`,
     `pass` or `changes`; the recorded verdict is computed (`review_verdict`)
@@ -306,20 +312,11 @@ async def record_check(
             payload["findings"] += [{"kind": "test failure", "text": t} for t in failures]
             payload["findings"] += [{"kind": "untested behavior", "text": t} for t in behaviors]
             payload["guard_id"] = machine.GUARD_BREADTH if behaviors else None
+        if undecided is not None and not (check is Check.REVIEW and leg != "kernel"):
+            raise VerdictRefused("only a session review answers the undecided hunks")
         try:
             if check is Check.DOCS:
                 head = head or c.sha
-                if head != c.sha:
-                    # The docs runner fetched and cut the head; it must sit under a docs ref.
-                    if b.mirror and (
-                        not re_sha(head)
-                        or not git.trusted(repo, "for-each-ref", "--points-at", head, "refs/valor/docs/")
-                    ):
-                        raise VerdictRefused(f"{head} is not a docs head the kernel kept in the mirror")
-                    if not git.is_ancestor(repo, c.sha, head):
-                        raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
-                    if git.merges_between(repo, c.sha, head):
-                        raise VerdictRefused("the docs commits hold a merge commit")
                 payload["head"] = head
                 payload["dropped"] = [dict(d) for d in dropped]
                 payload["paths"] = git.diff_paths(repo, c.sha, head) if head != c.sha else []
@@ -327,7 +324,10 @@ async def record_check(
             if check in (Check.REVIEW, Check.DOCS):
                 older, newer = (b.base_sha, c.sha) if check is Check.REVIEW else (c.sha, payload["head"])
                 ids = list(governance_from) if governance_from is not None else None
-                instances, judged = governance_instances(rows, repo, older, newer, ids, specs, notes or {})
+                answers = dict(undecided or {}) if check is Check.REVIEW and leg != "kernel" else None
+                instances, judged = governance_instances(
+                    rows, repo, older, newer, ids, specs, notes or {}, answers
+                )
         except git.GitError as exc:
             raise VerdictRefused(str(exc)) from None
         if notes and check is Check.TEST:
@@ -338,8 +338,10 @@ async def record_check(
                 payload["governance"].update(
                     {
                         "judgements": ids,
-                        "abstain_instances": judged["abstain_instances"],
-                        "unjudged_hunks": [h.id for h, _ in judged["unjudged"]],
+                        "undecided": [
+                            {"id": h.id, "path": h.path, "why": why, "reviewer": (answers or {}).get(h.id)}
+                            for h, why in judged["undecided"]
+                        ],
                     }
                 )
             if check is Check.REVIEW:
@@ -377,28 +379,39 @@ async def _append(conn, task_id: str, kind: str, payload: dict[str, Any]) -> int
 
 def governance_instances(
     rows: list[dict], repo: str, older: str, newer: str, ids: list[str] | None, specs: list[InstanceSpec],
-    notes: Mapping[str, Mapping[str, Any]],
+    notes: Mapping[str, Mapping[str, Any]], answers: Mapping[str, bool] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:  # fmt: skip
     """The instances of a review or docs diff: the hunks the governance
-    judgements `ids` make instances (none when `ids` is None, a kernel
-    verdict), `_union`ed with the reviewer's `specs`, the
-    unjudged-hunk instance when there is one, and `notes` attached.
-    Returns (instances, `governance_outcome`'s reading or None). Raises
-    `VerdictRefused` on unusable or unanswered judgements, and `git.GitError`
-    on a git failure."""
+    judgements `ids` answered yes without an abstain (none when `ids` is
+    None, a kernel verdict), and the undecided hunks `answers` (the
+    reviewer's boolean by hunk id) says yes to, `_union`ed with the
+    reviewer's `specs`, and `notes` attached. With `answers` given, every
+    undecided hunk must be answered and no other hunk may be; with it None,
+    an undecided hunk is no instance. Returns (instances,
+    `governance_outcome`'s reading or None). Raises `VerdictRefused` on
+    unusable or unanswered judgements or answers, and `git.GitError` on a
+    git failure."""
     judged = None
     specs = list(specs)
     if ids is not None:
         try:
             judged = judgement_sites.governance_outcome(
-                rows, ids, judgement_sites.diff_hunks(repo, older, newer)
+                rows, ids, judgement_sites.governance_hunks(repo, older, newer)
             )
         except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
             raise VerdictRefused(str(exc)) from None
-        specs = [InstanceSpec(h.path, h.start) for h in judged["instances"]] + specs
+        yes = []
+        if answers is not None:
+            open_ = {h.id: h for h, _ in judged["undecided"]}
+            unasked = sorted(set(answers) - set(open_))
+            if unasked:
+                raise VerdictRefused(f"answers for hunks that are not undecided here: {unasked}")
+            unanswered = sorted(set(open_) - set(answers))
+            if unanswered:
+                raise VerdictRefused(f"the reviewer left undecided hunks unanswered: {unanswered}")
+            yes = [h for hid, h in open_.items() if answers[hid] is True]
+        specs = [InstanceSpec(h.path, h.start) for h in [*judged["instances"], *yes]] + specs
     instances = _union(_instances(repo, older, newer, specs) if specs else [])
-    if judged is not None and judged["unjudged"]:
-        instances.append(judgement_sites.unjudged_instance(judged["unjudged"]))
     return _annotate(instances, notes), judged
 
 
