@@ -417,15 +417,17 @@ def _merge(**kw) -> dict:
     }
 
 
-def test_a_delivery_that_did_not_pass_ends_to_tom(monkeypatch):
-    result, calls = _drive(monkeypatch, _merge(delivery={"outcome": "did_not_pass"}))
-    assert result["outcome"] == "to tom" and calls == {"stand_in": 0, "run": 0}
+def test_a_task_valor_ended_ends_the_run_ended(monkeypatch):
+    result, calls = _drive(monkeypatch, {"state": "ended", "delivery": {"outcome": "did_not_pass"}})
+    assert result["outcome"] == "ended" and calls == {"stand_in": 0, "run": 0}
 
 
 @pytest.mark.parametrize("kind", ["refused", "failed"])
-def test_a_refused_or_failed_merge_ends_to_tom(monkeypatch, kind):
-    result, calls = _drive(monkeypatch, _merge(merge_effect={"effect_id": "e", "state": kind}))
-    assert result["outcome"] == "to tom" and calls["stand_in"] == 0
+def test_a_merge_that_did_not_land_runs_on_for_the_kernel_to_try_again(monkeypatch, kind):
+    result, calls = _drive(
+        monkeypatch, _merge(merge_effect={"effect_id": "e", "state": kind}), said="PARKED (task t)"
+    )
+    assert result["outcome"] is None and calls == {"stand_in": 0, "run": 1}
 
 
 @pytest.mark.parametrize(
@@ -620,7 +622,13 @@ def test_the_cli_runs_as_a_module():
 
 # The router settles these itself (a question for Tom, the merge, an end); every
 # other state, and every check, is run by one of the composition root's runners.
-SETTLED = {machine.State.WAITING, machine.State.MERGE, machine.State.MERGED, machine.State.STOPPED}
+SETTLED = {
+    machine.State.WAITING,
+    machine.State.MERGE,
+    machine.State.MERGED,
+    machine.State.ENDED,
+    machine.State.STOPPED,
+}
 
 
 def test_every_stage_the_state_machine_schedules_has_a_runner():

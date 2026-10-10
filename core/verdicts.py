@@ -17,9 +17,21 @@ from the kernel's tables, never from the caller's text.
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from core import broker, git, judgement, judgement_sites, judgement_tasks, ledger, machine, tasks
+from core import (
+    broker,
+    credentials,
+    git,
+    judgement,
+    judgement_sites,
+    judgement_tasks,
+    ledger,
+    machine,
+    targets,
+    tasks,
+)
 from core.machine import Check, State
 
 # What a reviewer's session answers; the recorded review verdict is computed
@@ -347,7 +359,7 @@ async def record_check(
             payload["guard_id"] = machine.GUARD_REVIEW
         event_id = await _append(conn, task_id, kind, payload)
         after = machine.fold(await ledger.read(conn, task_id))
-        if f.state is State.CHECKS and after.state is State.MERGE and after.join is not None:
+        if f.state is State.CHECKS and after.state in (State.MERGE, State.ENDED) and after.join is not None:
             await _append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
     return after
 
@@ -491,17 +503,120 @@ def merge_action(f: machine.Fold, b: tasks.Brief) -> broker.Action | None:
     )
 
 
-async def ensure_merge(conn, performers: broker.Performers, task_id: str) -> broker.Outcome | None:
+# A merge that failed is requested again, after a delay that doubles from
+# `MERGE_BACKOFF_S` up to `MERGE_BACKOFF_MAX_S`, until `MERGE_TRIES`
+# failures; then the task ends with a report. Two failures take their own
+# path: a push rejected because the target moved sends the work back to be
+# rebased (`machine.REBASES` per loop window, spending no round), and one
+# that needs the push credential asks Tom for it, the one thing only he
+# holds, and is tried again every `CREDENTIAL_RETRY_S` until it lands.
+MERGE_TRIES = 5
+MERGE_BACKOFF_S = 60.0
+MERGE_BACKOFF_MAX_S = 3600.0
+CREDENTIAL_RETRY_S = 600.0
+# Git's words for a push the target refused because its branch moved on.
+MOVED = ("[rejected]", "non-fast-forward", "fetch first")
+# The credential's name, as a missing key says it (`credentials.MissingKey`),
+# and the merge performer's words for a refused one (`tools/push_branch.py`,
+# `ROTATE`).
+CREDENTIAL = (credentials.GITHUB_KEY, "refused the credential")
+
+
+@dataclass(frozen=True)
+class MergeTry:
+    """One merge effect requested for a candidate: how it stands, why it
+    did not land, and when it settled."""
+
+    effect_id: str
+    state: str  # in_flight, done, failed, refused
+    reason: str
+    at: datetime | None
+
+
+def merge_tries(rows: list[dict[str, Any]], candidate: machine.Candidate) -> list[MergeTry]:
+    """Every merge effect requested for `candidate`, in request order, each
+    as its latest row leaves it."""
+    named = {"sha": candidate.sha, "turn_id": candidate.turn_id}
+    found: dict[str, MergeTry] = {}
+    for r in rows:
+        kind, p = r["type"], r["payload"]
+        effect_id = p.get("effect_id")
+        if effect_id not in found:
+            if kind not in ("effect.held", "effect.intent", "effect.refused"):
+                continue
+            if p.get("action_type") != "merge" or (p.get("payload") or {}).get("candidate") != named:
+                continue
+        if kind == "effect.refused":
+            found[effect_id] = MergeTry(effect_id, "refused", str(p.get("reason") or ""), r.get("at"))
+        elif kind == "effect.outcome":
+            found[effect_id] = MergeTry(effect_id, str(p.get("kind")), str(p.get("error") or ""), r.get("at"))
+        elif kind in ("effect.held", "effect.intent"):
+            found[effect_id] = MergeTry(effect_id, "in_flight", "", None)
+    return list(found.values())
+
+
+def merge_failure(t: MergeTry) -> str:
+    """Why a merge did not land, as the kernel acts on it: `credential`
+    (the push credential is missing or refused), `moved` (the target's
+    branch moved on), `governance` (refused for an instance not granted
+    then; `ensure_merge` asks only once every instance is granted),
+    `refused` (the broker or the predicate refused it; a
+    try again gets the same answer), or `transient`."""
+    if any(m in t.reason for m in CREDENTIAL):
+        return "credential"
+    if t.state == "refused" and t.reason.startswith(broker.UNGRANTED):
+        return "governance"
+    if t.state == "failed" and any(m in t.reason for m in MOVED):
+        return "moved"
+    if t.state == "refused":
+        return "refused"
+    return "transient"
+
+
+def credential_missing(performers: broker.Performers) -> str | None:
+    """Why the task's merge cannot carry its credential now (the key file
+    or the token in it is missing), or None. Only a merge to a remote with
+    a kernel mirror carries one."""
+    performer = performers.get("merge")
+    keyfile, url = getattr(performer, "credential", None), getattr(performer, "url", None)
+    if keyfile is None or not url or targets.local(url):
+        return None
+    try:
+        credentials.read_key(keyfile, credentials.GITHUB_KEY, "github-key")
+    except credentials.MissingKey as exc:
+        return str(exc)
+    return None
+
+
+def _backoff(failures: int) -> float:
+    return min(MERGE_BACKOFF_MAX_S, MERGE_BACKOFF_S * 2 ** max(failures - 1, 0))
+
+
+async def ensure_merge(
+    conn, performers: broker.Performers, task_id: str, *, now: datetime | None = None
+) -> broker.Outcome | None:
     """Request the merge for a task in `merge` whose current candidate's
     delivery passed (or passed with gaps) and whose merge is not in flight
     or done. It requests nothing while a governance instance awaits Tom's
-    tap. The request carries `merge:<payload digest>:<grants>` as its
-    `request_id`, so the broker answers a second request for the same
-    payload and grants with the first effect's standing (refused, failed,
-    in flight) under the task's lock: runs never pile refusals up or push
-    a failed merge again, and two racing steps make one intent. A new head
-    or a new grant is a fresh request."""
-    f = machine.fold(await ledger.read(conn, task_id))
+    tap. The request carries `merge:<payload digest>:<grants>:<tries>` as
+    its `request_id`, so the broker answers a second request for the same
+    try with the first effect's standing under the task's lock, and two
+    racing steps make one intent.
+
+    A merge that did not land is acted on by why (`merge_failure`): a
+    moved target writes `rebase.requested`, while rebases remain; a
+    credential asks Tom for it once per candidate (`notices.credential`)
+    and is tried again every `CREDENTIAL_RETRY_S`; a transient failure is
+    tried again after `_backoff`; a refusal, a transient failure past
+    `MERGE_TRIES`, or a moved target past the rebases ends the task
+    (`task.ended`, kind `merge`). A merge whose credential is missing is
+    not requested; Tom is asked for it. Before a try is due the answer is
+    `unknown` with the time it is due, so the step parks."""
+    from core import notices
+
+    now = now or datetime.now(UTC)
+    rows = await ledger.read(conn, task_id)
+    f = machine.fold(rows)
     if f.legacy or f.calibration or f.state is not State.MERGE or f.candidate is None:
         return None
     named = {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}
@@ -509,11 +624,86 @@ async def ensure_merge(conn, performers: broker.Performers, task_id: str) -> bro
         return None
     if f.ungranted():
         return None
-    action = merge_action(f, await tasks.brief(conn, task_id))
+    b = await tasks.brief(conn, task_id)
+    action = merge_action(f, b)
     if action is None:
         return None
     effect = f.merge_effect
     if effect and effect["state"] in ("in_flight", "done"):
         return None
-    request_id = f"merge:{ledger.digest(action.payload)}:{len(f.granted)}"
+    tries = [t for t in merge_tries(rows, f.candidate) if t.state in ("failed", "refused")]
+    last = tries[-1] if tries and effect and effect["state"] in ("refused", "failed") else None
+    if last is not None and last.reason == broker.NO_PERFORMER:
+        return None  # this kernel has no merge for the task: nothing to try again or end
+    # A refusal for an instance not granted then is no failure: every instance
+    # is granted now, so the request below is a fresh one.
+    if last is not None and merge_failure(last) != "governance":
+        why = merge_failure(last)
+        if why == "moved" and f.counts["rebases"] < machine.REBASES:
+            await _rebase(conn, task_id, b, last)
+            return None
+        transient = [t for t in tries if merge_failure(t) == "transient"]
+        if why in ("moved", "refused") or (why == "transient" and len(transient) >= MERGE_TRIES):
+            await end(conn, task_id, "merge", _first_line(last.reason), effect_id=last.effect_id)
+            return None
+        if why == "credential":
+            await notices.credential(conn, task_id, f.candidate.sha, _first_line(last.reason))
+        delay = CREDENTIAL_RETRY_S if why == "credential" else _backoff(len(transient))
+        due = (last.at or now) + timedelta(seconds=delay)
+        if now < due:
+            return broker.Outcome(last.effect_id, "unknown", error=f"tried again at {due.isoformat()}")
+    missing = credential_missing(performers)
+    if missing is not None:
+        await notices.credential(conn, task_id, f.candidate.sha, missing)
+        return broker.Outcome("", "unknown", error=missing)
+    request_id = f"merge:{ledger.digest(action.payload)}:{len(f.granted)}:{len(tries)}"
     return await broker.request(conn, performers, task_id, action, request_id=request_id)
+
+
+def _first_line(text: str, limit: int = 300) -> str:
+    """A reason as a report carries it: its first line with words, cut."""
+    line = next((s.strip() for s in (text or "").splitlines() if s.strip()), "")
+    return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+async def _rebase(conn, task_id: str, b: tasks.Brief, failed: MergeTry) -> None:
+    """Send the work back to rebase onto the target's new tip, which the
+    merge's lookup fetched into the kernel mirror (`git.LOOKUP_REF`)."""
+    repo = b.mirror or b.workspace
+    tip = None
+    if repo:
+        try:
+            tip = await git.threaded(git.trusted, repo, "rev-parse", "--verify", "-q", git.LOOKUP_REF)
+        except git.GitError:
+            tip = None
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        if machine.fold(await ledger.read(conn, task_id)).state is not State.MERGE:
+            return
+        await ledger.append(
+            conn,
+            task_id,
+            "rebase.requested",
+            {
+                "effect_id": failed.effect_id,
+                "target_branch": b.target_branch,
+                "tip": tip or None,
+                "reason": _first_line(failed.reason),
+            },
+        )
+
+
+async def end(conn, task_id: str, kind: str, reason: str, **more: Any) -> bool:
+    """Write `task.ended` from the kernel: Valor stops the work and Tom gets
+    a report (`notices.owe`). `kind` names what ended it: `step`,
+    `provision`, or `merge`. False when the task is already merged, ended,
+    or stopped."""
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        f = machine.fold(await ledger.read(conn, task_id))
+        if f.legacy or f.calibration or f.state in (State.MERGED, State.ENDED, State.STOPPED):
+            return False
+        await ledger.append(
+            conn, task_id, "task.ended", {"kind": kind, "by": "kernel", "reason": reason, **more}
+        )
+    return True

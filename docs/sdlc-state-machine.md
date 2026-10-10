@@ -23,8 +23,8 @@ Tom's decisions of 2026-10-01 fix the shape:
   skill says what must be true when the stage ends and what row proves it.
   How to get there is the agent's call.
 - **The plan sets the loops.** The plan decides how many times critique may
-  send the plan back (0, 1, or 2) and how many times review may send the
-  work to patch (0, 1, or 2), from the stakes. The replay baseline covered
+  send the plan back (0, 1, or 2) and how many times the checks may send
+  the work to patch (0, 1, or 2), from the stakes. The replay baseline covered
   six small changes and no large high-stakes one (rebuild-baseline.md), so
   the count is a call per task, not a constant.
 - **Test, review, and docs run in parallel.** After every build and every
@@ -51,14 +51,15 @@ ninety-day expiry.
 | `waiting` | Tom answers | nothing | `answered` | the state that asked |
 | `plan` | an approach, its stakes, its loop counts, its scope | working session | `planned`, `asked` | `critique`, `waiting` |
 | `critique` | find what the plan gets wrong before code exists | fresh session | `sound`, `revise` | `build`, `plan` or `build` |
-| `build` | a candidate that does what the plan says | working session | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting`, Tom |
-| `checks` | test, review, and docs agree on one candidate | three branches at once (see `checks` below) | the join | `merge` or `patch` |
+| `build` | a candidate that does what the plan says | working session | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting` |
+| `checks` | test, review, and docs agree on one candidate | three branches at once (see `checks` below) | the join | `merge`, `patch`, or `ended` |
 | `checks.test` | the suite passes at head where it passed at base, and the tests exercise what the diff changes | deterministic suite, then judgement tier | `pass`, `red`, `gaps` | the join |
 | `checks.review` | an independent verdict on the candidate | blind verifier, fresh session | `pass`, `changes`, `governance_refused` | the join |
 | `checks.docs` | no doc says something the candidate made untrue | fresh session, doc paths only | `updated`, `no_change`, `changes` | the join |
-| `patch` | every finding from the join resolved | working session, resumed | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting`, Tom |
-| `merge` | the delivery merged, or shown to Tom when it cannot be | kernel, broker, Tom | `merged`, `feedback`, `governance_granted` | `merged`, `patch`, `checks` |
+| `patch` | every finding from the join resolved, or the work stopped | working session, resumed | `candidate`, `asked`, `ended`, `idle`, `failed` | `checks`, `waiting`, `ended` |
+| `merge` | the delivery merged | kernel and broker | `merged`, `feedback`, `governance_granted`, `rebase` | `merged`, `patch`, `checks`, `ended` |
 | `merged` | the change is on the target branch | nothing | `feedback` | `patch` |
+| `ended` | Valor stopped the work without merging; Tom has a report | nothing | `feedback` | `patch` |
 | `stopped` | nothing more happens | nothing, ever again | | none |
 
 "`plan` or `build`" means the critique count decides (see Loops). The
@@ -102,7 +103,7 @@ status and stop work.
 ## Types
 
 `core/machine.py` holds the model as frozen dataclasses over JSONB
-payloads. `State` names the eleven states above and `Check` the three
+payloads. `State` names the twelve states above and `Check` the three
 branches of `checks`. `VERDICTS` maps each to its enum as the table lists
 it; every working-session state also has `idle` and `failed`, since any
 turn can end with neither of its stage's signals or fail. `Candidate` is a
@@ -112,7 +113,8 @@ two counts, 0 to 2; `Fold` the state with what it reads. `TRANSITIONS` is
 the Next column, with three rules beside it: `checks` leaves only through
 the join; `asked` from a working-session state goes to `waiting`, and
 `answered` returns to the state named on the `question.asked` row; any
-state goes to `stopped` on `task.stopped`, and nothing leaves `stopped`.
+state but `merged` goes to `ended` on `task.ended`; any state goes to
+`stopped` on `task.stopped`, and nothing leaves `stopped`.
 
 A verdict outside its enum is refused when the row is written, so the fold
 is total: every ledger prefix maps to exactly one state, and inside
@@ -130,22 +132,25 @@ finding of the three branches together.
   goes back to `plan` while fewer than `critique_rounds` revisions have
   happened; after that, or with `critique_rounds` 0, its findings ride
   into `build` as part of the prompt.
-- **Review rounds.** Review runs once on every candidate. A join in which
-  review said `changes` sends the work to `patch` while fewer than
-  `review_rounds` such send-backs have happened, and counts as one review
-  round whatever test and docs said. After that the candidate reaches Tom
-  as a delivery that did not pass, with every finding and Valor's
-  recommendation.
-- **The repair round.** A join in which review passed but test said `red`
-  or `gaps`, or docs said `changes`, may send the work to `patch` once, a
-  fixed allowance the plan does not set. It spends no review round: the
-  reviewer accepted the change; what is left is mechanical.
+- **Patch rounds.** Review runs once on every candidate. A join that did not pass (review `changes`,
+  test `red` or `gaps`, or docs `changes`) sends the work to `patch` while fewer than
+  `review_rounds` such send-backs have happened. One count covers all three checks.
+- **The last round.** Once the plan's rounds are spent, a join with only breadth gaps merges with
+  the gaps listed. Any other join that did not pass sends the work to `patch` once more, with every
+  finding and the word that the rounds are spent. In that round Valor decides, as the project
+  manager, whether to patch once more (`done.md`) or stop (`stop.md`, a note to Tom), optionally
+  after asking the advisor. When it stops, or that round's candidate does not pass either, the task
+  ends (`ended`, which runs nothing) and Tom gets one report of what was built, what did not pass,
+  and why it stopped; it asks for nothing, and feedback by reply opens a new loop window in `patch`.
+  The decision is Valor's, not Tom's, under Tom's rulings of 2026-10-03 ("Valor
+  decides who stops and who gets more budget") and 2026-10-09.
+- **Rebases.** A merge whose push the target rejects because its branch moved sends the work to
+  `patch` to rebase onto the new tip (`rebase.requested`). A rebase is mechanical and spends no
+  round; at most two happen per loop window, and the next such rejection ends the task.
 
-So a task patches at most `review_rounds` plus one times before Tom sees
-it; the join table below gives every case. The counts bound every
-path, and they exist so that work that does not converge reaches Tom
-with evidence instead of spending on itself: Mission item 6, and
-the setup plan's Why section (53 review-round commits in eleven days).
+So a task patches on findings at most `review_rounds` plus one times before it merges or ends (the
+join table gives every case): work that does not converge stops instead of spending on itself.
+Mission item 6, and the setup plan's Why section (53 review-round commits in eleven days).
 
 **Setting the counts.** The plan states the stakes in a sentence and picks
 both counts: the more a mistake would cost and the harder it is to undo,
@@ -170,7 +175,7 @@ ceiling, and unrelated debt is a new task for Tom. Mission items 1 and 5.
 
 `python -m core run TASK` is the router. Each call folds the ledger to the
 current state, runs the work that state calls for, records its verdict, and
-continues until the task needs Tom (`waiting`, `merge`, a failed turn, or `stopped`) or reaches a stage with no
+continues until the task settles (`waiting`, `merged`, `ended`, or `stopped`), waits in `merge`, a step fails, or it reaches a stage with no
 runner, then prints one status line and returns. The router reads verdicts
 and follows the table; it never writes a verdict and never decides
 authority. One run per task at a time: a run holds a session advisory lock
@@ -184,7 +189,7 @@ whose lock connection died returns `lock lost` before its next turn or write.
 | `critique`, `checks.docs` | frontier agent in a fresh session | a reading by a session that did not write the work |
 | the suite in `checks.test` | deterministic suite run | running tests decides nothing by judgement |
 | `checks.review` | blind verifier, Opus-class (see [architecture.md](architecture.md)) | an independent check, never the executor grading itself [4, 16] |
-| `merge` | kernel and broker, then Tom | authority |
+| `merge` | kernel and broker | authority |
 
 The judgement port is [judgement-layer.md](judgement-layer.md)'s; session
 resume and compaction are [harnesses.md](harnesses.md)'s.
@@ -320,10 +325,10 @@ Effects beyond the workspace are requests to the broker.
   the state, fails, the task is stopped, or the run loses its lock. An
   `idle` turn that left `.valor/advice.md` first gets the advisor's answer
   (`advice.given`), quoted in the next turn.
-- `failed`: the harness reported an error or the turn did not finish. The
-  step writes `step.failed` (the state, the check, the reason, the turn)
-  and the run returns; the task waits for a row it did not write (a steer,
-  an answer) or the next run, which retries from the ledger.
+- `failed`: the harness reported an error or the turn did not finish. The step writes `step.failed`
+  (the state, the check, the reason, the turn) and the run returns. The resident kernel steps the
+  task again after a delay that doubles from a minute (`router.retry_due`), the next turn opening
+  with the reason; at four failures in a row of one state and check it writes `task.ended`.
 
 **Ledgered.** `turn.started`, every gateway opening and charge,
 `turn.ended` (with the harness session id), `turn.collected`, effect rows.
@@ -451,31 +456,27 @@ them together, with the loop counts (see Loops), and moves the task once:
 |---|---|---|---|
 | `pass` | test `pass`; docs `updated` or `no_change` | | `merge`, as a delivery that passed |
 | `governance_refused` | anything | | `merge`, to Tom with the hunk and every other finding |
-| `changes` | anything | a review round left | `patch`, with every finding |
-| `changes` | anything | none left | `merge`, as a delivery that did not pass |
-| `pass` | test `red` or `gaps`, or docs `changes` | the repair round unspent | `patch`, with every finding |
-| `pass` | test `red`, or docs `changes` | the repair round spent | `merge`, as a delivery that did not pass |
-| `pass` | test `gaps`, docs passing | the repair round spent | `merge`, with the gaps listed |
+| anything else | anything | a plan's round left | `patch`, with every finding |
+| `pass` | test `gaps`, docs passing | none left | `merge`, with the gaps listed |
+| anything else | anything | the last round unspent | `patch`, with every finding, to patch or stop |
+| anything else | anything | the last round spent | `ended`, with a report to Tom |
 
-The rows are read in order and the first match decides, so a review
-`governance_refused` reaches Tom before a red test is looked at, and a
-review `changes` with a round left goes to `patch` whatever docs answered
-on governance. Row 2 reads review only; a docs instance awaiting a tap
-reaches Tom in `merge` and holds the merge until he grants it (predicate
-term 4). No row records the join. The verdict that completes a join to
-`merge` writes `task.delivered` with it, and the kernel requests the merge
-for a delivery that passed (or passed with gaps); the router requests it
-again on any run that finds the task in `merge` without one, so a crash
-between the two strands nothing. A delivery that did not pass, or whose
-review refused governance, gets no merge request.
-The findings the join passes to `patch` are the next turn's prompt.
+The rows are read in order and the first match decides, so a review `governance_refused` reaches Tom
+before a red test is looked at. Row 2 reads review only; a docs instance awaiting a tap reaches Tom
+in `merge` and holds the merge until he grants it (predicate term 4). No row records the join. The
+verdict that completes a join to `merge` or `ended` writes `task.delivered` with it, and the kernel
+requests the merge for a delivery that passed (or passed with gaps); the router requests it again on
+any run that finds the task in `merge` without one, so a crash between the two strands nothing. A
+delivery whose review refused governance gets no merge request. The findings the join passes to
+`patch` are the next turn's prompt.
 
 ### `patch`: the builder resolves the findings
 
 **Goal.** Every finding the join sent back is resolved or answered with a
 reason, and the result is a new candidate.
 
-**Entry.** The join sent work back, or Tom gave feedback in `merge` or `merged`.
+**Entry.** The join sent work back, a merge's target moved (`rebase.requested`), or Tom gave
+feedback in `merge`, `merged`, or `ended`.
 
 **What runs.** The working session, resumed, with all of the join's findings or Tom's
 feedback as one prompt. Never a new agent: the session that built carries why each line
@@ -486,34 +487,33 @@ a merge, before each turn the kernel fast-forwards the work branch to the merged
 origin, under the turn's profile (`session.merged_into_work`), so the round's merge
 lands on top of the first; when it cannot, the prompt names the head and why.
 
-**Exit evidence.** Same as `build`: `candidate` goes to `checks`, all three branches
-again on the new candidate; `asked`, `idle`, and `failed` as in `build`.
+**Exit evidence.** Same as `build`: `candidate` goes to `checks`, all three branches again on the
+new candidate; `asked`, `idle`, and `failed` as in `build`. `ended`: the turn wrote
+`.valor/stop.md`, recorded as `task.ended` (`kind: decided`, its text the note to Tom).
 
 **Why.** Tom's decision of 2026-10-01; the demonstration's two send-backs
 were one resumed turn each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 
-### `merge`: merged at request, or shown to Tom
+### `merge`: merged at request
 
-**Goal.** A delivery that passed lands on the target branch, and Tom hears
-what landed; one that cannot land reaches Tom with what stands in its way.
+**Goal.** A delivery that passed lands on the target branch, and Tom hears what landed.
 
-**Entry.** The join sent the task here, as a delivery that passed or one that did not.
+**Entry.** The join sent the task here, as a delivery that passed (or passed with gaps), or one
+whose review refused governance.
 
-**What runs.** The kernel writes `task.delivered` with the delivery
-summary: what was delivered, how it was verified, the test, review, and
-docs verdicts with any breadth gaps, the tech-debt additions, and the
-decisions Valor made that Tom may want to change, the one that most changes
-the outcome first. It then requests the merge, and the broker performs it
-at request when the predicate below holds. A done merge owes Tom a `report`
-notice; a reply to it is `feedback.given`. The summary reaches Tom as the
-delivered notice only when the delivery did not pass, a governance instance
-waits for his grant (the notice names each instance, its `path:line`, and its
-`python -m core grant` command), or the merge was refused or failed.
+**What runs.** The kernel writes `task.delivered` with the delivery summary: what was delivered, how
+it was verified, the test, review, and docs verdicts with any breadth gaps, the tech-debt additions,
+and the decisions Valor made that Tom may want to change, the one that most changes the outcome
+first. It then requests the merge, and the broker performs it at request when the predicate below
+holds. A done merge owes Tom a `report` notice of what shipped: the note the delivering turn wrote
+above the `---` line of `done.md`, and the task's status page link for the checks; a reply to it is
+`feedback.given`. Only a governance instance awaiting his grant sends him the delivered notice
+(each instance, its `path:line`, and its `python -m core grant` command).
 
-**Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done`
-for the merge. `feedback`: `feedback.given`, to `patch`.
-`governance_granted`: Tom's grant on a refused review, back to `checks`,
-where only review reruns.
+**Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done` for the merge. `feedback`:
+`feedback.given`, to `patch`. `governance_granted`: Tom's grant on a refused review, back to
+`checks`, where only review reruns. `rebase`: the push was rejected because the target moved, to
+`patch` (see Loops). `ended`: the merge cannot land.
 
 **The merge predicate.** The broker performs a merge only when all of
 these are facts in the task's ledger:
@@ -525,7 +525,7 @@ these are facts in the task's ledger:
    governance instance it names granted by Tom's own tap (a
    `guard.granted` bound to the instance); the Brief's `governance_grant`
    does not stand in for a tap;
-3. the test verdict `pass`, or `gaps` with the repair round spent and the
+3. the test verdict `pass`, or `gaps` with the plan's rounds spent and the
    gaps on the delivery; never `red`;
 4. the docs verdict `updated` or `no_change`, its commits running from `C`
    to the head being merged with no merge commit between, every path `git
@@ -537,12 +537,13 @@ Each term is deterministic: a row exists or a git fact holds, or not. No
 model call decides whether a merge may happen. The broker checks all four
 and writes the merge's intent in one transaction under the task's lock. A
 term that does not hold is an `effect.refused` naming it. When git cannot
-be read, no row is written, the task is parked, and the next step asks
-again. The kernel requests a merge once for each payload and grant count,
-so a refused or failed merge stands until a new candidate, a new docs head,
-or a new grant changes the request. A
-merge whose performing process died leaves an intent with no outcome; a
-later run settles it from the target once it answers (`broker.reconcile`).
+be read, no row is written, the task is parked, and the next step asks again. A merge that does not
+land is acted on by why (`verdicts.ensure_merge`): a failure is tried again after a delay doubling
+from a minute, and the fifth ends the task; a push the moved target rejected is a rebase; a refusal
+ends the task; a missing or refused push credential, which only Tom holds, sends him one request
+for it per candidate and is tried every ten minutes. Each try is its own request
+(`merge:<digest>:<grants>:<tries>`). A merge whose performing process died leaves an intent with no
+outcome; a later run settles it from the target once it answers (`broker.reconcile`).
 
 **Where a merge goes.** At start the kernel records origin's push URL (as
 an absolute path) and the target branch (the flag, or the branch origin's

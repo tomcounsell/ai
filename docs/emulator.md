@@ -154,16 +154,15 @@ keys in the kernel key directory.
 | Outcome | When |
 |---|---|
 | `merged` | the task merged to its bare origin and the stand-in accepted it, or its feedback rounds (default 2) are spent; the feedback count is recorded |
-| `to tom` | the delivery did not pass, or the merge was refused or failed: the pipeline hands the task to Tom |
+| `ended` | Valor ended the task: it did not pass after its last round, or its merge cannot land |
 | `stopped` | the task was stopped |
 
-A task in `merge` is read from its status in this order: a delivery that
-did not pass, then a governance instance not granted or a join of
-`governance_refused`, then a refused or failed merge, and otherwise it
-runs on. A merged task goes to the stand-in.
+A task in `merge` waits on a governance instance not granted or a join of
+`governance_refused`; otherwise it runs on, and the kernel tries a failed
+merge again itself. A merged task goes to the stand-in.
 
 After each `core run` the driver reads the first word of its answer.
-`QUESTION`, `DELIVERED`, `STOPPED` and `MERGED` go on to the next step.
+`QUESTION`, `DELIVERED`, `STOPPED`, `MERGED` and `ENDED` go on to the next step.
 `ALREADY RUNNING` waits on the task's run lock until it is free, then goes
 on. Every other answer exits the driver with the outcome unset and the
 answer recorded as the reason: `NO RUNNER` (a stage with no runner),

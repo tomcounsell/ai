@@ -917,7 +917,7 @@ def test_workspace_remove_is_refused_while_the_task_runs_and_frees_the_ports_aft
                               capture_output=True, text=True, check=False)  # fmt: skip
 
     refused = cli("workspace", "remove", task)
-    assert refused.returncode == 1 and "only a stopped or merged" in refused.stderr
+    assert refused.returncode == 1 and "only a stopped, merged, or ended" in refused.stderr
     shown = json.loads(cli("workspace", "show", task).stdout)
     assert shown["mirror"] == b.mirror and shown["project"]["ports"]["postgres"]
 
@@ -2085,7 +2085,7 @@ def test_workspace_remove_takes_an_unfinished_provisioning_once_stopped(dsn, tmp
     try:
         run(start())
         refused = _cli(tmp_path, "workspace", "remove", task)
-        assert refused.returncode == 1 and "only a stopped or merged" in refused.stderr
+        assert refused.returncode == 1 and "only a stopped, merged, or ended" in refused.stderr
         assert lay.root.exists() and port in run(taken())
         run(stop())
         removed = _cli(tmp_path, "workspace", "remove", task)

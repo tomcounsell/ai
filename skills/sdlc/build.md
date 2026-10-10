@@ -5,10 +5,14 @@ named, committed in the workspace. Your prompt holds the critique's
 verdict and any findings it left for the build.
 
 **Exit evidence.** Every change committed (nothing left uncommitted or
-untracked), then `.valor/done.md`: what you delivered, how you verified it,
-and the decisions Tom might want to change, the one that most changes the
-outcome first. The kernel records the head commit as the candidate, and
-test, review, and docs check it before Tom sees it. A question only Tom
+untracked), then `.valor/done.md`. It opens with a note to Tom, then a
+line that is exactly `---`, then the report: what you delivered, how you
+verified it, and the decisions Tom might want to change, the one that most
+changes the outcome first. The note is what Tom reads in his chat: a few
+plain sentences on what changed for him or the business, with no task ids,
+commit hashes, file paths, test counts, or findings; the report is on the
+task's status page. The kernel records the head commit as the candidate,
+and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 

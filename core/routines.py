@@ -506,7 +506,7 @@ async def open_run(ctx: Context) -> str | None:
     for row in reversed(ctx.ran):
         if row.get("run"):
             state = await state_of(ctx.conn, row["run"])
-            return None if state in ("merged", "stopped") else row["run"]
+            return None if state in ("merged", "ended", "stopped") else row["run"]
     return None
 
 

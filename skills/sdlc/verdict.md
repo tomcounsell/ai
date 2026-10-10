@@ -18,4 +18,5 @@ of your final message, bare or in a fenced block. The object holds:
 
 Nothing else you write reaches anyone. No effect is available to you, and
 the kernel ignores any other file under `.valor/`. A turn that ends without
-a valid verdict counts as no verdict, and the stage runs again.
+a valid verdict counts as no verdict: the kernel runs the stage again
+after a short wait, and after a few such failures in a row the task ends.

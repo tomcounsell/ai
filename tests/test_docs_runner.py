@@ -367,10 +367,11 @@ RED = {"tests/test_b.py": "def test_kept():\n    assert False\n"}
         (1, GREEN, ["pass"], 1, False),
         (2, GREEN, ["governance_refused"], 1, False),
         (3, GREEN, ["changes"], 1, False),
-        (4, GREEN, ["changes"], 0, False),
-        (5, RED, ["pass"], 1, False),
-        (6, RED, ["pass", "pass"], 1, False),
-        (7, GREEN, ["pass", "pass"], 1, True),
+        (3, RED, ["pass"], 1, False),
+        (4, GREEN, ["pass", "pass"], 1, True),
+        (5, GREEN, ["changes"], 0, False),
+        (5, RED, ["pass", "pass"], 1, False),
+        (6, RED, ["pass", "pass"], 0, False),
     ],
 )
 @pytest.mark.macos
@@ -410,9 +411,10 @@ def test_every_join_row_through_the_router(
     if row in (3, 5):
         assert f.state is State.PATCH and f.join.row == row, f.join
     else:
-        # A delivery that passed (rows 1 and 7) merges at request; the rest wait in merge.
-        merged = State.MERGED if row in (1, 7) else State.MERGE
-        assert f.state is merged and joined and joined[-1]["join_row"] == row, joined
+        # A delivery that passed (rows 1 and 4) merges at request; a refused review waits in
+        # merge for Tom's grant; row 6 ends the task.
+        goes = {1: State.MERGED, 4: State.MERGED, 2: State.MERGE, 6: State.ENDED}[row]
+        assert f.state is goes and joined and joined[-1]["join_row"] == row, joined
 
 
 @pytest.mark.macos
@@ -441,7 +443,7 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_docs_
     assert "holds a .valor entry" in first["findings"][0]["text"]
     assert not fresh_docs_turns(got)  # no docs session ran
     at = next(i for i, r in enumerate(got) if r["type"] == "docs.decided")
-    assert machine.fold(got[: at + 1]).state is State.PATCH  # the join moved on: the repair round
+    assert machine.fold(got[: at + 1]).state is State.PATCH  # the join moved on: a patch round
 
 
 @pytest.mark.macos

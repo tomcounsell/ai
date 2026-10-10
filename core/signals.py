@@ -9,8 +9,13 @@ task's workspace, read when the turn ends.
   change the result, and the approach.
 - `.valor/plan.json`: from a plan turn, the committed plan file and its
   stakes, loop counts, and scope additions.
-- `.valor/done.md`: from a build or patch turn, a candidate: what was
-  delivered and how it was verified.
+- `.valor/done.md`: from a build or patch turn, a candidate: a note to Tom
+  above a line that is exactly `---`, then what was delivered and how it
+  was verified. The kernel's reports to Tom carry the note
+  (`core/notices.py`).
+- `.valor/stop.md`: from a patch turn, Valor's decision to stop the work
+  instead of patching again: a note to Tom saying what was built, what
+  did not pass, and why it stops. The task ends (`task.ended`).
 - `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
@@ -43,7 +48,7 @@ from typing import Any
 from core import workspace
 
 DIR = ".valor"
-TEXT_SIGNALS = ("question", "no_question", "done", "advice")
+TEXT_SIGNALS = ("question", "no_question", "done", "advice", "stop")
 
 
 def kind(value: Any) -> str:
@@ -59,6 +64,7 @@ class Signals:
     no_question: str | None = None
     done: str | None = None
     advice: str | None = None
+    stop: str | None = None
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)

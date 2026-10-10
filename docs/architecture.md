@@ -163,15 +163,23 @@ The constraint it enforces: bounded authority, metered spending.
 **Built.** An `act` inside its task's ceiling leaves when it is requested.
 What bounds it is the ceiling, stop, the governance grant, the merge
 predicate, and each performer's `refuse`; nothing waits for a tap. A merge
-is requested once per payload (`request_id` `merge:<digest>:<grants>`): a
-refused or failed one stands until a new candidate or docs head, or a
-grant, makes a new request.
+that does not land is acted on by why (`verdicts.ensure_merge`): one that
+failed is requested again after a delay that doubles from a minute, and
+after five failures the task ends; a push the target rejected because its
+branch moved sends the work to `patch` to rebase onto the new tip, twice at
+most, spending no review round; a refusal ends the task. A merge that needs
+the push credential is the one case that reaches Tom, as a request for the
+token, and it is tried again on its own until the token works. Each try is
+one request (`request_id` `merge:<digest>:<grants>:<tries>`), so a second
+step asks nothing twice.
 
 What reaches Tom is a report of what left: when an `act` effect's outcome
 is `done`, the same transaction requests one `report` notice
-(`report:<effect_id>`) to the operator channel, saying what left in kernel
-words. A merge's report gives the task, branch, head, delivery summary, and
-each check's outcome, and ends "Reply to this message to give feedback". No
+(`report:<effect_id>`) to the operator channel, saying what left. A merge's
+report names the request, says it is merged into its branch, carries the
+note to Tom the delivering turn wrote above the `---` line of `done.md`,
+and links the task's status page, where the checks and findings are; a
+reply to it is feedback. No
 report is written for a push (a step inside the task), for a send that
 itself reached Tom (a Telegram send to the operator, an email only to Tom's
 addresses, any local chat send), or for a replay task. A replay task is
@@ -208,6 +216,12 @@ stops a real task mid-turn and asserts the audit is empty.
 
 When a sandbox rule failed a turn mid-demonstration, it failed cleanly,
 metered $0, and lost nothing (rebuild-demonstration.md, Kernel findings 3).
+
+Ending is not stopping. When Valor ends a task (`task.ended`: the working
+session decided to stop after the plan's rounds, a step or provisioning
+kept failing, or a merge cannot land), nothing runs and Tom gets a report,
+but the task is not fenced: feedback reopens it in `patch`. A stop
+(`python -m core stop`) is final.
 
 **Design.** Once tasks nest, stopping a task fences its whole subtree: each
 node carries a generation, a stop increments it, and the kernel and broker
@@ -443,10 +457,12 @@ runs that state's runner once (`router.step`). A task steps again only
 when a row it did not write arrives, including one written while its step
 ran, so one event is one step. A step that fails or raises writes
 `step.failed` (the state, the check, the reason, the turn), which the
-task's status shows, and like any row the step writes it steps nothing:
-the task waits for Tom's steer or answer, not the next tick, since a
-retry each tick would rerun a deterministic failure with nothing to bound
-its spend. One
+task's status shows. The kernel steps it again itself once a delay has
+passed, a minute doubling with each failure in a row (`router.retry_due`),
+and the next working turn opens with the reason; at four failures in a
+row of the same state and check it writes `task.ended`, and Tom gets a
+report of what failed. A provisioning that fails is tried again the same
+way, and the third failure ends the task with a report. One
 harness turn or check runs at a time on a machine (the turn slot, a
 Postgres lock that `python -m core run` also takes; the test, review,
 and docs checks hold it throughout); the judge and the
@@ -515,11 +531,15 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local ch
    findings go together to one patch in the resumed working session, and
    the three run again on the new candidate, within the loop counts.
 7. **Merge.** A passing delivery merges itself when the merge predicate
-   holds, and the merge's report reaches Tom with its summary and each
-   check's outcome. A delivery that will not merge by itself (it did not
-   pass, a governance instance awaits a grant, or its merge was refused or
-   failed) reaches him as the delivered notice, with the reason. Feedback
-   by reply to either goes to `patch` on the same task.
+   holds, and the merge's report reaches Tom: what shipped, in the
+   delivering turn's note, and a link to the status page. Work that has
+   not passed when the plan's rounds are spent gets one last round, in
+   which Valor patches once more or stops; when it stops, or that round
+   does not pass either, the task ends and Tom gets a report of what was
+   built, what did not pass, and why it stopped. A governance instance
+   awaiting a grant reaches him as the delivered notice, naming each
+   instance and its grant command. Feedback by reply to a report or that
+   notice goes to `patch` on the same task; nothing waits for it.
 
 The attention log, the money spent, and every verdict are read from the
 ledger at every step. The states, verdicts, loops, and the merge predicate

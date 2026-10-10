@@ -35,7 +35,7 @@ routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
 routine NAME --plist           print the launchd job for it
 routines                       every routine, its last run, and its spending
 workspace show TASK_ID         where the kernel provisioned the task
-workspace remove TASK_ID       delete a stopped or merged task's workspace and
+workspace remove TASK_ID       delete a stopped, merged, or ended task's workspace and
                                free its ports
 run TASK_ID                    run the task through the state machine until it
                                needs Tom or a stage with no runner; prints one
@@ -300,6 +300,8 @@ def _status_line(task_id: str, out: dict) -> str:
     detail = {
         "stopped": "stopped",
         "merged": "merged",
+        "ended": "ended without merging; Tom has its report",
+        "parked": "its merge waits: git could not say, its push has no answer yet, or its next try is not due",
         "legacy": "this task predates the state machine; it is read-only",
         "already running": "another run of this task is in progress",
         "lock lost": "the run's lock connection died; run again",
@@ -493,7 +495,7 @@ def _routine_runners() -> dict:
 async def _workspace(conn, args) -> str:
     """`workspace show TASK` prints where the kernel provisioned it;
     `workspace remove TASK` (Tom's) deletes it, only once the task is
-    stopped or merged, and frees its ports. It also deletes the directory
+    stopped, merged, or ended, and frees its ports. It also deletes the directory
     a provisioning that died left for a task with no workspace
     (`_unfinished`)."""
     try:
@@ -519,9 +521,9 @@ async def _workspace(conn, args) -> str:
     async with conn.transaction():
         await ledger.lock(conn, f"task:{args.task_id}")
         f = machine.fold(await ledger.read(conn, args.task_id))
-        if f.state not in (State.STOPPED, State.MERGED):
+        if f.state not in (State.STOPPED, State.MERGED, State.ENDED):
             raise SystemExit(
-                f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
+                f"task {args.task_id} is in {f.state}; only a stopped, merged, or ended task's workspace is removed"
             )
         await git.threaded(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
         await ledger.append(
@@ -542,9 +544,9 @@ async def _unfinished(conn, args) -> str:
     async with conn.transaction():
         await ledger.lock(conn, f"task:{args.task_id}")
         f = machine.fold(await ledger.read(conn, args.task_id))
-        if f.state not in (State.STOPPED, State.MERGED):
+        if f.state not in (State.STOPPED, State.MERGED, State.ENDED):
             raise SystemExit(
-                f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
+                f"task {args.task_id} is in {f.state}; only a stopped, merged, or ended task's workspace is removed"
             )
         got = await (
             await conn.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
@@ -584,7 +586,9 @@ async def _orphan(conn, args, *, after_lock=None) -> str:
         if await (
             await conn.execute("SELECT 1 FROM documents WHERE kind = 'task' AND id = %s", (args.task_id,))
         ).fetchone():
-            raise SystemExit(f"{args.task_id} became a task; remove it as one once it is stopped or merged")
+            raise SystemExit(
+                f"{args.task_id} became a task; remove it as one once it is stopped, merged, or ended"
+            )
         await git.threaded(workspace.remove, args.task_id, lay)
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))

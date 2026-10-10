@@ -26,6 +26,7 @@ The binding table, first match wins:
 | --- | --- |
 | Not verified, or not from the operator | `none` |
 | A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
+| A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
 | A reply to a merged or stopped task | `none`, with a notice |
 | A Telegram or local reply to a task's notice or send, exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
@@ -379,6 +380,10 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         as_ = await _bound(conn, p, task_id, "feedback")
         await session.feedback(conn, task_id, text, by="tom", via=via)
         return as_
+    if f.state is State.ENDED and text and not _near(text, "stop"):
+        as_ = await _bound(conn, p, task_id, "feedback")
+        await session.feedback(conn, task_id, text, by="tom", via=via)
+        return as_
     if f.state in (State.MERGED, State.STOPPED):
         as_ = await _bound(conn, p, task_id, "none")
         await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
@@ -419,12 +424,16 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             else f"Stops come by reply {_where()}; your email steers the task."
         )
         await _notice(conn, task_id, p, said)
-    if f.state is State.MERGE and notices._delivered_owed(f, rows) is not None:
+    if f.state is State.MERGE and f.delivery and notices._delivered_owed(f) is not None:
         await _notice(
             conn,
             task_id,
             p,
-            f"Task {task_id} is in merge; reply to the delivered notice to give feedback.",
+            notices.lead(
+                await notices.headline(conn, task_id),
+                "noted. It waits on your grant of the check it adds; my message about it has the command, "
+                "and a reply to that message changes the work instead.",
+            ),
             ":waiting",
         )
     return as_

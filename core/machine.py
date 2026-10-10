@@ -32,6 +32,7 @@ class State(StrEnum):
     PATCH = "patch"
     MERGE = "merge"
     MERGED = "merged"
+    ENDED = "ended"
     STOPPED = "stopped"
 
 
@@ -54,9 +55,10 @@ VERDICTS: dict[State | Check, frozenset[str]] = {
     State.PLAN: frozenset({"planned", "asked", "idle", "failed"}),
     State.CRITIQUE: frozenset({"sound", "revise"}),
     State.BUILD: frozenset({"candidate", "asked", "idle", "failed"}),
-    State.PATCH: frozenset({"candidate", "asked", "idle", "failed"}),
-    State.MERGE: frozenset({"released", "feedback", "governance_granted"}),
+    State.PATCH: frozenset({"candidate", "asked", "ended", "idle", "failed"}),
+    State.MERGE: frozenset({"released", "feedback", "governance_granted", "rebase"}),
     State.MERGED: frozenset({"feedback"}),
+    State.ENDED: frozenset({"feedback"}),
     Check.TEST: frozenset({"pass", "red", "gaps"}),
     Check.REVIEW: frozenset({"pass", "changes", "governance_refused"}),
     Check.DOCS: frozenset({"updated", "no_change", "changes"}),
@@ -75,14 +77,17 @@ TRANSITIONS: dict[tuple[State, str], State] = {
     (State.BUILD, "asked"): State.WAITING,
     (State.PATCH, "candidate"): State.CHECKS,
     (State.PATCH, "asked"): State.WAITING,
+    (State.PATCH, "ended"): State.ENDED,  # Valor stopped the work
     (State.MERGE, "released"): State.MERGED,
     (State.MERGE, "feedback"): State.PATCH,
     (State.MERGE, "governance_granted"): State.CHECKS,  # review reruns alone
+    (State.MERGE, "rebase"): State.PATCH,  # the target moved; spends no round
     (State.MERGED, "feedback"): State.PATCH,
+    (State.ENDED, "feedback"): State.PATCH,
 }
 # CHECKS leaves only through `join`. "answered" returns to the state named on
-# the question.asked row. Any state goes to STOPPED on task.stopped; nothing
-# leaves STOPPED.
+# the question.asked row. Any state but MERGED goes to ENDED on task.ended.
+# Any state goes to STOPPED on task.stopped; nothing leaves STOPPED.
 
 # The verdict row of each stage whose verdict is its own row.
 VERDICT_ROWS: dict[str, State | Check] = {
@@ -95,6 +100,11 @@ VERDICT_ROWS: dict[str, State | Check] = {
 CHECK_ROWS = {"test.decided": Check.TEST, "review.decided": Check.REVIEW, "docs.decided": Check.DOCS}
 
 ROUNDS = (0, 1, 2)
+# After the plan's rounds are spent, the one round Valor may still give a
+# task that has not passed (join row 5), and the rebases a merge whose
+# target moved may ask for, per loop window.
+LAST_ROUNDS = 1
+REBASES = 2
 
 # The guards each redirect fires under (core/guards.py seeds them).
 GUARD_JUDGE = "intake.underspecified"
@@ -197,11 +207,14 @@ class Loops:
 
 @dataclass(frozen=True)
 class JoinResult:
-    row: int  # the join table's row, 1 to 7
+    row: int  # the join table's row, 1 to 6
     target: State
-    outcome: str | None  # for MERGE: passed, gaps, did_not_pass, governance_refused
-    spends: str | None  # "review" or "repair" for a send-back
+    outcome: str | None  # for MERGE: passed, gaps, governance_refused; for ENDED: did_not_pass
+    spends: str | None  # "round" (the plan's) or "last" (Valor's one more) for a send-back
     findings: tuple[Finding, ...]
+
+
+FRESH_COUNTS = {"critique_revisions": 0, "review_rounds": 0, "last_rounds": 0, "rebases": 0}
 
 
 @dataclass
@@ -217,9 +230,7 @@ class Fold:
     raised: dict[str, int] = field(default_factory=lambda: {"critique_rounds": 0, "review_rounds": 0})
     candidate: Candidate | None = None
     checks: dict[Check, CheckVerdict] = field(default_factory=dict)
-    counts: dict[str, int] = field(
-        default_factory=lambda: {"critique_revisions": 0, "review_rounds": 0, "repair_rounds": 0}
-    )
+    counts: dict[str, int] = field(default_factory=lambda: dict(FRESH_COUNTS))
     entry: dict[str, Any] | None = None
     entry_finished: bool = False
     join: JoinResult | None = None
@@ -330,22 +341,25 @@ DOCS_PASS = ("updated", "no_change")
 
 def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]) -> JoinResult:
     """The join table, read in its order, first match wins. Row 2 reads
-    review only."""
+    review only. One round count: a review `changes`, a red test, test
+    gaps, and docs `changes` each send the work back inside the plan's
+    `review_rounds` (row 3). Once those are spent, gaps alone merge with
+    the gaps listed (row 4); anything else gets one more round, in which
+    Valor decides to patch or stop (row 5), and after it the task ends
+    (row 6)."""
     r, t, d = (checks[c].verdict for c in (Check.REVIEW, Check.TEST, Check.DOCS))
     found = tuple(f for c in (Check.TEST, Check.REVIEW, Check.DOCS) for f in checks[c].findings)
     if r == "pass" and t == "pass" and d in DOCS_PASS:
         return JoinResult(1, State.MERGE, "passed", None, found)
     if r == "governance_refused":
         return JoinResult(2, State.MERGE, "governance_refused", None, found)
-    if r == "changes" and counts["review_rounds"] < loops.review_rounds:
-        return JoinResult(3, State.PATCH, None, "review", found)
-    if r == "changes":
-        return JoinResult(4, State.MERGE, "did_not_pass", None, found)
-    if counts["repair_rounds"] < 1 and (t in ("red", "gaps") or d == "changes"):
-        return JoinResult(5, State.PATCH, None, "repair", found)
-    if t == "red" or d == "changes":
-        return JoinResult(6, State.MERGE, "did_not_pass", None, found)
-    return JoinResult(7, State.MERGE, "gaps", None, found)
+    if counts["review_rounds"] < loops.review_rounds:
+        return JoinResult(3, State.PATCH, None, "round", found)
+    if r == "pass" and t == "gaps" and d in DOCS_PASS:
+        return JoinResult(4, State.MERGE, "gaps", None, found)
+    if counts["last_rounds"] < LAST_ROUNDS:
+        return JoinResult(5, State.PATCH, None, "last", found)
+    return JoinResult(6, State.ENDED, "did_not_pass", None, found)
 
 
 def fold(rows: list[dict[str, Any]]) -> Fold:
@@ -452,7 +466,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             f.join = None
             f.merge_effect = None
             _enter(f, State.CHECKS, entry)
-        # `asked` and `planned` move on their own rows, written with this one.
+        # `asked`, `planned`, and `ended` move on their own rows, written with this one.
         return None
     if kind == "question.asked":
         asked_in = p.get("state", s.value)
@@ -523,10 +537,10 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if len(f.checks) == 3:
             result = join(f.checks, f.loops, f.counts)
             f.join = result
-            if result.spends == "review":
+            if result.spends == "round":
                 f.counts["review_rounds"] += 1
-            elif result.spends == "repair":
-                f.counts["repair_rounds"] += 1
+            elif result.spends == "last":
+                f.counts["last_rounds"] += 1
             _enter(
                 f,
                 result.target,
@@ -541,9 +555,24 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         f.delivery = p
         return None
     if kind == "feedback.given":
-        if s not in (State.MERGE, State.MERGED):
+        if s not in (State.MERGE, State.MERGED, State.ENDED):
             return f"feedback in {s}"
-        f.counts = {"critique_revisions": 0, "review_rounds": 0, "repair_rounds": 0}
+        f.counts = dict(FRESH_COUNTS)
+        _enter(f, State.PATCH, entry)
+        return None
+    if kind == "task.ended":
+        # Valor ended the work (the kernel writes it: a decision to stop, a
+        # step or provisioning that kept failing, a merge that cannot land).
+        if s in (State.MERGED, State.ENDED):
+            return f"task ended in {s}"
+        _enter(f, State.ENDED, entry)
+        return None
+    if kind == "rebase.requested":
+        # The merge's push was rejected because the target moved: the
+        # working session rebases onto it. Spends no round.
+        if s is not State.MERGE:
+            return f"rebase requested in {s}"
+        f.counts["rebases"] += 1
         _enter(f, State.PATCH, entry)
         return None
     if kind == "guard.granted":
@@ -698,11 +727,11 @@ def merge_predicate(f: Fold, payload: dict[str, Any], *, facts: GitFacts | None)
     gaps_ok = (
         test is not None
         and test.verdict == "gaps"
-        and f.counts["repair_rounds"] >= 1
+        and f.counts["review_rounds"] >= f.loops.review_rounds
         and (f.delivery or {}).get("outcome") == "gaps"
     )
     if test is None or not (test.verdict == "pass" or gaps_ok):
-        failed.append("3: test passed, or gaps with the repair round spent and the gaps on the delivery")
+        failed.append("3: test passed, or gaps with the plan's rounds spent and the gaps on the delivery")
     docs = checks.get(Check.DOCS)
     if (
         docs is None
