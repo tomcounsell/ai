@@ -149,9 +149,10 @@ GOVERNANCE = JudgementTask(
                 "guards. Nor is the wording or formatting of a message whose sending is already decided, even "
                 "one that asks for an approval; nor are tests and the code that serves them (fixtures, helpers, "
                 "scripted stand-ins, recording scripts), even where they exit early or refuse to run; nor is "
-                "code that makes the work itself correct (a lock or a transaction that makes two runs take "
-                "turns, a parser that refuses input it cannot read); nor is prose that only describes what code "
-                "does."
+                "code that makes the work itself correct (a lock or a transaction that makes a second run of "
+                "the same work wait, or answers it that one is already running; a parser that refuses input it "
+                "cannot read), though a step that refuses work on a judgement about the work is not; nor is "
+                "prose that only describes what code does."
             ),
             kind=Kind.BOOLEAN,
             labels={
@@ -181,8 +182,8 @@ GOVERNANCE = JudgementTask(
     consumer={"proceed": "no instance", "caution": "a governance instance at the hunk, awaiting Tom's tap"},
     serves="the governance constraint",
     guard="the CLAUDE.md governance paragraph (correction 1)",
-    # Run 10 on this question (task_sha256 f9034dc3cf49...) failed its entry check: Jev was
-    # right on every case, and the open-weight leg answered caution on two cases Tom labelled
+    # Run 11 on this question (task_sha256 183b1eac42cc...) failed its entry check: Jev was
+    # right on every case, and the open-weight leg answered caution on three cases Tom labelled
     # false (docs/plans/m1-4b-records.md, docs/plans/c11-governance-precision.md). A site
     # lands calibrated only on a record that passes, so this stays None and the docs runner
     # stays unregistered.

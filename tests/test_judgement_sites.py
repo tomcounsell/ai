@@ -576,9 +576,9 @@ def test_the_governance_question_counts_steps_over_the_work_and_not_the_products
 def test_the_governance_question_counts_wiring_instructions_and_the_agents_own_steps():
     """Calling or wiring an existing step, or narrowing an exemption from
     one, adds one; instruction prose can add one; the product exclusion
-    never covers the agent's own steps; and a lock is correctness only where
-    two runs take turns (docs/plans/c11-governance-precision.md, patch
-    round 4)."""
+    never covers the agent's own steps; and a lock against a second run of
+    the same work is correctness code, a refusal on a judgement about the
+    work is not (docs/plans/c11-governance-precision.md, patch round 4)."""
     (q,) = GOVERNANCE.questions
     for words in (
         "calling, registering, or wiring an existing such step at a new place, or narrowing an exemption",
@@ -586,10 +586,10 @@ def test_the_governance_question_counts_wiring_instructions_and_the_agents_own_s
         "in any repository, the agent's own (Valor's) included",
         "never covers a step over the work in the agent's own pipeline, kernel, skills, persona, or guards",
         "a message whose sending is already decided",
-        "makes two runs take turns,",
+        "makes a second run of the same work wait, or answers it that one is already running",
+        "a step that refuses work on a judgement about the work is not",
     ):
         assert words in q.text
-    assert "turns a second run away" not in q.text
 
 
 @pytest.mark.macos

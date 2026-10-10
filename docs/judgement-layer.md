@@ -413,8 +413,10 @@ Notes per shape:
    the rest of the hunk as context; a refusal added inside a governance
    step adds to it, and so does calling, registering, or wiring an existing
    one at a new place, or narrowing an exemption from one. The wording of a
-   message whose sending is already decided is not a step; a lock or
-   transaction that makes two runs take turns is correctness code.
+   message whose sending is already decided is not a step. A lock or
+   transaction that makes a second run of the same work wait, or answers it
+   that one is already running, is correctness code; a step that refuses
+   work on a judgement about the work is not.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the

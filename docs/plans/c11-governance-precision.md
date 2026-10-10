@@ -110,8 +110,10 @@ The question in `core/judgement_tasks.py` (`GOVERNANCE`) now:
 - puts outside the wording of a message whose sending is already decided,
   even one asking for an approval;
 - keeps the existing exclusions for tests, correctness code (a lock or a
-  transaction that makes two runs take turns, a parser that refuses input
-  it cannot read) and prose.
+  transaction that makes a second run of the same work wait, or answers it
+  that one is already running, and a parser that refuses input it cannot
+  read; a step that refuses work on a judgement about the work is not
+  correctness code) and prose.
 
 The labels say the same. Process code stays in, in every repository; the
 11 Tom positives are still answered caution by Jev on every run below.
@@ -140,7 +142,7 @@ second file of all 79 distinct routed D4 inputs, drafted `false`, was
 measured beside it and is not a case file.
 
 Every run used `python -m core calibrate` against the test database
-`valor_rebuild_test_c11`, never the real ledger. Runs 5 to 10 are on the 67
+`valor_rebuild_test_c11`, never the real ledger. Runs 5 to 11 are on the 67
 cases and are the site's calibration runs (`docs/plans/m1-4b-records.md`).
 The 79-input runs are measurement. All calls on both legs were answered;
 none was refused. Spend was about $0.31 over the eight runs.
@@ -157,21 +159,25 @@ none was refused. Spend was about $0.31 over the eight runs.
 | | same, 79 D4 | `7181f2cf1a20` | 0 | 2 | 0.0038, 0.0247 | |
 | 9 | `eda026ef59e4` (round 4, draft d) | `34ea6bc64f35` | 0 | 6: 4 `tom` negatives (`lock-in-expiry-runner`, `lock-prose-in-routines-doc`, `router-session-advisory-lock`, `fresh-verdict-parser-rewrite`), 2 D4 | 0.0088, 0.0818 | false |
 | | same, 79 D4 | `0c585c2504ba` | 1 abstain | 3 | 0.0037, 0.0361 | |
-| 10 | `f9034dc3cf49` (round 4, built) | `5dd580773c08` | 0 | 4: 2 `tom` negatives (`router-session-advisory-lock`, `fresh-verdict-parser-rewrite`), 2 D4 | 0.0084, 0.0550 | false |
+| 10 | `f9034dc3cf49` (round 4, draft e) | `5dd580773c08` | 0 | 4: 2 `tom` negatives (`router-session-advisory-lock`, `fresh-verdict-parser-rewrite`), 2 D4 | 0.0084, 0.0550 | false |
 | | same, 79 D4 | `465829809fe4` | 1 abstain | 4 | 0.0037, 0.0497 | |
+| 11 | `183b1eac42cc` (round 4, built) | `2bc99f121005` | 0 | 5: 3 `tom` negatives (`lock-prose-in-routines-doc`, `router-session-advisory-lock`, `signals-surrogate-refusal`), 2 D4 | 0.0088, 0.0693 | false |
+| | same, 79 D4 | `ef26bd2a5a95` | 1 abstain | 4 | 0.0034, 0.0495 | |
 
 The full task digest of the built question is
-`f9034dc3cf49ef0fca1c4107f9e1d5ef9ed04ab73029ef3f467b407eb8a0d44a`
-(run 10, event 5403).
+`183b1eac42cca02886714dc089c14150b9be36485f889e113c26b94e5c0c3144`
+(run 11, event 14864).
 
 On the built question every one of the 67 cases and the 79 D4 inputs ends
 right as the site runs it: Jev answers all 67 right, and its one abstain on
-the 79 (a plan document, 0.60) goes to the open-weight leg, which answers
-it right. The entry check asks both legs to be right on every `tom` case on
-their own; Jev passes it, and the open-weight leg answers
-`router-session-advisory-lock` and `fresh-verdict-parser-rewrite` at
-caution (0.05). The open-weight leg varies between samples: the same
-question gave it 1 to 2 wrong of 11 probes across three runs.
+the 79 (a plan document, 0.63) goes to the open-weight leg, which answers
+it right. The review's 11 probes, asked three times, end right at the site
+every time. The entry check asks both legs to be right on every `tom` case
+on their own; Jev passes it, and the open-weight leg answers
+`lock-prose-in-routines-doc`, `router-session-advisory-lock` and
+`signals-surrogate-refusal` at caution (0.05). The open-weight leg varies
+between samples; its `tom` misses moved among these lock and refusal cases
+from run 8 to run 11.
 
 The site is uncalibrated: `GOVERNANCE.calibrated` is `None` and the docs
 runner is unregistered. A changed question is asked fresh, since reuse is
@@ -211,7 +217,11 @@ built question.
   samples. Spend about $0.25. Tom labelled `router-session-advisory-lock`
   false, and that lock returns `already running` to a second run; with
   "turns a second run away" gone, the open-weight leg answered it caution
-  on runs 9 and 10.
+  on runs 9 and 10. Valor's call: Tom's label wins, so the question names
+  a lock or a transaction that makes a second run of the same work wait,
+  or answers it that one is already running, as correctness code, and a
+  step that refuses work on a judgement about the work as not. On run 11
+  the open-weight leg still answers that case caution (0.05).
 
 ## Follow-ups
 
