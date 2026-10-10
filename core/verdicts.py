@@ -162,7 +162,7 @@ def _instances(workspace: str, older: str, newer: str, specs: Iterable[InstanceS
         hunk = git.hunk_at(workspace, older, newer, spec.path, spec.line)
         if hunk is None:
             raise VerdictRefused(
-                f"no added lines at {spec.path}:{spec.line} in the diff {older[:12]}..{newer[:12]}"
+                f"no changed hunk at {spec.path}:{spec.line} in the diff {older[:12]}..{newer[:12]}"
             )
         out.append(
             {

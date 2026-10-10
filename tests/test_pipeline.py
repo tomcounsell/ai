@@ -359,7 +359,7 @@ def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reru
         await scripted.check(dsn, task, "docs", "no_change")
         with pytest.raises(verdicts.VerdictRefused, match="reviewer's verdict is one of"):
             await scripted.check(dsn, task, "review", "governance_refused", governance=[spec])
-        with pytest.raises(verdicts.VerdictRefused, match="no added lines"):
+        with pytest.raises(verdicts.VerdictRefused, match="no changed hunk"):
             await scripted.check(
                 dsn, task, "review", "pass", governance=[verdicts.InstanceSpec("README.md", 1)]
             )

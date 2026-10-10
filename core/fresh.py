@@ -779,7 +779,7 @@ def governance_input(
     granted: set[str],
 ) -> dict[str, Any]:  # fmt: skip
     """`governance.json`: each kernel instance (id, path, start and end line,
-    the hunk's added lines, granted or not), the abstentions, and the
+    the hunk's added and removed lines, granted or not), the abstentions, and the
     unjudged hunks."""
     hunks: dict[str, git.Hunk] = {}
     for path in {i["path"] for i in instances if not i["id"].startswith("unjudged-")}:
@@ -795,6 +795,7 @@ def governance_input(
                 "start": h.start if h else None,
                 "end": h.start + max(h.length, 1) - 1 if h else None,
                 "added": list(h.added) if h else [],
+                "removed": list(h.removed) if h else [],
                 "hunks": i.get("hunks"),
                 "granted": i["id"] in granted,
             }
@@ -945,7 +946,7 @@ def normalize(
 ) -> tuple[list[verdicts.InstanceSpec], dict[str, dict[str, Any]], list]:
     """The reviewer's instances and notes as the record takes them, so
     nothing the reviewer writes can refuse it: an instance whose path is not
-    exactly one of the diff's paths, or with no added line at its line, and
+    exactly one of the diff's paths, or with no changed hunk at its line, and
     a note for an id not in `governance.json`, each become a finding of
     kind `governance`. Returns (instance specs, notes, findings)."""
     paths = set(git.diff_paths(mirror, base, candidate))
@@ -962,7 +963,7 @@ def normalize(
                 {
                     "kind": "governance",
                     "text": f"the reviewer named governance at {_quoted(spec.path)} line {spec.line}, "
-                    f"where the diff adds no line: {spec.summary or 'no summary'}",
+                    f"where the diff changes no hunk: {spec.summary or 'no summary'}",
                 }
             )
     notes: dict[str, dict[str, Any]] = {}

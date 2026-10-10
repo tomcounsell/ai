@@ -426,6 +426,115 @@ def test_the_hunk_input_carries_its_enclosing_function_but_the_id_does_not(dsn, 
     assert h.id == plain.id()
 
 
+TAP = (
+    "def needs_tap(path):\n"
+    "    path = path.strip()\n"
+    "    if is_docs(path):\n"
+    "        return False\n"
+    "    return require_tap(path)\n"
+)
+MERGE = "def merge(change):\n    check_tests(change)\n    require_review(change)\n    return push(change)\n"
+
+
+def removals(ws) -> tuple[str, str]:
+    """A base holding a tap with a docs exemption and a merge with a review
+    step, and a commit that only removes lines: the exemption, and the
+    review step."""
+    commit(ws, "core/tap.py", TAP, "a tap with a docs exemption")
+    commit(ws, "core/merge.py", MERGE, "a merge with a review step")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(
+        ws, "core/tap.py", TAP.replace("    if is_docs(path):\n        return False\n", ""), "no exemption"
+    )
+    commit(ws, "core/merge.py", MERGE.replace("    require_review(change)\n", ""), "no review")
+    return older, git(ws, "rev-parse", "HEAD")
+
+
+def test_a_hunk_that_only_removes_lines_is_judged_on_its_removed_lines(tmp_path):
+    """Removing an exemption from an approval step adds instances of it, so
+    a hunk with no added lines is judged too; its id and anchor are
+    `git.hunk_at`'s (docs/plans/c13-removal-hunks.md)."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    older, newer = removals(ws)
+    by_path = {h.path: h for h in judgement_sites.diff_hunks(ws, older, newer)}
+    tap = by_path["core/tap.py"]
+    assert "-    if is_docs(path):" in tap.text and "-        return False" in tap.text
+    assert "-    require_review(change)" in by_path["core/merge.py"].text
+    (plain,) = git_.hunks(ws, older, newer, "core/tap.py")
+    assert plain.added == () and plain.removed == ("    if is_docs(path):", "        return False")
+    assert tap.id == plain.id() == git_.hunk_at(ws, older, newer, "core/tap.py", tap.start).id()
+    # Two removals in one function context are two hunks, not one id.
+    assert tap.id != by_path["core/merge.py"].id
+
+
+def test_a_deleted_file_is_one_removal_only_hunk_read_at_line_0(tmp_path):
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/merge.py", MERGE, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    git(ws, "rm", "-q", "core/merge.py")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "deleted")
+    newer = git(ws, "rev-parse", "HEAD")
+    (h,) = judgement_sites.diff_hunks(ws, older, newer)
+    assert h.start == 0 and "-    require_review(change)" in h.text
+    assert git_.hunk_at(ws, older, newer, "core/merge.py", 0).id() == h.id
+
+
+def test_a_hunk_with_added_lines_keeps_its_id_over_path_context_and_added_lines(tmp_path):
+    """The id an instance and its grant are recorded under does not move
+    for a hunk with added lines (docs/sdlc-state-machine.md)."""
+    import hashlib
+
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/merge.py", MERGE, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(ws, "core/merge.py", MERGE.replace("require_review", "require_two_reviews"), "changed")
+    (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/merge.py")
+    assert h.removed == ("    require_review(change)",)
+    body = json.dumps([h.path, h.context, list(h.added)], separators=(",", ":"))
+    assert h.id() == hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+@pytest.mark.macos
+def test_a_removal_only_hunk_is_asked_and_its_caution_is_an_instance_to_grant(dsn, tmp_path):
+    """The removed exemption answered caution is an instance at its hunk,
+    so the review is `governance_refused` until Tom grants it; the removed
+    review step answered proceed is no instance."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/tap.py", TAP, "a tap with a docs exemption")
+    commit(ws, "core/merge.py", MERGE, "a merge with a review step")
+    sid = UP.script(default={"by_path": {"core/tap.py": YES}, "probs": NO})
+
+    async def go():
+        task = await governance_candidate(
+            dsn,
+            ws,
+            {
+                "core/tap.py": TAP.replace("    if is_docs(path):\n        return False\n", ""),
+                "core/merge.py": MERGE.replace("    require_review(change)\n", ""),
+            },
+        )
+        older, newer = await candidate_range(dsn, task)
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        await review(dsn, task, "pass", ids)
+        return older, newer, (await rows(dsn, task, "review.decided"))[0]["payload"]
+
+    older, newer, decided = run(go())
+    assert requests_for(sid, "core/tap.py") >= 1 and requests_for(sid, "core/merge.py") >= 1
+    tap = git_.hunk_at(ws, older, newer, "core/tap.py", 1)
+    assert tap.added == ()
+    gov = decided["governance"]
+    assert decided["verdict"] == "governance_refused"
+    assert [(i["id"], i["path"]) for i in gov["instances"]] == [(tap.id(), "core/tap.py")]
+
+
 @pytest.mark.macos
 def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
@@ -571,6 +680,17 @@ def test_the_governance_question_counts_steps_over_the_work_and_not_the_products
     for behavior in ("input validation", "permission and visibility checks", "error handling"):
         assert behavior in q.text
     assert "Judge what the added lines add" in q.text
+
+
+def test_the_governance_question_says_what_a_hunk_that_only_removes_lines_adds():
+    """Removing a step adds none; removing an exemption from one adds to it
+    (docs/plans/c13-removal-hunks.md)."""
+    (q,) = GOVERNANCE.questions
+    for words in (
+        "or for a hunk that only removes lines, what removing them adds",
+        "removing such a step adds none; removing an exemption from one adds to it",
+    ):
+        assert words in q.text
 
 
 def test_the_governance_question_counts_wiring_instructions_and_the_agents_own_steps():

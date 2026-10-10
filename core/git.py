@@ -732,12 +732,15 @@ class Hunk:
     length: int
     context: str
     added: tuple[str, ...]
+    removed: tuple[str, ...] = ()
 
     def id(self) -> str:
         """The instance id: the path, the hunk header's function context, and
         the added lines, without line numbers, so the same hunk on a later
-        candidate keeps its id and a changed one gets a new id."""
-        body = json.dumps([self.path, self.context, list(self.added)], separators=(",", ":"))
+        candidate keeps its id and a changed one gets a new id. A hunk that
+        only removes lines digests its removed lines in their place."""
+        lines = [list(self.added)] if self.added else [[], list(self.removed)]
+        body = json.dumps([self.path, self.context, *lines], separators=(",", ":"))
         return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
@@ -762,16 +765,24 @@ def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk
                 "length": int(m.group(2) if m.group(2) is not None else 1),
                 "context": m.group(3).strip(),
                 "added": [],
+                "removed": [],
             }
             found.append(current)  # type: ignore[arg-type]
         elif current is not None and line.startswith("+") and not line.startswith("+++"):
             current["added"].append(line[1:])
-    return [Hunk(path, h["start"], h["length"], h["context"], tuple(h["added"])) for h in found]  # type: ignore[index]
+        elif current is not None and line.startswith("-"):
+            current["removed"].append(line[1:])
+    return [
+        Hunk(path, h["start"], h["length"], h["context"], tuple(h["added"]), tuple(h["removed"]))  # type: ignore[index]
+        for h in found
+    ]
 
 
 def hunk_at(workspace: str | Path, older: str, newer: str, path: str, line: int) -> Hunk | None:
-    """The hunk with added lines whose new range holds `line`."""
+    """The hunk whose new range holds `line`. A hunk that only removes lines
+    has its context lines as its new range, and a deleted or emptied file's
+    one hunk is read at line 0."""
     for h in hunks(workspace, older, newer, path):
-        if h.added and h.start <= line < h.start + max(h.length, 1):
+        if h.start <= line < h.start + max(h.length, 1):
             return h
     return None

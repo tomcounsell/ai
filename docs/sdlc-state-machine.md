@@ -558,8 +558,8 @@ merge, and its `push_branch` cannot target the target branch.
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the
 candidate's real diff and refuses one it does not find. An instance's id
-digests its path, the hunk header's function context, and its added lines,
-without line numbers, so the same hunk on a rerun or a later candidate
+digests its path, the hunk header's function context, and its added lines
+(its removed lines when it adds none), without line numbers, so the same hunk on a rerun or a later candidate
 keeps its id and its grant; a changed, moved, or split hunk needs a new
 tap, and identical added lines in one function context of one file share
 an id. After the merge the task is `merged`; a defect found in use comes back as
