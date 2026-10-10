@@ -2,7 +2,7 @@
 tracking: none
 slug: c15-persona-894
 type: plan
-status: built
+status: merged
 critique_rounds: 0
 review_rounds: 0
 ---
