@@ -23,8 +23,8 @@ Tom's decisions of 2026-10-01 fix the shape:
   skill says what must be true when the stage ends and what row proves it.
   How to get there is the agent's call.
 - **The plan sets the loops.** The plan decides how many times critique may
-  send the plan back (0, 1, or 2) and how many times the checks may send
-  the work to patch (0, 1, or 2), from the stakes. The replay baseline covered
+  send the plan back (0, 1, or 2) and whether the checks may send the work
+  to patch (0 or 1), from the stakes. The replay baseline covered
   six small changes and no large high-stakes one (rebuild-baseline.md), so
   the count is a call per task, not a constant.
 - **Test, review, and docs run in parallel.** After every build and every
@@ -109,7 +109,7 @@ it; every working-session state also has `idle` and `failed`, since any
 turn can end with neither of its stage's signals or fail. `Candidate` is a
 head commit and the turn that produced it; `CheckVerdict` a check's
 verdict, findings, and governance instances on one candidate; `Loops` the
-two counts, 0 to 2; `Fold` the state with what it reads. `TRANSITIONS` is
+two counts, critique's 0 to 2 and review's 0 or 1 (`REVIEW_MAX`); `Fold` the state with what it reads. `TRANSITIONS` is
 the Next column, with three rules beside it: `checks` leaves only through
 the join; `asked` from a working-session state goes to `waiting`, and
 `answered` returns to the state named on the `question.asked` row; any
@@ -156,10 +156,11 @@ Mission item 6, and the setup plan's Why section (53 review-round commits in ele
 both counts: the more a mistake would cost and the harder it is to undo,
 the more loops. As guidance, a small reversible change in well-tested code
 is a 0, and a change to stored data, money, authentication, migrations, or
-the kernel itself is a 2. The kernel refuses a value outside 0 to 2.
-Critique may raise either count, never lower it, and the kernel uses the
-higher, so the builder's call on its own stakes is read by a session that
-did not make it.
+the kernel itself gets 2 critique rounds and 1 review round. The kernel
+refuses a value outside 0 to 2, and reads a review count of 2 as 1: review
+sends work back at most once. Critique may raise either count, never lower
+it, and the kernel uses the higher, so the builder's call on its own stakes
+is read by a session that did not make it.
 
 ## Scope: leave it cleaner than we found it
 
@@ -413,7 +414,6 @@ review is a constraint of the setup plan with no expiry. Sending work back
 is the guard `review.loop`, on popoto #633: the stale-cache bug was moved,
 not removed, and the Sonnet stand-in accepted it, as it accepted #191 bare
 at fidelity 1 (rebuild-baseline.md, Review rounds), hence the Opus class.
-A second round has no incident and expires 2026-12-30 unless one occurs.
 
 #### `checks.docs`: the docs still describe reality
 

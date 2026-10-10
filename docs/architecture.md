@@ -388,7 +388,7 @@ what a thing is, nothing about what it may do. The SDLC uses three:
 
 The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md):
 one blind verification per candidate, beside test and docs, with as many
-send-backs to patch as the plan allows (0, 1, or 2, set by the stakes).
+send-backs to patch as the plan allows (0 or 1, set by the stakes).
 
 **Built.** `fresh.review_runner` is the verifier, registered in the
 kernel's `runners()`. The
@@ -518,7 +518,8 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local ch
    governance grant none, and a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
 3. **Plan.** The working session writes the plan: approach, stakes, the
-   critique and review loops (0 to 2 each), and related tech debt in scope.
+   critique loop (0 to 2) and the review loop (0 or 1), and related tech
+   debt in scope.
 4. **Critique.** A fresh session reads the plan; `revise` sends it back
    while the plan's critique rounds last.
 5. **Build.** The working session builds until it writes `done.md`, a

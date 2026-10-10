@@ -105,6 +105,11 @@ def test_prices_round_up_and_match_dated_ids():
     assert spending.cost({"output_tokens": 1}, price) == 5
     assert spending.cost({"input_tokens": 1}, price) == 1  # 1 micro-dollar, rounded up
     assert spending.prices("some-unpriced-model") is None
+    assert spending.charge_prices("claude-haiku-4-5") == (price, False)
+    stand_in, unpriced = spending.charge_prices("claude-haiku-5-5")
+    assert unpriced and stand_in == spending.prices("claude-haiku-4-5")
+    highest, _ = spending.charge_prices("some-unpriced-model")
+    assert highest["input"] == 5_000_000 and highest["output"] == 25_000_000
 
 
 # -- effects: classes, ceiling, and the request ---------------------------------
@@ -254,6 +259,14 @@ def test_a_turns_whole_output_is_in_files_no_turn_can_write_and_its_row_names_th
     assert ended["result"] == {"unparsed": True}
     line = _status_line(task, {"status": "failed", "state": {}, "turn": ended})
     assert line.endswith(f"the turn failed: {{'unparsed': True}}; its stderr is in {ended['stderr']}")
+
+
+def test_the_run_line_counts_calls_charged_at_a_stand_in_price():
+    from core.__main__ import _status_line
+
+    state = {"spent_usd_micros": 34, "unpriced_calls": ["c1", "c2"]}
+    line = _status_line("t1", {"status": "stopped", "state": state})
+    assert line == "STOPPED (task t1; metered spending: $0.0000, 2 calls at a stand-in price): stopped"
 
 
 def _pipe_turn(dsn, tmp_path, argv, stdin=None):

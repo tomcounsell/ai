@@ -1,6 +1,8 @@
 """The governance paragraph is the same, byte for byte, in every tracked
-file that holds it: `CLAUDE.md`'s paragraph is the one the persona renders
-into every turn, and each copy elsewhere must read the same words.
+file that holds it: `CLAUDE.md`'s paragraph and the persona's copy in
+`persona/governance.md`, which renders into every turn, and each copy
+elsewhere must read the same words. The "Tests are not governance."
+paragraph is the same in `CLAUDE.md` and the persona.
 
 No model call. Live spend: none.
 """
@@ -59,4 +61,13 @@ def test_every_tracked_copy_of_the_governance_paragraph_is_byte_identical():
         if "**" + OPENING in text:
             holders.append(name)
             assert held in text, f"{name} holds the governance paragraph in other words"
-    assert "CLAUDE.md" in holders and len(holders) > 1
+    assert "CLAUDE.md" in holders and "persona/governance.md" in holders
+
+
+def test_the_persona_carries_the_tests_paragraph_in_claude_mds_words():
+    tests = next(
+        line
+        for line in (ROOT / "CLAUDE.md").read_text().splitlines()
+        if line.startswith("**Tests are not governance.")
+    )
+    assert tests in (ROOT / "persona" / "governance.md").read_text().splitlines()

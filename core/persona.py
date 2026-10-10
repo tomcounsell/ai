@@ -3,13 +3,10 @@
 The text lives in `persona/` (`settings.persona_dir`) in the kernel's own
 checkout and changes only by a reviewed diff: the identity as data in
 `identity.toml`, then `turn.md` (what one turn is), `voice.md`,
-`conduct.md`, `governance.md` (the heading and the line that introduces
-the paragraph), and `delivery.md`. The
-governance paragraph and the "Tests are not governance." paragraph are not
-copied into any of them; each is read from its line of `CLAUDE.md`
-(`corrections.GOVERNANCE_SOURCE`, the same file and the same first-line rule
-as `corrections.governance_paragraph`) each time the persona is rendered,
-so they are the same words by construction.
+`conduct.md`, `governance.md` (the heading, the line that introduces the
+rules, the governance paragraph, and the "Tests are not governance."
+paragraph, each the same words as in `CLAUDE.md`), and `delivery.md`.
+Rendering reads nothing outside `persona/`.
 
 Nothing here reads a task's workspace, and nothing here decides anything:
 the persona shapes what a turn says, the kernel and the broker bound what
@@ -21,7 +18,7 @@ digest as `persona_sha256`.
 import tomllib
 from pathlib import Path
 
-from core import corrections, ledger
+from core import ledger
 
 # The identity fields, in the order they render, with their labels. The
 # file's own key order does not matter; a key not listed here is ignored.
@@ -38,14 +35,9 @@ TEXTS = ("voice.md", "conduct.md")
 CLOSING = "delivery.md"
 
 
-# The paragraphs of `CLAUDE.md` the persona carries under its governance
-# heading, each found as the first line starting with its prefix.
-RULES = ("**Governance", "**Tests are not governance.")
-
-
 class PersonaUnreadable(ValueError):
-    """A persona file is missing, the identity lacks a field `IDENTITY`
-    names, or `CLAUDE.md` is missing or lacks a paragraph `RULES` names."""
+    """A persona file is missing or the identity lacks a field `IDENTITY`
+    names."""
 
 
 def _text(directory: Path, name: str) -> str:
@@ -54,23 +46,6 @@ def _text(directory: Path, name: str) -> str:
         return path.read_text().strip()
     except OSError as exc:
         raise PersonaUnreadable(f"{path}: {exc.strerror or exc}") from None
-
-
-def rules() -> list[str]:
-    """The `RULES` paragraphs from `CLAUDE.md` (`corrections.GOVERNANCE_SOURCE`),
-    byte for byte, read each time the persona is rendered."""
-    path = corrections.GOVERNANCE_SOURCE
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        raise PersonaUnreadable(f"{path}: {exc.strerror or exc}") from None
-    found = []
-    for prefix in RULES:
-        line = next((line for line in lines if line.startswith(prefix)), None)
-        if line is None:
-            raise PersonaUnreadable(f"{path}: no line starting {prefix}")
-        found.append(line)
-    return found
 
 
 def identity(directory: str | Path) -> dict[str, str]:
@@ -90,8 +65,8 @@ def identity(directory: str | Path) -> dict[str, str]:
 def render(directory: str | Path) -> str:
     """The persona as a turn reads it: the identity and what one turn is,
     the voice, the conduct, the governance section with the governance
-    and tests paragraphs from `CLAUDE.md` under it, the delivery format. The
-    same files give the same bytes."""
+    and tests paragraphs, the delivery format. The same files give the same
+    bytes."""
     directory = Path(directory)
     who = identity(directory)
     head = (
@@ -103,7 +78,6 @@ def render(directory: str | Path) -> str:
     )
     sections = [head, *(_text(directory, name) for name in TEXTS)]
     sections.append(_text(directory, "governance.md"))
-    sections.extend(rules())
     sections.append(_text(directory, CLOSING))
     return "\n\n".join(sections)
 

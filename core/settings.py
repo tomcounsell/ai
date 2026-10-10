@@ -81,8 +81,9 @@ class Price:
 
 
 # Checked against https://platform.claude.com/docs/en/about-claude/pricing.
-# A model absent here is refused by the gateway: an unpriced call cannot be
-# metered. A dated id (`claude-haiku-4-5-20251001`) takes its undated entry.
+# A model absent here is forwarded and charged at the highest rates of its
+# family (`claude-haiku`), or of every entry when its family has none, its
+# charge marked `unpriced`. A dated id (`claude-haiku-4-5-20251001`) takes its undated entry.
 PRICES: dict[str, Price] = {
     "claude-opus-5-5": Price(4.00, 20.00, 5.00, 8.00, 0.20, date(2026, 10, 1)),
     "claude-opus-5": Price(5.00, 25.00, 6.25, 10.00, 0.50, date(2026, 10, 1)),
@@ -121,8 +122,9 @@ class OpenAIPrice:
 # Checked against https://developers.openai.com/api/docs/pricing and
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol. Kept apart from
 # `PRICES`, so the Anthropic route never prices an OpenAI model. A model
-# absent here has no price, and the gateway answers its request with a 400;
-# a tier absent from its entry is forwarded and charged at the highest tier.
+# absent here is forwarded and charged at its family's highest rates (every
+# entry's when its family has none), marked `unpriced`; a tier absent from its
+# entry is forwarded and charged at the highest tier.
 OPENAI_PRICES: dict[str, OpenAIPrice] = {
     "gpt-6.1-sol": OpenAIPrice(
         tiers={
@@ -153,7 +155,8 @@ class OpenAIToolFee:
 # Same page. A tool type matches its line exactly or by a dated or preview
 # suffix (`web_search_preview`). A tool billed by something the response
 # does not count (a container session, an image model's own rates) has no
-# line, so a request using it has no price.
+# line; a request using it is forwarded, its charge marked `unpriced` with
+# the tool named, and those fees are not counted.
 OPENAI_TOOL_FEES: dict[str, OpenAIToolFee] = {
     "web_search": OpenAIToolFee(10.00, "web_search_call", date(2026, 10, 3)),
     "file_search": OpenAIToolFee(2.50, "file_search_call", date(2026, 10, 3)),

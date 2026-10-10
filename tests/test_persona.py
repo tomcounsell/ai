@@ -1,6 +1,5 @@
 """The persona: rendered from the kernel's own `persona/` at the top of every
-turn, the governance paragraph read from `CLAUDE.md`, and its digest on
-`turn.started`.
+turn, the governance paragraph among it, and its digest on `turn.started`.
 
 No model call: turns run the argv the Claude Code harness builds, with the
 `claude` binary swapped for a Python process that exits at once.
@@ -99,54 +98,34 @@ def test_the_same_files_render_the_same_bytes():
     assert persona.render(PERSONA).startswith("# Persona\n\nYou are Valor Engels.")
 
 
-def test_the_governance_paragraph_is_claude_mds_and_follows_it(tmp_path, monkeypatch):
+def test_the_governance_paragraph_is_rendered_from_the_persona_under_its_heading():
     text = persona.render(PERSONA)
-    assert GOVERNANCE in text
     # Under its own heading, after the conduct and before the delivery format.
     section = text[text.index("\n## Governance\n") : text.index("\n## Delivery format")]
-    assert GOVERNANCE in section and "### " not in section
+    assert GOVERNANCE in section and "### " not in section and text.count(GOVERNANCE) == 1
     assert text.index("## Conduct") < text.index("## Governance")
-    edited = tmp_path / "CLAUDE.md"
-    changed = GOVERNANCE.replace("structure, not sentiment", "structure, never sentiment")
-    edited.write_text("# CLAUDE.md\n\n" + changed + "\n\n" + TESTS_LINE + "\n")
-    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", edited)
-    text = persona.render(PERSONA)
-    assert changed in text and GOVERNANCE not in text
 
 
-def test_the_tests_paragraph_is_claude_mds_under_the_governance_heading(tmp_path, monkeypatch):
+def test_the_tests_paragraph_follows_the_governance_paragraph():
     text = persona.render(PERSONA)
     section = text[text.index("\n## Governance\n") : text.index("\n## Delivery format")]
     assert TESTS_LINE in section and text.count(TESTS_LINE) == 1
     assert section.index(GOVERNANCE) < section.index(TESTS_LINE)
-    edited = tmp_path / "CLAUDE.md"
-    changed = TESTS_LINE.replace("part of the code", "part of the program")
-    edited.write_text("# CLAUDE.md\n\n" + GOVERNANCE + "\n\n" + changed + "\n")
-    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", edited)
-    text = persona.render(PERSONA)
-    assert changed in text and TESTS_LINE not in text
 
 
-@pytest.mark.parametrize(
-    "body, message",
-    [(None, "CLAUDE.md"), (GOVERNANCE, "Tests are not governance"), (TESTS_LINE, "Governance")],
-    ids=["missing-file", "missing-tests-line", "missing-governance-line"],
-)
-def test_a_claude_md_without_the_rules_is_an_unreadable_persona(tmp_path, monkeypatch, body, message):
-    source = tmp_path / "CLAUDE.md"
-    if body is not None:
-        source.write_text("# CLAUDE.md\n\n" + body + "\n")
-    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", source)
-    with pytest.raises(persona.PersonaUnreadable, match=message):
-        persona.render(PERSONA)
-
-
-def test_no_rendered_file_holds_a_copy_of_the_paragraph_and_the_readme_keeps_its_own():
-    for name in RENDERED:
-        body = (PERSONA / name).read_text()
-        assert "Governance is restrained" not in body and GOVERNANCE[200:260] not in body, name
-        assert "Tests are not governance" not in body, name
-    assert GOVERNANCE in (PERSONA / "README.md").read_text()
+def test_the_persona_renders_with_no_claude_md(tmp_path, monkeypatch):
+    """Rendering reads only `persona/`: a kernel checkout with no
+    `CLAUDE.md`, or one lacking either paragraph, still renders every turn."""
+    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", tmp_path / "absent.md")
+    target = copy_persona(tmp_path)
+    assert persona.render(target) == persona.render(PERSONA)
+    edited = (
+        (target / "governance.md")
+        .read_text()
+        .replace("structure, not sentiment", "structure, never sentiment")
+    )
+    (target / "governance.md").write_text(edited)
+    assert "structure, never sentiment" in persona.render(target)
 
 
 def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():

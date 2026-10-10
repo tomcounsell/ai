@@ -276,8 +276,17 @@ def test_the_plans_rounds_then_one_last_round_bound_the_patches_and_the_task_end
         else:
             break
     f = led.fold()
-    assert patches == rounds + machine.LAST_ROUNDS
+    # A plan's 2 is read as 1: review sends work back at most once, then
+    # the one last round.
+    assert patches == min(rounds, machine.REVIEW_MAX) + machine.LAST_ROUNDS
     assert f.state is State.ENDED and f.join.row == 6 and f.join.outcome == "did_not_pass"
+
+
+def test_a_critique_raise_of_review_rounds_to_2_is_accepted_and_read_as_1():
+    led = Ledger(review_rounds=0).plan()
+    led.critique("sound", review_rounds=2)
+    f = led.fold()
+    assert f.raised["review_rounds"] == 2 and f.loops.review_rounds == 1
 
 
 def test_a_red_test_and_docs_changes_spend_the_plans_rounds_like_a_review_changes():

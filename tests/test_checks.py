@@ -289,7 +289,7 @@ def never(_tid):
     [
         (_run(0), _run(0), []),
         (_run(0), _run(1), ["the suite exited 1 at head and 0 at base"]),
-        (_run(1), _run(1), [checks.BOTH_FAIL]),
+        (_run(1), _run(1), []),
         (_run(1), _run(0), []),
         (_run(0, _tests(["m::a"])), _run(0, _tests(["m::a"])), []),
         # Per-test results at base, none at head (a conftest calling os._exit(0)).
@@ -318,6 +318,15 @@ def test_a_test_failing_at_base_and_head_is_listed_and_not_a_failure():
     assert checks.compare(base, head, never) == {
         "failures": [], "deleted_at_head": [], "failing_at_base": ["m::broken"],
     }  # fmt: skip
+
+
+def test_a_whole_suite_failing_at_base_and_head_is_noted_and_not_a_failure():
+    assert checks.compare(_run(1), _run(2), never) == {
+        "failures": [], "deleted_at_head": [], "failing_at_base": [checks.BOTH_FAIL],
+    }  # fmt: skip
+    # The commit's own fault at head still counts against it.
+    broken = checks.compare(_run(1), _run(1, cause="commit", why="setup failed"), never)
+    assert broken["failures"] == ["setup failed"] and broken["failing_at_base"] == [checks.BOTH_FAIL]
 
 
 def test_an_absent_id_whose_definition_is_removed_is_deleted_not_failed():
@@ -626,21 +635,23 @@ def test_a_test_failing_at_base_and_head_does_not_make_red(dsn, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("base_suite", "verdict", "failures"),
+    ("base_suite", "verdict", "failures", "at_base"),
     [
-        ("exit 0", "red", ["the suite exited 1 at head and 0 at base"]),
-        ("exit 1", "red", [checks.BOTH_FAIL]),
+        ("exit 0", "red", ["the suite exited 1 at head and 0 at base"], []),
+        ("exit 1", "pass", [], [checks.BOTH_FAIL]),
     ],
 )
 @pytest.mark.macos
-def test_no_junit_on_either_side_is_decided_by_exit_codes(dsn, tmp_path, base_suite, verdict, failures):
+def test_no_junit_on_either_side_is_decided_by_exit_codes(
+    dsn, tmp_path, base_suite, verdict, failures, at_base
+):
     # The suite runs the commit's own script, so base and head differ by what it says.
     files = {"suite.sh": base_suite + "\n"}
     _task, _b, _out, got = through_test(
         dsn, tmp_path, files=files, writes={"suite.sh": "# head\nexit 1\n"}, suite="/bin/bash suite.sh"
     )
     d = decided(got)
-    assert d["verdict"] == verdict and d["failures"] == failures
+    assert d["verdict"] == verdict and d["failures"] == failures and d["failing_at_base"] == at_base
 
 
 @pytest.mark.macos

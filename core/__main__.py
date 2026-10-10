@@ -270,6 +270,8 @@ def _usd(micros: int) -> str:
 def _status_line(task_id: str, out: dict) -> str:
     state = out.get("state") or {}
     spent = f"metered spending: {_usd(state.get('spent_usd_micros', 0))}"
+    if state.get("unpriced_calls"):
+        spent += f", {len(state['unpriced_calls'])} calls at a stand-in price"
     status = out["status"]
     if status == "waiting":
         q = next(a for a in state["attention"] if a["kind"] == "question" and a["answer"] is None)

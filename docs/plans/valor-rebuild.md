@@ -33,10 +33,11 @@ Each milestone below states:
 - **Goal**, tied to the mission item or constraint it serves.
 - **Done**, as evidence: tests on real services, and a replay or emulator
   result where one applies. Narration is not evidence.
-- **Stakes**, which set the critique and review loops (0 to 2 each). The
-  guidance in the state machine doc applies: a small reversible change in
-  well-tested code is a 0, and a change to stored data, money,
-  authentication, migrations, or the kernel itself is a 2.
+- **Stakes**, which set the critique loop (0 to 2) and the review loop (0
+  or 1). The guidance in the state machine doc applies: a small reversible
+  change in well-tested code is a 0, and a change to stored data, money,
+  authentication, migrations, or the kernel itself gets 2 critique rounds
+  and 1 review round.
 - **Absorbs**, the known tech debt the plan pulls in ("leave it cleaner").
 - **Leaves out**, on purpose.
 

@@ -248,7 +248,7 @@ through the same path for $18.37 (rebuild-baseline.md, Caveats).
 
 **Prices.** A table of US dollars per million tokens per model, input,
 output, cache write, and cache read, from the provider's public pricing
-page. An Anthropic dated id matches its undated entry, longest match first; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix, since `-pro` variants cost more; any other id is unpriced. Each per-million charge is rounded up to a whole micro-dollar in integers, and a turn's spend is the numeric sum of its charges. Each price carries the day it was checked against that page, and every
+page. An Anthropic dated id matches its undated entry, longest match first; an OpenAI id matches only exactly or with a `-YYYY-MM-DD` suffix, since `-pro` variants cost more; any other id is unpriced, and its call is forwarded and charged at the highest rates of its family (`claude-haiku`, `gpt-6.1`), or of every entry when its family has none, the charge marked `unpriced`. Each per-million charge is rounded up to a whole micro-dollar in integers, and a turn's spend is the numeric sum of its charges. Each price carries the day it was checked against that page, and every
 `gateway.charged` row records it as `price_checked`, so a price change
 upstream is visible in the ledger. Status: **in use**.
 

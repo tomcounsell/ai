@@ -105,6 +105,9 @@ ROUNDS = (0, 1, 2)
 # target moved may ask for, per loop window.
 LAST_ROUNDS = 1
 REBASES = 2
+# Review sends work back at most once: a plan or a critique raise of 2 is
+# read as 1, never refused (docs/sdlc-state-machine.md, Loops).
+REVIEW_MAX = 1
 
 # The guards each redirect fires under (core/guards.py seeds them).
 GUARD_JUDGE = "intake.underspecified"
@@ -260,7 +263,7 @@ class Fold:
         plan = self.plan or {}
         return Loops(
             max(int(plan.get("critique_rounds", 0)), self.raised["critique_rounds"]),
-            max(int(plan.get("review_rounds", 0)), self.raised["review_rounds"]),
+            min(REVIEW_MAX, max(int(plan.get("review_rounds", 0)), self.raised["review_rounds"])),
         )
 
     def instances(self) -> list[Instance]:
