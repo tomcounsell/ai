@@ -113,3 +113,12 @@ None.
   session's images, its base included (named under `valor-test-<label>`),
   were deleted at session end; the machine's `images.json` is unchanged and
   the data disk went from 16 GB free before to 18 GB after.
+- Container, in the lead's window: one real psyoptimal verify through
+  `container.verify` on the test DB, the repo at `pso-a`'s base
+  `207457fccef0` with the draft spec from `cutover-data.md`; 1 passed in
+  965.6 s. The dependency build installed the lock (psycopg2 2.9.11 is
+  sdist only, built against the base image's `libpq-dev`, `pg_config` on
+  `VM_PATH`), and setup exited 0 at base and at head. Base: 1531 passed,
+  23 failed, 4 errored, exit 1, 185.9 s, peak 797 MB; head the same counts.
+  The free disk never went under 6 GB and was 14 GB after; the session's
+  images were deleted at session end.
