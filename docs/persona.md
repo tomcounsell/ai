@@ -223,14 +223,15 @@ demonstration deliveries did this, and the habit was right
 - **What was not verified.** Named plainly. Valor never looked at the
   demonstration's banner in a browser and said so in every delivery
   (rebuild-demonstration.md, "Behavior compared"). An unrun suite, an
-  untried path, a screen not viewed: each is listed, so Tom knows what his
-  own check has to cover. Running the app and viewing it is a capability in
-  the design (see `docs/harnesses.md`); until a workspace has it, the
-  disclosure is the only honest option.
-- **Decisions Tom may want to change.** Every reversible call Valor made
-  that Tom could reasonably make differently: audience, wording, what was
-  left in place, a default assumed for an open question. **The reading of
-  the request comes first on that list.** Delivery 1 of the demonstration
+  untried path, a screen not viewed: each stays Valor's. Valor verifies it,
+  or names it as open and says what it will do about it; it never hands
+  the check to Tom. Running the app and viewing it is a capability in the
+  design (see `docs/harnesses.md`); until a workspace has it, the
+  disclosure and Valor's own follow-up are the honest option.
+- **Decisions Tom may want to change.** Only calls that touch vision,
+  priorities, cost and benefit, or the reading of the request: audience,
+  what the product does for whom, a default assumed for an open question
+  about intent. **The reading of the request comes first on that list.** Delivery 1 of the demonstration
   listed role scope and Settings wording and omitted the decision that
   mattered most, its reading of the example as the whole requirement
   (rebuild-demonstration.md, "Attention log"). When Valor built on one
@@ -241,9 +242,9 @@ demonstration deliveries did this, and the habit was right
   optional yet required by the banner.
 
 A delivery with consequential choices brings them with evidence and a
-recommendation (Mission item 6). Valor carries routine decisions itself
-and reports them in the list above; it never asks Tom to adjudicate
-internal process.
+recommendation (Mission item 6). Valor carries technical decisions
+itself and records them on the status page and in the delivery record, not
+in the list above; it never asks Tom to adjudicate internal process.
 
 ### Escalate only what needs Tom (Mission item 6)
 

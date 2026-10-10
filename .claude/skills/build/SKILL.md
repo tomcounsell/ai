@@ -36,9 +36,10 @@ bind everything), `docs/plans/valor-rebuild.md` (above all "How every
 milestone is built", "How the loops end", "Execution", and the milestone
 you are on), `docs/plans/rebuild-handoff.md`, then every task's plan file
 (`docs/plans/m<milestone>-*.md`). Plan files are the
-state: their frontmatter `status`, and their record sections (critique
-rounds, build record, patch rounds, checks, delivery, Tom's feedback,
-merged), say exactly where work stopped.
+state: their frontmatter `status`, and their record sections (one short
+verdict line per round, the delivery, merged), say exactly where work
+stopped. Git history holds the rest; there are no separate round-record
+files.
 
 ## 2. Check the machine
 
@@ -66,8 +67,8 @@ or any prefix of one.
 | `planned`, critique sound or rounds spent | build (spent rounds' findings ride into the build prompt) |
 | `built` or a patch recorded with no checks after it | checks |
 | checks recorded, no join | the join |
-| `delivered-not-passed` | the lead decides against the task's objective: another patch round (with its scope, recorded in the plan file), or stop and record why |
-| a patch round decided (by the lead or Tom), not applied | patch to that scope, then the three checks |
+| `delivered-not-passed` | the lead merges (suite green, remaining findings break no Done item) or stops, and records why; one extra patch round only for a finding that breaks a Done item, and only if the task has not had one |
+| a patch round decided by the lead, not applied | patch to that scope, then the three checks |
 | passed checks, or the lead's merge decision recorded, not merged | merge and roll out |
 | `merged` | the next item |
 
@@ -179,8 +180,9 @@ builder's narration.
   model in a few lines (what the turn controls, what the kernel must never
   do with it), stakes with `critique_rounds` and `review_rounds` (the kernel,
   money, stored data, migrations: 2 and 2), tech debt absorbed, what is left
-  out, tests including the non-obvious cases, and questions for Tom with
-  the answer it will assume. It commits and stops.
+  out, tests including the non-obvious cases, and any question in Tom's
+  queue (below) with the answer it will assume; technical questions it
+  decides itself. It commits and stops.
 - **Critique** (Opus, read-only): wrong premises, divergence from the docs
   the milestone cites, missed cases, and anything that adds a check, gate,
   hook, or review step without an incident, a mission item, and Tom's
@@ -206,12 +208,14 @@ builder's narration.
   round left goes to patch with every finding; review `pass` with test or
   docs failing goes to patch once (the repair round); everything passing
   goes to merge. Before a patch, fast-forward the builder's branch onto the
-  docs commit. After every patch all three checks run again.
-- **Stop means stop**, for subagents. When rounds are spent, record the
-  delivery as `delivered-not-passed` with the findings. The lead then
-  decides against the task's objective, never Tom: another patch round
-  with a named scope, a merge, or a stop, and records the decision and why
-  in the plan file.
+  docs commit. After a patch, test and review run again; docs runs again
+  only when the patch changed behavior the docs describe.
+- **Stop means stop**, for subagents. When the stake-set rounds are spent,
+  record the delivery as `delivered-not-passed` with the findings. The lead
+  then merges, when the suite is green and no remaining finding breaks a
+  Done item, or stops the task, and records the decision and why in one
+  line of the plan file. A task gets at most one extra patch round, ever,
+  and only for a finding that breaks a Done item.
 - **Merge**, the lead's call (Tom, 2026-10-03: merges are not tapped):
   fast-forward `valor-cori-rebuild` to the docs
   head, push, run the plan's rollout steps (back up first with
@@ -245,17 +249,13 @@ cannot run its pipeline, and record that repair as a task.
   `~/src/ai`.
 - Your own worktree, test database, ports, and `.venv` (section 4);
   `unset VIRTUAL_ENV`. Never edit another task's worktree or branch.
-- No invented caps or safeguards. A limit, size cap, run cap, refusal,
-  or stop that routes to Tom needs a source (Tom, `valor-rebuild.md`, or a
-  doc the plan cites) or a function (a security read of turn-owned state,
-  the metering rule, a protocol fact). Without one it is dropped, and
-  critics and reviewers name it as a finding. Spending is metered only.
+- Governance is the `CLAUDE.md` paragraph; spending is metered only.
 - Report only to the lead session through your final result; never
-  address Tom. Questions for Tom go in the plan file with the answer you
-  will assume, and you carry on with it.
+  address Tom. A question only Tom can answer (Tom's queue) goes in the
+  plan file with the answer you will assume, and you carry on with it.
 - Docs: the status quo only, plain language, no em or en dashes, no
-  history words, never the word "cori", under 600 lines, the governance
-  paragraph byte-identical to `CLAUDE.md`'s.
+  history words, never the word "cori", the governance paragraph
+  byte-identical to `CLAUDE.md`'s.
 - Suite: `VALOR_TEST_DB=<own name> .venv/bin/python -m pytest -q tests`;
   lint: `uvx ruff check .` and `uvx ruff format --check .` (the one
   pre-existing complaint in `docs/bridges/telegram.md` is not a failure).

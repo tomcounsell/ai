@@ -173,10 +173,11 @@ ledgers count as evidence of.
 - The emulator replays human-originated historical requests, labelled by
   the human merge or review decision (`docs/emulator.md`). The demonstration
   and the baseline below are its first cases.
-- The audit sample is Tom reading a fraction of verified work himself, the
-  only check on the cheaper checks [4, 17]. Verifier calibration is scored
-  against it as a Brier score with its sample size [12]
-  (`python -m core audit`, `audit label`, `audit scores`).
+- The audit sample is Tom reading a fraction of verified work himself,
+  when he chooses to, the only check on the cheaper checks [4, 17].
+  Verifier calibration is scored against it as a Brier score with its
+  sample size [12] (`python -m core audit`, `audit label`, `audit scores`).
+  Labelling is on Tom's lead; nothing waits on it.
 
 A judge's score is a proxy, and an optimized proxy drifts from what it
 stands for [14]. No score is reported alone: a fidelity number comes with the

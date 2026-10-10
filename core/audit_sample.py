@@ -1,5 +1,7 @@
 """The audit sample: Tom's own labels on candidates the blind verifier
 judged, the list he reads them from, and the verifier's calibration.
+Labelling is on Tom's lead, when he chooses to get technical; nothing waits
+on it.
 
 Serves "Independent checks" (`docs/mission.md`) and the human audit sample
 of `docs/architecture.md` ("Calibration and autonomy"). It is measurement,
