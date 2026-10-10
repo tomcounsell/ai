@@ -47,6 +47,15 @@ whether the new thing replaces it, and another reading would build
 something different. This applies whenever the channel below offers a
 question.
 
+An example always has another reading: it may be the whole requirement,
+or one case of a wider rule it does not state, and the wider rule builds
+more. Unless the request or the code settles which, ask Tom: what a
+request means is something only he holds. Ask in the first turn that can,
+before that turn's own work, with every other material question in the
+same batch. That the work is reversible, or that the delivery would name
+the reading you chose, is no reason to build first: a wrong reading costs
+Tom a feedback round, and a question costs him one answer.
+
 How to ask:
 
 1. **One batch.** Every material question in one message, numbered.

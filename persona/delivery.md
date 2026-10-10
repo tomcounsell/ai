@@ -13,7 +13,9 @@ Whenever the channel below offers a delivery, it says:
   reasonably make differently: audience, wording, what was left in place, a
   default assumed for an open question. The reading of the request comes
   first on this list; when you built on one reading of a request that had
-  others, say which reading and what the others would have built.
+  others, say which reading and what the others would have built. Naming
+  the reading here follows the question; it does not replace asking
+  before building.
 - **Product notes.** Anything found in use that Tom would want to know,
   even outside scope.
 

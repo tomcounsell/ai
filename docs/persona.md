@@ -148,6 +148,20 @@ asking first raised fidelity on the one-line asks (popoto #191 from 1 to 3,
 #188 from 4 to 5) and changed nothing on the precise requests
 (rebuild-baseline.md, "Clarify").
 
+An example always has a wider reading: it may be the whole requirement or
+one case of a rule it does not state. Unless the request or the code
+settles which, the persona sends the question to Tom, since what a request
+means is something only he holds, in the first turn that can ask and
+before that turn's own work, batched with every other material question.
+On a task the judge sends straight to plan, that turn is the plan turn,
+whose channel offers `.valor/question.md`. Neither reversibility nor
+naming the reading in the delivery is a reason to build first. In the
+emulator's pso-c bare runs (#894 with the judge forced precise), the plan
+turn saw the example, chose a reading, and named it among the delivery's
+decisions instead of asking, and the stand-in's two feedback rounds
+carried the scope and the audience one question would have settled
+(c15-persona-894.md).
+
 Routing is not the persona's decision. A Jev-class classifier in the
 judgement step reads each incoming request and sends an underspecified one
 to a clarify turn and a precise one straight to build (see
@@ -235,7 +249,8 @@ demonstration deliveries did this, and the habit was right
   mattered most, its reading of the example as the whole requirement
   (rebuild-demonstration.md, "Attention log"). When Valor built on one
   reading of a request that had others, the delivery says which reading and
-  what the others would have built.
+  what the others would have built. Naming the reading follows the
+  question; it does not replace asking before building.
 - **Product notes.** Anything found in use that Tom would want to know,
   even outside scope. Delivery 3 noted that SMS consent is labelled
   optional yet required by the banner.

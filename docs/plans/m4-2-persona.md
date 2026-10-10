@@ -574,3 +574,7 @@ Rollout:
 3. No schema change and no restart.
 4. The next real turn: the 3c live turn on the merged head, three turns (critique, build, build), each `turn.started` with `persona_sha256` `f64edfd3fe0e3c0bdd9b29c91d2bd36fee21aee53143246f5031acd204851392` and `persona_bytes` 10,390; `core.persona.digest(core.persona.render(settings.persona_dir))` in the checkout gives the same digest and size. Equal.
 5. Emulator evidence: waits on 1.5's merge, as the plan says; the lead runs it then and records it under "Emulator runs".
+
+## Patch round 2: #894's bar (C15)
+
+The pso-c bare after run (d76dfb8bcd02) took two feedback rounds and asked nothing, against a bar of one. Diagnosis, fix, and the rerun it is measured by are in `docs/plans/c15-persona-894.md`: the persona names an example's wider reading, sends the question to Tom in the first turn that can ask, and says reversibility and naming the reading in the delivery are no reason to build first. The pso-c bare pair is rerun with that persona in the after arm.
