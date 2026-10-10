@@ -106,7 +106,7 @@ def test_a_docs_commit_is_kept_in_the_mirror_and_the_join_merges(dsn, tmp_path):
     before = {}
 
     async def go():
-        task, b, ws = await at_checks(dsn, tmp_path, docs_commits=[{"files": {"docs/greeting.md": "Hi.\n"}}])
+        task, b, ws = await at_checks(dsn, tmp_path, docs_commits=[{"files": {"guide/greeting.md": "Hi.\n"}}])
         before["builder"] = _refs_and_objects(b.workspace)
         out = await drive(dsn, task, docs_runners(ws))
         return task, b, out, await rows(dsn, task)
@@ -115,12 +115,12 @@ def test_a_docs_commit_is_kept_in_the_mirror_and_the_join_merges(dsn, tmp_path):
     d = decided(got)
     c = d["candidate"]["sha"]
     assert d["verdict"] == "updated" and d["leg"] == "session" and d["dropped"] == []
-    assert git.trusted(b.mirror, "show", f"{d['head']}:docs/greeting.md") == "Hi."
+    assert git.trusted(b.mirror, "show", f"{d['head']}:guide/greeting.md") == "Hi."
     assert git.trusted(b.mirror, "rev-parse", f"{d['head']}^") == c
     kept = next(r["payload"] for r in got if r["type"] == fresh.DOCS_KEPT)
     assert kept["kept"] == d["head"] and d["turn_id"] == kept["turn_id"]
     assert git.trusted(b.mirror, "rev-parse", f"refs/valor/docs/{kept['turn_id']}") == d["head"]
-    assert d["governance"]["judgements"]  # asked over the kept diff, after the turn
+    assert d["governance"]["judgements"]  # asked over the kept diff, after the turn (guide/ is not docs/)
     assert machine.fold(got).state is State.MERGE
     # The builder's clone is untouched; the docs commits never reach its branch.
     assert _refs_and_objects(b.workspace) == before["builder"]
@@ -170,12 +170,14 @@ def test_a_commit_the_kernel_will_not_keep_is_dropped_with_every_later_one(
     _task, b, _ws, _out, got = docs_run(dsn, tmp_path, docs_commits=commits)
     d = decided(got)
     c = d["candidate"]["sha"]
-    assert d["verdict"] == "changes"
+    # Dropped and noted, never `changes`: the merge goes on at what was kept.
+    assert d["verdict"] == ("updated" if kept_count else "no_change")
     assert len(git.trusted(b.mirror, "rev-list", f"{c}..{d['head']}").split()) == kept_count
     assert len(d["dropped"]) == len(commits) - kept_count
     assert named in " ".join(d["dropped"][0]["paths"])
-    texts = [x["text"] for x in d["findings"] if x["kind"] == "changes"]
+    texts = [x["text"] for x in d["findings"] if x["kind"] == "dropped"]
     assert len(texts) == len(d["dropped"]) and named.split(" (")[0] in texts[0]
+    assert not [x for x in d["findings"] if x["kind"] == "changes"]
 
 
 @pytest.mark.parametrize("how", ["merge", "orphan", "fsmonitor"])
@@ -192,8 +194,8 @@ def test_a_head_the_kernel_cannot_take_keeps_nothing(dsn, tmp_path, how):
     }[how]
     _task, _b, _ws, _out, got = docs_run(dsn, tmp_path, **cfg)
     d = decided(got)
-    assert d["verdict"] == "changes" and d["head"] == d["candidate"]["sha"]
-    assert any("no docs commit kept" in x["text"] for x in d["findings"])
+    assert d["verdict"] == "no_change" and d["head"] == d["candidate"]["sha"]
+    assert any(x["kind"] == "dropped" and "no docs commit kept" in x["text"] for x in d["findings"])
     assert not marker.exists()
 
 
@@ -231,7 +233,7 @@ def test_a_run_that_dies_after_the_turn_asks_only_governance_again(dsn, tmp_path
     down = UP.port(script=UP.script(default={"status": 503}))
 
     async def go():
-        task, _b, ws = await at_checks(dsn, tmp_path, docs_commits=[DOC])
+        task, _b, ws = await at_checks(dsn, tmp_path, docs_commits=[{"files": {"guide/a.md": "A.\n"}}])
         first = await drive(dsn, task, docs_runners(ws, down))
         for _ in range(3):  # until governance's reruns are spent or it answers
             between = await rows(dsn, task)
@@ -293,18 +295,11 @@ def test_a_docs_turn_stopped_mid_turn_leaves_no_verdict(dsn, tmp_path):
 
 
 @pytest.mark.macos
-def test_a_session_docs_head_must_be_one_the_kernel_kept(dsn, tmp_path):
+def test_a_session_docs_verdict_names_its_governance_judgements(dsn, tmp_path):
     async def go():
-        task, _b, ws = await at_checks(dsn, tmp_path)
+        task, _b, _ws = await at_checks(dsn, tmp_path)
         c = machine.fold(await rows(dsn, task)).candidate.sha
-        head = scripted.commit(ws, "docs/x.md", "x\n", "docs")  # in the builder's clone only
         async with await db.connect(dsn) as conn:
-            for h in (head, "abc"):
-                with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
-                    await verdicts.record_check(
-                        conn, task, Check.DOCS, "updated", head=h, governance_from=[], leg="session",
-                        model="m", turn_id="t",
-                    )  # fmt: skip
             with pytest.raises(verdicts.VerdictRefused, match="names its governance judgements"):
                 await verdicts.record_check(conn, task, Check.DOCS, "no_change", leg="session", model="m",
                                             turn_id="t")  # fmt: skip

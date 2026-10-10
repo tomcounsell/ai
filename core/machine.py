@@ -666,20 +666,11 @@ def is_doc_path(path: str) -> bool:
     return not any(part in INSTRUCTION_DIRS for part in parts[:-1])
 
 
-@dataclass(frozen=True)
-class GitFacts:
-    """What the broker reads from the workspace at request, between the
-    candidate and the head being merged."""
-
-    ancestor: bool
-    merges: tuple[str, ...]
-    paths: tuple[str, ...]
-
-
-def merge_predicate(f: Fold, payload: dict[str, Any], *, facts: GitFacts | None) -> list[str]:
+def merge_predicate(f: Fold, payload: dict[str, Any]) -> list[str]:
     """The four terms of the merge predicate over a merge effect's payload.
     Returns each term that does not hold, named; empty means the merge may
-    be performed. Each term reads a row or a git fact."""
+    be performed. Each term reads a row: what a docs head holds was read
+    once, when the docs runner kept it (`fresh.kept_prefix`)."""
     failed = []
     named = payload.get("candidate") or {}
     current = f.candidate
@@ -708,14 +699,7 @@ def merge_predicate(f: Fold, payload: dict[str, Any], *, facts: GitFacts | None)
         docs is None
         or docs.verdict not in DOCS_PASS
         or docs.payload.get("head") != payload.get("head_sha")
-        or facts is None
-        or not facts.ancestor
-        or facts.merges
-        or not all(is_doc_path(p) for p in facts.paths)
         or any(i.id not in f.granted for i in docs.instances)
     ):
-        failed.append(
-            "4: docs updated or unchanged, its commits running from the candidate to this head "
-            "with no merge commit and touching only doc paths, any governance granted"
-        )
+        failed.append("4: docs updated or unchanged at this head, any governance it named granted by Tom")
     return failed

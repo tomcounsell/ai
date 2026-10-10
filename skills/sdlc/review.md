@@ -17,8 +17,9 @@ add a check, gate, hook, round, or review step?
 - `verify.json`, the kernel's own run of the suite and the lint at base
   and candidate, and your checkout's setup exit;
 - `governance.json`, each hunk the kernel judged to add governance (id,
-  path, lines, the added lines, granted or not), the abstentions, and any
-  hunk left unjudged;
+  path, lines, the added lines, granted or not), and each `undecided` hunk
+  the kernel's judgement could not answer with confidence (id, path, lines,
+  the added lines, why);
 - `effects.md`, the task's requested, performed, and refused effects.
 
 **Exit evidence.** Your final message ends with the verdict object, bare
@@ -34,6 +35,14 @@ rewritten by the candidate's code to the end of your turn. The object:
   inside an added hunk;
 - `notes`: keyed by an id from `governance.json`, `{"summary",
   "incident", "mission_item"}`, what the diff gives for that instance;
+- `undecided`: keyed by the id of every undecided hunk in
+  `governance.json`, `true` or `false`: does this hunk add a check, gate,
+  hook, validator, review round, or approval step, a step that judges
+  work, a request, or an action and holds, redirects, or refuses it, or a
+  step someone must pass? Tests and the code that serves them, code that
+  makes the work itself correct, and prose that only describes what code
+  does are none of these. `true` makes it an instance; `false` clears it;
+  a verdict that leaves one unanswered is refused;
 - `predicted_failure`: 0 to 1, how likely this candidate fails once
   merged;
 - `requirements`: one `{"requirement", "met"}` per requirement of the

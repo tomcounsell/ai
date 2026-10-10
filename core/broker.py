@@ -22,13 +22,10 @@ refused while any instance it names lacks Tom's tap (`guard.granted`); the
 Brief's `governance_grant` does not stand in for the tap.
 
 A `merge` leaves only when the merge predicate holds
-(`machine.merge_predicate`): `request` evaluates it, with the git facts it
-reads from the kernel mirror or the workspace, in the same transaction,
-under the task's lock, that writes the intent, so nothing can land between
-the check and the intent. A term that does not hold refuses the merge.
-When git cannot say (an error, or an ancestry read that exits other than 0
-or 1), nothing is written and the answer is `unknown`, so the merge is
-asked again.
+(`machine.merge_predicate`): `request` evaluates it over the task's rows in
+the same transaction, under the task's lock, that writes the intent, so
+nothing can land between the check and the intent. A term that does not
+hold refuses the merge.
 
 Performing follows intent, then outcome: the intent row commits before the
 performer runs, so a kill between the two leaves a findable dangling intent,
@@ -68,7 +65,7 @@ from typing import Any, Protocol
 
 import psycopg
 
-from core import git, ledger, machine, outcomes, performing, tasks
+from core import ledger, machine, outcomes, performing, tasks
 from core.tasks import EFFECT_RANK
 
 
@@ -138,10 +135,6 @@ class Refused(RuntimeError):
     """A release the broker will not perform (no performer, or the
     performer's `refuse`), checked before the intent; one `effect.refused`
     records it."""
-
-
-class _Unreadable(Exception):
-    """Git could not say what a merge's facts are."""
 
 
 class Performers:
@@ -266,13 +259,7 @@ async def _request(
             reason = said
         landed = None
         if reason is None and action.action_type == "merge" and not declared(performer):
-            # A task the kernel provisioned reads its git facts from the
-            # kernel mirror, which no turn writes.
-            try:
-                facts = _git_facts(brief.mirror or brief.workspace, f, action.payload)
-            except _Unreadable as exc:
-                return Outcome(effect_id, "unknown", error=f"git could not read the merge's facts: {exc}")
-            failed = machine.merge_predicate(f, action.payload, facts=facts)
+            failed = machine.merge_predicate(f, action.payload)
             if failed:
                 reason = "the merge predicate does not hold: " + "; ".join(failed)
             else:
@@ -455,30 +442,6 @@ async def _release(conn, performers: Performers, effect_id: str) -> Outcome:
             raise Refused(said)
         await _intent(conn, task_id, effect_id, described)
     return await _perform(conn, performers, task_id, effect_id, action, described)
-
-
-def _git_facts(workspace: str | None, f: machine.Fold, payload: dict[str, Any]) -> machine.GitFacts | None:
-    """What the workspace's history says between the candidate and the head
-    being merged, read now, never taken from a row; None when there is no
-    workspace, candidate, or head to read. Raises `_Unreadable` when git
-    could not say: an error, or `merge-base --is-ancestor` exiting other
-    than 0 (an ancestor) or 1 (not one), as `git.ancestry` reads it."""
-    head = payload.get("head_sha")
-    if not workspace or f.candidate is None or not head:
-        return None
-    try:
-        done = git.run(workspace, "merge-base", "--is-ancestor", f.candidate.sha, head)
-        if done.returncode not in (0, 1):
-            raise _Unreadable((done.stderr or "").strip() or f"git exited {done.returncode}")
-        if done.returncode == 1:
-            return machine.GitFacts(False, (), ())
-        return machine.GitFacts(
-            True,
-            tuple(git.merges_between(workspace, f.candidate.sha, head)),
-            tuple(git.diff_paths(workspace, f.candidate.sha, head)),
-        )
-    except git.GitError as exc:
-        raise _Unreadable(str(exc)) from exc
 
 
 INTENT_FIELDS = ("action_type", "target", "payload", "payload_sha256", "effect_class")

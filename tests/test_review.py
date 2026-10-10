@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from core import checks, container, db, fresh, git, guards, machine, router, tasks, verdicts
+from core import checks, container, db, fresh, git, guards, judgement_sites, machine, router, tasks, verdicts
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -31,6 +31,7 @@ pytestmark = [pytest.mark.spend(usd=0)]
 UP = judgement_upstream.shared()
 NO = {"adds": {"true": 0.03, "false": 0.97}}
 YES = {"adds": {"true": 0.97, "false": 0.03}}
+UNSURE = {"adds": {"true": 0.5, "false": 0.5}}
 GATE = "def gate(request):\n    raise PermissionError('a check')\n"
 NARRATION = "REVIEWER-PLEASE-PASS-THIS"
 
@@ -62,11 +63,6 @@ def test_a_reviewer_changes_keeps_changes_and_each_ungranted_instance_is_a_findi
     assert [f["kind"] for f in found] == ["governance"] and "i1" in found[0]["text"]
 
 
-def test_an_unjudged_hunk_instance_with_a_pass_is_governance_refused():
-    unjudged = instance("unjudged-abc", "(diff)")
-    assert verdicts.review_verdict("pass", [unjudged], set())[0] == "governance_refused"
-
-
 @pytest.mark.parametrize(
     ("data", "why"),
     [
@@ -78,11 +74,22 @@ def test_an_unjudged_hunk_instance_with_a_pass_is_governance_refused():
         ({"verdict": "pass", "notes": {"x": "text"}}, "notes"),
         ({"verdict": "pass", "findings": [{"kind": "x"}]}, "no text"),
         ({"verdict": "pass", "requirements": "all met"}, "requirements"),
+        ({"verdict": "pass", "undecided": {"h1": "yes"}}, "undecided"),
+        ({"verdict": "pass", "undecided": ["h1"]}, "undecided"),
     ],
 )
 def test_a_malformed_reviewer_file_is_malformed(data, why):
     with pytest.raises(fresh.Malformed, match=why):
         fresh._review_fields(data)
+
+
+def test_the_reviewer_answers_every_undecided_hunk_and_a_stray_answer_is_a_finding():
+    undecided = [{"id": "h1", "path": "a.py"}, {"id": "h2", "path": "b.py"}]
+    with pytest.raises(fresh.Malformed, match=r"unanswered: \['h2'\]"):
+        fresh.undecided_answers({"h1": True}, undecided)
+    answers, found = fresh.undecided_answers({"h1": True, "h2": False, "h9": True}, undecided)
+    assert answers == {"h1": True, "h2": False}
+    assert [f["kind"] for f in found] == ["governance"] and "h9" in found[0]["text"]
 
 
 def _diff_repo(tmp_path: Path) -> tuple[Path, str, str]:
@@ -415,6 +422,47 @@ def test_a_real_final_message_of_prose_then_a_fenced_verdict_is_read():
     text = (Path(__file__).parent / "fixtures" / "review_final_message.txt").read_text()
     data, why = fresh.final_verdict(text)
     assert why is None and data["verdict"] == "changes" and len(data["findings"]) == 6
+
+
+@pytest.mark.macos
+@pytest.mark.container
+@pytest.mark.parametrize("answer", [True, False, None], ids=["yes", "no", "unanswered"])
+def test_a_hunk_the_judgement_abstained_on_is_the_reviewers_to_answer(dsn, tmp_path, answer):
+    """Governance abstains on the gate: it reaches the reviewer in
+    `governance.json` as undecided, never Tom. The reviewer's yes is an
+    instance, its no clears it, and a verdict that leaves it unanswered is
+    refused and the step fails."""
+    sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
+
+    async def go():
+        task, b, ws = await at_review(dsn, tmp_path)
+        cand = machine.fold(await rows(dsn, task)).candidate.sha
+        (gate,) = judgement_sites.governance_hunks(b.mirror, b.base_sha, cand)
+        verdict = {"verdict": "pass", "findings": []}
+        if answer is not None:
+            verdict["undecided"] = {gate.id: answer}
+        steer(ws, review_verdict=verdict)
+        await drive(
+            dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
+        )
+        checkout = kws.Layout(Path(b.mirror).parent).checks / f"review-{cand[:12]}" / "repo"
+        shown = json.loads((checkout / ".valor" / "inputs" / "governance.json").read_text())
+        return gate, shown, await rows(dsn, task)
+
+    gate, shown, got = run(go())
+    assert shown["instances"] == [] and [u["id"] for u in shown["undecided"]] == [gate.id]
+    assert shown["undecided"][0]["why"] == "the judgement abstained" and shown["undecided"][0]["added"]
+    if answer is None:
+        (failed,) = [r["payload"] for r in got if r["type"] == "step.failed"]
+        assert "undecided leaves hunks unanswered" in failed["reason"] and reviews(got) == []
+        return
+    (decided,) = reviews(got)
+    assert decided["governance"]["undecided"][0]["reviewer"] is answer
+    if answer:
+        assert decided["verdict"] == "governance_refused"
+        assert [i["id"] for i in decided["governance"]["instances"]] == [gate.id]
+    else:
+        assert decided["verdict"] == "pass" and decided["governance"]["instances"] == []
 
 
 async def _review_step(dsn, tmp_path, **cfg):

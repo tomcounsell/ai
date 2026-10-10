@@ -475,12 +475,6 @@ def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
                 await verdicts.record_check(
                     conn, task, machine.Check.TEST, "pass", leg="session", breadth="b"
                 )
-            for head in ("abc123", "1" * 40):
-                with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
-                    await verdicts.record_check(
-                        conn, task, machine.Check.DOCS, "updated", head=head, governance_from=[],
-                        **scripted.SESSION_LEG,
-                    )  # fmt: skip
 
     run(checks_refuse())
 
@@ -557,7 +551,7 @@ def test_a_docs_head_only_in_the_builders_clone_is_refused(dsn, tmp_path):
         await drive(dsn, task, scripted.fresh_runners(ws))
         head = scripted.commit(ws, "docs/x.md", "x\n", "docs")
         async with await db.connect(dsn) as conn:
-            with pytest.raises(verdicts.VerdictRefused, match="not a docs head the kernel kept"):
+            with pytest.raises(verdicts.VerdictRefused, match="bad object|unknown revision|not a valid"):
                 await verdicts.record_check(
                     conn,
                     task,

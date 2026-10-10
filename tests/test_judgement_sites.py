@@ -386,14 +386,15 @@ def test_governance_judges_every_hunk_and_the_kernel_makes_the_instances(dsn, tm
         return ids, again, gate, (await rows(dsn, task, "review.decided"))[0]["payload"], older, newer
 
     ids, again, gate, decided, older, newer = run(go())
-    hunks = judgement_sites.diff_hunks(ws, older, newer)
-    assert again == ids and len(ids) == len(hunks) == 4  # docs/plan.md and three files; reused on rerun
-    assert len([r for r in UP.seen(sid) if r["leg"] == "jev"]) == 4 + 1  # four hunks, one stray
+    hunks = judgement_sites.governance_hunks(ws, older, newer)
+    assert len(judgement_sites.diff_hunks(ws, older, newer)) == 4  # docs/plan.md and three files
+    assert again == ids and len(ids) == len(hunks) == 3  # docs/plan.md is not asked; reused on rerun
+    assert len([r for r in UP.seen(sid) if r["leg"] == "jev"]) == 3 + 1  # three hunks, one stray
     assert decided["verdict"] == "governance_refused" and decided["reviewer_verdict"] == "pass"
     gov = decided["governance"]
     assert gov["adds"] is True and [i["id"] for i in gov["instances"]] == [gate.id]
     assert gov["instances"][0]["incident"] == "incident X" and gov["judgements"] == ids
-    assert gov["abstain_instances"] == 0 and gov["unjudged_hunks"] == []
+    assert gov["undecided"] == []
     from core import git as git_
 
     assert gate.id == git_.hunk_at(ws, older, newer, "hooks/gate.py", 1).id()
@@ -427,7 +428,7 @@ def test_the_hunk_input_carries_its_enclosing_function_but_the_id_does_not(dsn, 
 
 
 @pytest.mark.macos
-def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_path):
+def test_an_abstain_goes_to_the_reviewer_whose_yes_is_an_instance_and_a_reviewer_adds_caution(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
 
@@ -435,22 +436,79 @@ def test_a_reviewer_adds_caution_an_abstain_counts_and_tom_taps_each(dsn, tmp_pa
         task = await governance_candidate(dsn, ws)
         older, newer = await candidate_range(dsn, task)
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        gate = next(
+            h.id for h in judgement_sites.governance_hunks(ws, older, newer) if h.path == "hooks/gate.py"
+        )
+        with pytest.raises(verdicts.VerdictRefused, match="left undecided hunks unanswered"):
+            await review(dsn, task, "pass", ids)
+        with pytest.raises(verdicts.VerdictRefused, match="not undecided here"):
+            await review(dsn, task, "pass", ids, undecided={gate: True, "f" * 16: False})
         util = verdicts.InstanceSpec("lib/util.py", 1, "the reviewer's own reading", "incident Y", "1")
-        await review(dsn, task, "pass", ids, governance=[util])
+        await review(dsn, task, "pass", ids, governance=[util], undecided={gate: True})
         await scripted.check(dsn, task, "test", "pass")
         await scripted.check(dsn, task, "docs", "no_change")
-        return task, (await rows(dsn, task, "review.decided"))[0]["payload"]
+        return task, gate, (await rows(dsn, task, "review.decided"))[0]["payload"]
 
-    task, decided = run(go())
+    task, gate, decided = run(go())
     gov = decided["governance"]
     assert {i["path"] for i in gov["instances"]} == {"hooks/gate.py", "lib/util.py"}
-    assert gov["abstain_instances"] == 1
+    assert gov["undecided"] == [
+        {"id": gate, "path": "hooks/gate.py", "why": "the judgement abstained", "reviewer": True}
+    ]
     f = machine.fold(run(rows(dsn, task)))
     assert f.state is State.MERGE and len(f.ungranted()) == 2 and f.merge_effect is None
 
 
 @pytest.mark.macos
-def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(dsn, tmp_path):
+def test_an_abstain_the_reviewer_answers_no_is_no_instance_and_never_reaches_tom(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        gate = next(
+            h.id for h in judgement_sites.governance_hunks(ws, older, newer) if h.path == "hooks/gate.py"
+        )
+        await review(dsn, task, "pass", ids, undecided={gate: False})
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        return task, (await rows(dsn, task, "review.decided"))[0]["payload"]
+
+    task, decided = run(go())
+    assert decided["verdict"] == "pass" and decided["governance"]["instances"] == []
+    assert decided["governance"]["undecided"][0]["reviewer"] is False
+    f = machine.fold(run(rows(dsn, task)))
+    assert f.state is State.MERGED and f.ungranted() == []  # merged with no tap
+
+
+@pytest.mark.macos
+def test_an_undecided_hunk_on_a_kernel_review_is_no_instance(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
+
+    async def go():
+        task = await governance_candidate(dsn, ws)
+        older, newer = await candidate_range(dsn, task)
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="only a session review"):
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "changes", governance_from=ids, leg="kernel", undecided={}
+                )
+            await verdicts.record_check(
+                conn, task, Check.REVIEW, "changes", governance_from=ids, leg="kernel"
+            )
+        return (await rows(dsn, task, "review.decided"))[0]["payload"]
+
+    decided = run(go())
+    assert decided["governance"]["instances"] == []
+    assert decided["governance"]["undecided"][0]["reviewer"] is None
+
+
+@pytest.mark.macos
+def test_governance_left_unanswered_reruns_then_goes_to_the_reviewer(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"fail_paths": ["lib/util.py", "lib/handler.py"], "probs": NO})
 
@@ -463,16 +521,18 @@ def test_governance_left_unanswered_reruns_then_makes_one_diff_level_instance(ds
             await review(dsn, task, "pass", first)
         second = await judgement_sites.governance(p, dsn, task, older, newer)
         third = await judgement_sites.governance(p, dsn, task, older, newer)
-        await review(dsn, task, "pass", second)
-        return first, second, third, (await rows(dsn, task, "review.decided"))[0]["payload"]
+        hunks = {h.path: h.id for h in judgement_sites.governance_hunks(ws, older, newer)}
+        answers = {hunks["lib/util.py"]: False, hunks["lib/handler.py"]: True}
+        await review(dsn, task, "pass", second, undecided=answers)
+        return first, second, third, hunks, (await rows(dsn, task, "review.decided"))[0]["payload"]
 
-    first, second, third, decided = run(go())
+    first, second, third, hunks, decided = run(go())
     assert second == third and first != second
     gov = decided["governance"]
-    assert len(gov["unjudged_hunks"]) == 2
-    (instance,) = gov["instances"]  # one tap for the whole diff, not one per hunk
-    assert instance["path"] == "(diff)" and instance["id"].startswith("unjudged-")
-    assert "lib/handler.py" in instance["summary"] and "lib/util.py" in instance["summary"]
+    assert {u["path"] for u in gov["undecided"]} == {"lib/util.py", "lib/handler.py"}
+    assert all(u["why"].startswith("both judgement legs failed") for u in gov["undecided"])
+    # The reviewer's yes is the one instance; its no clears the other.
+    assert [i["id"] for i in gov["instances"]] == [hunks["lib/handler.py"]]
 
 
 def reworded(task=GOVERNANCE):
@@ -538,13 +598,33 @@ def test_reruns_spent_under_one_question_are_not_spent_under_a_reworded_one(dsn,
         with pytest.raises(verdicts.VerdictRefused, match="governance unanswered"):
             await review(dsn, task, "pass", fresh)
         last = await judgement_sites.governance(p, dsn, task, older, newer)
-        await review(dsn, task, "pass", last)
         util = next(h.id for h in judgement_sites.diff_hunks(ws, older, newer) if h.path == "lib/util.py")
+        await review(dsn, task, "pass", last, undecided={util: False})
         return spent, fresh, util, (await rows(dsn, task, "review.decided"))[0]["payload"]
 
     spent, fresh, util, decided = run(go())
     assert not set(fresh) & set(spent)
-    assert decided["governance"]["unjudged_hunks"] == [util]
+    assert [u["id"] for u in decided["governance"]["undecided"]] == [util]
+
+
+@pytest.mark.parametrize(
+    ("path", "exempt"),
+    [
+        ("docs/routines.md", True),
+        ("docs/plans/x.md", True),
+        ("README.md", True),
+        ("core/README.md", True),
+        ("docs/tool.py", False),
+        ("CLAUDE.md", False),
+        ("docs/CLAUDE.md", False),
+        ("persona/README.md", False),
+        ("skills/sdlc/review.md", False),
+        ("notes/plan.md", False),
+        ("core/routines.py", False),
+    ],
+)
+def test_docs_prose_and_readmes_are_not_asked_the_governance_question(path, exempt):
+    assert judgement_sites.governance_exempt(path) is exempt
 
 
 def test_the_governance_question_excludes_correctness_code_and_descriptive_prose():
@@ -555,7 +635,7 @@ def test_the_governance_question_excludes_correctness_code_and_descriptive_prose
 
 
 @pytest.mark.macos
-def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
+def test_a_hunk_too_large_for_both_legs_goes_to_the_reviewer_at_once(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     sid = UP.script(default={"probs": NO})
     big = "".join(f"line_{i} = '{'x' * 60}'\n" for i in range(12_000))  # about 900 KB, one hunk
@@ -564,11 +644,16 @@ def test_a_hunk_too_large_for_both_legs_is_an_instance_at_once(dsn, tmp_path):
         task = await governance_candidate(dsn, ws, extra={"data/big.py": big})
         older, newer = await candidate_range(dsn, task)
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
-        await review(dsn, task, "pass", ids)
+        hid = next(
+            h.id for h in judgement_sites.governance_hunks(ws, older, newer) if h.path == "data/big.py"
+        )
+        await review(dsn, task, "pass", ids, undecided={hid: False})
         return (await rows(dsn, task, "review.decided"))[0]["payload"]
 
     decided = run(go())
-    assert [i["path"] for i in decided["governance"]["instances"]] == ["data/big.py"]
+    assert decided["verdict"] == "pass" and decided["governance"]["instances"] == []
+    (u,) = decided["governance"]["undecided"]
+    assert u["path"] == "data/big.py" and u["why"] == "too large for both judgement legs"
 
     def path(r):
         return r["body"]["state"] if r["leg"] == "jev" else json.loads(r["body"]["messages"][1]["content"])
@@ -857,7 +942,7 @@ def test_an_unchanged_hunk_whose_function_changed_keeps_its_id_and_is_asked_agai
     asked = [r for r in UP.seen(sid) if r["leg"] == "jev" and r["body"]["state"]["path"] == "lib/handler.py"]
     assert len(asked) == 1 + 2  # once in the first range; both handler hunks again in the second
     unchanged = [i for i in ids2 if i in ids1]
-    assert len(unchanged) == 3  # gate, util, and the plan: same id and same input, reused
+    assert len(unchanged) == 2  # gate and util: same id and same input, reused (the plan is not asked)
 
 
 @pytest.mark.macos
@@ -881,12 +966,12 @@ def test_a_reviewer_naming_a_line_in_a_kernel_instance_adds_its_notes_to_it(dsn,
 @pytest.mark.macos
 def test_docs_governance_reads_the_candidate_to_docs_head_range(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
-    sid = UP.script(default={"by_path": {"docs/rules.md": YES}, "probs": NO})
+    sid = UP.script(default={"by_path": {"CONTRIBUTING.md": YES}, "probs": NO})
 
     async def go():
         task = await to_checks(dsn, ws)
         candidate = machine.fold(await rows(dsn, task)).candidate.sha
-        head = commit(ws, "docs/rules.md", "# Rules\n\nEvery push waits for a second review.\n", "a rule")
+        head = commit(ws, "CONTRIBUTING.md", "# Rules\n\nEvery push waits for a second review.\n", "a rule")
         ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, candidate, head)
         async with await db.connect(dsn) as conn:
             await verdicts.record_check(conn, task, Check.DOCS, "updated", head=head, governance_from=ids,
@@ -895,7 +980,33 @@ def test_docs_governance_reads_the_candidate_to_docs_head_range(dsn, tmp_path):
 
     ids, decided = run(go())
     assert len(ids) == 1 and decided["governance"]["adds"] is True
-    assert [i["path"] for i in decided["governance"]["instances"]] == ["docs/rules.md"]
+    assert [i["path"] for i in decided["governance"]["instances"]] == ["CONTRIBUTING.md"]
+
+
+@pytest.mark.macos
+def test_prose_under_docs_and_a_readme_are_not_asked_and_make_no_instance(dsn, tmp_path):
+    """Tom's 2026-10-07 incident: a docs/routines.md sentence describing a
+    lock was answered as governance. Prose under docs/ and a README is not
+    asked the question; a skills file beside them is."""
+    ws, _ = scripted.workspace(tmp_path)
+    sid = UP.script(default={"probs": YES})
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        candidate = machine.fold(await rows(dsn, task)).candidate.sha
+        commit(ws, "docs/routines.md", "# Routines\n\nA lock makes two runs take turns.\n", "prose")
+        commit(ws, "lib/README.md", "# lib\n\nWhat lib holds.\n", "a readme")
+        head = commit(ws, "skills/x/rule.md", "Always wait for a second review.\n", "a rule")
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, candidate, head)
+        async with await db.connect(dsn) as conn:
+            await verdicts.record_check(conn, task, Check.DOCS, "updated", head=head, governance_from=ids,
+                                        **scripted.SESSION_LEG)  # fmt: skip
+        return ids, (await rows(dsn, task, "docs.decided"))[0]["payload"]
+
+    ids, decided = run(go())
+    asked = {r["body"]["state"]["path"] for r in UP.seen(sid) if r["leg"] == "jev"}
+    assert asked == {"skills/x/rule.md"} and len(ids) == 1
+    assert [i["path"] for i in decided["governance"]["instances"]] == ["skills/x/rule.md"]
 
 
 def test_a_calibration_task_runs_no_turn_and_takes_no_review_or_docs_verdict(dsn, tmp_path):
@@ -1154,7 +1265,7 @@ def test_breadth_and_governance_read_the_mirror_when_the_clone_lost_the_candidat
     other = tmp_path / "other"
     subprocess.run(["git", "clone", "-q", b.mirror, str(other)], check=True)
     git(other, "checkout", "-q", f.candidate.sha)
-    head = commit(other, "docs/notes.md", "# Notes\n", "notes")
+    head = commit(other, "notes/notes.md", "# Notes\n", "notes")
     git(b.mirror, "fetch", "-q", str(other), f"{head}:refs/valor/docs/test")
 
     async def go():
@@ -1221,7 +1332,7 @@ def test_governance_fan_out_runs_past_eight_at_once(dsn, tmp_path):
     async def go():
         task = await _many_hunks(dsn, ws, 12)
         older, newer = await candidate_range(dsn, task)
-        hunks = judgement_sites.diff_hunks(str(ws), older, newer)
+        hunks = judgement_sites.governance_hunks(str(ws), older, newer)
         port = _stub_port(need=len(hunks))
         ids = await judgement_sites.governance(port, dsn, task, older, newer)
         return hunks, ids, port.legs["jev"].most

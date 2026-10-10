@@ -160,13 +160,18 @@ GOVERNANCE = JudgementTask(
     floor={"primary": 0.65, "fallback": 0.70},
     on_abstain="caution",
     on_failure="no_verdict",
-    consumer={"proceed": "no instance", "caution": "a governance instance at the hunk, awaiting Tom's tap"},
+    consumer={
+        "proceed": "no instance",
+        "caution": (
+            "a governance instance at the hunk, awaiting Tom's tap, when answered without an abstain; "
+            "an abstain goes to the blind reviewer, whose yes is an instance"
+        ),
+    },
     serves="the governance constraint",
     guard="the CLAUDE.md governance paragraph (correction 1)",
     # Run 4 on this question (task_sha256 67f938745187e259...) failed its entry check:
     # both legs answered caution on cases Tom labelled false (docs/plans/m1-4b-records.md).
-    # A site lands calibrated only on a record that passes, so this stays None and the
-    # docs runner stays unregistered.
+    # A site lands calibrated only on a record that passes, so this stays None.
     calibrated=None,
 )
 
