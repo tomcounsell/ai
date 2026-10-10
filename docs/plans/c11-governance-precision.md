@@ -222,3 +222,10 @@ built question.
   grant, but removing an exemption from one adds instances of it, for
   example deleting `if is_docs(path): return False` above
   `return require_tap(path)`. A separate item; it is not part of this fix.
+- A hunk that adds only a guard row, with no name saying what it checks
+  (`guard_id`, `incident`, `mission_items`, `expires`), is missed at the
+  site in some samples on both the round 3 and round 4 questions: Jev
+  abstains (0.40 to 0.59) and the open-weight leg answers proceed in 1 of 2
+  samples. A named row, a row inside `SEEDED`, or a row in a list of guards
+  is answered caution by both legs. The probes are in
+  `~/src/valor-build-notes/c11p/probes-guard.json`.
