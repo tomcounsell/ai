@@ -38,7 +38,7 @@ name drivers; a driver's program comes from config. So every call:
 - on a call carrying the GitHub credential, also pins
   `http.followRedirects=false` and an empty `http.proxy`, at the general
   scope and the URL's own (`credential_pins`), so the header reaches the
-  granted URL and nothing else whatever the repository's config says;
+  merge's URL and nothing else whatever the repository's config says;
 - passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
   submodules in `status`;
 - and first refuses the workspace outright (`GitError`) when its local or
@@ -142,7 +142,7 @@ def credential_pins(url: str) -> list[str]:
     the command line, which outranks the repository's config and the header
     file, at both the general and the URL's own scope (a key scoped to the
     URL beats a general one wherever it is set): no redirect is followed and
-    no proxy is used, so the header reaches the granted URL and nothing
+    no proxy is used, so the header reaches the merge's URL and nothing
     else. `url` is one `targets.url_ok` accepted, so it holds no `=`."""
     pins = []
     for key, value in (("followRedirects", "false"), ("proxy", "")):

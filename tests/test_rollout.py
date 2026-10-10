@@ -1,18 +1,23 @@
 """The kernel rolling itself forward to its own merges (`core/rollout.py`,
 `Kernel.roll`), on real Postgres and temporary checkouts cloned from a
 local bare remote: which merges are the kernel's, the restart class, the
-hold and the background turn's cancel, the dependency and schema stops,
-the fast-forward, the migrate and stepping back, the retries, the rows
+hold and the background turn's cancel, the backup before a schema change,
+the fast-forward, the dependency sync, the migrate and stepping back, the
+uncommitted-file stop, the retries and the notice after them, the rows
 `recover` ends after a restart, and the exit through `serve` and `python
 -m core serve`.
 
-The migrate and the restart are stand-ins; nothing touches the build's own
+The backup, the sync, the migrate, and the restart are stand-ins (the
+default sync is run once for real, in a checkout of its own); nothing
+touches the build's own
 checkout, the machine's kernel, or the real ledger. No model call.
 """
 
 import asyncio
 import contextlib
+import os
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -21,6 +26,7 @@ import psycopg
 import pytest
 
 from core import db, git, ledger, rollout, serve
+from core.settings import settings
 from tests import bridges, scripted
 from tests.bridges import new_task, rows
 from tests.conftest import TEST_DB
@@ -101,19 +107,38 @@ async def landed(dsn, task, remote, sha, branch="main", kind="done", **extra) ->
     return effect
 
 
-def kernel(dsn, repo: Repo, task: str, *, started: str | None = None, migrate=None) -> serve.Kernel:
-    """A kernel on the test database rolling `repo.co`, the stand-in migrate
-    recording each call. `ready` records each task `schedule` considers, so
-    an empty list after a wake means no job could have started."""
+def kernel(
+    dsn, repo: Repo, task: str, *, started: str | None = None, migrate=None, sync=None, backup=None
+) -> serve.Kernel:
+    """A kernel on the test database rolling `repo.co`, the stand-in
+    backup, sync, and migrate recording each call, in one list `k.ran` of
+    `(step, the checkout's head then)`. `ready` records each task `schedule`
+    considers, so an empty list after a wake means no job could have
+    started."""
     migrated: list[str] = []
+    ran: list[tuple[str, str]] = []
 
     def stand_in(database: str) -> None:
         migrated.append(database)
+        ran.append(("migrate", repo.head()))
         if migrate is not None:
             migrate(database)
 
-    k = serve.Kernel(None, {}, None, dsn, checkout=repo.co, started=started or repo.base, migrate=stand_in)
-    k.migrated = migrated
+    def synced() -> None:
+        ran.append(("sync", repo.head()))
+        if sync is not None:
+            sync()
+
+    def backed_up(database: str) -> None:
+        ran.append(("backup", repo.head()))
+        if backup is not None:
+            backup(database)
+
+    k = serve.Kernel(
+        None, {}, None, dsn, checkout=repo.co, started=started or repo.base, migrate=stand_in,
+        sync=synced, backup=backed_up,
+    )  # fmt: skip
+    k.migrated, k.ran = migrated, ran
     k.ready = []
 
     async def active(conn):
@@ -368,16 +393,19 @@ def test_of_two_merges_recorded_newer_first_the_descendant_rolls(fresh, tmp_path
 
 def test_recover_ends_a_failed_merge_the_lead_rolled_by_hand(fresh, tmp_path):
     repo = Repo(tmp_path)
-    sha = repo.land("uv.lock")
+    sha = repo.land("core/b.py")
+
+    def broken(database):
+        raise RuntimeError("the merged migrate broke")
 
     async def go():
         task = await new_task(fresh)
         effect = await landed(fresh, task, repo.url, sha)
-        await tick(kernel(fresh, repo, task), fresh)
+        await tick(kernel(fresh, repo, task, migrate=broken), fresh)
         return task, effect
 
     task, effect = run(go())
-    assert typed(run(rows(fresh, task)), "rollout.failed")[0]["step"] == "dependencies"
+    assert typed(run(rows(fresh, task)), "rollout.failed")[0]["step"] == "migrate"
     scripted.git(repo.co, "pull", "-q", "--ff-only")
     assert run(recovered(fresh, repo, sha)) == [effect]
     assert typed(run(rows(fresh, task)), "rollout.ended") == [
@@ -520,10 +548,16 @@ def test_a_re_prepare_with_no_restart_due_lifts_the_hold(fresh, tmp_path, then):
 
 
 @pytest.mark.parametrize(
-    ("path", "step"),
-    [("uv.lock", "dependencies"), ("pyproject.toml", "dependencies"), ("core/schema.sql", "schema")],
+    ("path", "ran"),
+    [
+        ("uv.lock", ["sync", "migrate"]),
+        ("pyproject.toml", ["sync", "migrate"]),
+        ("core/schema.sql", ["backup", "migrate"]),
+    ],
 )
-def test_a_dependency_or_schema_change_stops_and_is_not_retried(fresh, tmp_path, monkeypatch, path, step):
+def test_a_dependency_or_schema_change_rolls_with_its_sync_or_backup(fresh, tmp_path, path, ran):
+    """The backup runs before the checkout moves; the sync after the
+    fast-forward, against the merged lock, before the migrate."""
     repo = Repo(tmp_path)
     sha = repo.land(path)
 
@@ -531,67 +565,74 @@ def test_a_dependency_or_schema_change_stops_and_is_not_retried(fresh, tmp_path,
         task = await new_task(fresh)
         effect = await landed(fresh, task, repo.url, sha)
         k = kernel(fresh, repo, task)
-        first = [await tick(k, fresh), list(k.ready), k.restart_due]
-        with counting_git(monkeypatch) as calls:
-            again = await tick(k, fresh, timer=True)
-        return task, effect, first, again, calls, k
+        return task, effect, k, await tick(k, fresh)
 
-    task, effect, first, again, calls, k = run(go())
-    assert first == [None, [task], None]
-    assert again is None and calls == []
+    task, effect, k, restarted = run(go())
+    assert restarted == sha and repo.head() == sha
+    heads = {"backup": repo.base, "sync": sha, "migrate": sha}
+    assert k.ran == [(step, heads[step]) for step in ran]
     written = run(rows(fresh, task))
-    (failed,) = typed(written, "rollout.failed")
-    assert failed["step"] == step and failed["effect_id"] == effect
-    assert failed["steps"] == ["fetch", "restart class"]
-    (notice,) = typed(written, "notice.requested", about_key=f"rollout:{effect}")
-    assert notice["kind"] == "rollout"
-    assert repo.head() == repo.base and k.migrated == []
+    (restarting,) = typed(written, "rollout.restarting")
+    named = {"sync": "dependencies", "backup": "backup", "migrate": "migrate"}
+    order = ["fetch", "restart class", *(["backup"] if "backup" in ran else []), "fast-forward"]
+    order += [named[s] for s in ran if s != "backup"]
+    assert restarting["effect_id"] == effect and restarting["steps"] == order
+    assert typed(written, "rollout.failed") == [] and typed(written, "notice.requested") == []
 
 
-@pytest.mark.parametrize(("path", "step"), [("core/schema.sql", "schema"), ("uv.lock", "dependencies")])
-def test_a_change_beyond_the_sha_in_the_checkout_stops_the_restart(fresh, tmp_path, path, step):
+def test_a_change_beyond_the_sha_in_the_checkout_syncs_and_backs_up(fresh, tmp_path):
     """The checkout already holds a commit past the merged sha: the restart
     would run that commit, so its diff from `started` is the one classified."""
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
-    beyond = repo.land(path)
+    repo.land("core/schema.sql")
+    beyond = repo.land("uv.lock")
     scripted.git(repo.co, "pull", "-q", "--ff-only")
 
     async def go():
         task = await new_task(fresh)
-        effect = await landed(fresh, task, repo.url, sha)
+        await landed(fresh, task, repo.url, sha)
         k = kernel(fresh, repo, task)
-        return task, effect, k, await tick(k, fresh)
+        return k, await tick(k, fresh)
 
-    task, effect, k, restarted = run(go())
-    assert restarted is None and k.migrated == [] and repo.head() == beyond
-    (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
-    assert failed["step"] == step and failed["effect_id"] == effect
-    assert beyond in failed["reason"] and path in failed["reason"]
+    k, restarted = run(go())
+    assert restarted == sha and repo.head() == beyond
+    assert [step for step, _ in k.ran] == ["backup", "sync", "migrate"]
 
 
-@pytest.mark.parametrize(
-    ("path", "step"), [("core/schema.sql", "schema"), ("pyproject.toml", "dependencies")]
-)
-def test_an_uncommitted_schema_or_dependency_file_stops_the_restart(fresh, tmp_path, path, step):
-    """The restart imports, and migrate reads, the working tree."""
+@pytest.mark.parametrize("path", ["core/schema.sql", "pyproject.toml", "uv.lock"])
+def test_an_uncommitted_schema_or_dependency_file_stops_the_restart_until_it_is_gone(fresh, tmp_path, path):
+    """The restart would run, and the migrate read, the working tree. It is
+    tried again on each timer wake, and Tom hears once it has failed
+    `NOTICE_AFTER` times."""
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
+    (repo.co / path).parent.mkdir(parents=True, exist_ok=True)
     (repo.co / path).write_text("the lead's edit\n")
 
     async def go():
         task = await new_task(fresh)
         effect = await landed(fresh, task, repo.url, sha)
         k = kernel(fresh, repo, task)
-        return task, effect, k, await tick(k, fresh)
+        seen = []
+        for _ in range(rollout.NOTICE_AFTER):
+            seen.append(await tick(k, fresh, timer=True))
+            notices = typed(await rows(fresh, task), "notice.requested", about_key=f"rollout:{effect}")
+            seen.append(len(notices))
+        edit = (repo.co / path).read_text()
+        (repo.co / path).unlink()
+        return task, effect, k, seen, edit, await tick(k, fresh, timer=True)
 
-    task, effect, k, restarted = run(go())
-    assert restarted is None and k.migrated == [] and repo.head() == repo.base
-    (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
-    assert (
-        failed["effect_id"] == effect and failed["step"] == step and f"uncommitted {path}" in failed["reason"]
-    )
-    assert (repo.co / path).read_text() == "the lead's edit\n"
+    task, effect, k, seen, edit, restarted = run(go())
+    assert seen == [None, 0] * (rollout.NOTICE_AFTER - 1) + [None, 1]
+    assert edit == "the lead's edit\n"
+    written = run(rows(fresh, task))
+    (failed,) = typed(written, "rollout.failed")
+    assert failed["effect_id"] == effect and failed["step"] == "uncommitted"
+    assert f"uncommitted {path}" in failed["reason"]
+    (notice,) = typed(written, "notice.requested", about_key=f"rollout:{effect}")
+    assert notice["kind"] == "rollout" and "uncommitted" in notice["text"] and "by hand" not in notice["text"]
+    assert restarted == sha and [step for step, _ in k.ran] == ["migrate"]
 
 
 def test_a_dirty_schema_file_does_not_stop_a_rollout_with_no_restart(fresh, tmp_path):
@@ -664,27 +705,92 @@ def test_a_dirty_file_the_merge_changes_refuses_and_one_it_does_not_is_kept(fres
 # -- the migrate -------------------------------------------------------------------------
 
 
-def test_a_failed_migrate_steps_back_and_is_not_retried(fresh, tmp_path):
+def test_a_failed_migrate_steps_back_and_is_retried_on_the_timer(fresh, tmp_path):
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
+    tries = []
 
-    def broken(database):
-        raise RuntimeError("the merged migrate broke")
+    def broken_twice(database):
+        tries.append(database)
+        if len(tries) <= 2:
+            raise RuntimeError("the merged migrate broke")
 
     async def go():
         task = await new_task(fresh)
         effect = await landed(fresh, task, repo.url, sha)
-        k = kernel(fresh, repo, task, migrate=broken)
-        return task, effect, k, [await tick(k, fresh), await tick(k, fresh, timer=True)]
+        k = kernel(fresh, repo, task, migrate=broken_twice)
+        first = [await tick(k, fresh), repo.head(), await tick(k, fresh)]
+        return task, effect, k, first, [await tick(k, fresh, timer=True), await tick(k, fresh, timer=True)]
 
-    task, effect, k, restarted = run(go())
-    assert restarted == [None, None]
-    assert repo.head() == repo.base and k.migrated == [dbname(fresh)]
+    task, effect, k, first, later = run(go())
+    assert first == [None, repo.base, None]  # a wake from a row does not retry
+    assert later == [None, sha] and repo.head() == sha
+    assert k.migrated == [dbname(fresh)] * 3
     written = run(rows(fresh, task))
     (failed,) = typed(written, "rollout.failed")
     assert failed["step"] == "migrate" and "broke" in failed["reason"] and "mixed" not in failed
     assert failed["steps"] == ["fetch", "restart class", "fast-forward", "migrate"]
+    assert typed(written, "notice.requested", about_key=f"rollout:{effect}") == []  # fewer than NOTICE_AFTER
     assert typed(written, "notice.requested", about_key=f"rollout:{effect}:mixed") == []
+
+
+def test_a_failed_sync_steps_back_syncs_the_old_lock_and_tells_tom_after_repeated_failures(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("uv.lock", "the merged lock\n")
+
+    def sync():
+        if (repo.co / "uv.lock").exists():
+            raise RuntimeError("uv could not resolve the merged lock")
+
+    async def go():
+        task = await new_task(fresh)
+        effect = await landed(fresh, task, repo.url, sha)
+        k = kernel(fresh, repo, task, sync=sync)
+        restarted = [await tick(k, fresh, timer=True) for _ in range(rollout.NOTICE_AFTER)]
+        return task, effect, k, restarted
+
+    task, effect, k, restarted = run(go())
+    assert restarted == [None] * rollout.NOTICE_AFTER and repo.head() == repo.base
+    # Each try: the sync at the merged lock fails, the checkout steps back,
+    # and the sync at the old one restores the environment.
+    assert k.ran == [("sync", sha), ("sync", repo.base)] * rollout.NOTICE_AFTER
+    written = run(rows(fresh, task))
+    (failed,) = typed(written, "rollout.failed")
+    assert failed["step"] == "dependencies" and "mixed" not in failed
+    assert failed["steps"] == ["fetch", "restart class", "fast-forward", "dependencies"]
+    (notice,) = typed(written, "notice.requested", about_key=f"rollout:{effect}")
+    assert f"dependencies failed {rollout.NOTICE_AFTER} times" in notice["text"]
+    assert "could not resolve" in notice["text"] and "by hand" not in notice["text"]
+
+
+def test_a_failed_backup_moves_nothing_and_one_backup_serves_the_retries(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/schema.sql")
+    backups, migrates = [], []
+
+    def backup(database):
+        backups.append(database)
+        if len(backups) == 1:
+            raise RuntimeError("the backup disk is not mounted")
+
+    def migrate(database):
+        migrates.append(database)
+        if len(migrates) == 1:
+            raise RuntimeError("the merged migrate broke")
+
+    async def go():
+        task = await new_task(fresh)
+        await landed(fresh, task, repo.url, sha)
+        k = kernel(fresh, repo, task, backup=backup, migrate=migrate)
+        failed_backup = [await tick(k, fresh, timer=True), repo.head()]
+        failed_migrate = [await tick(k, fresh, timer=True), repo.head()]
+        return task, k, failed_backup, failed_migrate, await tick(k, fresh, timer=True)
+
+    task, k, failed_backup, failed_migrate, restarted = run(go())
+    assert failed_backup == [None, repo.base] and failed_migrate == [None, repo.base]
+    assert restarted == sha and len(backups) == 2 and len(migrates) == 2
+    assert [step for step, _ in k.ran] == ["backup", "backup", "migrate", "migrate"]
+    assert [f["step"] for f in typed(run(rows(fresh, task)), "rollout.failed")] == ["backup", "migrate"]
 
 
 def test_a_migrate_failure_that_cannot_step_back_says_mixed(fresh, tmp_path):
@@ -710,8 +816,9 @@ def test_a_migrate_failure_that_cannot_step_back_says_mixed(fresh, tmp_path):
     written = run(rows(fresh, task))
     assert [f["step"] for f in typed(written, "rollout.failed")] == ["fast-forward", "migrate"]
     assert typed(written, "rollout.failed")[-1]["mixed"] is True
-    assert len(typed(written, "notice.requested", about_key=f"rollout:{effect}")) == 1
-    assert len(typed(written, "notice.requested", about_key=f"rollout:{effect}:mixed")) == 1
+    assert typed(written, "notice.requested", about_key=f"rollout:{effect}") == []  # two failures
+    (mixed,) = typed(written, "notice.requested", about_key=f"rollout:{effect}:mixed")
+    assert "mixed code" in mixed["text"] and "by hand" not in mixed["text"]
 
 
 def test_a_commit_after_the_fast_forward_is_not_reset(fresh, tmp_path):
@@ -754,6 +861,28 @@ def test_the_default_migrate_runs_db_migrate_in_the_checkout(tmp_path, monkeypat
             tmp_path,
         )
     ]
+
+
+@pytest.mark.skipif(not Path(settings.uv).exists(), reason="no uv at settings.uv")
+def test_the_default_sync_runs_uv_frozen_in_the_checkout_on_its_own_venv(tmp_path):
+    """The real uv, in a checkout of its own: it keeps the `.venv` there,
+    finds no Python on a PATH, and a lock it cannot read fails the step."""
+    co = tmp_path / "co"
+    co.mkdir()
+    (co / "pyproject.toml").write_text(
+        '[project]\nname = "toy"\nversion = "0"\nrequires-python = ">=3.14"\ndependencies = []\n'
+        "[tool.uv]\npackage = false\n"
+    )
+    env = rollout.sync_env()
+    assert env["PATH"] == git.PATH and env["UV_PYTHON_DOWNLOADS"] == "never" and "VIRTUAL_ENV" not in env
+    subprocess.run([settings.uv, "lock", "-q"], cwd=co, env=env | {"PATH": os.environ["PATH"]}, check=True)
+    subprocess.run([settings.uv, "venv", "-q", "--python", sys.executable], cwd=co, env=env, check=True)
+    before = (co / ".venv" / "pyvenv.cfg").read_text()
+    run(git.threaded(rollout.sync, co, settings.uv))
+    assert (co / ".venv" / "pyvenv.cfg").read_text() == before
+    (co / "uv.lock").write_text("not a lock\n")
+    with pytest.raises(RuntimeError, match="uv sync exited with status"):
+        run(git.threaded(rollout.sync, co, settings.uv))
 
 
 # -- off the loop, the sources of a merge, the checkout's config, the credential ---------
@@ -847,7 +976,8 @@ def test_a_refused_config_fails_on_the_kernels_merge_not_the_newest_of_any_proje
         effect = await landed(fresh, ours, repo.url, sha)
         await landed(fresh, theirs, "/somewhere/else.git", sha, branch="feature")
         k = kernel(fresh, repo, ours)
-        await tick(k, fresh)
+        for _ in range(rollout.NOTICE_AFTER):
+            await tick(k, fresh, timer=True)
         return ours, theirs, effect
 
     ours, theirs, effect = run(go())

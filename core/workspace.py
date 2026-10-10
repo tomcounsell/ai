@@ -71,7 +71,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, git, runs, targets
+from core import binaries, git, runs
 from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
@@ -912,8 +912,6 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
-    if spec.merge_url and not targets.local(spec.merge_url):
-        _not_default(cache, spec.merge_url, target)
     for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
               lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
@@ -996,7 +994,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         workspace=str(lay.repo),
         mirror=str(lay.mirror),
         # push_branch lands on the task's own bare origin; the merge lands on
-        # the spec's merge_url when it has one (granted, checked at start).
+        # the spec's merge_url when it has one, recorded here in the Brief.
         push_url=str(lay.origin),
         origin_url=spec.merge_url or str(lay.origin),
         target_branch=target,
@@ -1004,19 +1002,6 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         harness=harness,
         project=project,
     )
-
-
-def _not_default(cache: Path, url: str, target: str) -> None:
-    """Refuse a merge target that is the remote's default branch, read
-    anonymously now, from the kernel's cache clone."""
-    try:
-        named = git.remote_head(cache, url)
-    except git.GitError as exc:
-        raise Refused(f"cannot read the remote's HEAD: {exc}") from None
-    if named is None:
-        raise Refused("the remote's HEAD names no branch")
-    if named == target:
-        raise Refused(f"{target} is the default branch of {url}; a merge never lands there")
 
 
 def _remote_head(cache: Path) -> str:

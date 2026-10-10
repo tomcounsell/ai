@@ -16,7 +16,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from core import db, guards, ledger, machine, routines, targets, tasks, workspace
+from core import db, guards, ledger, machine, routines, tasks, workspace
 from core.machine import State
 from core.settings import settings
 from tests import scripted
@@ -556,22 +556,12 @@ def test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge(tmp
     assert done.kind == "done" and merged.state is State.MERGED
 
 
-def test_the_real_valor_spec_loads_through_the_routines_path_and_needs_the_granted_merge_target(world):
-    dsn, _, _ = world
+def test_the_real_valor_spec_loads_through_the_routines_path_with_its_merge_url():
     r = routines.load("expiry")
     assert r.project == "valor"
     spec = workspace.Spec.load(r.project)  # projects/valor.toml in the checkout, no clone, no push
     spec = dataclasses.replace(spec, branch=r.branch, target_branch=r.branch)
-    assert spec.name == "valor" and spec.merge_url
-
-    async def go():
-        async with await db.connect(dsn) as conn:
-            before = await targets.check(conn, spec.merge_url, spec.target_branch)
-            await targets.grant(conn, spec.merge_url, spec.target_branch, "the granted merge target")
-            return before, await targets.check(conn, spec.merge_url, spec.target_branch)
-
-    before, after = run(go())
-    assert before and after is None
+    assert spec.name == "valor" and spec.merge_url == "https://github.com/tomcounsell/ai.git"
 
 
 async def scripted_drive(dsn, task, runners_):

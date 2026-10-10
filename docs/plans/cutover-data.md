@@ -279,8 +279,8 @@ and the key directory. Gap G10.
 
 | Item | Old system | New system | How |
 |---|---|---|---|
-| Where a merge may land | The old pipeline pushed with Valor's token to each repo's default branch; GitHub ruleset 24370170 on `tomcounsell/ai` `main` restricts updates but is disabled until takeover | One grant per (URL, branch) pair, written to the `merge_targets` stream; `start` refuses a pair without one | Existing: `python -m core merge-target add URL BRANCH --note TEXT`. List with `merge-target list` |
-| Pairs the day-one projects need | none | `https://github.com/tomcounsell/ai.git` branch `main` (at cutover), and for each spec with a `merge_url` its repo URL and branch | Existing command, once per pair (`cutover-runbook-tom.md`, item 2) |
+| Where a merge may land | The old pipeline pushed with Valor's token to each repo's default branch; GitHub ruleset 24370170 on `tomcounsell/ai` `main` restricts updates but is disabled until takeover | Each spec's `merge_url` and branch, recorded in the task's Brief at start; the token's reach bounds the rest | Edit the spec |
+| Targets the day-one projects need | none | `https://github.com/tomcounsell/ai.git` branch `main` (at cutover), and for each spec with a `merge_url` its repo URL and branch | In each spec (`cutover-runbook-tom.md`, item 2, for the token's reach) |
 | Valor's write access to each repo | `valorengels` is a collaborator with push on the repos it works | Same account, same token | By hand: check push access on each repo before its spec is added |
 | Ruleset 24370170 | Disabled | Set to active at cutover | By hand, Tom's `gh` login (admin only) |
 
@@ -419,10 +419,10 @@ tools. The new kernel does not read them. Recommendation: leave them in place.
 
 ## 9. Questions with assumed answers
 
-Psyoptimal's merge branch is `main` (section 8). The merge-target grants
-for the four day-one pairs (ai, popoto, psyoptimal and cuttlefish, each on
-`main`, the default branch of all four) are Tom's, granted in one sitting at
-cutover (`cutover-runbook-tom.md`, item 2).
+Psyoptimal's merge branch is `main` (section 8). The four day-one
+projects (ai, popoto, psyoptimal and cuttlefish) each merge to `main`, the
+default branch of all four, as their specs name it; the token's reach to
+those four is Tom's (`cutover-runbook-tom.md`, item 2).
 
 **Q3. Is the operator group "Valor rebuild" the permanent operator chat?**
 Assumed: yes. Notices keep going there; Tom's DM is added as an
@@ -433,7 +433,7 @@ ordinary listed chat (G2).
 1. Specs written and checked into `projects/` (popoto, psyoptimal,
    cuttlefish; valor edited). Edit a file.
 2. `VALOR_MACHINE` set in each launchd job and each spec's `machine` (G3).
-3. Merge-target grants added (section 5). Existing command.
+3. The push token's reach checked (section 5). Tom's, on GitHub.
 4. Old worker drained (G5), then the old bridge and email bridge disabled.
 5. `telegram-seen.json` seeded (G4); `VALOR_EMAIL_SINCE` set (G7).
 6. New bridges and routines enabled; one message from Tom in each listed

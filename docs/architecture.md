@@ -148,8 +148,11 @@ Two performers run in the kernel's process, never forcing: `push_branch`
 (`act`) pushes one commit to one branch, never the target branch, to `push_url`
 or else the origin URL recorded at start; `merge` (`act`, offered to no turn)
 pushes a passed candidate onto the target branch at the recorded origin URL,
-from the kernel mirror with the GitHub token when there is one, only to a
-(URL, branch) pair Tom granted and never to the remote's default branch. The kernel runs no program a turn
+from the kernel mirror with the GitHub token when there is one. The URL
+and target branch are the ones the kernel recorded in the Brief at start,
+from the project spec, which no turn changes; the token's own reach bounds
+which repositories a merge can land on at all
+([machine.md](machine.md), Where a merge lands). The kernel runs no program a turn
 chose: its git (the Command Line Tools' install), `ps`, and `sandbox-exec` are
 checked before each run to be root's alone (`core/binaries.py`), and its git
 refuses a workspace whose config names a program, redirects a push, sets any
@@ -482,16 +485,19 @@ merge whose outcome names the push URL and branch of the checkout it runs
 from. A merge that changes only `persona/`, `skills/`, `docs/`, `tests/`
 or top-level `*.md` is fast-forwarded at once, since those are read per
 turn or never. Any other holds new jobs until the running ones end, then
-cancels the background turn, fast-forwards the checkout, runs the merged
-code's `db.migrate`, writes `rollout.restarting`, and exits; launchd
-starts it again on the merged code. A change to the dependencies or the
-schema, in the diff from the running commit to the one the restart would
-run (the checkout's head when it is already past the merge) or uncommitted
-in the checkout, stops before the checkout moves, and the lead rolls it by
-hand. A
-failed step lifts the hold and writes `rollout.failed` and a notice. It is
-tried again on the next `serve_tick_s` wake, except a failed migrate, which
-the process does not try again: a fix reaches it with the next start.
+cancels the background turn, backs up the database when the diff from the
+running commit to the one the restart would run (the checkout's head when
+it is already past the merge) changes `core/schema.sql`, fast-forwards the
+checkout, runs `uv sync --frozen` there when that diff changes `uv.lock`
+or `pyproject.toml`, runs the merged code's `db.migrate`, writes
+`rollout.restarting`, and exits; launchd starts it again on the merged
+code. An uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql` in
+the checkout stops the restart before the checkout moves, since the
+restart would run an edit nothing merged. A failed step steps the checkout
+and its dependencies back when they had moved, lifts the hold, writes
+`rollout.failed`, and is tried again on the next `serve_tick_s` wake. Once
+one merge's rollout has failed three times (`rollout.NOTICE_AFTER`), Tom
+gets one notice reporting the step and the reason.
 
 **Steering.** A message for a task mid-turn is a ledger row
 (`message.steered`), delivered as the opening of the next working turn

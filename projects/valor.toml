@@ -1,10 +1,8 @@
 # This repository, as the kernel builds it after takeover. The rebuild lands
 # on `branch` until cutover; a task started by a message has no `--branch`,
 # so the spec names it, and `python -m core start ... --project valor
-# --branch B` still overrides it. The merge lands on merge_url, from the
-# kernel mirror with the GitHub credential, only for a (URL, branch) pair
-# Tom granted with `python -m core merge-target add`, and never on the
-# remote's default branch.
+# --branch B` still overrides it. The merge lands on merge_url at that
+# branch, from the kernel mirror with the GitHub credential.
 name = "valor"
 branch = "valor-cori-rebuild"
 repo = "https://github.com/tomcounsell/ai.git"

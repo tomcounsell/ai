@@ -5,8 +5,7 @@ kernel-owned bare repository, pushes a commit to `valor/push-check` of
 the branch does not exist, the head of the branch this checkout is on (the
 rebuild branch, in the kernel checkout).
 
-Tom grants `valor/push-check` with `python -m core merge-target add`
-before it runs; the branch stays on GitHub afterwards.
+The branch stays on GitHub afterwards.
 
 Live spend: none (no model call). Runs only when `VALOR_LIVE=1` and
 `VALOR_LIVE_GITHUB=1`.

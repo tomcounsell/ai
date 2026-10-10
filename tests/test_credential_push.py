@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, credentials, db, git, ledger, targets, tasks
+from core import broker, credentials, db, git, ledger, tasks
 from core import workspace as kws
 from core.settings import settings
 from tests import scripted
@@ -177,7 +177,7 @@ def test_a_refused_token_fails_the_merge_saying_rotate_it(tmp_path, keyfile, tok
 
 def test_a_workspace_task_merges_without_the_header(dsn, tmp_path, keyfile, token):
     """A `--workspace` task has no mirror: its merge gets no credential, so
-    a granted remote answers it with 401, and its push_branch sends none."""
+    the merge's remote answers it with 401, and its push_branch sends none."""
     with Server(tmp_path / "remote", token=token) as server:
         src = toy(tmp_path)
         bare = remote(server, src)
@@ -237,14 +237,14 @@ def test_a_redirect_never_carries_the_header_to_the_second_server(tmp_path, keyf
             merge = Merge(made.mirror, url=url, branch="rebuild", credential=keyfile, loopback=True)
             with contextlib.suppress(git.GitError, ValueError):
                 run(merge.perform(merge_action(url, "rebuild", sha), "k"))
-        assert first.authorized()  # the header went to the granted URL
+        assert first.authorized()  # the header went to the merge URL
         assert second.authorized() == []
 
 
 # The keys a mirror's own config could set to steer the credential. `run`
 # refuses every one before git starts; with that refusal switched off, the
 # command line pins and the URL-scoped header still keep the token on the
-# granted URL.
+# merge URL.
 STEERING = {
     "redirect": lambda url, second: ("http.followRedirects", "true"),
     "redirect for the url": lambda url, second: (f"http.{url}.followRedirects", "true"),
@@ -511,35 +511,29 @@ def test_a_release_cancelled_mid_push_kills_git_and_reconciles_to_failed(dsn, tm
     assert outcome["reconciled"] is True and not moved
 
 
-# -- the merge-target list at release ----------------------------------------------------------
+# -- the Brief's URL and branch at release ------------------------------------------------------
 
 
-def test_merge_refuse_binds_the_brief_and_the_list(dsn, tmp_path):
+def test_merge_refuse_binds_the_brief_alone(dsn, tmp_path):
     url, branch = "https://github.com/example/refuse-check.git", f"valor/r-{secrets.token_hex(4)}"
     ws, _ = scripted.workspace(tmp_path)
     merge = Merge(ws, url=url, branch=branch)
 
     async def go():
         async with await db.connect(dsn) as conn:
-            ungranted = await merge.refuse(conn, merge_action(url, branch, "a" * 40))
-            await targets.grant(conn, url, branch, "test")
-            granted = await merge.refuse(conn, merge_action(url, branch, "a" * 40))
+            bound = await merge.refuse(conn, merge_action(url, branch, "a" * 40))
             other_url = await merge.refuse(conn, merge_action(url + "x", branch, "a" * 40))
             other_branch = await merge.refuse(conn, merge_action(url, "main", "a" * 40))
             shapeless = await merge.refuse(conn, broker.Action("merge", branch, {"url": url}))
-            await targets.revoke(conn, url, branch, "done", by="valor")
-            revoked = await merge.refuse(conn, merge_action(url, branch, "a" * 40))
-            return ungranted, granted, other_url, other_branch, shapeless, revoked
+            return bound, other_url, other_branch, shapeless
 
-    ungranted, granted, other_url, other_branch, shapeless, revoked = run(go())
-    assert "merge-target add" in ungranted and granted is None
+    bound, other_url, other_branch, shapeless = run(go())
+    assert bound is None
     assert "the task's Brief names" in other_url and "the task's Brief names" in other_branch
-    assert "names its URL" in shapeless and "not a granted merge target" in revoked
+    assert "names its URL" in shapeless
 
 
-def test_a_remote_head_moved_onto_the_target_after_start_fails_the_merge_before_any_push(
-    tmp_path, keyfile, token
-):
+def test_a_merge_onto_the_remote_s_default_branch_lands(tmp_path, keyfile, token):
     with Server(tmp_path / "remote", token=token) as server:
         bare = remote(server, toy(tmp_path))
         url = server.url("ai.git")
@@ -547,13 +541,12 @@ def test_a_remote_head_moved_onto_the_target_after_start_fails_the_merge_before_
         sh(bare, "symbolic-ref", "HEAD", "refs/heads/rebuild")
         sha = candidate(made.mirror, made.base_sha)
         merge = Merge(made.mirror, url=url, branch="rebuild", credential=keyfile, loopback=True)
-        with pytest.raises(ValueError, match="is the default branch of"):
-            run(merge.perform(merge_action(url, "rebuild", sha), "k"))
-        assert not [r for r in server.log if "receive-pack" in r["path"]]
-    assert sh(bare, "rev-parse", "rebuild") != sha
+        result = run(merge.perform(merge_action(url, "rebuild", sha), "k"))
+    assert result == {"remote": url, "branch": "rebuild", "sha": sha}
+    assert sh(bare, "rev-parse", "rebuild") == sha
 
 
-def test_a_local_origin_needs_no_grant_and_its_head_refuses_nothing(dsn, tmp_path):
+def test_a_local_origin_and_its_head_refuse_nothing(dsn, tmp_path):
     ws, origin = scripted.workspace(tmp_path)  # origin's HEAD names main
     merge = Merge(ws, url=str(origin), branch="main")
     scripted.commit(ws, "a.txt", "a\n", "work")

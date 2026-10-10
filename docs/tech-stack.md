@@ -521,7 +521,11 @@ both turn sandbox profiles deny: the kernel databases' passwords in a libpq
 password file, the judgement keys in `judgement-keys` and the OpenAI key in `openai-key`
 beside it, copied from the vault `.env` by `python -m core judgement-keys` and
 `python -m core openai-key` ([machine.md](machine.md),
-Keychain, for why not the Keychain). Status: **in use**. Telegram's keys and
+Keychain, for why not the Keychain). Status: **in use**. The GitHub push
+token sits there as `github-keys`, from `python -m core github-key`; it
+belongs to Valor's own account, `valorengels`, a collaborator only on the
+repositories Valor builds, and that reach is the bound on where a merge
+can land ([machine.md](machine.md), Where a merge lands). Status: **in use**. Telegram's keys and
 session sit there too (**in use**), and email's `mail-keys`, written by
 `python -m bridges.email keys` ([email.md](bridges/email.md)), and the local chat's `local-token`, made by `python -m bridges.local run` ([local.md](bridges/local.md)). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the

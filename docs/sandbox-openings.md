@@ -59,7 +59,13 @@ Stated so the boundary is drawn where it is [4]:
   tools run outside it for `python -m core backup` and `restore`, and the
   scratch cluster `restore` makes sits in the kernel key directory (the
   `pg_scratch` setting), which no turn can read or write; a task's Postgres
-  and Redis run only under `service.sb`.
+  and Redis run only under `service.sb`. A rollout of a merge that changes
+  the kernel's dependencies runs `uv sync --frozen` in the kernel's own
+  checkout outside the sandbox: uv is `/opt/homebrew/bin/uv` (the `uv`
+  setting, `VALOR_UV`, held to the same rule as `VALOR_PG_BIN`), with a
+  PATH of system directories only and Python downloads off, so it keeps
+  the checkout's `.venv` interpreter and finds none a turn left on a PATH;
+  it reads uv's cache, which every turn profile write-denies.
 - A turn can unmount a disk the user mounted, the backup disk included,
   since macOS allows a user's own unmount whatever the profile says. It
   cannot mount anything in the disk's place (The turn sandbox, Files, in
