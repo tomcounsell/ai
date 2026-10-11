@@ -412,17 +412,21 @@ _HEAD_VALID = re.compile(rb"ref:\s*refs/|[0-9a-f]{40}")
 
 def _config_key(workspace: str | Path, git_bin: str) -> tuple[str, str] | None:
     """The key `hostile`'s cached answer is held under: the trusted git, the
-    environment of a kernel git call, the workspace's real path, and the
-    `.git` directory's `HEAD`, `config`, `config.worktree`, and `commondir`
-    (absent, or a regular file, by content hash, inode, and change time,
-    which a turn cannot set; never the modification time, which it can),
-    plus the effective user, the owners of the workspace and `.git`, and
-    whether `objects/` and `refs/` are reachable. None (read uncached) unless `.git` is a plain
-    directory git would stop at: a `HEAD` that names a ref or a commit,
-    `objects/` and `refs/` directories, no `commondir`, every file above
-    regular and readable. So a gitfile, a linked worktree, a repository
-    found above the workspace, or a link anywhere among them is never
-    cached; an include is never cached either (`hostile`)."""
+    environment of a kernel git call, the effective user, the workspace's
+    real path, the workspace directory and its `.git` directory (owner,
+    inode, and change time, so a `.git` renamed away and back is seen), and
+    `.git`'s `HEAD`, `config`, `config.worktree`, and `commondir` (absent,
+    or a regular file by content hash, inode, and change time), plus
+    whether `objects/` and `refs/` are reachable. Change times are the
+    kernel's clock, which no turn sets; a modification time, which a turn
+    sets, is never part of it.
+
+    None (read uncached) unless `.git` is a plain directory git stops at:
+    a `HEAD` that names a ref or a commit, `objects/` and `refs/`
+    directories, no `commondir`, every file above regular and readable. So
+    a gitfile, a linked worktree, a repository found above the workspace,
+    or a link among them is never cached; nor is an include (`hostile`).
+    The directories above the workspace are the kernel's."""
     try:
         real = os.path.realpath(workspace)
         dot = os.path.join(real, ".git")
@@ -431,7 +435,14 @@ def _config_key(workspace: str | Path, git_bin: str) -> tuple[str, str] | None:
             return None
         h = hashlib.sha256()
         h.update(
-            json.dumps([git_bin, sorted(env().items()), os.geteuid(), top.st_uid, gitdir.st_uid]).encode()
+            json.dumps(
+                [
+                    git_bin,
+                    sorted(env().items()),
+                    os.geteuid(),
+                    *((d.st_uid, d.st_dev, d.st_ino, d.st_ctime_ns) for d in (top, gitdir)),
+                ]
+            ).encode()
         )
         for name in ("objects", "refs"):
             got = os.lstat(os.path.join(dot, name))
