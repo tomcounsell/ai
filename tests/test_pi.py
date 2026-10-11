@@ -51,7 +51,13 @@ def _flag_value(argv: list[str], flag: str) -> str:
 
 
 @pytest.mark.macos
-def test_the_command_runs_node_and_the_script_under_the_turn_profile_with_every_loader_off(tmp_path):
+def test_the_command_runs_node_and_the_script_under_the_turn_profile_with_every_loader_off(
+    tmp_path, monkeypatch
+):
+    script = tmp_path / "pi" / "dist" / "cli.js"  # the installed layout, on a Mac without Pi too
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    monkeypatch.setattr(pi, "settings", dataclasses.replace(settings, pi=str(script)))
     command, harness = _build(tmp_path, resume="sess-1")
     argv = command.argv
     assert argv[0] == "/usr/bin/sandbox-exec" and _flag_value(argv, "-f") == harness["sandbox_profile"]
