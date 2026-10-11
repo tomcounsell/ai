@@ -436,6 +436,10 @@ checkout and its interpreter. A launchd job needs macOS's permission to
 read and write removable volumes, which Terminal already has; if the
 kicked dump fails with "Operation not permitted", grant it to that
 interpreter in System Settings, Privacy and Security, then kick it again.
+The grant follows the interpreter's binary, so an upgrade of
+`python@3.14` voids it and the job then hangs opening the backup
+directory. `brew pin python@3.14` keeps the nightly brew job from
+upgrading it; after a deliberate upgrade, grant and kick again.
 `launchctl bootout gui/$(id -u)/com.valor.backup` removes the job.
 
 ## Open questions for Tom
