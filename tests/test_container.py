@@ -653,7 +653,9 @@ def test_a_verification_runs_both_commits_in_vms_and_leaves_the_system_stopped(d
         0 < v["peak_mb"] <= v["memory_mb"] == settings.verify_memory_mb and v["cpus"] == settings.verify_cpus
     )
     assert v["image_tag"] == v["base_image_tag"] == container.base_tag() and not v["manifests_differ"]
-    assert v["setup"] == [{"command": "sh -c 'sleep 600 >/dev/null 2>&1 &'", "exit": 0}]
+    [setup] = v["setup"]
+    assert setup["command"] == "sh -c 'sleep 600 >/dev/null 2>&1 &'" and setup["exit"] == 0
+    assert isinstance(setup["output"], str) and setup["output"]  # names the output file, never its text
     assert v["base_run"]["tests"]["passed"] and v["base_run"]["cause"] is None
     lay = kws.Layout(Path(b.mirror).parent)
     assert sorted(p.name for p in (lay.checks / f"vm-head-{candidate[:12]}" / "src").iterdir()) == [
@@ -929,10 +931,11 @@ def test_the_builder_cannot_reach_the_kernels_postgres_or_a_tasks_services(tmp_p
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     lan = lan_address()
-    # The four connects run at once: each that is dropped waits out the
-    # builder's own connect timeout, about two minutes.
+    # The four connects run at once, each given 15 s: a reachable port answers
+    # in milliseconds, and a dropped one would wait out the builder's own
+    # connect timeout, about two minutes.
     tries = " ".join(
-        f"{{ if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo REACHED {h}:{p}; fi; }} &"
+        f"{{ if timeout 15 bash -c 'exec 3<>/dev/tcp/{h}/{p}' 2>/dev/null; then echo REACHED {h}:{p}; fi; }} &"
         for h in (GATEWAY, lan)
         for p in (settings.pgport, port)
     )
