@@ -38,7 +38,7 @@ import re
 from pathlib import Path
 
 FENCE = "decision-record"
-_BLOCK = re.compile(r"^```" + re.escape(FENCE) + r"[ \t]*\n(.*?)^```[ \t]*$", re.M | re.S)
+_BLOCK = re.compile(r"^```" + re.escape(FENCE) + r"[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 
 SYSTEM = """You are judging one replay of a business decision against the decision the business \
 actually made. You get the question as it was asked, the business context the person who asked \
