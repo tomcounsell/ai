@@ -375,8 +375,8 @@ another Mac or with a turn.
   socket. The kernel connects as `valor_kernel`, which can read and append
   and never update or delete the ledger; memory connects as `valor_memory`,
   which owns the schema `memory` and reaches nothing else. Roles and grants are
-  [data.md](data.md). The schema `memory` is here today; the design moves
-  it to the shared memory store (below).
+  [data.md](data.md). The schema `memory` is here until the `memory_dsn`
+  setting names the shared memory store (below).
 - **A workspace cluster** per task the kernel provisions, on demand, on
   its own port (5440 to 5599; its Redis, 6400 to 6499) with password
   authentication, owned by the workspace, holding only the app's test
@@ -406,26 +406,32 @@ refused.
 
 ## The shared memory store
 
-Not built yet. The design puts popoto's store ([memory.md](memory.md)) on
-one Postgres that all four Macs reach, so a standard of working Valor
-learned for one client is recalled on another client's Mac (docs/business.md,
-constraint "Generic across businesses"). Every record carries its client
-and its project. Each Mac's kernel ingests its own ledger's rows into it and
-recalls from it; no ledger row, task, or grant crosses with them. The
-store holds only what memory ingests from the four ledgers, and it grants
-nothing ([memory.md](memory.md), Memory grants nothing). Today each Mac's
-memory is the schema `memory` in its own machine cluster.
+popoto's store ([memory.md](memory.md)) goes on one Postgres that all four
+Macs reach, so a standard of working Valor learned for one client is
+recalled on another client's Mac (docs/business.md, constraint "Generic
+across businesses"). Every record carries its client, its project, and its
+ledger. Each Mac's kernel ingests its own ledger's rows into it and recalls
+from it; no ledger row, task, or grant crosses with them. The store holds
+only what memory ingests from the four ledgers, and it grants nothing
+([memory.md](memory.md), Memory grants nothing).
+
+The code is built: the setting `memory_dsn` (`VALOR_MEMORY_DSN`) names the
+store, apart from the kernel's DSN. Until the host is chosen it is unset,
+and each Mac's memory is the schema `memory` in its own machine cluster.
 
 **Chosen at cutover.** Where the shared Postgres runs, how each Mac
 reaches it (address, transport, and the role each Mac's kernel logs in
-as), and, if it runs on one of the four Macs, its line in that Mac's RAM
-plan are Valor's operational call, made when memory moves to the shared
-store and recorded here then. Until then the RAM plan above has no line
-for it.
+as, which `memory_dsn` then names), and, if it runs on one of the four
+Macs, its line in that Mac's RAM plan are Valor's operational call, made
+when memory moves to the shared store and recorded here then. Until then
+the RAM plan above has no line for it.
 
-**When a Mac cannot reach the store.** The turn runs without memory recall
-and does not wait for the store, and its Brief records that recall was
-skipped.
+**When a Mac cannot reach the store.** Its server not accepting a
+connection within two seconds, the turn runs without memory recall and
+does not wait for the store, and its Brief records `Memory: recall
+skipped: the store could not be reached (<reason>)`. The ingest after the
+turn is skipped the same way; the next one that reaches the store takes
+the rows.
 
 ## Backups
 
@@ -450,7 +456,7 @@ can read or write), compares it with its manifest, and removes the cluster.
 The digests cover `events` and `documents`, not the schema `memory`, whose
 records are rebuilt by ingesting the ledger again. Once memory is on the
 shared store, a rebuild ingests all four Macs' ledgers, each from its own
-kernel database. A restore is made with
+kernel database; what is taken is kept per ledger. A restore is made with
 `--no-owner`, so after restoring a dump for use, run `python -m core
 migrate` against it: it gives the schema `memory` and its tables back to
 `valor_memory`.

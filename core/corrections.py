@@ -15,6 +15,11 @@ the next turn of every task, including tasks started before it.
 filter in `in_force`. `source_class` is `direct` for a correction Tom gave;
 `exemplar` names the exemplar ledger, which shares this store. Withdrawing or
 superseding a correction is not built yet.
+
+`record` names a memory record (`<ledger>/<key>`, as its Remembered label
+shows) a correction is about: a fact about one client that turned up in
+another client's Brief. Memory stops recalling that record outside its
+client once it ingests the correction (docs/memory.md).
 """
 
 from pathlib import Path
@@ -54,6 +59,7 @@ def payload(
     scope: str = "global",
     source_class: str = "direct",
     role_played: bool = False,
+    record: str | None = None,
 ) -> dict[str, Any]:
     """A `correction.recorded` payload: the one place its shape is built."""
     text = text.strip()
@@ -63,13 +69,16 @@ def payload(
         raise ValueError(f"unknown scope {scope!r}")
     if source_class not in SOURCE_CLASSES:
         raise ValueError(f"unknown source class {source_class!r}")
-    return {
+    made = {
         "number": number,
         "scope": scope,
         "source_class": source_class,
         "text": text,
         "provenance": ledger.provenance(by, via, role_played),
     }
+    if record:
+        made["memory_record"] = record
+    return made
 
 
 async def record(
@@ -80,6 +89,7 @@ async def record(
     via: str,
     scope: str = "global",
     source_class: str = "direct",
+    record: str | None = None,
 ) -> dict[str, Any]:
     """Append the next numbered correction. Returns its ledger id and payload."""
     async with conn.transaction():
@@ -91,7 +101,9 @@ async def record(
                 (STREAM,),
             )
         ).fetchone()
-        recorded = payload(row[0] + 1, text, by=by, via=via, scope=scope, source_class=source_class)
+        recorded = payload(
+            row[0] + 1, text, by=by, via=via, scope=scope, source_class=source_class, record=record
+        )
         event_id = await ledger.append(conn, STREAM, "correction.recorded", recorded)
     return {"event_id": event_id, **recorded}
 

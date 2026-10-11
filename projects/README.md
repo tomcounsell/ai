@@ -30,6 +30,13 @@ workspaces for (`python -m core start ... --project NAME`).
   description lives. A working task's turns read and write that folder
   (`VALOR_KNOWLEDGE_BASE` names it to them); a replay's never do, since it
   may hold the reasoning behind the decisions a replay is scored against.
+- `client` names the client the project is for. Valor has one Mac per
+  client, and an internal Yudame project's client is `yudame`. Every memory
+  record ingested from the project's tasks carries it with the project, so
+  a record marked a standard of working is recalled for other clients, and
+  a record confined by a correction only for its own
+  ([docs/memory.md](../docs/memory.md)). A spec without one gives its records
+  the empty client.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

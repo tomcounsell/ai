@@ -48,7 +48,7 @@ outside the model is AI Control [4].
 | Driver and schema | psycopg 3 async, hand-written SQL, one idempotent `core/schema.sql` | in use |
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
 | Redis | none | in use (absent by decision) |
-| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs chosen, not built; its host chosen at cutover |
+| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs built (`memory_dsn`), its host chosen at cutover |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
@@ -212,10 +212,13 @@ both directions": the corrections and exemplar ledgers live in the kernel's even
 episodic memory recalls Tom's earlier words into later Briefs of the same project. Retrieved
 content carries no source class and grants nothing [7].
 
-The store moves to one Postgres shared by the four Macs, every record carrying its client and
-project, and recall adds the records Valor has judged to be standards of working, from any
-client ([memory.md](memory.md)). Status: **chosen, not built** (Tom, 2026-10-11); where that
-Postgres runs is chosen at cutover ([machine.md](machine.md), The shared memory store).
+The store moves to one Postgres shared by the four Macs, every record carrying its client,
+project, and ledger, and recall adds the records Valor has judged to be standards of working, from
+any client ([memory.md](memory.md)). Status: **built** (Tom, 2026-10-11): the store's own setting
+(`memory_dsn`), the client and project on every record, the standards of working, the correction
+that confines a record to its client, and recall skipped when the store cannot be reached. Where
+that Postgres runs is chosen at cutover ([machine.md](machine.md), The shared memory store); until
+the setting names it, each Mac's store is its kernel database's schema `memory`.
 
 ## 4. The model gateway
 

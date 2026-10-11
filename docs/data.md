@@ -6,8 +6,8 @@ keys. Every call opened and charged, turn, effect, approval, question, answer,
 piece of feedback, correction, and stop is a row in the events table, and
 everything the kernel knows about a task is computed from those rows when it
 is needed. Postgres is the one store; memory lives there in its own schema
-today, and the design moves it to one Postgres shared by the four Macs
-(Memory, below).
+until a setting points it at one Postgres shared by the four Macs (Memory,
+below).
 
 This doc owns the storage: tables, roles, the integrity mechanisms, how
 state is read, how a turn's Brief is rendered from the store, test
@@ -142,7 +142,8 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`). No code writes it; the attention fold reads the rows a ledger holds | Attention spent |
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, the action (`action_type`, target, payload, `payload_sha256`, `effect_class`), `adds_governance`, and `request_id` when the request had one. Older rows also hold an `approval_id`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error; a performer's answer jsonb refuses is written with an empty result and an error naming Postgres's reason | Legibility |
-| `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance | Corrections are first-class and carry provenance |
+| `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance, and `memory_record` when it confines a memory record to its client | Corrections are first-class and carry provenance |
+| `core/memory.py` | `memory.marked` | on the `memory` stream: `record` (`<ledger>/<key>`), provenance | Valor's judgement that a record is a standard of working, kept through a rebuild of the store |
 | `core/intake.py` | `message.received` | on the stream named for the channel: `received_id`, `verified`, and the bridge's record whole (`channel`, `chat_id`, `chat_kind`, `message_id`, `sender_id`, `sender_name`, `sent_at`, `kind`, `text`, `reply_to`, `thread`, `topic_id`, `attachments`, `headers`) | Mission item 1; one row per inbound message |
 | `core/intake.py` | `message.bound` | `received_id`, `task_id`, `as` (`start`, `steer`, `answer`, `feedback`, `stop`, `none`; older rows also `approve`), `error` when binding raised | A message acts once |
 | `core/intake.py` | `message.steered` | `received_id`, channel, chat and message ids, text, attachments, provenance; the next working turn opens with it | Corrections reach every session |
@@ -471,8 +472,9 @@ with a default for this Mac and an environment override: host
 (`VALOR_PGHOST`, default the `/tmp` socket), port (`VALOR_PGPORT`, 5432),
 database (`VALOR_DB`, `valor_rebuild`), test database (`VALOR_TEST_DB`,
 `valor_rebuild_test`), owner (`VALOR_PG_OWNER`), memory's role
-(`VALOR_MEMORY_ROLE`), memory `on` or `off` (`VALOR_MEMORY`), and the
-password file (`VALOR_PG_PASSFILE`). Every connection string names the
+(`VALOR_MEMORY_ROLE`), memory `on` or `off` (`VALOR_MEMORY`), memory's
+own store (`VALOR_MEMORY_DSN`, unset for the kernel database's schema
+`memory`), and the password file (`VALOR_PG_PASSFILE`). Every connection string names the
 password file and never holds a password.
 
 ## The kernel database is out of a turn's reach
@@ -561,12 +563,13 @@ call in every run by replaying a recorded provider response.
 ## Memory
 
 Memory lives in the kernel database's schema `memory`, owned by
-`valor_memory` (Roles, above). The design moves it to one Postgres that
-all four Macs reach, one Mac per client, every record carrying its client
-and project; the kernel database, its ledger, and its documents stay on
-their own Mac ([machine.md](machine.md), The shared memory store). Not
-built yet. What it takes from the ledger and what it recalls into a Brief
-is [memory.md](memory.md).
+`valor_memory` (Roles, above), until the `memory_dsn` setting
+(`VALOR_MEMORY_DSN`) names one Postgres that all four Macs reach, one Mac
+per client; that host is chosen at cutover. Every record carries its
+client, its project, and its ledger, so the store can be shared; the
+kernel database, its ledger, and its documents stay on their own Mac
+([machine.md](machine.md), The shared memory store). What it takes from
+the ledger and what it recalls into a Brief is [memory.md](memory.md).
 
 ## Gaps
 

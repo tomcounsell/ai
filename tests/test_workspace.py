@@ -179,12 +179,15 @@ def test_spec_refusals(tmp_path):
         ({"knowledge_base": ".."}, "not a folder name"),
         ({"knowledge_base": 'a"b'}, "not a folder name"),
         ({"knowledge_base": ""}, "not a folder name"),
+        ({"client": ""}, "client names a client"),
+        ({"client": 3}, "client names a client"),
     ]:
         with pytest.raises(kws.Refused, match=why):
             kws.Spec.from_dict({"name": "x", "repo": "r", "kind": "plain", "suite": "true", **bad})
     with pytest.raises(kws.Refused, match="no project spec"):
         kws.Spec.load(str(tmp_path / "missing.toml"))
     assert kws.Spec.load("valor").suite.startswith("uv run pytest")
+    assert kws.Spec.load("valor").client == "yudame"
 
 
 def test_a_projects_knowledge_base_reaches_its_turn_profile_environment_and_copy(tmp_path):

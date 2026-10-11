@@ -6,8 +6,13 @@ secure-login                   the kernel databases' password file, the kernel's
                                the owner's, and memory's passwords, and the
                                pg_hba.conf rules; idempotent
 memory ingest                  take the ledger rows memory has not taken (run
-                               after every turn; by hand, the rollout's backfill)
-settings                       every setting, as shell assignments
+                               after every turn; by hand, the rollout's backfill
+                               or a rebuild)
+memory mark RECORD [--by] [--via]
+                               mark a record (`<ledger>/<key>`, as its
+                               Remembered label names it) a standard of
+                               working, recalled for any client's task
+settings                     every setting, as shell assignments
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
       [--by B] [--role-played] [--harness {claude_code,pi}]
@@ -89,7 +94,11 @@ used TASK_ID --by B [--delivery EVENT_ID] [--note TEXT] [--via V] [--role-played
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task and every task under it now,
                                wherever their turns run
-correct TEXT [--by] [--via]    record Tom's next correction (global, direct)
+correct TEXT [--by] [--via] [--record RECORD]
+                               record Tom's next correction (global, direct);
+                               `--record` names the memory record a client
+                               fact in another client's Brief came from, which
+                               memory then recalls for its own client only
 corrections                    every correction, in force for every turn
 audit                          the reviewed candidates with no label from Tom,
                                in the list's weighted order, each with the git
@@ -692,6 +701,12 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"granted {args.instance} as {guard_id}; continue with: python -m core run {args.task_id}")
+        elif args.command == "memory" and args.memory_command == "mark":
+            try:
+                row = await memory.mark(conn, args.record, by=args.by, via=args.via)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from None
+            print(f"{args.record} marked a standard of working, ledger row {row}")
         elif args.command == "memory":
             print(json.dumps(await memory.ingest(conn)))
         elif args.command == "status":
@@ -730,7 +745,7 @@ async def _run(args) -> None:
             else:
                 print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
         elif args.command == "correct":
-            c = await corrections.record(conn, args.text, by=args.by, via=args.via)
+            c = await corrections.record(conn, args.text, by=args.by, via=args.via, record=args.record)
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
@@ -938,6 +953,7 @@ def main() -> None:
     correct.add_argument("text")
     correct.add_argument("--by", default="tom")
     correct.add_argument("--via", default="the command line")
+    correct.add_argument("--record", help="the memory record (<ledger>/<key>) the correction confines")
     sub.add_parser("corrections")
     audit_cmd = sub.add_parser("audit").add_subparsers(dest="audit_command", parser_class=_Parser)
     label = audit_cmd.add_parser("label")
@@ -950,7 +966,12 @@ def main() -> None:
     label.add_argument("--role-played", action="store_true")
     audit_cmd.add_parser("scores")
     sub.add_parser("secure-login")
-    sub.add_parser("memory").add_subparsers(dest="memory_command", required=True).add_parser("ingest")
+    memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)
+    memory_cmd.add_parser("ingest")
+    mark = memory_cmd.add_parser("mark")
+    mark.add_argument("record")
+    mark.add_argument("--by", default="valor")
+    mark.add_argument("--via", default="the command line")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")

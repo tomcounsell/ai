@@ -4,6 +4,8 @@
 # --branch B` still overrides it. The merge lands on merge_url at that
 # branch, from the kernel mirror with the GitHub credential.
 name = "valor"
+# An internal Yudame project: its memory records carry this client.
+client = "yudame"
 branch = "valor-cori-rebuild"
 repo = "https://github.com/tomcounsell/ai.git"
 kind = "python-uv"

@@ -3,6 +3,12 @@
 Every model is popoto's, on its Postgres backend in the schema `memory`,
 connected as memory's own role. No Redis: each model names the `postgres`
 backend, and `use` installs it before any read or write.
+
+The store may be shared by the four Macs (docs/machine.md, The shared
+memory store), so every record and every taken row names its `ledger`, the
+kernel database it came from (`<machine>/<database>`): ledger ids are only
+unique within one. A record is named across the store by `ref`,
+`<ledger>/<key>`.
 """
 
 import popoto
@@ -16,11 +22,15 @@ _dsn: str | None = None
 
 class Record(popoto.Model):
     """One raw entry: a row's words, or one text entry of a turn's
-    transcript. `key` is `<ledger id>.<entry index>`, so saving a row's
-    records again overwrites them. `meta` holds what the label is rendered
-    from (origin, task, turn, provenance, correction number)."""
+    transcript. `key` is `<ledger id>.<entry index>` within its `ledger`, so
+    saving a row's records again overwrites them. It carries the client and
+    the project of the task it came from. `meta` holds what the label is
+    rendered from (origin, task, turn, provenance, correction number) and
+    `ledger_at`, the row's time in epoch seconds."""
 
     key = popoto.KeyField()
+    ledger = popoto.KeyField()
+    client = popoto.KeyField()
     project = popoto.KeyField()
     ledger_id = popoto.SortedField(type=int, partition_by="project")
     origin = popoto.StringField()
@@ -35,10 +45,43 @@ class Record(popoto.Model):
 class Ingested(popoto.Model):
     """One per ledger row taken, saved after its records."""
 
+    ledger = popoto.KeyField()
     ledger_id = popoto.KeyField()
 
     class Meta:
         backend = "postgres"
+
+
+class Standard(popoto.Model):
+    """A record Valor has judged a standard of working: recalled for any
+    client's task. Made from a `memory.marked` ledger row."""
+
+    record = popoto.KeyField()
+
+    class Meta:
+        backend = "postgres"
+
+
+class Confined(popoto.Model):
+    """A record a correction named as a client fact found in another
+    client's Brief: recalled for its own client's tasks only, mark or no
+    mark. Made from that `correction.recorded` row."""
+
+    record = popoto.KeyField()
+
+    class Meta:
+        backend = "postgres"
+
+
+def ref(ledger: str, key: str) -> str:
+    """A record's name across the store."""
+    return f"{ledger}/{key}"
+
+
+def split(name: str) -> tuple[str, str]:
+    """`ref`'s inverse: the ledger and the key."""
+    ledger, _, key = str(name).rpartition("/")
+    return ledger, key
 
 
 def use(dsn: str) -> PostgresBackend:

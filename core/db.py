@@ -80,6 +80,18 @@ def memory_schema(conn: psycopg.Connection) -> None:
         can_set = conn.execute("SELECT pg_has_role(current_user, %s, 'SET')", (settings.memory_role,))
         if not can_set.fetchone()[0]:
             conn.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(role))
+        # A store written before records named their ledger and client
+        # (docs/memory.md) is dropped whole: popoto will not change a
+        # model's keys in place, and the next ingest rebuilds every record
+        # from the ledger.
+        before_ledgers = conn.execute(
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'memory' AND c.relname = 'ingested' AND NOT EXISTS ("
+            "  SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'ledger' "
+            "  AND NOT a.attisdropped)"
+        ).fetchone()
+        if before_ledgers:
+            conn.execute("DROP SCHEMA memory CASCADE")
         conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS memory AUTHORIZATION {}").format(role))
         conn.execute(sql.SQL("ALTER SCHEMA memory OWNER TO {}").format(role))
         tables = conn.execute(

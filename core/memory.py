@@ -1,4 +1,5 @@
-"""The port `core/` reads memory through (docs/plans/b1-memory.md).
+"""The port `core/` reads memory through (docs/plans/b1-memory.md,
+docs/memory.md).
 
 The only importer of `memory/`, which it imports only when
 `settings.memory` is `on`. It reads the ledger as `valor_kernel` and hands
@@ -7,10 +8,23 @@ call into `memory/` runs in a worker thread: popoto's search is
 synchronous, and the kernel's event loop carries its stop notices and
 bridges.
 
+The store is `settings.memory_dsn` when set: the Postgres the four Macs
+share (docs/machine.md, The shared memory store). Unset, it is the schema
+`memory` of the kernel database `conn` is connected to. Either way every
+record names its ledger (`<machine>/<database>`), its client, and its
+project, so each Mac's kernel ingests its own ledger into a shared store
+and a rebuild is every Mac ingesting its own again.
+
 - `ingest(conn)` takes the ledger rows memory has not taken, found by set
-  difference with memory's `Ingested` set, under a session advisory lock.
+  difference with memory's `Ingested` set for this ledger, under a session
+  advisory lock.
 - `recall(conn, task_id, fresh)` returns the Remembered section, the empty
-  string, or `Memory: unavailable: <reason>`.
+  string, `Memory: unavailable: <reason>`, or, when the store cannot be
+  reached, `Memory: recall skipped: ...`, without waiting for it.
+- `mark(conn, record, by=..., via=...)` records Valor's judgement that a
+  record is a standard of working, recalled for any client's task.
+- A correction naming a record (`corrections.record(..., record=...)`)
+  confines it to its own client.
 - `after_turn(dsn)` is `ingest` on a connection of its own, run by
   `run_turn` once the turn slot is released; its failure goes to stderr.
 
@@ -19,16 +33,31 @@ turn.
 """
 
 import asyncio
+import socket
 import sys
 from typing import Any
 
-from core import db, transcripts
+from psycopg.conninfo import conninfo_to_dict
+
+from core import db, ledger, transcripts
 from core.settings import settings
 
-# The rows memory takes (`memory.ingest.ORIGINS`).
-TYPES = ("task.started", "question.answered", "feedback.given", "correction.recorded", "turn.ended")
+# The rows memory takes (`memory.ingest.ORIGINS`, and `memory.ingest.MARKED`).
+TYPES = (
+    "task.started",
+    "question.answered",
+    "feedback.given",
+    "correction.recorded",
+    "turn.ended",
+    "memory.marked",
+)
 CORRECTIONS = "corrections"
+# The stream Valor's standard-of-working marks are written on.
+MARKS = "memory"
+STREAMS = (CORRECTIONS, MARKS)
 LOCK = "memory:ingest"
+# How long the store has to answer before recall goes without it.
+REACH_SECONDS = 2.0
 
 
 def on() -> bool:
@@ -36,10 +65,39 @@ def on() -> bool:
 
 
 def dsn_for(conn) -> str:
-    """Memory's DSN for the database `conn` is connected to."""
+    """Memory's DSN: the shared store's when set, else the database `conn`
+    is connected to, as memory's role."""
+    if settings.memory_dsn:
+        return settings.memory_dsn
     info = conn.info
     passfile = info.get_parameters().get("passfile")
     return settings.dsn(memory=True, database=info.dbname, host=info.host, port=info.port, passfile=passfile)
+
+
+def ledger_name(conn) -> str:
+    """The ledger `conn` reads, as memory names it: this machine and the
+    kernel database."""
+    return f"{settings.machine}/{conn.info.dbname}"
+
+
+def unreachable(mdsn: str, timeout: float = REACH_SECONDS) -> str | None:
+    """Why the store at `mdsn` cannot be reached, or None when its server
+    accepts a connection within `timeout` seconds. Only the transport is
+    tried: a store that answers but refuses the login is reached, and its
+    failure is the recall's own."""
+    params = conninfo_to_dict(mdsn)
+    host = str(params.get("host") or "/tmp").split(",")[0]
+    port = int(str(params.get("port") or "5432").split(",")[0])
+    try:
+        if host.startswith("/"):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect(f"{host}/.s.PGSQL.{port}")
+        else:
+            socket.create_connection((host, port), timeout=timeout).close()
+    except OSError as exc:
+        return f"{host}:{port}: {_reason(exc)}"
+    return None
 
 
 def _reason(exc: BaseException) -> str:
@@ -58,47 +116,80 @@ async def recall(conn, task_id: str, fresh: str | None) -> str:
         project = (b.project or {}).get("repo")
         row = await (
             await conn.execute(
-                "SELECT id FROM events WHERE task_id = %s AND type = 'task.started' ORDER BY id LIMIT 1",
+                "SELECT id, at FROM events WHERE task_id = %s AND type = 'task.started' ORDER BY id LIMIT 1",
                 (task_id,),
             )
         ).fetchone()
         if not project or row is None:
             return ""
+        mdsn = dsn_for(conn)
+        why = await asyncio.to_thread(unreachable, mdsn)
+        if why:
+            return f"Memory: recall skipped: the store could not be reached ({why})"
         from memory import recall as m
 
-        return await asyncio.to_thread(m.render, dsn_for(conn), project, row[0], b.instruction)
+        name = ledger_name(conn)
+        return await asyncio.to_thread(
+            lambda: m.render(
+                mdsn,
+                ledger=name,
+                project=project,
+                client=(b.project or {}).get("client") or "",
+                cutoff=row[0],
+                started_at=row[1].timestamp(),
+                query=b.instruction,
+            )
+        )
     except Exception as exc:  # noqa: BLE001  rendered in the Brief; the turn runs
         return f"Memory: unavailable: {_reason(exc)}"
+
+
+async def mark(conn, record: str, *, by: str = "valor", via: str = "the command line") -> int:
+    """Record that `record` (`<ledger>/<key>`, as its Remembered label
+    names it) is a standard of working: from the next ingest on, it is
+    recalled for any client's task. No fixed rule decides which records are
+    standards; Valor judges each one. Returns the ledger row's id."""
+    if "/" not in record or not record.rsplit("/", 1)[1]:
+        raise ValueError(f"{record!r} is not a record name (<ledger>/<key>)")
+    return await ledger.append(
+        conn, MARKS, "memory.marked", {"record": record, "provenance": ledger.provenance(by, via, False)}
+    )
 
 
 async def ingest(conn) -> dict[str, Any]:
     """Take every row memory has not taken. A task's rows are taken once
     the task has a `turn.started`, so its project is settled (a task
     started by message gets its project when provisioned); a calibration
-    task runs no turn and is never taken. Returns the count of rows and
-    records taken."""
+    task runs no turn and is never taken. The corrections and marks streams
+    are taken whole. Returns the count of rows and records taken, or why
+    the store could not be reached."""
     if not on():
         return {"memory": "off"}
     from memory import ingest as m
 
     mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        return {"skipped": f"the store could not be reached ({why})"}
+    name = ledger_name(conn)
     await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (LOCK,))
     try:
-        done = await asyncio.to_thread(m.taken, mdsn)
+        done = await asyncio.to_thread(m.taken, mdsn, name)
         ids = await (
             await conn.execute(
-                "SELECT e.id FROM events e WHERE e.type = ANY(%s) AND (e.task_id = %s OR EXISTS ("
+                "SELECT e.id FROM events e WHERE e.type = ANY(%s) AND (e.task_id = ANY(%s) OR EXISTS ("
                 "  SELECT 1 FROM events t WHERE t.task_id = e.task_id AND t.type = 'turn.started')) "
                 "ORDER BY e.id",
-                (list(TYPES), CORRECTIONS),
+                (list(TYPES), list(STREAMS)),
             )
         ).fetchall()
-        projects: dict[str, str] = {}
+        projects: dict[str, tuple[str, str]] = {}
         rows = records = 0
         for (ledger_id,) in ids:
             if ledger_id in done:
                 continue
             unit = await _unit(conn, ledger_id, projects)
+            unit["ledger"] = name
             records += await asyncio.to_thread(m.save, mdsn, unit)
             rows += 1
         return {"rows": rows, "records": records}
@@ -106,9 +197,9 @@ async def ingest(conn) -> dict[str, Any]:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (LOCK,))
 
 
-async def _unit(conn, ledger_id: int, projects: dict[str, str]) -> dict[str, Any]:
-    task_id, type_, payload = await (
-        await conn.execute("SELECT task_id, type, payload FROM events WHERE id = %s", (ledger_id,))
+async def _unit(conn, ledger_id: int, projects: dict[str, tuple[str, str]]) -> dict[str, Any]:
+    task_id, type_, payload, at = await (
+        await conn.execute("SELECT task_id, type, payload, at FROM events WHERE id = %s", (ledger_id,))
     ).fetchone()
     if task_id not in projects:
         projects[task_id] = await _project(conn, task_id)
@@ -116,36 +207,44 @@ async def _unit(conn, ledger_id: int, projects: dict[str, str]) -> dict[str, Any
     if type_ == "turn.ended":
         for f in (payload.get("transcript") or {}).get("files", []):
             files[f["name"]] = await transcripts.joined(conn, payload["turn_id"], f["name"])
+    project, client = projects[task_id]
     return {
         "id": ledger_id,
         "task_id": task_id,
         "type": type_,
         "payload": payload,
-        "project": projects[task_id],
+        "project": project,
+        "client": client,
+        "at": at.timestamp(),
         "files": files,
     }
 
 
-async def _project(conn, task_id: str) -> str:
-    if task_id == CORRECTIONS:
-        return ""
+async def _project(conn, task_id: str) -> tuple[str, str]:
+    """The task's project (its spec's `repo`) and client."""
+    if task_id in STREAMS:
+        return "", ""
     from core import tasks
 
     try:
         b = await tasks.brief(conn, task_id)
     except KeyError:
-        return ""
-    return (b.project or {}).get("repo") or ""
+        return "", ""
+    spec = b.project or {}
+    return spec.get("repo") or "", spec.get("client") or ""
 
 
 async def after_turn(dsn: str) -> None:
-    """Ingest on a connection of its own; a failure is written to stderr
-    and the rows stay untaken until the next ingest."""
+    """Ingest on a connection of its own; a failure, or a store that cannot
+    be reached, is written to stderr and the rows stay untaken until the
+    next ingest."""
     if not on():
         return
     try:
         async with await db.connect(dsn, application_name="valor memory ingest") as conn:
-            await ingest(conn)
+            done = await ingest(conn)
+        if "skipped" in done:
+            print(f"memory: ingest skipped: {done['skipped']}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001  reported; the turn's rows are written
         print(f"memory: ingest failed: {_reason(exc)}", file=sys.stderr)
 

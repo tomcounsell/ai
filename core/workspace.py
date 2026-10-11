@@ -215,7 +215,10 @@ class Spec:
     `settings.default_machine`, so each chat has one owner.
 
     `knowledge_base` names the business's folder in `~/work-vault`, which a
-    working task's turns read and write; a replay's never do."""
+    working task's turns read and write; a replay's never do.
+
+    `client` names the client the project is for (one Mac per client); every
+    memory record ingested from its tasks carries it (docs/memory.md)."""
 
     name: str
     repo: str
@@ -234,6 +237,7 @@ class Spec:
     chats: tuple[str, ...] = ()
     machine: str | None = None
     knowledge_base: str | None = None
+    client: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -281,6 +285,9 @@ class Spec:
             not isinstance(kb, str) or kb in ("", ".", "..") or any(c in kb for c in '/"\\\n')
         ):
             raise Refused(f"knowledge_base {kb!r} is not a folder name in ~/{VAULT}")
+        client = raw.get("client")
+        if client is not None and (not isinstance(client, str) or not client.strip()):
+            raise Refused("client names a client")
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -299,6 +306,7 @@ class Spec:
             chats=tuple(c if c.startswith("telegram:") else c.lower() for c in chats),
             machine=machine,
             knowledge_base=kb,
+            client=client,
         )
 
     @classmethod

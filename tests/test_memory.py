@@ -519,3 +519,197 @@ def test_migrate_runs_for_an_owner_that_is_not_a_superuser(monkeypatch):
         with psycopg.connect(cluster.dsn(database="ledger"), autocommit=True) as conn:
             owner = conn.execute("SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'memory'")
             assert owner.fetchone()[0] == settings.memory_role
+
+
+# -- the store shared by the four Macs (docs/memory.md, docs/machine.md) ------------------
+
+
+async def client_task(conn, instruction: str, repo: str, client: str) -> str:
+    """A task of `client`'s project `repo`, with the `turn.started` that
+    settles its project for ingest."""
+    task = await tasks.start(
+        conn, tasks.Brief(instruction=instruction, project={"repo": repo, "name": "p", "client": client})
+    )
+    await ledger.append(conn, task, "turn.started", {"turn_id": ledger.new_id()})
+    return task
+
+
+async def record_of(conn, task: str) -> str:
+    """The name of the record a task's instruction made."""
+    row = await (
+        await conn.execute(
+            "SELECT id FROM events WHERE task_id = %s AND type = 'task.started' ORDER BY id LIMIT 1", (task,)
+        )
+    ).fetchone()
+    return f"{memory.ledger_name(conn)}/{row[0]}.0"
+
+
+def shared(monkeypatch, value: str) -> None:
+    monkeypatch.setattr(memory, "settings", dataclasses.replace(settings, memory_dsn=value))
+
+
+def test_the_memory_dsn_is_a_setting_of_its_own_and_unset_is_the_kernel_database(dsn, monkeypatch):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            default = memory.dsn_for(conn)
+            shared(monkeypatch, "host=memory.example port=5433 dbname=memory user=valor_memory")
+            return default, memory.dsn_for(conn)
+
+    default, chosen = run(go())
+    assert f"dbname={TEST_DB} " in default and f"user={settings.memory_role} " in default
+    assert chosen == "host=memory.example port=5433 dbname=memory user=valor_memory"
+    assert settings.memory_dsn == ""
+
+
+def test_every_record_carries_its_ledger_client_and_project(dsn):
+    repo = project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await client_task(conn, "Kestrel record.", repo, "acme")
+            name = await record_of(conn, task)
+        await ingest(dsn)
+        return name
+
+    name = run(go())
+    from memory.records import Record, split, use
+
+    def look():
+        use(memory_dsn())
+        return [(r.ledger, r.client, r.project, r.text) for r in Record.query.filter(project=repo)]
+
+    at_ledger, _key = split(name)
+    assert run(asyncio.to_thread(look)) == [(at_ledger, "acme", repo, "Kestrel record.")]
+    assert at_ledger == f"{settings.machine}/{TEST_DB}"
+
+
+def test_a_standard_of_working_is_recalled_for_any_client_and_an_unmarked_record_is_not(dsn):
+    acme, acme_other, globex = project(), project(), project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            rule = await client_task(conn, "Write the lynx changelog entry before the merge.", acme, "acme")
+            await client_task(conn, "The lynx price for acme is 40 dollars.", acme, "acme")
+            await memory.mark(conn, await record_of(conn, rule))
+            theirs = await client_task(conn, "lynx changelog merge price", globex, "globex")
+            sibling = await client_task(conn, "lynx changelog merge price", acme_other, "acme")
+        await ingest(dsn)
+        async with await db.connect(dsn) as conn:
+            brief = (await tasks.dispatch(conn, theirs))["text"]
+        return brief, await recall(dsn, sibling)
+
+    brief, sibling = run(go())
+    assert "  > Write the lynx changelog entry before the merge." in brief
+    assert "lynx price" not in brief
+    assert "  > Write the lynx changelog entry before the merge." in sibling
+    assert "lynx price" not in sibling
+
+
+def test_a_correction_naming_a_record_keeps_it_from_other_clients_and_not_its_own(dsn):
+    acme, acme_other, globex = project(), project(), project()
+
+    async def go():
+        from core import corrections
+
+        async with await db.connect(dsn) as conn:
+            fact = await client_task(conn, "The margay launch date for acme is 3 March.", acme, "acme")
+            name = await record_of(conn, fact)
+            await memory.mark(conn, name)
+            before = await client_task(conn, "margay launch date", globex, "globex")
+        await ingest(dsn)
+        leaked = await recall(dsn, before)
+        async with await db.connect(dsn) as conn:
+            c = await corrections.record(
+                conn,
+                "An acme launch date reached a globex Brief; it is acme's alone.",
+                by="valor",
+                via="test",
+                record=name,
+            )
+            theirs = await client_task(conn, "margay launch date", project(), "globex")
+            own = await client_task(conn, "margay launch date", acme_other, "acme")
+        await ingest(dsn)
+        return leaked, c, name, await recall(dsn, theirs), await recall(dsn, before), await recall(dsn, own)
+
+    leaked, c, name, theirs, before, own = run(go())
+    assert "margay launch date for acme" in leaked
+    assert c["memory_record"] == name
+    assert theirs == "" and before == ""
+    assert "  > The margay launch date for acme is 3 March." in own
+
+
+def test_a_shared_store_takes_every_ledgers_rows_and_recalls_standards_across_them(dsn, monkeypatch):
+    """Two kernel databases, two Macs' ledgers, one store: ledger ids
+    overlap, every row of each is taken, and a standard marked on one is
+    recalled on the other."""
+    other = db.migrate(f"{TEST_DB}_mac2", fresh=True)
+    shared(monkeypatch, memory_dsn())
+    acme, globex = project(), project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            rule = await client_task(conn, "Name every serval migration by date.", acme, "acme")
+            await client_task(conn, "The serval acme budget is private.", acme, "acme")
+            await memory.mark(conn, await record_of(conn, rule))
+        async with await db.connect(other) as conn:
+            await client_task(conn, "Globex serval tables use plural names.", globex, "globex")
+            later = await client_task(conn, "serval migration names budget plural", globex, "globex")
+        first, second = await ingest(dsn), await ingest(other)
+        again = await ingest(other)
+        return first, second, again, await recall(other, later)
+
+    first, second, again, found = run(go())
+    assert first["rows"] >= 3 and second["rows"] >= 2 and again == {"rows": 0, "records": 0}
+    assert "  > Name every serval migration by date." in found
+    assert "  > Globex serval tables use plural names." in found
+    assert "serval acme budget" not in found
+    assert found.index("Globex serval tables") < found.index("Name every serval migration")
+
+
+def test_an_unreachable_store_is_skipped_without_waiting_and_the_brief_says_so(dsn, monkeypatch):
+    import socket
+    import time
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    shared(monkeypatch, f"host=127.0.0.1 port={port} dbname=memory user=valor_memory connect_timeout=30")
+    repo = project()
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await client_task(conn, "Quail earlier record.", repo, "acme")
+            task = await client_task(conn, "quail", repo, "acme")
+            began = time.monotonic()
+            brief = (await tasks.dispatch(conn, task))["text"]
+            took = time.monotonic() - began
+        return brief, took, await ingest(dsn)
+
+    brief, took, taken = run(go())
+    assert f"Memory: recall skipped: the store could not be reached (127.0.0.1:{port}: " in brief
+    assert "## Remembered" not in brief
+    assert took < memory.REACH_SECONDS + 1
+    assert taken["skipped"].startswith("the store could not be reached")
+
+
+def test_migrate_drops_a_store_written_before_records_named_their_ledger():
+    """Its records are rebuilt by the next ingest from the ledger."""
+    name = f"{TEST_DB}_oldshape"
+    db.migrate(name, fresh=True)
+    with psycopg.connect(settings.dsn(owner=True, database=name), autocommit=True) as conn:
+        conn.execute("CREATE TABLE memory.ingested (_pk text PRIMARY KEY, ledger_id text)")
+        conn.execute("CREATE TABLE memory.record (_pk text PRIMARY KEY, key text, project text)")
+    db.migrate(name)
+    with psycopg.connect(settings.dsn(owner=True, database=name), autocommit=True) as conn:
+        left = conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'memory'").fetchone()[0]
+        owner = conn.execute("SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'memory'")
+        assert left == 0 and owner.fetchone()[0] == settings.memory_role
+        conn.execute("CREATE TABLE memory.ingested (_pk text PRIMARY KEY, ledger text, ledger_id text)")
+    db.migrate(name)
+    with psycopg.connect(settings.dsn(owner=True, database=name), autocommit=True) as conn:
+        assert conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'memory'").fetchone()[0] == 1
+
+
+def test_a_mark_names_a_record():
+    with pytest.raises(ValueError, match="not a record name"):
+        run(memory.mark(None, "no-slash"))

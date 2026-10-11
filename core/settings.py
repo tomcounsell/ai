@@ -255,6 +255,11 @@ class Settings:
     # back-out (docs/plans/b1-memory.md).
     memory_role: str = field(default_factory=lambda: _env("VALOR_MEMORY_ROLE", "valor_memory"))
     memory: str = field(default_factory=lambda: _env("VALOR_MEMORY", "on"))
+    # The memory store's own connection string, apart from the kernel's: the
+    # shared Postgres the four Macs reach (docs/machine.md, The shared memory
+    # store), its host chosen at cutover. Empty means the schema `memory` in
+    # the kernel database this Mac's kernel is connected to.
+    memory_dsn: str = field(default_factory=lambda: _env("VALOR_MEMORY_DSN", ""))
     owner_role: str = field(default_factory=lambda: _env("VALOR_PG_OWNER", getpass.getuser()))
     # Programs the kernel runs are named by fixed path, never looked up on
     # PATH: a turn can write to directories on the user's PATH, so a lookup

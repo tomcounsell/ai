@@ -1,18 +1,26 @@
 """Turning ledger rows into records.
 
 The kernel's port hands each row over as plain data (a dict, with the
-task's project and the bytes of any transcript the row names); nothing here
-reads the ledger. A row is one unit: its records are saved, then its id is
-marked taken, so a unit cut short is taken again whole and overwrites the
-same keys.
+ledger it came from, the task's client and project, the row's time, and the
+bytes of any transcript the row names); nothing here reads the ledger. A
+row is one unit: its records are saved, then its id is marked taken, so a
+unit cut short is taken again whole and overwrites the same keys.
+
+A `memory.marked` row makes no record: it marks the record it names a
+standard of working. A correction that names a record (`memory_record`)
+confines that record to its client.
 """
 
 import json
 from typing import Any
 
-from memory.records import Ingested, Record, use
+from memory.records import Confined, Ingested, Record, Standard, use
 
-# The ledger rows memory takes, and the origin each one's records carry.
+# The row that marks a standard of working.
+MARKED = "memory.marked"
+
+# The ledger rows memory takes records from, and the origin each one's
+# records carry.
 ORIGINS = {
     "task.started": "instruction",
     "question.answered": "answer",
@@ -22,10 +30,10 @@ ORIGINS = {
 }
 
 
-def taken(dsn: str) -> set[int]:
-    """The ids of the ledger rows already taken."""
+def taken(dsn: str, ledger: str) -> set[int]:
+    """The ids of `ledger`'s rows already taken."""
     use(dsn)
-    return {int(i.ledger_id) for i in Ingested.query.all()}
+    return {int(i.ledger_id) for i in Ingested.query.filter(ledger=ledger)}
 
 
 def entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
@@ -35,7 +43,7 @@ def entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
     Postgres text holds none."""
     payload = unit["payload"]
     origin = ORIGINS[unit["type"]]
-    meta: dict[str, Any] = {"task_id": unit["task_id"]}
+    meta: dict[str, Any] = {"task_id": unit["task_id"], "ledger_at": float(unit.get("at") or 0)}
     if origin == "transcript":
         meta["turn_id"] = payload.get("turn_id", "")
         texts = [t for name in sorted(unit.get("files", {})) for t in transcript_texts(unit["files"][name])]
@@ -93,8 +101,19 @@ def save(dsn: str, unit: dict[str, Any]) -> int:
     """Save one row's records, then mark the row taken. Returns the number
     of records."""
     use(dsn)
-    made = entries(unit)
+    payload = unit["payload"]
+    made = [] if unit["type"] == MARKED else entries(unit)
     for e in made:
-        Record.create(project=unit["project"], ledger_id=unit["id"], **e)
-    Ingested.create(ledger_id=str(unit["id"]))
+        Record.create(
+            ledger=unit["ledger"],
+            client=unit.get("client") or "",
+            project=unit["project"],
+            ledger_id=unit["id"],
+            **e,
+        )
+    if unit["type"] == MARKED and payload.get("record"):
+        Standard.create(record=str(payload["record"]))
+    if unit["type"] == "correction.recorded" and payload.get("memory_record"):
+        Confined.create(record=str(payload["memory_record"]))
+    Ingested.create(ledger=unit["ledger"], ledger_id=str(unit["id"]))
     return len(made)
