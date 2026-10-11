@@ -745,33 +745,31 @@ def test_a_build_leaves_no_builder_and_no_cache_the_next_build_reuses(tmp_path):
 
 @pytest.mark.container
 def test_an_image_retagged_by_hand_is_a_kernel_cause_and_dropped(tmp_path):
+    """A built tag swapped by hand for another image, here the base image's,
+    is held under another digest than the one recorded."""
+
     async def go():
         base = await base_image()
-        out = {}
-        for name in ("one", "two"):
-            context = tmp_path / name
-            context.mkdir()
-            (context / "Containerfile").write_text(f"FROM {base}\nRUN echo {name} > /name\n")
-            out[name] = await container.build(f"{container.REPO}/{name}:test", context, tmp_path / f"{name}.out",
-                                              never(), conftest.LABEL)  # fmt: skip
-        return out
+        context = tmp_path / "one"
+        context.mkdir()
+        (context / "Containerfile").write_text(f"FROM {base}\nRUN echo one > /name\n")
+        return base, await container.build(one, context, tmp_path / "one.out", never(), conftest.LABEL)
 
-    one, two = f"{container.REPO}/one:test", f"{container.REPO}/two:test"
+    one = f"{container.REPO}/one:test"
     with held():
         try:
-            digests = run(go())
-            assert unstopped(container.checked, one) == digests["one"]
+            other, digest = run(go())
+            assert unstopped(container.checked, one) == digest
             # `image tag` leaves a built tag in place, so the swap deletes it first.
             assert container.call("image", "delete", one)[0] == 0
-            assert container.call("image", "tag", two, one)[0] == 0
+            assert container.call("image", "tag", other, one)[0] == 0
             with pytest.raises(container.Failed) as raised:
                 unstopped(container.checked, one)
             assert raised.value.cause == "kernel"
             assert unstopped(container.inspect, one) is None and one not in container._images()
         finally:
-            for tag in (one, two):
-                container.call("image", "delete", tag)
-                container._record(tag, None, "")
+            container.call("image", "delete", one)  # the tag only: the base image stays
+            container._record(one, None, "")
 
 
 PACKAGE = '{"name": "toy", "version": "1.0.0"}\n'
