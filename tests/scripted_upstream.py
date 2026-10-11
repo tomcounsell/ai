@@ -120,7 +120,7 @@ class ScriptedUpstream:
             app.router.add_post(f"{prefix}/v1/messages", self._messages)
             app.router.add_post(f"{prefix}/v1/responses", self._responses)
         app.router.add_post("/v1/messages/count_tokens", self._count)
-        self._runner = web.AppRunner(app)
+        self._runner = web.AppRunner(app, handler_cancellation=True)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", ports.listen() if port is None else port)
         await site.start()

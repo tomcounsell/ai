@@ -837,15 +837,19 @@ def test_a_lookup_that_never_answers_does_not_hold_the_outbox(dsn, op, mailbox, 
 
     monkeypatch.setattr(smtp, "lookup", hung)
 
+    async def wakes_then_free() -> bool:
+        await asyncio.sleep(0.6)  # a few wakes while the lookup hangs
+        free.set()  # the hung thread ends before the bridge is cancelled
+        return True
+
     async def go():
         task = await new_task(dsn)
         later = await released(dsn, task, PAYLOAD)
         try:
-            (done,) = await served_until(dsn, mailbox.config(), later)
-            await asyncio.sleep(0.6)  # a few wakes
+            (done,) = await served_until(dsn, mailbox.config(), later, ready=wakes_then_free)
             return done
         finally:
-            free.set()  # the hung thread ends before the loop closes
+            free.set()  # and on a failure, before the loop closes
 
     outcome = run(go())
     assert entered.is_set() and outcome["kind"] == "done"
