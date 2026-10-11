@@ -14,10 +14,24 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from core import checks, container, db, fresh, git, guards, judgement_sites, machine, router, tasks, verdicts
+from core import (
+    checks,
+    container,
+    db,
+    fresh,
+    git,
+    guards,
+    judgement_sites,
+    ledger,
+    machine,
+    router,
+    tasks,
+    verdicts,
+)
 from core import workspace as kws
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -214,11 +228,13 @@ def roles(got) -> list[str]:
     return [r["payload"]["role"] for r in got if r["type"] == checks.SUITE]
 
 
-async def at_review(dsn, tmp_path, *, writes=None, test=True, **spec):
+async def at_review(dsn, tmp_path, *, writes=None, test=True, verification=None, **spec):
     """A provisioned task whose candidate adds `writes` (default a gate and a
     plan rewrite), with a scripted test verdict unless `test` is
     false, left waiting on review. The suite runs on the host and in a
-    verification VM alike."""
+    verification VM alike. Given `verification` (the module's), the task's
+    ledger holds it as the candidate's `verify.ran`, so the review reuses it
+    and runs no VM."""
     task, b, ws = await test_checks.to_candidate(
         dsn, tmp_path, writes=writes or {"hooks/gate.py": GATE, "docs/plan.md": "rewritten after critique\n"},
         suite=spec.pop("suite", test_checks.VM_SUITE), **spec,
@@ -227,7 +243,46 @@ async def at_review(dsn, tmp_path, *, writes=None, test=True, **spec):
         out = await drive(dsn, task, scripted.fresh_runners(ws))
         assert out["missing"] == ["test", "review", "docs"], out
         await scripted.check(dsn, task, "test", "pass")
+    if verification is not None:
+        await reused(dsn, task, b, verification)
     return task, b, ws
+
+
+async def reused(dsn, task, b, verification: dict) -> None:
+    """The module's verification appended as this task's `verify.ran` for its
+    candidate, under its keys (`container.reusable`)."""
+    candidate = machine.fold(await rows(dsn, task)).candidate.sha
+    k = await asyncio.to_thread(container.keys, b, candidate)
+    payload = {**verification, "candidate": candidate, "base": b.base_sha, "digest": k["head"],
+               "base_digest": k["base"]}  # fmt: skip
+    async with await db.connect(dsn) as conn, conn.transaction():
+        await ledger.append(conn, task, fresh.VERIFY, payload)
+
+
+@pytest.fixture(scope="module")
+def verification(dsn, tmp_path_factory) -> dict:
+    """One real verification, the base and head runs in VMs, of the
+    candidate `at_review` makes by default. It serves the tests that read a
+    `verify.ran` and whose subject is not the VM runs."""
+
+    async def go():
+        tmp = tmp_path_factory.mktemp("verification")
+        task, b, _ws = await at_review(dsn, tmp)
+        async with await db.connect(dsn) as conn:
+            got = await ledger.read(conn, task)
+
+        async def record(payload):
+            return {"verify": payload}
+
+        candidate = machine.fold(got).candidate.sha
+        ctx = SimpleNamespace(task_id=task, dsn=dsn)
+        lay = kws.Layout(Path(b.mirror).parent)
+        stop = asyncio.ensure_future(asyncio.Event().wait())
+        return await container.verify(ctx, lay, b, candidate, got, stop, record)
+
+    got = run(go())
+    assert "verify" in got and got["verify"]["cause"] is None, got
+    return got["verify"]
 
 
 def steer(ws: Path, **cfg) -> None:
@@ -334,11 +389,11 @@ def test_a_review_through_the_router_then_a_grant_reruns_nothing(dsn, tmp_path):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tmp_path):
+def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tmp_path, verification):
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path)
+        task, _b, ws = await at_review(dsn, tmp_path, verification=verification)
         steer(ws, review_verdict={"verdict": "changes", "findings": [{"kind": "naming", "text": "rename"}]})
         await drive(
             dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
@@ -357,14 +412,18 @@ def test_a_reviewer_changes_goes_to_patch_with_the_instance_as_a_finding(dsn, tm
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can_write(dsn, tmp_path):
+def test_the_reviewers_verdict_is_its_final_message_not_a_file_its_processes_can_write(
+    dsn, tmp_path, verification
+):
     """The candidate's code, run by the reviewer, leaves a process that keeps
     `.valor/verdict.json` saying `pass`; the reviewer's final message says
     `changes`, and `changes` is recorded."""
     sid = UP.script(default={"probs": NO})
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={"lib/a.py": "A = 1\n"})
+        task, _b, ws = await at_review(
+            dsn, tmp_path, writes={"lib/a.py": "A = 1\n"}, verification=verification
+        )
         steer(
             ws,
             review_forger=True,
@@ -427,7 +486,7 @@ def test_a_real_final_message_of_prose_then_a_fenced_verdict_is_read():
 @pytest.mark.macos
 @pytest.mark.container
 @pytest.mark.parametrize("answer", [True, False, None], ids=["yes", "no", "unanswered"])
-def test_a_hunk_the_judgement_abstained_on_is_the_reviewers_to_answer(dsn, tmp_path, answer):
+def test_a_hunk_the_judgement_abstained_on_is_the_reviewers_to_answer(dsn, tmp_path, answer, verification):
     """Governance abstains on the gate: it reaches the reviewer in
     `governance.json` as undecided, never Tom. The reviewer's yes is an
     instance, its no clears it, and a verdict that leaves it unanswered is
@@ -435,7 +494,7 @@ def test_a_hunk_the_judgement_abstained_on_is_the_reviewers_to_answer(dsn, tmp_p
     sid = UP.script(default={"by_path": {"hooks/gate.py": UNSURE}, "probs": NO})
 
     async def go():
-        task, b, ws = await at_review(dsn, tmp_path)
+        task, b, ws = await at_review(dsn, tmp_path, verification=verification)
         cand = machine.fold(await rows(dsn, task)).candidate.sha
         (gate,) = judgement_sites.governance_hunks(b.mirror, b.base_sha, cand)
         verdict = {"verdict": "pass", "findings": []}
@@ -465,9 +524,9 @@ def test_a_hunk_the_judgement_abstained_on_is_the_reviewers_to_answer(dsn, tmp_p
         assert decided["verdict"] == "pass" and decided["governance"]["instances"] == []
 
 
-async def _review_step(dsn, tmp_path, **cfg):
+async def _review_step(dsn, tmp_path, verification, **cfg):
     sid = UP.script(default={"probs": NO})
-    task, _b, ws = await at_review(dsn, tmp_path, writes={"lib/a.py": "A = 1\n"})
+    task, _b, ws = await at_review(dsn, tmp_path, writes={"lib/a.py": "A = 1\n"}, verification=verification)
     steer(ws, **cfg)
     gateway = Gateway(dsn)
     await gateway.start(port=listen())
@@ -482,9 +541,9 @@ async def _review_step(dsn, tmp_path, **cfg):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_fenced_verdict_after_prose_is_recorded(dsn, tmp_path):
+def test_a_fenced_verdict_after_prose_is_recorded(dsn, tmp_path, verification):
     text = 'I reran the tests; the change is right.\n\n```json\n{"verdict": "pass", "findings": []}\n```'
-    _task, _out, state, got = run(_review_step(dsn, tmp_path, review_text=text))
+    _task, _out, state, got = run(_review_step(dsn, tmp_path, verification, review_text=text))
     (decided,) = reviews(got)
     assert decided["reviewer_verdict"] == "pass"
     assert state["failed_step"] is None and not [r for r in got if r["type"] == "step.failed"]
@@ -499,11 +558,13 @@ def test_a_fenced_verdict_after_prose_is_recorded(dsn, tmp_path):
         ({"review_error": True}, "the turn ended done"),
     ],
 )
-def test_a_review_with_no_verdict_writes_step_failed_and_the_status_shows_it(dsn, tmp_path, cfg, reason):
+def test_a_review_with_no_verdict_writes_step_failed_and_the_status_shows_it(
+    dsn, tmp_path, cfg, reason, verification
+):
     """Incident (a): a review turn whose final message is no verdict, or
     whose harness reports an error, writes `step.failed` naming the check,
     the reason as text, and the turn, and the task's status shows it."""
-    _task, out, state, got = run(_review_step(dsn, tmp_path, **cfg))
+    _task, out, state, got = run(_review_step(dsn, tmp_path, verification, **cfg))
     (turn,) = review_turns(got)
     (row,) = [r["payload"] for r in got if r["type"] == "step.failed"]
     assert out["status"] == "failed" and reviews(got) == []
@@ -537,9 +598,9 @@ def test_governance_runs_first_and_a_judge_outage_starts_no_run_and_no_turn(dsn,
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_reviewer_naming_paths_outside_the_diff_still_records(dsn, tmp_path):
+def test_a_reviewer_naming_paths_outside_the_diff_still_records(dsn, tmp_path, verification):
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path)
+        task, _b, ws = await at_review(dsn, tmp_path, verification=verification)
         steer(ws, review_verdict={
             "verdict": "pass", "findings": [],
             "governance": [{"path": ".", "line": 1, "summary": "everything"},
@@ -559,11 +620,11 @@ def test_a_reviewer_naming_paths_outside_the_diff_still_records(dsn, tmp_path):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewers_database_is_fresh_and_the_tasks_comes_back(dsn, tmp_path):
+def test_the_reviewers_database_is_fresh_and_the_tasks_comes_back(dsn, tmp_path, verification):
     psql = str(Path(settings.pg_bin) / "psql")
 
     async def go():
-        task, b, ws = await at_review(dsn, tmp_path, services=["postgres"])
+        task, b, ws = await at_review(dsn, tmp_path, services=["postgres"], verification=verification)
         lay = kws.Layout(Path(b.mirror).parent)
         names, ports = kws.services_of(b)
         await asyncio.to_thread(kws.start_services, task, lay, names, ports)
@@ -593,11 +654,11 @@ def test_the_reviewers_database_is_fresh_and_the_tasks_comes_back(dsn, tmp_path)
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tmp_path):
+def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tmp_path, verification):
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path)
+        task, _b, ws = await at_review(dsn, tmp_path, verification=verification)
         steer(ws)
         await drive(
             dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
@@ -635,7 +696,7 @@ def test_a_run_at_another_seat_appends_review_compared_and_moves_nothing(dsn, tm
 @pytest.mark.parametrize("where", ["head run", "lint", "setup", "turn"])
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
+def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where, verification):
     hang = {
         "head run": {"suite": f"[ -e greeting.txt ] && exec sleep 600; {test_checks.VM_SUITE}"},
         "lint": {"lint": "[ -e greeting.txt ] && exec sleep 600; true"},
@@ -644,7 +705,11 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where):
     }[where]
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, **hang)
+        # A stop in a VM needs the runs; one after them reads the module's.
+        seed = verification if where in ("setup", "turn") else None
+        task, _b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, verification=seed, **hang
+        )
         steer(ws, fresh_acts=["hang"] if where == "turn" else [])
         running = asyncio.create_task(
             drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
@@ -696,12 +761,14 @@ async def _run_review(dsn, task, ws, alive):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path):
+def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path, verification):
     """A stop written after the head run and before the setup's LISTEN: the
     setup never starts and nothing is recorded."""
 
     async def go():
-        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"])
+        task, b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"], verification=verification
+        )
         steer(ws)
         lay = kws.Layout(Path(b.mirror).parent)
         sha = machine.fold(await rows(dsn, task)).candidate.sha
@@ -724,11 +791,13 @@ def test_a_stop_written_before_the_reviewer_setup_listens_is_heard(dsn, tmp_path
     assert not reviews(got) and not seen_turn(ws)
 
 
-def _setup_run(dsn, tmp_path, setup):
+def _setup_run(dsn, tmp_path, setup, verification):
     """A candidate with the spec's `setup`, run to the review runner's end."""
 
     async def go():
-        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=setup)
+        task, b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=setup, verification=verification
+        )
         steer(ws)
         await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
         return b, ws, await rows(dsn, task)
@@ -738,7 +807,7 @@ def _setup_run(dsn, tmp_path, setup):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
+def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path, verification):
     """Setup tries to swap the checkout for a link to another directory
     holding a `.valor`: the checkout itself is not the setup's to rename, so
     the swap is refused, the other directory is untouched, and the session
@@ -747,7 +816,7 @@ def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
     (victim / ".valor").mkdir(parents=True)
     (victim / ".valor" / "done.md").write_text("kept\n")
     plant = f'case "$PWD" in */review-*/repo) cd .. && mv repo cache/repo.moved && ln -s {victim} repo;; esac'
-    b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    b, ws, got = _setup_run(dsn, tmp_path, [plant], verification)
     assert sorted(os.listdir(victim / ".valor")) == ["done.md"]
     assert (victim / ".valor" / "done.md").read_text() == "kept\n"
     lay = kws.Layout(Path(b.mirror).parent)
@@ -759,7 +828,7 @@ def test_the_reviewer_setup_cannot_move_or_replace_the_checkout(dsn, tmp_path):
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path):
+def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path, verification):
     """Setup commits, sets an fsmonitor, a hooks path and an alias, and makes
     nested repositories: every write is refused, so the reviewer's git log
     holds only the kernel's two commits, and its `git status` runs nothing
@@ -783,7 +852,9 @@ def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path)
     steer_cfg = {"review_probe": {"status": "git status --porcelain", "log": "git log --format=%s"}}
 
     async def go():
-        task, b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[plant])
+        task, b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=[plant], verification=verification
+        )
         steer(ws, **steer_cfg)
         await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
         return b, ws, await rows(dsn, task)
@@ -810,11 +881,11 @@ def test_the_reviewer_setup_cannot_write_the_checkouts_repository(dsn, tmp_path)
 @pytest.mark.parametrize("mode", ["500", "000"])
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode):
+def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode, verification):
     """Setup's `chmod` of the checkout is refused, so the kernel writes the
     inputs and the session runs, rather than every rerun failing."""
     plant = f'case "$PWD" in */review-*/repo) chmod {mode} . ; echo $? > ../cache/chmod-exit;; esac'
-    b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    b, ws, got = _setup_run(dsn, tmp_path, [plant], verification)
     lay = kws.Layout(Path(b.mirror).parent)
     check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
     assert (check_dir / "cache" / "chmod-exit").read_text().strip() != "0"
@@ -826,7 +897,7 @@ def test_a_reviewer_setup_cannot_change_the_checkouts_mode(dsn, tmp_path, mode):
 @pytest.mark.parametrize("where", ["setup_left", "write_inputs"])
 @pytest.mark.macos
 @pytest.mark.container
-def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypatch, where):
+def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypatch, where, verification):
     """An error the kernel meets in the checkout after setup is the commit's
     own, since every rerun runs the same setup: the kernel's `changes` with
     the error, not a failure."""
@@ -835,7 +906,9 @@ def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypa
         raise PermissionError(errno.EACCES, "Permission denied", ".valor")
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"])
+        task, _b, ws = await at_review(
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, setup=["true"], verification=verification
+        )
         steer(ws)
         monkeypatch.setattr(kws, where, refused)  # after the runs before review, which write inputs too
         await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
@@ -850,7 +923,7 @@ def test_an_error_in_the_checkout_after_setup_is_changes(dsn, tmp_path, monkeypa
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
+def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path, verification):
     """Setup runs `psql` with the libpq defaults its environment names
     (`PGPASSFILE` among them) against the review's fresh Postgres."""
     psql = str(Path(settings.pg_bin) / "psql")
@@ -861,7 +934,12 @@ def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
 
     async def go():
         task, b, ws = await at_review(
-            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, services=["postgres"], setup=[plant]
+            dsn,
+            tmp_path,
+            writes={"greeting.txt": "hi\n"},
+            services=["postgres"],
+            setup=[plant],
+            verification=verification,
         )
         steer(ws, review_probe={"table": f"{psql} -tAc \"select to_regclass('public.setup_made')\""})
         await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
@@ -880,13 +958,15 @@ def test_the_reviewer_setup_reaches_the_fresh_database(dsn, tmp_path):
 @pytest.mark.parametrize("entry", [".valor", ".pi"])
 @pytest.mark.macos
 @pytest.mark.container
-def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(dsn, tmp_path, entry):
+def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(
+    dsn, tmp_path, entry, verification
+):
     """A setup that writes `.pi/settings.json` (what Pi reads whatever its
     flags) or makes `.valor` in the checkout: the session never starts
     there, and review is the kernel's `changes` naming why, not a failure
     every rerun would repeat."""
     plant = f'case "$PWD" in */review-*/repo) mkdir {entry} && echo {{}} > {entry}/settings.json;; esac'
-    _b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    _b, ws, got = _setup_run(dsn, tmp_path, [plant], verification)
     (decided,) = reviews(got)
     assert decided["verdict"] == "changes" and decided["leg"] == "kernel", decided
     assert decided["findings"][0] == {"kind": "commit", "text": f"the setup left {entry} in the checkout"}
@@ -899,7 +979,7 @@ def test_an_entry_the_reviewer_setup_leaves_is_changes_and_no_reviewer_runs(dsn,
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_path):
+def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_path, verification):
     """The setup's profile writes the checkout and its caches only: what it
     tries to put in the session's Pi and Claude Code directories and its
     TMPDIR never lands, and the session runs as usual."""
@@ -908,7 +988,7 @@ def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_p
         for d, n in (("pi", "AGENTS.md"), ("claude", "settings.json"), ("tmp", "x"))
     )
     plant = f'case "$PWD" in */review-*/repo) {tries} ; touch setup-ran;; esac'
-    b, ws, got = _setup_run(dsn, tmp_path, [plant])
+    b, ws, got = _setup_run(dsn, tmp_path, [plant], verification)
     lay = kws.Layout(Path(b.mirror).parent)
     check_dir = lay.checks / f"review-{machine.fold(got).candidate.sha[:12]}"
     assert (check_dir / "repo" / "setup-ran").exists()
@@ -921,7 +1001,7 @@ def test_the_reviewer_setup_cannot_write_the_sessions_own_directories(dsn, tmp_p
 @pytest.mark.macos
 @pytest.mark.container
 def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_reviewer_runs(
-    dsn, tmp_path, monkeypatch
+    dsn, tmp_path, monkeypatch, verification
 ):
     # The builder's clone hides the entry from the kernel's look there (a
     # replace ref would), so the mirror holds a candidate with `.valor`.
@@ -931,7 +1011,7 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_re
     )
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={".VALOR/x": "x"})
+        task, _b, ws = await at_review(dsn, tmp_path, writes={".VALOR/x": "x"}, verification=verification)
         await drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
         return await test_checks.rows(dsn, task), ws
 
@@ -944,7 +1024,9 @@ def test_a_candidate_whose_tree_holds_valor_is_changes_with_the_reason_and_no_re
 
 @pytest.mark.macos
 @pytest.mark.container
-def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(dsn, tmp_path, monkeypatch):
+def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(
+    dsn, tmp_path, monkeypatch, verification
+):
     """The kernel's `changes` on a `.valor` tree still answers governance:
     each ungranted instance is a `governance` finding the patch sees."""
     look = kws.tree_has_valor
@@ -954,7 +1036,9 @@ def test_a_valor_candidate_names_its_governance_instances_on_the_kernel_leg(dsn,
     sid = UP.script(default={"by_path": {"hooks/gate.py": YES}, "probs": NO})
 
     async def go():
-        task, _b, ws = await at_review(dsn, tmp_path, writes={".VALOR/x": "x", "hooks/gate.py": GATE})
+        task, _b, ws = await at_review(
+            dsn, tmp_path, writes={".VALOR/x": "x", "hooks/gate.py": GATE}, verification=verification
+        )
         await drive(
             dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws, UP.port(script=sid))}
         )
