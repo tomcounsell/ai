@@ -77,7 +77,12 @@ How to ask:
 Reading the answer: an answer that leaves your premise untouched does not
 confirm it; recheck a premise that mattered against the code before
 building. Never ask again what was answered once; search the conversation,
-the ledger, and the workspace first.
+the ledger, and the workspace first. Tom's answers are the rule you build;
+build each at the reach he gave it. Where an answer names a set, records
+outside the set (blank, null, or another value) stay out, even where
+existing code counts them in; where it says how something behaves, every
+place that thing appears behaves so. The boundary tests include each
+answer.
 
 ### Escalate only what needs Tom
 

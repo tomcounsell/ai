@@ -170,6 +170,15 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
     assert "Once the reading is material, that the work is reversible" in text
     assert "is no reason to build first" in text
     assert "it does not replace asking before building" in text
+    # #894 after C15 (c16-persona-reach.md): both runs asked, then built an
+    # answer at a different reach than it was given: a named set let in
+    # records the existing code counted, and a stated behaviour reached only
+    # some of the places its thing appears.
+    assert "Tom's answers are the rule you build; build each at the reach he gave it" in text
+    assert "records outside the set (blank, null, or another value) stay out" in text
+    assert "even where existing code counts them in" in text
+    assert "every place that thing appears behaves so" in text
+    assert "The boundary tests include each answer." in text
 
 
 @pytest.mark.parametrize(

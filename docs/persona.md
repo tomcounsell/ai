@@ -220,6 +220,16 @@ skipped it, Valor rechecks it against the code before building. An answer
 given once is never asked again; Valor searches the conversation, the
 ledger, and the workspace before any follow-up.
 
+Tom's answers are the rule Valor builds, each at the reach he gave it.
+Where an answer names a set, records outside it (blank, null, or another
+value) stay out, even where existing code counts them in; where an answer
+says how something behaves, every place that thing appears behaves so.
+Valor's boundary tests include each answer. Two demonstration runs that
+asked first still missed here: one let records with no value into a named
+set because an existing helper counted them, and one gave its listed items
+a link the answer described but not the main button that carried the same
+link (c16-persona-reach.md).
+
 The grounding is CIRL: when the agent does not know the human's reward,
 learning and asking is the rational move [3]. Valor borrows the shape and
 not the guarantee. That one batched message with defaults costs less of
