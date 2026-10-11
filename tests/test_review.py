@@ -10,6 +10,7 @@ Live spend: none.
 
 import asyncio
 import errno
+import fcntl
 import json
 import os
 import subprocess
@@ -744,7 +745,7 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where, veri
     out, mark, before, got = run(go())
     assert out["status"] == "stopped", out
     assert not reviews(got) and not reviews(got, fresh.REVIEW_COMPARED)
-    assert not container.running()
+    assert not running_now()
     if where in ("head run", "lint"):  # only the module's run, appended before the review
         (seeded,) = [r for r in got if r["type"] == fresh.VERIFY]
         assert seeded["payload"]["candidate"] != machine.fold(got).candidate.sha
@@ -753,6 +754,18 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where, veri
         for pid in before:
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
+
+
+def running_now() -> bool:
+    """`container.running()` read while holding the machine lock, so it reads
+    what every holder left, not a verification elsewhere on the machine
+    mid-run (each holder stops the runtime before it releases the lock)."""
+    fd = os.open(container.LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return container.running()
+    finally:
+        os.close(fd)
 
 
 def seen_turn(ws: Path) -> list[dict]:
