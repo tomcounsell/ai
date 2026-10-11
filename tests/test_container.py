@@ -1112,6 +1112,11 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
 
     got = run(go())
     v = got["verify"]
+    # No task names its image, so the session's next prune would delete it:
+    # it is kept for the next session now, as `conftest.release_images` keeps
+    # the ones a task names.
+    with held():
+        container._record(v["image_tag"], v["image"], conftest.kept_label())
     assert v["cause"] is None and v["macos_skipped"] > 0, v
     assert v["counts"]["skipped"] >= v["macos_skipped"] and v["counts"]["passed"] > 0
     # Sparse-file sizing is portable POSIX, so it runs (and passes) in the VM.
