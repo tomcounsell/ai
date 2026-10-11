@@ -1484,6 +1484,31 @@ def test_a_change_to_an_included_file_is_read_again(tmp_path):
     assert kgit.hostile(ws) == ["local: include.path"]
 
 
+def test_a_read_raced_by_objects_taken_away_is_not_kept(tmp_path, monkeypatch):
+    """A turn makes `.git/objects` untraversable while git reads, so git
+    lists a clean bare repo planted at the workspace root instead: that
+    answer is not kept for the hostile `.git/config`."""
+    ws, _ = scripted.workspace(tmp_path)
+    (ws / "HEAD").write_text("ref: refs/heads/main\n")
+    (ws / "objects").mkdir()
+    (ws / "refs").mkdir()
+    (ws / "config").write_text("[core]\n\tbare = true\n")
+    git(ws, "config", "alias.x", "status")
+    objects, real = ws / ".git" / "objects", kgit._git
+
+    def racing(*a, **k):
+        objects.chmod(0)
+        try:
+            return real(*a, **k)
+        finally:
+            objects.chmod(0o755)
+
+    monkeypatch.setattr(kgit, "_git", racing)
+    assert kgit.hostile(ws) == []  # the raced read saw the planted repo
+    monkeypatch.setattr(kgit, "_git", real)
+    assert kgit.hostile(ws) == ["local: alias.x"]
+
+
 def test_kernel_git_drops_inherited_git_variables_and_a_planted_git_on_path(tmp_path, monkeypatch):
     ws, _ = scripted.workspace(tmp_path)
     marker = tmp_path / "ran"
