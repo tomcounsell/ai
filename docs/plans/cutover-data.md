@@ -290,10 +290,10 @@ and the key directory. Gap G10.
 
 | Item | Old system | New system | How |
 |---|---|---|---|
-| Where a merge may land | The old pipeline pushed with Valor's token to each repo's default branch; GitHub ruleset 24370170 on `tomcounsell/ai` `main` restricts updates but is disabled until takeover | Each spec's `merge_url` and branch, recorded in the task's Brief at start; the token's reach bounds the rest | Edit the spec |
+| Where a merge may land | The old pipeline pushed with Valor's token to each repo's default branch; GitHub ruleset 24370170 on `tomcounsell/ai` `main` restricts updates and is disabled | Each spec's `merge_url` and branch, recorded in the task's Brief at start; the token's reach bounds the rest | Edit the spec |
 | Targets the day-one projects need | none | `https://github.com/tomcounsell/ai.git` branch `main` (at cutover), and for each spec with a `merge_url` its repo URL and branch | In each spec (`cutover-runbook-tom.md`, item 2, for the token's reach) |
 | Valor's write access to each repo | `valorengels` is a collaborator with push on the repos it works | Same account, same token | By hand: check push access on each repo before its spec is added |
-| Ruleset 24370170 | Disabled | Set to active at cutover | By hand, Tom's `gh` login (admin only) |
+| Ruleset 24370170 | Disabled | Stays disabled: an active ruleset would refuse Valor's merges to `main`, and a merge may land there (Tom, 2026-10-11) | Nothing to do |
 
 ## 6. Recurring work
 
@@ -383,8 +383,8 @@ pick them up by number.
 names the rebuild branch; the old `ai` repo's `main` still holds the old
 system, whose services run from `~/src/ai` on `main`. Recommendation: at
 cutover the rebuild branch becomes the repo's `main` (Tom's step, a rename or
-a merge), `projects/valor.toml` drops `branch`, the grant in section 5 is
-added, and the ruleset is made active. The old checkout in `~/src/ai` is not
+a merge) and `projects/valor.toml` drops `branch`; the ruleset stays
+disabled (section 5). The old checkout in `~/src/ai` is not
 touched until the old services are off.
 
 **G7. The mailbox backlog.** The email job sets `VALOR_EMAIL_SINCE` to

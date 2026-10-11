@@ -15,8 +15,9 @@ setup.
 The only places a person is in the path; none is a tap on work Valor started.
 
 1. **Writes the cutover date** at the top of this file.
-2. **Keeps the push token's reach to Valor's repositories** (the account
-   is his): `valorengels`, whose token is `GITHUB_PUSH_TOKEN`, is a
+2. **Keeps the push token's reach to Valor's repositories** (adding a
+   collaborator is each repository owner's grant, and Tom owns these;
+   the account is Valor's own, [machine.md](../machine.md), Keychain): `valorengels`, whose token is `GITHUB_PUSH_TOKEN`, is a
    collaborator with write access on `tomcounsell/ai`, `tomcounsell/popoto`,
    `yudame/psyoptimal`, and `yudame/cuttlefish`, and on no repository Valor
    must not write. Each project spec's `merge_url` and branch are where its
@@ -39,24 +40,24 @@ The only places a person is in the path; none is a tap on work Valor started.
    would let every old Mac fast-forward onto the rebuild and lose its
    bridge. As a forced update it is inert there: the old cron update does
    `merge --ff-only`, which fails on diverged history and logs "continuing
-   with current code". His `gh` login, not Valor's, since the ruleset
-   restricts updates to `main`. Afterwards no old Mac may run `/update
+   with current code". Afterwards no old Mac may run `/update
    --full`, whose pull falls back to a rebase and leaves that checkout
    mid-rebase. Tom tells whoever holds each of the Captain, the Bald, and
    the Pirate (by message, one line: "do not run /update --full"). Their
    update jobs stay enabled, since the cron path is safe.
-4. **Sets ruleset 24370170 to active** (admin only), after item 3:
+4. **Keeps ruleset 24370170 disabled**, as it is today
+   ([rebuild-handoff.md](rebuild-handoff.md)). It restricts updates to
+   `main` with only the repository admin role able to bypass, and
+   `valorengels` (push, not admin) is not, so an active ruleset would
+   refuse every merge Valor lands on `main`, and a merge may land on `main`
+   (Tom, 2026-10-11). What bounds Valor's merges is the token's reach
+   (item 2) and the ledger's record of each one. Check:
 
    ```
-   gh api -X PUT repos/tomcounsell/ai/rulesets/24370170 -f enforcement=active
+   gh api repos/tomcounsell/ai/rulesets/24370170 --jq .enforcement
    ```
 
-   After this, pushes to `main` go only through the kernel's merge
-   performer, under the grant in item 2. To undo, `enforcement=disabled`.
-   Valor's account is not a bypass actor: `gh api
-   repos/tomcounsell/ai/rulesets/24370170` reports `current_user_can_bypass:
-   never` for it (the ruleset's actor list itself is hidden from Valor's
-   token, so Tom can confirm it in the ruleset's page).
+   prints `disabled`.
 5. **Stops the Captain's old bridge, worker, and email bridge** (G11), or
    says which person or session holds that Mac, so psyoptimal and
    cuttlefish chats can be added to their specs. On the Captain, as
@@ -80,17 +81,16 @@ The way back's decisions are in [cutover-runbook-back.md](cutover-runbook-back.m
   default branch.** Reason: a merge commit lets every old Mac fast-forward
   onto the rebuild, whose tree has no old bridge or update script, so the
   old system dies on every Mac; a new default branch buys nothing, since
-  the ruleset, the grants, and the specs all name `main` and the old Macs
-  keep pulling it.
+  the specs name `main` and the old Macs keep pulling it.
 - **Open pull requests closed or relabeled before the force.** Reason: they
   would show diverged diffs against the rebuild.
 - **No `/update --full` on an old Mac after the force.** Reason: its pull
   falls back to a rebase on divergence and never aborts it. The note goes
   to each old Mac's holder by message; the cron update path is safe and
   stays on.
-- **The ruleset's bypass list was read.** Valor's account is not on it
-  (`current_user_can_bypass: never`), so the ruleset tells an old Mac's
-  push from the kernel's push.
+- **The ruleset stays disabled.** Reason: Valor's account is not on its
+  bypass list (`current_user_can_bypass: never`), so an active ruleset
+  would refuse the kernel's merges to `main` along with an old Mac's push.
 
 The old Redis, its data, and `~/Desktop/Valor` stay running and in place;
 Tom removes them on a later day, once the way back is not wanted.

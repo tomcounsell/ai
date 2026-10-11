@@ -198,7 +198,7 @@ def test_a_reply_to_the_ended_report_is_feedback_and_reopens_the_work(dsn, op):
     async def go():
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
-            assert await verdicts.end(conn, task, "merge", "the merge-target list does not name the remote")
+            assert await verdicts.end(conn, task, "merge", "the remote rejected the push")
             await notices.owe(conn, task)
             await notices.owe(conn, task)  # owed once
         (n,) = [r for r in await of_type(dsn, "notice.requested", kind="ended") if r["task_id"] == task]
@@ -207,7 +207,7 @@ def test_a_reply_to_the_ended_report_is_feedback_and_reopens_the_work(dsn, op):
         return task, n, bound, machine.fold(await rows(dsn, task))
 
     task, n, bound, f = run(go())
-    assert "the merge-target list does not name the remote" in n["text"]
+    assert "the remote rejected the push" in n["text"]
     assert notices.report_link(task) in n["text"] and "Reply to" not in n["text"]
     assert bound["as"] == "feedback" and bound["task_id"] == task
     assert f.state is State.PATCH and f.entry["type"] == "feedback.given"

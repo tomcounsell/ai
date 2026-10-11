@@ -41,8 +41,7 @@ Check: `loaded: 1`. Every task shown by `core status` is `merged` or
 
 First keep the new `main` tip, because the kernel's merges landed on `main`
 after step 6 and the reset would orphan them. Tom does the push (his
-login; the ruleset restricts updates to `main`). He sets the ruleset
-24370170 to disabled first.
+login). Ruleset 24370170 is disabled, so nothing needs turning off first.
 
 ```
 NEWTIP=$(git ls-remote https://github.com/tomcounsell/ai.git refs/heads/main | cut -f1)
