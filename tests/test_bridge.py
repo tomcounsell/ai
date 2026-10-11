@@ -395,7 +395,11 @@ def test_oversize_file_refused_at_request(dsn, op, tmp_path):
     assert nobody.kind == "refused" and "no recipient" in nobody.error
 
 
-def test_telegram_refuses_a_chat_it_does_not_receive_and_an_empty_send(dsn, op):
+def test_telegram_sends_to_a_chat_it_does_not_receive_and_refuses_an_empty_send(dsn, op):
+    """Any chat Valor's account can reach is a target (docs/business.md,
+    Business item 8); an empty send is refused, since Telegram would send
+    nothing."""
+
     async def go():
         task = await new_task(dsn)
         async with await db.connect(dsn) as conn:
@@ -406,7 +410,7 @@ def test_telegram_refuses_a_chat_it_does_not_receive_and_an_empty_send(dsn, op):
         return elsewhere, empty
 
     elsewhere, empty = run(go())
-    assert elsewhere.kind == "refused" and "not one this machine" in elsewhere.error
+    assert elsewhere.kind == "released"
     assert empty.kind == "refused" and "both empty" in empty.error
 
 

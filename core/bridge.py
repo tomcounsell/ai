@@ -196,10 +196,8 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
 
 
 async def _refuse_telegram(conn, action: broker.Action) -> str | None:
-    from core import intake
-
-    if not intake.owns("telegram", action.target):
-        return "the target chat is not one this machine's Telegram bridge receives"
+    # Any chat Valor's account can reach is a target, owned or not: the
+    # boundary is the account's access (docs/business.md, Business item 8).
     if not _strings(action.payload, ("text",)):
         return TEXT_SHAPE
     text = action.payload.get("text") or ""

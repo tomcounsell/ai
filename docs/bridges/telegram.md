@@ -101,6 +101,11 @@ whether the message with that idempotency key exists.
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 | `local.send_message` | `act` | `local` | `text`; see [local.md](local.md) |
 
+A `telegram.send_message` may target any chat Valor's account can reach,
+whether or not this machine's bridge receives it: the boundary is the
+account's access ([business.md](../business.md), Business item 8). A
+reply in a chat the bridge does not receive is not read.
+
 The payload is the message. The digest binds the exact text, the reply target,
 and each file's bytes, so what leaves is what was requested. `text`
 is absent, null, or a string; any other value is refused with "the text
