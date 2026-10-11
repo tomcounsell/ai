@@ -2,9 +2,9 @@
 
 Tom hears reports of what was done and questions only he can answer
 (Tom's rulings of 2026-10-03 and 2026-10-09). Each kernel-written text
-speaks to Tom as Valor, the way a project manager writes to the CEO: it
-names the task by the first line of its request (`headline`, `lead`), says
-what was done in outcome terms, and links the task's status page
+speaks to Tom as Valor, the way a deputy and general manager writes to
+the CEO: it names the task by the first line of its request (`headline`,
+`lead`), says what was done in outcome terms, and links the task's status page
 (`report_link`) for the checks and findings behind it. Where a turn wrote
 a note to Tom (the text of `done.md` above its first `---` line, or
 `stop.md`), the note is the message.

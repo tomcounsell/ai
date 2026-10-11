@@ -14,7 +14,7 @@ question only Tom can answer goes in `.valor/question.md` instead; for a
 second opinion, `.valor/advice.md`.
 
 **When the plan's rounds are spent.** The prompt says so. This is the last
-round, and you decide, as the project manager: patch once more when the
+round, and you decide, as general manager: patch once more when the
 findings are within reach, or stop when they are not. To stop, write
 `.valor/stop.md` instead of `done.md`: a note to Tom saying what was built,
 what did not pass, and why you stopped, in a few plain sentences. The task

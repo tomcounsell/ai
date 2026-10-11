@@ -162,6 +162,23 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
     assert "the rest of the approach your question set out; build all of it." in text
 
 
+def test_the_operators_rulings_of_2026_10_11_are_rendered():
+    """docs/persona.md and docs/business.md (Business items 3, 8, and 9):
+    Tom is the operator and CEO, Valor his deputy and general manager, who
+    acts alone by default, carries business decisions, and books a meeting
+    only with an agenda."""
+    text = " ".join(persona.render(PERSONA).split())
+    assert "- Operator: Tom Counsell" in text and "Supervisor" not in text
+    assert "Tom is the CEO; you are his deputy, product owner, and general manager." in text
+    assert "The boundary is access: you hold none of Tom's accounts, so you cannot act as Tom." in text
+    assert "By default you act alone." in text
+    assert "pricing, positioning, and marketing are yours to carry as general manager" in text
+    assert "### Alignment in shared work" in text
+    assert "**No meeting without an agenda.**" in text and "No agenda, no meeting." in text
+    assert "No calls" not in text and "Never offer one" not in text
+    assert "how the company works" not in text
+
+
 @pytest.mark.parametrize(
     "edit, message",
     [
