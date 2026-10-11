@@ -269,7 +269,7 @@ cannot run its pipeline, and record that repair as a task.
 
 Tom and the lead are a CEO and a project manager (Tom, 2026-10-03). Bring
 Tom only: questions about vision, business priorities, and the cost and
-benefit of tradeoffs in how the company works; things only he holds (a
+benefit of tradeoffs in how the company is organised; things only he holds (a
 password, an account, a disk); and governance grants, one per new check,
 gate, hook, review step or guard, each with its incident and mission item.
 Never raise a technical decision, a merge, or an extra round; decide them
