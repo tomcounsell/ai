@@ -243,7 +243,10 @@ def test_a_second_bridge_waits_on_the_lock_while_the_first_serves(emu, dsn, tmp_
     it, receives nothing, and takes over when the first's session ends."""
 
     async def holder():
+        """The lock taken, waiting at most 15 s: a bridge another test
+        leaked holding it fails this test instead of hanging the run."""
         conn = await db.connect(dsn)
+        await conn.execute("SET lock_timeout = '15s'")
         await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", ("bridge:telegram:m-test",))
         return conn
 
@@ -262,7 +265,12 @@ def test_a_second_bridge_waits_on_the_lock_while_the_first_serves(emu, dsn, tmp_
             await until(lambda: _has(dsn, op, mid), timeout=15)
         finally:
             proc.send_signal(signal.SIGTERM)
-            await asyncio.wait_for(proc.wait(), 15)
+            try:
+                await asyncio.wait_for(proc.wait(), 15)
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
 
     run(go())
 

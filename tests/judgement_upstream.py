@@ -147,7 +147,7 @@ class Upstream:
             app = web.Application()
             app.router.add_post("/fixed/{answer}/{leg}", self.handle)
             app.router.add_post("/s/{script}/{leg}", self.handle)
-            runner = web.AppRunner(app)
+            runner = web.AppRunner(app, handler_cancellation=True)
             self.loop.run_until_complete(runner.setup())
             site = web.TCPSite(runner, "127.0.0.1", self._port)
             self.loop.run_until_complete(site.start())

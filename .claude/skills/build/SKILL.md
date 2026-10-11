@@ -130,9 +130,11 @@ and its reports say whose they are.
   builders on `m<id>-<slug>`, docs on `m<id>-docs`;
 - test database, `VALOR_TEST_DB=valor_rebuild_test_<id><role>` with the
   id's dots removed;
-- service ports: a block of ten the lead assigns from 6430 up (6430 to
-  6439, 6440 to 6449, ...), kept in the running table, never 6379 (the
-  live Redis);
+- service ports: a span of 200 the lead assigns from 7000 up (7000 to
+  7199, 7200 to 7399, ...), its `VALOR_TEST_PORTS`, kept in the running
+  table, which the suite's workers cut into slices of their own; never
+  6379 (the live Redis), the dev ports 8000 to 8009, or 6600 to 6799,
+  which a run with no span takes;
 - `unset VIRTUAL_ENV` and only its worktree's own `.venv`.
 
 **Plan files live on `valor-cori-rebuild`.** A builder commits its plan
@@ -161,8 +163,9 @@ the others.
 
 **Release.** The machine runs out of memory with idle agents (Tom,
 2026-10-03). Stop each agent with TaskStop as soon as its report is
-joined, drop its test databases by exact name, and free its port block. A
-builder is respawned from `builder-brief.md` for a later patch; the plan
+joined, drop its test databases by exact name (a parallel run's are
+`<name>_gw0`, `<name>_gw1`, ... and the names derived from each), and
+free its port span. A builder is respawned from `builder-brief.md` for a later patch; the plan
 file is its state.
 
 ## 5. Run the pipeline, per task
@@ -256,7 +259,9 @@ cannot run its pipeline, and record that repair as a task.
 - Docs: the status quo only, plain language, no em or en dashes, no
   history words, never the word "cori", the governance paragraph
   byte-identical to `CLAUDE.md`'s.
-- Suite: `VALOR_TEST_DB=<own name> .venv/bin/python -m pytest -q tests`;
+- Suite: `VALOR_TEST_DB=<own name> VALOR_TEST_PORTS=<own span>
+  .venv/bin/python -m pytest -q -n auto --dist loadgroup tests` (`-n 4`
+  when other builders run theirs at the same time);
   lint: `uvx ruff check .` and `uvx ruff format --check .` (the one
   pre-existing complaint in `docs/bridges/telegram.md` is not a failure).
 

@@ -52,9 +52,15 @@ def _openssl(*args: str, cwd: Path) -> None:
 
 def make_certs(root: Path) -> None:
     """`ca.pem`, a server cert it signs (`srv.pem`, `srv.key`) for
-    localhost and 127.0.0.1, and a self-signed one (`rogue.pem`)."""
+    localhost and 127.0.0.1, and a self-signed one (`rogue.pem`).
+
+    The CA names its own key identifier: LibreSSL's `req -x509` (macOS's
+    `/usr/bin/openssl`) writes none unasked, the server certificate's
+    Authority Key Identifier then carries no key id, and Python 3.14's
+    strict verification refuses the chain."""
     _openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=valor test CA",
              "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+             "-addext", "subjectKeyIdentifier=hash", "-addext", "authorityKeyIdentifier=keyid:always",
              "-keyout", "ca.key", "-out", "ca.pem", cwd=root)  # fmt: skip
     (root / "san.ext").write_text(
         "subjectAltName=DNS:localhost,IP:127.0.0.1\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
