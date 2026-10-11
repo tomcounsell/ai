@@ -81,7 +81,7 @@ async def _upstream(*, hold: float = 0.0):
 
     app = web.Application()
     app.router.add_post("/v1/messages", handle)
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", listen())
     await site.start()

@@ -134,6 +134,22 @@ def held():
             os.close(fd)
 
 
+def unkept(b, candidate: str) -> None:
+    """The dependency images of the base and the candidate deleted when an
+    earlier session kept them (`conftest.release_images`), so the
+    verification builds both."""
+    project = b.project or {}
+    keys = container.keys(b, candidate)
+    tags = [container.deps_tag(project, keys[k]) for k in ("base", "head")]
+    if not set(tags) & set(container._images()):
+        return
+    with held():
+        unstopped(container.start)
+        for tag in tags:
+            container.call("image", "delete", tag)
+            container._record(tag, None, "")
+
+
 async def base_image() -> str:
     """The base image's tag, built when missing, the system started; the
     caller holds the machine lock."""
@@ -449,11 +465,11 @@ def test_a_runtime_that_is_down_is_told_apart_from_a_missing_image(tmp_path, mon
 @pytest.mark.container
 def test_a_container_test_keeps_its_own_records_and_image_names():
     """A container test shares the machine lock with every kernel, and
-    keeps its image records and image names to its session."""
+    keeps its image records and image names to the test sessions."""
     machine = Path.home() / container.STATE_DIR
     assert container.LOCK == machine / "container.lock"
     assert container.IMAGES.parent != machine
-    assert container.REPO == f"valor-test-{conftest.LABEL}" != "valor"
+    assert container.REPO == "valor-test" and container.REPO != "valor"
     assert container.base_tag().startswith(f"{container.REPO}/base:")
 
 
@@ -729,33 +745,31 @@ def test_a_build_leaves_no_builder_and_no_cache_the_next_build_reuses(tmp_path):
 
 @pytest.mark.container
 def test_an_image_retagged_by_hand_is_a_kernel_cause_and_dropped(tmp_path):
+    """A built tag swapped by hand for another image, here the base image's,
+    is held under another digest than the one recorded."""
+
     async def go():
         base = await base_image()
-        out = {}
-        for name in ("one", "two"):
-            context = tmp_path / name
-            context.mkdir()
-            (context / "Containerfile").write_text(f"FROM {base}\nRUN echo {name} > /name\n")
-            out[name] = await container.build(f"{container.REPO}/{name}:test", context, tmp_path / f"{name}.out",
-                                              never(), conftest.LABEL)  # fmt: skip
-        return out
+        context = tmp_path / "one"
+        context.mkdir()
+        (context / "Containerfile").write_text(f"FROM {base}\nRUN echo one > /name\n")
+        return base, await container.build(one, context, tmp_path / "one.out", never(), conftest.LABEL)
 
-    one, two = f"{container.REPO}/one:test", f"{container.REPO}/two:test"
+    one = f"{container.REPO}/one:test"
     with held():
         try:
-            digests = run(go())
-            assert unstopped(container.checked, one) == digests["one"]
+            other, digest = run(go())
+            assert unstopped(container.checked, one) == digest
             # `image tag` leaves a built tag in place, so the swap deletes it first.
             assert container.call("image", "delete", one)[0] == 0
-            assert container.call("image", "tag", two, one)[0] == 0
+            assert container.call("image", "tag", other, one)[0] == 0
             with pytest.raises(container.Failed) as raised:
                 unstopped(container.checked, one)
             assert raised.value.cause == "kernel"
             assert unstopped(container.inspect, one) is None and one not in container._images()
         finally:
-            for tag in (one, two):
-                container.call("image", "delete", tag)
-                container._record(tag, None, "")
+            container.call("image", "delete", one)  # the tag only: the base image stays
+            container._record(one, None, "")
 
 
 PACKAGE = '{"name": "toy", "version": "1.0.0"}\n'
@@ -779,6 +793,7 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
         task, b, rows, candidate = await at_candidate(
             dsn, tmp_path, files=files, writes={"package.json": PLANTING}, setup=["npm install"]
         )
+        await asyncio.to_thread(unkept, b, candidate)  # the builds are this test's own
         return task, b, await verified(dsn, task, b, rows, candidate)
 
     _task, b, got = run(go())
@@ -914,11 +929,14 @@ def test_the_builder_cannot_reach_the_kernels_postgres_or_a_tasks_services(tmp_p
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     lan = lan_address()
-    probe = " ".join(
-        f"if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo REACHED {h}:{p}; exit 1; fi;"
+    # The four connects run at once: each that is dropped waits out the
+    # builder's own connect timeout, about two minutes.
+    tries = " ".join(
+        f"{{ if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo REACHED {h}:{p}; fi; }} &"
         for h in (GATEWAY, lan)
         for p in (settings.pgport, port)
     )
+    probe = f'out=$({tries} wait); if [ -n "$out" ]; then echo "$out"; exit 1; fi;'
 
     async def go():
         base = await base_image()
@@ -1021,7 +1039,10 @@ def test_a_sweep_touches_only_its_own_databases_vms(dsn):
 def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn, tmp_path):
     """A commit of HEAD's tree against HEAD, each in a VM: every `macos` test
     skips and the count is on `verify.ran`. The base is HEAD itself, since an
-    older commit's suite may predate the `macos` marks."""
+    older commit's suite may predate the `macos` marks. The suite is narrow:
+    two files whose tests use the ledger's Postgres, one test marked `macos`,
+    and the two sparse-file tests; the whole suite runs in a VM in every real
+    review."""
     repo = Path(__file__).resolve().parent.parent
     mirror = tmp_path / "mirror.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(mirror)], check=True)
@@ -1029,7 +1050,8 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
                           capture_output=True, text=True, check=True).stdout.strip()  # fmt: skip
     project = {
         "name": "valor", "kind": "python-uv", "services": ["postgres"], "roles": ["valor_kernel", "valor_memory"],
-        "setup": ["uv sync --frozen"], "suite": "uv run pytest -q -p no:cacheprovider --junitxml={junit} tests",
+        "setup": ["uv sync --frozen"],
+        "suite": "uv run pytest -q -p no:cacheprovider --junitxml={junit} tests/test_look.py tests/test_transcripts.py",
         "env": {"VALOR_PGHOST": "127.0.0.1", "VALOR_PGPORT": "5432", "VALOR_PG_OWNER": "app",
                 "VALOR_PG_PASSFILE": str(container.VM_PASSFILE), "VALOR_TEST_DB": "app_test"},
     }  # fmt: skip
@@ -1050,6 +1072,11 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
 
     got = run(go())
     v = got["verify"]
+    # No task names its image, so the session's next prune would delete it:
+    # it is kept for the next session now, as `conftest.release_images` keeps
+    # the ones a task names.
+    with held():
+        container._record(v["image_tag"], v["image"], conftest.kept_label())
     assert v["cause"] is None and v["macos_skipped"] > 0, v
     assert v["counts"]["skipped"] >= v["macos_skipped"] and v["counts"]["passed"] > 0
     # Sparse-file sizing is portable POSIX, so it runs (and passes) in the VM.
