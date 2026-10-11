@@ -3,8 +3,13 @@ checked against the business's own data (docs/routines.md, Watched
 conditions; docs/business.md, item 7).
 
 For every project spec, the runner reads `decisions/conditions.toml` from
-the business's repository on its committed branch (`core.conditions`). The
-run is a node under the routine's objective, and each condition checked is a
+the business's repository on its committed branch (`core.conditions`),
+fetching a remote repository as Valor's GitHub account when the composition
+root gives it the key file, so a private repository Valor's account can read
+is read. Each repository fetched is a `repository.fetched` row (the
+business, the repository, the commit, and the name of the key the fetch
+carried, never its value), on the run, or on the objective when the firing
+starts no run. The run is a node under the routine's objective, and each condition checked is a
 row on it: `condition.read` (a numeric condition: the figure, where, when),
 `condition.observed` (an observation: what Valor saw, where, when), or
 `condition.unread` (no adapter for its source is granted, or the adapter
@@ -57,22 +62,37 @@ def runner(
     *,
     projects: Callable[[], list[workspace.Spec]] = workspace.Spec.all,
     work: Callable[[], Path] = workspace.work_dir,
+    credential: str | Path | None = None,
+    loopback: bool = False,
 ):
-    """The `conditions` runner over the granted `adapters`, by source name."""
+    """The `conditions` runner over the granted `adapters`, by source name.
+    `credential` is the GitHub key file a remote repository is fetched with
+    (None: anonymously); `loopback` is for tests only."""
 
     async def run(ctx: Context) -> Ran:
         read: list[conditions.Committed] = []
+        fetched: list[dict[str, Any]] = []
         unread: list[str] = []
         for spec in projects():
             try:
-                found = conditions.committed(spec, work())
+                found = conditions.committed(spec, work(), credential=credential, loopback=loopback)
             except (workspace.Refused, conditions.Malformed) as exc:
                 unread.append(f"{spec.name}: {exc}")
                 continue
-            if found is not None and any(d.conditions for d in found.decisions):
+            fetched.append(
+                {
+                    "business": found.business,
+                    "repo": found.fetched,
+                    "commit": found.commit,
+                    "credential": found.credential,
+                }
+            )
+            if any(d.conditions for d in found.decisions):
                 read.append(found)
         not_read = "".join(f"; not read, {u}" for u in unread)
         if not read:
+            for row in fetched:
+                await ledger.append(ctx.conn, ctx.objective, "repository.fetched", row)
             return Ran(None, "nothing_due", f"no committed decision carries conditions{not_read}")
         run_id = await tasks.start_child(
             ctx.conn,
@@ -85,6 +105,8 @@ def runner(
             model=resolve_model(ctx.routine.model),
             routine=ctx.routine.name,
         )
+        for row in fetched:
+            await ledger.append(ctx.conn, run_id, "repository.fetched", row)
         checked = met = put = 0
         for found in read:
             for d in found.decisions:

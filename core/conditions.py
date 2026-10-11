@@ -6,7 +6,8 @@ business's own repository, never in the kernel's checkout: the file
 `decisions/conditions.toml` on the branch commitments merge to (the
 project spec's `branch`, else the remote's default branch). `committed`
 reads it from the kernel's bare cache of the repository, fetched by its
-trusted git; `parse` reads the format.
+trusted git, as Valor's GitHub account when given the key file, so a private
+repository that account can read is read; `parse` reads the format.
 
 A condition is numeric when it names a `metric` with `above` or `below`,
 read from the business's data through a `Source`, or an observation when it
@@ -24,7 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
 
-from core import git, workspace
+from core import credentials, git, workspace
 
 PATH = "decisions/conditions.toml"
 
@@ -159,26 +160,37 @@ def parse(raw: str) -> list[Decision]:
 class Committed:
     """A business's conditions file as committed: the commit it was read
     at, its decisions, and each decision's reasoning text at that commit
-    (None when the reference is not a file there)."""
+    (None when the reference is not a file there). `fetched` is the
+    repository fetched, and `credential` the key the fetch carried
+    (`credentials.GITHUB_KEY`, Valor's GitHub account) or None when it
+    carried none."""
 
     business: str
     commit: str
     decisions: list[Decision]
     reasoning: dict[str, str | None]
+    fetched: str = ""
+    credential: str | None = None
 
 
-def committed(spec: workspace.Spec, work: Path) -> Committed | None:
+def committed(
+    spec: workspace.Spec, work: Path, *, credential: str | Path | None = None, loopback: bool = False
+) -> Committed:
     """The business's conditions file on its committed branch, fetched into
-    the kernel's cache; None when the repository holds none. Raises
-    `workspace.Refused` when the repository cannot be fetched and
-    `Malformed` when the file cannot be read."""
-    cache = workspace._cache(spec, None, work)
+    the kernel's cache, with no decisions when the repository holds none. With
+    `credential`, the GitHub key file, a remote repository is fetched as
+    Valor's GitHub account, so a private one Valor's account can read is
+    read (`workspace._cache`). Raises `workspace.Refused` when the
+    repository cannot be fetched and `Malformed` when the file cannot be
+    read."""
+    cache = workspace._cache(spec, None, work, credential=credential, loopback=loopback)
+    keyed = credential is not None and not Path(spec.repo).expanduser().exists()
     branch = spec.branch or workspace._remote_head(cache)
     commit = workspace._commit_of(cache, f"refs/heads/{branch}")
     try:
         raw = git.trusted(cache, "show", f"{commit}:{PATH}", strip=False)
     except git.GitError:
-        return None
+        raw = ""  # no file: no watched conditions
     decisions = parse(raw)
     reasoning: dict[str, str | None] = {}
     for d in decisions:
@@ -186,7 +198,14 @@ def committed(spec: workspace.Spec, work: Path) -> Committed | None:
             reasoning[d.id] = git.trusted(cache, "show", f"{commit}:{d.reasoning}", strip=False)
         except git.GitError:
             reasoning[d.id] = None
-    return Committed(spec.name, commit, decisions, reasoning)
+    return Committed(
+        spec.name,
+        commit,
+        decisions,
+        reasoning,
+        fetched=spec.repo,
+        credential=credentials.GITHUB_KEY if keyed else None,
+    )
 
 
 def key(business: str, decision: str, condition: Condition) -> str:

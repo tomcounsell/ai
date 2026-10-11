@@ -494,10 +494,12 @@ def _routine_runners() -> dict:
 
     # No business data source is granted yet (Stripe, Google Analytics), so
     # the conditions runner has no adapters and records each condition unread.
+    # It fetches each business's repository as Valor's GitHub account, so a
+    # private repository that account can read is read.
     return {
         routines.EXPIRY_RUNNER: routines.expiry_runner,
         "emulator": emulator.run,
-        "conditions": conditions.runner({}),
+        "conditions": conditions.runner({}, credential=settings.github_keyfile),
     }
 
 

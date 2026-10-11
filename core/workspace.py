@@ -72,7 +72,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, git, runs
+from core import binaries, credentials, git, runs
 from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
@@ -738,22 +738,42 @@ def cache_path(origin: str, work: Path) -> Path:
     return work / "cache" / f"{name}.git"
 
 
-def _cache(spec: Spec, source: str | None, work: Path) -> Path:
+def _cache(
+    spec: Spec,
+    source: str | None,
+    work: Path,
+    *,
+    credential: str | Path | None = None,
+    loopback: bool = False,
+) -> Path:
     """The kernel's bare clone of the repository, fetched by its trusted git:
-    a local path, or a public HTTPS URL fetched anonymously. A repository
-    that needs a credential to fetch is refused."""
+    a local path, or an HTTPS URL. Without `credential` (provisioning) the
+    URL is fetched anonymously and a repository that needs a credential to
+    fetch is refused. With `credential`, the GitHub key file (the conditions
+    routine), a remote URL is fetched as Valor's GitHub account: each git
+    call against it gets a header file of its own
+    (`core.credentials.header_file`) and the pins of `git.credential_pins`,
+    as the merge's push does. `loopback` lets a loopback http URL be
+    fetched and named in the header file, for tests only."""
     origin = source or spec.repo
     local = Path(origin).expanduser()
     url = str(local.resolve()) if local.exists() else origin
     cache = cache_path(origin, work)
-    if not local.exists() and not url.startswith("https://"):
+    keyed = credential is not None and not local.exists()
+    if not local.exists() and not url.startswith("https://") and not loopback:
         raise Refused(f"{origin} is neither a local repository nor an https URL")
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         git.trusted(cache.parent, "init", "-q", "--bare", str(cache))
+
+    def remote(*args: str) -> str:
+        if not keyed:
+            return git.trusted(cache, *args)
+        with credentials.header_file(credential, url, loopback=loopback) as header:
+            return git.out(cache, *args, credential=header, url=url)
+
     try:
-        git.trusted(
-            cache,
+        remote(
             "fetch",
             "-q",
             "--no-tags",
@@ -763,11 +783,15 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
         )
     except git.GitError as exc:
         if needs_credential(str(exc)):
+            if keyed:
+                raise Refused(f"{origin} refused Valor's GitHub credential; rotate it: {exc}") from None
             raise Refused(
                 f"{origin} needs a credential to fetch; private repositories are not fetched"
             ) from None
         raise Refused(f"fetching {origin}: {exc}") from None
-    listed = git.trusted(cache, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
+    except credentials.CredentialError as exc:
+        raise Refused(f"fetching {origin} as Valor: {exc}") from None
+    listed = remote("ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
     for line in listed.splitlines():
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             git.trusted(cache, "symbolic-ref", "HEAD", line[len("ref: ") : -len("\tHEAD")])

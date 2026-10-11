@@ -174,7 +174,7 @@ the safety mechanism"), so for each account this section says whether its
 actions pass the broker and how they reach the ledger. The per-account
 table, with the gaps, is [performers.md](performers.md).
 
-**Built.** Three kinds of path leave the Mac.
+**Built.** Four kinds of path leave the Mac.
 
 - **Through the broker**, as typed actions with `effect.intent` and
   `effect.outcome` rows (or `effect.held`, `release.requested`, and the
@@ -193,6 +193,11 @@ table, with the gaps, is [performers.md](performers.md).
   and marks read Valor's Telegram messages, and the email bridge reads the
   mailbox over IMAP and sets `\Seen`. Each message taken is one
   `message.received` row; marking it read writes no row of its own.
+- **Through a routine's read, not the broker**: the `conditions` routine
+  fetches each business's repository, private ones included, through
+  Valor's GitHub account with `GITHUB_PUSH_TOKEN`. Each repository fetched
+  is one `repository.fetched` row ([routines.md](routines.md), Watched
+  conditions).
 
 **The gap.** A turn runs as the Mac's one macOS user, can read the login
 keychain through `security`, and reaches the public internet (Limits,

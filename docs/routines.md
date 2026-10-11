@@ -238,9 +238,21 @@ git, as provisioning does, and reads `decisions/conditions.toml` on the
 branch commitments merge to: the spec's `branch`, else the repository's
 default branch. A decision is committed when it is merged there (Business
 item 3), so a file on any other branch is not read. A repository without the
-file has no watched conditions. The kernel fetches no private repository, so
-a business whose repository needs a credential is named in the summary as
-not read.
+file has no watched conditions. A remote repository is fetched as Valor's
+own GitHub account, `valorengels`, with `GITHUB_PUSH_TOKEN` from
+`github-keys`: a private business repository is read when that account has
+access to it, and the boundary is that access (docs/business.md, item 8).
+Each git call against the remote gets a header file of its own, as the
+merge's push does ([performers.md](performers.md), `merge`); the token is
+never written to the ledger, the summary, or a log. A fetch is a read, so it
+sits under the routine's `propose` ceiling and passes no broker. Each
+repository fetched is a `repository.fetched` row naming the business, the
+repository, the commit read, and the key the fetch carried (by name, or
+null for a local path), on the run, or on the objective beside its
+`routine.ran` when the firing starts no run. A repository Valor's account
+cannot read, or a missing key file, is named in the summary as not read, and
+the other businesses go on. Provisioning still fetches anonymously
+(`workspace._cache` without a credential).
 
 The file lists each committed decision, its reasoning reference, and its
 conditions:

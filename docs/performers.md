@@ -71,6 +71,7 @@ known yet.
 | Account | Mac | What Valor does through it | Through the broker | How it reaches the ledger |
 |---|---|---|---|---|
 | GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | `merge` of a passed candidate onto the Brief's URL and branch | yes | `effect.intent` then `effect.outcome`; a `report` notice to Tom |
+| GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | read: the `conditions` routine fetches each business's repository, private ones included, to read `decisions/conditions.toml` ([routines.md](routines.md), Watched conditions) | no; a read under the routine's `propose` ceiling | one `repository.fetched` row per repository, naming the key, never its value |
 | Telegram, Valor's user account, by `telegram-keys` and `telegram.session` | this install | `telegram.send_message`; receiving, which marks messages read | sends yes; receive no | a send is `effect.held`, `release.requested`, and the bridge's outcome; each message taken is `message.received`; marking it read has no row |
 | Gmail, Valor's mailbox, by `mail-keys` | this install | `email.send` over SMTP; receiving over IMAP, which sets `\Seen` | sends yes; receive no | as Telegram's; setting `\Seen` has no row |
 | Anthropic, by `claude-token` or Claude Code's login | this install | frontier turns' model calls | no; the gateway | `gateway.opened` and `gateway.charged` per call; spend on `turn.ended` |
