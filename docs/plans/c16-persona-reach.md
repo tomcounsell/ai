@@ -201,3 +201,29 @@ appears" may not reach an approach the answer accepted without restating.
 - Suite alone (`-m "not container"`): 1907 passed, 24 skipped, 53
   deselected, 0 failed. `uvx ruff check .` and `uvx ruff format --check .`
   clean.
+
+## Measurement
+
+after-p3 (task 9de14d0f6557) ran on `~/src/valor-rebuild-d3` with
+`c15.patch` and `c16.patch` applied. All nine `turn.started` events show
+`a3ea95d9...` (11,596 bytes). One row per run is in
+[m4-2-emulator-runs.md](m4-2-emulator-runs.md).
+
+| Run | Rounds | Questions | F/C/S | Hidden | Broad | Spend | Wall |
+|---|---|---|---|---|---|---|---|
+| before-p1 (control) | 2 | 0 | 3/3/4 | 3/5 | 2 new | $7.62 + $0.38 | 2.3h |
+| after-p3 | 0 | 1 | 4/4/3 | 4/5 | 1 new | $7.72 + $0.34 | 1.6h |
+
+- **Bar met.** There were 0 feedback rounds. The fidelity rationale says
+  all six key items are covered, and no divergence names a missed one.
+- **Set reach (p1's miss).** The question offered "no sector counts as
+  possibly Sports" as its default. The stand-in left no-sector teams to
+  Valor. The build keeps blank and null sectors out of the Sports set.
+- **Approach reach (p2's miss).** The question set out per-item links
+  to each Settings tab. The main button deep-links to the first missing
+  item's tab.
+- **Hidden 4/5.** The new notifications checkbox renders above SMS
+  consent, and the reference test wants it below. The key marks that
+  control as inferred and leaves placement open. This is not a key item.
+- after-p4 is not run.
+

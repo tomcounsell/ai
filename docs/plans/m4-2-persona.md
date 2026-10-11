@@ -437,6 +437,9 @@ One row per run, with the setup, re-verifies and findings, is in
   the first missing tab). Both miss the bar as written, so the task
   goes back to patch: C16, persona text. before-p1 takes 2 rounds,
   hidden 3/5.
+- **#894 met on C16.** after-p3 (`a3ea95d9...`) takes 0 rounds, and no
+  divergence names a missed key item. Hidden 4/5: checkbox placement,
+  which the key leaves open. It is not worse than before-p1.
 
 ## Critique round 1 (of 1): revise
 

@@ -74,6 +74,7 @@ rounds; Q is questions asked.
 | pso-c bare before-p1 | 4b5cc43cb666 | held | 2 | 0 | 3/3/4 | 3/5 | 2 (the hidden 2) | $7.62 + $0.38 |
 | pso-c bare after-p1 | 82fd01e7f009 | held | 0 | 1 | 3/4/3 | 5/5 | 0 | $6.12 + $0.42 |
 | pso-c bare after-p2 | 6b7dd86844c2 | held | 1 | 1 | 4/4/3 | 5/5 | 0 | $9.32 + $0.88 |
+| pso-c bare after-p3 | 9de14d0f6557 | held | 0 | 1 | 4/4/3 | 4/5 | 1 (the hidden 1) | $7.72 + $0.34 |
 
 - **after-r2 rows.** Each is the one rerun the "Worse" rule allows, and
   the item is judged on it. Both runs are recorded.
@@ -108,6 +109,7 @@ rounds; Q is questions asked.
 | pso-c clarify | not worse | after-r2: 5/5, F/C 4/4 against 3/4 |
 | pso-c bare | not worse; misses the #894 bar | Rounds 2 against 2, no question asked |
 | pso-c bare, p1 | not worse; after-p1 and after-p2 miss the #894 bar (items 3 and 6) | See below |
+| pso-c bare, p3 | not worse; after-p3 meets the #894 bar | C16 persona; see below |
 
 A worse result or a missed bar is a 4.2 patch finding.
 - **pso-c clarify after** was worse on its first run: hidden 4/5 against
@@ -155,6 +157,53 @@ A worse result or a missed bar is a 4.2 patch finding.
 - **Result.** after-p1 misses the bar on item 3 and after-p2 on item 6.
   The one rerun is used, so the task goes back to patch: C16, persona
   text. Its after-arm rerun runs on the same after worktree.
+
+## #894: after-p3 (C16 persona a3ea95d9)
+
+after-p3 is the after arm only, on the same after worktree with C15's
+and C16's persona patches applied. All nine of its `turn.started`
+events show `persona_sha256` `a3ea95d9...` (11,596 bytes). The control
+is before-p1, whose inputs are unchanged.
+
+- **The question.** One question in the first turn, with defaults:
+  - general rule or the career dates only (the default was the general
+    rule, without phone and SMS);
+  - who is asked for career dates (the default was active Sports
+    teams, with teams that have no sector counted as possibly Sports);
+  - whether to keep "(Optional)" on the career dates tab.
+
+  The stand-in answered: the general rule with all seven fields, any
+  Sports-sector membership including past and inactive ones, and the
+  banner replaces the first-name nudge. It left no-sector teams and
+  the label to Valor.
+- **The build.** Blank and null sectors are not counted as Sports. A
+  notifications-consent checkbox was added to Basic Information. The
+  main button deep-links to the first missing item's tab.
+- **Rounds.** The review asked for one change: a shared Spanish msgid
+  had been renamed. The patch restored it. The stand-in accepted on
+  first delivery, so there were 0 feedback rounds. Both hand docs
+  verdicts were no_change.
+- **Hidden tests: 4/5.** The one failure is
+  `test_checkbox_renders_below_sms_consent`: the new checkbox sits
+  above SMS consent, not below it. The key marks that control as
+  inferred and leaves placement to Valor. Broad: the same test is the
+  only new failure (22 at base, 23 now).
+- **The judge's divergences.** F/C/S 4/4/3. The fidelity rationale says
+  all six intent points are covered. No divergence names a missed key
+  item:
+  - The main button follows a field order with phone first. It goes to
+    the same tab, so the link is the same in practice (item 6 met).
+  - The language hint stays in the header, shown only while the profile
+    is incomplete; the judge calls this stylistic.
+  - The rest are copy, placement or structure, which the key leaves to
+    Valor: "(optional)" dropped from two settings labels, the checkbox
+    position, a model property against a module, per-item links, and a
+    plan file in place of a feature doc.
+- **Result.** after-p3 meets the #894 bar: 0 rounds, and no divergence
+  names a missed key item. after-p4 is not run. Against before-p1 it is
+  not worse: rounds 0 against 2, hidden 4/5 against 3/5, F/C 4/4
+  against 3/3. Kernel $7.72, emulator $0.34, wall 1.6h. The candidate
+  (`0673ee30`) was torn down after the judge and is not in keep.git.
 
 ## Findings
 
