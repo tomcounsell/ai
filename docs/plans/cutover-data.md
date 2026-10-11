@@ -225,7 +225,9 @@ superuser, so the kernel must make the extension in `template1` first),
 `chats = ["telegram:-1003801797780"]`, suite from the
 `Makefile` test target. Its setup line carries the same `PATH` and
 `SDKROOT` prefix as psyoptimal's, since its psycopg2 build needs `pg_config`
-and the SDK headers; its branch is unconfirmed. Neither the
+and the SDK headers. Its suite leaves out `apps/podcast/tests/e2e`, whose
+conftest imports playwright, which the `test` extra does not install; its
+branch is unconfirmed. Neither the
 psyoptimal nor the popoto draft needs `extensions`: psyoptimal's suite runs
 no extension, and popoto's pgvector tests sit in `tests/postgres`, which its
 suite leaves out.
