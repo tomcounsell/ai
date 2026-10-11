@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 from core import db, guards, ledger, machine, routines, tasks, workspace
 from core.machine import State
 from core.settings import settings
-from tests import fresh_db, scripted
+from tests import scripted
 from tests.conftest import TEST_DB
 from tests.ports import listen
 from tests.test_docs_runner import docs_runners
@@ -38,7 +38,7 @@ def world(tmp_path, monkeypatch):
     """A database of this test's own and a routines directory holding the
     kernel's two routines."""
     name = f"{TEST_DB}_expiry"
-    dsn = fresh_db.fresh(name)
+    dsn = db.migrate(name, fresh=True)
     owner = settings.dsn(owner=True, database=name)
     for n in ("expiry", "emulator"):
         shutil.copytree(ROOT / "routines" / n, tmp_path / "routines" / n)
@@ -484,7 +484,7 @@ def cli(tmp_path: Path, name: str, *args: str) -> subprocess.CompletedProcess:
 @pytest.mark.macos  # the fresh and docs runners fetch under sandbox-exec
 def test_items_due_start_one_project_task_the_kernel_carries_to_a_held_merge(tmp_path):
     name = f"{TEST_DB}_expiry"
-    dsn = fresh_db.fresh(name)
+    dsn = db.migrate(name, fresh=True)
     owner = settings.dsn(owner=True, database=name)
     spec = _spec_file(tmp_path)
     expiry = tmp_path / "routines" / "expiry"
