@@ -290,8 +290,8 @@ docstring drops "a release Tom asked for" and "a release's outcome".
   A task that reaches `merged` goes to the stand-in, whose accept or spent
   feedback rounds end the run `merged`; its feedback runs the task on.
   Outcomes `held` and "an effect other than a local push is held" go. Its
-  tasks merge to their own bare origin; a remote merge still needs a
-  granted merge-target pair (`core.targets`), as now.
+  tasks merge to their own bare origin; a remote merge lands on the URL and
+  branch its Brief recorded at start, as every task's does.
 
 ## Threat model
 
@@ -326,11 +326,12 @@ schema and dependencies as now; nothing is added there.
   request and at release, the email bridge's cancel on stop, the reply
   `stop`.
 - Reconcile, dangling intents, the per-effect lock, intent before perform.
-- The merge-target grants (`core/targets.py`, `Merge.refuse` through
-  `targets.check`): a standing authority, Tom's grant per remote pair. A
-  merge to a pair not granted is refused as now. The lead confirms that
-  Valor's pair (its GitHub URL and its live branch) is granted before
-  the live window.
+- Where a merge lands: the URL and target branch the kernel recorded in the
+  task's Brief at start, from the project spec, the remote's default branch
+  included (`Merge.refuse`). The merge-target grants and the default-branch
+  refusal are gone (Tom, 2026-10-10 and 2026-10-11: a merge to main is a soft
+  commitment, harder to reverse once on prod); what the push can reach is
+  bounded by the GitHub credential's own reach.
 
 ## Migration of held rows
 

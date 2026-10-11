@@ -87,7 +87,7 @@ def test_every_identity_field_renders_in_the_renderers_order_whatever_the_files(
     who = persona.identity(PERSONA)
     for key, label in persona.IDENTITY:
         assert f"- {label}: {who[key]}" in text
-    assert who["name"] == "Valor Engels" and who["supervisor"] == "Tom Counsell"
+    assert who["name"] == "Valor Engels" and who["operator"] == "Tom Counsell"
     lines = (target / "identity.toml").read_text().splitlines()
     (target / "identity.toml").write_text("\n".join(reversed(lines)) + "\n")
     assert persona.render(target) == text
@@ -171,13 +171,13 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
                 "\n".join(
                     line
                     for line in (d / "identity.toml").read_text().splitlines()
-                    if not line.startswith("supervisor")
+                    if not line.startswith("operator")
                 )
             ),
-            "supervisor",
+            "operator",
         ),
     ],
-    ids=["missing-conduct", "missing-supervisor"],
+    ids=["missing-conduct", "missing-operator"],
 )
 def test_an_unreadable_persona_raises_naming_what_is_wrong(tmp_path, edit, message):
     target = copy_persona(tmp_path)

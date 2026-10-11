@@ -46,7 +46,41 @@ Status: **in use**.
   file of its own holding one `Authorization` header scoped to that URL,
   removed when git exits, with redirects and proxies pinned off in the file
   and on the command line. GitHub's refusal of the token fails the merge
-  saying to rotate it ([machine.md](machine.md), Keychain).
+  saying to rotate it ([machine.md](machine.md), Keychain). A merge may
+  land on the remote's default branch: landing work there is Valor's own
+  call, and the ledger's record of the merge is what makes it safe
+  (docs/business.md, constraint "The record is the safety mechanism"). A
+  merge to a branch that deploys to production is the harder-to-reverse
+  case, which gets the longer argument (docs/business.md, Business item 4);
+  the performer treats it like any other branch.
 - **`WorkspaceWrite`** (`propose`) and **`OutboxAppend`** (`act`)
   (`tests/performers.py`), for the tests only: a file in the workspace, and
   a local outbox that stands where a bridge's send will.
+
+## The accounts each business gives Valor
+
+Valor acts through its own accounts on the client's Mac, and those
+accounts are the boundary of what it can do there (docs/business.md,
+Business item 8). Every channel that can act records what it did; an
+account Valor can act through without a record is a gap (docs/business.md,
+constraint "The record is the safety mechanism"). The rows below are this
+install's, from the code. Each of the four Macs gets its own copy of this
+table as its client's accounts are granted; the per-Mac lists are not
+known yet.
+
+| Account | Mac | What Valor does through it | Through the broker | How it reaches the ledger |
+|---|---|---|---|---|
+| GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | `merge` of a passed candidate onto the Brief's URL and branch | yes | `effect.intent` then `effect.outcome`; a `report` notice to Tom |
+| Telegram, Valor's user account, by `telegram-keys` and `telegram.session` | this install | `telegram.send_message`; receiving, which marks messages read | sends yes; receive no | a send is `effect.held`, `release.requested`, and the bridge's outcome; each message taken is `message.received`; marking it read has no row |
+| Gmail, Valor's mailbox, by `mail-keys` | this install | `email.send` over SMTP; receiving over IMAP, which sets `\Seen` | sends yes; receive no | as Telegram's; setting `\Seen` has no row |
+| Anthropic, by `claude-token` or Claude Code's login | this install | frontier turns' model calls | no; the gateway | `gateway.opened` and `gateway.charged` per call; spend on `turn.ended` |
+| OpenAI, by `openai-key` | this install | model calls on the OpenAI route | no; the gateway | `gateway.opened` and `gateway.charged` per call |
+| TypeSafe (Jev) and OpenRouter, by `judgement-keys` | this install | judgement calls from the kernel | no; the gateway | `gateway.opened` and `gateway.charged` with `route: judgement`; `judgement.answered` or `judgement.failed` |
+| Claude Code's login in the login keychain, read by a turn through `security` | this install | a model call around the gateway | no | none beyond the turn's own transcript. **Gap**, accepted by Tom on 2026-10-01 ([architecture.md](architecture.md), Limits) |
+| Any other account logged in on the Mac, in the login keychain or a browser session | this install | whatever the account allows, from a turn | no | none beyond the turn's own transcript. **Gap** |
+| Stripe | per business, not yet granted | | | |
+| Google Analytics | per business, not yet granted | | | |
+
+A business account granted to Valor is recorded only when its actions
+pass a performer or the gateway. Granted as a login on the Mac and
+nothing more, it joins the second gap row.

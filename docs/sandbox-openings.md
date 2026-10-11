@@ -21,6 +21,10 @@ Stated so the boundary is drawn where it is [4]:
   could leave a note there for a reviewer. Nothing reads one on purpose;
   independence rests on the inputs, the checkout, and the reviewer's own
   reruns.
+- A working task's turns read and write its business's knowledge base
+  (`~/work-vault/<knowledge_base>`, Tom, 2026-10-11), so what one task
+  writes there a later task of the same business, and Tom, reads. A fresh
+  session and a replay never reach it.
 - Narrowed for kernel workspaces, not closed: their profiles deny writes to
   the machine user's startup places, `~/.local/bin` (which the user's PATH
   puts before `/usr/bin`), `~/Library/LaunchAgents`, the shell's rc files

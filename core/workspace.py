@@ -79,10 +79,13 @@ SERVICES = ("postgres", "redis")
 DEV_PORTS = range(8000, 8010)
 HOME = Path.home()
 GITCONFIG = "[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n[init]\n\tdefaultBranch = main\n"
+# The businesses' knowledge bases, one folder each, under the user's home. A
+# working task's profile allows its project's folder back (`knowledge_base`).
+VAULT = "work-vault"
 # Read and write denied to every workspace sandbox, under the user's home.
 HOME_DENIED = (
     "src",
-    "work-vault",
+    VAULT,
     "Desktop",
     "Documents",
     "Downloads",
@@ -208,7 +211,10 @@ class Spec:
     `chats` lists the chats whose messages start tasks under this project
     (`"telegram:<chat id>"`, `"email:<sender address>"`), and `machine` the
     machine whose bridges receive them; none means
-    `settings.default_machine`, so each chat has one owner."""
+    `settings.default_machine`, so each chat has one owner.
+
+    `knowledge_base` names the business's folder in `~/work-vault`, which a
+    working task's turns read and write; a replay's never do."""
 
     name: str
     repo: str
@@ -226,6 +232,7 @@ class Spec:
     max_output_tokens: int | None = None
     chats: tuple[str, ...] = ()
     machine: str | None = None
+    knowledge_base: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -268,6 +275,11 @@ class Spec:
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
+        kb = raw.get("knowledge_base")
+        if kb is not None and (
+            not isinstance(kb, str) or kb in ("", ".", "..") or any(c in kb for c in '/"\\\n')
+        ):
+            raise Refused(f"knowledge_base {kb!r} is not a folder name in ~/{VAULT}")
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -285,6 +297,7 @@ class Spec:
             max_output_tokens=cap,
             chats=tuple(c if c.startswith("telegram:") else c.lower() for c in chats),
             machine=machine,
+            knowledge_base=kb,
         )
 
     @classmethod
@@ -318,6 +331,11 @@ class Spec:
 
 def work_dir() -> Path:
     return Path(settings.work_dir).expanduser()
+
+
+def knowledge_base(spec: Spec, home: Path = HOME) -> Path | None:
+    """The spec's business folder, `~/work-vault/<knowledge_base>`, or None."""
+    return home / VAULT / spec.knowledge_base if spec.knowledge_base else None
 
 
 @dataclass(frozen=True)
@@ -557,8 +575,9 @@ def turn_profile(
 ) -> str:
     """The working session's (and provisioning setup's) profile: its clone,
     its caches, its own state; its task's home and origin read-only; no
-    shared temp directory. The emulator's verification passes `tmp` and
-    its own tree in `rw`, to run as its baseline did."""
+    shared temp directory. Provisioning passes the project's knowledge base
+    folder in `rw`. The emulator's verification passes `tmp` and its own
+    tree in `rw`, to run as its baseline did."""
     return profile(
         rw=[lay.repo, lay.cache, lay.work_state, *rw],
         ro=[lay.home, lay.origin, lay.root.parent / "bin"],
@@ -836,9 +855,11 @@ def harness_env(
     directory's `bin/`) first on PATH, then the trusted git's directory (the
     developer tools, so `git` and `python3` are not `/usr/bin`'s shims, which
     write a cache to the user temp directory no turn can write), the caches
-    under `lay`, the database and Redis it was given, and `passfile` as the
-    Postgres password file. The directories are passed, never derived from
-    `lay`, so a check's own service layout gets the task's `bin/`."""
+    under `lay`, the database and Redis it was given, `passfile` as the
+    Postgres password file, and the business's knowledge base folder
+    (`VALOR_KNOWLEDGE_BASE`) when the spec names one. The directories are
+    passed, never derived from `lay`, so a check's own service layout gets
+    the task's `bin/`."""
     git_dir = Path(git.binary()).parent
     env = {
         "PATH": f"{bin_dir}:{git_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
@@ -877,6 +898,9 @@ def harness_env(
             for k, v in spec.env.items()
         }
     )
+    kb = knowledge_base(spec)
+    if kb:
+        env["VALOR_KNOWLEDGE_BASE"] = str(kb)
     return env
 
 
@@ -959,7 +983,9 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     # Home: identity, empty gh, the profiles.
     (lay.home / "gitconfig").write_text(GITCONFIG)
     service_ports = [ports[s] for s in spec.services]
-    (lay.profiles / "turn.sb").write_text(turn_profile(lay, service_ports))
+    kb = knowledge_base(spec)
+    opened = sorted({str(kb), os.path.realpath(kb)}) if kb else []
+    (lay.profiles / "turn.sb").write_text(turn_profile(lay, service_ports, rw=[Path(p) for p in opened]))
     passwords: dict[str, str] = {}
     if spec.services:
         (lay.profiles / "service.sb").write_text(
@@ -1001,6 +1027,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "repo": spec.repo,
         "merge_url": spec.merge_url,
         "env": spec.env,
+        "knowledge_base": str(kb) if kb else None,
     }
     return Provisioned(
         workspace=str(lay.repo),

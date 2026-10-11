@@ -436,8 +436,12 @@ must not reach. It runs as Tom's user.
   `~/.claude/projects` and `history.jsonl`, and the whole work directory
   (`work_dir`), other tasks included.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
-  clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config),
-  with `/private/tmp`, `/private/var/tmp`, and `/private/var/folders` denied,
+  clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config), and
+  the project's knowledge base, `~/work-vault/<knowledge_base>` when the spec
+  names one (`VALOR_KNOWLEDGE_BASE` in its environment). A replay's working
+  session never gets it, since the folder may hold the reasoning behind the
+  decisions the replay is scored against, as `~/src` holds the answers; `start
+  --replay` drops the field. With `/private/tmp`, `/private/var/tmp`, and `/private/var/folders` denied,
   so no two tasks share a temp directory; for a fresh session, its own check
   directory, the same three and `~/.claude*` denied. Its `UV_CACHE_DIR` is
   `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python` in that directory,

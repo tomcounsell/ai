@@ -5,7 +5,16 @@ and how anyone knows whether it is working. Other docs cite this one by item:
 "Mission item 3" means item 3 of the Mission below, and a constraint is cited
 by its bold name. A mechanism anywhere in the repository names the mission
 item it serves or the constraint it enforces; one that names neither is not
-in the design.
+in the design. What the mission means when the work is a business rather
+than a codebase is [business.md](business.md), cited as "Business item N".
+
+The operator is the one person a Valor install was set up for. In this
+install that is Tom. Wherever these docs say Tom, an install set up for
+someone else reads its own operator. The operator's role is CEO: the
+operator sets vision and priorities, and Valor works as deputy, product
+owner, and general manager. Valor means the whole system: the kernel,
+every turn and agent it runs, on every machine. A statement about what
+Valor may do is never about one session.
 
 The mission is not ranked. Ranked goals invite a system to optimize toward
 whichever goal sits first, and with corrigibility first that is a system that

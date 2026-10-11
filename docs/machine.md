@@ -1,12 +1,17 @@
 # The machine
 
 One Valor install runs on one Mac, and the design is for one machine. Valor
-has four Macs; they exist for project isolation only. Each runs its own
-install, with its own Postgres, ledger, and bridges, for the projects it
-owns. Nothing is shared between them: no cross-machine ledger, no hub, no
-replication. Production runs on Valor's Macs, never on Tom's (Tom,
-2026-10-01). The design target for one install is a MacBook Air M4 with
-16 GB of RAM, Mac native. This doc says what runs on it all the time, what runs only while work is in flight,
+has four Macs, one per client (Tom, 2026-10-11). Every project of a client,
+or every internal Yudame project, runs on that client's Mac, and Valor is
+logged into the same accounts for all of them. Each Mac keeps its own
+kernel Postgres, ledger, and bridges. Exactly two things cross machines:
+the code that runs Valor, and the memory store on a shared Postgres (see
+The shared memory store). There is no cross-machine ledger, no hub, and no
+replication. The hard boundary between clients is the Mac and the accounts
+on it (docs/business.md, constraint "Generic across businesses").
+Production runs on Valor's Macs, never on Tom's (Tom, 2026-10-01). The
+design target for one install is a MacBook Air M4 with 16 GB of RAM, Mac
+native. This doc says what runs on it all the time, what runs only while work is in flight,
 how much memory each part may take, how many turns run at once, where
 secrets live, and how launchd starts things. It enforces the plan
 constraint "16 GB of RAM": Postgres, one container runtime, one `claude -p`
@@ -363,13 +368,15 @@ copies only its allowlist.
 
 ## Postgres on the machine
 
-Two kinds of cluster run on each machine, never one shared.
+Two kinds of cluster run on each machine, and neither is shared with
+another Mac or with a turn.
 
 - **The machine cluster**, resident, on the default port and a Unix
   socket. The kernel connects as `valor_kernel`, which can read and append
   and never update or delete the ledger; memory connects as `valor_memory`,
   which owns the schema `memory` and reaches nothing else. Roles and grants are
-  [data.md](data.md).
+  [data.md](data.md). The schema `memory` is here today; the design moves
+  it to the shared memory store (below).
 - **A workspace cluster** per task the kernel provisions, on demand, on
   its own port (5440 to 5599; its Redis, 6400 to 6499) with password
   authentication, owned by the workspace, holding only the app's test
@@ -397,6 +404,29 @@ dump fails, naming both paths, until it matches), then run `python -m core
 secure-login` and check that a login without the password file is
 refused.
 
+## The shared memory store
+
+Not built yet. The design puts popoto's store ([memory.md](memory.md)) on
+one Postgres that all four Macs reach, so a standard of working Valor
+learned for one client is recalled on another client's Mac (docs/business.md,
+constraint "Generic across businesses"). Every record carries its client
+and its project. Each Mac's kernel ingests its own ledger's rows into it and
+recalls from it; no ledger row, task, or grant crosses with them. The
+store holds only what memory ingests from the four ledgers, and it grants
+nothing ([memory.md](memory.md), Memory grants nothing). Today each Mac's
+memory is the schema `memory` in its own machine cluster.
+
+**Chosen at cutover.** Where the shared Postgres runs, how each Mac
+reaches it (address, transport, and the role each Mac's kernel logs in
+as), and, if it runs on one of the four Macs, its line in that Mac's RAM
+plan are Valor's operational call, made when memory moves to the shared
+store and recorded here then. Until then the RAM plan above has no line
+for it.
+
+**When a Mac cannot reach the store.** The turn runs without memory recall
+and does not wait for the store, and its Brief records that recall was
+skipped.
+
 ## Backups
 
 `python -m core backup` dumps the kernel database to the `backup_dir`
@@ -418,7 +448,9 @@ restores a dump into a scratch cluster under the kernel key directory (the
 `pg_scratch` setting, `~/.config/valor-kernel/run`, which no sandbox profile
 can read or write), compares it with its manifest, and removes the cluster.
 The digests cover `events` and `documents`, not the schema `memory`, whose
-records are rebuilt by ingesting the ledger again. A restore is made with
+records are rebuilt by ingesting the ledger again. Once memory is on the
+shared store, a rebuild ingests all four Macs' ledgers, each from its own
+kernel database. A restore is made with
 `--no-owner`, so after restoring a dump for use, run `python -m core
 migrate` against it: it gives the schema `memory` and its tables back to
 `valor_memory`.

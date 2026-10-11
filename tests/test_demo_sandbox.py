@@ -242,6 +242,19 @@ def test_a_task_turn_reaches_the_gateway_at_any_port(tmp_path):
             s.close()
 
 
+def test_a_task_turn_reads_and_writes_its_knowledge_base_and_no_other_folder_of_the_vault(tmp_path):
+    lay = _task(tmp_path)
+    vault = tmp_path / "home" / kws.VAULT
+    own, other = vault / "Toy Business" / "notes.md", vault / "Other Business" / "notes.md"
+    for f in (own, other):
+        f.parent.mkdir(parents=True)
+        f.write_text("x")
+    profile = tmp_path / "kb.sb"
+    profile.write_text(kws.turn_profile(lay, [], home=tmp_path / "home", rw=[own.parent]))
+    assert _probe(profile, 1, f"read:{own}", f"write:{own}", f"read:{other}", f"write:{other}",
+                  f"list:{vault}") == ["open", "open", "denied", "denied", "denied"]  # fmt: skip
+
+
 def test_a_task_without_services_reaches_neither_service(tmp_path):
     lay = _task(tmp_path)
     profile = _turn_profile(tmp_path, lay, [])

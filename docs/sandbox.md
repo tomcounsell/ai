@@ -9,7 +9,8 @@ and this section states what they guarantee. The first demonstration and
 the baseline ran every turn under one (rebuild-demonstration.md, Setup,
 Isolation). The profile confines reads and writes to the workspace and
 what the toolchain needs, away from Tom's other checkouts, notes,
-transcripts, and keys; denies writes to the bare `origin`, so a push leaves
+transcripts, and keys (a working task's turns, never a replay's, also read
+and write its business's knowledge base folder in `~/work-vault`); denies writes to the bare `origin`, so a push leaves
 only through the broker's `push_branch` or `merge`; on loopback reaches
 only the gateway, the workspace's own Postgres, and the app's dev ports,
 never the kernel's database; and puts denies before allows, because

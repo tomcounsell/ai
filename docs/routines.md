@@ -161,6 +161,48 @@ The kinds of scheduled work this design carries:
   `propose`, since nothing removed is unrecoverable.
 - **The expiry sweep.** Described below. Mission item 5 and the governance
   constraint.
+- **Watched conditions.** Checking each committed decision's conditions for
+  reopening against the business's own data. Described below. Business
+  item 7 (`docs/business.md`).
+
+## Watched conditions
+
+This runner is design and is not built yet; the kernel holds only `expiry`
+and `emulator`, and today no routine reads a business's data on a schedule.
+
+A committed decision carries the conditions that would make it worth
+reopening (Business item 7). A third runner, `conditions`, checks each
+committed decision's conditions on its schedule:
+
+- **Where Valor has access, it reads the business's own data.** Which
+  accounts that is depends on the business: its Stripe account for billing,
+  its Google Analytics property for traffic, or whatever else the business
+  has given Valor access to. Each credential is reached the way any routine's
+  is, through a tool that reads Keychain inside a performer.
+- **Where a condition has no number, the run records what Valor observes.**
+  The condition is checked against its written text, and the run records
+  what Valor saw, where, and when, as a row on the run. Such a condition is
+  watched on the same footing as a numeric one; having no number does not
+  drop it.
+- **When a condition is met**, the run puts the decision's original
+  reasoning, the condition, and what changed (the figure or the observation,
+  with its source) on the agenda of the next strategy meeting. It sends Tom
+  no message; the decision is raised at the meeting, where it is made.
+
+Its ceiling is `propose`: reading accounts is `read`, and an agenda item is
+a draft. Watching the business's data for a decision to reopen is work for
+the business, not a check on Valor's own process, so it is not a guard under
+the section below. Like any routine, it is added on a demonstrated second
+need.
+
+**Where the conditions live.** The kernel reads every `routine.toml` from
+`settings.routines_dir`, which defaults to `routines/` in the kernel's own
+checkout, and that checkout is `tomcounsell/ai`, a public repository. A
+client's decisions and their conditions are therefore never written in a
+`routine.toml` or anywhere else in the kernel's checkout. They live in that
+client's business repository, beside the decision they belong to, and the
+run reads them from there. The kernel's `routine.toml` names the runner, the
+schedule, and the ceiling, and holds no business's conditions.
 
 ## What a routine may not do
 

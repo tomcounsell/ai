@@ -405,6 +405,10 @@ async def _start_project(conn, args) -> str:
         spec = workspace.Spec.load(args.project)
         if args.branch:
             spec = dataclasses.replace(spec, branch=args.branch, target_branch=args.branch)
+        if getattr(args, "replay", False):
+            # The knowledge base may hold the reasoning behind the decisions a
+            # replay is scored against, so a replay's turns never reach it.
+            spec = dataclasses.replace(spec, knowledge_base=None)
     except workspace.Refused as exc:
         raise SystemExit(f"start refused: {exc}") from None
     task_id = ledger.new_id()

@@ -433,6 +433,29 @@ A mobile item needs its toolchain readable from the sandbox the way `uv` is
 (a shared `bin/`), and Flutter's SDK and caches are large; where they live on
 the 16 GB machine is `docs/machine.md`'s concern.
 
+## Business items
+
+The items above are all code requests. A business case set is design and
+is not built yet: no business item has been written and no replay of one has
+run.
+
+- **Its items.** Replays of the marketing and pricing pull requests merged in
+  `yudame/cuttlefish`. Those PRs were business decisions, about how the
+  product is marketed and what it charges, made in code.
+- **Its labels.** Each item is labelled by what was merged, the same merge
+  decision that labels a code item.
+- **What a score means.** Every outcome is unknown: no record shows whether
+  any of those decisions was right for the business. A score therefore
+  measures agreement with Tom's merged decision, not whether the decision was
+  right. Each was considered with care, so agreement with it is a better
+  baseline than a random choice, and it is no more than that.
+- **The perspective measure.** A replay's decision record names which
+  perspective's objection changed the option chosen. That is how a
+  perspective is measured (Business item 5, `docs/business.md`): read from
+  the record, whether an objection it raised is named there as having changed
+  the option chosen. Nothing is counted from whether a perspective's text was
+  used, edited, or discarded.
+
 ## Cost
 
 Measured, gateway-metered for Valor's turns:

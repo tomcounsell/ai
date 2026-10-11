@@ -163,8 +163,9 @@ fields decide where a merge lands.
 The old `working_directory` (for example `~/src/popoto`) has no field in the
 new spec. The kernel clones from `repo` into `work_dir`
 (`~/valor-tasks`) for every task, so the local checkout is not read.
-`knowledge_base` (the `~/work-vault/<name>` folder), `linear.team`, and
-`context.tech_stack` have no field either (gap G9).
+`linear.team` and `context.tech_stack` have no field either (gap G9).
+`knowledge_base` (the `~/work-vault/<name>` folder) is the spec's
+`knowledge_base` field, which a working task's turns read and write (G9).
 
 ### 2.1 Draft specs for the three projects Tom's backlog names
 
@@ -401,10 +402,13 @@ project once an import task exists, starting with `valor` and `company` (about 2
 Do not block cutover on it. For upkeep, add nothing; add a routine when an
 incident names the need.
 
-**G9. Fields with no home.** `knowledge_base`, `linear.team`,
-`context.tech_stack`, `working_directory`, `transport`, `respond_to_*`, and
-`mention_triggers`. Recommendation: drop them. The spec carries what the
-kernel acts on; the descriptions live in this file's tables.
+**G9. Fields with no home.** `linear.team`, `context.tech_stack`,
+`working_directory`, `transport`, `respond_to_*`, and `mention_triggers`.
+Recommendation: drop them. The spec carries what the kernel acts on; the
+descriptions live in this file's tables. `knowledge_base` is closed (Tom,
+2026-10-11): the spec's `knowledge_base` field names the business's folder
+in `~/work-vault`, which every working task's turns read and write and no
+replay's reach.
 
 **G10. Third-party keys.** Linear, Sentry, Notion, Render, Stripe, and the
 rest are unreachable from a new-system turn. Recommendation: none at

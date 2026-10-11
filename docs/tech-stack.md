@@ -48,7 +48,7 @@ outside the model is AI Control [4].
 | Driver and schema | psycopg 3 async, hand-written SQL, one idempotent `core/schema.sql` | in use |
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
 | Redis | none | in use (absent by decision) |
-| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use |
+| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs chosen, not built; its host chosen at cutover |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
@@ -67,7 +67,7 @@ outside the model is AI Control [4].
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | in use: `ui/`, aiohttp, loopback only |
 | Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
-| Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
+| Machine | one install per Mac, four Macs, one per client; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
 
 ## 1. Language and tooling
 
@@ -211,6 +211,11 @@ it only through `core/memory.py`. Status: **in use**. Serves the Evidence item "
 both directions": the corrections and exemplar ledgers live in the kernel's events table, and
 episodic memory recalls Tom's earlier words into later Briefs of the same project. Retrieved
 content carries no source class and grants nothing [7].
+
+The store moves to one Postgres shared by the four Macs, every record carrying its client and
+project, and recall adds the records Valor has judged to be standards of working, from any
+client ([memory.md](memory.md)). Status: **chosen, not built** (Tom, 2026-10-11); where that
+Postgres runs is chosen at cutover ([machine.md](machine.md), The shared memory store).
 
 ## 4. The model gateway
 
@@ -539,8 +544,12 @@ Status: **in use**. An operational telemetry stack (latency, error rates) is
 ## 11. The 16 GB M4 Air
 
 Everything runs Mac native, one install per machine, with a MacBook Air M4 and 16 GB of RAM as the
-target (Tom's decision). Valor's four Macs each run their own install for the projects they own,
-with nothing shared between them. The demonstration and the baseline ran on a 64 GB Mac, so no
+target (Tom's decision). Valor has four Macs, one per client (Tom, 2026-10-11): every project of a
+client, or every internal Yudame project, runs on that client's Mac under the same accounts. Each Mac
+keeps its own kernel Postgres, ledger, and bridges. Exactly two things cross machines: the code that
+runs Valor, and the memory store on a shared Postgres (the Memory entry in section 3; where that
+Postgres runs is chosen at cutover, [machine.md](machine.md), The shared memory store). The
+demonstration and the baseline ran on a 64 GB Mac, so no
 memory figure from them carries over; the RAM plan per component is [machine.md](machine.md). What
 the target machine fixes in the stack:
 
@@ -550,7 +559,8 @@ the target machine fixes in the stack:
   That is a 64 GB practice and does not carry over.
 - **One container runtime.** Apple's, and only while a sandbox is running.
 - **One Postgres server for the kernel**, resident. Workspace clusters start
-  with their task and stop with it.
+  with their task and stop with it. The shared memory store is not on this
+  list until its host is chosen at cutover.
 - **No resident model.** Judgement is hosted (section 5). The open-weight
   fallback is hosted too (Parasail, through OpenRouter).
 - **The kernel and the bridges resident, everything else on demand.** They are the only
@@ -572,7 +582,9 @@ the target machine fixes in the stack:
   another vendor's Opus-class model is metered [16].
 - **One machine per install, no encryption at rest beyond the disk's.** Each
   kernel database is as safe as the Mac it runs on. A client's destruction
-  clause reopens this.
+  clause reopens this, and it covers the shared memory store too: that
+  client's memory records live outside its Mac, on the shared Postgres, so
+  destroying the client's Mac does not destroy them.
 - **The gateway is a single point of failure and a single point of control.**
   Those are the same property.
 
@@ -585,6 +597,8 @@ the target machine fixes in the stack:
 - **An in-house agent loop.** The harness is the `claude` CLI behind the
   `TurnCommand` port; a different loop is a second harness on a second need.
 - **Hosted Postgres, hosted sandboxes, cloud hosting.** Everything runs on
-  the Mac until the Mac is measured to be insufficient.
+  the Mac until the Mac is measured to be insufficient. The one possible
+  exception is the shared memory store, whose host is chosen at cutover
+  ([machine.md](machine.md), The shared memory store).
 - **A resident local model.** It does not fit in 16 GB beside the rest.
 - **Docker.** Apple's container runtime is the one Linux runtime.

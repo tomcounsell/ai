@@ -28,7 +28,7 @@ IDENTITY = (
     ("organization", "Organization"),
     ("timezone", "Timezone"),
     ("handles", "Handles"),
-    ("supervisor", "Supervisor"),
+    ("operator", "Operator"),
 )
 
 TEXTS = ("voice.md", "conduct.md")

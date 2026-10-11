@@ -214,8 +214,8 @@ def test_an_abbreviated_head_is_kept_as_the_commit_it_names(dsn, tmp_path):
 def test_a_head_that_names_no_commit_in_the_clone_keeps_nothing(dsn, tmp_path, head):
     _task, _b, _ws, _out, got = docs_run(dsn, tmp_path, docs_commits=[DOC], docs_head=head)
     d = decided(got)
-    assert d["verdict"] == "changes" and d["head"] == d["candidate"]["sha"]
-    assert any("no docs commit kept" in x["text"] for x in d["findings"])
+    assert d["verdict"] == "no_change" and d["head"] == d["candidate"]["sha"]
+    assert any(x["kind"] == "dropped" and "no docs commit kept" in x["text"] for x in d["findings"])
 
 
 @pytest.mark.parametrize(

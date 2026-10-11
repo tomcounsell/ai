@@ -175,12 +175,48 @@ def test_spec_refusals(tmp_path):
         ({"surprise": 1}, "unknown project spec keys"),
         ({"extensions": ["vector"]}, "need the postgres service"),
         ({"extensions": ["a;b"], "services": ["postgres"]}, "not allowed"),
+        ({"knowledge_base": "a/b"}, "not a folder name"),
+        ({"knowledge_base": ".."}, "not a folder name"),
+        ({"knowledge_base": 'a"b'}, "not a folder name"),
+        ({"knowledge_base": ""}, "not a folder name"),
     ]:
         with pytest.raises(kws.Refused, match=why):
             kws.Spec.from_dict({"name": "x", "repo": "r", "kind": "plain", "suite": "true", **bad})
     with pytest.raises(kws.Refused, match="no project spec"):
         kws.Spec.load(str(tmp_path / "missing.toml"))
     assert kws.Spec.load("valor").suite.startswith("uv run pytest")
+
+
+def test_a_projects_knowledge_base_reaches_its_turn_profile_environment_and_copy(tmp_path):
+    """The folder `~/work-vault/<knowledge_base>` is allowed back in the
+    working session's profile and named to it; a spec without one opens no
+    folder of the vault."""
+    kb = kws.HOME / "work-vault" / "Toy Business"
+    _task, made = provision(tmp_path, knowledge_base="Toy Business")
+    assert made.project["knowledge_base"] == str(kb)
+    assert made.harness["env"]["VALOR_KNOWLEDGE_BASE"] == str(kb)
+    allowed = Path(made.harness["sandbox_profile"]).read_text().split("(allow file-read* file-write*")[1]
+    assert f'(subpath "{kb}")' in allowed.split("\n)")[0]
+    _task, bare = provision(tmp_path)
+    assert bare.project["knowledge_base"] is None and "VALOR_KNOWLEDGE_BASE" not in bare.harness["env"]
+    assert "work-vault/" not in Path(bare.harness["sandbox_profile"]).read_text()
+
+
+def test_a_replay_start_opens_no_knowledge_base(dsn, tmp_path):
+    """A replay's turns never reach the knowledge base: it may hold the
+    reasoning behind the decisions the replay is scored against."""
+    spec_path = _spec_file(tmp_path, knowledge_base="Toy Business")
+    shown = {}
+    for arm, flags in (("working", []), ("replay", ["--replay"])):
+        started = _cli(tmp_path, "start", "go", "--project", str(spec_path), *flags)
+        assert started.returncode == 0, started.stderr
+        shown[arm] = json.loads(_cli(tmp_path, "workspace", "show", started.stdout.strip()).stdout)
+    kb = str(kws.HOME / "work-vault" / "Toy Business")
+    assert shown["working"]["project"]["knowledge_base"] == kb
+    assert shown["working"]["harness"]["env"]["VALOR_KNOWLEDGE_BASE"] == kb
+    assert shown["replay"]["project"]["knowledge_base"] is None
+    assert "VALOR_KNOWLEDGE_BASE" not in shown["replay"]["harness"]["env"]
+    assert "work-vault/" not in Path(shown["replay"]["harness"]["sandbox_profile"]).read_text()
 
 
 # -- the task's Postgres --------------------------------------------------------------------

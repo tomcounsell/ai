@@ -109,7 +109,9 @@ task's ceiling bounds everything beneath it [11].
 | `propose` | reversible: a file in the workspace, a branch, a draft, anything that can be withdrawn | the grant; Valor asks first when Tom would want to be asked |
 | `act` | irreversible or money: push to a shared remote, merge, send, pay, deploy | the task's ceiling; performed when requested, and reported to Tom |
 
-**Built.** The broker is the one path to the world. A **performer** is the
+**Built.** The broker is the one path for a typed action; model calls and
+a bridge's receive leave by other recorded paths, and a turn using a
+credential it found on the Mac is a gap (How an act leaves). A **performer** is the
 code that carries out one action type, and it declares that type's class;
 the requester never names a class. For each request the broker, under the
 task's lock:
@@ -163,7 +165,44 @@ The constraint it enforces: bounded authority, metered spending.
 
 ## How an act leaves
 
-**Built.** An `act` inside its task's ceiling leaves when it is requested.
+Valor acts in the world through its own accounts on the client's Mac, and
+the boundary is access: what those accounts permit is what Valor can do
+there, and an account Valor does not hold is one it cannot act through
+(docs/business.md, Business item 8). The record is what makes stop,
+recovery, and correction real (docs/business.md, constraint "The record is
+the safety mechanism"), so for each account this section says whether its
+actions pass the broker and how they reach the ledger. The per-account
+table, with the gaps, is [performers.md](performers.md).
+
+**Built.** Three kinds of path leave the Mac.
+
+- **Through the broker**, as typed actions with `effect.intent` and
+  `effect.outcome` rows (or `effect.held`, `release.requested`, and the
+  bridge's outcome for a send): `merge` through Valor's GitHub account,
+  `valorengels`, with `GITHUB_PUSH_TOKEN`; `telegram.send_message` through
+  Valor's Telegram user account; `email.send` through Valor's Gmail
+  mailbox over SMTP; and `local.send_message`, which uses no account.
+  `push_branch` also passes the broker, to the task's own bare origin on
+  the Mac, with no account.
+- **Through the gateway, not the broker**: model calls on the Anthropic
+  credential and the OpenAI key, and the judgement tier's calls on the
+  TypeSafe and OpenRouter keys. Each call is a `gateway.opened` and a
+  `gateway.charged` row; a judgement is also a `judgement.answered` or
+  `judgement.failed` row.
+- **Through a bridge's receive, not the broker**: the Telegram bridge reads
+  and marks read Valor's Telegram messages, and the email bridge reads the
+  mailbox over IMAP and sets `\Seen`. Each message taken is one
+  `message.received` row; marking it read writes no row of its own.
+
+**The gap.** A turn runs as the Mac's one macOS user, can read the login
+keychain through `security`, and reaches the public internet (Limits,
+below). Any account whose credential is in that keychain, or whose session
+is held on the Mac, can be used by a turn around the broker and the
+gateway, and such a use is recorded only in the turn's transcript, which is
+the agent's account. The machine's Claude login is the known case; every
+business account logged in on the Mac is another.
+
+An `act` inside its task's ceiling leaves when it is requested.
 What bounds it is the ceiling, stop, the governance grant, the merge
 predicate, and each performer's `refuse`; nothing waits for a tap. A merge
 that does not land is acted on by why (`verdicts.ensure_merge`): one that
@@ -588,7 +627,9 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
   on it could reach the provider with the machine's Claude login and
   bypass the meter. Tom accepted this on 2026-10-01 and chose no separate
   macOS user for turns: the gateway gives visibility and honest metering,
-  not a hard wall. Effects on shared targets still leave only through the
-  broker, which runs outside the sandbox.
+  not a hard wall. Effects made with the credentials the kernel holds
+  leave only through the broker, which runs outside the sandbox; an
+  account a turn reaches through the keychain or a session on the Mac is
+  the gap named in How an act leaves.
 - **One provider by default.** The reviewer is the builder's model in a
   blind fresh session; `reviewer_openai` runs it on a second vendor.

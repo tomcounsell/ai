@@ -26,6 +26,10 @@ workspaces for (`python -m core start ... --project NAME`).
   (`telegram:<chat id>`, `email:<sender address>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so
   each chat has one owner.
+- `knowledge_base` names the business's folder in `~/work-vault`, where its
+  description lives. A working task's turns read and write that folder
+  (`VALOR_KNOWLEDGE_BASE` names it to them); a replay's never do, since it
+  may hold the reasoning behind the decisions a replay is scored against.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 
