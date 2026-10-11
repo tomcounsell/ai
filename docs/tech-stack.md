@@ -186,7 +186,7 @@ kernel cluster's authentication method and role separation are
 restore into a scratch cluster checked against the manifest
 (`core/backup.py`; [machine.md](machine.md), Backups). Status: **in use**,
 rehearsed once from the command line. The nightly launchd job is in the
-code (`python -m core backup --plist`) and runs once Tom loads it
+code (`python -m core backup --plist`) and runs once it is loaded on the Mac
 ([machine.md](machine.md), Backups). Serves "Reliable stop, recovery, and
 correction": a ledger nobody can edit is still lost with the disk.
 

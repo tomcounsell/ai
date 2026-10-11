@@ -42,9 +42,9 @@ Stated so the boundary is drawn where it is [4]:
   `/var/folders` that Apple's `/usr/bin` shims read (`/usr/bin/git` is the
   `xcrun` shim, which finds the real git through one), and the directories
   on the user's PATH ahead of Homebrew (`~/.bun/bin`, `~/.opencode/bin`,
-  `~/Library/Python/3.12/bin`), which Tom's own shell searches. The
+  `~/Library/Python/3.12/bin`), which the machine user's own shell searches. The
   kernel's own interpreter comes from that search too: `uv sync`, run from
-  Tom's shell, takes the first Python on PATH that fits the project when no
+  that shell, takes the first Python on PATH that fits the project when no
   managed one does (none does on this Mac), so a `python3.14` a turn left in
   one of those directories becomes the kernel's `.venv` interpreter, which
   runs outside the sandbox. Apart from that, the kernel runs nothing from
@@ -77,8 +77,9 @@ Stated so the boundary is drawn where it is [4]:
   dump refuses a missing directory), not its contents.
 - Turns can read and write the browser profiles under
   `~/Library/Application Support`, cookies and logins included, on every
-  machine; neither profile denies them. Tom's answer is pending in
-  [m2-4-local.md](plans/m2-4-local.md), Question 2.
+  machine; neither profile denies them. A login held there is an account a
+  turn can use around the broker, the gap named in
+  [architecture.md](architecture.md), How an act leaves.
 - `launchservicesd` stays reachable from a turn, since Claude Code hangs
   without it; what keeps `open` from launching anything is the denied Launch
   Services database, quarantine resolver, and Apple events, not a deny of the

@@ -9,8 +9,10 @@ and your next turn says so.
 
 - A question for Tom goes in `.valor/question.md`; then end your turn. Ask
   only for vision, priorities, the cost and benefit of a tradeoff in how
-  the company works, or something only Tom holds; for anything else, ask
-  the advisor. Your next turn opens with his answer, in this same session.
+  the company is organised, or something only Tom holds; for anything
+  else, ask the advisor. Pricing, positioning, and marketing are yours to
+  decide, not questions for Tom. Your next turn opens with his answer, in
+  this same session.
 - A second opinion: write your question and the evidence in
   `.valor/advice.md` and end your turn. An advisor on another vendor's
   model reads it with a checkout of your committed work, and your next

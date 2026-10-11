@@ -88,7 +88,7 @@ persistence, safe mode and `--setting-sources ""` as below, a system prompt of t
 The live tests use it. It copies the kernel's environment minus Claude Code's
 own variables and every libpq (`PG*`) and `VALOR_PG*` variable, and carries
 the placeholder credential a workspace turn does, so it never reads the
-machine user's own Claude Code login: the gateway supplies the kernel's. It runs under no sandbox profile, so it can read whatever Tom's user can, the
+machine user's own Claude Code login: the gateway supplies the kernel's. It runs under no sandbox profile, so it can read whatever the machine's user can, the
 kernel's password file included; it must not be given tools without one.
 
 Both builders default to the light seat's pinned model id
@@ -426,11 +426,11 @@ protocol holds even if the model tries to get around it [4].
 A workspace turn runs under a sandbox-exec profile written for its workspace
 by `core/workspace.py` (every task the kernel provisions, replays
 included). The profile starts from `(allow default)` and denies what a turn
-must not reach. It runs as Tom's user.
+must not reach. It runs as the Mac's one macOS user.
 
 ### Files
 
-- **Denied, read and write:** `~/src` (Tom's checkouts, which hold the
+- **Denied, read and write:** `~/src` (the checkouts on the Mac, which hold the
   answers), `~/work-vault`, Desktop, Documents, Downloads, Dropbox, iCloud and
   cloud storage, Mail, Messages, `~/.ssh`, `~/.config/gh`, Claude Code's
   `~/.claude/projects` and `history.jsonl`, and the whole work directory

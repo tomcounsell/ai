@@ -107,8 +107,10 @@ Metering has one gap. A turn that deliberately called the provider directly
 with the machine's Claude login would spend outside it, visible only on the
 provider's invoice. Tom accepted that risk on 2026-10-01 and chose not to
 close it, with no separate macOS user for turns: the gateway is for
-visibility and honest metering. Bounded authority is unchanged by this. Effects on shared targets leave only through the broker,
-inside each task's ceiling, and every `act` that leaves is reported to Tom.
+visibility and honest metering. Bounded authority is unchanged by this. Effects made with the credentials the kernel holds leave only through the broker,
+inside each task's ceiling, and every `act` that leaves is reported to Tom; an
+account a turn reaches through the keychain or a session on the Mac is a gap
+(`docs/architecture.md`, How an act leaves).
 
 ### What the governance constraint means in practice
 

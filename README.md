@@ -3,7 +3,7 @@
 > **corrigible** | ˈkôrəjəb(ə)l | *adjective*
 > capable of being corrected, rectified, or reformed.
 
-Valor is one AI employee with one identity, running on one Mac, corrigible by construction. Tom gives it work in conversation; it carries that work to a finished result and brings back only the decisions that need him. Every message and pull request it sends leaves as Valor. Authority lives in a deterministic kernel outside the model's reach: every task is bounded in money and in effect, recorded in a ledger the system cannot edit, and stoppable at any instant with nothing lost. Autonomy grows only by Tom's decision and shrinks on its own when the evidence says it should. That is what aligned means here: a system that wants to understand the person it serves, built so that wanting is enough only when it is also right.
+Valor is one AI employee with one identity, running on its own Macs, one per client, corrigible by construction. Tom gives it work in conversation; it carries that work to a finished result and brings back only the decisions that need him. Every message and pull request it sends leaves as Valor. Authority lives in a deterministic kernel outside the model's reach: every task is bounded in money and in effect, recorded in a ledger the system cannot edit, and stoppable at any instant with nothing lost. Autonomy grows only by Tom's decision and shrinks on its own when the evidence says it should. That is what aligned means here: a system that wants to understand the person it serves, built so that wanting is enough only when it is also right.
 
 ## Mission
 

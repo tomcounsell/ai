@@ -170,7 +170,7 @@ that encodes behavior it replaces), each listed in the plan's scope with
 the debt it pays. Review may do the same with a finding of kind `debt`,
 which goes to `patch` inside the review rounds. The bound is the task's
 Brief: added scope is metered on the same task and never raises the effect
-ceiling, and unrelated debt is a new task for Tom. Mission items 1 and 5.
+ceiling, and unrelated debt is a new task, not this one's scope. Mission items 1 and 5.
 
 ## The control loop
 

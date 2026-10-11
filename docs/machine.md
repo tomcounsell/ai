@@ -274,7 +274,7 @@ Air sleeps is suspended with it, and its stream to the API may not survive
 the gap. Holding a power assertion (`caffeinate -i`) for the life of a
 turn is the design, so a turn finishes or is stopped by the kernel, never
 by the lid (Mission item 1). Whether the Air stays on mains power with
-sleep disabled is Tom's call.
+sleep disabled is Valor's operational call for each Mac, not yet made.
 
 ## Keychain
 
@@ -310,9 +310,9 @@ What a merge can reach beyond its Brief is bounded by the token alone.
 `GITHUB_PUSH_TOKEN` belongs to Valor's own GitHub account, `valorengels`,
 and that account is a collaborator only on the repositories Valor builds,
 so the token writes nothing else; a repository Valor must not write is one
-the account is not a collaborator on. Choosing that list, or replacing the
-token with a fine-grained one limited to those repositories, is Tom's,
-since he holds the account.
+the account is not a collaborator on. Adding the account as a collaborator
+is each repository owner's grant; replacing the token with a fine-grained
+one limited to those repositories is Valor's, since the account is its own.
 
 **Reading what a turn wrote.** A file or directory under a turn's own
 state is the turn's to change, so the kernel opens it component by
@@ -481,11 +481,6 @@ The grant follows the interpreter's binary, so an upgrade of
 directory. `brew pin python@3.14` keeps the nightly brew job from
 upgrading it; after a deliberate upgrade, grant and kick again.
 `launchctl bootout gui/$(id -u)/com.valor.backup` removes the job.
-
-## Open questions for Tom
-
-1. **Mains power and sleep.** Whether the machine is kept awake, or a power
-   assertion per turn is enough.
 
 ## Gaps
 

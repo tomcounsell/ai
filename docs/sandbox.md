@@ -8,7 +8,7 @@ workspace turn runs under (`workspace_turn` refuses a task without one);
 and this section states what they guarantee. The first demonstration and
 the baseline ran every turn under one (rebuild-demonstration.md, Setup,
 Isolation). The profile confines reads and writes to the workspace and
-what the toolchain needs, away from Tom's other checkouts, notes,
+what the toolchain needs, away from the Mac's other checkouts, notes,
 transcripts, and keys (a working task's turns, never a replay's, also read
 and write its business's knowledge base folder in `~/work-vault`); denies writes to the bare `origin`, so a push leaves
 only through the broker's `push_branch` or `merge`; on loopback reaches

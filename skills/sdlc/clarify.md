@@ -2,7 +2,7 @@
 
 **Goal.** Every question only Tom can answer (the request's intent where
 it is not on the page, vision, priorities, the cost and benefit of a
-tradeoff in how the company works, or something only he holds) reaches him
+tradeoff in how the company is organised, or something only he holds) reaches him
 in one message; nothing the code can settle is asked. For a second opinion
 on anything else, ask the advisor (`.valor/advice.md`, in the channel
 above), then decide.
