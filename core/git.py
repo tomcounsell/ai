@@ -425,6 +425,20 @@ def hostile(
     return found
 
 
+def commit_named(workspace: str | Path, name: str, profile: str | Path, mark: str) -> str | None:
+    """The full id of the one commit `name` (a commit id or an abbreviation
+    of one, hex only) names in a workspace a turn owns, or None. The read
+    runs under the sandbox `profile`, marked `mark`; the caller has read the
+    workspace's config first (`hostile`)."""
+    if not re.fullmatch(r"[0-9a-f]{4,40}", name):
+        return None
+    prefix = [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
+              "-f", str(profile)]  # fmt: skip
+    got = _git(workspace, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", prefix=prefix)
+    found = got.stdout.strip()
+    return found if got.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", found) else None
+
+
 def run(
     workspace: str | Path,
     *args: str,

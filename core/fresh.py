@@ -45,6 +45,7 @@ run starts the stage again.
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -511,8 +512,8 @@ def _docs_fields(data: dict[str, Any]) -> tuple[str, list, str | None]:
     for x in findings:
         if isinstance(x, dict) and not isinstance(x.get("text"), str):
             raise Malformed("a finding has no text")
-    if head is not None and not (isinstance(head, str) and verdicts.re_sha(head)):
-        raise Malformed("the head is not a full commit id")
+    if head is not None and not (isinstance(head, str) and re.fullmatch(r"[0-9a-f]{4,40}", head)):
+        raise Malformed("the head is not a commit id")
     return verdict, findings, head
 
 
@@ -706,7 +707,7 @@ async def _docs_turn(
         raw = f"refs/valor/docs-raw/{turn_id}"
         try:
             # In `git.threaded`, so a stop kills the fetch.
-            await git.threaded(
+            head = await git.threaded(
                 workspace.fetch_into_mirror, b.mirror, checkout, head, raw, harness["sandbox_profile"],
                 f"docs-fetch-{ctx.task_id}",
             )  # fmt: skip

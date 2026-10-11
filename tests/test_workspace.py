@@ -1182,11 +1182,26 @@ def test_the_index_dirty_reads_is_made_in_the_output_directory(tmp_path, monkeyp
         assert not index.parent.exists()
 
 
-def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
+@pytest.mark.macos
+def test_a_fetch_names_one_commit_by_its_id_or_an_abbreviation_and_one_mirror_ref(tmp_path):
     _, made = provision(tmp_path)
     sha = candidate(made)
-    with pytest.raises(kws.FetchRefused, match="not a full commit"):
-        fetch(made, sha[:12])
+    assert (
+        kws.fetch_into_mirror(
+            made.mirror,
+            made.workspace,
+            sha[:12],
+            "refs/valor/candidates/t",
+            made.harness["sandbox_profile"],
+            "fetch-t",
+        )
+        == sha
+    )
+    assert git(made.mirror, "rev-parse", "refs/valor/candidates/t") == sha
+    with pytest.raises(kws.FetchRefused, match="names no single commit"):
+        fetch(made, "0000000", ref="refs/valor/candidates/u")
+    with pytest.raises(kws.FetchRefused, match="not a commit id"):
+        fetch(made, "HEAD")
     with pytest.raises(kws.FetchRefused, match="not a mirror ref"):
         fetch(made, sha, ref="refs/heads/main")
 

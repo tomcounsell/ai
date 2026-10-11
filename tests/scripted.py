@@ -408,6 +408,8 @@ elif act == "docs":
         out["head"] = head
     if "docs_head" in cfg:
         out["head"] = cfg["docs_head"]
+    if "docs_head_chars" in cfg:
+        out["head"] = head[: cfg["docs_head_chars"]]
     result = json.dumps(out)
 elif act == "nul":
     result = json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "a\x00b"}]})

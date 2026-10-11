@@ -197,17 +197,36 @@ def test_a_head_the_kernel_cannot_take_keeps_nothing(dsn, tmp_path, how):
     assert not marker.exists()
 
 
+@pytest.mark.macos
+def test_an_abbreviated_head_is_kept_as_the_commit_it_names(dsn, tmp_path):
+    _task, b, _ws, _out, got = docs_run(dsn, tmp_path, docs_commits=[DOC], docs_head_chars=12)
+    d = decided(got)
+    kept = next(r["payload"] for r in got if r["type"] == fresh.DOCS_KEPT)
+    assert d["verdict"] == "updated" and kept["refused"] is None
+    assert len(d["head"]) == 40 and kept["kept"] == d["head"]
+    assert git.trusted(b.mirror, "rev-parse", f"{d['head']}^") == d["candidate"]["sha"]
+
+
+@pytest.mark.parametrize("head", ["0000000", "0" * 40], ids=["short", "full"])
+@pytest.mark.macos
+def test_a_head_that_names_no_commit_in_the_clone_keeps_nothing(dsn, tmp_path, head):
+    _task, _b, _ws, _out, got = docs_run(dsn, tmp_path, docs_commits=[DOC], docs_head=head)
+    d = decided(got)
+    assert d["verdict"] == "changes" and d["head"] == d["candidate"]["sha"]
+    assert any("no docs commit kept" in x["text"] for x in d["findings"])
+
+
 @pytest.mark.parametrize(
     ("bad", "why"),
     [
-        ("short_head", "head"),
+        ("not_hex", "head"),
         # A valid verdict left as a file is not the verdict: the final message is.
         ("file_only", "the final message is not a JSON object"),
     ],
 )
 @pytest.mark.macos
 def test_a_malformed_verdict_records_nothing_and_the_next_run_reruns_docs_only(dsn, tmp_path, bad, why):
-    cfg = {"short_head": {"docs_head": "abc123"}, "file_only": {"fresh_acts": ["sound", "file_only"]}}[bad]
+    cfg = {"not_hex": {"docs_head": "HEAD~1"}, "file_only": {"fresh_acts": ["sound", "file_only"]}}[bad]
 
     async def go():
         task, _b, ws = await at_checks(dsn, tmp_path, **cfg)

@@ -424,11 +424,11 @@ since this Mac's file system ignores case (`machine.is_doc_path`). No plan
 widens this, so no code rides in an unreviewed docs commit.
 
 **Exit evidence.** The session writes a verdict, its findings, and its
-head. The kernel fetches that head from the session's clone into the mirror
-under the check profile and keeps the longest prefix of commits on the
-candidate that touch doc paths alone, with regular file modes (`100644`,
-`100755`, read from `git diff-tree -r`); a merge, a commit off the
-candidate, or a tree holding `.valor` keeps nothing. It records
+head: a commit id, or an abbreviation its clone resolves to one commit. The
+kernel fetches it into the mirror under the check profile and keeps the
+longest prefix of commits on the candidate touching doc paths alone, with
+regular file modes (`100644`, `100755`, from `git diff-tree -r`); a merge,
+a commit off the candidate, or a tree holding `.valor` keeps nothing. It records
 `docs.kept`, so a rerun asks only governance again, then judges governance
 over the kept diff (a doc can add a rule) and records `docs.decided`: the
 candidate, the kept head, the dropped commits and their paths, the

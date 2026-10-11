@@ -1402,12 +1402,14 @@ def fetch_into_mirror(
     *,
     max_bytes: int | None = None,
     max_footprint: int | None = None,
-) -> None:
+) -> str:
     """Fetch one commit from a clone a turn controls into the kernel mirror,
-    under `ref`. Raises `FetchRefused` with the reason."""
+    under `ref`, and return its full id. `sha` is the commit's id or an
+    abbreviation of it, resolved in the clone under the turn's profile after
+    its config is read. Raises `FetchRefused` with the reason."""
     source, mirror = Path(source), Path(mirror)
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
-        raise FetchRefused(f"{sha!r} is not a full commit id")
+    if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+        raise FetchRefused(f"{sha!r} is not a commit id")
     if not ref.startswith("refs/valor/"):
         raise FetchRefused(f"{ref} is not a mirror ref")
     _no_borrowed_objects(source)
@@ -1417,6 +1419,14 @@ def fetch_into_mirror(
         raise FetchRefused(str(exc)) from None
     if found:
         raise FetchRefused("the clone's git config names what the kernel will not run: " + "; ".join(found))
+    if len(sha) < 40:
+        try:
+            full = git.commit_named(source, sha, turn_profile_path, mark)
+        finally:
+            runs.reap(mark)
+        if full is None:
+            raise FetchRefused(f"{sha!r} names no single commit in the clone")
+        sha = full
     git_bin = git.binary()
     upload = " ".join(
         shlex.quote(a)
@@ -1449,6 +1459,7 @@ def fetch_into_mirror(
         if code == "footprint":
             raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
+    return sha
 
 
 def bring_merged(
