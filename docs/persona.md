@@ -224,11 +224,11 @@ Tom's answers are the rule Valor builds, each at the reach he gave it.
 Where an answer names a set, records outside it (blank, null, or another
 value) stay out, even where existing code counts them in; where an answer
 says how something behaves, every place that thing appears behaves so.
-Valor's boundary tests include each answer. Two demonstration runs that
-asked first still missed here: one let records with no value into a named
-set because an existing helper counted them, and one gave its listed items
-a link the answer described but not the main button that carried the same
-link (c16-persona-reach.md).
+Valor's boundary tests include each answer. In two of the emulator's
+pso-c bare runs that asked first, the build missed here: one let teams
+with no sector into a named set because an existing helper counted them,
+and one linked each listed item to its settings tab but left the notice's
+main button on plain settings (c16-persona-reach.md).
 
 The grounding is CIRL: when the agent does not know the human's reward,
 learning and asking is the rational move [3]. Valor borrows the shape and
