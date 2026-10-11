@@ -420,7 +420,23 @@ Recorded, not asked; each is reversible.
 
 ## Emulator runs
 
-None yet; they run once 1.5 is merged.
+One row per run, with the setup, re-verifies and findings, is in
+[m4-2-emulator-runs.md](m4-2-emulator-runs.md).
+
+- **No item is worse** after the persona, judged on the one allowed
+  rerun where the first after run was worse (pop-a bare: more rounds;
+  pso-c clarify: hidden 4/5 against 5/5). Those two first runs are 4.2
+  patch findings.
+- **#894.** pso-c bare after, on this task's persona, misses the bar:
+  2 feedback rounds and no question. C15 patches the persona text
+  (`61f4517e...`, 11,141 bytes). With it, after-p1 asks the wider-rule
+  question in its first turn, takes 0 rounds and passes hidden 5/5,
+  but the judge names Tom's item 3 (sector-less teams count as
+  Sports). Its one rerun, after-p2, takes 1 round and passes hidden 5/5,
+  but the judge names item 6 (the main button does not deep-link to
+  the first missing tab). Both miss the bar as written, so the task
+  goes back to patch: C16, persona text. before-p1 takes 2 rounds,
+  hidden 3/5.
 
 ## Critique round 1 (of 1): revise
 
