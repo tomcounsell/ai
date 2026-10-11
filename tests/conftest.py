@@ -39,6 +39,65 @@ from pathlib import Path
 
 import pytest
 
+# The machine's own settings (its operator channel and chat, its machine
+# name, its mailbox, its projects and inbound directory, its UI and local
+# page ports) never reach the tests: a test sets the ones it needs. Left in
+# the shell, `VALOR_OPERATOR_CHANNEL=local` refuses every Telegram send a
+# test's child makes.
+MACHINE_ONLY = (
+    "VALOR_OPERATOR_CHANNEL", "VALOR_OPERATOR_CHAT", "VALOR_OPERATOR_TELEGRAM_ID", "VALOR_OPERATOR_EMAIL",
+    "VALOR_MACHINE", "VALOR_DEFAULT_MACHINE", "VALOR_EMAIL_ADDRESS", "VALOR_EMAIL_SINCE",
+    "VALOR_IMAP_HOST", "VALOR_IMAP_PORT", "VALOR_SMTP_HOST", "VALOR_SMTP_PORT", "VALOR_MAIL_CAFILE",
+    "VALOR_INBOUND", "VALOR_PROJECTS", "VALOR_SERVE_TICK_S", "VALOR_UI_PORT", "VALOR_LOCAL_PORT",
+    "VALOR_DB",
+)  # fmt: skip
+for _name in MACHINE_ONLY:
+    os.environ.pop(_name, None)
+
+# Under pytest-xdist each worker is a session of its own: the test database
+# is `<VALOR_TEST_DB>_<worker>` (every name derived from it follows: the
+# image label and repository, the `_expiry`, `_serve`, `_rollout`, `_twice`,
+# `_prio` databases, the advisory locks in them), and the worker listens in
+# an equal slice of the run's `VALOR_TEST_PORTS`. With no span given, each
+# worker (or a run with none) takes 20 ports from 6600 up. The controller
+# of a parallel run restores what it was given (`pytest_configure`), so a
+# worker slices the run's span, not the controller's default.
+DEFAULT_PORTS, PORTS_PER_WORKER = 6600, 20
+_GIVEN = {k: os.environ.get(k) for k in ("VALOR_TEST_PORTS", "VALOR_PG_PORTS", "VALOR_REDIS_PORTS")}
+WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+
+
+def worker_ports(given: str | None, index: int, count: int) -> str:
+    """The `LOW-HIGH` span worker `index` of `count` listens in: its equal
+    slice of `given`, or 20 ports of its own from 6600 up."""
+    if not given:
+        low = DEFAULT_PORTS + index * PORTS_PER_WORKER
+        return f"{low}-{low + PORTS_PER_WORKER - 1}"
+    low, high = (int(p) for p in given.split("-"))
+    size = (high - low + 1) // count
+    if size < 1:
+        raise RuntimeError(f"VALOR_TEST_PORTS {given} cannot be cut into {count} slices")
+    return f"{low + index * size}-{low + (index + 1) * size - 1}"
+
+
+if WORKER:
+    os.environ["VALOR_TEST_DB"] = f"{os.environ.get('VALOR_TEST_DB', 'valor_rebuild_test')}_{WORKER}"
+    _span = worker_ports(
+        _GIVEN["VALOR_TEST_PORTS"],
+        int(WORKER.removeprefix("gw")),
+        int(os.environ["PYTEST_XDIST_WORKER_COUNT"]),
+    )
+    # The task Postgres and Redis ports the kernel chooses are the worker's
+    # slice too, not the controller's whole span.
+    for _name in ("VALOR_TEST_PORTS", "VALOR_PG_PORTS", "VALOR_REDIS_PORTS"):
+        os.environ[_name] = _span
+else:
+    os.environ.setdefault("VALOR_TEST_PORTS", worker_ports(None, 0, 1))
+    # The task Postgres and Redis ports the kernel chooses, in the tests' own
+    # span, so a kernel the tests start listens where the tests' servers do.
+    os.environ.setdefault("VALOR_PG_PORTS", os.environ["VALOR_TEST_PORTS"])
+    os.environ.setdefault("VALOR_REDIS_PORTS", os.environ["VALOR_TEST_PORTS"])
+
 os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
@@ -46,11 +105,6 @@ atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
 # The ports reserved for the task services a test provisions (`tests/ports.py`).
 _fd, os.environ["VALOR_TEST_RESERVED_PORTS"] = tempfile.mkstemp(prefix="valor-test-reserved-ports-")
 os.close(_fd)
-# The task Postgres and Redis ports the kernel chooses, in the tests' own span when it
-# is set, so a kernel the tests start listens where the tests' servers do.
-if os.environ.get("VALOR_TEST_PORTS"):
-    os.environ.setdefault("VALOR_PG_PORTS", os.environ["VALOR_TEST_PORTS"])
-    os.environ.setdefault("VALOR_REDIS_PORTS", os.environ["VALOR_TEST_PORTS"])
 # Scratch clusters start from `settings.pg_bin`, the Homebrew PostgreSQL 18 by
 # default; where it is absent (the verification VM), Debian's PostgreSQL 18.
 if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
@@ -67,10 +121,25 @@ atexit.register(ports.release)
 MACOS_ONLY = "macOS only"
 
 
+def pytest_configure(config):
+    """The controller of a parallel run starts no test: it hands its
+    workers the ports it was given, which each worker slices."""
+    if not WORKER and getattr(config.option, "numprocesses", None):
+        for name, value in _GIVEN.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def pytest_collection_modifyitems(config, items):
     darwin = sys.platform == "darwin"
     runtime = container.present()
     for item in items:
+        if item.get_closest_marker("container"):
+            # One worker runs every `container` test: they share the machine
+            # lock, and one worker builds one base image.
+            item.add_marker(pytest.mark.xdist_group("container"))
         if not darwin and item.get_closest_marker("macos"):
             item.add_marker(pytest.mark.skip(reason=f"{MACOS_ONLY}: needs macOS itself"))
         if not runtime and item.get_closest_marker("container"):

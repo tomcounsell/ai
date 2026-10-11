@@ -400,14 +400,15 @@ def test_a_hostile_row_renders_with_nothing_live(dsn, op):
                 if text.startswith("<"):
                     assert (await tab.js(f"{row}.textContent")).startswith(text)
             # The Markdown link, clicked, runs nothing; a deferred handler
-            # would have fired by the second look.
+            # would have fired by the second look, taken once the page has
+            # rendered a row it fetched after the click.
             link = f"{rows[2]}.querySelector('a')"
             assert await tab.js(f"{link}.textContent") == "click me"
             await tab.js(
                 f"{link}.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true}}))"
             )
             assert await tab.js("window.pwned === undefined")
-            await asyncio.sleep(1)
+            await notice_rows(dsn, tab, base, token, http, ["rendered after the click"])
             assert await tab.js("window.pwned === undefined")
 
     run(go())
