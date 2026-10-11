@@ -21,17 +21,20 @@ denies it). A `container` test shares the machine lock and the runtime with
 every kernel on the machine, as the runtime is one per machine; every other
 test takes the machine lock in a directory of the session's own, never the
 machine's, which the check profile denies too, and the runtime reads as
-absent to it. Every test keeps its image
-records in the session's own directory and names its images under
-`valor-test-<label>`, the label being `container.owner` of the session's
-test database, so it never deletes, retags, or records an image a kernel
-built. At session end the session's images are deleted under the machine
-lock.
+absent to it. Every test names its images under `valor-test` and labels
+them with `container.owner` of the session's test database, so it never
+deletes, retags, or records an image a kernel built. A `container` test
+records its images in a file the test sessions share (`KEPT`), every other
+test in the session's own directory. At session end, under the machine
+lock, the base and dependency images the session recorded are kept for the
+next session and every other image it recorded is deleted
+(`release_images`).
 """
 
 import asyncio
 import atexit
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -83,8 +86,14 @@ LABEL = container.owner(f"dbname={TEST_DB}")
 
 _STATE = Path(tempfile.mkdtemp(prefix="valor-test-container-"))
 atexit.register(shutil.rmtree, _STATE, True)
+# A `container` test's image records outlive the session, so the next one
+# finds the base and dependency images the last one built (`release_images`).
+KEPT = Path.home() / "Library" / "Caches" / "valor-test"
 container.IMAGES = _STATE / "images.json"
-container.REPO = f"valor-test-{LABEL}"
+if sys.platform == "darwin" and container.present():
+    KEPT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    container.IMAGES = KEPT / "images.json"
+container.REPO = "valor-test"
 
 
 @pytest.fixture(autouse=True)
@@ -96,24 +105,54 @@ def session_machine_lock(request, monkeypatch):
     kernel's verification."""
     if request.node.get_closest_marker("container") is None:
         monkeypatch.setattr(container, "LOCK", _STATE / "container.lock")
+        monkeypatch.setattr(container, "IMAGES", _STATE / "images.json")
         monkeypatch.setattr(container, "BUILDER_OWNER", _STATE / "builder.owner")
         monkeypatch.setattr(container, "present", lambda: False)
 
 
+# What a session keeps at its end: the base image and the dependency images,
+# each tagged by its content (`container.base_tag`, `container.deps_key`).
+_KEPT_TAG = re.compile(r"^valor-test/[a-z0-9._-]+:[0-9a-f]{64}$")
+
+
+def kept_label() -> str:
+    """The record label of a kept image: the base image's hash it was built
+    on, so a change to `core/images/base/` makes every kept image stale."""
+    return "kept:" + container.base_tag().rsplit(":", 1)[1][:12]
+
+
 def release_images(label: str) -> None:
-    """Every image recorded under `label` deleted and its record dropped,
-    under the machine lock with the system started, then stopped, as
-    `container.verify` holds the runtime."""
-    tags = [tag for tag, rec in container._images().items() if rec.get("db") == label]
-    if not tags:
+    """At session end, under the machine lock: the base and dependency
+    images recorded under `label` are kept for the next session, their
+    records relabelled `kept_label()`; every other image recorded under
+    `label`, and every kept image of a stale base, is deleted with the
+    system started, then stopped, as `container.verify` holds the runtime,
+    and its record dropped."""
+    current = kept_label()
+
+    def mine(images):
+        tags = [tag for tag, rec in images.items() if rec.get("db") == label]
+        stale = [
+            t for t, rec in images.items() if rec.get("db", "").startswith("kept:") and rec["db"] != current
+        ]
+        return [t for t in tags if _KEPT_TAG.match(t)], [t for t in tags if not _KEPT_TAG.match(t)] + stale
+
+    keep, gone = mine(container._images())
+    if not keep and not gone:
         return
 
     async def go():
         stop = asyncio.ensure_future(asyncio.Event().wait())
         async with container.machine_lock(stop):
+            images = container._images()
+            keep, gone = mine(images)
+            for tag in keep:
+                container._record(tag, images[tag]["digest"], current)
+            if not gone:
+                return
             try:
                 await container.start(stop)
-                for tag in tags:
+                for tag in gone:
                     await container.short(stop, "image", "delete", tag)
                     container._record(tag, None, "")
             finally:

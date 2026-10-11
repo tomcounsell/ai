@@ -73,11 +73,14 @@ which is one per machine because the runtime is.
 **Tests that use the runtime.** A `container`-marked test shares the machine
 lock and the runtime with every kernel on the machine and does its runtime work
 only while it holds the lock, stopping the system before it releases it. It
-keeps its image records in a directory of the test session's own and names its
-images under `valor-test-<label>`, the label being `container.owner` of the
-test database, so it never deletes, retags, or records an image a kernel built.
-At session end the session takes the machine lock, deletes every image recorded
-under its label, and drops the records. Every other test takes the machine lock
+names its images under `valor-test`, labels them with `container.owner` of the
+test database, and keeps its image records in
+`~/Library/Caches/valor-test/images.json`, shared by the test sessions, so it
+never deletes, retags, or records an image a kernel built. At session end the
+session takes the machine lock, keeps the base image and the dependency images
+recorded under its label for the next session (each is tagged by its content),
+deletes every other image recorded under its label, and drops those records. A
+kept image built on another base image is deleted then too. Every other test takes the machine lock
 in a directory of the session's own, and the runtime reads as absent to it, as it
 does under the check profile: its lock does not hold the machine's runtime, so
 the sweep at the start of every run it makes never stops that runtime under a

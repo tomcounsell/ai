@@ -134,6 +134,22 @@ def held():
             os.close(fd)
 
 
+def unkept(b, candidate: str) -> None:
+    """The dependency images of the base and the candidate deleted when an
+    earlier session kept them (`conftest.release_images`), so the
+    verification builds both."""
+    project = b.project or {}
+    keys = container.keys(b, candidate)
+    tags = [container.deps_tag(project, keys[k]) for k in ("base", "head")]
+    if not set(tags) & set(container._images()):
+        return
+    with held():
+        unstopped(container.start)
+        for tag in tags:
+            container.call("image", "delete", tag)
+            container._record(tag, None, "")
+
+
 async def base_image() -> str:
     """The base image's tag, built when missing, the system started; the
     caller holds the machine lock."""
@@ -449,11 +465,11 @@ def test_a_runtime_that_is_down_is_told_apart_from_a_missing_image(tmp_path, mon
 @pytest.mark.container
 def test_a_container_test_keeps_its_own_records_and_image_names():
     """A container test shares the machine lock with every kernel, and
-    keeps its image records and image names to its session."""
+    keeps its image records and image names to the test sessions."""
     machine = Path.home() / container.STATE_DIR
     assert container.LOCK == machine / "container.lock"
     assert container.IMAGES.parent != machine
-    assert container.REPO == f"valor-test-{conftest.LABEL}" != "valor"
+    assert container.REPO == "valor-test" and container.REPO != "valor"
     assert container.base_tag().startswith(f"{container.REPO}/base:")
 
 
@@ -779,6 +795,7 @@ def test_the_base_runs_in_its_own_manifests_image_and_images_are_kept_while_name
         task, b, rows, candidate = await at_candidate(
             dsn, tmp_path, files=files, writes={"package.json": PLANTING}, setup=["npm install"]
         )
+        await asyncio.to_thread(unkept, b, candidate)  # the builds are this test's own
         return task, b, await verified(dsn, task, b, rows, candidate)
 
     _task, b, got = run(go())
