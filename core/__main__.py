@@ -39,6 +39,7 @@ routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
                                when Tom stopped it; --restart begins a fresh one
 routine NAME --plist           print the launchd job for it
 routines                       every routine, its last run, and its spending
+agenda                         the next strategy meeting's open agenda items, as JSON
 workspace show TASK_ID         where the kernel provisioned the task
 workspace remove TASK_ID       delete a stopped, merged, or ended task's workspace and
                                free its ports
@@ -137,6 +138,7 @@ import signal
 from pathlib import Path
 
 from core import (
+    agenda,
     audit_sample,
     backup,
     broker,
@@ -487,9 +489,16 @@ async def _routine_project(
 
 
 def _routine_runners() -> dict:
+    from routines.conditions import runner as conditions
     from routines.emulator import runner as emulator
 
-    return {routines.EXPIRY_RUNNER: routines.expiry_runner, "emulator": emulator.run}
+    # No business data source is granted yet (Stripe, Google Analytics), so
+    # the conditions runner has no adapters and records each condition unread.
+    return {
+        routines.EXPIRY_RUNNER: routines.expiry_runner,
+        "emulator": emulator.run,
+        "conditions": conditions.runner({}),
+    }
 
 
 async def _workspace(conn, args) -> str:
@@ -646,6 +655,8 @@ async def _run(args) -> None:
         if args.command == "routines":
             for rep in await routines.reports(conn):
                 print(routines.listing(rep))
+        elif args.command == "agenda":
+            print(json.dumps(await agenda.open_items(conn), indent=2, default=str))
         elif args.command == "start" and args.project:
             print(await _start_project(conn, args))
         elif args.command == "start":
@@ -983,6 +994,7 @@ def main() -> None:
     routine.add_argument("--plist", action="store_true", help="print the launchd job and exit")
     routine.add_argument("--restart", action="store_true", help="begin a fresh objective after a stop")
     sub.add_parser("routines")
+    sub.add_parser("agenda")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
     restore = sub.add_parser("restore")

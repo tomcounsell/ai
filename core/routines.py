@@ -649,7 +649,8 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
 
 async def _used(conn, objectives: list[str], cutoff: datetime) -> bool:
     """Whether a run in the window led to use: an effect performed, a
-    question Tom answered, or a child task that delivered."""
+    question Tom answered, a child task that delivered, or an item put on
+    the strategy meeting's agenda (`core/agenda.py`)."""
     for row in await runs(conn, objectives):
         if row["at"] < cutoff or not row.get("run"):
             continue
@@ -658,8 +659,9 @@ async def _used(conn, objectives: list[str], cutoff: datetime) -> bool:
             await conn.execute(
                 "SELECT 1 FROM events WHERE (task_id = ANY(%s) AND ((type = 'effect.outcome' "
                 "AND payload->>'kind' = 'done') OR type = 'question.answered')) "
-                "OR (task_id = ANY(%s) AND type = 'task.delivered') LIMIT 1",
-                (nodes, nodes[1:]),
+                "OR (task_id = ANY(%s) AND type = 'task.delivered') "
+                "OR (task_id = 'agenda' AND type = 'agenda.item' AND payload->>'run' = ANY(%s)) LIMIT 1",
+                (nodes, nodes[1:], nodes),
             )
         ).fetchone()
         if found:

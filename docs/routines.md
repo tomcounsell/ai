@@ -20,7 +20,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`, `conditions`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -73,7 +73,7 @@ the next launchd firing writes nothing and says the routine is stopped.
 changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending.
 
-The two routines the kernel holds:
+The routines the kernel holds:
 
 - **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
   and, when something is due, starts one task on the `valor` project with
@@ -93,6 +93,9 @@ The two routines the kernel holds:
   resumes the same run under the same names. A driver that exits nonzero
   has its exit code and output appended at once to
   `$VALOR_DEMO/results/<replay>.driver.log`, beside its result file.
+- **conditions** (05:00 daily, ceiling `propose`): checks each committed
+  decision's watched conditions in every business's own repository and puts
+  each one met on the next strategy meeting's agenda. Described below.
 
 ## Metered spending and ceiling
 
@@ -167,33 +170,58 @@ The kinds of scheduled work this design carries:
 
 ## Watched conditions
 
-This runner is design and is not built yet; the kernel holds only `expiry`
-and `emulator`, and today no routine reads a business's data on a schedule.
+The runner is built (`routines/conditions/runner.py`, the file format and
+the source interface in `core/conditions.py`, the agenda in
+`core/agenda.py`). No business data source is granted yet, so the kernel
+gives it no adapter, and every condition it reads is recorded as unread
+until one is.
 
 A committed decision carries the conditions that would make it worth
-reopening (Business item 7). A third runner, `conditions`, checks each
-committed decision's conditions on its schedule:
+reopening (Business item 7). The `conditions` runner checks each committed
+decision's conditions on its schedule:
 
 - **Where Valor has access, it reads the business's own data.** Which
   accounts that is depends on the business: its Stripe account for billing,
   its Google Analytics property for traffic, or whatever else the business
-  has given Valor access to. Each credential is reached the way any routine's
-  is, through a tool that reads Keychain inside a performer.
+  has given Valor access to. A numeric condition names its `source`, and the
+  runner reads the figure through that source's adapter (`Source.read`,
+  returning the value, where it was read, and when), recorded as a
+  `condition.read` row on the run. Adapters live in `tools/` and reach their
+  credential the way any routine's tool does, reading Keychain inside a
+  performer; the composition root passes the granted ones to the runner.
+  None is built yet: Stripe and Google Analytics are not granted.
 - **Where a condition has no number, the run records what Valor observes.**
-  The condition is checked against its written text, and the run records
-  what Valor saw, where, and when, as a row on the run. Such a condition is
-  watched on the same footing as a numeric one; having no number does not
-  drop it.
+  The condition is checked against its written text by the observer its
+  `source` names (`Observer.observe`), and the run records what Valor saw,
+  where, and when, as a `condition.observed` row on the run. Such a
+  condition is watched on the same footing as a numeric one; having no
+  number does not drop it.
+- **Where no adapter for a condition's source is granted**, or the adapter
+  fails, the run records a `condition.unread` row saying why. The condition
+  stays in the file and is read again on the next run.
 - **When a condition is met**, the run puts the decision's original
-  reasoning, the condition, and what changed (the figure or the observation,
-  with its source) on the agenda of the next strategy meeting. It sends Tom
-  no message; the decision is raised at the meeting, where it is made.
+  reasoning (the reference and the referenced file's text at the commit
+  read), the condition, and what changed (the figure or the observation,
+  with where and when) on the agenda of the next strategy meeting: an
+  `agenda.item` row on the `agenda` stream. A condition is put there once;
+  a later run that finds it still met names the same item, and a condition
+  whose terms change in the file is a new condition. Valor reads the open
+  items when it books the meeting (`python -m core agenda`); an
+  `agenda.raised` row naming items takes them off the agenda once the
+  meeting has heard them. The run sends Tom no message; the decision is
+  raised at the meeting, where it is made.
+
+Each run is a node under the routine's objective, like the emulator's, and
+the rows above are on it. A run that finds no committed decision carrying
+conditions starts no run and records `nothing_due`. A repository the kernel
+cannot fetch, or a conditions file it cannot read, is named in the run's
+summary and the other businesses go on. An agenda item put by a run counts
+as the routine's use for the ninety-day review below.
 
 Its ceiling is `propose`: reading accounts is `read`, and an agenda item is
 a draft. Watching the business's data for a decision to reopen is work for
 the business, not a check on Valor's own process, so it is not a guard under
-the section below. Like any routine, it is added on a demonstrated second
-need.
+the section below. Its `need` is Business item 7 itself.
 
 **Where the conditions live.** The kernel reads every `routine.toml` from
 `settings.routines_dir`, which defaults to `routines/` in the kernel's own
@@ -203,6 +231,42 @@ client's decisions and their conditions are therefore never written in a
 client's business repository, beside the decision they belong to, and the
 run reads them from there. The kernel's `routine.toml` names the runner, the
 schedule, and the ceiling, and holds no business's conditions.
+
+The businesses are the project specs in `settings.projects_dir`. For each,
+the run fetches the spec's `repo` into the kernel's cache with its trusted
+git, as provisioning does, and reads `decisions/conditions.toml` on the
+branch commitments merge to: the spec's `branch`, else the repository's
+default branch. A decision is committed when it is merged there (Business
+item 3), so a file on any other branch is not read. A repository without the
+file has no watched conditions. The kernel fetches no private repository, so
+a business whose repository needs a credential is named in the summary as
+not read.
+
+The file lists each committed decision, its reasoning reference, and its
+conditions:
+
+```toml
+[[decision]]
+id = "pro-price-49"                                 # unique in the file
+decided = 2026-09-14                                # the date it was committed
+reasoning = "decisions/2026-09-14-pro-price.md"     # the decision record, a path in this repository
+
+[[decision.condition]]                              # numeric: a metric and one threshold
+id = "churn"
+text = "Pro monthly churn rises above 6%"
+source = "stripe"                                   # the adapter that reads it
+metric = "pro_monthly_churn_pct"
+above = 6.0                                         # met when the figure is above; or `below`
+
+[[decision.condition]]                              # observation: no metric
+id = "competitor"
+text = "A direct competitor prices a comparable plan under $30"
+source = "web"                                      # the observer that looks
+```
+
+A decision is never edited, only superseded (Business item 3): the new
+decision gets its own entry, with its own conditions, and the superseded
+one's entry is removed in the same commit.
 
 ## What a routine may not do
 
@@ -253,8 +317,8 @@ work done by hand, as a task, twice. `routine.toml` names both task ids.
 A first occurrence is a task, not a routine (Mission item 5).
 
 **Use.** A routine is in use when a run in the last ninety days led to
-something outside itself: an effect performed, a question Tom answered, or a
-child task that delivered. A routine that has run for ninety days and
+something outside itself: an effect performed, a question Tom answered, a
+child task that delivered, or an item put on the strategy meeting's agenda. A routine that has run for ninety days and
 produced only "nothing found" is unused. The emulator sweep's replays
 deliver, so it is in use while it runs.
 

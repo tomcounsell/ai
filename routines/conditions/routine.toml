@@ -1,0 +1,12 @@
+name = "conditions"
+runner = "conditions"
+ceiling = "propose"
+model = "frontier"
+mission_item = "Business item 7; a committed decision is reopened in time when a watched condition is met"
+need = ["Business item 7 (docs/business.md): a committed decision carries the conditions that would reopen it, and Valor watches them in the business's own data"]
+created = 2026-10-12
+instruction = "Check each committed decision's watched conditions in every business's repository against the business's own data, record each reading or observation on the run, and put each met condition on the next strategy meeting's agenda with the decision's original reasoning and what changed. Send Tom nothing."
+
+[schedule]
+hour = 5
+minute = 0
