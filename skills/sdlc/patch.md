@@ -6,7 +6,9 @@ the session that built this, so you know why each line is there.
 
 **Exit evidence.** As for build: every change committed, then
 `.valor/done.md`, a note to Tom, a line that is exactly `---`, then what
-changed for each finding and why for any you answered without a change.
+changed for each finding and why for any you answered without a change,
+and, when the work commits a business decision, its `decision-record`
+block as build describes, updated if the decision changed.
 That is a new candidate, and test, review, and docs check it again. A
 question only Tom can answer goes in `.valor/question.md` instead; for a
 second opinion, `.valor/advice.md`.

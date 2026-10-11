@@ -60,8 +60,8 @@ answer to a question.
 
 A package, `tests/emulator/`, run as modules (`python -m
 tests.emulator.replay`) and never collected by pytest: `replay.py` (the
-driver), `workspace.py`, `stand_in.py`, and `judge.py`, sharing
-`common.py`. Items, answer keys, results, and each
+driver), `workspace.py`, `stand_in.py`, `judge.py`, and `business.py`
+(the business case set's scoring), sharing `common.py`. Items, answer keys, results, and each
 run's spec live in the experiment directory, `valor-demo`, outside the
 repository, set by `VALOR_DEMO`; the kernel keeps each run's workspace
 under its `work_dir` setting (`~/valor-tasks`).
@@ -86,7 +86,12 @@ under its `work_dir` setting (`~/valor-tasks`).
 on GitHub; `reference_diff` is a file in its place, required when the clean
 base is a rebuilt commit the PR does not descend from. `services` is any of
 `postgres` and `redis`. An item's `project` key may also list `extensions`
-the task's Postgres holds for the app's tests (`vector`). Relative paths resolve against the item file. Items
+the task's Postgres holds for the app's tests (`vector`). `drop` lists
+paths (`docs/plans`) the workspace removes from the base's tree: the run
+starts from a commit of the rest with no parent, the same commit every time
+(`workspace.clean_base`), the rebuilt clean base below made by the driver
+instead of by hand. A business item adds `kind` and `decision` (Business
+items, below). Relative paths resolve against the item file. Items
 and answer keys stay outside every run directory, where no turn's sandbox can
 read them.
 
@@ -282,7 +287,8 @@ Each run writes `results/<run>.json`, atomically, after every step:
 - `questions` (each with its answer and provenance) and `feedback` (each with
   the delivery it answers and its provenance), read from the kernel's
   attention state; `feedback_rounds`; `attention`, counts by kind;
-- `deliveries`, the delivery note of every `task.delivered` row;
+- `deliveries`, the delivery note of every `task.delivered` row, and
+  `decision_record`, the last one's `decision-record` block, or null;
 - `turns`, each with its outcome, its gateway-metered dollars, and the
   harness's own cumulative figure;
 - `kernel_spend_usd`, the item task's metered spending, and
@@ -435,26 +441,48 @@ the 16 GB machine is `docs/machine.md`'s concern.
 
 ## Business items
 
-The items above are all code requests. A business case set is design and
-is not built yet: no business item has been written and no replay of one has
-run.
+The items above are all code requests. The business case set is built: its
+seventeen items are written (`biz-a` to `biz-q` in the experiment
+directory's `items/`, mapped to their PRs in its `INDEX.md` and written by
+its `make_business_items.py`), and the scoring path is
+`tests/emulator/business.py`. No replay of one has run.
 
 - **Its items.** Replays of the marketing and pricing pull requests merged in
   `yudame/cuttlefish`. Those PRs were business decisions, about how the
-  product is marketed and what it charges, made in code.
+  product is marketed and what it charges, made in code. Each PR merged in
+  the repository was read and judged; the index lists those left out and
+  why.
 - **Its labels.** Each item is labelled by what was merged, the same merge
-  decision that labels a code item.
+  decision that labels a code item: the item's `decision`, a statement of
+  the option chosen, beside `"kind": "business"`. The request is the
+  question as it was asked, with any statement of the option removed; the
+  answer key holds only the business context Tom would answer from, so the
+  stand-in says "Your call." when asked to decide; the base drops
+  `docs/plans`, where the plan committed before each build states the
+  decision. An item has no verification commands.
 - **What a score means.** Every outcome is unknown: no record shows whether
   any of those decisions was right for the business. A score therefore
   measures agreement with Tom's merged decision, not whether the decision was
   right. Each was considered with care, so agreement with it is a better
-  baseline than a random choice, and it is no more than that.
+  baseline than a random choice, and it is no more than that. The judge is
+  the same blind call with a rubric of its own (`business.SYSTEM`): it sees
+  the request, the answer key, the merged decision and its diff, and the
+  candidate's diff, and scores `agreement` from 0 to 5, naming the option
+  the candidate committed to.
 - **The perspective measure.** A replay's decision record names which
   perspective's objection changed the option chosen. That is how a
   perspective is measured (Business item 5, `docs/business.md`): read from
   the record, whether an objection it raised is named there as having changed
   the option chosen. Nothing is counted from whether a perspective's text was
-  used, edited, or discarded.
+  used, edited, or discarded. The record is a fenced `decision-record` block
+  in the delivery's report (`skills/sdlc/build.md`): one JSON object with
+  `recommended`, the option favoured before the argument, `chosen`, and
+  `objections`, each with its `perspective`, the `objection`, and
+  `changed_choice`. The driver keeps the last delivery's record as the
+  run's `decision_record`, and `python -m tests.emulator.business
+  RESULT.json ...` reads the agreement scores and, per perspective, the runs
+  where it raised an objection and the runs where one it raised changed the
+  option, from that field alone.
 
 ## Cost
 

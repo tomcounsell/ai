@@ -37,6 +37,11 @@ alias `sonnet` to for the first-party provider. The baseline judge called that a
 (5d90b4776:scripts/judge_replay.py:171) and did not record what it resolved
 to. Its one call goes through the kernel's gateway and is metered on the
 run's emulator task.
+
+A business item (`"kind": "business"`) is judged on agreement alone: the
+same blind call, with `business.SYSTEM` and the item's merged `decision`
+in place of the code rubric, scoring 0 to 5 whether the candidate commits
+to the same option (`tests/emulator/business.py`).
 """
 
 import argparse
@@ -49,6 +54,7 @@ from pathlib import Path
 from core import ledger, runs
 from core import workspace as kws
 from harnesses.claude_code import KEEP_ENV
+from tests.emulator import business
 from tests.emulator.common import DEMO, Meter, claude_json, machine_lock, mirror_diff, now, sh
 
 # Claude Code 2.1.286's catalog: alias `sonnet` -> claude-sonnet-5-5 (first party).
@@ -216,17 +222,24 @@ def _judge(path: Path, model: str, meter: Meter) -> dict:
         "\n\n".join(f"$ {c['command']}\n(exit {c['exit']})\n{c['output_tail']}" for c in checks)
         or "(no verification commands ran)"
     )
-    prompt = "\n\n".join(
-        [
-            f"# The request\n\n{item['request']}",
-            f"# Answer key: the requester's intent\n\n{Path(item['answer_key']).read_text()}",
-            f"# Reference implementation (merged)\n\n```diff\n{_clip(reference_diff(item)) or '(none)'}\n```",
-            f"# Candidate implementation\n\n```diff\n{_clip(candidate) or '(the candidate changed nothing)'}\n```",
-            f"# Verification of the candidate\n\n{verification}",
-        ]
-    )
+    if business.is_business(item):
+        system = business.SYSTEM
+        prompt = business.prompt(
+            item, Path(item["answer_key"]).read_text(), _clip(reference_diff(item)), _clip(candidate)
+        )
+    else:
+        system = SYSTEM
+        prompt = "\n\n".join(
+            [
+                f"# The request\n\n{item['request']}",
+                f"# Answer key: the requester's intent\n\n{Path(item['answer_key']).read_text()}",
+                f"# Reference implementation (merged)\n\n```diff\n{_clip(reference_diff(item)) or '(none)'}\n```",
+                f"# Candidate implementation\n\n```diff\n{_clip(candidate) or '(the candidate changed nothing)'}\n```",
+                f"# Verification of the candidate\n\n{verification}",
+            ]
+        )
     workdir = Path(result.get("workspace", {}).get("run_dir") or DEMO)
-    reply = claude_json(prompt, system=SYSTEM, model=model, meter=meter, call_id="judge", workdir=workdir)
+    reply = claude_json(prompt, system=system, model=model, meter=meter, call_id="judge", workdir=workdir)
     verdict = reply["json"] or {"unparsed": reply["text"]}
     if "judge" in result:
         result.setdefault("judge_history", []).append(result["judge"])
@@ -239,6 +252,7 @@ def _judge(path: Path, model: str, meter: Meter) -> dict:
         "scores": verdict.get("scores"),
         "divergences": verdict.get("divergences"),
         "rationale": verdict.get("rationale"),
+        **({"candidate_decision": verdict.get("candidate_decision")} if business.is_business(item) else {}),
         "verification": checks,
         **({"unparsed": verdict["unparsed"]} if "unparsed" in verdict else {}),
     }

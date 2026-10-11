@@ -81,6 +81,45 @@ def _has(repo: Path, sha: str) -> bool:
     return ok("git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}")
 
 
+def clean_base(cache: Path, base: str, drop: list[str]) -> str:
+    """A commit in `cache` holding `base`'s tree less every path under
+    `drop`, with no parent, so the run's clone holds neither the dropped
+    files nor the history that had them. Its author, committer, and dates
+    are fixed, so the same base and drop make the same commit every time;
+    a branch `clean/<sha>` keeps it from garbage collection."""
+    listing = git(cache, "ls-tree", "-r", "-z", "--full-tree", base)
+    prefixes = [d.strip("/") for d in drop]
+    kept = [
+        entry
+        for entry in listing.split("\0")
+        if entry
+        and not any(
+            (path := entry.split("\t", 1)[1]) == p or path.startswith(p + "/") for p in prefixes
+        )
+    ]
+    index = DEMO / "cache" / f"clean-{os.getpid()}.index"
+    env = {
+        **os.environ,
+        "GIT_INDEX_FILE": str(index),
+        "GIT_AUTHOR_NAME": "replay driver",
+        "GIT_AUTHOR_EMAIL": "replay@valor.invalid",
+        "GIT_COMMITTER_NAME": "replay driver",
+        "GIT_COMMITTER_EMAIL": "replay@valor.invalid",
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+    }
+    index.unlink(missing_ok=True)
+    try:
+        sh("git", "-C", str(cache), "update-index", "-z", "--index-info", input="\0".join(kept) + "\0", env=env)
+        tree = sh("git", "-C", str(cache), "write-tree", env=env)
+    finally:
+        index.unlink(missing_ok=True)
+    message = f"clean base: {base} without {', '.join(prefixes)}"
+    commit = sh("git", "-C", str(cache), "commit-tree", tree, "-m", message, env=env)
+    git(cache, "update-ref", f"refs/heads/clean/{commit}", commit)
+    return commit
+
+
 def build(
     repo: str,
     base: str,
@@ -94,11 +133,14 @@ def build(
     suite: str = "true",
     env: dict[str, str] | None = None,
     extensions: list[str] | None = None,
+    drop: list[str] | None = None,
 ) -> dict:
     """The run's cache and project spec; the kernel provisions the rest at
     `core start --project`. `kind`, `setup`, `suite`, `env`, and `extensions` come from
     the item's `project` key; without one the suite is `true`, so a delivery
-    says the suite was not run. Returns its replay.json."""
+    says the suite was not run. With `drop`, the run's base is
+    `clean_base`'s commit and `source_base` the item's. Returns its
+    replay.json."""
     unknown = set(services) - set(SERVICES)
     if unknown:
         raise SystemExit(f"unknown services {sorted(unknown)}; known: {', '.join(SERVICES)}")
@@ -107,6 +149,9 @@ def build(
         teardown(run_name)
     cache = _cache(repo, base)
     base = git(cache, "rev-parse", f"{base}^{{commit}}")
+    source_base = base
+    if drop:
+        base = clean_base(cache, base, drop)
     run.mkdir(parents=True, exist_ok=True)
     spec = run / "project.toml"
     lines = [
@@ -133,6 +178,7 @@ def build(
             "run": run_name,
             "repo": repo,
             "base": base,
+            **({"source_base": source_base, "dropped": list(drop)} if drop else {}),
             "services": services,
             "run_dir": str(run),
             "spec": str(spec),

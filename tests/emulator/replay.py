@@ -26,6 +26,7 @@ An item is a JSON file:
       "services": ["postgres"],          postgres, redis, or []
       "request": "Tom's request, verbatim",
       "answer_key": "psyoptimal-894.key.md",
+      "drop": ["docs/plans"],             paths removed from the base's tree
       "verify": ["shell commands the judge runs on the final commit, sandboxed"],
       "project": {"kind": "python-uv", "setup": ["uv sync --frozen"],
                   "suite": "uv run pytest -q --junitxml={junit} tests",
@@ -33,7 +34,16 @@ An item is a JSON file:
     }
 
 `project` is optional; without it the suite is `true`, and a delivery says
-the suite was not run.
+the suite was not run. `drop` is optional: paths (`["docs/plans"]`) the
+workspace removes from the base's tree, replaying from a commit of the rest
+with no history (`workspace.clean_base`), so a plan committed before the
+build does not hand the turn the answer.
+
+A business item adds `"kind": "business"` and `"decision"`, what was
+merged, the option Tom chose; its judge scores agreement with that decision
+(`tests/emulator/business.py`). The record carries `decision_record`, the
+last delivery's `decision-record` block, read by `business` for the
+perspective measure.
 
 Relative paths are relative to the item file. Keep items and answer keys
 outside every run directory (for example $VALOR_DEMO/items/): a turn's
@@ -84,6 +94,7 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
+from tests.emulator import business
 from tests.emulator import workspace as replay_workspace
 from tests.emulator.common import (
     DEMO,
@@ -117,7 +128,8 @@ def load_item(path: str) -> dict:
     item.setdefault("services", [])
     item.setdefault("verify", [])
     item.setdefault("name", item_path.stem)
-    for key in ("repo", "base", "request", "answer_key"):
+    item.setdefault("drop", [])
+    for key in ("repo", "base", "request", "answer_key") + (("decision",) if business.is_business(item) else ()):
         if not item.get(key):
             raise SystemExit(f"{item_path}: missing {key!r}")
     return item
@@ -161,6 +173,7 @@ def summarize(result: dict, meter: Meter | None = None) -> None:
     result["feedback_rounds"] = len(result["feedback"])
     result["attention"] = dict(Counter(a["kind"] for a in state["attention"]))
     result["deliveries"] = [r["payload"]["summary"] for r in ledger_rows if r["type"] == "task.delivered"]
+    result["decision_record"] = business.latest_record(result["deliveries"])
     result["turns"] = [
         {
             "turn_id": t["turn_id"],
@@ -240,6 +253,7 @@ def _replay(item: dict, arm: str, args) -> dict:
         item["services"],
         max_output_tokens=args.max_output_tokens,
         rebuild=args.rebuild,
+        drop=item["drop"],
         **item.get("project", {}),
     )
     if result is not None and result.get("task_id"):

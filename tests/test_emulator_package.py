@@ -15,7 +15,7 @@ import pytest
 pytestmark = pytest.mark.spend(usd=0)
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULES = ("common", "workspace", "stand_in", "judge", "replay")
+MODULES = ("common", "workspace", "stand_in", "judge", "replay", "business")
 
 
 @pytest.mark.parametrize("name", MODULES)
@@ -23,7 +23,7 @@ def test_every_module_imports_from_the_package(name):
     importlib.import_module(f"tests.emulator.{name}")
 
 
-@pytest.mark.parametrize("name", ["replay", "judge", "stand_in", "workspace"])
+@pytest.mark.parametrize("name", ["replay", "judge", "stand_in", "workspace", "business"])
 def test_each_entry_point_runs_as_a_module(name):
     out = subprocess.run(
         [sys.executable, "-m", f"tests.emulator.{name}", "--help"], cwd=ROOT, capture_output=True, text=True,

@@ -11,7 +11,13 @@ verified it, and the decisions Tom might want to change, the one that most
 changes the outcome first. The note is what Tom reads in his chat: a few
 plain sentences on what changed for him or the business, with no task ids,
 commit hashes, file paths, test counts, or findings; the report is on the
-task's status page. The kernel records the head commit as the candidate,
+task's status page. When the work commits a business decision (a price, an
+offer, positioning, how the business markets itself), the report carries
+its decision record, a fenced block labelled `decision-record` holding one
+JSON object: `recommended`, the option you favoured before the argument;
+`chosen`, the option the candidate commits to; and `objections`, each with
+the `perspective` that raised it, the `objection`, and `changed_choice`,
+true when it changed the option chosen. The kernel records the head commit as the candidate,
 and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
