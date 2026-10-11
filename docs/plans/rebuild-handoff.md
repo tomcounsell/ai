@@ -138,24 +138,26 @@ judgement keys, and the model credential, and nothing from Telegram or email.
    the job, so the job carries it.
 4. **Open the page.** `.venv/bin/python -m bridges.local open` opens
    `http://127.0.0.1:8711/` with the token in the URL fragment. Messages
-   sent there start work; Valor's notices and approvals come back on the
-   same page, and replying `approve` or `stop` to a notice binds as it does
-   in Telegram. Reopen the page with `open` whenever it asks.
+   sent there start work; Valor's notices and reports come back on the
+   same page, and replying `stop` to a notice binds as it does in
+   Telegram. Reopen the page with `open` whenever it asks.
 
-The local and Telegram channels cannot both be the operator channel, and an
-approved `email.send` waits for an email bridge that this Mac does not run.
+The local and Telegram channels cannot both be the operator channel, and a
+requested `email.send` waits for an email bridge that this Mac does not run.
+
+1.4d's ruleset exists (2026-10-02, created by Tom through his `gh` login):
+ruleset 24370170 on `main` of `tomcounsell/ai`, restrict updates, bypass
+for the repository admin role only, so `valorengels` (push, not admin) is
+off it. Its enforcement stays disabled: every commit and PR merge on `main`
+lands under `valorengels`, and a merge may land on `main` (Tom,
+2026-10-11), so an active rule would refuse Valor's merges there. The push
+token is settled: Valor's classic `repo`-scope token, in the vault as
+`GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
+
+Which Mac hosts the new bridges, and the test windows in which its old
+bridge, email bridge, and worker are disabled, are Valor's to choose.
 
 ## Waiting on Tom
 
-- 1.4d's ruleset is created (2026-10-02, by Tom through his `gh` login):
-  ruleset 24370170 on `main` of `tomcounsell/ai`, restrict updates, bypass
-  for the repository admin role only, so `valorengels` (push, not admin) is
-  off it. Enforcement is disabled until takeover: today every commit and PR
-  merge on `main` lands under `valorengels`, so an active rule would stop
-  the running pipeline. At takeover, set it to active. The push token is
-  settled: Valor's classic `repo`-scope token, in the vault as
-  `GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
 - 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
   and popoto #188.
-- Milestone 2: which Mac hosts the new bridges, and the test windows in
-  which its old bridge, email bridge, and worker are disabled.

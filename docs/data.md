@@ -5,7 +5,9 @@ JSONB documents written once, an append-only events table, and no foreign
 keys. Every call opened and charged, turn, effect, approval, question, answer,
 piece of feedback, correction, and stop is a row in the events table, and
 everything the kernel knows about a task is computed from those rows when it
-is needed. Postgres is the one store; memory lives there in its own schema.
+is needed. Postgres is the one store; memory lives there in its own schema
+today, and the design moves it to one Postgres shared by the four Macs
+(Memory, below).
 
 This doc owns the storage: tables, roles, the integrity mechanisms, how
 state is read, how a turn's Brief is rendered from the store, test
@@ -559,8 +561,12 @@ call in every run by replaying a recorded provider response.
 ## Memory
 
 Memory lives in the kernel database's schema `memory`, owned by
-`valor_memory` (Roles, above). What it takes from the ledger and what it
-recalls into a Brief is [memory.md](memory.md).
+`valor_memory` (Roles, above). The design moves it to one Postgres that
+all four Macs reach, one Mac per client, every record carrying its client
+and project; the kernel database, its ledger, and its documents stay on
+their own Mac ([machine.md](machine.md), The shared memory store). Not
+built yet. What it takes from the ledger and what it recalls into a Brief
+is [memory.md](memory.md).
 
 ## Gaps
 

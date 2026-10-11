@@ -158,7 +158,7 @@ notice is marked sent with its notice id as the message id.
 - Files in either direction; more than one local chat; reaching the page
   from another device; browser notifications; paging long history;
   images in a text; syntax highlighting.
-- A merge to a granted GitHub remote fails with the GitHub credential
+- A merge to a GitHub remote fails with the GitHub credential
   named when this Mac holds none.
 - A requested `email.send` waits for an email bridge this Mac does not
   run; nothing is sent and the page shows no outcome.

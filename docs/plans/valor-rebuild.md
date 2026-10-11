@@ -59,8 +59,8 @@ How the loops end (Tom's rulings in [valor-rebuild-feedback.md](valor-rebuild-fe
 - **Done is the plan's Done items, a green suite, and a review pass or
   Valor's merge decision.** "No findings left" is not the bar.
 - **Tom's queue holds** questions about vision, business priorities, and
-  the cost and benefit of tradeoffs; things only he holds (a password, an
-  account); and governance grants. Tom gets a report of each merge and
+  the cost and benefit of a tradeoff in how the company is organised;
+  things only he holds (a password, an account); and governance grants. Tom gets a report of each merge and
   send. Every other call is Valor's, recorded under "Decided by default"
   and not asked.
 
