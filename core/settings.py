@@ -384,10 +384,6 @@ class Settings:
     # a Django suite with Postgres peaked at 2,154 MB and thrashed at 1 GB.
     verify_memory_mb: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_MEMORY_MB", "4096")))
     verify_cpus: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_CPUS", "4")))
-    # How many verifications run at once on the machine: the machine lock's
-    # slots (`container.slots`). One on Valor's 16 GB Air; a Mac with the
-    # memory for two VMs and the builder may set more.
-    verify_slots: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_SLOTS", "1")))
 
     # -- the resident kernel and the bridges (docs/plans/m2-1-port.md) -------
     # This machine's name: the kernel's and the turn slot's lock keys, and

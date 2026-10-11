@@ -68,9 +68,7 @@ recorded in `images.json` beside the machine lock, with the digest and the
 `valor.db` label of the database that built it. A prune deletes only images
 carrying its own database's label, and never the base image. All runtime work
 (start, build, check, prune, run, stop) happens while holding the machine lock,
-which is one per machine because the runtime is. The lock has one slot unless
-`verify_slots` gives it more; with more, the holders take the one builder and
-`images.json` in turn, and the last holder out stops the runtime.
+which is one per machine because the runtime is.
 
 **Tests that use the runtime.** A `container`-marked test shares the machine
 lock and the runtime with every kernel on the machine and does its runtime work

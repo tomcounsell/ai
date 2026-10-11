@@ -128,14 +128,10 @@ def held():
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
-        if container.settings.verify_slots > 1:  # the last holder out stops it
+        try:
+            container.stop_system()
+        finally:
             os.close(fd)
-            container.stop_if_free()
-        else:
-            try:
-                container.stop_system()
-            finally:
-                os.close(fd)
 
 
 def unkept(b, candidate: str) -> None:
@@ -528,12 +524,7 @@ def test_outside_a_container_test_the_sweep_never_stops_the_runtime(tmp_path, mo
 # -- the lock --------------------------------------------------------------------------------
 
 
-def slots(monkeypatch, n: int) -> None:
-    monkeypatch.setattr(container, "settings", dataclasses.replace(container.settings, verify_slots=n))
-
-
-def test_a_stop_while_waiting_on_the_lock_returns_without_taking_it(monkeypatch):
-    slots(monkeypatch, 1)
+def test_a_stop_while_waiting_on_the_lock_returns_without_taking_it():
     held = container.try_lock()
     assert held is not None
 
@@ -549,37 +540,6 @@ def test_a_stop_while_waiting_on_the_lock_returns_without_taking_it(monkeypatch)
         assert container.try_lock() is None  # still the holder's alone
     finally:
         os.close(held)
-
-
-def test_with_two_slots_two_hold_the_lock_and_the_last_out_stops_the_runtime(tmp_path, monkeypatch):
-    """`verify_slots` 2: two holders at once and a third waiting until its
-    stop; the runtime is stopped when the last holder releases its slot, not
-    before."""
-    calls = tmp_path / "calls"
-    cli = tmp_path / "container"
-    cli.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit 0\n')
-    cli.chmod(0o755)
-    monkeypatch.setattr(container, "require", lambda: str(cli))
-    slots(monkeypatch, 2)
-
-    def stops() -> int:
-        return calls.read_text().splitlines().count("system stop") if calls.exists() else 0
-
-    async def go():
-        stop = asyncio.get_running_loop().create_future()
-        first, second = container.machine_lock(never()), container.machine_lock(never())
-        a, b = await first.__aenter__(), await second.__aenter__()
-        assert {a, b} == set(container.slots()) and not container.all_free()
-        asyncio.get_running_loop().call_later(0.5, stop.set_result, None)
-        with pytest.raises(checks._Stopped):
-            async with container.machine_lock(asyncio.ensure_future(stop)):
-                raise AssertionError("a third slot was taken")
-        await first.__aexit__(None, None, None)
-        assert stops() == 0  # the second still holds its slot
-        await second.__aexit__(None, None, None)
-        assert stops() == 1 and container.all_free()
-
-    run(go())
 
 
 def test_a_helper_writable_by_its_group_is_refused(tmp_path, monkeypatch):
