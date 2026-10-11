@@ -1038,7 +1038,10 @@ def test_a_sweep_touches_only_its_own_databases_vms(dsn):
 def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn, tmp_path):
     """A commit of HEAD's tree against HEAD, each in a VM: every `macos` test
     skips and the count is on `verify.ran`. The base is HEAD itself, since an
-    older commit's suite may predate the `macos` marks."""
+    older commit's suite may predate the `macos` marks. The suite is narrow:
+    two files whose tests use the ledger's Postgres, one test marked `macos`,
+    and the two sparse-file tests; the whole suite runs in a VM in every real
+    review."""
     repo = Path(__file__).resolve().parent.parent
     mirror = tmp_path / "mirror.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(mirror)], check=True)
@@ -1046,7 +1049,8 @@ def test_this_repositorys_suite_runs_in_the_vm_with_the_macos_tests_skipped(dsn,
                           capture_output=True, text=True, check=True).stdout.strip()  # fmt: skip
     project = {
         "name": "valor", "kind": "python-uv", "services": ["postgres"], "roles": ["valor_kernel", "valor_memory"],
-        "setup": ["uv sync --frozen"], "suite": "uv run pytest -q -p no:cacheprovider --junitxml={junit} tests",
+        "setup": ["uv sync --frozen"],
+        "suite": "uv run pytest -q -p no:cacheprovider --junitxml={junit} tests/test_look.py tests/test_transcripts.py",
         "env": {"VALOR_PGHOST": "127.0.0.1", "VALOR_PGPORT": "5432", "VALOR_PG_OWNER": "app",
                 "VALOR_PG_PASSFILE": str(container.VM_PASSFILE), "VALOR_TEST_DB": "app_test"},
     }  # fmt: skip
