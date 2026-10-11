@@ -46,6 +46,7 @@ the sending side run inside the turn's own sandbox, the receiving side with
 fsck, one pack file under a file-size limit, and a footprint watchdog.
 """
 
+import atexit
 import contextlib
 import ctypes
 import errno
@@ -1121,10 +1122,124 @@ def _service_run(lay: Layout, task_id: str, *argv: str) -> subprocess.CompletedP
     return subprocess.CompletedProcess(full, proc.returncode, stdout, stderr)
 
 
+# The initdb arguments every task cluster is made with, past `-D` and the
+# password file.
+INITDB_ARGS = ("-U", "postgres", "--auth=scram-sha-256", "-E", "UTF8", "--locale=C")
+# Per process, per `_pg_template_key`: a template data directory and its
+# superuser's password, or None where a clone failed (`_make_cluster`).
+_PG_TEMPLATES: dict[str, tuple[Path, str] | None] = {}
+_PG_TEMPLATES_LOCK = threading.Lock()
+
+
+def _pg_template_key() -> str:
+    """The Postgres a cluster is made by: `initdb` and `postgres` by real
+    path (a Homebrew upgrade changes it) and file identity, and the initdb
+    arguments."""
+    h = hashlib.sha256()
+    for name in ("initdb", "postgres"):
+        real = os.path.realpath(_pg(name))
+        st = os.stat(real)
+        h.update(f"{real} {st.st_ino} {st.st_size} {st.st_mtime_ns}\n".encode())
+    h.update(json.dumps(INITDB_ARGS).encode())
+    return h.hexdigest()[:16]
+
+
+def _clone_dir(src: Path, dest: Path) -> None:
+    """`src` copied to a new `dest` as an APFS clone (`cp -c`), modes kept.
+    Raises `subprocess.CalledProcessError` where the volume cannot clone."""
+    subprocess.run(["/bin/cp", "-c", "-p", "-R", str(src), str(dest)], check=True, capture_output=True)
+
+
+def _drop_pg_templates() -> None:
+    with _PG_TEMPLATES_LOCK:
+        held = [t[0] for t in _PG_TEMPLATES.values() if t is not None]
+        _PG_TEMPLATES.clear()
+    for path in held:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_drop_pg_templates)
+
+
+def _drop_dead_templates(root: Path) -> None:
+    """Remove the templates in `root` (named `<pid>-...`) whose process has
+    exited without removing its own (a kernel killed)."""
+    for entry in root.iterdir():
+        pid = entry.name.split("-", 1)[0]
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            shutil.rmtree(entry, ignore_errors=True)
+        except PermissionError:
+            pass
+
+
+def _make_cluster(lay: Layout, task_id: str, data: Path) -> str:
+    """A new cluster at `data`, as `initdb` with `INITDB_ARGS` makes it;
+    returns its superuser's password, which the caller replaces.
+
+    The first cluster a process makes for a Postgres (`_pg_template_key`)
+    is initdb'd under the task's service profile with a random password
+    held in memory only, then cloned (`cp -c`) into a template under
+    `settings.performing_dir`, which no workspace sandbox can read; the
+    template is removed when the process exits. Each later cluster is a
+    clone of the template. Where cloning fails (a volume that is not
+    APFS), every cluster is initdb'd as before."""
+    key = _pg_template_key()
+    with _PG_TEMPLATES_LOCK:
+        held = _PG_TEMPLATES.get(key, ())
+    if held:
+        template, password = held
+        try:
+            _clone_dir(template, data)
+            return password
+        except subprocess.CalledProcessError, OSError:
+            shutil.rmtree(data, ignore_errors=True)
+            with _PG_TEMPLATES_LOCK:
+                _PG_TEMPLATES[key] = None
+            shutil.rmtree(template, ignore_errors=True)
+    password = secrets.token_urlsafe(24)
+    pwfile = lay.pg / "init.pw"
+    pwfile.write_text(password + "\n")
+    pwfile.chmod(0o600)
+    try:
+        done = _service_run(
+            lay, task_id, _pg("initdb"), "-D", str(data), f"--pwfile={pwfile}", *INITDB_ARGS
+        )  # fmt: skip
+        if done.returncode != 0:
+            raise Refused(f"initdb: {done.stderr.strip()}")
+    finally:
+        pwfile.unlink(missing_ok=True)
+    if held == ():  # no template yet, and none failed: this cluster becomes it
+        Path(settings.performing_dir).mkdir(mode=0o700, parents=True, exist_ok=True)
+        root = Path(settings.performing_dir) / "pg-template"
+        root.mkdir(mode=0o700, exist_ok=True)
+        _drop_dead_templates(root)
+        template = root / f"{os.getpid()}-{key}-{secrets.token_hex(4)}"
+        try:
+            _clone_dir(data, template)
+        except subprocess.CalledProcessError, OSError:
+            shutil.rmtree(template, ignore_errors=True)
+            made = None
+        else:
+            made = (template, password)
+        with _PG_TEMPLATES_LOCK:
+            if key not in _PG_TEMPLATES:
+                _PG_TEMPLATES[key] = made
+                made = None
+        if made is not None:  # another thread's template is kept
+            shutil.rmtree(made[0], ignore_errors=True)
+    return password
+
+
 def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str, str]:
     """A cluster of the task's own with password auth on every login. The
-    superuser password lives in a file only until the roles exist, then is
-    removed from the role and the file deleted. `app` is `CREATEDB` (and
+    cluster is made by `_make_cluster` (a clone of the process's template
+    cluster, or initdb), its superuser password replaced by a random one of
+    the task's own as the server's first statement, and removed from the
+    role once the roles exist. `app` is `CREATEDB` (and
     `CREATEROLE` with the spec's roles) and a member of `pg_signal_backend`
     and `pg_read_all_settings`, nothing more. The spec's extensions are
     created by the superuser in `template1`, so `app`'s database and every
@@ -1132,19 +1247,8 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
     superuser and cannot create an untrusted extension such as `vector`."""
     data = lay.pg / "data"
     lay.pg.mkdir(parents=True, exist_ok=True)
+    made_pw = _make_cluster(lay, task_id, data)
     super_pw = secrets.token_urlsafe(24)
-    pwfile = lay.pg / "init.pw"
-    pwfile.write_text(super_pw + "\n")
-    pwfile.chmod(0o600)
-    try:
-        done = _service_run(
-            lay, task_id, _pg("initdb"), "-D", str(data), "-U", "postgres", "--auth=scram-sha-256",
-            f"--pwfile={pwfile}", "-E", "UTF8", "--locale=C",
-        )  # fmt: skip
-        if done.returncode != 0:
-            raise Refused(f"initdb: {done.stderr.strip()}")
-    finally:
-        pwfile.unlink(missing_ok=True)
     with (data / "postgresql.conf").open("a") as f:
         f.write(
             f"\n# valor workspace: TCP on loopback only, no unix socket\nlisten_addresses = '127.0.0.1'\n"
@@ -1156,6 +1260,11 @@ def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str
         import psycopg
         from psycopg import sql
 
+        with psycopg.connect(
+            host="127.0.0.1", port=port, dbname="postgres", user="postgres", password=made_pw,
+            autocommit=True,
+        ) as conn:  # fmt: skip
+            conn.execute(sql.SQL("ALTER ROLE postgres PASSWORD {}").format(sql.Literal(super_pw)))
         if spec.extensions:
             with psycopg.connect(
                 host="127.0.0.1", port=port, dbname="template1", user="postgres", password=super_pw,

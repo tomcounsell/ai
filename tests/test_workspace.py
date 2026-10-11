@@ -287,6 +287,82 @@ def test_the_task_cluster_takes_passwords_only_and_the_app_role_cannot_escape(tm
     assert postmaster in {p["pid"] for p in stopped}
 
 
+def _counting_initdb(monkeypatch) -> list[str]:
+    """The task ids `initdb` runs for, from here on."""
+    ran, real = [], kws._service_run
+
+    def counted(lay, task_id, *argv):
+        if Path(argv[0]).name == "initdb":
+            ran.append(task_id)
+        return real(lay, task_id, *argv)
+
+    monkeypatch.setattr(kws, "_service_run", counted)
+    return ran
+
+
+def _cluster_logins(task, lay, port, own, others) -> None:
+    """The task's cluster takes its own passwords on its own port, and
+    neither another task's nor the superuser's."""
+    kws.start_services(task, lay, ["postgres"], {"postgres": port})
+    try:
+        with psycopg.connect(
+            host="127.0.0.1", port=port, dbname="app", user="app", password=own["app"]
+        ) as conn:
+            assert conn.execute("SHOW port").fetchone()[0] == str(port)
+            assert conn.execute("SHOW data_directory").fetchone()[0] == str(lay.pg / "data")
+        for user, password in [("app", others["app"]), *(("postgres", pw) for pw in others.values())]:
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(host="127.0.0.1", port=port, dbname="postgres", user=user, password=password)
+    finally:
+        kws.stop_services(task, lay)
+
+
+def _pgpass(lay) -> dict[str, str]:
+    return {line.split(":")[3]: line.split(":")[4] for line in (lay.home / "pgpass").read_text().splitlines()}
+
+
+@pytest.mark.macos
+def test_a_later_cluster_is_a_clone_of_the_template_with_its_own_port_and_passwords(tmp_path, monkeypatch):
+    monkeypatch.setattr(kws, "_PG_TEMPLATES", {})
+    ran = _counting_initdb(monkeypatch)
+    first, a = provision(tmp_path, services=["postgres"])
+    second, b = provision(tmp_path, services=["postgres"])
+    assert ran == [first]  # the second cluster was cloned
+    template, template_pw = kws._PG_TEMPLATES[kws._pg_template_key()]
+    assert template.parent == Path(settings.performing_dir) / "pg-template"
+    assert stat.S_IMODE(template.parent.stat().st_mode) == 0o700
+    lay_a, lay_b = kws.Layout(Path(a.mirror).parent), kws.Layout(Path(b.mirror).parent)
+    port_a, port_b = a.project["ports"]["postgres"], b.project["ports"]["postgres"]
+    conf_a = (lay_a.pg / "data" / "postgresql.conf").read_text()
+    conf_b = (lay_b.pg / "data" / "postgresql.conf").read_text()
+    assert conf_b == conf_a.replace(f"port = {port_a}\n", f"port = {port_b}\n") and conf_a != conf_b
+    for name in ("pg_hba.conf", "pg_ident.conf", "PG_VERSION"):
+        assert (lay_a.pg / "data" / name).read_bytes() == (lay_b.pg / "data" / name).read_bytes()
+    pw_a, pw_b = _pgpass(lay_a), _pgpass(lay_b)
+    assert pw_a["app"] != pw_b["app"]
+    _cluster_logins(first, lay_a, port_a, pw_a, {**pw_b, "template": template_pw})
+    _cluster_logins(second, lay_b, port_b, pw_b, {**pw_a, "template": template_pw})
+    kws._drop_pg_templates()
+    assert not template.exists()
+
+
+@pytest.mark.macos
+def test_where_a_clone_fails_every_cluster_is_made_by_initdb(tmp_path, monkeypatch):
+    monkeypatch.setattr(kws, "_PG_TEMPLATES", {})
+
+    def cannot(src, dest):
+        raise subprocess.CalledProcessError(1, ["/bin/cp", "-c"], b"", b"cp: clonefile failed")
+
+    monkeypatch.setattr(kws, "_clone_dir", cannot)
+    ran = _counting_initdb(monkeypatch)
+    first, a = provision(tmp_path, services=["postgres"])
+    second, b = provision(tmp_path, services=["postgres"])
+    assert ran == [first, second] and kws._PG_TEMPLATES == {kws._pg_template_key(): None}
+    lay_a, lay_b = kws.Layout(Path(a.mirror).parent), kws.Layout(Path(b.mirror).parent)
+    pw_a, pw_b = _pgpass(lay_a), _pgpass(lay_b)
+    _cluster_logins(second, lay_b, b.project["ports"]["postgres"], pw_b, pw_a)
+
+
 HOLDER = """
 import sys, psycopg
 conn = psycopg.connect(sys.argv[1], autocommit=True)
@@ -1971,6 +2047,7 @@ def test_a_service_program_has_no_time_limit_and_an_interrupt_ends_it(tmp_path):
 def test_a_service_programs_whole_stderr_is_in_its_refusal(tmp_path, monkeypatch):
     lay = _service_layout(tmp_path)
     long = "e" * 5000
+    monkeypatch.setattr(kws, "_PG_TEMPLATES", {})  # no template yet, so initdb runs
     monkeypatch.setattr(
         kws, "_service_run", lambda lay, task_id, *argv: subprocess.CompletedProcess(argv, 1, "", long + "\n")
     )
