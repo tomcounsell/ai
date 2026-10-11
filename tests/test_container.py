@@ -931,11 +931,14 @@ def test_the_builder_cannot_reach_the_kernels_postgres_or_a_tasks_services(tmp_p
     listener = socket.create_server(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     lan = lan_address()
-    probe = " ".join(
-        f"if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo REACHED {h}:{p}; exit 1; fi;"
+    # The four connects run at once: each that is dropped waits out the
+    # builder's own connect timeout, about two minutes.
+    tries = " ".join(
+        f"{{ if (exec 3<>/dev/tcp/{h}/{p}) 2>/dev/null; then echo REACHED {h}:{p}; fi; }} &"
         for h in (GATEWAY, lan)
         for p in (settings.pgport, port)
     )
+    probe = f'out=$({tries} wait); if [ -n "$out" ]; then echo "$out"; exit 1; fi;'
 
     async def go():
         base = await base_image()
