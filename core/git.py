@@ -50,7 +50,13 @@ name drivers; a driver's program comes from config. So every call:
   any `push.*` or `hook.*` setting, the alternate refs command, the
   interactive diff filter, partial clone, any `*.cmd`, aliases, submodule
   settings, `core.worktree`, and every include. Config that cannot be read
-  is refused too.
+  is refused too. The answer is kept per workspace while nothing it
+  depends on changes: the key is the content hash, inode, and change time
+  of `.git`'s `HEAD`, `config`, `config.worktree`, and `commondir`, never
+  a modification time, which a turn sets, with the git, its environment,
+  and the owners. A config with an include, a `.git` that is not a plain
+  directory git stops at, a failed read, and a read under a sandbox
+  profile are read every time (`hostile`).
 
 Reading config (`git config --list`) runs nothing: it only reads files. A
 workspace whose config the kernel refuses gets no candidate, no instance,
@@ -396,6 +402,64 @@ async def interrupt(held: Interruptible, job: asyncio.Future) -> None:
         job.exception()
 
 
+# What `hostile` last found per workspace, under the key of every input the
+# answer depends on (`_config_key`); kept for the most recent workspaces only.
+_HOSTILE_SEEN: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
+_HOSTILE_LOCK = threading.Lock()
+_HOSTILE_KEPT = 1024
+_HEAD_VALID = re.compile(rb"ref:\s*refs/|[0-9a-f]{40}")
+
+
+def _config_key(workspace: str | Path, git_bin: str) -> tuple[str, str] | None:
+    """The key `hostile`'s cached answer is held under: the trusted git, the
+    environment of a kernel git call, the workspace's real path, and the
+    `.git` directory's `HEAD`, `config`, `config.worktree`, and `commondir`
+    (absent, or a regular file, by content hash, inode, and change time,
+    which a turn cannot set; never the modification time, which it can),
+    plus the effective user, the owners of the workspace and `.git`, and
+    whether `objects/` and `refs/` are reachable. None (read uncached) unless `.git` is a plain
+    directory git would stop at: a `HEAD` that names a ref or a commit,
+    `objects/` and `refs/` directories, no `commondir`, every file above
+    regular and readable. So a gitfile, a linked worktree, a repository
+    found above the workspace, or a link anywhere among them is never
+    cached; an include is never cached either (`hostile`)."""
+    try:
+        real = os.path.realpath(workspace)
+        dot = os.path.join(real, ".git")
+        top, gitdir = os.lstat(real), os.lstat(dot)
+        if not (stat.S_ISDIR(top.st_mode) and stat.S_ISDIR(gitdir.st_mode)):
+            return None
+        h = hashlib.sha256()
+        h.update(
+            json.dumps([git_bin, sorted(env().items()), os.geteuid(), top.st_uid, gitdir.st_uid]).encode()
+        )
+        for name in ("objects", "refs"):
+            got = os.lstat(os.path.join(dot, name))
+            if not stat.S_ISDIR(got.st_mode) or not os.access(os.path.join(dot, name), os.X_OK):
+                return None
+        for name in ("HEAD", "config", "config.worktree", "commondir"):
+            path = os.path.join(dot, name)
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            except FileNotFoundError:
+                if name == "HEAD":
+                    return None
+                h.update(f"{name}: absent\n".encode())
+                continue
+            with os.fdopen(fd, "rb") as f:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or name == "commondir":
+                    return None
+                data = f.read()
+            if name == "HEAD" and not _HEAD_VALID.match(data):
+                return None
+            h.update(f"{name}: {st.st_ino} {st.st_ctime_ns} {len(data)} ".encode())
+            h.update(hashlib.sha256(data).digest())
+        return (git_bin, real), h.hexdigest()
+    except OSError:
+        return None
+
+
 def hostile(
     workspace: str | Path, profile: str | Path | None = None, mark: str = "valor-git-config"
 ) -> list[str]:
@@ -403,7 +467,35 @@ def hostile(
     followed) that the kernel will not run git under, named without its
     value. With `profile`, the
     read runs under that sandbox profile, marked `mark`, so an include
-    naming a file the profile denies fails the read."""
+    naming a file the profile denies fails the read.
+
+    Without `profile`, a read whose config held no include is kept under
+    the key of everything it depends on (`_config_key`), taken before and
+    after the read, and answered from there while that key holds; a read
+    under a profile, one with an include, one that failed, and one whose
+    key changed while git read are never kept."""
+    if profile is not None:
+        return _hostile_read(workspace, profile, mark)[0]
+    git_bin = binary()
+    before = _config_key(workspace, git_bin)
+    if before is not None:
+        with _HOSTILE_LOCK:
+            held = _HOSTILE_SEEN.get(before[0])
+        if held is not None and held[0] == before[1]:
+            return list(held[1])
+    found, keep = _hostile_read(workspace, None, mark)
+    if keep and before is not None and _config_key(workspace, git_bin) == before:
+        with _HOSTILE_LOCK:
+            _HOSTILE_SEEN.pop(before[0], None)
+            _HOSTILE_SEEN[before[0]] = (before[1], tuple(found))
+            while len(_HOSTILE_SEEN) > _HOSTILE_KEPT:
+                del _HOSTILE_SEEN[next(iter(_HOSTILE_SEEN))]
+    return found
+
+
+def _hostile_read(workspace: str | Path, profile: str | Path | None, mark: str) -> tuple[list[str], bool]:
+    """`hostile`'s answer read from git now, and whether it may be kept: the
+    read succeeded and the config held no include, in any scope."""
     prefix = (
         [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
          "-f", str(profile)]
@@ -412,17 +504,19 @@ def hostile(
     )  # fmt: skip
     listed = _git(workspace, "config", "--list", "--show-scope", "--includes", prefix=prefix)
     if listed.returncode != 0:  # unreadable config is refused, never assumed clean
-        return [f"the config could not be read: {listed.stderr.strip()}"]
-    found = []
+        return [f"the config could not be read: {listed.stderr.strip()}"], False
+    found, keep = [], True
     for line in listed.stdout.splitlines():
         scope, _, entry = line.partition("\t")
-        if scope not in ("local", "worktree"):
-            continue
         name = entry.split("=", 1)[0]
         key = name.lower()
+        if key.startswith(("include.", "includeif.")):
+            keep = False
+        if scope not in ("local", "worktree"):
+            continue
         if key.startswith(HOSTILE_PREFIXES) or key.endswith(HOSTILE_SUFFIXES):
             found.append(f"{scope}: {name}")  # the key, never the value the turn set
-    return found
+    return found, keep
 
 
 def commit_named(workspace: str | Path, name: str, profile: str | Path, mark: str) -> str | None:
