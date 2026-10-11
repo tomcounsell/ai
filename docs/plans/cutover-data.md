@@ -202,7 +202,7 @@ does not install, so collection fails there.
 name = "psyoptimal"
 repo = "https://github.com/yudame/psyoptimal.git"
 kind = "django"
-branch = "prod"
+branch = "main"
 merge_url = "https://github.com/yudame/psyoptimal.git"
 services = ["postgres"]
 setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen"]
@@ -215,12 +215,22 @@ DJANGO_SETTINGS_MODULE = "settings.test"
 ```
 
 Psyoptimal merges land on `main`: it is the repository's default branch and
-the base of nine of its last ten merged pull requests. `prod` is the deploy
-branch the local checkout is on.
+the base of nine of its last ten merged pull requests, so the spec names it;
+`prod` is the deploy branch the local checkout is on.
 The cuttlefish spec follows the same shape: `kind = "django"`,
 `services = ["postgres", "redis"]` (its `pyproject.toml` lists
-`django-redis`), `chats = ["telegram:-1003801797780"]`, suite from the
-`Makefile` test target. Its setup and branch are unconfirmed.
+`django-redis`), `extensions = ["vector"]` (its bookworm migration runs
+`CREATE EXTENSION IF NOT EXISTS vector`, and the task's `app` role is not a
+superuser, so the kernel must make the extension in `template1` first),
+`chats = ["telegram:-1003801797780"]`, suite from the
+`Makefile` test target. Its setup line carries the same `PATH` and
+`SDKROOT` prefix as psyoptimal's, since its psycopg2 build needs `pg_config`
+and the SDK headers. Its suite leaves out `apps/podcast/tests/e2e`, whose
+conftest imports playwright, which the `test` extra does not install; its
+branch is unconfirmed. Neither the
+psyoptimal nor the popoto draft needs `extensions`: psyoptimal's suite runs
+no extension, and popoto's pgvector tests sit in `tests/postgres`, which its
+suite leaves out.
 
 The `machine` value in these drafts is `"Mac"` because that is what the
 Cowboy's setting says today. Gap G3 recommends changing it everywhere

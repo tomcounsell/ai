@@ -410,6 +410,27 @@ Notes per shape:
    classifier change, never a grant. An ungranted instance is a refused
    merge: it flags the action from the diff, and the broker refuses it.
    Its guard is the governance paragraph itself, so it carries no expiry.
+   The question counts steps over how work is done and approved: a step
+   that can stop, send back, or redirect a request, plan, change, commit,
+   merge, send, or an agent's commands, written in code or in instructions
+   a turn follows (a skill, brief, persona, or prompt). Such a step counts
+   in any repository, Valor's own included. The behavior of the software
+   being built, serving its own users (input validation, permission checks,
+   error handling, the messages its users see), is not one of them, and
+   that never covers a step over the work in Valor's own pipeline, kernel,
+   skills, persona, or guards (`docs/plans/c11-governance-precision.md`).
+   The question tells the leg to judge what the added lines add and what
+   removing the removed lines adds, in every hunk: removing a step adds
+   none, and removing an exemption from one adds to it, whatever lines are
+   added in its place. The rest of the hunk is context. Every hunk is
+   asked, one that only removes lines included
+   (`docs/plans/c13-removal-hunks.md`). A refusal added inside a governance
+   step adds to it, and so does calling, registering, or wiring an existing
+   one at a new place, or narrowing or removing an exemption from one. The wording of a
+   message whose sending is already decided is not a step. A lock or
+   transaction that makes a second run of the same work wait, or answers it
+   that one is already running, is correctness code; a step that refuses
+   work on a judgement about the work is not.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the

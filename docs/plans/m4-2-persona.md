@@ -420,7 +420,26 @@ Recorded, not asked; each is reversible.
 
 ## Emulator runs
 
-None yet; they run once 1.5 is merged.
+One row per run, with the setup, re-verifies and findings, is in
+[m4-2-emulator-runs.md](m4-2-emulator-runs.md).
+
+- **No item is worse** after the persona, judged on the one allowed
+  rerun where the first after run was worse (pop-a bare: more rounds;
+  pso-c clarify: hidden 4/5 against 5/5). Those two first runs are 4.2
+  patch findings.
+- **#894.** pso-c bare after, on this task's persona, misses the bar:
+  2 feedback rounds and no question. C15 patches the persona text
+  (`61f4517e...`, 11,141 bytes). With it, after-p1 asks the wider-rule
+  question in its first turn, takes 0 rounds and passes hidden 5/5,
+  but the judge names Tom's item 3 (sector-less teams count as
+  Sports). Its one rerun, after-p2, takes 1 round and passes hidden 5/5,
+  but the judge names item 6 (the main button does not deep-link to
+  the first missing tab). Both miss the bar as written, so the task
+  goes back to patch: C16, persona text. before-p1 takes 2 rounds,
+  hidden 3/5.
+- **#894 met on C16.** after-p3 (`a3ea95d9...`) takes 0 rounds, and no
+  divergence names a missed key item. Hidden 4/5: checkbox placement,
+  which the key leaves open. It is not worse than before-p1.
 
 ## Critique round 1 (of 1): revise
 
@@ -574,3 +593,7 @@ Rollout:
 3. No schema change and no restart.
 4. The next real turn: the 3c live turn on the merged head, three turns (critique, build, build), each `turn.started` with `persona_sha256` `f64edfd3fe0e3c0bdd9b29c91d2bd36fee21aee53143246f5031acd204851392` and `persona_bytes` 10,390; `core.persona.digest(core.persona.render(settings.persona_dir))` in the checkout gives the same digest and size. Equal.
 5. Emulator evidence: waits on 1.5's merge, as the plan says; the lead runs it then and records it under "Emulator runs".
+
+## Patch round 2: #894's bar (C15)
+
+The pso-c bare after run (d76dfb8bcd02) took two feedback rounds and asked nothing, against a bar of one. Diagnosis, fix, and the rerun it is measured by are in `docs/plans/c15-persona-894.md`: the persona names an example's wider reading, sends the question to Tom in the first turn that can ask, and says reversibility and naming the reading in the delivery are no reason to build first. The pso-c bare pair is rerun with that persona in the after arm.

@@ -427,6 +427,186 @@ def test_the_hunk_input_carries_its_enclosing_function_but_the_id_does_not(dsn, 
     assert h.id == plain.id()
 
 
+TAP = (
+    "def needs_tap(path):\n"
+    "    path = path.strip()\n"
+    "    if is_docs(path):\n"
+    "        return False\n"
+    "    return require_tap(path)\n"
+)
+MERGE = "def merge(change):\n    check_tests(change)\n    require_review(change)\n    return push(change)\n"
+
+
+def removals(ws) -> tuple[str, str]:
+    """A base holding a tap with a docs exemption and a merge with a review
+    step, and a commit that only removes lines: the exemption, and the
+    review step."""
+    commit(ws, "core/tap.py", TAP, "a tap with a docs exemption")
+    commit(ws, "core/merge.py", MERGE, "a merge with a review step")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(
+        ws, "core/tap.py", TAP.replace("    if is_docs(path):\n        return False\n", ""), "no exemption"
+    )
+    commit(ws, "core/merge.py", MERGE.replace("    require_review(change)\n", ""), "no review")
+    return older, git(ws, "rev-parse", "HEAD")
+
+
+def test_a_hunk_that_only_removes_lines_is_judged_on_its_removed_lines(tmp_path):
+    """Removing an exemption from an approval step adds instances of it, so
+    a hunk with no added lines is judged too; its id and anchor are
+    `git.hunk_at`'s (docs/plans/c13-removal-hunks.md)."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    older, newer = removals(ws)
+    by_path = {h.path: h for h in judgement_sites.diff_hunks(ws, older, newer)}
+    tap = by_path["core/tap.py"]
+    assert "-    if is_docs(path):" in tap.text and "-        return False" in tap.text
+    assert "-    require_review(change)" in by_path["core/merge.py"].text
+    (plain,) = git_.hunks(ws, older, newer, "core/tap.py")
+    assert plain.added == () and plain.removed == ("    if is_docs(path):", "        return False")
+    assert tap.id == plain.id() == git_.hunk_at(ws, older, newer, "core/tap.py", tap.start).id()
+
+
+def test_two_removals_in_one_function_context_get_two_ids(tmp_path):
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    body = "def steps(change):\n" + "".join(f"    step_{i}(change)\n" for i in range(30))
+    commit(ws, "core/steps.py", body, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(
+        ws,
+        "core/steps.py",
+        body.replace("    step_5(change)\n", "").replace("    step_25(change)\n", ""),
+        "two",
+    )
+    first, second = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/steps.py")
+    assert first.context == second.context == "def steps(change):"
+    assert first.added == second.added == () and first.id() != second.id()
+
+
+def test_a_file_replaced_by_a_symlink_is_two_hunks_with_no_header_lines(tmp_path):
+    """With `--no-renames` a typechange is two diff sections for one path;
+    each section's `---` and `+++` headers are headers, not hunk lines."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "f", "a\nb\n", "a file")
+    older = git(ws, "rev-parse", "HEAD")
+    (ws / "f").unlink()
+    (ws / "f").symlink_to("target")
+    git(ws, "add", "f")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "a symlink")
+    gone, link = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "f")
+    assert (gone.added, gone.removed) == ((), ("a", "b"))
+    assert (link.added, link.removed) == (("target",), ())
+    assert gone.id() != link.id()
+    texts = [h.text for h in judgement_sites.diff_hunks(ws, older, git(ws, "rev-parse", "HEAD"))]
+    assert len(texts) == 2 and not any("/dev/null" in t or "+++ b/f" in t for t in texts)
+
+
+def test_a_deleted_file_is_one_removal_only_hunk_read_at_line_0(tmp_path):
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/merge.py", MERGE, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    git(ws, "rm", "-q", "core/merge.py")
+    git(ws, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "deleted")
+    newer = git(ws, "rev-parse", "HEAD")
+    (h,) = judgement_sites.diff_hunks(ws, older, newer)
+    assert h.start == 0 and "-    require_review(change)" in h.text
+    assert git_.hunk_at(ws, older, newer, "core/merge.py", 0).id() == h.id
+
+
+def test_lines_whose_text_starts_with_two_signs_are_lines_not_file_headers(tmp_path):
+    """Git renders an added `++i` as `+++i` and a removed `--flag` as
+    `---flag`; only the lines before the first `@@` are file headers."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "notes/signs.txt", "a\n--flag\nb\n", "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(ws, "notes/signs.txt", "a\n++i\nb\n", "signs")
+    (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "notes/signs.txt")
+    assert h.added == ("++i",) and h.removed == ("--flag",)
+
+
+def test_a_hunk_that_only_adds_lines_keeps_its_id_over_path_context_and_added_lines(tmp_path):
+    """The id an instance and its grant are recorded under does not move
+    for a hunk that only adds lines (docs/sdlc-state-machine.md)."""
+    import hashlib
+
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/merge.py", MERGE, "base")
+    older = git(ws, "rev-parse", "HEAD")
+    commit(ws, "core/merge.py", MERGE.replace("    return", "    log(change)\n    return"), "added")
+    (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/merge.py")
+    assert h.added and h.removed == ()
+    body = json.dumps([h.path, h.context, list(h.added)], separators=(",", ":"))
+    assert h.id() == hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def test_a_mixed_hunk_id_digests_its_removed_lines(tmp_path):
+    """Two hunks that add the same line in the same context but remove
+    different lines get distinct ids, so a grant on one does not cover the
+    other (docs/plans/c13-removal-hunks.md)."""
+    from core import git as git_
+
+    body = "def steps(change):\n" + "".join(f"    step_{i}(change)\n" for i in range(30))
+
+    def mixed(name: str, removed: str) -> git_.Hunk:
+        ws, _ = scripted.workspace(tmp_path / name)
+        commit(ws, "core/steps.py", body, "base")
+        older = git(ws, "rev-parse", "HEAD")
+        commit(ws, "core/steps.py", body.replace(removed, "    # every step runs\n"), "mixed")
+        (h,) = git_.hunks(ws, older, git(ws, "rev-parse", "HEAD"), "core/steps.py")
+        return h
+
+    exemption = mixed("a", "    step_20(change)\n")
+    other = mixed("b", "    step_21(change)\n")
+    assert exemption.added == other.added and exemption.context == other.context == "def steps(change):"
+    assert exemption.removed != other.removed and exemption.id() != other.id()
+
+
+@pytest.mark.macos
+def test_a_removal_only_hunk_is_asked_and_its_caution_is_an_instance_to_grant(dsn, tmp_path):
+    """The removed exemption answered caution is an instance at its hunk,
+    so the review is `governance_refused` until Tom grants it; the removed
+    review step answered proceed is no instance."""
+    from core import git as git_
+
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/tap.py", TAP, "a tap with a docs exemption")
+    commit(ws, "core/merge.py", MERGE, "a merge with a review step")
+    sid = UP.script(default={"by_path": {"core/tap.py": YES}, "probs": NO})
+
+    async def go():
+        task = await governance_candidate(
+            dsn,
+            ws,
+            {
+                "core/tap.py": TAP.replace("    if is_docs(path):\n        return False\n", ""),
+                "core/merge.py": MERGE.replace("    require_review(change)\n", ""),
+            },
+        )
+        older, newer = await candidate_range(dsn, task)
+        ids = await judgement_sites.governance(UP.port(script=sid), dsn, task, older, newer)
+        await review(dsn, task, "pass", ids)
+        return older, newer, (await rows(dsn, task, "review.decided"))[0]["payload"]
+
+    older, newer, decided = run(go())
+    assert requests_for(sid, "core/tap.py") >= 1 and requests_for(sid, "core/merge.py") >= 1
+    tap = git_.hunk_at(ws, older, newer, "core/tap.py", 1)
+    assert tap.added == ()
+    gov = decided["governance"]
+    assert decided["verdict"] == "governance_refused"
+    assert [(i["id"], i["path"]) for i in gov["instances"]] == [(tap.id(), "core/tap.py")]
+
+
 @pytest.mark.macos
 def test_an_abstain_goes_to_the_reviewer_whose_yes_is_an_instance_and_a_reviewer_adds_caution(dsn, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
@@ -631,7 +811,63 @@ def test_the_governance_question_excludes_correctness_code_and_descriptive_prose
     (q,) = GOVERNANCE.questions
     for words in ("makes the work itself correct", "only describes what code does"):
         assert words in q.text and words in q.labels["false"]
-    assert "judges work, a request, or an action" in q.text
+
+
+def test_the_governance_question_counts_steps_over_the_work_and_not_the_products_own_behavior():
+    """The paragraph governs steps over how work is done and approved; the
+    behavior of the software being built, serving its own users, is none of
+    them, even where it refuses (docs/plans/c11-governance-precision.md)."""
+    (q,) = GOVERNANCE.questions
+    for words in ("over how work is done and approved", "serving its own users"):
+        assert words in q.text and words in q.labels["true" if "approved" in words else "false"]
+    for step in (
+        "a pre-commit or CI gate",
+        "a hook",
+        "a review or approval step",
+        "a merge check",
+        "a guard row",
+    ):
+        assert step in q.text
+    for behavior in ("input validation", "permission and visibility checks", "error handling"):
+        assert behavior in q.text
+    assert "Judge what the added lines add" in q.text
+
+
+def test_the_governance_question_judges_the_removed_lines_of_every_hunk():
+    """Every hunk's removed lines are judged, beside its added lines:
+    removing a step adds none, and removing an exemption from one adds to
+    it whatever replaces it (docs/plans/c13-removal-hunks.md)."""
+    (q,) = GOVERNANCE.questions
+    for words in (
+        "Judge what the added lines add and what removing the removed lines adds:",
+        (
+            "removing such a step adds none, and removing an exemption from one adds to it, "
+            "whatever lines are added in its place"
+        ),
+    ):
+        assert words in q.text
+
+
+def test_the_governance_question_counts_wiring_instructions_and_the_agents_own_steps():
+    """Calling or wiring an existing step, or narrowing an exemption from
+    one, adds one; instruction prose can add one; the product exclusion
+    never covers the agent's own steps; and a lock against a second run of
+    the same work is correctness code, a refusal on a judgement about the
+    work is not (docs/plans/c11-governance-precision.md, patch round 4)."""
+    (q,) = GOVERNANCE.questions
+    for words in (
+        (
+            "calling, registering, or wiring an existing such step at a new place, or narrowing or "
+            "removing an exemption"
+        ),
+        "in instructions a turn follows (a skill, brief, persona, or prompt)",
+        "in any repository, the agent's own (Valor's) included",
+        "never covers a step over the work in the agent's own pipeline, kernel, skills, persona, or guards",
+        "a message whose sending is already decided",
+        "makes a second run of the same work wait, or answers it that one is already running",
+        "a step that refuses work on a judgement about the work is not",
+    ):
+        assert words in q.text
 
 
 @pytest.mark.macos

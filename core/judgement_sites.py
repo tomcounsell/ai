@@ -236,31 +236,35 @@ class DiffHunk:
 def _hunk_texts(diff: str) -> list[tuple[int, int, str]]:
     """Each hunk of one path's diff: its new start, new length, and lines."""
     out: list[list] = []
+    inside = False  # past a section's headers, as `git.hunks` reads them
     for line in diff.splitlines():
         m = HUNK_HEADER.match(line)
-        if m:
+        if line.startswith("diff --git "):
+            inside = False
+        elif m:
+            inside = True
             out.append([int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1), [line]])
-        elif out:
+        elif inside:
             out[-1][2].append(line)
     return [(s, n, "\n".join(lines)) for s, n, lines in out]
 
 
 def diff_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
-    """Every hunk with added lines between two commits, once per hunk id.
-    The hunks and their ids are `git.hunks`'s (three lines of context), the
-    ones `git.hunk_at` and the instance ids read. The text the judgement
-    reads is the `git diff -W` hunk holding it, so the enclosing function
-    comes with it: an unchanged hunk in a changed function keeps its id
-    while its input changes."""
+    """Every hunk between two commits, one that only removes lines
+    included, once per hunk id. The hunks and their ids are `git.hunks`'s
+    (three lines of context), the ones `git.hunk_at` and the instance ids
+    read. The text the judgement reads is the `git diff -W` hunk holding
+    it, so the enclosing function comes with it: an unchanged hunk in a
+    changed function keeps its id while its input changes."""
     seen: dict[str, DiffHunk] = {}
     for path in git.diff_paths(workspace, older, newer):
         hunks = git.hunks(workspace, older, newer, path)
-        if not any(h.added for h in hunks):
+        if not hunks:
             continue
         plain = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, older, newer, "--", path))
         wide = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, "-W", older, newer, "--", path))
         for h, (_, _, own) in zip(hunks, plain, strict=False):
-            if not h.added or h.id() in seen:
+            if h.id() in seen:
                 continue
             text = next((t for s, n, t in wide if s <= h.start and h.start + h.length <= s + max(n, 1)), own)
             if len(text.encode()) > FUNCTION_HUNK_MAX_BYTES:
@@ -292,15 +296,14 @@ def _governance_inputs(h: DiffHunk, paths: list[str]) -> dict[str, str]:
 
 
 async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, newer: str) -> list[str]:
-    """One governance judgement per hunk with added lines between `older`
-    and `newer` (review: the base to the candidate; docs: the candidate to
-    the docs head), all at once, writing through one shared connection. A
-    hunk with an answered row for the same id and the same input under the
-    same question (its `task_sha256`) reuses it; a hunk whose reruns under
-    that question are spent reuses its last failure. A reworded question is
-    asked fresh. Every hunk
-    finishes, and its calls are charged, before a stop or other failure is
-    raised. Returns the ids, one per hunk."""
+    """One governance judgement per hunk between `older` and `newer`
+    (review: the base to the candidate; docs: the candidate to the docs
+    head), all at once, writing through one shared connection. A hunk with
+    an answered row for the same id and the same input under the same
+    question (its `task_sha256`) reuses it; a hunk whose reruns under that
+    question are spent reuses its last failure. A reworded question is asked
+    fresh. Every hunk finishes, and its calls are charged, before a stop or
+    other failure is raised. Returns the ids, one per hunk."""
 
     async def one(h: DiffHunk) -> str:
         inputs = _governance_inputs(h, paths)

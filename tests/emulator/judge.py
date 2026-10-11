@@ -167,6 +167,8 @@ def verify(result: dict) -> list[dict]:
                 "-f",
                 str(profile),
                 "/bin/bash",
+                "-o",
+                "pipefail",
                 "-c",
                 command,
             ]

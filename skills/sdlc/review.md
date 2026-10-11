@@ -17,9 +17,9 @@ add a check, gate, hook, round, or review step?
 - `verify.json`, the kernel's own run of the suite and the lint at base
   and candidate, and your checkout's setup exit;
 - `governance.json`, each hunk the kernel judged to add governance (id,
-  path, lines, the added lines, granted or not), and each `undecided` hunk
-  the kernel's judgement could not answer with confidence (id, path, lines,
-  the added lines, why);
+  path, lines, the added and removed lines, granted or not), and each
+  `undecided` hunk the kernel's judgement could not answer with confidence
+  (id, path, lines, the added and removed lines, why);
 - `effects.md`, the task's requested, performed, and refused effects.
 
 **Exit evidence.** Your final message ends with the verdict object, bare
@@ -32,7 +32,8 @@ rewritten by the candidate's code to the end of your turn. The object:
   paying now);
 - `governance`: each instance you find that the kernel did not, as
   `{"path", "line", "summary", "incident", "mission_item"}`, with a line
-  inside an added hunk;
+  inside a changed hunk (a hunk that only removes lines is read at its
+  context lines, a deleted file at line 0);
 - `notes`: keyed by an id from `governance.json`, `{"summary",
   "incident", "mission_item"}`, what the diff gives for that instance;
 - `undecided`: keyed by the id of every undecided hunk in

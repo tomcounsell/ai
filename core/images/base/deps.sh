@@ -1,13 +1,15 @@
 #!/bin/bash
 # The dependency build (core/images/deps/Containerfile), as root, with the
 # network open. Runs the spec's installing setup commands as `valor` in
-# /work, which holds only the project's manifests: each `uv sync` with
-# --no-install-project, each `npm ci` or `npm install` as written. Every
-# other setup command needs the source and runs offline in the VM
-# (run.sh). For a Python project with a build system, its build
-# requirements and what its backend adds for an editable build are fetched
-# into the uv cache for the Python of the project's environment, so the
-# offline sync can build the project itself.
+# /work, which holds only the project's manifests: the spec's `install`
+# list, which the kernel writes (`container.install_commands`): each
+# `uv sync`, `npm ci` or `npm install` setup command, leading assignments
+# kept, `uv sync` given --no-install-project. Every other setup command
+# needs the source and runs offline in the VM (run.sh). For a Python
+# project with a build system, its build requirements and what its backend
+# adds for an editable build are fetched into the uv cache for the Python
+# of the project's environment, so the offline sync can build the project
+# itself.
 #
 # Every command gets the environment run.sh gives the setup (the spec's
 # `env`, which holds PATH and the cache paths), less the two variables that
@@ -33,13 +35,9 @@ as_valor() {
 }
 
 cd /work
-mapfile -d '' commands < <(jq -j '.setup[]? | "\(.)\u0000"' "$spec")
+mapfile -d '' commands < <(jq -j '.install[]? | "\(.)\u0000"' "$spec")
 for command in "${commands[@]}"; do
-  case "$command" in
-    "uv sync"*) as_valor "uv sync --no-install-project${command#uv sync}" ;;
-    "npm ci"* | "npm install"*) as_valor "$command" ;;
-    *) echo "runs in the VM: $command" ;;
-  esac
+  as_valor "$command"
 done
 
 if [ -f pyproject.toml ] && [ "$(jq -r '.kind' "$spec")" != "node" ]; then

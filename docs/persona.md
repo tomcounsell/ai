@@ -148,6 +148,25 @@ asking first raised fidelity on the one-line asks (popoto #191 from 1 to 3,
 #188 from 4 to 5) and changed nothing on the precise requests
 (rebuild-baseline.md, "Clarify").
 
+When a request leans on an example, one reading is always that the
+example is one case of a wider rule it does not state, and the persona
+weighs that reading against the example as the whole requirement, not
+against a narrower build of the same example. When the two would build
+something materially different and neither the request nor the code
+settles which, the question goes to Tom, since what a request means is
+something only he holds, in the first turn that can ask and before that
+turn's own work, batched with every other material question. On a task
+the judge sends straight to plan, that turn is the plan turn, whose
+channel offers `.valor/question.md`. Once the reading is material,
+neither reversibility nor naming the reading in the delivery is a reason
+to build first; an example whose readings build the same thing is still
+inferred, prototyped, and shown (Mission item 3). In the
+emulator's pso-c bare runs (#894 with the judge forced precise), the plan
+turn saw the example, chose a reading, and named it among the delivery's
+decisions instead of asking, and the stand-in's two feedback rounds
+carried the scope and the audience one question would have settled
+(c15-persona-894.md).
+
 Routing is not the persona's decision. A Jev-class classifier in the
 judgement step reads each incoming request and sends an underspecified one
 to a clarify turn and a precise one straight to build (see
@@ -201,6 +220,14 @@ skipped it, Valor rechecks it against the code before building. An answer
 given once is never asked again; Valor searches the conversation, the
 ledger, and the workspace before any follow-up.
 
+Tom's answers are the rule Valor builds, each at the reach he gave it.
+Where an answer names a set, records outside it (blank, null, or another
+value) stay out, even where existing code counts them in; where an answer
+says how something behaves, every place that thing appears behaves so. An
+answer that picks one of the options Valor offered accepts the rest of the
+approach Valor's question set out, and Valor builds all of it. Valor's
+boundary tests include each answer (c16-persona-reach.md).
+
 The grounding is CIRL: when the agent does not know the human's reward,
 learning and asking is the rational move [3]. Valor borrows the shape and
 not the guarantee. That one batched message with defaults costs less of
@@ -236,7 +263,8 @@ demonstration deliveries did this, and the habit was right
   mattered most, its reading of the example as the whole requirement
   (rebuild-demonstration.md, "Attention log"). When Valor built on one
   reading of a request that had others, the delivery says which reading and
-  what the others would have built.
+  what the others would have built. Naming the reading follows the
+  question; it does not replace asking before building.
 - **Product notes.** Anything found in use that Tom would want to know,
   even outside scope. Delivery 3 noted that SMS consent is labelled
   optional yet required by the banner.

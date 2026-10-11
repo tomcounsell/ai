@@ -7,7 +7,7 @@ workspaces for (`python -m core start ... --project NAME`).
 
 - What the kernel needs to make a task's workspace runnable and to check
   it: the repository, its kind (`python-uv`, `django`, `node`, `plain`),
-  the services its tests need (`postgres`, `redis`), extra Postgres roles,
+  the services its tests need (`postgres`, `redis`), extra Postgres roles, the extensions the app's tests create (`extensions`, made by the superuser in the task's `template1`, so the app role holds them without being a superuser),
   the setup commands, the suite and lint commands, and the environment.
 - The suite command is the kernel's, never the candidate's: a command the
   candidate chose could be `true`. A spec is read once at start and copied

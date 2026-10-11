@@ -444,6 +444,10 @@ checkout and its interpreter. A launchd job needs macOS's permission to
 read and write removable volumes, which Terminal already has; if the
 kicked dump fails with "Operation not permitted", grant it to that
 interpreter in System Settings, Privacy and Security, then kick it again.
+The grant follows the interpreter's binary, so an upgrade of
+`python@3.14` voids it and the job then hangs opening the backup
+directory. `brew pin python@3.14` keeps the nightly brew job from
+upgrading it; after a deliberate upgrade, grant and kick again.
 `launchctl bootout gui/$(id -u)/com.valor.backup` removes the job.
 
 ## Open questions for Tom
@@ -459,4 +463,4 @@ Each estimate above is a gap until measured on the Air:
 - A connected Telegram bridge after a week of traffic.
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
-- A Django suite's peak in the VM with every test reaching its database (the measured suite's vector tests failed at setup because the VM's base image has no pgvector).
+- A Django suite's peak in the VM with every test reaching its database (the base image holds pgvector, and a project's `extensions` make it in the task's Postgres).

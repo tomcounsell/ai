@@ -45,6 +45,7 @@ run starts the stage again.
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -511,8 +512,8 @@ def _docs_fields(data: dict[str, Any]) -> tuple[str, list, str | None]:
     for x in findings:
         if isinstance(x, dict) and not isinstance(x.get("text"), str):
             raise Malformed("a finding has no text")
-    if head is not None and not (isinstance(head, str) and verdicts.re_sha(head)):
-        raise Malformed("the head is not a full commit id")
+    if head is not None and not (isinstance(head, str) and re.fullmatch(r"[0-9a-f]{4,40}", head)):
+        raise Malformed("the head is not a commit id")
     return verdict, findings, head
 
 
@@ -709,7 +710,7 @@ async def _docs_turn(
         raw = f"refs/valor/docs-raw/{turn_id}"
         try:
             # In `git.threaded`, so a stop kills the fetch.
-            await git.threaded(
+            head = await git.threaded(
                 workspace.fetch_into_mirror, b.mirror, checkout, head, raw, harness["sandbox_profile"],
                 f"docs-fetch-{ctx.task_id}",
             )  # fmt: skip
@@ -782,8 +783,9 @@ def governance_input(
     granted: set[str],
 ) -> dict[str, Any]:  # fmt: skip
     """`governance.json`: each kernel instance (id, path, start and end line,
-    the hunk's added lines, granted or not), and each undecided hunk (id,
-    path, lines, added lines, why), which the reviewer answers."""
+    the hunk's added and removed lines, granted or not), and each undecided
+    hunk (id, path, lines, added and removed lines, why), which the reviewer
+    answers."""
     hunks: dict[str, git.Hunk] = {}
     for path in {i["path"] for i in instances} | {h.path for h, _ in judged["undecided"]}:
         for h in git.hunks(mirror, base, candidate, path):
@@ -795,6 +797,7 @@ def governance_input(
             "start": h.start if h else None,
             "end": h.start + max(h.length, 1) - 1 if h else None,
             "added": list(h.added) if h else [],
+            "removed": list(h.removed) if h else [],
         }
 
     return {
@@ -952,7 +955,7 @@ def normalize(
 ) -> tuple[list[verdicts.InstanceSpec], dict[str, dict[str, Any]], list]:
     """The reviewer's instances and notes as the record takes them, so
     nothing the reviewer writes can refuse it: an instance whose path is not
-    exactly one of the diff's paths, or with no added line at its line, and
+    exactly one of the diff's paths, or with no changed hunk at its line, and
     a note for an id not in `governance.json`, each become a finding of
     kind `governance`. Returns (instance specs, notes, findings)."""
     paths = set(git.diff_paths(mirror, base, candidate))
@@ -969,7 +972,7 @@ def normalize(
                 {
                     "kind": "governance",
                     "text": f"the reviewer named governance at {_quoted(spec.path)} line {spec.line}, "
-                    f"where the diff adds no line: {spec.summary or 'no summary'}",
+                    f"where the diff changes no hunk: {spec.summary or 'no summary'}",
                 }
             )
     notes: dict[str, dict[str, Any]] = {}

@@ -436,26 +436,28 @@ since this Mac's file system ignores case (`machine.is_doc_path`). No plan
 widens this, so no code rides in an unreviewed docs commit.
 
 **Exit evidence.** The session writes a verdict, its findings, and its
-head. The kernel fetches that head from the session's clone into the mirror
-under the check profile and keeps the longest prefix of commits on the
-candidate that touch doc paths alone, with regular file modes (`100644`,
-`100755`, read from `git diff-tree -r`); a merge, a commit off the
-candidate, or a tree holding `.valor` keeps nothing. It records
-`docs.kept`, so a rerun asks only governance again, then judges governance
-over the kept diff, less prose under `docs/` and READMEs (a Markdown file
-elsewhere can add a rule), and records `docs.decided`: the
-candidate, the kept head, the dropped commits and their paths, the
-governance answer, and the verdict it computes. This cut is the one place
-docs commits are read; the verdict and the merge take its head as kept. No
-reviewer reads the docs diff, so a hunk the judgement leaves undecided is
-no instance there. `updated` or `no_change` passes, at the kept head: a
-dropped commit is a `dropped` finding, noted on the delivery, and the merge
-goes on at what was kept. `changes` means a doc states something the code
-should still honor and the candidate breaks it, a doc cannot be made true
-without a code change, or the candidate's tree holds `.valor`
-(no clone or session; the kernel records it, leg `kernel`). Docs commits
-belong to their candidate: after a send-back they are not merged, and the
-next docs session reads them as `previous-docs.patch`, keeping what holds.
+head: a commit id or an abbreviation of one. The kernel resolves an
+abbreviation in the clone, fetches the commit into the mirror under the
+check profile, and keeps the longest prefix of commits on the candidate
+that touch doc paths alone, with regular file modes (`100644`, `100755`,
+read from `git diff-tree -r`); a merge, a commit off the candidate, a tree
+holding `.valor`, or a head naming no single commit keeps nothing. It
+records `docs.kept` with the full id, so a rerun asks only governance
+again, then judges governance over the kept diff, less prose under `docs/`
+and READMEs (a Markdown file elsewhere can add a rule), and records
+`docs.decided`: the candidate, the kept head, the dropped commits and their
+paths, the governance answer, and the verdict it computes. This cut is the
+one place docs commits are read; the verdict and the merge take its head as
+kept. No reviewer reads the docs diff, so a hunk the judgement leaves
+undecided is no instance there. `updated` or `no_change` passes, at the
+kept head: a dropped commit is a `dropped` finding, noted on the delivery,
+and the merge goes on at what was kept. `changes` means a doc states
+something the code should still honor and the candidate breaks it, a doc
+cannot be made true without a code change, or the candidate's tree holds
+`.valor` (no clone or session; the kernel records it, leg `kernel`). Docs
+commits belong to their candidate: after a send-back they are not merged,
+and the next docs session reads them as `previous-docs.patch`, keeping what
+holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 
@@ -573,11 +575,12 @@ merge, and its `push_branch` cannot target the target branch.
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the
 candidate's real diff and refuses one it does not find. An instance's id
-digests its path, the hunk header's function context, and its added lines,
-without line numbers, so the same hunk on a rerun or a later candidate
-keeps its id and its grant; a changed, moved, or split hunk needs a new
-tap, and identical added lines in one function context of one file share
-an id. After the merge the task is `merged`; a defect found in use comes back as
+digests its path, the hunk header's function context, its added lines,
+and its removed lines when it has any, without line numbers, so the same
+hunk on a rerun or a later candidate keeps its id and its grant; a hunk
+that removes other lines, or a changed, moved, or split hunk, needs a new
+tap, and identical hunks (the same added and removed lines) in one
+function context of one file share an id. After the merge the task is `merged`; a defect found in use comes back as
 `feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects").
 After a merge, `python -m core status` reads what came after it
 (`core/outcomes.py`): the feedback given after it and before the next

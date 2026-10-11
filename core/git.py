@@ -425,6 +425,20 @@ def hostile(
     return found
 
 
+def commit_named(workspace: str | Path, name: str, profile: str | Path, mark: str) -> str | None:
+    """The full id of the one commit `name` (a commit id or an abbreviation
+    of one, hex only) names in a workspace a turn owns, or None. The read
+    runs under the sandbox `profile`, marked `mark`; the caller has read the
+    workspace's config first (`hostile`)."""
+    if not re.fullmatch(r"[0-9a-f]{4,40}", name):
+        return None
+    prefix = [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
+              "-f", str(profile)]  # fmt: skip
+    got = _git(workspace, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", prefix=prefix)
+    found = got.stdout.strip()
+    return found if got.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", found) else None
+
+
 def run(
     workspace: str | Path,
     *args: str,
@@ -732,12 +746,16 @@ class Hunk:
     length: int
     context: str
     added: tuple[str, ...]
+    removed: tuple[str, ...] = ()
 
     def id(self) -> str:
-        """The instance id: the path, the hunk header's function context, and
-        the added lines, without line numbers, so the same hunk on a later
-        candidate keeps its id and a changed one gets a new id."""
-        body = json.dumps([self.path, self.context, list(self.added)], separators=(",", ":"))
+        """The instance id: the path, the hunk header's function context, the
+        added lines, and the removed lines when there are any, without line
+        numbers, so the same hunk on a later candidate keeps its id and a
+        changed one gets a new id. A hunk that only adds lines digests
+        [path, context, added]."""
+        lines = [list(self.added), list(self.removed)] if self.removed else [list(self.added)]
+        body = json.dumps([self.path, self.context, *lines], separators=(",", ":"))
         return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
@@ -756,22 +774,36 @@ def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk
     current = None
     for line in text.splitlines():
         m = HUNK.match(line)
-        if m:
+        if line.startswith("diff --git "):
+            # A typechange (a file to a symlink) is two sections for one
+            # path; each opens with its own `---` and `+++` headers.
+            current = None
+        elif m:
             current = {
                 "start": int(m.group(1)),
                 "length": int(m.group(2) if m.group(2) is not None else 1),
                 "context": m.group(3).strip(),
                 "added": [],
+                "removed": [],
             }
             found.append(current)  # type: ignore[arg-type]
-        elif current is not None and line.startswith("+") and not line.startswith("+++"):
+        # A section's `---` and `+++` headers come before its first `@@`, so
+        # a line inside a hunk is a line, whatever its text starts with.
+        elif current is not None and line.startswith("+"):
             current["added"].append(line[1:])
-    return [Hunk(path, h["start"], h["length"], h["context"], tuple(h["added"])) for h in found]  # type: ignore[index]
+        elif current is not None and line.startswith("-"):
+            current["removed"].append(line[1:])
+    return [
+        Hunk(path, h["start"], h["length"], h["context"], tuple(h["added"]), tuple(h["removed"]))  # type: ignore[index]
+        for h in found
+    ]
 
 
 def hunk_at(workspace: str | Path, older: str, newer: str, path: str, line: int) -> Hunk | None:
-    """The hunk with added lines whose new range holds `line`."""
+    """The hunk whose new range holds `line`. A hunk that only removes lines
+    has its context lines as its new range, and a deleted or emptied file's
+    one hunk is read at line 0."""
     for h in hunks(workspace, older, newer, path):
-        if h.added and h.start <= line < h.start + max(h.length, 1):
+        if h.start <= line < h.start + max(h.length, 1):
             return h
     return None

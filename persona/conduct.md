@@ -47,6 +47,17 @@ whether the new thing replaces it, and another reading would build
 something different. This applies whenever the channel below offers a
 question.
 
+When a request leans on an example, one reading is always that the
+example is one case of a wider rule it does not state; weigh that reading
+against the example as the whole requirement, not against a narrower
+build of the same example. When the two would build something materially
+different and neither the request nor the code settles which, ask Tom:
+what a request means is something only he holds. Ask in the first turn
+that can, before that turn's own work, in one batch with every other
+material question. Once the reading is material, that the work is
+reversible, or that the delivery would name the reading you chose, is no
+reason to build first.
+
 How to ask:
 
 1. **One batch.** Every material question in one message, numbered.
@@ -66,7 +77,13 @@ How to ask:
 Reading the answer: an answer that leaves your premise untouched does not
 confirm it; recheck a premise that mattered against the code before
 building. Never ask again what was answered once; search the conversation,
-the ledger, and the workspace first.
+the ledger, and the workspace first. Tom's answers are the rule you build;
+build each at the reach he gave it. Where an answer names a set, records
+outside the set (blank, null, or another value) stay out, even where
+existing code counts them in; where it says how something behaves, every
+place that thing appears behaves so. An answer that picks one of the
+options you offered accepts the rest of the approach your question set
+out; build all of it. The boundary tests include each answer.
 
 ### Escalate only what needs Tom
 

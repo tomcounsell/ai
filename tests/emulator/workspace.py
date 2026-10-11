@@ -93,9 +93,10 @@ def build(
     setup: list[str] | None = None,
     suite: str = "true",
     env: dict[str, str] | None = None,
+    extensions: list[str] | None = None,
 ) -> dict:
     """The run's cache and project spec; the kernel provisions the rest at
-    `core start --project`. `kind`, `setup`, `suite`, and `env` come from
+    `core start --project`. `kind`, `setup`, `suite`, `env`, and `extensions` come from
     the item's `project` key; without one the suite is `true`, so a delivery
     says the suite was not run. Returns its replay.json."""
     unknown = set(services) - set(SERVICES)
@@ -116,6 +117,8 @@ def build(
         f"services = {json.dumps(services)}",
         'target_branch = "main"',
     ]
+    if extensions:
+        lines.append(f"extensions = {json.dumps(extensions)}")
     if setup:
         lines.append(f"setup = {json.dumps(list(setup))}")
     if env:

@@ -20,7 +20,8 @@ installed, or denied by the sandbox the suite runs under (the check profile
 denies it). A `container` test shares the machine lock and the runtime with
 every kernel on the machine, as the runtime is one per machine; every other
 test takes the machine lock in a directory of the session's own, never the
-machine's, which the check profile denies too. Every test keeps its image
+machine's, which the check profile denies too, and the runtime reads as
+absent to it. Every test keeps its image
 records in the session's own directory and names its images under
 `valor-test-<label>`, the label being `container.owner` of the session's
 test database, so it never deletes, retags, or records an image a kernel
@@ -89,10 +90,14 @@ container.REPO = f"valor-test-{LABEL}"
 @pytest.fixture(autouse=True)
 def session_machine_lock(request, monkeypatch):
     """Outside a `container` test, the machine lock and the builder's owner
-    file are the session's own."""
+    file are the session's own, and the runtime reads as absent, as under
+    the check profile: the session's lock does not hold the machine's
+    runtime, so the sweep every run starts with never stops it under a
+    kernel's verification."""
     if request.node.get_closest_marker("container") is None:
         monkeypatch.setattr(container, "LOCK", _STATE / "container.lock")
         monkeypatch.setattr(container, "BUILDER_OWNER", _STATE / "builder.owner")
+        monkeypatch.setattr(container, "present", lambda: False)
 
 
 def release_images(label: str) -> None:
