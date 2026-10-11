@@ -156,7 +156,8 @@ def release_images(label: str) -> None:
                     await container.short(stop, "image", "delete", tag)
                     container._record(tag, None, "")
             finally:
-                await container.system_stopped(stop)
+                if container.settings.verify_slots == 1:  # with more, the last slot out stops it
+                    await container.system_stopped(stop)
 
     asyncio.run(go())
 

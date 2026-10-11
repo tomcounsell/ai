@@ -236,7 +236,8 @@ Both serve the constraint "bounded authority, metered spending" by least privile
 [11]. On the Air, one verification runs at a time on the machine (a lock on
 the container runtime, which kernels and `container`-marked tests all take
 before any runtime work), and a review check holds the turn slot while it
-does. Which work runs under which mechanism is
+does. A Mac with the memory for more sets `VALOR_VERIFY_SLOTS` (the lock's
+slots, one by default) to run that many at once. Which work runs under which mechanism is
 [sandbox.md](sandbox.md)'s; this doc only fixes that a
 container costs its workload plus about 0.6 GB and sandbox-exec costs
 nothing. The review's rerun gets a 4 GB limit (`verify_memory_mb`): a

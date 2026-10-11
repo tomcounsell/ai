@@ -33,14 +33,18 @@ file (relative to the checks directory) and tail as the host's do;
 `verify.ran` records their commands, exits, and output files, never the
 text.
 
-One verification at a time on the machine: an `fcntl.flock` on `LOCK`,
-taken before `container system start` and held through the builds, the
-runs, the `verify.ran` append, the prune, and `container system stop`. The
-runtime is resident only while a verification runs. Every container
+One verification at a time on the machine by default: an `fcntl.flock` on
+`LOCK`, taken before `container system start` and held through the builds,
+the runs, the `verify.ran` append, the prune, and `container system stop`.
+The runtime is resident only while a verification runs. `verify_slots`
+above one gives the lock that many slots (`slots`), so that many
+verifications run at once: they take the one builder in turn with the check
+before each build, and `images.json` in turn, and the runtime is stopped by
+the last holder out (`stop_if_free`). Every container
 carries `valor.db` (the first 12 hex of the sha256 of the owning database's
 name) and `valor.task`; the builder, which takes no label, is owned through
 the `BUILDER_OWNER` file. `reap` kills and deletes what a killed kernel of
-the same database left, when the lock is free.
+the same database left, when every slot is free.
 
 Every CLI call writes its output to a file and is waited on by its exit;
 the long ones (a build, a run) are raced against the task's stop, which
@@ -49,6 +53,7 @@ kills the group and then the builder or VM. No step has a time limit.
 
 import asyncio
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -224,7 +229,8 @@ async def start(stop: asyncio.Task) -> float:
     """`container system start`, with the kernel the install fetched, raced
     against the stop; the seconds it took. Raises `Failed` (`kernel`)."""
     started = time.monotonic()
-    code, out = await short(stop, "system", "start", "--disable-kernel-install")
+    async with _shared("system", stop):
+        code, out = await short(stop, "system", "start", "--disable-kernel-install")
     if code != 0:
         raise Failed("kernel", f"the container system did not start: {out.strip()[-300:]}")
     return round(time.monotonic() - started, 1)
@@ -279,36 +285,137 @@ def containers() -> list[dict[str, Any]]:
 # -- the machine lock ----------------------------------------------------------------
 
 
+def slots() -> list[Path]:
+    """The machine lock's slots, `verify_slots` of them: `LOCK`, then
+    `LOCK.1`, `LOCK.2`, ... beside it. One by default, so one verification
+    runs at a time on the machine."""
+    return [LOCK, *(LOCK.with_name(f"{LOCK.name}.{i}") for i in range(1, settings.verify_slots))]
+
+
+def _many() -> bool:
+    return settings.verify_slots > 1
+
+
+def _open(path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+
+
 @contextlib.asynccontextmanager
 async def machine_lock(stop: asyncio.Task):
-    """The machine lock, tried once a second until free or the stop is heard
-    (`_Stopped`, the lock never taken)."""
-    LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    """A slot of the machine lock, each tried once a second until one is
+    free or the stop is heard (`_Stopped`, no slot taken). Yields the
+    slot's path. With more than one slot, its release stops the runtime
+    when every slot is then free (`stop_if_free`)."""
+    held = [_open(p) for p in slots()]
+    taken = False
     try:
         while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
+            for fd, path in zip(held, slots(), strict=True):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    continue
+            else:
                 done, _ = await asyncio.wait({stop}, timeout=1.0)
                 if done:
                     raise checks._Stopped from None
-        yield
+                continue
+            break
+        taken = True
+        yield path
     finally:
-        os.close(fd)
+        for fd in held:
+            os.close(fd)
+        if taken and _many():
+            await asyncio.to_thread(stop_if_free)
 
 
 def try_lock() -> int | None:
     """The machine lock's descriptor if it is free now, else None."""
-    LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    fd = _open(LOCK)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         return None
     return fd
+
+
+def all_free() -> bool:
+    """Whether every slot is free now."""
+    for path in slots():
+        fd = _open(path)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+    return True
+
+
+# With more than one slot, what the slots share is taken in turn, each under a
+# lock file beside `LOCK`: `system` (starting the runtime, and stopping it only
+# when no other slot is held), `builder` (the one builder, held through a
+# build and the check before it), and `records` (`images.json`). A task holds
+# each at most once; a nested take is a no-op.
+_SHARED: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar("_SHARED", default=frozenset())
+
+
+@contextlib.asynccontextmanager
+async def _shared(name: str, stop: asyncio.Task):
+    """The shared lock `name` with more than one slot, tried every 0.2 s until
+    free or the stop is heard (`_Stopped`); with one slot, nothing."""
+    if not _many() or name in _SHARED.get():
+        yield
+        return
+    fd = _open(LOCK.with_name(f"{LOCK.name}.{name}"))
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                done, _ = await asyncio.wait({stop}, timeout=0.2)
+                if done:
+                    raise checks._Stopped from None
+        token = _SHARED.set(_SHARED.get() | {name})
+        try:
+            yield
+        finally:
+            _SHARED.reset(token)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _shared_now(name: str):
+    """`_shared` waited on in this thread, never raced; for the short steps
+    a stop runs."""
+    if not _many() or name in _SHARED.get():
+        yield
+        return
+    fd = _open(LOCK.with_name(f"{LOCK.name}.{name}"))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        token = _SHARED.set(_SHARED.get() | {name})
+        try:
+            yield
+        finally:
+            _SHARED.reset(token)
+    finally:
+        os.close(fd)
+
+
+def stop_if_free() -> None:
+    """With more than one slot, run after a slot is released: `stop_system`
+    when every slot is free, so the last holder out stops the runtime and no
+    holder stops it under another's VM."""
+    with _shared_now("system"):
+        if all_free():
+            stop_system()
 
 
 # -- images ---------------------------------------------------------------------------
@@ -372,14 +479,15 @@ def _images() -> dict[str, dict[str, str]]:
 
 
 def _record(tag: str, digest: str | None, db_label: str) -> None:
-    images = _images()
-    if digest is None:
-        images.pop(tag, None)
-    else:
-        images[tag] = {"digest": digest, "db": db_label}
-    tmp = IMAGES.with_suffix(".tmp")
-    tmp.write_text(json.dumps(images, indent=1, sort_keys=True))
-    tmp.replace(IMAGES)
+    with _shared_now("records"):
+        images = _images()
+        if digest is None:
+            images.pop(tag, None)
+        else:
+            images[tag] = {"digest": digest, "db": db_label}
+        tmp = IMAGES.with_suffix(".tmp")
+        tmp.write_text(json.dumps(images, indent=1, sort_keys=True))
+        tmp.replace(IMAGES)
 
 
 async def inspect(tag: str, stop: asyncio.Task) -> str | None:
@@ -416,42 +524,58 @@ async def checked(tag: str, stop: asyncio.Task) -> str | None:
     return None
 
 
+async def _as_recorded(tag: str, stop: asyncio.Task) -> str | None:
+    """The recorded digest of `tag` when the runtime holds that digest, else
+    None, changing nothing: with more slots, what a holder reads before
+    waiting on the builder, which another holder may be using."""
+    recorded = (await asyncio.to_thread(_images)).get(tag, {}).get("digest")
+    if recorded is not None and await inspect(tag, stop) == recorded:
+        return recorded
+    return None
+
+
 async def build(tag: str, context: Path, out: Path, stop: asyncio.Task, db_label: str,
                 *, file: Path | None = None, build_args: dict[str, str] | None = None) -> str | None:  # fmt: skip
     """One image built in a fresh builder with no cache, labelled with the
     owning database, its digest recorded. The builder is deleted before and
     after. Returns the digest, or None when the build failed."""
-    await builder_deleted(stop)
-    BUILDER_OWNER.write_text(db_label)
-    args = ["build", "--no-cache", "-t", tag, "-l", f"valor.db={db_label}"]
-    for k, v in (build_args or {}).items():
-        args += ["--build-arg", f"{k}={v}"]
-    if file is not None:
-        args += ["-f", str(file)]
-    try:
-        code = await _race([*args, str(context)], out, stop, delete_builder)
-    finally:
-        if stop.done():
-            await asyncio.to_thread(delete_builder)
-        else:
-            await builder_deleted(stop)
-    if code != 0:
-        return None
-    digest = await inspect(tag, stop)
-    if digest is not None:
-        await asyncio.to_thread(_record, tag, digest, db_label)
-    return digest
+    async with _shared("builder", stop):
+        await builder_deleted(stop)
+        BUILDER_OWNER.write_text(db_label)
+        args = ["build", "--no-cache", "-t", tag, "-l", f"valor.db={db_label}"]
+        for k, v in (build_args or {}).items():
+            args += ["--build-arg", f"{k}={v}"]
+        if file is not None:
+            args += ["-f", str(file)]
+        try:
+            code = await _race([*args, str(context)], out, stop, delete_builder)
+        finally:
+            if stop.done():
+                await asyncio.to_thread(delete_builder)
+            else:
+                await builder_deleted(stop)
+        if code != 0:
+            return None
+        digest = await inspect(tag, stop)
+        if digest is not None:
+            await asyncio.to_thread(_record, tag, digest, db_label)
+        return digest
 
 
 async def ensure_base(lay: workspace.Layout, stop: asyncio.Task, db_label: str) -> tuple[str, str]:
     """The base image's tag and digest, built when missing. A failed build
     is the kernel's (`Failed`)."""
     tag = base_tag()
-    digest = await checked(tag, stop)
-    if digest is None:
-        digest = await build(tag, BASE_DIR, lay.checks / "vm-base-image.out", stop, db_label)
+    if _many() and (digest := await _as_recorded(tag, stop)) is not None:
+        return tag, digest
+    async with _shared("builder", stop):  # with more slots, one builds it and the others find it
+        digest = await checked(tag, stop)
         if digest is None:
-            raise Failed("kernel", f"the base image did not build (see {lay.checks / 'vm-base-image.out'})")
+            digest = await build(tag, BASE_DIR, lay.checks / "vm-base-image.out", stop, db_label)
+            if digest is None:
+                raise Failed(
+                    "kernel", f"the base image did not build (see {lay.checks / 'vm-base-image.out'})"
+                )
     return tag, digest
 
 
@@ -462,6 +586,15 @@ async def ensure_deps(lay: workspace.Layout, b, sha: str, base: str, key: str, s
     build has `cause`."""
     project = b.project or {}
     tag = deps_tag(project, key)
+    if _many() and (digest := await _as_recorded(tag, stop)) is not None:
+        return tag, digest
+    async with _shared("builder", stop):  # with more slots, one builds it and the others find it
+        return await _ensure_deps(lay, b, sha, base, key, tag, stop, db_label, cause)
+
+
+async def _ensure_deps(lay: workspace.Layout, b, sha: str, base: str, key: str, tag: str, stop: asyncio.Task,
+                       db_label: str, cause: str) -> tuple[str, str]:  # fmt: skip
+    project = b.project or {}
     digest = await checked(tag, stop)
     if digest is not None:
         return tag, digest
@@ -788,10 +921,11 @@ async def verify(ctx, lay: workspace.Layout, b, candidate: str, rows: list[dict]
         except Failed as exc:
             return {"status": "failed", "turn": {"result": exc.why}}
         finally:
-            if stop.done():
-                await asyncio.to_thread(stop_system)
-            else:
-                await system_stopped(stop)
+            if not _many():  # with more slots, the slot's release stops it (`machine_lock`)
+                if stop.done():
+                    await asyncio.to_thread(stop_system)
+                else:
+                    await system_stopped(stop)
 
 
 async def _open_rows(dsn: str) -> dict[str, list[dict]]:
@@ -857,9 +991,16 @@ def reap(dsn: str) -> list[str]:
     container and no builder remains. Returns what was removed."""
     if not present():
         return []
-    fd = try_lock()
-    if fd is None:
-        return []
+    fds = []
+    for path in slots():
+        fd = _open(path)
+        fds.append(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            for held in fds:
+                os.close(held)
+            return []
     try:
         if not running():
             return []
@@ -876,4 +1017,5 @@ def reap(dsn: str) -> list[str]:
             stop_system()
         return gone
     finally:
-        os.close(fd)
+        for fd in fds:
+            os.close(fd)
