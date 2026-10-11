@@ -27,7 +27,7 @@ import pytest
 
 from core import db, git, ledger, rollout, serve
 from core.settings import settings
-from tests import bridges, scripted
+from tests import bridges, fresh_db, scripted
 from tests.bridges import new_task, rows
 from tests.conftest import TEST_DB
 from tests.scripted import commit
@@ -42,7 +42,7 @@ def run(coro):
 @pytest.fixture
 def fresh() -> str:
     """A database of this test's own."""
-    return db.migrate(f"{TEST_DB}_rollout", fresh=True)
+    return fresh_db.fresh(f"{TEST_DB}_rollout")
 
 
 @pytest.fixture

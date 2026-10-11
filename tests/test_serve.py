@@ -41,7 +41,7 @@ from core import workspace as kws
 from core.__main__ import _performers
 from core.gateway import Gateway
 from core.machine import State
-from tests import bridges, scripted
+from tests import bridges, fresh_db, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows
 from tests.conftest import TEST_DB
 from tests.ports import listen
@@ -62,7 +62,7 @@ def run(coro):
 @pytest.fixture
 def fresh() -> str:
     """A database of this test's own."""
-    return db.migrate(f"{TEST_DB}_serve", fresh=True)
+    return fresh_db.fresh(f"{TEST_DB}_serve")
 
 
 @pytest.fixture

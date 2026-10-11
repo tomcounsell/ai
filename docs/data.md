@@ -545,6 +545,12 @@ role password, password file, or `pg_hba.conf`, so a test run leaves the
 machine cluster's credentials as it found them; the credential tests run
 `secure_login` only on scratch clusters.
 
+A test that needs a database of its own (`tests/test_serve.py`,
+`tests/test_rollout.py`, `tests/test_expiry.py`) gets a copy (`CREATE
+DATABASE ... TEMPLATE`) of a template the session migrates once
+(`tests/fresh_db.py`), named after the test database, so each session and
+each worker has its own.
+
 The rule from `tests/README.md` applies: real Postgres, no mocks, and every
 test marks its live spend (`@pytest.mark.spend(usd=...)`, declared in
 `pyproject.toml`). The ledger tests spend nothing.
