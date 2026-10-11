@@ -81,8 +81,9 @@ the ledger, and the workspace first. Tom's answers are the rule you build;
 build each at the reach he gave it. Where an answer names a set, records
 outside the set (blank, null, or another value) stay out, even where
 existing code counts them in; where it says how something behaves, every
-place that thing appears behaves so. The boundary tests include each
-answer.
+place that thing appears behaves so. An answer that picks one of the
+options you offered accepts the rest of the approach your question set
+out; build all of it. The boundary tests include each answer.
 
 ### Escalate only what needs Tom
 

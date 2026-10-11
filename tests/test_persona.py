@@ -179,6 +179,8 @@ def test_the_conduct_and_delivery_habits_the_evidence_asked_for_are_rendered():
     assert "even where existing code counts them in" in text
     assert "every place that thing appears behaves so" in text
     assert "The boundary tests include each answer." in text
+    assert "An answer that picks one of the options you offered accepts" in text
+    assert "the rest of the approach your question set out; build all of it." in text
 
 
 @pytest.mark.parametrize(

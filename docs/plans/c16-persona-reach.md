@@ -80,7 +80,7 @@ safer choice.
 
 ## The change
 
-`persona/conduct.md`, "Reading the answer", gains three sentences after
+`persona/conduct.md`, "Reading the answer", gains four sentences after
 "search the conversation, the ledger, and the workspace first.":
 
 ```
@@ -88,13 +88,17 @@ Tom's answers are the rule you build; build each at the reach he gave it.
 Where an answer names a set, records outside the set (blank, null, or
 another value) stay out, even where existing code counts them in; where it
 says how something behaves, every place that thing appears behaves so.
-The boundary tests include each answer.
+An answer that picks one of the options you offered accepts the rest of
+the approach your question set out; build all of it. The boundary tests
+include each answer.
 ```
 
 Each part answers one cause above: "even where existing code counts them
 in" answers the precedent argument that flipped p1's plan, and the
 paragraph renders into every stage, critique included; "every place that
-thing appears behaves so" answers p2; "The boundary tests include each
+thing appears behaves so" and "accepts the rest of the approach your
+question set out" answer p2, whose own approach had the button open the
+tab before the build dropped it; "The boundary tests include each
 answer" ties "Test breadth" to the answer, not to the rule the build
 settled on. No term from the item appears in the persona. `delivery.md`
 does not change: no mapping of answers to code is added to the delivery,
@@ -105,8 +109,8 @@ since that would be a self-audit.
 digest or size.
 
 Rendered at this branch: `persona_sha256`
-`481c83c8a25df74b11921500e15837f55fdc9cf37856fcecd3c2591f55a44828`,
-11,653 bytes.
+`d94de822096461647402142b3140789d78562ceff0232717ef92e1dc1c5bd228`,
+11,778 bytes.
 
 ## How it is measured
 
@@ -123,8 +127,8 @@ worktree's before `c16.patch`, and the C15 render reproduces
 `61f4517e...` (11,141 bytes); with both applied, that tree's
 `tests/test_persona.py` passes 20 of 20. The after
 arm's render is `persona_sha256`
-`0bfb0147d29eec471b91b774522966d8a3a46f76dc27dc2ca3a7d529c0b2fe41`,
-11,471 bytes; each `turn.started` of after-p3 shows it.
+`a3ea95d9c593612701f71eb7ba3057dc575ea07c186ea8a48afcbfb41a075328`,
+11,596 bytes; each `turn.started` of after-p3 shows it.
 
 The paired control is **before-p1** (4b5cc43cb666), reused: the before
 arm's inputs (worktree, persona "You are Valor.", item, emulator, judge,
@@ -144,7 +148,7 @@ are "only members of teams in the Research category, inactive included"
 and "the reminder links to the member's own log page". The toy code holds
 a helper that counts a team with no category as every category. Each
 turn's persona is the after-arm render, either C15 (`61f4517e...`, "old")
-or C15 plus C16 (`0bfb0147...`, "new"). The Brief, corrections, channel
+or C15 plus C16 before patch round 1 (`0bfb0147...`, "new"). The Brief, corrections, channel
 and stage text are row 9871's or row 9795's, with only the Brief replaced.
 
 | Turn | Arm | Result | Cost |
@@ -169,3 +173,31 @@ container"`): 1907 passed, 24 skipped, 53 deselected, 0 failed.
 `uvx ruff check .` and `uvx ruff format --check .` clean.
 `~/src/valor-build-notes/c16/c16.patch` is this branch's `persona/` diff
 against d63777916; `git apply --check` passes in `~/src/valor-rebuild-d3`.
+
+## Patch round 1
+
+The review passed (governance: no) with one finding: in p2 the run's own
+stated approach had the notice's main button open the tab and the build
+dropped it once Tom picked the wider option; "every place that thing
+appears" may not reach an approach the answer accepted without restating.
+
+- `persona/conduct.md` gains one sentence before the boundary-tests
+  sentence: "An answer that picks one of the options you offered accepts
+  the rest of the approach your question set out; build all of it." It
+  says "the approach your question set out", not the approach sent with
+  the chosen option, because p2's approach paragraph went with the
+  question as a whole, under its default, not under the option Tom chose.
+- The docs commit 4e758a2bd is cherry-picked; `docs/persona.md` then
+  states the rule only, with no account of past runs.
+- `tests/test_persona.py` asserts the new sentence.
+- Digests rerendered: head `d94de822...`, 11,778 bytes; after arm
+  (6ecd6f1d3 with `c15.patch` and `c16.patch`) `a3ea95d9...`, 11,596
+  bytes, and that tree's `tests/test_persona.py` passes 20 of 20. The
+  probe above ran on the earlier after-arm text (`0bfb0147...`) and was
+  not rerun.
+- `~/src/valor-build-notes/c16/c16.patch` regenerated (`persona/conduct.md`
+  only); `git apply --check` passes in `~/src/valor-rebuild-d3`, not
+  applied there.
+- Suite alone (`-m "not container"`): 1907 passed, 24 skipped, 53
+  deselected, 0 failed. `uvx ruff check .` and `uvx ruff format --check .`
+  clean.
