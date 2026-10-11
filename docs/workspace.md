@@ -94,7 +94,14 @@ returns. A program's output goes to a file in that same `output/` directory. A p
 
 - **Postgres.** A cluster of the task's own on `127.0.0.1` only (no unix
   socket), port 5440 to 5599, scram-sha-256 on every login; the superuser
-  password is random and removed once the roles exist. `app` owns database
+  password is random, the task's own, and removed once the roles exist.
+  The kernel runs `initdb` once per process and Postgres install, keeps
+  the result as a template in its effect lock directory (which no sandbox
+  reaches), and makes each later cluster as an APFS clone of it (`cp -c`),
+  with the task's port appended to its config and the template's superuser
+  password replaced by the task's own as the server's first statement; a
+  volume that cannot clone gets `initdb` per cluster. Clones share
+  `initdb`'s system identifier. `app` owns database
   `app` and may create databases (and manage only the spec's extra roles); the
   spec's `extensions` (such as `vector`, which `app` could not create, not
   being a superuser) are made by the superuser in `template1`, so database

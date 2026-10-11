@@ -1451,6 +1451,39 @@ def test_unreadable_config_is_refused(tmp_path):
     assert kgit.hostile(ws) and "could not be read" in kgit.hostile(ws)[0]
 
 
+def _rewrite_keeping_mtime(path: Path, text: str) -> None:
+    """`text` written over `path` in place, its access and modification
+    times put back as they were, as a turn can."""
+    was = path.stat()
+    path.write_text(text)
+    os.utime(path, ns=(was.st_atime_ns, was.st_mtime_ns))
+    assert path.stat().st_mtime_ns == was.st_mtime_ns
+
+
+def test_a_config_changed_under_an_unchanged_mtime_is_read_again(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    assert kgit.hostile(ws) == [] and kgit.hostile(ws) == []  # the second answered from the first
+    config = ws / ".git" / "config"
+    _rewrite_keeping_mtime(config, config.read_text() + "[alias]\n\tx = status\n")
+    assert kgit.hostile(ws) == ["local: alias.x"]
+    with pytest.raises(kgit.GitError, match="will not run"):
+        kgit.head(ws)
+    _rewrite_keeping_mtime(config, config.read_text().replace("[alias]\n\tx = status\n", ""))
+    assert kgit.hostile(ws) == []
+
+
+def test_a_change_to_an_included_file_is_read_again(tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    target = tmp_path / "included"
+    target.write_text("[user]\n\tname = x\n")
+    git(ws, "config", "include.path", str(target))
+    assert kgit.hostile(ws) == ["local: include.path"]
+    _rewrite_keeping_mtime(target, "[core]\n\tpager = cat\n")
+    assert kgit.hostile(ws) == ["local: include.path", "local: core.pager"]
+    _rewrite_keeping_mtime(target, "[user]\n\tname = y\n")
+    assert kgit.hostile(ws) == ["local: include.path"]
+
+
 def test_kernel_git_drops_inherited_git_variables_and_a_planted_git_on_path(tmp_path, monkeypatch):
     ws, _ = scripted.workspace(tmp_path)
     marker = tmp_path / "ran"
