@@ -423,22 +423,22 @@ anything under `skills/`, `persona/`, or `.claude/`, in any letter case,
 since this Mac's file system ignores case (`machine.is_doc_path`). No plan
 widens this, so no code rides in an unreviewed docs commit.
 
-**Exit evidence.** The session writes a verdict, its findings, and its
-head: a commit id, or an abbreviation its clone resolves to one commit. The
-kernel fetches it into the mirror under the check profile and keeps the
-longest prefix of commits on the candidate touching doc paths alone, with
-regular file modes (`100644`, `100755`, from `git diff-tree -r`); a merge,
-a commit off the candidate, or a tree holding `.valor` keeps nothing. It records
-`docs.kept`, so a rerun asks only governance again, then judges governance
-over the kept diff (a doc can add a rule) and records `docs.decided`: the
-candidate, the kept head, the dropped commits and their paths, the
-governance answer, and the verdict it computes. `updated` or `no_change`
-passes. `changes` means a doc states something the code should still honor
-and the candidate breaks it, a doc cannot be made true without a code
-change, the kernel dropped a commit, or the candidate's tree holds `.valor`
-(no clone or session; the kernel records it, leg `kernel`). Docs commits
-belong to their candidate: after a send-back they are not merged, and the
-next docs session reads them as `previous-docs.patch`, keeping what holds.
+**Exit evidence.** The session writes a verdict, its findings, and its head: a
+commit id or an abbreviation of one. The kernel resolves an abbreviation in the
+clone, fetches the commit into the mirror under the check profile, and keeps
+the longest prefix of commits on the candidate touching doc paths alone, with
+regular file modes (`100644`, `100755`, from `git diff-tree -r`); a merge, a
+commit off the candidate, a tree holding `.valor`, or a head naming no single
+commit keeps nothing. It records `docs.kept` with the full id, so a rerun asks
+only governance again, then judges governance over the kept diff (a doc can add
+a rule) and records `docs.decided`: the candidate, the kept head, the dropped
+commits and their paths, the governance answer, and the verdict it computes.
+`updated` or `no_change` passes. `changes` means a doc states something the
+code should still honor and the candidate breaks it, a doc cannot be made true
+without a code change, the kernel dropped a commit, or the candidate's tree
+holds `.valor` (no clone or session; the kernel records it, leg `kernel`). Docs
+commits belong to their candidate: after a send-back they are not merged, and
+the next docs session reads them as `previous-docs.patch`, keeping what holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 
