@@ -228,13 +228,16 @@ def roles(got) -> list[str]:
     return [r["payload"]["role"] for r in got if r["type"] == checks.SUITE]
 
 
-async def at_review(dsn, tmp_path, *, writes=None, test=True, verification=None, **spec):
+async def at_review(dsn, tmp_path, *, writes=None, test=True, verification=None, base_run=None, **spec):
     """A provisioned task whose candidate adds `writes` (default a gate and a
     plan rewrite), with a scripted test verdict unless `test` is
     false, left waiting on review. The suite runs on the host and in a
     verification VM alike. Given `verification` (the module's), the task's
     ledger holds it as the candidate's `verify.ran`, so the review reuses it
-    and runs no VM."""
+    and runs no VM. Given `base_run` (the module's verification) instead, it
+    holds it as an earlier candidate's `verify.ran` on this base, so the
+    review reuses its base run (`container.reusable_base`) and runs the head
+    alone."""
     task, b, ws = await test_checks.to_candidate(
         dsn, tmp_path, writes=writes or {"hooks/gate.py": GATE, "docs/plan.md": "rewritten after critique\n"},
         suite=spec.pop("suite", test_checks.VM_SUITE), **spec,
@@ -245,16 +248,21 @@ async def at_review(dsn, tmp_path, *, writes=None, test=True, verification=None,
         await scripted.check(dsn, task, "test", "pass")
     if verification is not None:
         await reused(dsn, task, b, verification)
+    if base_run is not None:
+        await reused(dsn, task, b, base_run, head=False)
     return task, b, ws
 
 
-async def reused(dsn, task, b, verification: dict) -> None:
+async def reused(dsn, task, b, verification: dict, head: bool = True) -> None:
     """The module's verification appended as this task's `verify.ran` for its
-    candidate, under its keys (`container.reusable`)."""
+    candidate, under its keys (`container.reusable`); with `head` false, for
+    the module's own candidate on this task's base, so only its base run is
+    reused (`container.reusable_base`)."""
     candidate = machine.fold(await rows(dsn, task)).candidate.sha
     k = await asyncio.to_thread(container.keys, b, candidate)
-    payload = {**verification, "candidate": candidate, "base": b.base_sha, "digest": k["head"],
-               "base_digest": k["base"]}  # fmt: skip
+    payload = {**verification, "base": b.base_sha, "base_digest": k["base"]}
+    if head:
+        payload.update(candidate=candidate, digest=k["head"])
     async with await db.connect(dsn) as conn, conn.transaction():
         await ledger.append(conn, task, fresh.VERIFY, payload)
 
@@ -705,11 +713,13 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where, veri
     }[where]
 
     async def go():
-        # A stop in a VM needs the runs; one after them reads the module's.
-        seed = verification if where in ("setup", "turn") else None
+        # A stop in the head's VM needs the head run, and reuses the module's
+        # base run; a stop after the runs reads the module's verification.
+        vm_stop = where in ("head run", "lint")
         task, _b, ws = await at_review(
-            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, verification=seed, **hang
-        )
+            dsn, tmp_path, writes={"greeting.txt": "hi\n"}, verification=None if vm_stop else verification,
+            base_run=verification if vm_stop else None, **hang,
+        )  # fmt: skip
         steer(ws, fresh_acts=["hang"] if where == "turn" else [])
         running = asyncio.create_task(
             drive(dsn, task, {**scripted.fresh_runners(ws), Check.REVIEW: review_runner(ws)})
@@ -735,8 +745,9 @@ def test_a_stop_records_nothing_and_leaves_no_process(dsn, tmp_path, where, veri
     assert out["status"] == "stopped", out
     assert not reviews(got) and not reviews(got, fresh.REVIEW_COMPARED)
     assert not container.running()
-    if where in ("head run", "lint"):
-        assert not [r for r in got if r["type"] == fresh.VERIFY]
+    if where in ("head run", "lint"):  # only the module's run, appended before the review
+        (seeded,) = [r for r in got if r["type"] == fresh.VERIFY]
+        assert seeded["payload"]["candidate"] != machine.fold(got).candidate.sha
     if where == "setup":
         assert test_checks._wait(lambda: not test_checks._marked(mark), 10), test_checks._marked(mark)
         for pid in before:
