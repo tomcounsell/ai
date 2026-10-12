@@ -449,7 +449,9 @@ def _config_key(workspace: str | Path, git_bin: str) -> tuple[str, str] | None:
             if not stat.S_ISDIR(got.st_mode) or not os.access(os.path.join(dot, name), os.X_OK):
                 return None
             # Taken away and back during a read, git finds no repository here and lists another's config.
-            h.update(f"{name}: {got.st_mode} {got.st_uid} {got.st_dev} {got.st_ino} {got.st_ctime_ns}\n".encode())
+            h.update(
+                f"{name}: {got.st_mode} {got.st_uid} {got.st_dev} {got.st_ino} {got.st_ctime_ns}\n".encode()
+            )
         for name in ("HEAD", "config", "config.worktree", "commondir"):
             path = os.path.join(dot, name)
             try:

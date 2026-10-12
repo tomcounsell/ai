@@ -33,6 +33,9 @@ routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
                                first run registers its objective; stops at once
                                when Tom stopped it; --restart begins a fresh one
 routine NAME --plist           print the launchd job for it
+routine NAME --finding TEXT --key KEY [--key KEY] [--evidence FILE]
+                               start one fix task for a finding under the
+                               routine's objective, unless a task holds a key
 routines                       every routine, its last run, and its spending
 workspace show TASK_ID         where the kernel provisioned the task
 workspace remove TASK_ID       delete a stopped, merged, or ended task's workspace and
@@ -135,6 +138,7 @@ from core import (
     corrections,
     credentials,
     db,
+    findings,
     fresh,
     git,
     guards,
@@ -479,8 +483,9 @@ async def _routine_project(
 
 def _routine_runners() -> dict:
     from routines.emulator import runner as emulator
+    from routines.verify import runner as verify
 
-    return {routines.EXPIRY_RUNNER: routines.expiry_runner, "emulator": emulator.run}
+    return {routines.EXPIRY_RUNNER: routines.expiry_runner, "emulator": emulator.run, "verify": verify.run}
 
 
 async def _workspace(conn, args) -> str:
@@ -616,6 +621,21 @@ async def _run(args) -> None:
         except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
         print(json.dumps(record, indent=2))
+        return
+    if args.command == "routine" and args.finding is not None:
+        if not args.key:
+            raise SystemExit("routine refused: --finding takes at least one --key")
+        evidence = Path(args.evidence).read_text(errors="replace") if args.evidence else ""
+        finding = findings.Finding(keys=tuple(args.key), text=args.finding, evidence=evidence)
+        async with await db.connect() as conn:
+            try:
+                said, task = await findings.start_by_hand(
+                    conn, args.name, finding, start_project=_routine_project
+                )
+            except routines.Refused as exc:
+                raise SystemExit(f"routine refused: {exc}") from None
+        print(said)
+        print(task)
         return
     if args.command == "routine":
         async with await db.connect() as conn:
@@ -961,6 +981,11 @@ def main() -> None:
     routine.add_argument("name")
     routine.add_argument("--plist", action="store_true", help="print the launchd job and exit")
     routine.add_argument("--restart", action="store_true", help="begin a fresh objective after a stop")
+    routine.add_argument("--finding", help="start one fix task from this text (the backlog's path)")
+    routine.add_argument(
+        "--key", action="append", default=[], help="a dedupe key of the finding (repeatable)"
+    )
+    routine.add_argument("--evidence", help="a file whose text is the finding's evidence")
     sub.add_parser("routines")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")

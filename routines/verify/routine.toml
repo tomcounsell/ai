@@ -1,0 +1,17 @@
+name = "verify"
+runner = "verify"
+ceiling = "act"
+model = "frontier"
+mission_item = "1; resolving discovered defects"
+need = [
+    "Tom asked for it on 2026-10-12: a red test on the branch starts a task to fix it",
+    "Hand runs on 2026-10-12 found 7c57334f8 had left test_advisor red on the branch, unnoticed",
+]
+created = 2026-10-12
+project = "valor"
+branch = "valor-cori-rebuild"
+instruction = "Run the project's suite at the head of its branch in the check sandbox, and start one fix task for each group of red tests that no task already holds."
+
+[schedule]
+hour = 2
+minute = 0
