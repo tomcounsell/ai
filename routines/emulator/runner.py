@@ -274,6 +274,9 @@ async def run(ctx: Context) -> Ran:
         out = demo / "sweeps" / f"{run_id}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=2) + "\n")
+        if await state_of(ctx.conn, run_id) == "stopped":
+            # A stopped run starts no findings: `start_child` refuses a stopped parent.
+            return Ran(run_id, "finished", f"{len(found)} items, {failed} failed; stopped; report {out}")
         worse_items = regressions(report)
         started = held = 0
         if worse_items and (ctx.start_project is None or not ctx.routine.project):

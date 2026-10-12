@@ -235,9 +235,10 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
    `suite.ran` row. A run that already holds one skips the suite.
 4. **Preempted or stopped.** If Tom's foreground work wants the slot,
    nothing is written and the firing returns `running`. The next firing
-   resumes the same run at the same commit, and the workspace is kept. If
-   the run is stopped instead, its workspace is removed and the outcome is
-   `failed` with "stopped".
+   resumes the same run at the same commit, and the workspace is kept. A
+   run stopped while it waits for the slot, during the suite, or before
+   its findings starts no finding: its workspace is removed and the
+   outcome is `failed` with "stopped".
 5. **Findings.** These come from the `suite.ran` payload and the JUnit
    file. A sibling of `checks.read_junit` reads each failed or errored
    case's message and text through the same no-follow read.
@@ -326,7 +327,9 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
 
     The fix turn cannot read `$VALOR_DEMO`, so nothing points there.
   - An item compared with no arm worse is listed in `cleared`.
-- **When.** After the report is written and before `finished`.
+- **When.** After the report is written and before `finished`. A run
+  stopped mid-sweep writes its report, starts no finding, and ends
+  `finished`, as it did before.
   - The runner takes `routine:<name>` across find-or-create, as `verify`
     does, so two firings never start two runs.
   - It continues the run `routines.open_node` names: the latest child
@@ -350,8 +353,10 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
 
 The lead starts each backlog item this way after merge, on `verify`, with
 one key per item named `backlog:<item>` (for example
-`backlog:c14-prefix`). So every loop task is a child of a loop objective,
-runs in the background, and counts in its period spending.
+`backlog:c14-prefix`). No run clears a `backlog:` key, so an ended or
+stopped backlog task keeps it; the lead starts the item again under a new
+key. So every loop task is a child of a loop objective, runs in the
+background, and counts in its period spending.
 
 ### Docs
 
@@ -425,8 +430,9 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
     no `suite.ran`.
   - The next firing resumes the same run at the same commit and starts no
     second run node.
-  - A run stopped mid-suite gives `failed` with "stopped", and its
-    workspace is removed.
+  - A run stopped mid-suite, or while it waits for the slot, gives
+    `failed` with "stopped", no finding, and its workspace removed.
+  - An emulator run stopped mid-sweep writes its report and starts none.
 - **verify, never the kernel's checkout:** the run's check directory is
   under the work directory, the kernel checkout's `git status` and `HEAD`
   are unchanged, and the run records `base_sha` and `kernel_tip`.
@@ -440,23 +446,16 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
     merged with three.
   - The task carries every arm's scores, the one hidden id that differs,
     clarify's question and answer, and each replay task id.
-- **emulator, the bar:**
-  - Each rule alone flags.
-  - A total exactly one point below does not flag.
-  - The fixtures are written from the D5 record's counts and ids, in
-    pytest's and Django's summary formats.
-  - pso-b (66 and 62 passed, none failed) flags nothing.
-  - pso-a flags clarify only.
-  - pop-b (bare and routed each 10 of 11, different failing ids) flags
-    nothing.
+- **emulator, the bar:** each rule alone flags; a total exactly one point
+  below does not. The fixtures are written from the D5 record's counts
+  and ids, in pytest's and Django's summary formats.
+  - pso-b (66 and 62 passed, none failed) and pop-b (bare and routed each
+    10 of 11, different failing ids) flag nothing; pso-a flags clarify.
   - Pop-a's broad Redis failures are never read.
   - A stopped arm, or a bare with no outcome, compares nothing.
   - An item worse in both arms gives one task.
-- **emulator, the parser:**
-  - pytest and Django outputs in the items' summary formats give the
-    counts the D5 record states.
-  - A tail cut to its last 4000 characters still gives the counts from
-    its summary line.
+- **emulator, the parser:** pytest and Django outputs give the counts the
+  D5 record states, also from a tail cut to its last 4000 characters.
 - **emulator, crash between report and findings:** a run with a report
   and no `finished` is continued and starts its finding.
 - **two firings at once and a hand child**, for `verify` and the
@@ -597,3 +596,4 @@ The governance grant, one tap per instance (Governance above).
   `test_advisor` only, the build showed the check skips `test_pi`; S4 the first emulator firing
   is by hand with the weekly job unloaded; S5 Existence unchanged; S6 to S11 and all nits as
   written.
+- Patch round 1 (review: changes): a stopped emulator or `verify` run, including one stopped in the slot wait, starts no finding and records its outcome; task text reuses `MESSAGE`; `backlog:` keys stay held; the suite's TMPDIR is in the workspace.

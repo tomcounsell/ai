@@ -126,7 +126,7 @@ def grouped(payload: dict[str, Any], failures: list[dict[str, str]], branch: str
                 keys=tuple(sorted(keys)),
                 text=(
                     f"{len(cases)} red at the head of {branch} ({sha[:12]}), failing with "
-                    f"{'; '.join(findings.head(m, 300) for m in messages)}: {findings.head(named, 1000)}."
+                    f"{'; '.join(findings.head(m) for m in messages)}: {named}."
                 ),
                 evidence="\n\n".join([where, *(_show(c) for c in cases)]),
             )
@@ -222,6 +222,12 @@ async def run(ctx: Context) -> Ran:
         await lock.close()
 
 
+async def _stopped(ctx: Context, run_id: str, b: tasks.Brief) -> Ran:
+    """A stopped run starts no findings: remove its workspace and fail it."""
+    await _remove(ctx.conn, run_id, b)
+    return Ran(run_id, "failed", "stopped")
+
+
 async def _run(ctx: Context, run_id: str) -> Ran:
     cc = check_context(run_id, ctx.dsn)
     rows = await ledger.read(ctx.conn, run_id)
@@ -233,6 +239,10 @@ async def _run(ctx: Context, run_id: str) -> Ran:
     kept = next((x["payload"] for x in reversed(rows) if x["type"] == checks.SUITE), None)
     if kept is None:
         async with slot.held(run_id, ctx.dsn):
+            # A stop that came while the run waited for the slot was sent
+            # before `stop_heard` listens.
+            if await tasks.is_stopped(ctx.conn, run_id):
+                return await _stopped(ctx, run_id, b)
             digest = await asyncio.to_thread(
                 checks.environment_digest, b.mirror, b.base_sha, b.project or {}, lay.root.parent / "bin"
             )
@@ -242,8 +252,7 @@ async def _run(ctx: Context, run_id: str) -> Ran:
             except checks._Stopped:
                 if (await checks.interrupted(cc)).get("preempted"):
                     return Ran(run_id, "running", "preempted by foreground work; the next firing resumes it")
-                await _remove(ctx.conn, run_id, b)
-                return Ran(run_id, "failed", "stopped")
+                return await _stopped(ctx, run_id, b)
         if payload["cause"] == "kernel":
             await _remove(ctx.conn, run_id, b)
             return Ran(run_id, "failed", payload["why"])
@@ -252,6 +261,8 @@ async def _run(ctx: Context, run_id: str) -> Ran:
             await _remove(ctx.conn, run_id, b)
             return Ran(run_id, "failed", f"the {checks.SUITE} row: {ledger.UNSTORABLE}: {why}")
         kept = payload
+    if await tasks.is_stopped(ctx.conn, run_id):
+        return await _stopped(ctx, run_id, b)  # a stopped run is refused as a parent
     failures = await asyncio.to_thread(checks.junit_failures, lay.checks, f"test-{ROLE}-{b.base_sha[:12]}")
     found = grouped(kept, failures, b.target_branch or ctx.routine.branch or "")
     held_ended = await findings.held_ended(ctx.conn, f"{ROLE}:")

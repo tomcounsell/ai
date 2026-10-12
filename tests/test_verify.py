@@ -257,6 +257,8 @@ def test_a_usable_run_sees_passing_keys_and_the_suite_gone():
 @pytest.mark.macos
 def test_a_red_test_starts_one_task_and_the_next_firing_holds_it(toy):
     """The Done case, and the run never touches the kernel's checkout."""
+    # pytest's basetemp follows TMPDIR, so it is inside the run's workspace.
+    toy.spec(suite=f"echo tmpdir=$TMPDIR; {SUITE}")
     head = toy.tests({"tests/test_a.py": RED})
     before = kernel_state()
     first = run(fire(toy))
@@ -271,6 +273,8 @@ def test_a_red_test_starts_one_task_and_the_next_firing_holds_it(toy):
     assert Path(b.mirror).is_relative_to(toy.work) and not Path(b.mirror).parent.exists()
     (suite,) = run(rows_of(toy, run1, checks.SUITE))
     assert suite["commit"] == head and suite["tests"]["failed"] == ["tests.test_a::test_red"]
+    tmp = Path(next(ln for ln in suite["tail"].splitlines() if ln.startswith("tmpdir="))[7:])
+    assert tmp.is_relative_to(Path(b.mirror).parent)
     assert run(rows_of(toy, run1, "workspace.removed"))
 
     second = run(fire(toy))
@@ -432,6 +436,43 @@ def test_a_stopped_run_fails_and_its_workspace_is_removed(toy):
 
     run_id, said = run(go())
     assert "failed" in said and run(ran(toy))[-1]["summary"] == "stopped"
+    assert run(rows_of(toy, run_id, "workspace.removed")) and not (toy.work / run_id).exists()
+
+
+@pytest.mark.macos
+def test_a_run_stopped_while_it_waits_for_the_slot_runs_no_suite(toy):
+    toy.tests({"tests/test_a.py": RED})
+
+    async def go():
+        async with await db.connect(toy.dsn) as conn:
+            # Another background holder (a sweep), so no foreground notice preempts the run.
+            sweep = await tasks.start(conn, tasks.Brief(instruction="a sweep", routine="emulator"))
+        taken, release = asyncio.Event(), asyncio.Event()
+
+        async def hold():  # its own task, so the firing does not inherit the hold
+            async with slot.held(sweep, toy.dsn):
+                taken.set()
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        await taken.wait()
+        firing = asyncio.create_task(fire(toy))
+        await objective(toy)
+        for _ in range(600):
+            nodes = await run_nodes(toy)
+            if nodes and (await brief(toy, nodes[0])).mirror:
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(1)  # the run is waiting for the slot
+        async with await db.connect(toy.dsn) as conn:
+            await tasks.stop(conn, nodes[0], reason="not now")
+        release.set()
+        await holder
+        return nodes[0], await asyncio.wait_for(firing, 60)
+
+    run_id, said = run(go())
+    assert "failed" in said and run(ran(toy))[-1]["summary"] == "stopped"
+    assert not run(rows_of(toy, run_id, checks.SUITE)) and not run(fixes(toy, run_id))
     assert run(rows_of(toy, run_id, "workspace.removed")) and not (toy.work / run_id).exists()
 
 

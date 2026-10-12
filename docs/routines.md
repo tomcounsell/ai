@@ -293,7 +293,9 @@ like any other: the loop adds no merge path and no gate.
   [--key KEY] [--evidence FILE]` starts a finding under the routine's
   objective, and records `routine.ran` with `run` None, so it never counts
   as the routine's own use. A stopped routine refuses it. Backlog items
-  use one key each, named `backlog:<item>`.
+  use one key each, named `backlog:<item>`. No run clears a `backlog:`
+  key, so it stays held after its task ends or is stopped; the lead
+  starts the item again under a new key.
 
 ## When a routine exists and when it is deleted
 

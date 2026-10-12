@@ -300,3 +300,30 @@ def test_a_hand_child_is_never_a_run_and_two_firings_at_once_make_one(dsn, sweep
     _, nodes, _ = run(tree(dsn, name))
     assert len(nodes) == 1 and hand not in nodes
     assert sorted(" running;" in s for s in said) == [False, True], said
+
+
+def test_a_run_stopped_mid_sweep_writes_its_report_and_starts_no_finding(dsn, sweep, monkeypatch):
+    name, add, calls = sweep
+    item = unique()  # a key is global to the ledger
+    add(item, done_case())
+    drive = runner._drive
+
+    async def stop_after_clarify(item_path, arm, run_id, nm):
+        out = await drive(item_path, arm, run_id, nm)
+        if arm == "clarify":
+            async with await db.connect(dsn) as conn:
+                await tasks.stop(conn, run_id, reason="not now")
+        return out
+
+    monkeypatch.setattr(runner, "_drive", stop_after_clarify)
+    said = run(fire(dsn, name))
+    obj, (node,), found = run(tree(dsn, name))
+
+    async def ran():
+        async with await db.connect(dsn) as conn:
+            return [r["payload"] for r in await ledger.read(conn, obj) if r["type"] == "routine.ran"]
+
+    (row,) = run(ran())
+    assert "finished" in said and found[node] == [] and len(calls) == 2
+    assert row["outcome"] == "finished" and row["run"] == node and "report" in row["summary"]
+    assert not row.get("cleared")
