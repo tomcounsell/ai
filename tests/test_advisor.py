@@ -392,7 +392,7 @@ OLD_ASKING_RULE = (
 )
 CONDUCT_LINE = (
     "When unsure, ask the advisor, then act. Ask Tom only for vision, priorities, the cost and "
-    "benefit of a tradeoff in how the company works, or something only he holds."
+    "benefit of a tradeoff in how the company is organised, or something only he holds."
 )
 
 
