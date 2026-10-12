@@ -549,7 +549,7 @@ def test_a_finding_started_by_hand_is_held_and_refused_on_a_stopped_routine(toy,
             return b
 
     b = run(look())
-    assert "`env` and `cd`" in b.instruction and "[cut]" in b.instruction and b.routine == toy.name
+    assert evidence.read_text() in b.instruction and b.routine == toy.name
     assert [(r["run"], r["outcome"]) for r in run(ran(toy))] == [(None, "started"), (None, "nothing_due")]
     third = cli(toy, *args)
     assert third.returncode != 0 and "is stopped" in third.stderr

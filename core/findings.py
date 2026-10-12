@@ -16,9 +16,9 @@ What holds a key:
 
 The evidence is text the kernel did not write (the branch's suite output,
 a replay's verification output). It is quoted into the instruction as data
-in a fence, trimmed to the lengths `checks` uses (`MESSAGE` for a message
-and for the evidence a hand start reads from a file, `TAIL` for an output
-tail), and decides only which findings start and their keys.
+in a fence and decides only which findings start and their keys. A
+routine's own evidence is trimmed to the lengths `checks` uses (`MESSAGE`
+for a message, `TAIL` for an output tail); a hand start's is passed whole.
 """
 
 import re

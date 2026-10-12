@@ -635,7 +635,7 @@ async def _run(args) -> None:
             evidence = Path(args.evidence).read_text(errors="replace") if args.evidence else ""
         except OSError as exc:
             raise SystemExit(f"routine refused: --evidence {args.evidence}: {exc.strerror}") from None
-        finding = findings.Finding(keys=tuple(args.key), text=args.finding, evidence=findings.head(evidence))
+        finding = findings.Finding(keys=tuple(args.key), text=args.finding, evidence=evidence)
         async with await db.connect() as conn:
             try:
                 said, task = await findings.start_by_hand(

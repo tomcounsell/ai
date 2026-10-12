@@ -298,8 +298,8 @@ like any other: the loop adds no merge path and no gate.
   objective, and records `routine.ran` with `run` None, so it never counts
   as the routine's own use. It refuses a stopped routine, an empty
   finding or key, `--key` or `--evidence` without `--finding`, and an
-  evidence file it cannot read. The evidence is cut to its first 1500
-  characters (`findings.MESSAGE`). Backlog items
+  evidence file it cannot read. The evidence file is passed whole.
+  Backlog items
   use one key each, named `backlog:<item>`. No run clears a `backlog:`
   key, so it stays held after its task ends or is stopped; the lead
   starts the item again under a new key.

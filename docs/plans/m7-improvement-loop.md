@@ -345,7 +345,7 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
 `python -m core routine NAME --finding TEXT --key KEY [--key KEY]
 [--evidence FILE]` works in five steps:
 1. It refuses an empty finding or key, a key without a finding, and an
-   evidence file it cannot read; it cuts the evidence to `MESSAGE`. It
+   evidence file it cannot read; it passes the evidence whole. It
    finds or registers the routine's objective, refusing a stopped one.
 2. It calls `start_fix` with `parent` the objective.
 3. It appends `routine.ran` with outcome `started`, or `nothing_due`
@@ -410,14 +410,12 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
     and the assertion message in its evidence.
   - Firing 2 starts none and says the key is held.
   - The run's workspace is gone after each firing.
-- **verify, grouping:** a parametrized test failing in three cases gives
-  one task listing all three ids; fifty tests failing with one message (a
-  broken fixture) give one; two messages give two; a module that fails to
-  import gives one `verify:suite` task. A resumed run that cannot read
-  the JUnit file again keeps the red ids its `suite.ran` recorded.
+- **verify, grouping:** one parametrized test failing three ways gives one
+  task listing the ids; fifty tests with one message give one; two
+  messages give two; a module that fails to import gives `verify:suite`.
+  A resumed run that cannot read the JUnit keeps its recorded red ids.
 - **verify, green:** a passing branch starts no task, ends `finished`
-  with "0 red", and lists the passing held keys and `verify:suite` in
-  `cleared`.
+  with "0 red", and clears the passing held keys and `verify:suite`.
 - **verify, no usable report:** each of the following gives one
   `verify:suite` task:
   - a setup line that fails;
@@ -547,14 +545,15 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
      real `~/src/valor-demo` items. That covers the demo's current items,
      which may not be D5's set: it may hold items D5 left out, each of
      which can start its own finding, and its cost is that of those items.
-   - The real ledger holds no emulator `routine.ran` rows, so this firing
-     starts a fresh run.
-   - The lead watches `df` during the firing and reuses D5's disk
-     practice: under the lock, it deletes the images of paused runs.
+   - The firing starts a fresh run (no emulator `routine.ran` rows yet).
+   - The lead watches `df` and, under the lock, deletes paused runs'
+     images, as D5 did.
    - The firing should start `emulator:pso-a` by itself. If clarify does
      not regress this time, the report says so, and the lead starts pso-a
      by hand from the D5 record's evidence, under `emulator`.
    - After the firing, the lead bootstraps the weekly job again.
+   - Known: a stop during a run's findings aborts that firing with no
+     outcome; the next firing closes the run and removes its workspace.
 
 ## Decided by default
 
@@ -597,3 +596,4 @@ The governance grant, one tap per instance (Governance above).
   is by hand with the weekly job unloaded; S5 Existence unchanged; S6 to S11 and all nits as
   written.
 - Patch round 1 (review: changes): a stopped emulator or `verify` run, including one stopped in the slot wait, starts no finding and records its outcome; task text reuses `MESSAGE`; `backlog:` keys stay held; the suite's TMPDIR is in the workspace. From the test check: a resumed run keeps its recorded red; `--finding` refuses bad input and cuts evidence to `MESSAGE`; the bar removes colour codes and names an unread count.
+- Delivered, not passed, after review 1 and one rereview. The lead merges after a scoped patch: hand evidence is passed whole. The suite is green and the stop during findings breaks no Done item.
