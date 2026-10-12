@@ -90,17 +90,19 @@ def _row(result: dict | None, preempted: int) -> dict:
     if result is None:
         return {"outcome": None, "preempted": preempted}
     judge = result.get("judge") or {}
+    tail = (judge.get("verification") or [{}])[0].get("output_tail")
+    read = hidden(tail)
     return {
         "outcome": result.get("outcome"),
         "task": result.get("task_id"),
         "scores": judge.get("scores"),
         "hidden_tests": [c.get("exit") for c in judge.get("verification") or []],
-        "hidden": hidden((judge.get("verification") or [{}])[0].get("output_tail")),
+        "hidden": read,
         "attention": result.get("attention", {}),
         "kernel_spend_usd": result.get("kernel_spend_usd"),
         "emulator_spend_usd": result.get("emulator_spend_usd"),
         "preempted": preempted,
-    }
+    } | ({"hidden_unread": NO_COUNT} if tail and read is None else {})
 
 
 # -- the hidden test command's output ---------------------------------------------------
@@ -110,6 +112,8 @@ _DJANGO_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.MULTILINE)
 _DJANGO_OK = re.compile(r"^OK\b", re.MULTILINE)
 _PYTEST_ID = re.compile(r"^(?:FAILED|ERROR) ([^\s(]\S*)", re.MULTILINE)
 _DJANGO_ID = re.compile(r"^(?:FAIL|ERROR): (.+)$", re.MULTILINE)
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+NO_COUNT = "no summary line with a count in the hidden output tail; the hidden rule is not applied"
 
 
 def hidden(tail: str | None) -> dict[str, Any] | None:
@@ -118,9 +122,11 @@ def hidden(tail: str | None) -> dict[str, Any] | None:
     M error` or Django's `FAILED (failures=a, errors=b)`, `OK` being zero;
     `failing`, the ids on pytest's `FAILED`/`ERROR` lines and Django's
     `FAIL:`/`ERROR:` lines, best effort since the tail is the last 4000
-    characters. None when no summary line is there."""
+    characters. Colour codes are removed first. None when no summary line
+    is there (the arm's row then says so in `hidden_unread`)."""
     if not tail:
         return None
+    tail = _ANSI.sub("", tail)
     marks: list[tuple[int, int]] = []
     for m in _PYTEST_SUMMARY.finditer(tail):
         counts = {w: int(n) for n, w in re.findall(r"(\d+) ([a-z]+)", m.group(1))}

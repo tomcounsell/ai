@@ -134,6 +134,21 @@ def grouped(payload: dict[str, Any], failures: list[dict[str, str]], branch: str
     return out
 
 
+UNREAD = "the JUnit report could not be read again; the failure's message is not kept"
+
+
+def failures_of(kept: dict[str, Any], read: list[dict[str, str]]) -> list[dict[str, str]]:
+    """The failures `read` from the JUnit report, or, when a resumed run can
+    no longer read it, each failed and errored id the kept `suite.ran`
+    recorded, with no message: the red is kept, not lost."""
+    if read or not usable(kept):
+        return read
+    tests = kept["tests"]
+    return [
+        {"id": t, "kind": k, "message": UNREAD, "text": ""} for k in ("failed", "errored") for t in tests[k]
+    ]
+
+
 def seen_gone(payload: dict[str, Any], failures: list[dict[str, str]]) -> set[str]:
     """The keys this run saw pass: each passing test's, less any key a case
     still fails under; and `verify:suite` when the report was usable and
@@ -263,7 +278,8 @@ async def _run(ctx: Context, run_id: str) -> Ran:
         kept = payload
     if await tasks.is_stopped(ctx.conn, run_id):
         return await _stopped(ctx, run_id, b)  # a stopped run is refused as a parent
-    failures = await asyncio.to_thread(checks.junit_failures, lay.checks, f"test-{ROLE}-{b.base_sha[:12]}")
+    read = await asyncio.to_thread(checks.junit_failures, lay.checks, f"test-{ROLE}-{b.base_sha[:12]}")
+    failures = failures_of(kept, read)
     found = grouped(kept, failures, b.target_branch or ctx.routine.branch or "")
     held_ended = await findings.held_ended(ctx.conn, f"{ROLE}:")
     cleared = sorted(held_ended & seen_gone(kept, failures))

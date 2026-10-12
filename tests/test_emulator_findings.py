@@ -125,6 +125,16 @@ def test_a_tail_cut_to_its_last_4000_characters_keeps_its_summary_count():
     assert runner.hidden("ls docs\ngrep: nothing\n") is None
 
 
+def test_ansi_colour_is_read_and_an_unreadable_summary_is_named_in_the_arm():
+    red, off = "\x1b[31m", "\x1b[0m"
+    coloured = f"{red}FAILED{off} {HIDDEN}::test_x - assert\n{red}===== 2 failed{off}, 3 passed in 1.20s ====={off}\n"
+    assert runner.hidden(coloured) == {"failed": 2, "failing": [f"{HIDDEN}::test_x"]}
+    assert "hidden_unread" not in runner._row(result("merged", (4, 4, 4), coloured), 0)
+    cut = f"FAILED {HIDDEN}::test_x\n===== 2 fai"
+    row = runner._row(result("merged", (4, 4, 4), cut), 0)
+    assert row["hidden"] is None and row["hidden_unread"] == runner.NO_COUNT
+
+
 # -- the bar -----------------------------------------------------------------------------------
 
 

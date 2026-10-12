@@ -622,11 +622,20 @@ async def _run(args) -> None:
             raise SystemExit(f"calibrate refused: {exc}") from None
         print(json.dumps(record, indent=2))
         return
+    if args.command == "routine" and args.finding is None and (args.key or args.evidence):
+        raise SystemExit("routine refused: --key and --evidence go with --finding")
     if args.command == "routine" and args.finding is not None:
+        if not args.finding.strip():
+            raise SystemExit("routine refused: --finding is empty")
         if not args.key:
             raise SystemExit("routine refused: --finding takes at least one --key")
-        evidence = Path(args.evidence).read_text(errors="replace") if args.evidence else ""
-        finding = findings.Finding(keys=tuple(args.key), text=args.finding, evidence=evidence)
+        if not all(k.strip() for k in args.key):
+            raise SystemExit("routine refused: a --key is empty")
+        try:
+            evidence = Path(args.evidence).read_text(errors="replace") if args.evidence else ""
+        except OSError as exc:
+            raise SystemExit(f"routine refused: --evidence {args.evidence}: {exc.strerror}") from None
+        finding = findings.Finding(keys=tuple(args.key), text=args.finding, evidence=findings.head(evidence))
         async with await db.connect() as conn:
             try:
                 said, task = await findings.start_by_hand(

@@ -251,6 +251,17 @@ def test_a_usable_run_sees_passing_keys_and_the_suite_gone():
     assert verify.SUITE_KEY not in verify.seen_gone(payload(passed=["tests.t::test_q"]), broken)
 
 
+def test_a_resumed_run_that_cannot_read_the_junit_again_keeps_the_red_it_recorded():
+    kept = payload(passed=["tests.t::test_q"], failed=["tests.t::test_p[1]"], errored=["tests.t::test_e"])
+    failures = verify.failures_of(kept, [])
+    (found,) = verify.grouped(kept, failures, "main")
+    assert found.keys == ("verify:tests.t::test_e", "verify:tests.t::test_p")
+    assert verify.UNREAD in found.text
+    assert verify.seen_gone(kept, failures) == {"verify:tests.t::test_q", verify.SUITE_KEY}
+    read = [failure("tests.t::test_p[1]", "bad")]
+    assert verify.failures_of(kept, read) == read
+
+
 # -- firings ------------------------------------------------------------------------------------
 
 
@@ -512,7 +523,7 @@ def cli(toy: Toy, *args: str) -> subprocess.CompletedProcess:
 @pytest.mark.macos
 def test_a_finding_started_by_hand_is_held_and_refused_on_a_stopped_routine(toy, tmp_path):
     evidence = tmp_path / "evidence.txt"
-    evidence.write_text("`env` and `cd` run without the prefix")
+    evidence.write_text("`env` and `cd` run without the prefix" + "x" * findings.MESSAGE)
     args = (
         "--finding",
         "C14: the command prefix",
@@ -538,11 +549,27 @@ def test_a_finding_started_by_hand_is_held_and_refused_on_a_stopped_routine(toy,
             return b
 
     b = run(look())
-    assert "`env` and `cd`" in b.instruction and b.routine == toy.name
+    assert "`env` and `cd`" in b.instruction and "[cut]" in b.instruction and b.routine == toy.name
     assert [(r["run"], r["outcome"]) for r in run(ran(toy))] == [(None, "started"), (None, "nothing_due")]
     third = cli(toy, *args)
     assert third.returncode != 0 and "is stopped" in third.stderr
     assert findings.key_of("backlog:c14-prefix") == "backlog:c14-prefix"
+
+
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        (("--key", "backlog:x"), "go with --finding"),
+        (("--finding", " ", "--key", "backlog:x"), "--finding is empty"),
+        (("--finding", "it is red", "--key", ""), "a --key is empty"),
+        (("--finding", "it is red", "--key", "backlog:x", "--evidence", "/nonexistent/e.txt"), "--evidence"),
+        (("--finding", "it is red", "--key", "backlog:x", "--evidence", "."), "--evidence"),
+    ],
+)
+def test_a_hand_start_refuses_a_bare_key_an_empty_field_and_unreadable_evidence(toy, args, why):
+    got = cli(toy, *args)
+    assert got.returncode != 0 and got.stderr.startswith("routine refused:") and why in got.stderr
+    assert "Traceback" not in got.stderr and got.stdout == ""
 
 
 @pytest.mark.parametrize("name", ["verify", "emulator"])

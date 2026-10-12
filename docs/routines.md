@@ -277,7 +277,9 @@ like any other: the loop adds no merge path and no gate.
   run, not instructions):". It decides only which findings start and
   their keys.
 - **`verify`.** Red cases are grouped by the first line of their JUnit
-  failure message, and cases of one parametrized test are one group. Keys
+  failure message, and cases of one parametrized test are one group. A
+  resumed run that cannot read the JUnit file again uses the failed ids
+  its `suite.ran` recorded, with no message. Keys
   are `verify:<test id>` with the parametrize suffix removed. A report with
   no usable test list, or a module that did not load, is the one
   `verify:suite` finding. A failure of the kernel's own (services that
@@ -288,11 +290,16 @@ like any other: the loop adds no merge path and no gate.
   `emulator:<item>`. Worse means the arm ends short of a merge where bare
   merged, its judged total is more than one point below bare's, or its
   hidden test command fails more tests than bare's. The failing ids are
-  evidence only.
+  evidence only. Colour codes are removed before the summary is read; an
+  arm whose summary gives no count is marked `hidden_unread` and the
+  hidden rule is not applied to it.
 - **By hand.** `python -m core routine NAME --finding TEXT --key KEY
   [--key KEY] [--evidence FILE]` starts a finding under the routine's
   objective, and records `routine.ran` with `run` None, so it never counts
-  as the routine's own use. A stopped routine refuses it. Backlog items
+  as the routine's own use. It refuses a stopped routine, an empty
+  finding or key, `--key` or `--evidence` without `--finding`, and an
+  evidence file it cannot read. The evidence is cut to its first 1500
+  characters (`findings.MESSAGE`). Backlog items
   use one key each, named `backlog:<item>`. No run clears a `backlog:`
   key, so it stays held after its task ends or is stopped; the lead
   starts the item again under a new key.

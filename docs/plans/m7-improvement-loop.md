@@ -241,7 +241,8 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
    outcome is `failed` with "stopped".
 5. **Findings.** These come from the `suite.ran` payload and the JUnit
    file. A sibling of `checks.read_junit` reads each failed or errored
-   case's message and text through the same no-follow read.
+   case's message and text through the same no-follow read. A resumed run
+   that cannot read the file again uses the ids `suite.ran` recorded.
    - **Kernel failure** (`cause == "kernel"`, for example the services
      did not start): no `suite.ran`, no finding. The outcome is `failed`
      with the reason, which closes the run. The kernel's own failure is
@@ -299,7 +300,8 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
     lines and Django's `FAIL:` and `ERROR:` lines. These are best effort,
     since `judge.py` keeps the last 4000 characters and a long output
     loses its first lines;
-  - None when the summary line is missing.
+  - None when no summary count is read once colour codes are removed;
+    the row then says so in `hidden_unread`.
 - **The bar** (`regressions(report)`) is the D5 record's, applied per
   item to each of `clarify` and `routed` against this run's `bare`. An
   arm is worse when any of these holds:
@@ -342,8 +344,9 @@ A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
 
 `python -m core routine NAME --finding TEXT --key KEY [--key KEY]
 [--evidence FILE]` works in five steps:
-1. It finds or registers the routine's objective. A stopped routine is
-   refused, as a firing is.
+1. It refuses an empty finding or key, a key without a finding, and an
+   evidence file it cannot read; it cuts the evidence to `MESSAGE`. It
+   finds or registers the routine's objective, refusing a stopped one.
 2. It calls `start_fix` with `parent` the objective.
 3. It appends `routine.ran` with outcome `started`, or `nothing_due`
    naming the task that holds the key.
@@ -407,13 +410,11 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
     and the assertion message in its evidence.
   - Firing 2 starts none and says the key is held.
   - The run's workspace is gone after each firing.
-- **verify, grouping:**
-  - A parametrized test failing in three cases gives one task listing
-    all three ids.
-  - Fifty tests failing with one message (a broken fixture) give one
-    task.
-  - Two failures with different messages give two tasks.
-  - A module that fails to import gives one `verify:suite` task.
+- **verify, grouping:** a parametrized test failing in three cases gives
+  one task listing all three ids; fifty tests failing with one message (a
+  broken fixture) give one; two messages give two; a module that fails to
+  import gives one `verify:suite` task. A resumed run that cannot read
+  the JUnit file again keeps the red ids its `suite.ran` recorded.
 - **verify, green:** a passing branch starts no task, ends `finished`
   with "0 red", and lists the passing held keys and `verify:suite` in
   `cleared`.
@@ -427,9 +428,7 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
   it fixed, the next firing makes a fresh run that runs the suite.
 - **verify, preempted or stopped:**
   - A foreground holder taking the slot mid-suite gives `running` with
-    no `suite.ran`.
-  - The next firing resumes the same run at the same commit and starts no
-    second run node.
+    no `suite.ran`; the next firing resumes that run at the same commit.
   - A run stopped mid-suite, or while it waits for the slot, gives
     `failed` with "stopped", no finding, and its workspace removed.
   - An emulator run stopped mid-sweep writes its report and starts none.
@@ -455,14 +454,15 @@ spec from a temporary file, as `test_expiry.py`'s project test does.
   - A stopped arm, or a bare with no outcome, compares nothing.
   - An item worse in both arms gives one task.
 - **emulator, the parser:** pytest and Django outputs give the counts the
-  D5 record states, also from a tail cut to its last 4000 characters.
+  D5 record states, cut to 4000 characters or coloured; no count is named.
 - **emulator, crash between report and findings:** a run with a report
   and no `finished` is continued and starts its finding.
 - **two firings at once and a hand child**, for `verify` and the
   emulator: one run node, and the hand child is never taken for it.
 - **the command line:** `routine verify --finding ... --key K` starts one
   task under the objective and writes `routine.ran` with `run` None; run
-  again it prints the holder and starts none; a stopped routine refuses.
+  again it prints the holder and starts none; a stopped routine, an
+  empty field, a bare `--key` and unreadable evidence are refused.
 - **the real tomls:** `routines/verify/routine.toml` and the emulator's
   load, name the `valor` spec, and print a plist.
 
@@ -596,4 +596,4 @@ The governance grant, one tap per instance (Governance above).
   `test_advisor` only, the build showed the check skips `test_pi`; S4 the first emulator firing
   is by hand with the weekly job unloaded; S5 Existence unchanged; S6 to S11 and all nits as
   written.
-- Patch round 1 (review: changes): a stopped emulator or `verify` run, including one stopped in the slot wait, starts no finding and records its outcome; task text reuses `MESSAGE`; `backlog:` keys stay held; the suite's TMPDIR is in the workspace.
+- Patch round 1 (review: changes): a stopped emulator or `verify` run, including one stopped in the slot wait, starts no finding and records its outcome; task text reuses `MESSAGE`; `backlog:` keys stay held; the suite's TMPDIR is in the workspace. From the test check: a resumed run keeps its recorded red; `--finding` refuses bad input and cuts evidence to `MESSAGE`; the bar removes colour codes and names an unread count.
