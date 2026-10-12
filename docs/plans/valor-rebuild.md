@@ -568,28 +568,26 @@ off.
 
 ## Milestone 7: the improvement loop
 
-Self-built. Stakes: the kernel, critique 2 and review 1. A guard: it waits
-for Tom's tap per instance. Plan in
+A driving session builds it through `/build` and a kernel landing task merges it. Stakes: the
+kernel, critique 2 and review 1. A guard: it waits for Tom's tap per instance. Plan in
 [m7-improvement-loop.md](m7-improvement-loop.md).
 
-**Goal.** Valor turns its own measured defects, red tests on the branch
-and emulator items worse than bare, into tasks its kernel carries through
-the normal pipeline (Mission item 1, "resolving discovered defects";
-Evidence "Working results in real use").
+**Goal.** Valor turns its measured defects (red tests on the branch, emulator items worse than
+bare) into tasks its kernel carries (Mission item 1; Evidence "Working results in real use").
 
 **Done.**
-- A planted red test on a throwaway branch makes the `verify` run start
-  exactly one task, and a second firing starts none.
-- A planted worse-than-bare sweep report makes the emulator run start
-  exactly one task.
-- One task the loop started reaches merged on the branch through the
-  kernel, with no driving-session hand on the code.
+- A planted red test on a throwaway branch makes the `verify` run start exactly one task, and a
+  second firing starts none.
+- A planted worse-than-bare sweep report makes the emulator run start exactly one task.
+- One task the loop started reaches merged on the branch through the kernel, with no
+  driving-session hand on the code.
 - The guard row exists with its grant, incident, mission item and expiry.
 
-**Absorbs.** The emulator report's hidden tests kept as exit codes only.
+**Absorbs.** The emulator report's hidden tests recorded as exit codes only: each row gains failed
+counts and failing ids.
 
-**Leaves out.** Any controller, research cycle, arena, promotion step, or
-merge path or gate of the loop's own; container tests in `verify`.
+**Leaves out.** Any controller, research cycle, arena, promotion step, or merge path or gate of
+the loop's own; container tests in `verify`.
 
 ## Before cutover
 
@@ -606,7 +604,9 @@ Cutover is Tom's to plan. These must be true first:
 - The old system's data the new one needs (projects, chat ownership,
   operator identity) is listed, with where each comes from.
 
-Decided by default: [valor-rebuild-decided.md](valor-rebuild-decided.md).
+## Decided by default
+
+[valor-rebuild-decided.md](valor-rebuild-decided.md).
 
 ## Open items
 
