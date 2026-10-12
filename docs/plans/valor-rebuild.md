@@ -61,7 +61,7 @@ How the loops end (Tom's rulings in [valor-rebuild-feedback.md](valor-rebuild-fe
 - **Tom's queue holds** questions about vision, business priorities, and
   the cost and benefit of tradeoffs; things only he holds (a password, an
   account); and governance grants. Tom gets a report of each merge and
-  send. Every other call is Valor's, recorded under "Decided by default"
+  send. Every other call is Valor's, recorded in [valor-rebuild-decided.md](valor-rebuild-decided.md)
   and not asked.
 
 Governance binds every milestone. A milestone that needs a new check, gate,
@@ -92,16 +92,19 @@ same stages by hand:
 The driving session keeps no findings log beyond the plan file and the
 verdicts in each commit message.
 
-**The takeover point.** When milestone 1 is done, Valor builds everything after it through its own
-kernel. Tom starts each task, and each merge leaves at request and is reported to him on the
-operator channel, Telegram while the new bridge is up (see Where it runs). Each task's workspace is
-a fresh clone of this repository; a merge pushes to the rebuild branch on GitHub. The running
-kernel runs from the lead's checkout, and after its own merge lands it rolls that checkout forward
-(`core/rollout.py`): a merge that changes only persona, skills, docs or tests is fast-forwarded at
-once; any other waits for the running jobs, backs up the database when the schema changes,
-fast-forwards, syncs the dependencies when they change, runs the merged migrate, and restarts the
-kernel through launchd. A failed step is tried again on later ticks, and Tom gets a report once it
-has failed three times.
+**The takeover point.** When milestone 1 is done, Valor builds everything
+after it through its own kernel. Tom starts each task, and each merge leaves
+at request and is reported to him on the operator channel, Telegram while
+the new bridge is up (see Where it runs). Each task's workspace is a fresh clone of this repository;
+a merge pushes to the rebuild branch on GitHub. The running kernel runs
+from the lead's checkout, and after its own merge lands it rolls that
+checkout forward (`core/rollout.py`): a merge that changes only persona,
+skills, docs or tests is fast-forwarded at once; any other waits for the
+running jobs, backs up the database when the schema changes,
+fast-forwards, syncs the dependencies when they change, runs the merged
+migrate, and restarts the kernel through launchd. A failed step is tried
+again on later ticks, and Tom gets a report once it has failed three
+times.
 
 **Fan-out (Tom's decision of 2026-10-03).** Every remaining task is
 planned at once, and every task whose code does not wait on another is
@@ -116,15 +119,18 @@ only to repair the kernel when Valor cannot run its pipeline at all. Such
 a repair is a task in the ledger like any other once the kernel runs
 again, so the record shows every fix.
 
-**Where it runs.** Milestone 1 runs in `~/src/valor-rebuild` on the Mac this plan was written on.
-Before milestone 2 the kernel moves to the build Mac, one of Valor's, by a fresh clone and a
-restore of the kernel's database dump; the old system keeps running there. From milestone 2 the new
-bridges use Valor's real Telegram account and mailbox, live only during test windows. For a window,
-the old Telegram bridge, email bridge, and worker on that Mac are disabled (`worker-disable`,
-`email-disable`, and the bridge's own disable, so launchd does not restart them), and enabled again
-after; messages that arrive in the window belong to the new system and the old one does not replay
-them. A window can be long enough for one whole real task. The new bridge honors the same
-single-machine ownership of chats, so it never reads chats another Mac owns.
+**Where it runs.** Milestone 1 runs in `~/src/valor-rebuild` on the Mac
+this plan was written on. Before milestone 2 the kernel moves to the build
+Mac, one of Valor's, by a fresh clone and a restore of the kernel's
+database dump; the old system keeps running there. From milestone 2 the
+new bridges use Valor's real Telegram account and mailbox, live only
+during test windows. For a window, the old Telegram bridge, email bridge,
+and worker on that Mac are disabled (`worker-disable`, `email-disable`,
+and the bridge's own disable, so launchd does not restart them), and
+enabled again after; messages that arrive in the window belong to the new
+system and the old one does not replay them. A window can be long enough
+for one whole real task. The new bridge honors the same single-machine
+ownership of chats, so it never reads chats another Mac owns.
 
 ## Milestone 1: the kernel and its Postgres data
 
@@ -544,9 +550,28 @@ off.
 
 ## Milestone 7: the improvement loop
 
-Self-built. Stakes: the kernel, critique 2 and review 1; a guard that waits for Tom's tap per
-instance. Red tests on the branch and emulator items worse than bare become tasks Valor's kernel
-carries (Mission item 1). Plan: [m7-improvement-loop.md](m7-improvement-loop.md).
+Self-built. Stakes: the kernel, critique 2 and review 1. A guard: it waits
+for Tom's tap per instance. Plan in
+[m7-improvement-loop.md](m7-improvement-loop.md).
+
+**Goal.** Valor turns its own measured defects, red tests on the branch
+and emulator items worse than bare, into tasks its kernel carries through
+the normal pipeline (Mission item 1, "resolving discovered defects";
+Evidence "Working results in real use").
+
+**Done.**
+- A planted red test on a throwaway branch makes the `verify` run start
+  exactly one task, and a second firing starts none.
+- A planted worse-than-bare sweep report makes the emulator run start
+  exactly one task.
+- One task the loop started reaches merged on the branch through the
+  kernel, with no driving-session hand on the code.
+- The guard row exists with its grant, incident, mission item and expiry.
+
+**Absorbs.** The emulator report's hidden tests kept as exit codes only.
+
+**Leaves out.** Any controller, research cycle, arena, promotion step, or
+merge path or gate of the loop's own; container tests in `verify`.
 
 ## Before cutover
 
@@ -563,32 +588,7 @@ Cutover is Tom's to plan. These must be true first:
 - The old system's data the new one needs (projects, chat ownership,
   operator identity) is listed, with where each comes from.
 
-## Decided by default
-
-Tom can overturn any of these; each is reversible.
-
-- The judgement port, the blind verifier, the emulator, and the GitHub
-  credential for pushes are built inside milestone 1, since the pipeline
-  needs them before takeover.
-- Milestone 2 binds a message to a task without a classifier: a reply to
-  one of Valor's messages goes to that task, and any other message from Tom
-  starts a new task. Judgement use shapes 2 and 3 wait for a misrouted
-  message.
-- The objective tree is built at the start of milestone 4, where routines
-  first need it.
-- Stage instructions live as plain files in `skills/sdlc/` until the skill
-  system is designed.
-- The read-only status page in `ui/` comes with routines.
-- Stakes per milestone as stated above.
-- Polls are dropped from the Telegram bridge, per Tom's ruling on `main`
-  (#3550).
-- The inbound Telegram record carries the forum topic id.
-- The rebuild runs on Valor's Mac, where the old system also runs.
-- The answer keys for cuttlefish #646, popoto #191, and popoto #188 stand
-  as written ([m1-5-emulator-records.md](m1-5-emulator-records.md)).
-- The old system's spend on the replayed PRs is not needed: every
-  milestone's evidence compares against the bare baseline and the emulator,
-  not against the old system's cost.
+Decided by default: [valor-rebuild-decided.md](valor-rebuild-decided.md).
 
 ## Open items
 
