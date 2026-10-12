@@ -400,13 +400,21 @@ def test_a_hand_child_is_never_a_run_and_two_firings_at_once_make_one(toy):
     assert run(ran(toy))[0]["summary"] == "already running"
 
 
-async def _in_suite(toy: Toy) -> str:
+async def _ended(toy: Toy, firing: asyncio.Task) -> None:
+    """A firing that ended before the moment a test waits for fails the test
+    with what it said, so a denial the run met is the failure's own text."""
+    if firing.done():
+        raise AssertionError(f"the firing ended early: {firing.result()}; {(await ran(toy))[-1]['summary']}")
+
+
+async def _in_suite(toy: Toy, firing: asyncio.Task) -> str:
     """The run, once its check has checked out the commit."""
     await objective(toy)
     for _ in range(600):
         nodes = await run_nodes(toy)
         if nodes and list((toy.work / nodes[0]).glob("checks/test-verify-*/repo")):
             return nodes[0]
+        await _ended(toy, firing)
         await asyncio.sleep(0.05)
     raise AssertionError("the suite never started")
 
@@ -418,7 +426,7 @@ def test_a_foreground_holder_preempts_the_run_and_the_next_firing_resumes_it(toy
 
     async def go():
         firing = asyncio.create_task(fire(toy))
-        run_id = await _in_suite(toy)
+        run_id = await _in_suite(toy, firing)
         async with await db.connect(toy.dsn) as conn:
             tom = await tasks.start(conn, tasks.Brief(instruction="Tom's"))
         async with slot.held(tom, toy.dsn):
@@ -440,7 +448,7 @@ def test_a_stopped_run_fails_and_its_workspace_is_removed(toy):
 
     async def go():
         firing = asyncio.create_task(fire(toy))
-        run_id = await _in_suite(toy)
+        run_id = await _in_suite(toy, firing)
         async with await db.connect(toy.dsn) as conn:
             await tasks.stop(conn, run_id, reason="not now")
         return run_id, await asyncio.wait_for(firing, 60)
@@ -473,8 +481,10 @@ def test_a_run_stopped_while_it_waits_for_the_slot_runs_no_suite(toy):
             nodes = await run_nodes(toy)
             if nodes and (await brief(toy, nodes[0])).mirror:
                 break
+            await _ended(toy, firing)
             await asyncio.sleep(0.05)
         await asyncio.sleep(1)  # the run is waiting for the slot
+        await _ended(toy, firing)
         async with await db.connect(toy.dsn) as conn:
             await tasks.stop(conn, nodes[0], reason="not now")
         release.set()
