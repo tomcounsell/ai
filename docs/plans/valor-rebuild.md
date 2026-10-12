@@ -435,6 +435,23 @@ bridge's port.
 **Done.** On Tom's Mac: a message typed on the page starts a task, a
 notice comes back, and a send leaves at request and is shown once.
 
+### 2.5 Slack
+
+Stakes: sender verification and the kernel's declarations, and sends to
+real people under Valor's name, critique 2 and review 2. Plan (draft,
+waiting on Tom's identity and workspace answers):
+[m2-5-slack.md](m2-5-slack.md).
+
+`bridges/slack/` over Socket Mode, to the same port: a `message` event is
+acked only after `intake.receive` commits, gap fill reads
+`conversations.history` from the newest `ts` seen, and every post carries
+a metadata marker that `lookup` finds after a crash (OpenClaw's design;
+Slack has no `random_id`).
+
+**Done.** In a test window on Valor's workspace: Tom's DM starts a task,
+his thread reply binds to a question, and a crash between intent and
+outcome does not post twice.
+
 **Leaves out (milestone 2).** Other channels.
 
 ## Milestone 3: the harnesses
