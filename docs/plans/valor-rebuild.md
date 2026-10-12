@@ -92,19 +92,16 @@ same stages by hand:
 The driving session keeps no findings log beyond the plan file and the
 verdicts in each commit message.
 
-**The takeover point.** When milestone 1 is done, Valor builds everything
-after it through its own kernel. Tom starts each task, and each merge leaves
-at request and is reported to him on the operator channel, Telegram while
-the new bridge is up (see Where it runs). Each task's workspace is a fresh clone of this repository;
-a merge pushes to the rebuild branch on GitHub. The running kernel runs
-from the lead's checkout, and after its own merge lands it rolls that
-checkout forward (`core/rollout.py`): a merge that changes only persona,
-skills, docs or tests is fast-forwarded at once; any other waits for the
-running jobs, backs up the database when the schema changes,
-fast-forwards, syncs the dependencies when they change, runs the merged
-migrate, and restarts the kernel through launchd. A failed step is tried
-again on later ticks, and Tom gets a report once it has failed three
-times.
+**The takeover point.** When milestone 1 is done, Valor builds everything after it through its own
+kernel. Tom starts each task, and each merge leaves at request and is reported to him on the
+operator channel, Telegram while the new bridge is up (see Where it runs). Each task's workspace is
+a fresh clone of this repository; a merge pushes to the rebuild branch on GitHub. The running
+kernel runs from the lead's checkout, and after its own merge lands it rolls that checkout forward
+(`core/rollout.py`): a merge that changes only persona, skills, docs or tests is fast-forwarded at
+once; any other waits for the running jobs, backs up the database when the schema changes,
+fast-forwards, syncs the dependencies when they change, runs the merged migrate, and restarts the
+kernel through launchd. A failed step is tried again on later ticks, and Tom gets a report once it
+has failed three times.
 
 **Fan-out (Tom's decision of 2026-10-03).** Every remaining task is
 planned at once, and every task whose code does not wait on another is
@@ -114,23 +111,20 @@ files merge one at a time. The waves, the models per role, and each
 agent's isolation are in `.claude/skills/build/SKILL.md`. The takeover
 gate still measures the pipeline before Valor carries tasks itself.
 
-**Phase B, self-built (milestones 2 to 6).** A driving session steps in
+**Phase B, self-built (milestones 2 to 7).** A driving session steps in
 only to repair the kernel when Valor cannot run its pipeline at all. Such
 a repair is a task in the ledger like any other once the kernel runs
 again, so the record shows every fix.
 
-**Where it runs.** Milestone 1 runs in `~/src/valor-rebuild` on the Mac
-this plan was written on. Before milestone 2 the kernel moves to the build
-Mac, one of Valor's, by a fresh clone and a restore of the kernel's
-database dump; the old system keeps running there. From milestone 2 the
-new bridges use Valor's real Telegram account and mailbox, live only
-during test windows. For a window, the old Telegram bridge, email bridge,
-and worker on that Mac are disabled (`worker-disable`, `email-disable`,
-and the bridge's own disable, so launchd does not restart them), and
-enabled again after; messages that arrive in the window belong to the new
-system and the old one does not replay them. A window can be long enough
-for one whole real task. The new bridge honors the same single-machine
-ownership of chats, so it never reads chats another Mac owns.
+**Where it runs.** Milestone 1 runs in `~/src/valor-rebuild` on the Mac this plan was written on.
+Before milestone 2 the kernel moves to the build Mac, one of Valor's, by a fresh clone and a
+restore of the kernel's database dump; the old system keeps running there. From milestone 2 the new
+bridges use Valor's real Telegram account and mailbox, live only during test windows. For a window,
+the old Telegram bridge, email bridge, and worker on that Mac are disabled (`worker-disable`,
+`email-disable`, and the bridge's own disable, so launchd does not restart them), and enabled again
+after; messages that arrive in the window belong to the new system and the old one does not replay
+them. A window can be long enough for one whole real task. The new bridge honors the same
+single-machine ownership of chats, so it never reads chats another Mac owns.
 
 ## Milestone 1: the kernel and its Postgres data
 
@@ -550,30 +544,9 @@ off.
 
 ## Milestone 7: the improvement loop
 
-Self-built. Stakes: the kernel, critique 2 and review 1. A guard: it
-carries a `governance_grant` and waits for Tom's tap per instance. Plan
-in [m7-improvement-loop.md](m7-improvement-loop.md).
-
-**Goal.** Valor turns its own measured defects into tasks its kernel
-carries through the normal pipeline, so a defect found is resolved without
-Tom coordinating (Mission item 1, "resolving discovered defects"; Evidence
-"Working results in real use").
-
-**Done.**
-- A planted red test on a throwaway branch makes the `verify` run start
-  exactly one task, and a second firing starts none.
-- A planted worse-than-bare sweep report makes the emulator run start
-  exactly one task.
-- One task the loop started reaches merged on the branch through the
-  kernel, with no driving-session hand on the code.
-- The guard row exists with its grant, incident, mission item and expiry.
-
-**Absorbs.** The emulator report's hidden tests as exit codes only (it
-gains passed counts and failing ids).
-
-**Leaves out.** Any controller, research cycle, arena, or promotion step;
-a merge path or gate of the loop's own; grouping red tests beyond one
-test function.
+Self-built. Stakes: the kernel, critique 2 and review 1; a guard that waits for Tom's tap per
+instance. Red tests on the branch and emulator items worse than bare become tasks Valor's kernel
+carries (Mission item 1). Plan: [m7-improvement-loop.md](m7-improvement-loop.md).
 
 ## Before cutover
 

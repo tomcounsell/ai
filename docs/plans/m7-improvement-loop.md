@@ -13,45 +13,50 @@ governance_grant: required, one tap per instance through python -m core grant
 Valor turns its own measured defects into tasks its own kernel carries.
 Two sources start them: the emulator sweep, when an item does worse than
 its bare run, and a new `verify` routine, when a test is red on the
-branch tip. One shared function starts each task from a finding, and a
-dedupe key keeps one open task per defect. Each task is an ordinary task:
+branch tip. One shared function starts each task from a finding, and its
+dedupe keys keep one open task per defect. Each task is an ordinary task:
 judge, plan, critique, build, test, review, docs, and a merge at request
 when the predicate holds. The loop adds no merge path, no promotion step,
 and no gate of its own.
 
-**Goal.** Mission item 1 ("resolving discovered defects": Tom never
-coordinates the gaps) and the Evidence item "Working results in real use"
-("was each defect found in use resolved without Tom coordinating").
+**Goal.** Valor resolves the defects it finds in its own work without Tom
+coordinating them. `verify` serves Mission item 1 ("resolving discovered
+defects") and the Evidence item "Working results in real use". The
+emulator's findings serve Mission item 1 only: a replay is not real use
+(`docs/mission.md`).
 
-**Stakes 2 critique, 1 review.** It changes the kernel (`core/`), starts
+**Stakes: critique 2, review 1.** It changes the kernel (`core/`), starts
 `act`-ceiling tasks with no human in the start, and runs the kernel's own
 suite on a schedule.
+
+**Absorbs.** The emulator report's hidden tests recorded as exit codes
+only: each row gains failed counts and failing ids.
 
 ## Threat model
 
 The fix task's turns control their own workspace and candidate, as any
-task's do. The suite run by `verify` executes the branch's code in the
-kernel's check sandbox, and writes the JUnit file the runner reads. A
-replay's verification output is written by code a stand-in-driven turn
-built. So the finding's evidence is text the kernel did not write. The
-kernel must never: read that text through a path that follows a link
-(the JUnit file is read by `checks.read_junit`, the replay result by the
-driver's own file), run the suite inside its own live checkout, start a
-task above the routine's ceiling, or let evidence text decide anything:
-it is quoted into the new task's instruction as data, and the task still
-passes its checks and the merge predicate like any other.
+task's do. The suite `verify` runs is the branch's code, run in the
+kernel's check sandbox, and it writes the JUnit file the runner reads. A
+replay's verification output comes from code a turn built. So all of a
+finding's evidence is text the kernel did not write. The kernel must
+never read that text through a path that follows a link, run the suite
+inside its own live checkout, start a task above the routine's ceiling, or
+let the evidence decide anything.
+
+The evidence is quoted into the new task's instruction as data, and the
+task still passes its checks and the merge predicate like any other.
 
 ## Governance: this is a guard
 
 **Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, or approval step is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance is an `act`-class effect: the Brief carries a `governance_grant` field, default none, and a diff that adds any of the above needs Tom's tap, one approval per instance, through the same approval surface as a merge or a send. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is deleted by default. The blind verifier asks one Jev-class boolean over every diff, "does this add a check, gate, hook, round, or review step", and a yes with no grant is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
 
-A routine that looks for something wrong and raises it is a guard
-(`docs/routines.md`, "Routines that are checks"). This one is.
+`docs/routines.md`, "Routines that are checks", says a routine that looks
+for something wrong and raises it is a guard. This one is.
 
 **Mission item.** Mission item 1, resolving discovered defects, and the
 Evidence item "working results in real use".
 
-**Incidents that already happened without it:**
+**The incidents that already happened without it:**
 
 - (a) three red tests on the branch went unnoticed until a hand run on
   2026-10-12: `7c57334f8` changed the persona wording but not
@@ -62,26 +67,77 @@ Evidence item "working results in real use".
 - (c) the D4 failures were found by a sweep and then fixed by hand from a
   driving session (C9 to C14), not by Valor's kernel
 
-**Grant.** The diff carries a `governance_grant` and merges only after
-Tom's tap on each instance the blind verifier names, through
-`python -m core grant TASK INSTANCE --note TEXT`. Tom asked for the loop
-on 2026-10-12; that request is not the tap. A grant binds to a kernel
-task's review verdict, so the merge is carried by the kernel (Rollout,
-step 2). The lead asks Tom once, when the instances exist, in one message
-naming the three incidents; the same message says the loop's first
-emulator firing is the D5 re-sweep at the current head (about $140), so
-that cost question is not asked twice.
+**Which source catches which.** `verify` runs the suite through the
+kernel's sandboxed check:
+`checks.suite` runs the command under `workspace.sandboxed`, where
+`container.present()` is false, so `tests/conftest.py` skips container
+tests.
+
+So `verify` catches each part of incident (a) as follows:
+- **(a)(1), `test_advisor`.** Caught. It is a plain test.
+- **(a)(2), `test_pi` at `f44d024d9`.** Caught on a Mac with Pi installed:
+  - The test compared the stand-in's version against
+    `pi.version(settings.pi)`. That function reads
+    `/opt/homebrew/bin/pi`'s `package.json`.
+  - The check profile denies only writes to the Pi install
+    (`workspace.py`, `pi_install()` in the write-deny list), so the check
+    reads the same file.
+  - The test, as it stood at `f44d024d9`, failed when run on this Mac
+    outside the sandbox on 2026-10-12.
+  - The build adds a test that runs it inside the check sandbox. If that
+    test shows the check does not see Pi, the build drops (a)(2) from
+    this section and says so in its report.
+- **(a)(3), the container-only test.** Not caught. The container group
+  stays with the backlog's VM item (the C8 container suite in the
+  verification VM).
+
+Incidents (b) and (c) are the emulator's.
+
+**Grant.** The landing task's diff adds this guard, so its merge is
+refused until Tom taps each instance the blind verifier names, through
+`python -m core grant`. Tom asked for the loop on 2026-10-12, and that
+request is not the tap. A grant binds to a kernel task's review verdict,
+so a kernel landing task carries the merge (Rollout, step 2).
+
+`guards.grant` falls back to the verdict's own incident and mission item
+when the command gives none. So the lead hands Tom ready-to-paste
+commands that name both, one per instance:
+
+```
+.venv/bin/python -m core grant LANDING_TASK INSTANCE \
+  --incident "(a) three red tests went unnoticed until a hand run on 2026-10-12 (7c57334f8 test_advisor, f44d024d9 test_pi, a container test red since C6); (b) D5's pso-a regression was recorded and nothing followed it up; (c) the D4 failures were fixed by hand from a driving session (C9 to C14)" \
+  --mission-item "1" \
+  --note "the improvement loop: verify and the emulator's findings start fix tasks"
+```
+
+The lead fills in LANDING_TASK and each INSTANCE from the review's
+verdict.
+
+**When Tom is asked.** The lead asks him once, when no named instance is
+left ungranted. The same message names the three incidents and says the
+loop's first emulator firing is the D5 re-sweep at the current head (about
+$140), so that cost question is not asked twice.
+
+After the grants, review runs again (`governance_granted` returns the
+task to checks). It may name a new instance, and then a second ask
+happens. That is accepted.
 
 **Ledger row and expiry.** Each tap writes a `guard.granted` row on the
 landing task through `guards.grant`: `guard_id`, `instance_id`, `name`,
 `incident`, `mission_items`, `granted_at`, `expires` (granted plus ninety
-days), Tom's note and provenance. The expiry sweep (`routines.due`) lists
-an instance grant past its expiry and proposes its deletion by default;
-Tom keeps it with `grant` on the sweep's task. The routine itself is also
-in `due`'s routine fold: a `verify` whose runs led to no use in ninety
-days is listed for deletion. No new seed in `guards.SEEDED`: the seeded
-rows are Tom's 2026-10-01 pipeline decision, and this grant is his tap
-through the grant surface.
+days), Tom's note and provenance.
+
+The expiry sweep (`routines.due`) lists an instance grant once today is
+past its `expires`, whether it has fired or not. It proposes deletion by
+default, and Tom keeps it with `grant` on the sweep's task. That question
+at day ninety is counted as Tom's attention, as any sweep question is.
+
+The routine is also in `due`'s routine fold. A `verify` whose runs led to
+no use in ninety days is listed for deletion.
+
+There is no new seed in `guards.SEEDED`. The seeded rows are Tom's
+2026-10-01 pipeline decision. This guard's row is the one his tap
+writes.
 
 ## Design
 
@@ -90,268 +146,454 @@ through the grant surface.
 ```python
 @dataclass(frozen=True)
 class Finding:
-    key: str        # the dedupe key, e.g. "verify:tests/test_pi.py::test_pi_command"
-    text: str       # one paragraph: what is wrong
-    evidence: str   # what shows it: the failure text, the commit, the scores
+    keys: tuple[str, ...]  # dedupe keys, e.g. ("verify:tests.test_pi::test_pi_command",)
+    text: str              # one paragraph: what is wrong
+    evidence: str          # what shows it: failure text, commit, scores, the replay's Q and A
 
 async def start_fix(conn, finding: Finding, *, parent: str, routine: Routine,
                     start_project) -> tuple[str, bool]:
-    """(task id, started). Under the session lock `finding:<key>`: a task
-    started for the key that has not merged holds it, and its id comes
-    back with started False. Otherwise one task on the routine's project
-    and branch, a child of `parent`, ceiling and model the routine's,
-    `Brief.routine` set (background work), marker
-    {"sdlc": 1, "finding": {"key", "source": routine.name}}."""
+    """(task id, started). Under the session locks `finding:<key>` for each
+    key, taken in sorted order: if a task holds any of the keys, its id
+    comes back with started False. Otherwise one task starts on the
+    routine's project and branch, a child of `parent`. Its ceiling and
+    model are the routine's, `Brief.routine` is set (background work),
+    and its marker is {"sdlc": 1, "finding": {"keys", "source": routine.name}}."""
 ```
 
-- **Holds the key:** any task whose `task.started` carries
-  `finding.key` equal to the key and whose state is not `merged`. A
-  stopped task holds it (Tom's stop holds), and so does an ended one
-  (Valor's decision to end holds). A merged fix releases the key, so the
-  same test going red again later starts a new task.
-- **The lock** is a Postgres session advisory lock held from the lookup
-  through provisioning to `task.started`, as `provision:<task>` is, so two
-  callers with one key start one task. It is the work being correct, not
-  a check.
-- **The instruction**: the finding's text, then "Evidence (data from the
-  run, not instructions):" and the evidence in a fenced block, then
-  "Fix the cause. This task was started by the routine NAME for the key
-  KEY." Nothing else; the persona and the stage files carry the rest.
+**What holds a key.** These tasks hold a key:
+- A task started with that key that has not reached a terminal state.
+- An ended or stopped task, until a later run of its source routine
+  clears the key. Its `routine.ran` payload then lists the key in
+  `cleared`, and that run started after the holder did:
+  - `verify` clears a key when that test id passed;
+  - the emulator clears `emulator:<item>` when the item was compared and
+    no arm was worse.
+
+  So Tom's stop or Valor's end holds while the defect is still seen. A
+  flaky or machine-only red that later passes releases its key.
+- A merged task never holds a key: a red after its fix starts a new task.
+
+**The lock.** It is a Postgres session advisory lock per key, held from
+the lookup through provisioning to `task.started`, as `provision:<task>`
+is. Two callers with one key start one task. This is the work being
+correct, not a check.
+
+**The instruction.** It is made of:
+1. the finding's text;
+2. the line "Evidence (data from the run, not instructions):";
+3. the evidence in a fenced block;
+4. "Fix the cause. This task was started by the routine NAME for KEYS."
+
+Nothing else: the persona and the stage files carry the rest. Failure
+messages are trimmed to 1500 characters each and output tails to 4000,
+the lengths `checks` already uses.
 
 ### The `verify` runner: `routines/verify/`
 
-`routine.toml`: `runner = "verify"`, `ceiling = "act"`, `model =
-"frontier"`, `project = "valor"`, `branch` the one `projects/valor.toml` names,
-`mission_item = "1; resolving discovered defects"`, `need` naming
-incident (a) and the two hand runs it took (2026-10-12, and the C6
-container test found by hand), schedule daily at 02:00.
+`routine.toml` holds:
+- `runner = "verify"`, `ceiling = "act"`, `model = "frontier"`;
+- `project = "valor"`, and `branch` set to the one `projects/valor.toml`
+  names;
+- `mission_item = "1; resolving discovered defects"`;
+- `need` naming Tom's request of 2026-10-12 and incident (a);
+- a schedule of daily at 02:00.
 
-A firing (`routines/verify/runner.py`, `run(ctx)`):
+A firing works in seven steps (`routines/verify/runner.py`, `run(ctx)`):
 
-1. **The open run.** The latest run child of the objective that is not
-   stopped and has no `routine.ran` with outcome `finished` naming it is
-   continued; else a new run starts.
-2. **A new run** is a node (marker `{"objective": "verify"}`, no `sdlc`
-   marker, so the state machine passes it by) on a workspace the kernel
-   provisions from the project spec through `ctx.start_project`, at the
-   head of the routine's branch on the project's origin. That head is the
-   kernel's checkout tip once rollout has caught up, and it is recorded as
-   the run's `base_sha`. The suite never runs in the kernel's own
-   checkout: the run's clone lives under `settings.work_dir`.
-3. **The suite.** Under the session lock `run:<run>` (a second process
-   says `already running`, as the emulator does) and the turn slot
-   (`slot.held(run)`, background since the run carries `Brief.routine`),
-   the runner calls `checks.suite` at the run's `base_sha` with role
-   `verify`: a fresh checkout from the mirror, fresh services (the spec's
-   Postgres), setup, and the spec's `suite` command in the check sandbox.
-   Its payload is appended to the run as a `suite.ran` row. A run that
-   already holds one skips the suite.
-4. **Preempted** (Tom's foreground work wanted the slot): nothing is
-   written and the firing returns `running`; the next firing resumes the
-   same run at the same commit.
-5. **Findings.** From the `suite.ran` payload and the JUnit file:
-   - each failed or errored test id, grouped by test function (the id
-     with its parametrize suffix `[...]` removed), one finding per group,
-     key `verify:<id without suffix>`, evidence: the commit, the command,
-     every id in the group, and each one's failure message and text from
-     the JUnit file;
-   - a suite with no report and `cause == "commit"` (setup failed, or the
-     suite crashed): one finding, key `verify:suite`, evidence the `why`
-     and the output tail;
-   - `cause == "kernel"` (the services did not start, no checkout): no
-     finding, outcome `failed` with the reason. The kernel's own failure
-     is not the branch's defect.
-6. Each finding goes through `start_fix` with `parent` the run.
-7. **Finish.** The run's workspace is removed (`workspace.remove`), and
-   the firing returns `finished` with "N red in M groups at SHA; started
-   T, held K". A preempted run keeps its workspace for its resume.
+1. **Find or make the run.** This happens under `routine:<name>`, the
+   session lock `routines.run` already holds for the expiry sweep, taken
+   across find-or-create only.
+   - A run is a child of the objective whose marker is
+     `{"objective": "verify"}`. A hand-started child is never taken for a
+     run.
+   - The open run is the latest run node that is not stopped and has no
+     `routine.ran` naming it with outcome `finished` or `failed`. It is
+     continued. Otherwise a new run starts.
+2. **A new run** is a node (no `sdlc` marker, so the state machine passes
+   it by) on a workspace the kernel provisions from the project spec
+   through `ctx.start_project`.
+   - It starts at the head of the routine's branch on the project's
+     origin.
+   - The run records that head as its `base_sha`, and records the
+     kernel's checkout tip as `kernel_tip`, read with `git rev-parse HEAD`
+     and no other access.
+   - The suite never runs in the kernel's own checkout: the run's clone
+     lives under `settings.work_dir`.
+3. **The suite.**
+   - The runner holds the session lock `run:<run>`. A second process says
+     `already running`, as the emulator does.
+   - It holds the turn slot (`slot.held(run)`), which is background
+     because the run carries `Brief.routine`.
+   - It calls `checks.suite` at `base_sha` with role `verify`. That gives
+     a fresh checkout from the mirror, fresh services, setup, and the
+     spec's suite command in the check sandbox.
 
-No other grouping: one task per failing test function. Two functions
-failing from one cause give two tasks; the second's builder finds the
-first's fix on the branch at its base or in review.
+   `checks.suite` takes a check context, not a routine's. A small
+   adapter, `verify.check_context(run, dsn)`, gives it:
+   - `task_id = run`, `dsn`, and an `alive` that is always true;
+   - the run's `workspace.Layout`;
+   - the run's Brief, which carries `mirror` and `base_sha`.
+
+   The stop task is `checks.stop_heard(ctx)`, entered inside
+   `slot.held`, since `slot.preempting()` reads a context variable set
+   there.
+
+   Setup runs twice, once at provision and once in the check, unseeded.
+   For this spec that is `uv sync --frozen` from uv's cache, and it is
+   accepted.
+
+   A usable payload (cause not `kernel`) is appended to the run as a
+   `suite.ran` row. A run that already holds one skips the suite.
+4. **Preempted.** If Tom's foreground work wants the slot, nothing is
+   written and the firing returns `running`. The next firing resumes the
+   same run at the same commit, and the workspace is kept.
+5. **Findings.** These come from the `suite.ran` payload and the JUnit
+   file. A sibling of `checks.read_junit` reads each failed or errored
+   case's message and text through the same no-follow read.
+   - **Kernel failure** (`cause == "kernel"`, for example the services
+     did not start): no `suite.ran`, no finding. The outcome is `failed`
+     with the reason, which closes the run. The kernel's own failure is
+     not the branch's defect.
+   - **No usable test list** with any other cause: one finding, key
+     `verify:suite`, with evidence the `why`, the exit and the output
+     tail. This covers:
+     - setup failed;
+     - the suite crashed with no report;
+     - exit 0 or 1 with no JUnit (cause None, tests None);
+     - pytest's "no tests ran";
+     - a report with zero tests.
+   - **A collection error** (pytest's JUnit case with message
+     `collection failure`): folded into the same `verify:suite` finding.
+     It means the module did not load.
+   - **Every other failed or errored case is grouped by the first line of
+     its JUnit failure message.** A fixture that breaks errors every test
+     using it with one message, so it becomes one finding. Two unrelated
+     failures with different messages are two.
+   - Each group's keys are its ids in `read_junit`'s format with the
+     parametrize suffix `[...]` removed, prefixed `verify:` (for example
+     `verify:tests.test_pi::test_pi_command`).
+   - Each group's evidence is the commit, the suite command, and every id
+     in the group with its message and text.
+   - The run lists, in its `routine.ran` `cleared`, every key from this
+     source held by an ended or stopped task whose ids all passed.
+6. Each finding goes through `start_fix`, with `parent` the run.
+7. **Finish.** A run that ends `finished` or `failed` removes its
+   workspace (`workspace.remove`). The firing's summary is "N red in M
+   groups at SHA (kernel at TIP); started T, held K".
 
 ### The emulator runner extended
 
-- `routines/emulator/routine.toml` gains `project = "valor"` and `branch`
-  set to the spec's branch, the project its findings start on.
-- **The report's hidden tests.** Each arm's row keeps `hidden_tests` (the
-  exit codes) and gains `hidden`: per verification command, `passed`,
-  `total`, and `failing` (ids), parsed from that command's
-  `output_tail`. The parser reads pytest's summary (`N passed`, `N
-  failed`, `N error`) and `FAILED id` or `ERROR id` lines, and Django's
-  `Ran N tests`, `FAILED (failures=a, errors=b)` or `OK`, and `FAIL: name
-  (module.Class)` lines. A command it cannot read is `None`.
-- **The bar** (`regressions(report)`), the D5 record's, per item, each of
-  `clarify` and `routed` against this run's `bare`:
-  - short of a merge where bare merged (`outcome != "merged"` and bare's
-    is);
-  - judged total (fidelity + correctness + simplicity) more than one
-    point below bare's;
-  - fewer hidden tests passed than bare on any verification command
-    whose counts both arms have.
-  An arm with no outcome, a failed driver, or no bare outcome is not
-  compared. A rule whose numbers are missing on either side is not
-  applied.
-- **One finding per item**, key `emulator:<item>`, text naming the arms
-  and the rules they broke, evidence: the run id, the report path, every
-  arm's outcome, scores and hidden counts, and the hidden tests that
-  fail in the worse arm and pass in bare.
-- **When.** After the report is written, before `finished`. `_open` now
-  continues the latest run that has no `finished` `routine.ran`, so a
-  firing that crashed after the report and before its findings is
-  continued: the replays all have results, the report is written again,
-  and `start_fix` starts what is not started.
+- **The project.** `routines/emulator/routine.toml` gains
+  `project = "valor"` and `branch` set to the spec's branch. That is the
+  project its findings start on.
+- **The hidden test command.** It is an item's first `verify` command:
+  `docs/emulator.md` says it carries the hidden reference test, and the
+  broad suite command after it is never read for the bar. The broad
+  suite's failures are the hidden ones counted again, plus whatever the
+  item's services break (pop-a's Redis hook tests).
+- **The report's hidden tests.** Each arm's row keeps `hidden_tests`
+  (the exit codes) and gains `hidden`, read from the hidden command's
+  `output_tail`:
+  - `failed`, read from the summary line: pytest's `N failed`,
+    `N error`, or Django's `FAILED (failures=a, errors=b)`, with `OK` as
+    zero;
+  - `failing`, the ids, read from pytest's `FAILED id` and `ERROR id`
+    lines and Django's `FAIL:` and `ERROR:` lines. These are best effort,
+    since `judge.py` keeps the last 4000 characters and a long output
+    loses its first lines;
+  - None when the summary line is missing.
+- **The bar** (`regressions(report)`) is the D5 record's, applied per
+  item to each of `clarify` and `routed` against this run's `bare`. An
+  arm is worse when any of these holds:
+  - it ends short of a merge where bare merged ("to Tom" and "stopped
+    for a grant" are short of a merge);
+  - its judged total (fidelity + correctness + simplicity) is more than
+    one point below bare's;
+  - on the hidden command, its `failed` exceeds bare's, or an id is in
+    its `failing` and not in bare's while bare's summary was read.
+
+  A passed count is never compared, so tests an arm wrote itself (pso-b's
+  module: 66/66 bare, 62/62 clarify) do not count. An arm or bare that
+  has no outcome, was stopped, or whose driver failed is not compared. A
+  rule whose numbers are missing on either side is not applied.
+- **One finding per item**, key `emulator:<item>`.
+  - The text names the arms and the rules they broke.
+  - The evidence holds:
+    - the run id and each arm's replay task id;
+    - every arm's outcome, scores and hidden counts;
+    - the hidden ids that fail in the worse arm and not in bare;
+    - for a clarify arm, its question and the stand-in's answer, quoted
+      from the result file.
+
+    The fix turn cannot read `$VALOR_DEMO`, so nothing points there.
+  - An item compared with no arm worse is listed in `cleared`.
+- **When.** After the report is written and before `finished`.
+  - `_open` takes `routine:<name>` across find-or-create, as `verify`
+    does, so two firings never start two runs.
+  - It continues the latest run node that has no `finished` or `failed`
+    `routine.ran`. So a firing that crashed after its report and before
+    its findings is continued. Its replays all have results, the report
+    is written again, and `start_fix` starts what is not started.
 
 ### Starting a finding by hand: the backlog's path
 
-`python -m core routine NAME --finding TEXT --key KEY [--evidence FILE]`
-finds or registers the routine's objective (a stopped routine is refused,
-as a firing is), calls `start_fix` with `parent` the objective, and
-appends `routine.ran` with outcome `started` (or `nothing_due`, naming
-the task that holds the key). It prints the routine's one line and the
-task id. The lead starts each backlog item this way after merge, on
-`verify`, so every loop task is a child of a loop objective, background,
-and counted in its period spending.
+`python -m core routine NAME --finding TEXT --key KEY [--key KEY]
+[--evidence FILE]` works in five steps:
+1. It finds or registers the routine's objective. A stopped routine is
+   refused, as a firing is.
+2. It calls `start_fix` with `parent` the objective.
+3. It appends `routine.ran` with outcome `started`, or `nothing_due`
+   naming the task that holds the key.
+4. That row carries `run: None`, so `_used` does not count a hand start
+   as the routine's own use.
+5. It prints the routine's one line and the task id.
 
-`_routine_project` gains `base` (None keeps the branch head) so the
-signature matches `start_project` everywhere; the verify run passes None.
+The lead starts each backlog item this way after merge, on `verify`. So
+every loop task is a child of a loop objective, runs in the background,
+and counts in its period spending.
+
+`_routine_project` gains `base` (None keeps the branch head), so its
+signature matches `start_project` everywhere. The verify run passes None.
+
+### Docs
+
+`docs/routines.md` changes in three places:
+- **"Verification runs"** becomes `verify` as built. Its class is `act`,
+  per Tom's request: a red test starts a task to fix it, carried through
+  the pipeline and merged at request. The bullet says what it does not
+  see: container tests, which the sandboxed check skips.
+- **"Existence"** says a routine Tom asks for exists on his request,
+  named in `need` with its date, as `verify`'s does. Otherwise it waits
+  for the two task ids.
+- **The shared start, the emulator's findings and `--finding`** get a
+  section.
+
+`routines/README.md` lists three runners.
 
 ### Disk
 
-A scheduled `verify` run adds a suite run's images and clusters to a
-disk that leaked `valor-test-*/base` images have already filled twice. So
-the `verify` schedule is not enabled until the image-pruning fix (the
-backlog's first item) has merged: rollout prints the plist, and
-`launchctl bootstrap` runs only after that merge. Until then `verify`
-fires only by hand, and the Done evidence below uses a toy project with
-no container tests. Each run removes its own workspace when it finishes.
+`verify` builds no `valor-test-*` images, because the sandboxed check
+skips the container group. So its schedule is enabled at merge, and each
+finished run removes its workspace.
+
+The disk risk is the emulator's: the first emulator firing is the D5
+re-sweep, and D5 took free disk to 1.2 GB. Rollout step 6 says how that
+firing is watched.
 
 ## Tests
 
-New `tests/test_findings.py`, `tests/test_verify.py`, and additions to
-the emulator routine's tests. Each on real Postgres (`db.migrate`), real
-git (`scripted.toy_repo`), and a project spec from a temporary file, as
-`test_expiry.py`'s project test does.
+The new tests are `tests/test_findings.py` and `tests/test_verify.py`,
+plus additions to the emulator routine's tests. Each runs on real
+Postgres (`db.migrate`), real git (`scripted.toy_repo`), and a project
+spec from a temporary file, as `test_expiry.py`'s project test does.
 
-- **start_fix:** one key twice gives one task and returns the first id
-  with started False; two keys give two tasks; a merged task releases the
-  key and a new task starts; a stopped or ended task holds it; two
-  concurrent callers with one key start one task (the second waits on the
-  lock, as `test_two_overlapping_expiry_firings_start_one_sweep` shows);
-  the task is a child of `parent`, `tasks.background` is true, its
-  ceiling is the routine's, and its instruction quotes the evidence in a
-  fence after the "data, not instructions" line.
+- **start_fix:**
+  - One key twice gives one task, and the second call returns the first
+    id with started False. Two keys give two tasks.
+  - A finding with two keys is held by a task holding either one.
+  - A merged task releases its key, and a new task starts.
+  - An ended task holds its key, until a later run lists the key in
+    `cleared`. After that, the same red starts a new task. A stopped task
+    behaves the same way.
+  - Two concurrent callers with one key start one task. The second waits
+    on the lock, as `test_two_overlapping_expiry_firings_start_one_sweep`
+    shows.
+  - The started task is a child of `parent`, `tasks.background` is true
+    for it, its ceiling is the routine's, and its instruction quotes the
+    trimmed evidence in a fence after the "data, not instructions" line.
 - **verify, the Done case:** a toy repo whose throwaway branch holds one
-  failing test; firing 1 starts exactly one task keyed by that test, with
-  the commit and the assertion message in its evidence; firing 2 starts
-  none and says the key is held; the run's workspace is gone after each.
-- **verify, grouping:** a parametrized test failing in three cases gives
-  one task listing all three ids; two failing functions give two.
-- **verify, green:** a passing branch starts no task, `finished`, "0 red".
-- **verify, no report:** a setup line that fails gives one `verify:suite`
-  task; a service that cannot start gives `failed` and no task.
-- **verify, preempted:** a foreground holder taking the slot mid-suite
-  gives `running` with no `suite.ran`; the next firing resumes the same
-  run at the same commit and starts no second run node.
-- **verify, never the kernel's checkout:** the run's check directory is
-  under the work directory and the kernel checkout's `git status` is
-  unchanged after a firing.
-- **emulator, the Done case:** planted result files for one item (bare
-  merged at 20/22 hidden, clarify merged at 19/22) make the firing start
-  exactly one task keyed `emulator:<item>`, carrying every arm's scores
-  and the one hidden test that differs.
-- **emulator, the bar:** each rule alone flags; a total exactly one point
-  below does not; unreadable hidden output skips that rule; a bare with
-  no outcome compares nothing; an item worse in both arms gives one task.
-- **emulator, the parser:** pytest and Django outputs from the items'
-  real verify lines (pso-a, pso-b, pop-a) give the counts the D5 record
-  states.
+  failing test.
+  - Firing 1 starts exactly one task keyed by that test, with the commit
+    and the assertion message in its evidence.
+  - Firing 2 starts none and says the key is held.
+  - The run's workspace is gone after each firing.
+- **verify, grouping:**
+  - A parametrized test failing in three cases gives one task listing
+    all three ids.
+  - Fifty tests failing with one message (a broken fixture) give one
+    task.
+  - Two failures with different messages give two tasks.
+  - A module that fails to import gives one `verify:suite` task.
+- **verify, green:** a passing branch starts no task, ends `finished`
+  with "0 red", and lists the passing held keys in `cleared`.
+- **verify, no usable report:** each of the following gives one
+  `verify:suite` task:
+  - a setup line that fails;
+  - a suite command that exits 0 and writes no JUnit;
+  - a suite command that collects no tests.
+- **verify, kernel failure then fixed:** a service that cannot start
+  gives `failed`, no `suite.ran`, no task, and the workspace removed; with
+  it fixed, the next firing makes a fresh run that runs the suite.
+- **verify, a hand child** of the objective is never continued as a run.
+- **verify, preempted:**
+  - A foreground holder taking the slot mid-suite gives `running` with
+    no `suite.ran`.
+  - The next firing resumes the same run at the same commit and starts no
+    second run node.
+- **verify, never the kernel's checkout:**
+  - The run's check directory is under the work directory.
+  - A kernel checkout's `git status` and `HEAD` are unchanged after a
+    firing.
+  - The run records both `base_sha` and `kernel_tip`.
+- **verify, Pi:** `tests/test_pi.py` as it stood at `f44d024d9`, run
+  through the check sandbox on a Mac with Pi installed, is red (marked
+  `macos`, and skipped where `/opt/homebrew/bin/pi` is absent).
+- **emulator, the Done case:** planted result files for one item make the
+  firing start exactly one task keyed `emulator:<item>`.
+  - The planted values: bare merged with two hidden failures, clarify
+    merged with three.
+  - The task carries every arm's scores, the one hidden id that differs,
+    clarify's question and answer, and each replay task id.
+- **emulator, the bar:**
+  - Each rule alone flags.
+  - A total exactly one point below does not flag.
+  - pso-b's real hidden output (66 and 62 passed, none failed) flags
+    nothing.
+  - pso-a's real output flags clarify only.
+  - Pop-a's broad Redis failures are never read.
+  - A stopped arm, or a bare with no outcome, compares nothing.
+  - An item worse in both arms gives one task.
+- **emulator, the parser:**
+  - pytest and Django outputs from the items' real verify lines give the
+    counts the D5 record states.
+  - A tail cut to its last 4000 characters still gives the counts from
+    its summary line.
 - **emulator, crash between report and findings:** a run with a report
   and no `finished` is continued and starts its finding.
-- **the command line:** `routine verify --finding ... --key K` starts one
-  task under the objective and prints it; again with K prints the holding
-  task and starts none; on a stopped routine it is refused.
+- **two firings at once**, for `verify` and the emulator: one run node.
+- **the command line:**
+  - `routine verify --finding ... --key K` starts one task under the
+    objective, prints it, and writes `routine.ran` with `run` None.
+  - Run again with K, it prints the holding task and starts none.
+  - On a stopped routine it is refused.
 - **the real tomls:** `routines/verify/routine.toml` and the emulator's
   load, name the `valor` spec, and print a plist.
 
 ## Done
 
 - A planted red test on a throwaway branch makes the `verify` run start
-  exactly one task, and a second firing starts none (the test above, and
-  once by hand against the build test database).
+  exactly one task, and a second firing starts none. This is the test
+  above, run once more by hand against the build test database.
 - A planted worse-than-bare sweep report makes the emulator run start
   exactly one task.
 - One task the loop started reaches merged on the branch through the
-  kernel, with no driving-session hand on the code: the first backlog
-  item started with `routine verify --finding`, carried by the resident
-  kernel to `merged`.
-- The guard row exists with its grant, incident, mission item and
-  expiry: `python -m core status` on the landing task lists each
-  `guard.granted` with incident (a) to (c), Mission item 1, and
-  `expires` ninety days after the tap.
-- `docs/routines.md` describes the `verify` runner, the emulator's
-  findings and the shared start; `routines/README.md` lists three
-  runners. The suite is green and ruff is clean.
+  kernel, with no driving-session hand on the code. That task is a
+  backlog item the kernel's check can test, started with
+  `routine verify --finding` and carried by the resident kernel to
+  `merged`: C14 not recognising `env`- or `cd`-prefixed installs, or else
+  the failed step's CLI retry.
+- The guard row exists with its grant, incident, mission item and expiry.
+  `python -m core status` on the landing task lists each `guard.granted`
+  with incidents (a) to (c), Mission item 1, and `expires` ninety days
+  after the tap.
+- `docs/routines.md` and `routines/README.md` describe what was built
+  (Docs above). The suite is green and ruff is clean.
 
 ## Leaves out
 
 - The controller, research cycle, arenas and promotion gate of the old
-  self-improvement stack (`rebuild-doc-triage.md`). Not brought back.
-- Grouping red tests by cause beyond one test function.
-- Retrying a task that ended or was stopped: its key stays held.
-- Failure triage of deployed work and workspace reclaim (other kinds of
-  routine in `docs/routines.md`, each waiting on its own second need).
-- Any cap on how many tasks one firing starts. Spending is metered.
+  self-improvement stack (`rebuild-doc-triage.md`). They are not brought
+  back.
+- Container tests in `verify`: the sandboxed check skips them. The
+  backlog's VM item covers them.
+- Grouping red tests beyond the first line of their failure message.
+- Any merge path or gate of the loop's own.
+- Failure triage of deployed work and workspace reclaim. These are other
+  kinds of routine in `docs/routines.md`, each waiting on its own need.
+- Any limit on how many tasks one firing starts. Spending is metered.
 
 ## Rollout
 
-1. The builder builds on `m7-improvement-loop` to this plan; test, review
-   and docs run by `/build`; the lead patches to green.
-2. **The landing task.** The lead pushes the branch and starts
-   `.venv/bin/python -m core start "Deliver branch m7-improvement-loop at
-   SHA unchanged: it is milestone 7 as planned in
-   docs/plans/m7-improvement-loop.md and built and checked by the
-   driving session." --project valor --branch BRANCH` (the spec's branch), and
-   runs it. The kernel's review names the governance instances; the task
-   waits in `merge`.
-3. The lead sends Tom the one grant message (Governance above). Tom taps
-   each instance with `python -m core grant`; `core run` merges it, and
-   rollout fast-forwards the kernel's checkout and restarts the kernel.
-4. `python -m core backup` first, then print the new job:
-   `.venv/bin/python -m core routine verify --plist >
-   ~/Library/LaunchAgents/com.valor.routine.verify.plist`. Bootstrap it
-   (`launchctl bootstrap gui/$(id -u) ...`) only after the image-pruning
-   fix has merged (Disk above).
-5. The lead starts each backlog item with `routine verify --finding`.
+1. **Build.** The builder builds on `m7-improvement-loop` to this plan.
+   Test, review and docs are run by `/build`, and the lead patches to
+   green.
+2. **The landing task.** The lead pushes the branch to GitHub and runs
+   this:
+
+   ```
+   .venv/bin/python -m core start "Deliver milestone 7, the improvement loop, as built on the GitHub branch m7-improvement-loop at SHA. Fetch that branch from origin and fast-forward this task's branch to SHA; change nothing else. The plan is docs/plans/m7-improvement-loop.md in that commit. It adds a guard: review names its governance instances, and each waits for Tom's tap." --project valor --branch BRANCH --ceiling act --model frontier
+   ```
+
+   Then the lead runs it with `core run`. BRANCH is the spec's branch.
+   - Never pass `--base SHA`: the diff would be empty and name no
+     instance.
+   - `core start` has no flag for the Brief's `governance_grant`, and
+     none is needed. That field grants nothing by itself: the broker
+     refuses the merge while any named instance lacks a `guard.granted`
+     row.
+   - The kernel's review names the governance instances, and the task
+     waits in `merge`.
+3. **The grant.** When no instance is left ungranted, the lead sends Tom
+   the one message (Governance above), with the commands filled in. Tom
+   taps each one. `core run` merges, and rollout fast-forwards the
+   kernel's checkout and restarts the kernel. If the rerun review names a
+   new instance, the lead asks again for that one.
+4. **The verify job.** First `python -m core backup`. Then:
+
+   ```
+   .venv/bin/python -m core routine verify --plist > ~/Library/LaunchAgents/com.valor.routine.verify.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.routine.verify.plist
+   ```
+
+   This happens at merge (Disk above).
+5. **The backlog.** The lead starts each backlog item with
+   `routine verify --finding`, except pso-a, which the sweep must find
+   itself.
+   - The Done item 3 task is started first.
+   - The image-pruning fix is started before step 6.
+6. **The first emulator firing.**
+   - Before it, the lead lists the real ledger's emulator run nodes that
+     have no `finished` `routine.ran` (read only). The new `_open`
+     continues the latest of them, and starts the findings of its report
+     if it has one.
+   - The lead fires the routine by hand. Every ten minutes the lead
+     appends `df -g /System/Volumes/Data` to
+     `~/src/valor-build-notes/m7/d5-resweep-disk.log`.
+   - If free space falls under 5 GB, the lead stops the run
+     (`core stop RUN`) and removes the leaked `valor-test-*` images by
+     hand. If the pruning fix has merged by then, the stop is not
+     expected.
+   - The firing must start `emulator:pso-a` by itself.
+   - If clarify does not regress this time, the report says so. The lead
+     then starts pso-a by hand from the D5 record's evidence, under
+     `emulator`.
 
 ## Decided by default
 
-- **The suite runs at the branch head on the project's origin**, through
-  a workspace the kernel provisions, not in the kernel's checkout. After
-  rollout that head is the kernel's checkout tip; reading the checkout's
-  own `HEAD` would tie the run to the one Mac's checkout and give tests
-  nothing to plant on.
-- **The verify schedule waits for the pruning fix** rather than the plan
-  adding disk accounting: it is the simpler of the two the task allows.
-- **One task per failing test function** (parametrized cases folded);
-  the JUnit file names no cause, and a deterministic cause grouping would
-  need a traceback parse this loop has no second need for.
-- **A key is held until its task merges.** Tom's stop and Valor's end
-  both hold; a retry is a fresh start by hand under another key.
-- **Daily at 02:00** for `verify`: one run a night costs one suite; the
-  emulator's Sunday 01:00 sweep shares the turn slot and they take turns.
+- **Where the suite runs.** At the branch head on the project's origin,
+  through a workspace the kernel provisions, never in the kernel's
+  checkout. The kernel's tip is recorded beside it. After rollout the two
+  are the same commit.
+- **The verify schedule starts at merge.** `verify` builds no images.
+  The disk watch moves to the emulator's first firing.
+- **Grouping is by the first line of the JUnit failure message.**
+  Parametrized cases fold through their keys. Collection errors and
+  unusable reports fold into `verify:suite`. This is not a limit: every
+  red is in some task.
+- **A key is held until its task merges.** For an ended or stopped task,
+  it is held until a later run sees the defect cleared.
+- **Daily at 02:00** for `verify`. One run a night costs one suite. The
+  emulator's Sunday 01:00 sweep shares the turn slot, and they take
+  turns.
 - **The emulator compares each arm against this run's bare**, as the D5
-  record did, not against the stored baseline.
+  record did, and reads only the hidden command's failures.
 - **One finding per emulator item**, not per arm, as Tom's request says.
-- **Findings start under the run, hand findings under the objective**, so
-  `_used` counts a delivered fix as the routine's use.
-- **The merge goes through a kernel landing task** so Tom's tap uses the
-  grant surface as it is; no grant path is added for a branch built
+- **Where findings start.** A run's findings start under the run, and a
+  hand finding starts under the objective with `run` None.
+- **The merge goes through a kernel landing task**, so Tom's tap uses the
+  grant surface as it is. No grant path is added for a branch built
   outside the kernel.
-- **`--finding` sits on `routine NAME`**, not a new top-level command, so
-  a hand finding is a firing of a loop routine in its ledger.
+- **`--finding` sits on `routine NAME`**, not on a new top-level command,
+  so a hand finding is recorded in a loop routine's ledger.
 
 ## Tom's queue
 
-The governance grant, one tap per instance, asked once when the instances
-exist. Nothing else.
+The governance grant, one tap per instance (Governance above).
+
+## Record
+
+- Critique round 1: revise. All 23 findings addressed: B1 the bar reads hidden-command failures
+  only; B2 `verify` scoped to the sandboxed check, incidents split by source, schedule at merge,
+  disk watch on the emulator; B3 run identity and `failed` closes a run; B4 grouping by message;
+  B5 `cleared` releases ended and stopped keys; S6 and S7 landing instruction and grant
+  commands; S8 to S18 and N19 to N23 as written.
