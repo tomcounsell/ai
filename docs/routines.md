@@ -73,7 +73,7 @@ the next launchd firing writes nothing and says the routine is stopped.
 changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending.
 
-The two routines the kernel holds:
+The three routines the kernel holds:
 
 - **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
   and, when something is due, starts one task on the `valor` project with
@@ -85,14 +85,21 @@ The two routines the kernel holds:
 - **emulator** (Sunday 01:00, ceiling `act`): replays every item in
   `$VALOR_DEMO/items` in the `bare`, `clarify` and `routed` arms, each a
   child of the run, judged, and writes `$VALOR_DEMO/sweeps/<run>.json` with
-  the baseline, scores, hidden-test exits, attention, spending and the count
-  of preempted turns. The runner holds the session lock `run:<run>`, so a
+  the baseline, scores, hidden-test exits with each arm's failed count and
+  failing ids, attention, spending and the count of preempted turns. An item
+  worse than its `bare` run then starts a fix task (Findings, below). The runner holds the session lock `run:<run>`, so a
   second process says `already running`. A run with no report is continued.
   When a replay is paused before it has an outcome, the run writes no report
   and says `running` with the count of paused replays; the next firing
   resumes the same run under the same names. A driver that exits nonzero
   has its exit code and output appended at once to
   `$VALOR_DEMO/results/<replay>.driver.log`, beside its result file.
+- **verify** (02:00 daily, ceiling `act`): runs the suite at the head of the
+  routine's branch in the kernel's check sandbox, on a workspace the kernel
+  provisions, and starts one fix task for each group of red tests that no
+  task holds (Findings, below). The runner holds the session lock
+  `run:<run>`; a run Tom's foreground work preempted is resumed by the next
+  firing at the same commit.
 
 ## Metered spending and ceiling
 
