@@ -108,7 +108,7 @@ def _row(result: dict | None, preempted: int) -> dict:
 _PYTEST_SUMMARY = re.compile(r"^\W*((?:\d+ [a-z]+(?:, )?)+) in [\d.]+s\b", re.MULTILINE)
 _DJANGO_FAILED = re.compile(r"^FAILED \(([^)]*)\)", re.MULTILINE)
 _DJANGO_OK = re.compile(r"^OK\b", re.MULTILINE)
-_PYTEST_ID = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.MULTILINE)
+_PYTEST_ID = re.compile(r"^(?:FAILED|ERROR) ([^\s(]\S*)", re.MULTILINE)
 _DJANGO_ID = re.compile(r"^(?:FAIL|ERROR): (.+)$", re.MULTILINE)
 
 
