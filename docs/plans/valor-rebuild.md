@@ -548,6 +548,33 @@ off.
 
 **Leaves out.** pgvector until a measured need.
 
+## Milestone 7: the improvement loop
+
+Self-built. Stakes: the kernel, critique 2 and review 1. A guard: it
+carries a `governance_grant` and waits for Tom's tap per instance. Plan
+in [m7-improvement-loop.md](m7-improvement-loop.md).
+
+**Goal.** Valor turns its own measured defects into tasks its kernel
+carries through the normal pipeline, so a defect found is resolved without
+Tom coordinating (Mission item 1, "resolving discovered defects"; Evidence
+"Working results in real use").
+
+**Done.**
+- A planted red test on a throwaway branch makes the `verify` run start
+  exactly one task, and a second firing starts none.
+- A planted worse-than-bare sweep report makes the emulator run start
+  exactly one task.
+- One task the loop started reaches merged on the branch through the
+  kernel, with no driving-session hand on the code.
+- The guard row exists with its grant, incident, mission item and expiry.
+
+**Absorbs.** The emulator report's hidden tests as exit codes only (it
+gains passed counts and failing ids).
+
+**Leaves out.** Any controller, research cycle, arena, or promotion step;
+a merge path or gate of the loop's own; grouping red tests beyond one
+test function.
+
 ## Before cutover
 
 Cutover is Tom's to plan. These must be true first:
