@@ -8,7 +8,7 @@ import pytest
 
 from core import db, ledger, tasks
 from tests import bridges
-from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task
+from tests.bridges import OPERATOR_CHAT, new_task
 from tests.test_intake import (
     TEAM,
     TOM_SLACK,
@@ -98,6 +98,3 @@ def test_a_slack_message_before_every_post_in_its_thread_binds_nothing_from_them
 
     bound = run(go())
     assert bound["task_id"] is None or bound["as"] == "start"
-
-
-_ = (OPERATOR,)
