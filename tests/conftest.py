@@ -149,6 +149,10 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(reason=f"{MACOS_ONLY}: needs macOS itself"))
         if not runtime and item.get_closest_marker("container"):
             item.add_marker(pytest.mark.skip(reason=f"needs Apple's container at {binaries.CONTAINER}"))
+    if WORKER and runtime:
+        # The container group is the longest unit of a parallel run: it is
+        # handed out first, so it starts while the other workers share the rest.
+        items.sort(key=lambda item: item.get_closest_marker("container") is None)
 
 
 TEST_DB = settings.test_database

@@ -296,9 +296,11 @@ def test_a_stop_of_the_tree_beside_a_preempting_step_deadlocks_nowhere(dsn):
             under = await tasks.start_child(conn, top, instruction="under")
             fg = await root(conn)
         events = []
+        holding = asyncio.Event()
 
         async def background():
             async with slot.held(under, dsn):
+                holding.set()
                 async with await db.connect(dsn) as conn, conn.transaction():
                     await tasks.lock_tree(conn, under)  # a step's writers, inside its hold
                     await ledger.lock(conn, f"task:{under}")
@@ -306,7 +308,7 @@ def test_a_stop_of_the_tree_beside_a_preempting_step_deadlocks_nowhere(dsn):
                 events.append("bg preempted")
 
         async def foreground():
-            await asyncio.sleep(0.05)
+            await holding.wait()  # a foreground that takes the slot first preempts nothing
             async with slot.held(fg, dsn):
                 events.append("fg held")
 
