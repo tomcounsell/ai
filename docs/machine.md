@@ -419,12 +419,14 @@ The code is built: the setting `memory_dsn` (`VALOR_MEMORY_DSN`) names the
 store, apart from the kernel's DSN. Until the host is chosen it is unset,
 and each Mac's memory is the schema `memory` in its own machine cluster.
 
-**Chosen at cutover.** Where the shared Postgres runs, how each Mac
-reaches it (address, transport, and the role each Mac's kernel logs in
-as, which `memory_dsn` then names), and, if it runs on one of the four
-Macs, its line in that Mac's RAM plan are Valor's operational call, made
-when memory moves to the shared store and recorded here then. Until then
-the RAM plan above has no line for it.
+**Chosen when a second Mac is installed.** At cutover the store stays
+where the Cowboy's kernel has it: `memory_dsn` unset, the schema `memory`
+in the Cowboy's own machine cluster. Where the shared Postgres runs, how
+each Mac reaches it (address, transport, and the role each Mac's kernel
+logs in as, which `memory_dsn` then names), and, if it runs on one of the
+four Macs, its line in that Mac's RAM plan are Valor's operational call,
+made with the Captain's install, the first second Mac, and recorded here
+then. Until then the RAM plan above has no line for it.
 
 **When a Mac cannot reach the store.** Its server not accepting a
 connection within two seconds, the turn runs without memory recall and
@@ -436,9 +438,11 @@ the rows.
 ## Backups
 
 `python -m core backup` dumps the kernel database to the `backup_dir`
-setting, an external disk (`/Volumes/<U+F028>/valor_temp` today; the
-volume's name is that one private-use character, which macOS shows as
-blank, and renaming it means changing the setting). Each dump is a
+setting, an external disk. Its default is `/Volumes/<U+F028>/valor_temp`
+(the volume's name is that one private-use character, which macOS shows as
+blank). On the Cowboy it is set by `VALOR_BACKUP_DIR` to
+`/Volumes/PINK/valor_temp`, carried in the backup job and in the kernel's
+job, whose rollout backs up before a schema change. Each dump is a
 `pg_dump` custom-format file with a manifest beside it (counts and SHA-256
 digests of the events and documents, read from the dump's own snapshot,
 and the dump's own SHA-256). The newest 30 are kept; the ledger itself is

@@ -48,7 +48,7 @@ outside the model is AI Control [4].
 | Driver and schema | psycopg 3 async, hand-written SQL, one idempotent `core/schema.sql` | in use |
 | Queue and coordination | Postgres only: advisory locks, `LISTEN`/`NOTIFY` | in use |
 | Redis | none | in use (absent by decision) |
-| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs built (`memory_dsn`), its host chosen at cutover |
+| Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs built (`memory_dsn`), its host chosen with a second Mac's install |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
@@ -217,7 +217,7 @@ project, and ledger, and recall adds the records Valor has judged to be standard
 any client ([memory.md](memory.md)). Status: **built** (Tom, 2026-10-11): the store's own setting
 (`memory_dsn`), the client and project on every record, the standards of working, the correction
 that confines a record to its client, and recall skipped when the store cannot be reached. Where
-that Postgres runs is chosen at cutover ([machine.md](machine.md), The shared memory store); until
+that Postgres runs is chosen with a second Mac's install ([machine.md](machine.md), The shared memory store); until
 the setting names it, each Mac's store is its kernel database's schema `memory`.
 
 ## 4. The model gateway
@@ -551,7 +551,7 @@ target (Tom's decision). Valor has four Macs, one per client (Tom, 2026-10-11): 
 client, or every internal Yudame project, runs on that client's Mac under the same accounts. Each Mac
 keeps its own kernel Postgres, ledger, and bridges. Exactly two things cross machines: the code that
 runs Valor, and the memory store on a shared Postgres (the Memory entry in section 3; where that
-Postgres runs is chosen at cutover, [machine.md](machine.md), The shared memory store). The
+Postgres runs is chosen with a second Mac's install, [machine.md](machine.md), The shared memory store). The
 demonstration and the baseline ran on a 64 GB Mac, so no
 memory figure from them carries over; the RAM plan per component is [machine.md](machine.md). What
 the target machine fixes in the stack:
@@ -563,7 +563,7 @@ the target machine fixes in the stack:
 - **One container runtime.** Apple's, and only while a sandbox is running.
 - **One Postgres server for the kernel**, resident. Workspace clusters start
   with their task and stop with it. The shared memory store is not on this
-  list until its host is chosen at cutover.
+  list until its host is chosen with a second Mac's install.
 - **No resident model.** Judgement is hosted (section 5). The open-weight
   fallback is hosted too (Parasail, through OpenRouter).
 - **The kernel and the bridges resident, everything else on demand.** They are the only
@@ -601,7 +601,7 @@ the target machine fixes in the stack:
   `TurnCommand` port; a different loop is a second harness on a second need.
 - **Hosted Postgres, hosted sandboxes, cloud hosting.** Everything runs on
   the Mac until the Mac is measured to be insufficient. The one possible
-  exception is the shared memory store, whose host is chosen at cutover
+  exception is the shared memory store, whose host is chosen with a second Mac's install
   ([machine.md](machine.md), The shared memory store).
 - **A resident local model.** It does not fit in 16 GB beside the rest.
 - **Docker.** Apple's container runtime is the one Linux runtime.

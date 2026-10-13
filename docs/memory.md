@@ -17,7 +17,8 @@ Every record carries its client (its project spec's `client`), its project,
 and its ledger (`<machine>/<kernel database>`, since ledger ids are unique
 only within one ledger). The store's connection string is the setting
 `memory_dsn` (`VALOR_MEMORY_DSN`), apart from the kernel's; its host is
-chosen at cutover. Until it is set, the store is the schema `memory` in the
+chosen with a second Mac's install, and the Cowboy's cutover leaves it
+unset. Until it is set, the store is the schema `memory` in the
 Mac's own kernel database, as memory's role.
 
 - **Memory grants nothing.** Retrieved content can act as instructions to

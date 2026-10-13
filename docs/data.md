@@ -565,7 +565,7 @@ call in every run by replaying a recorded provider response.
 Memory lives in the kernel database's schema `memory`, owned by
 `valor_memory` (Roles, above), until the `memory_dsn` setting
 (`VALOR_MEMORY_DSN`) names one Postgres that all four Macs reach, one Mac
-per client; that host is chosen at cutover. Every record carries its
+per client; that host is chosen with a second Mac's install. Every record carries its
 client, its project, and its ledger, so the store can be shared; the
 kernel database, its ledger, and its documents stay on their own Mac
 ([machine.md](machine.md), The shared memory store). What it takes from

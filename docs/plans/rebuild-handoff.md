@@ -159,5 +159,5 @@ bridge, email bridge, and worker are disabled, are Valor's to choose.
 
 ## Waiting on Tom
 
-- 1.5: confirm the drafted answer keys for cuttlefish #646, popoto #191,
-  and popoto #188.
+Nothing. The 1.5 answer keys stand as written
+([valor-rebuild-decided.md](valor-rebuild-decided.md)).
