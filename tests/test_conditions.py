@@ -316,6 +316,11 @@ DECISION = "[[decision]]\nid = 'd'\ndecided = 2026-01-01\nreasoning = 'r.md'\n[[
         ),
         (DECISION + "id = 'c'\ntext = 't'\nsource = 's'\nbelow = 3\n", "a threshold needs a metric"),
         (DECISION + "id = 'c'\ntext = 't'\n", "source is text"),
+        (
+            "[[decision]]\nid = 'd'\ndecided = 2026-01-01\nreasoning = 'r.md'\n[decision.condition]\nid = 'c'\n",
+            "is an array of tables",
+        ),
+        ("decision = ['d']\n", "decision 0 is a table"),
     ],
 )
 def test_a_conditions_file_missing_a_term_is_malformed(body, error):
@@ -443,6 +448,29 @@ def test_without_the_credential_or_with_a_refused_one_a_private_repository_is_na
     assert f"{spec.repo} refused Valor's GitHub credential" in refused["summary"]
     assert authorized and all(r["headers"]["authorization"] != server.expected for r in authorized)
     assert not any(form in refused["summary"] for form in secret_forms(wrong_token))
+
+
+def test_valors_github_key_goes_to_github_only_and_a_failed_head_lookup_is_named_not_raised(
+    tmp_path, monkeypatch
+):
+    """A spec naming another host is fetched anonymously; a lookup of the
+    remote's HEAD that fails after the fetch refuses that one repository."""
+    keyfile = github_keys(tmp_path, "ghp_test" + secrets.token_hex(16))
+    real = workspace.git.trusted
+
+    def trusted(cwd, *args, **kw):
+        if args[0] == "ls-remote":
+            raise workspace.git.GitError("ls-remote: the connection dropped")
+        return "" if args[0] == "fetch" else real(cwd, *args, **kw)
+
+    def header_file(*a, **kw):
+        raise AssertionError("the key was offered to a host other than github.com")
+
+    monkeypatch.setattr(workspace.git, "trusted", trusted)
+    monkeypatch.setattr(workspace.credentials, "header_file", header_file)
+    spec = remote_spec("https://gitlab.example/acme/business")
+    with pytest.raises(workspace.Refused, match="the connection dropped"):
+        workspace._cache(spec, None, tmp_path / "work", credential=keyfile)
 
 
 def test_a_local_repository_carries_no_credential_and_a_firing_with_no_run_records_its_fetch_on_the_objective(

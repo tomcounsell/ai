@@ -116,6 +116,8 @@ def parse(raw: str) -> list[Decision]:
     out: list[Decision] = []
     seen: set[str] = set()
     for i, d in enumerate(decisions):
+        if not isinstance(d, dict):
+            raise Malformed(f"decision {i} is a table")
         did = _text(d.get("id"), f"decision {i} id")
         if did in seen:
             raise Malformed(f"decision {did} is listed twice")
@@ -126,7 +128,12 @@ def parse(raw: str) -> list[Decision]:
         reasoning = _text(d.get("reasoning"), f"decision {did} reasoning")
         conds: list[Condition] = []
         ids: set[str] = set()
-        for j, c in enumerate(d.get("condition") or []):
+        listed = d.get("condition") or []
+        if not isinstance(listed, list):
+            raise Malformed(f"decision {did}: [[decision.condition]] is an array of tables")
+        for j, c in enumerate(listed):
+            if not isinstance(c, dict):
+                raise Malformed(f"decision {did}: condition {j} is a table")
             cid = _text(c.get("id"), f"decision {did} condition {j} id")
             if cid in ids:
                 raise Malformed(f"decision {did}: condition {cid} is listed twice")

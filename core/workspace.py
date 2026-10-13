@@ -67,6 +67,7 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.parse
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -759,7 +760,11 @@ def _cache(
     local = Path(origin).expanduser()
     url = str(local.resolve()) if local.exists() else origin
     cache = cache_path(origin, work)
-    keyed = credential is not None and not local.exists()
+    keyed = (
+        credential is not None
+        and not local.exists()
+        and (loopback or urllib.parse.urlsplit(url).hostname == "github.com")
+    )
     if not local.exists() and not url.startswith("https://") and not loopback:
         raise Refused(f"{origin} is neither a local repository nor an https URL")
     if not cache.exists():
@@ -781,6 +786,7 @@ def _cache(
             url,
             "+refs/heads/*:refs/heads/*",
         )
+        listed = remote("ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
     except git.GitError as exc:
         if needs_credential(str(exc)):
             if keyed:
@@ -791,7 +797,6 @@ def _cache(
         raise Refused(f"fetching {origin}: {exc}") from None
     except credentials.CredentialError as exc:
         raise Refused(f"fetching {origin} as Valor: {exc}") from None
-    listed = remote("ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
     for line in listed.splitlines():
         if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
             git.trusted(cache, "symbolic-ref", "HEAD", line[len("ref: ") : -len("\tHEAD")])

@@ -76,7 +76,9 @@ def payload(
         "text": text,
         "provenance": ledger.provenance(by, via, role_played),
     }
-    if record:
+    if record is not None:
+        if "/" not in record or not record.rsplit("/", 1)[1]:
+            raise ValueError(f"{record!r} is not a record name (<ledger>/<key>)")
         made["memory_record"] = record
     return made
 

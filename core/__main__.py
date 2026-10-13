@@ -788,7 +788,10 @@ async def _run(args) -> None:
             else:
                 print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
         elif args.command == "correct":
-            c = await corrections.record(conn, args.text, by=args.by, via=args.via, record=args.record)
+            try:
+                c = await corrections.record(conn, args.text, by=args.by, via=args.via, record=args.record)
+            except ValueError as exc:
+                raise SystemExit(f"correct refused: {exc}") from None
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))

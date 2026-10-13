@@ -692,6 +692,23 @@ def test_an_unreachable_store_is_skipped_without_waiting_and_the_brief_says_so(d
     assert taken["skipped"].startswith("the store could not be reached")
 
 
+def test_a_store_whose_name_does_not_resolve_in_time_is_unreachable_within_the_timeout(monkeypatch):
+    import time
+
+    monkeypatch.setattr(memory, "_probe", lambda host, port, timeout: time.sleep(5))
+    began = time.monotonic()
+    why = memory.unreachable("host=memory.example port=5432", timeout=0.2)
+    assert why == "memory.example:5432: no answer within 0.2 s"
+    assert time.monotonic() - began < 1
+
+
+def test_a_correction_naming_no_record_is_refused():
+    from core import corrections
+
+    with pytest.raises(ValueError, match="is not a record name"):
+        corrections.payload(1, "keep it to acme", by="tom", via="test", record="acme-pricing")
+
+
 def test_migrate_drops_a_store_written_before_records_named_their_ledger():
     """Its records are rebuilt by the next ingest from the ledger."""
     name = f"{TEST_DB}_oldshape"

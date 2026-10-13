@@ -255,6 +255,8 @@ file has no watched conditions. A remote repository is fetched as Valor's
 own GitHub account, `valorengels`, with `GITHUB_PUSH_TOKEN` from
 `github-keys`: a private business repository is read when that account has
 access to it, and the boundary is that access (docs/business.md, item 8).
+The token is GitHub's, so a repository on any other host is fetched
+anonymously.
 Each git call against the remote gets a header file of its own, as the
 merge's push does ([performers.md](performers.md), `merge`); the token is
 never written to the ledger, the summary, or a log. A fetch is a read, so it

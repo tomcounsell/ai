@@ -18,6 +18,7 @@ condition, and what changed on the next strategy meeting's agenda
 (`core.agenda`), once. It sends Tom nothing.
 """
 
+import asyncio
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -75,7 +76,9 @@ def runner(
         unread: list[str] = []
         for spec in projects():
             try:
-                found = conditions.committed(spec, work(), credential=credential, loopback=loopback)
+                found = await asyncio.to_thread(
+                    conditions.committed, spec, work(), credential=credential, loopback=loopback
+                )
             except (workspace.Refused, conditions.Malformed) as exc:
                 unread.append(f"{spec.name}: {exc}")
                 continue

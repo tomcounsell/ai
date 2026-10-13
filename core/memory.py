@@ -35,6 +35,7 @@ turn.
 import asyncio
 import socket
 import sys
+import threading
 from typing import Any
 
 from psycopg.conninfo import conninfo_to_dict
@@ -88,6 +89,18 @@ def unreachable(mdsn: str, timeout: float = REACH_SECONDS) -> str | None:
     params = conninfo_to_dict(mdsn)
     host = str(params.get("host") or "/tmp").split(",")[0]
     port = int(str(params.get("port") or "5432").split(",")[0])
+    # create_connection's timeout does not cover the name lookup, so the
+    # probe runs in a thread the caller stops waiting for.
+    found: list[str | None] = []
+    probe = threading.Thread(target=lambda: found.append(_probe(host, port, timeout)), daemon=True)
+    probe.start()
+    probe.join(timeout)
+    if not found:
+        return f"{host}:{port}: no answer within {timeout:g} s"
+    return found[0]
+
+
+def _probe(host: str, port: int, timeout: float) -> str | None:
     try:
         if host.startswith("/"):
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
