@@ -2,7 +2,7 @@
 tracking: none
 slug: m7-improvement-loop
 type: plan
-status: built
+status: merged (e0d770929)
 critique_rounds: 2
 review_rounds: 1
 governance_grant: required, one tap per instance through python -m core grant
@@ -585,15 +585,8 @@ The governance grant, one tap per instance (Governance above).
 
 ## Record
 
-- Critique round 1: revise. All 23 findings addressed: B1 the bar reads hidden-command failures
-  only; B2 `verify` scoped to the sandboxed check, incidents split by source, schedule at merge,
-  disk watch on the emulator; B3 run identity and `failed` closes a run; B4 grouping by message;
-  B5 `cleared` releases ended and stopped keys; S6 and S7 landing instruction and grant
-  commands; S8 to S18 and N19 to N23 as written.
-- Critique round 2: revise. B1 the bar compares only hidden failed counts, ids are evidence, a
-  pop-b test; S1 Done reads `core ledger`; S2 a usable run clears `verify:suite`; S3 (a) is
-  `test_advisor` only, the build showed the check skips `test_pi`; S4 the first emulator firing
-  is by hand with the weekly job unloaded; S5 Existence unchanged; S6 to S11 and all nits as
-  written.
+- Critique round 1: revise. All 23 findings addressed: B1 the bar reads hidden-command failures only; B2 `verify` scoped to the sandboxed check, incidents split by source, schedule at merge, disk watch on the emulator; B3 run identity and `failed` closes a run; B4 grouping by message; B5 `cleared` releases ended and stopped keys; S6 and S7 landing instruction and grant commands; S8 to S18 and N19 to N23 as written.
+- Critique round 2: revise. B1 the bar compares only hidden failed counts, ids are evidence, a pop-b test; S1 Done reads `core ledger`; S2 a usable run clears `verify:suite`; S3 (a) is `test_advisor` only, the build showed the check skips `test_pi`; S4 the first emulator firing is by hand with the weekly job unloaded; S5 Existence unchanged; S6 to S11 and all nits as written.
 - Patch round 1 (review: changes): a stopped emulator or `verify` run, including one stopped in the slot wait, starts no finding and records its outcome; task text reuses `MESSAGE`; `backlog:` keys stay held; the suite's TMPDIR is in the workspace. From the test check: a resumed run keeps its recorded red; `--finding` refuses bad input and cuts evidence to `MESSAGE`; the bar removes colour codes and names an unread count.
 - Delivered, not passed, after review 1 and one rereview. The lead merges after a scoped patch: hand evidence is passed whole. The suite is green and the stop during findings breaks no Done item.
+- Merged 2026-10-13 as e0d770929 by landing task 3fcc41a43772, with Tom's grants for the three instances review named (`grant-2b7caa1177b2`, `grant-0106ad5f7fb7`, `grant-96396e67b720`); rollout restarted the kernel. Two corrections to Rollout: in step 2 the task's origin is a local mirror, so the lead pushed `m7-improvement-loop` to it by hand; and the branch moved to d7c5ad207 before the merge push, so the task rebased onto it (fd91569b6) and reran its checks, and review named the same three instances.
