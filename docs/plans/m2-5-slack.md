@@ -62,7 +62,11 @@ calls):
 - **One record per message.** The same message delivered twice (a Slack
   retry, then a gap fill) lands once. An envelope redelivered while the
   first delivery's receive is still running (a slow download) is acked
-  and not processed again, and the file is written once.
+  until the first receive commits, and the file is written once. If the
+  first receive fails, the redelivery is processed and the message lands
+  once. A DM whose live event carries only `team` and whose history copy
+  carries neither `team` nor `user_team` gives one `chat_id` and one
+  `sender_id`: one record, one start.
 - **Valor's own posts.** A send produces no `message.received`, live or
   in gap fill: messages whose `user` is the token's own id (from
   `auth.test` at connect) are dropped.
@@ -72,7 +76,9 @@ calls):
   three channel messages and a thread reply. On restart, gap fill records
   all four and records nothing twice. A thread reply to a notice posted
   three days earlier, made while the bridge was down, is recorded on
-  restart and binds to that notice.
+  restart and binds to that notice. With the page budget spent between
+  a chat's history read and its replies reads, the next tick still
+  records the reply.
 - **Projects.** A spec listing `slack:T0ABC/C0DEF` is accepted, the chat
   is in `owned("slack")`, and `_project_for` returns that spec for a
   message in it.
@@ -83,14 +89,20 @@ calls):
   metadata, through the text fallback. A send of 9,000 characters leaves
   as three posts, and a kill after the first post finishes with the two
   that are missing. A 429 on the second post is waited out for its
-  `Retry-After` and the send finishes with three posts.
+  `Retry-After` and the send finishes with three posts. A send whose
+  second post Slack refuses (`is_archived`) settles done with one `sent`
+  entry. The text fallback finds a post containing a URL, an `&`, and a
+  trailing newline, which the emulator stores the way Slack does. A
+  target in a workspace other than the connected one is `broker.Failed`
+  with "not a connected workspace".
 - **A file post** settles with the `ts` the bounded `files.info` poll
   reads. With the emulator never sharing the file, the outcome is
   `broker.Unknown` and `lookup` finds the share in history.
 - **Replies bind.** A notice posted in a thread rooted at Tom's message,
   then Tom's reply in that thread, records `question.answered` with
   `via: "slack"`. With two notices in one thread, Tom's reply binds to
-  the newer. A reply of exactly `stop` stops the task; a near miss steers
+  the newer. In a 60-reply thread whose notice is reply 58, Tom's reply
+  60 binds as the answer. A reply of exactly `stop` stops the task; a near miss steers
   and owes the notice.
 - **Binding notices.** A binding notice about Tom's message in a client
   channel goes to the operator channel and chat, not into the client
@@ -106,7 +118,8 @@ calls):
 Live, in a test window on `yudame.slack.com`, with
 `VALOR_OPERATOR_CHANNEL=slack` for the window: `test_live_slack.py`
 first, which says whether metadata is kept on a user-token post, so the
-window knows which lookup branch runs; a message from a non-whitelisted
+window knows which lookup branch runs, and shows how Slack stored a part
+with a URL, an `&`, and a trailing newline; a message from a non-whitelisted
 DM is not received, and one in an owned channel from any member is
 recorded; Tom DMs Valor and a task starts; a question reaches him in
 Slack and his thread reply binds to it; a forced crash between the intent
@@ -188,16 +201,20 @@ approval, the yudame admin approves the install.
   stated guidance for `chat.postMessage`, which truncates past 40,000;
   1 GB per file). `DECLARED["slack.send_message"]`, with `_refuse_slack`
   matching `_refuse_telegram`: the text has the right shape, and the post
-  is not empty. `split_text` learns `chars` units.
+  is not empty. `split_text` already reads `LIMITS[channel]` and counts
+  `chars`, so the limit is all it needs.
 - `intake.py`:
   - `"slack"` in the table: verified, replies, threaded.
   - `owned("slack")` always adds each of `settings.operator_slack_ids`,
-    as `owned("email")` adds Tom's addresses, then the project chats.
+    as `owned("email")` adds Tom's addresses, then `settings.operator_chat`
+    when the operator channel is Slack, then the project chats.
   - `_from_operator`: a verified Slack record whose `sender_id` is in
     `operator_slack_ids`.
   - `_replied`: for a threaded channel, when `reply_to` matches no sent
-    row, the newest id in the record's `thread` that is in a sent row
-    binds instead. Ledger only.
+    row, the newest `sent` entry in the record's chat whose `thread_ts`
+    equals the record's `topic_id` and whose `message_id` sorts below the
+    record's (C collation, as `lowest_ts`) binds instead. Ledger only,
+    with no cap; `thread` is not read.
   - `lowest_ts`: the smallest Slack `ts` recorded for a chat, compared
     as text with C collation (a `ts` is ten digits, a dot, and six digits,
     so text order is time order). `lowest` keeps its integer meaning for
@@ -210,7 +227,8 @@ approval, the yudame admin approves the install.
   is Slack.
 - `settings.py`: `VALOR_OPERATOR_SLACK_IDS`, a comma list of
   `<team>/<user>` (Tom's ids, one per workspace), and `slack` as an
-  operator channel.
+  operator channel, whose `VALOR_OPERATOR_CHAT` is `<team>/<channel>`, or
+  `<team>/<user>` for Tom's DM.
 - `workspace.py`: project `chats` accept `slack:<team>/<id>`, through
   the table's shape and case rule, in place of the Telegram and email
   special case.
@@ -220,10 +238,10 @@ approval, the yudame admin approves the install.
 | Module | Does | Taken from |
 |---|---|---|
 | `wire.py` | The only module importing `slack_sdk`: `SocketModeClient` (aiohttp) and `AsyncWebClient`, with no Bolt. Writes retry 0 times and a 429 surfaces its `Retry-After`; reads retry on 429 and 5xx, bounded. Reconnection is `slack_sdk`'s own session monitor. `auth.test` at connect gives the team id and the token's own user id. `conversations.open` maps a `<team>/<user>` to its IM channel, cached in memory | OpenClaw `client-options.ts` 32-35 |
-| `inbound.py` | One `message` event to an `Inbound`, or nothing when its `user` is the token's own. `chat_id` is `<team>/<channel>`, or for an IM the other person's `<user_team>/<user>`. `sender_id` is `<user_team>/<user>`. `message_id` is `ts`, `chat_kind` is `dm` for an IM and `group` otherwise, `topic_id` is the `thread_ts` of a threaded reply, and `reply_to` is the thread root. `thread` holds the root and the replies before this one (`conversations.replies`, capped at 50). Files are fetched from `url_private_download` to a temp file, then renamed into `inbound_dir/slack/` by sha256; a `text/html` answer is listed as skipped ("not signed in"). The subtype allowlist is none, `file_share`, `thread_broadcast`, and `me_message`; edits, deletions, joins, and bot messages are not part of the port | Hermes 4513-4517, 6255-6340 |
-| `bridge.py` | `run`: every envelope type is acked, so Slack never disables event delivery. A `message` envelope runs as its own task and is acked once its `intake.receive` commits. A redelivered envelope whose `(chat, ts)` is already in flight in this process is acked and not processed again. If `receive` fails, the envelope is not acked, and seen stays below it, so gap fill takes it. Also the outbox loop and SIGTERM handling, as Telegram does them | OpenClaw `ingress.ts` 166-184 |
-| `gap.py` | On every connect and tick, for each owned chat: `conversations.history` from the chat's seen `ts`; then `conversations.replies(oldest=seen)` for each thread with recent activity, which is any parent in that page whose `latest_reply` is newer than seen, the roots of Valor's sends and notices in the chat (from `sent` rows), and the `topic_id`s of messages recorded in the chat, both from the last 14 days. A chat with no seen entry starts from `intake.lowest_ts`; with no rows either, its seen is set to its newest `ts` and nothing is recorded (Telegram's first pass, `bridge.py` 265-273). Seen is held below any receive still in flight. Pages are budgeted per tick at Tier 3, per method (about 50 calls a minute each for history and replies); the pass resumes where it stopped | Ours; Hermes and OpenClaw only catch up lazily |
-| `send.py` | `slack.send_message` perform and lookup, and notices. Each post is `chat.postMessage` with `mrkdwn: false`, `unfurl_links: false`, `unfurl_media: false`, `thread_ts`, and metadata `{event_type: "valor_send", event_payload: {key: sha256(broker key), part, parts}}`. A DM target is opened through the cached `conversations.open`. `thread_ts` is the root: a `reply_to` that is a recorded message resolves through its `topic_id`, and one that is Valor's own post through its `sent` row's `thread_ts`. A 429 on a later part is waited out for its `Retry-After` and the send continues. Files go through `files.getUploadURLExternal` and `completeUploadExternal`, then `files.info` is polled, five times two seconds apart, for the share's `ts`; none is `Unknown`. Each `sent` entry is `{channel, chat_id, message_id, thread_ts}` with a DM's `chat_id` as `<team>/<user>`. Lookup is below | OpenClaw `send.ts` 494-830 |
+| `inbound.py` | One `message` event to an `Inbound`, or nothing when its `user` is the token's own (the rule applies to the event itself; `thread` keeps Valor's posts). One function builds a person's id, used live, in gap fill, and in send: the team is the message's `user_team`, else its `team`, else the connected team from `auth.test`. `chat_id` is `<team>/<channel>`, or for an IM the other person's id. `sender_id` is the sender's id. `message_id` is `ts`, `chat_kind` is `dm` for an IM and `group` otherwise, `topic_id` is the `thread_ts` of a threaded reply, and `reply_to` is the thread root. `thread` holds the root and the replies before this one (`conversations.replies`), the last 50, as context for the turn. Files are fetched from `url_private_download` to a temp file, then renamed into `inbound_dir/slack/` by sha256; a `text/html` answer is listed as skipped ("not signed in"). The subtype allowlist is none, `file_share`, `thread_broadcast`, and `me_message`; edits, deletions, joins, and bot messages are not part of the port | Hermes 4513-4517, 6255-6340 |
+| `bridge.py` | `run`: every non-message envelope is acked on arrival, so Slack never disables event delivery. A `message` envelope runs as its own task and is acked once its `intake.receive` commits. A redelivered envelope whose `(chat, ts)` is already in flight in this process waits for the first receive: it is acked once that commits, and processed itself if that fails. If `receive` fails, the envelope is not acked, so Slack retries it; seen stays at it, and its thread root is held in memory on the next pass's thread list, so gap fill takes it once Slack's retries run out. Also the outbox loop and SIGTERM handling, as Telegram does them | OpenClaw `ingress.ts` 166-184 |
+| `gap.py` | On every connect and tick, for each owned chat: `conversations.history` from the chat's seen `ts`; then `conversations.replies(oldest=seen)` for each thread with recent activity, which is any parent in that page whose `latest_reply` is newer than seen, the roots of Valor's sends and notices in the chat (from `sent` rows), and the `topic_id`s of messages recorded in the chat, both from the last 14 days. A chat with no seen entry starts from `intake.lowest_ts`; with no rows either, its seen is set to its newest `ts` and nothing is recorded (Telegram's first pass, `bridge.py` 265-273). A chat's seen advances only after its history pages and every thread on its list for the pass have been read. Seen is held at the `ts` of any receive still in flight, and a read from a held `ts` uses `inclusive=true`. Pages are budgeted per tick at Tier 3, per method (about 50 calls a minute each for history and replies); the pass resumes where it stopped | Ours; Hermes and OpenClaw only catch up lazily |
+| `send.py` | `slack.send_message` perform and lookup, and notices. Each post is `chat.postMessage` with `mrkdwn: false`, `unfurl_links: false`, `unfurl_media: false`, `thread_ts`, and metadata `{event_type: "valor_send", event_payload: {key: sha256(broker key), part, parts}}`. A target whose team is not the connected one is `broker.Failed` ("not a connected workspace"), a can't-perform fact like `channel_not_found`. A DM target is opened through the cached `conversations.open`. `thread_ts` is the root, resolved in order: a recorded message's `topic_id`, else its own `ts`; a `sent` row's `thread_ts`, else its `ts`; else one `conversations.replies(ts=reply_to, limit=1)` for the root; else `reply_to` as given, and Slack's own error on that post is the outcome. A 429 on a later part is waited out for its `Retry-After` and the send continues. A definite Slack refusal of a later part, or a file of the send gone, settles done with the parts posted, as Telegram's `_finish` does. Files go through `files.getUploadURLExternal` and `completeUploadExternal`, then `files.info` is polled, five times two seconds apart, for the share's `ts`; none is `Unknown`. Each `sent` entry is `{channel, chat_id, message_id, thread_ts}` with a DM's `chat_id` as `<team>/<user>`. Lookup is below | OpenClaw `send.ts` 494-830 |
 | `state.py` | `slack-seen.json` (the seen `ts` per chat), written whole, flushed, and renamed into place, as Telegram's is | Ours |
 | `kernel.py`, `__main__.py` | The port as one object. `run`, `keys` (copies `SLACK_APP_TOKEN` and `SLACK_USER_TOKEN` from the vault into `slack-keys`, under the team id `auth.test` returns), `manifest` (prints the app manifest to paste into api.slack.com), and `--plist`. `run` connects the one workspace in `slack-keys` and refuses to start with more than one entry, since 2.5 serves one | Hermes `slack_cli.py` 36-75 |
 
@@ -237,13 +255,16 @@ are `split_text` of the payload, then the files. For each part in order:
 
 1. if any kept post carries metadata, the post whose marker is this key
    and this part;
-2. else the earliest kept post after the previous part's `ts` whose text,
-   with `&amp;`, `&lt;` and `&gt;` decoded, equals the part and whose
-   `thread_ts` equals the payload's root; a file part matches on name
-   and size.
+2. else the earliest kept post after the previous part's `ts` whose
+   normalised text equals the part's and whose `thread_ts` equals the
+   payload's root; a file part matches on name and size. Both sides are
+   normalised the same way: `&amp;`, `&lt;` and `&gt;` decoded,
+   `<url|label>` turned into `label` and `<url>` into `url`, and the ends
+   stripped.
 
 All parts found is done with their `ts`. A prefix found means the rest are
-sent, then done. A part found after a missing one, or two candidates for
+sent, then done; if Slack definitely refuses the rest, done with the
+prefix. A part found after a missing one, or two candidates for
 one part, is `Unknown`. Nothing found is None, as on Telegram. A notice
 takes the same path, with `since` its request row's `at`. `since` covers
 what a record of the newest `ts` before each send did, so there is no
@@ -269,7 +290,7 @@ particular to Slack. Updates to `bridges/README.md`, the port table in
 
 ## Tech debt absorbed
 
-- `split_text` is Telegram-only today (`core/bridge.py`), and the email
+- The email
   and local `chats` are special-cased in `workspace.py` and `intake.py`:
   `workspace.py` accepts only `telegram` and `email` entries and
   lowercases everything but Telegram's. Adding a fourth channel moves the
@@ -284,9 +305,9 @@ particular to Slack. Updates to `bridges/README.md`, the port table in
 ## Left out
 
 - **Converting markdown to mrkdwn.** Text is sent verbatim with
-  `mrkdwn: false`. Slack still stores `&`, `<` and `>` as entities and
-  renders `<...>` sequences as links or mentions, so lookup decodes the
-  entities before comparing. If persona wants Slack formatting, persona
+  `mrkdwn: false`. Slack still stores `&`, `<` and `>` as entities, wraps
+  URLs as `<...>`, and trims the ends, so lookup normalises both sides
+  before comparing. If persona wants Slack formatting, persona
   renders it in `core/` before the request.
 - **Escaping `<!channel>` and `<!here>`.** Hermes escapes them so a bot
   cannot ping a whole channel. With `mrkdwn: false` and no `parse`,
@@ -319,7 +340,8 @@ particular to Slack. Updates to `bridges/README.md`, the port table in
 
 - `tests/slack_emulator.py`: a Socket Mode server (`apps.connections.open`
   hands out a `ws://127.0.0.1` URL) that redelivers an unacked envelope
-  after 3 seconds, plus `auth.test`, `conversations.open`,
+  after 3 seconds, and stores text the way Slack does (entities, wrapped
+  URLs, trimmed ends), plus `auth.test`, `conversations.open`,
   `chat.postMessage` (storing metadata, or dropping it on request, and
   echoing the post as an event), `conversations.history` and
   `conversations.replies` (with paging, `oldest`, and
@@ -336,7 +358,9 @@ particular to Slack. Updates to `bridges/README.md`, the port table in
 - `tests/test_live_slack.py`, skipped without `slack-keys`: a post to a
   test channel in Valor's workspace, then a history scan with
   `include_all_metadata`. It reports first whether the marker came back,
-  so the live window knows which lookup branch it runs.
+  so the live window knows which lookup branch it runs. A second post
+  carries a URL, an `&`, and a trailing newline; the test reports its
+  stored form and that the text fallback matches it.
 
 ## Gaps
 
@@ -445,3 +469,37 @@ Findings, in brief, and what changed:
 Also folded in: a Slack send may target any chat Valor's account can
 reach, owned or not, as Telegram's does (Business item 8). `_refuse_slack`
 and the threat model say so.
+
+### Round 2 (of 2): revise
+
+Both rounds are spent, so these findings ride into the build, as the
+lead decided:
+
+1. A DM's team came from `user_team`, which Slack does not always send,
+   so a live event and its gap-fill copy could differ. One function takes
+   `user_team`, else `team`, else the connected team, live, in gap fill
+   and in send; a test dedupes the two copies of one DM.
+2. Seen could pass thread replies not yet read, and `oldest` is
+   exclusive. Seen advances only after every listed thread is read; a
+   held `ts` is read with `inclusive=true`; a test spends the budget
+   between the two reads.
+3. The `_replied` fallback read `thread`, capped at its oldest end. It
+   reads each `sent` entry's `thread_ts` from the ledger instead, with no
+   cap; `thread` keeps the last 50. A 60-reply test covers it.
+4. Slack rewrites more than three entities. Both sides of the text match
+   are normalised (entities, `<url>` and `<url|label>`, trimmed ends); the
+   emulator stores text as Slack does; the live test posts a URL.
+5. A definite refusal of a later part left the send `failed` with part 1
+   live. It settles done with the parts found, as Telegram does.
+6. The operator chat was not owned when the operator channel is Slack.
+   `owned("slack")` adds it.
+7. Acking a redelivery while the first was in flight could lose a
+   message if the first failed. The redelivery waits for the first
+   receive, is acked when it commits, and is processed if it fails; the
+   failed message's thread root joins the next gap fill pass.
+8. A target in another workspace, and an unresolvable `reply_to`, had no
+   stated behaviour. The first is `broker.Failed` at perform; the
+   resolution order of `reply_to` is written out.
+
+Minor: the `split_text` lines were false (it already counts `chars` per
+`LIMITS`); struck.
