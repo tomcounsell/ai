@@ -135,6 +135,8 @@ def pytest_configure(config):
                 os.environ[name] = value
 
 
+# Before xdist's own hook, which reads `xdist_group` to place each test on a worker.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     darwin = sys.platform == "darwin"
     runtime = container.present()
