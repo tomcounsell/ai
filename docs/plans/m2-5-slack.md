@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-5-slack
 type: build
-status: planned
+status: merged
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
@@ -547,3 +547,25 @@ lead decided:
 
 Minor: the `split_text` lines were false (it already counts `chars` per
 `LIMITS`); struck.
+
+## Checks
+
+Round 1, on 337a9ab10 (base cb3f53159):
+
+- **Test:** pass. Base: 4 failed, 1963 passed, 65 errors. Head: 3 failed, 2002 passed, 65 errors. The 3 shared failures and the 65 errors need dovecot, Apple `container`, or this Mac's backup plist environment; the extra base failure is the flaky Telegram lock test. The check added 5 tests (tests/test_channel_gaps.py): the local binding notice in reply, a Telegram topic reply, Slack thread binding scoped to its own chat, and two fallback cases.
+- **Review:** changes, three findings: a refused read halted gap fill for every chat; the page cursor advanced before the page was recorded; the lookup fallback missed `<@U>`, `<#C>` and `<!here>`. A minor one: `VALOR_OPERATOR_CHAT` case. Governance: no.
+- **Docs:** updated (f35881b98). It found `VALOR_OPERATOR_SLACK_IDS` missing from the kernel's and the other bridges' environment lists and from `MACHINE_ONLY`; patch round 1 adds it.
+
+Round 2, after patch round 1, on 41264e84e (base db190e4e3):
+
+- **Test:** pass. Full suite: 3 failed, 2016 passed, 112 skipped, 65 errors, all the known machine failures. The Telegram SIGTERM test passed 5 of 5 at base and at head under `-n 4`. The check added 9 tests of the text match (tests/test_slack_text.py).
+- **Review:** pass, round 2 of 2. Governance: no. It broke the refused-read fix on purpose and saw its test fail. Five notes, none blocking; the largest is that gap fill can re-read history already seen, which spends rate limit but loses nothing.
+- **Docs:** no_change.
+
+The lead checked the governance paragraph against CLAUDE.md byte for byte in bridges/README.md and core/README.md. The diff adds no "cori" and no em or en dashes. `ruff format --check` names three files outside the diff, as at base.
+
+## Merged
+
+The lead's decision: merge. Every check passed on 41264e84e; the head adds only the test check's commit. Valor-cori-rebuild was fast-forwarded to it.
+
+Rollout on this Mac: `uv sync` in the rollout checkout for `slack_sdk`, after a `pg_dump -Fc` of `valor_rebuild` to `~/valor-backups/` (no backup disk is set). No Slack job is loaded: the app, Socket Mode, the install to Valor's account and the two tokens are Tom's, set out in Tom's answers. The first live fact is whether `chat.postMessage` keeps `metadata` on a user-token post; if not, lookup matches on text and `thread_ts` alone, which the tests already cover.
