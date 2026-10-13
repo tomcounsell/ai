@@ -2,7 +2,7 @@
 tracking: none
 slug: fast-suite
 type: plan
-status: planned
+status: done
 critique_rounds: 1
 review_rounds: 1
 ---
@@ -198,3 +198,33 @@ measures the `container` group exactly, and phase 3 is sized from it.
   serially under the check profile. They get faster from phases 1 and 4,
   not from workers.
 - A time limit anywhere.
+
+## Outcome (2026-10-13)
+
+Built by fs1 (phases 1 and 2), fs3 (phase 3), fs4 (phase 4 items 1 and 3),
+and the lead. `uv run pytest -n auto --dist loadgroup` on the lead's Mac,
+three runs in a row at `d24ccce17`: 9 min 14 s (one flaky failure, fixed
+below), 9 min 25 s, 9 min 9 s; 2095 passed, 46 skipped. The `container`
+group alone, serially, takes 8 min 2 s and is the floor.
+
+What differed from the plan:
+
+- Phase 2's `xdist_group("container")` was added after xdist read the
+  groups, so container tests ran on every worker and one's sweep reaped
+  another's VM. The hook now runs first, and under xdist the container
+  group is handed out before any other test.
+- Phase 3's fallback (machine lock slots) was built and dropped: a second
+  slot breaks the tests that assert the runtime is stopped after their own
+  verification.
+- Phase 4 item 2 (template databases) was built and dropped: a copy saved
+  about 10 ms over a 0.15 s migrate.
+- Item 4 and the remaining item 5 sleeps were not needed for the target.
+- The builder reach test gives each connect 15 s instead of waiting out the
+  builder's two-minute timeout (566 s, then 160 s, now 41 s).
+- `test_slot_priority`'s preempt test ordered its tasks by a 50 ms sleep,
+  which a parallel run outlasted; it waits on the background's hold.
+- A review of the hostile-config cache found a raced read through
+  `.git/objects` could be kept as clean; the key now holds the stat of
+  `objects` and `refs`.
+- `max_connections` lives only on the machine cluster and stays 100; a
+  parallel run used about 20.
