@@ -207,7 +207,12 @@ def make_app() -> web.Application:
         return ws
 
     def event_of(channel: str, m: dict, extra: dict | None = None) -> dict:
-        ev = {**_public(m, True), "type": "message", "channel": channel, "channel_type": channel_type(channel)}
+        ev = {
+            **_public(m, True),
+            "type": "message",
+            "channel": channel,
+            "channel_type": channel_type(channel),
+        }
         ev["event_ts"] = m["ts"]
         ev.update(extra or {})
         return ev
@@ -250,7 +255,9 @@ def make_app() -> web.Application:
         return ok({"url": f"ws://{request.host}/ws"})
 
     async def conversations_open(request, p):
-        return ok({"channel": {"id": "D" + p["users"]}})
+        channel = "D" + p["users"]
+        s.channels.setdefault(channel, [])  # an opened DM has a history, empty at first
+        return ok({"channel": {"id": channel}})
 
     async def users_info(request, p):
         user = p["user"]
@@ -395,7 +402,15 @@ def make_app() -> web.Application:
 
     async def control(request):
         b = await request.json()
-        for k in ("team", "me", "keep_metadata", "share_mode", "share_delay_s", "redeliver_s", "redeliver_max"):
+        for k in (
+            "team",
+            "me",
+            "keep_metadata",
+            "share_mode",
+            "share_delay_s",
+            "redeliver_s",
+            "redeliver_max",
+        ):
             if k in b:
                 setattr(s, k, b[k])
         for f in b.get("faults", []):
@@ -485,7 +500,9 @@ class Emulator:
         self.proc: subprocess.Popen | None = None
 
     def start(self, **control) -> Emulator:
-        self.proc = subprocess.Popen([sys.executable, "-m", "tests.slack_emulator"], stdout=subprocess.PIPE, text=True)
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "tests.slack_emulator"], stdout=subprocess.PIPE, text=True
+        )
         line = self.proc.stdout.readline()
         if not line.strip().isdigit():
             raise RuntimeError("the emulator did not report its port")

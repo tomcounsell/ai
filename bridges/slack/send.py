@@ -23,13 +23,14 @@ What a failure means, as the broker reads it:
   `files.info` reads two seconds apart do not show) is `broker.Unknown`,
   and the outbox's reconcile settles it through `lookup`.
 
-`lookup` scans the target chat from `since` less five minutes (the
-thread when there is a root, else the history), keeping Valor's own posts
+`lookup` before the bridge has connected is `Unknown`. It scans the
+target chat from `since` less five minutes (the thread when there is a
+root, else the history), keeping Valor's own posts
 not already claimed by a recorded send or notice. When any kept post
 carries a marker, a text part is the post with this key's marker and its
 part number; otherwise it is the earliest kept post after the previous
-part whose normalised text equals the part's and whose thread is the
-send's. A file part matches on name and size. All found is done; a found
+part whose text, decoded from Slack's form, equals the part's (both
+trimmed) and whose thread is the send's. A file part matches on name and size. All found is done; a found
 prefix is finished, then done; a part found after a missing one, or two
 candidates for one part, is `Unknown`; nothing found is None.
 """
@@ -56,9 +57,11 @@ _LINK = re.compile(r"<([^<>|]*)(?:\|([^<>]*))?>")
 
 
 def normal(text: str) -> str:
-    """Text as compared by lookup, on both sides: `<url|label>` to
-    `label`, `<url>` to `url`, `&lt;` `&gt;` `&amp;` decoded, ends
-    stripped."""
+    """A post's text as Slack stores it, back to the text that was sent:
+    `<url|label>` to `label`, `<url>` to `url`, `&lt;` `&gt;` `&amp;`
+    decoded, ends stripped. Lookup compares it with the requested text,
+    ends stripped: the requested text is plain, so decoding it too would
+    turn a literal `<this>` or `&amp;` into something else."""
     text = _LINK.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(1), text)
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
 
@@ -207,6 +210,10 @@ class Sender:
 
     async def lookup(self, action, key: str, since: str) -> dict[str, Any] | None:
         p = action.payload
+        if not self.wire.team_id:
+            # `serve` reconciles before the bridge connects: nothing can be
+            # read yet, so the effect stays in flight for the next wake.
+            raise self.kernel.Unknown("not connected to Slack yet")
         try:
             target = self._target(action.target)
         except self.kernel.Failed:
@@ -316,7 +323,7 @@ def _thread(m: dict) -> str | None:
 
 def _matches(m: dict, exp: Part) -> bool:
     if exp.kind == "text":
-        return not m.get("files") and normal(m.get("text") or "") == normal(exp.text)
+        return not m.get("files") and normal(m.get("text") or "") == exp.text.strip()
     return any(
         f.get("name") == exp.name and (exp.size is None or f.get("size") == exp.size)
         for f in m.get("files") or []
