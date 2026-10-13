@@ -251,12 +251,14 @@ def test_a_message_is_recorded_once_and_what_is_not_wanted_is_acked(w):
     assert w.records(f"{w.team}/C0ELSE") == []
 
 
-def test_both_copies_of_a_dm_are_one_person_and_one_record(w):
-    """The live event names `user_team`, the history copy does not: both
-    make Tom's id, so the DM is one chat and its message one record."""
+@pytest.mark.parametrize("field", ["team", "user_team"])
+def test_both_copies_of_a_dm_are_one_person_and_one_record(w, field):
+    """The live event names its team, the history copy does not: both
+    make Tom's id, so the DM is one chat, its message one record, and Tom's
+    DM starts work."""
     with w.bridge():
-        live = w.say(w.tom, "a DM", live_extra={"user_team": w.team.lower()})
-        w.recorded(w.tom, live)
+        live = w.say(w.tom, "a DM", live_extra={field: w.team.lower()})
+        assert w.bind(w.tom, live)["as"] == "start"
     (w.state / "slack-seen.json").unlink()  # the restart reads the DM again from its lowest ts
     later = w.say(w.tom, "while the bridge was down", live=False)
     with w.bridge():
@@ -362,7 +364,9 @@ def test_a_redelivered_envelope_waits_for_the_first_receive(w, first):
     once that commits, or taken by the redelivery when it fails."""
     w.emu.control(redeliver_s=0.3, redeliver_max=20)
     with w.bridge("--receive", first):
-        ts = w.say(w.ops, "delivered twice")
+        ts = w.say(
+            w.ops, "delivered twice", files=[{"name": "a.txt", "data_b64": base64.b64encode(b"a").decode()}]
+        )
         wait_for(Path(f"{w.mark}.paused").exists)
         envelope = lambda: next(iter(w.emu.state()["envelopes"].values()))
         wait_for(lambda: envelope()["sent"] >= 3)
@@ -374,6 +378,10 @@ def test_a_redelivered_envelope_waits_for_the_first_receive(w, first):
         time.sleep(1)
         assert envelope()["sent"] == sent
     assert w.ids(w.ops) == [ts]
+    # The file is fetched once while the first receive runs; a failed one
+    # is fetched again by the redelivery, to the same sha256 name.
+    assert list(w.emu.state()["downloads"].values()) == [1 if first == "hold" else 2]
+    assert len(list((w.tmp / "inbound" / "slack").iterdir())) == 1
 
 
 def test_files_are_named_by_sha_and_an_off_host_redirect_never_gets_the_token(w):
@@ -463,8 +471,8 @@ def test_a_long_send_is_three_posts_and_a_kill_after_the_first_finishes_the_rest
 def test_a_rate_limit_on_part_two_is_waited_out(w):
     with w.bridge():
         w.emu.control(faults=[{"method": "chat.postMessage", "kind": "429", "nth": 2, "retry_after": 1}])
-        out = w.outcome(w.release(send(w.ops, _long(5000))))
-    assert out["kind"] == "done" and len(out["result"]["sent"]) == 2 == len(w.own(w.ops))
+        out = w.outcome(w.release(send(w.ops, _long(9000))), timeout=30)
+    assert out["kind"] == "done" and len(out["result"]["sent"]) == 3 == len(w.own(w.ops))
 
 
 def test_part_two_refused_settles_done_with_the_part_sent(w):
