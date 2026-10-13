@@ -22,7 +22,8 @@ import plistlib
 import re
 import sys
 import tomllib
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -398,11 +399,13 @@ def listing(rep: dict[str, Any]) -> str:
 @dataclass
 class Ran:
     """What a runner did: the run's task id (None when it started none), the
-    outcome, and a short summary."""
+    outcome, a short summary, and `cleared`: the finding keys an ended or
+    stopped task held that this run saw gone (`core/findings.py`)."""
 
     run: str | None
     outcome: str
     summary: str
+    cleared: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -452,10 +455,17 @@ async def run(
         return await _fire(conn, r, runners, restart=restart, now=now, start_project=start_project, dsn=dsn)
     # A second expiry firing waits here, outside any transaction, until the
     # first has recorded `routine.ran`, and then continues its open sweep.
-    key = f"routine:{r.name}"
+    async with holding(conn, f"routine:{r.name}"):
+        return await _fire(conn, r, runners, restart=restart, now=now, start_project=start_project, dsn=dsn)
+
+
+@asynccontextmanager
+async def holding(conn, key: str) -> AsyncIterator[None]:
+    """The session advisory lock `key` on `conn`, waited for, released on
+    the way out."""
     await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
     try:
-        return await _fire(conn, r, runners, restart=restart, now=now, start_project=start_project, dsn=dsn)
+        yield
     finally:
         await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
 
@@ -491,13 +501,42 @@ async def _fire(
     if did.outcome not in OUTCOMES:
         raise Refused(f"runner {r.runner} returned the outcome {did.outcome!r}")
     spent = (await spend(conn, [did.run]))["spent_usd_micros"] if did.run else 0
-    await ledger.append(
-        conn,
-        objective,
-        "routine.ran",
-        {"run": did.run, "outcome": did.outcome, "summary": did.summary, "spent_usd_micros": spent},
-    )
+    row = {"run": did.run, "outcome": did.outcome, "summary": did.summary, "spent_usd_micros": spent}
+    if did.cleared:
+        row["cleared"] = sorted(did.cleared)
+    await ledger.append(conn, objective, "routine.ran", row)
     return line(name, await report(conn, name, given or datetime.now(UTC)), did.run, did.outcome, spent)
+
+
+async def open_node(ctx: Context) -> str | None:
+    """The run a sweeping runner continues: the objective's latest child
+    whose marker is `{"objective": NAME}` (a hand-started child is never a
+    run), when it is not stopped, no `routine.ran` names it `finished` or
+    `failed`, and its workspace, if it had one, is not removed. Call it
+    holding `routine:<name>` (`holding`), so two firings find one run."""
+    closed = {
+        row.get("run")
+        for row in await runs(ctx.conn, [ctx.objective])
+        if row["outcome"] in ("finished", "failed")
+    }
+    for child in reversed(await tasks.children(ctx.conn, ctx.objective)):
+        marker = await (
+            await ctx.conn.execute(
+                "SELECT payload->>%s FROM events WHERE task_id = %s AND type = 'task.started'",
+                (OBJECTIVE, child),
+            )
+        ).fetchone()
+        if marker is None or marker[0] != ctx.routine.name:
+            continue
+        removed = await (
+            await ctx.conn.execute(
+                "SELECT 1 FROM events WHERE task_id = %s AND type = 'workspace.removed'", (child,)
+            )
+        ).fetchone()
+        if child in closed or removed or await tasks.is_stopped(ctx.conn, child):
+            return None
+        return child
+    return None
 
 
 async def open_run(ctx: Context) -> str | None:

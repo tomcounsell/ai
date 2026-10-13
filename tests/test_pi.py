@@ -72,7 +72,7 @@ def test_the_command_runs_node_and_the_script_under_the_turn_profile_with_every_
     assert _flag_value(argv, "--append-system-prompt") == "BRIEF TEXT", "only the Brief is appended"
     assert _flag_value(argv, "--session-dir") == str(Path(harness["pi_agent_dir"]) / "sessions")
     assert command.env["PI_CODING_AGENT_DIR"] == harness["pi_agent_dir"] and command.env["PI_OFFLINE"] == "1"
-    assert command.harness == "pi" and command.harness_version == pi.version(settings.pi)
+    assert command.harness == "pi" and command.harness_version == pi.version(str(script))
 
 
 @pytest.mark.macos

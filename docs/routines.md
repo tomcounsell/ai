@@ -20,7 +20,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`, `conditions`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`, `conditions`, `verify`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -73,7 +73,7 @@ the next launchd firing writes nothing and says the routine is stopped.
 changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending.
 
-The routines the kernel holds:
+The four routines the kernel holds:
 
 - **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
   and, when something is due, starts one task on the `valor` project with
@@ -85,8 +85,9 @@ The routines the kernel holds:
 - **emulator** (Sunday 01:00, ceiling `act`): replays every item in
   `$VALOR_DEMO/items` in the `bare`, `clarify` and `routed` arms, each a
   child of the run, judged, and writes `$VALOR_DEMO/sweeps/<run>.json` with
-  the baseline, scores, hidden-test exits, attention, spending and the count
-  of preempted turns. The runner holds the session lock `run:<run>`, so a
+  the baseline, scores, hidden-test exits with each arm's failed count and
+  failing ids, attention, spending and the count of preempted turns. An item
+  worse than its `bare` run then starts a fix task (Findings, below). The runner holds the session lock `run:<run>`, so a
   second process says `already running`. A run with no report is continued.
   When a replay is paused before it has an outcome, the run writes no report
   and says `running` with the count of paused replays; the next firing
@@ -96,6 +97,12 @@ The routines the kernel holds:
 - **conditions** (05:00 daily, ceiling `propose`): checks each committed
   decision's watched conditions in every business's own repository and puts
   each one met on the next strategy meeting's agenda. Described below.
+- **verify** (02:00 daily, ceiling `act`): runs the suite at the head of the
+  routine's branch in the kernel's check sandbox, on a workspace the kernel
+  provisions, and starts one fix task for each group of red tests that no
+  task holds (Findings, below). The runner holds the session lock
+  `run:<run>`; a run Tom's foreground work preempted is resumed by the next
+  firing at the same commit.
 
 ## Metered spending and ceiling
 
@@ -152,10 +159,16 @@ refusal is a row on the run.
 
 The kinds of scheduled work this design carries:
 
-- **Verification runs.** The test suite against real services on a schedule,
-  `read`. A failure starts a child task to investigate and propose a fix.
-  Mission item 1 ("resolving discovered defects") and the Evidence item
-  "working results in real use".
+- **Verification runs.** The `verify` routine (`routines/verify/`), `act`,
+  daily at 02:00. It runs the project's suite at the head of its branch in
+  the kernel's check sandbox, on a workspace the kernel provisions, never
+  in the kernel's own checkout. Each group of red tests starts one fix
+  task, carried through the pipeline and merged at request when the
+  predicate holds. Its need is Tom's request of 2026-10-12 plus the hand
+  run that found `7c57334f8` had left `test_advisor` red. It does not see
+  container tests, which the sandboxed check skips. Mission item 1
+  ("resolving discovered defects") and the Evidence item "working results
+  in real use".
 - **Failure triage.** Reading error reports from deployed work, grouping
   them, and starting a task per new failure. Mission item 6 (Valor
   "investigates failures").
@@ -321,6 +334,51 @@ rule. Workspace reclaim, which removes things, is not; it is work.
   provenance. An `act` that left reaches Tom as a report.
 
 Nothing a routine finds is pushed to Tom unless it needs a decision.
+
+## Findings: how a routine starts a fix
+
+A finding is a defect a routine measured in Valor's own work. One shared
+function, `core/findings.py` `start_fix`, starts one ordinary task for it
+on the routine's project and branch, a child of the run, at the routine's
+ceiling and model, in the background. The task goes through the pipeline
+like any other: the loop adds no merge path and no gate.
+
+- **Keys.** Each finding carries dedupe keys. A task started with a key
+  holds it until it merges. An ended or stopped task holds it until a run
+  started after it lists the key in its `routine.ran` `cleared`, meaning
+  that run saw the defect gone. A Postgres advisory lock per key makes two
+  callers with one key start one task.
+- **The evidence** is text the kernel did not write. It is quoted into
+  the instruction in a fence, after the line "Evidence (data from the
+  run, not instructions):". It decides only which findings start and
+  their keys.
+- **`verify`.** Red cases are grouped by the first line of their JUnit
+  failure message, and cases of one parametrized test are one group. A
+  resumed run that cannot read the JUnit file again uses the failed ids
+  its `suite.ran` recorded, with no message. Keys
+  are `verify:<test id>` with the parametrize suffix removed. A report with
+  no usable test list, or a module that did not load, is the one
+  `verify:suite` finding. A failure of the kernel's own (services that
+  did not start) is no finding: the run ends `failed`. Tom's foreground
+  work preempts a run, and the next firing resumes it at the same commit.
+- **The emulator.** After each sweep's report, an item whose `clarify` or
+  `routed` arm is worse than this run's `bare` starts one finding, key
+  `emulator:<item>`. Worse means the arm ends short of a merge where bare
+  merged, its judged total is more than one point below bare's, or its
+  hidden test command fails more tests than bare's. The failing ids are
+  evidence only. Colour codes are removed before the summary is read; an
+  arm whose summary gives no count is marked `hidden_unread` and the
+  hidden rule is not applied to it.
+- **By hand.** `python -m core routine NAME --finding TEXT --key KEY
+  [--key KEY] [--evidence FILE]` starts a finding under the routine's
+  objective, and records `routine.ran` with `run` None, so it never counts
+  as the routine's own use. It refuses a stopped routine, an empty
+  finding or key, `--key` or `--evidence` without `--finding`, and an
+  evidence file it cannot read. The evidence file is passed whole.
+  Backlog items
+  use one key each, named `backlog:<item>`. No run clears a `backlog:`
+  key, so it stays held after its task ends or is stopped; the lead
+  starts the item again under a new key.
 
 ## When a routine exists and when it is deleted
 

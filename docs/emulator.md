@@ -515,8 +515,9 @@ those changes alter behavior without changing kernel code and nothing else
 measures them. It also runs on any change to the request-underspecification
 classifier (below). A sweep is a routine, its result is a report to Tom
 comparing the change against the last sweep on the same items, and the
-decision to keep the change is his. Today it runs by hand, one item at a
-time.
+decision to keep the change is his. The `emulator` routine sweeps weekly,
+and an item whose `clarify` or `routed` arm is worse than its `bare` run
+starts one fix task ([routines.md](routines.md), "Findings").
 
 The emulator refuses no merge. Milestone 1.5's takeover gate (three items
 reaching a merge at the baseline's bars) is a one-time Done item Tom

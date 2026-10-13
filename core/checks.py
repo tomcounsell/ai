@@ -71,17 +71,9 @@ LOCKFILES = (
 # -- JUnit -------------------------------------------------------------------------
 
 
-def read_junit(
-    checks_dir: Path, name: str, relpath: str = JUNIT
-) -> tuple[dict[str, list[str]] | None, str | None]:
-    """The per-test results the suite wrote at `<name>/<relpath>` (by
-    default `tmp/junit.xml`; a VM run's is `out/junit.xml`) under
-    the kernel-owned `checks_dir`: `checks_dir` and the check directory
-    `name` each opened with `O_NOFOLLOW | O_DIRECTORY`, the file read whole
-    with `workspace.read_turn_file` (no link followed, no FIFO blocked on).
-    A file holding a DOCTYPE or an entity declaration is refused. Returns
-    ({passed, failed, errored, skipped: [test id]}, None) or (None, why
-    not). A test id is `classname::name`."""
+def _junit_tree(checks_dir: Path, name: str, relpath: str) -> tuple[ET.Element | None, str | None]:
+    """The parsed JUnit report at `<name>/<relpath>` under `checks_dir`, or
+    (None, why not); see `read_junit`."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY
     try:
         root = os.open(checks_dir, flags)
@@ -103,14 +95,34 @@ def read_junit(
     if why := _declares(body):
         return None, why
     try:
-        tree = ET.fromstring(body)
+        return ET.fromstring(body), None
     except ET.ParseError as exc:
         return None, f"the JUnit report is not XML ({exc})"
+
+
+def _case_id(case: ET.Element) -> str:
+    name = case.get("name") or ""
+    cls = case.get("classname") or case.get("file") or ""
+    return f"{cls}::{name}" if cls else name
+
+
+def read_junit(
+    checks_dir: Path, name: str, relpath: str = JUNIT
+) -> tuple[dict[str, list[str]] | None, str | None]:
+    """The per-test results the suite wrote at `<name>/<relpath>` (by
+    default `tmp/junit.xml`; a VM run's is `out/junit.xml`) under
+    the kernel-owned `checks_dir`: `checks_dir` and the check directory
+    `name` each opened with `O_NOFOLLOW | O_DIRECTORY`, the file read whole
+    with `workspace.read_turn_file` (no link followed, no FIFO blocked on).
+    A file holding a DOCTYPE or an entity declaration is refused. Returns
+    ({passed, failed, errored, skipped: [test id]}, None) or (None, why
+    not). A test id is `classname::name`."""
+    tree, why = _junit_tree(checks_dir, name, relpath)
+    if tree is None:
+        return None, why
     out: dict[str, list[str]] = {"passed": [], "failed": [], "errored": [], "skipped": []}
     for case in tree.iter("testcase"):
-        name = case.get("name") or ""
-        cls = case.get("classname") or case.get("file") or ""
-        tid = f"{cls}::{name}" if cls else name
+        tid = _case_id(case)
         tags = {child.tag for child in case}
         if "error" in tags:
             out["errored"].append(tid)
@@ -121,6 +133,33 @@ def read_junit(
         else:
             out["passed"].append(tid)
     return out, None
+
+
+def junit_failures(checks_dir: Path, name: str, relpath: str = JUNIT) -> list[dict[str, str]]:
+    """Each failed or errored case of the report `read_junit` reads, through
+    the same no-follow read: `id`, `kind` (`failed` or `errored`), the
+    element's `message` attribute and its text. Empty when the report
+    cannot be read."""
+    tree, _why = _junit_tree(checks_dir, name, relpath)
+    if tree is None:
+        return []
+    out = []
+    for case in tree.iter("testcase"):
+        found = case.find("error")
+        kind = "errored"
+        if found is None:
+            found, kind = case.find("failure"), "failed"
+        if found is None:
+            continue
+        out.append(
+            {
+                "id": _case_id(case),
+                "kind": kind,
+                "message": found.get("message") or "",
+                "text": found.text or "",
+            }
+        )
+    return out
 
 
 def _declares(body: bytes) -> str | None:

@@ -61,7 +61,7 @@ How the loops end (Tom's rulings in [valor-rebuild-feedback.md](valor-rebuild-fe
 - **Tom's queue holds** questions about vision, business priorities, and
   the cost and benefit of a tradeoff in how the company is organised;
   things only he holds (a password, an account); and governance grants. Tom gets a report of each merge and
-  send. Every other call is Valor's, recorded under "Decided by default"
+  send. Every other call is Valor's, recorded in [valor-rebuild-decided.md](valor-rebuild-decided.md)
   and not asked.
 
 Governance binds every milestone. A milestone that needs a new check, gate,
@@ -114,7 +114,7 @@ files merge one at a time. The waves, the models per role, and each
 agent's isolation are in `.claude/skills/build/SKILL.md`. The takeover
 gate still measures the pipeline before Valor carries tasks itself.
 
-**Phase B, self-built (milestones 2 to 6).** A driving session steps in
+**Phase B, self-built (milestones 2 to 7).** A driving session steps in
 only to repair the kernel when Valor cannot run its pipeline at all. Such
 a repair is a task in the ledger like any other once the kernel runs
 again, so the record shows every fix.
@@ -435,6 +435,24 @@ bridge's port.
 **Done.** On Tom's Mac: a message typed on the page starts a task, a
 notice comes back, and a send leaves at request and is shown once.
 
+### 2.5 Slack
+
+Stakes: sender verification and the kernel's declarations, and sends to
+real people under Valor's name, critique 2 and review 2. Plan:
+[m2-5-slack.md](m2-5-slack.md). Valor joins clients' workspaces as itself
+(a user token, not a bot); who may talk to it is configured as on
+Telegram; the first workspace is `yudame.slack.com`.
+
+`bridges/slack/` over Socket Mode, to the same port: a `message` event is
+acked only after `intake.receive` commits, gap fill reads
+`conversations.history` from the newest `ts` seen, and every post carries
+a metadata marker that `lookup` finds after a crash (OpenClaw's design;
+Slack has no `random_id`).
+
+**Done.** In a test window on `yudame.slack.com`: Tom's DM starts a task,
+his thread reply binds to a question, and a crash between intent and
+outcome does not post twice.
+
 **Leaves out (milestone 2).** Other channels.
 
 ## Milestone 3: the harnesses
@@ -548,6 +566,29 @@ off.
 
 **Leaves out.** pgvector until a measured need.
 
+## Milestone 7: the improvement loop
+
+A driving session builds it through `/build` and a kernel landing task merges it. Stakes: the
+kernel, critique 2 and review 1. A guard: it waits for Tom's tap per instance. Plan in
+[m7-improvement-loop.md](m7-improvement-loop.md).
+
+**Goal.** Valor turns its measured defects (red tests on the branch, emulator items worse than
+bare) into tasks its kernel carries (Mission item 1; Evidence "Working results in real use").
+
+**Done.**
+- A planted red test on a throwaway branch makes the `verify` run start exactly one task, and a
+  second firing starts none.
+- A planted worse-than-bare sweep report makes the emulator run start exactly one task.
+- One task the loop started reaches merged on the branch through the kernel, with no
+  driving-session hand on the code.
+- The guard row exists with its grant, incident, mission item and expiry.
+
+**Absorbs.** The emulator report's hidden tests recorded as exit codes only: each row gains failed
+counts and failing ids.
+
+**Leaves out.** Any controller, research cycle, arena, promotion step, or merge path or gate of
+the loop's own; container tests in `verify`.
+
 ## Before cutover
 
 Cutover is Tom's to plan. These must be true first:
@@ -565,30 +606,7 @@ Cutover is Tom's to plan. These must be true first:
 
 ## Decided by default
 
-Tom can overturn any of these; each is reversible.
-
-- The judgement port, the blind verifier, the emulator, and the GitHub
-  credential for pushes are built inside milestone 1, since the pipeline
-  needs them before takeover.
-- Milestone 2 binds a message to a task without a classifier: a reply to
-  one of Valor's messages goes to that task, and any other message from Tom
-  starts a new task. Judgement use shapes 2 and 3 wait for a misrouted
-  message.
-- The objective tree is built at the start of milestone 4, where routines
-  first need it.
-- Stage instructions live as plain files in `skills/sdlc/` until the skill
-  system is designed.
-- The read-only status page in `ui/` comes with routines.
-- Stakes per milestone as stated above.
-- Polls are dropped from the Telegram bridge, per Tom's ruling on `main`
-  (#3550).
-- The inbound Telegram record carries the forum topic id.
-- The rebuild runs on Valor's Mac, where the old system also runs.
-- The answer keys for cuttlefish #646, popoto #191, and popoto #188 stand
-  as written ([m1-5-emulator-records.md](m1-5-emulator-records.md)).
-- The old system's spend on the replayed PRs is not needed: every
-  milestone's evidence compares against the bare baseline and the emulator,
-  not against the old system's cost.
+[valor-rebuild-decided.md](valor-rebuild-decided.md).
 
 ## Open items
 
