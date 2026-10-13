@@ -54,18 +54,18 @@ interpretation.
 
 | Field | Meaning |
 |---|---|
-| `channel` | `telegram`, `email`, or `local` |
-| `chat_id` | The conversation: a Telegram chat id, or for email the thread root's Message-ID |
+| `channel` | `telegram`, `email`, `slack`, or `local` |
+| `chat_id` | The conversation: a Telegram chat id, for email the thread root's Message-ID, or for Slack `<team>/<channel>` (a DM's is the other person's `sender_id`) |
 | `chat_kind` | `dm`, `group`, or `email` |
-| `message_id` | The platform's id for this message, unique within `chat_id` |
-| `sender_id` | The platform's stable id for the sender: a Telegram user id, or an email address |
+| `message_id` | The platform's id for this message, unique within `chat_id` (Slack's `ts`) |
+| `sender_id` | The platform's stable id for the sender: a Telegram user id, an email address, or a Slack `<team>/<user>` |
 | `sender_name` | Display name, for rendering only; never used to identify anyone |
 | `sent_at` | The platform's timestamp |
 | `kind` | `message` |
 | `text` | The body as the platform delivered it, unaltered |
 | `reply_to` | The `message_id` this message replies to, if any |
 | `thread` | The ancestors the bridge could fetch, oldest first, each `{id, text, attachments}`, nothing downloaded |
-| `topic_id` | The Telegram forum topic, when the message is in one |
+| `topic_id` | The Telegram forum topic, when the message is in one; for Slack, the thread root of a reply |
 | `attachments` | Files the bridge downloaded, each `{name, mime, bytes, path}`, or `{name, mime, bytes, skipped}` with the reason it could not fetch the file |
 | `headers` | Channel facts with no field above: for Telegram, `grouped_id` of an album; for email, the raw headers |
 
@@ -99,6 +99,7 @@ whether the message with that idempotency key exists.
 |---|---|---|---|
 | `telegram.send_message` | `act` | chat id | `text`, `reply_to`, `topic_id`, `files` (each a path and its sha256) |
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
+| `slack.send_message` | `act` | `<team>/<channel>`, or `<team>/<user>` for a DM | `text`, `reply_to`, `files` (each a path and its sha256); see [slack.md](slack.md) |
 | `local.send_message` | `act` | `local` | `text`; see [local.md](local.md) |
 
 A `telegram.send_message` may target any chat Valor's account can reach,
@@ -276,7 +277,11 @@ Stop binds by structure, a verified sender replying to a known message
 with a fixed token, because it decides what may happen. A classifier
 decides what a thing is; it never decides what a thing may do. A reply
 near `stop` that is not it is told "Not a stop; reply `stop`. Your message
-steers the task." and steers. How an act leaves belongs to
+steers the task." and steers. A notice about how a message bound goes in
+reply to it only in Tom's own chat (his DM on that channel, or the operator
+chat); about a message anywhere else, such as a project group, it goes to
+the operator channel and chat, so kernel text never reaches the other
+people there. How an act leaves belongs to
 [architecture.md](../architecture.md).
 
 ### Unbound messages: classified by the judgement layer

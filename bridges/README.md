@@ -4,14 +4,14 @@ Self-contained comms modules.
 
 ## Scope
 
-- One module per channel: `telegram/`, `email/`, `local/`, and later others.
+- One module per channel: `telegram/`, `email/`, `slack/`, `local/`, and later others.
 - Each does I/O and the outbox only: receive, normalize, hand to `core/`; take an outbound message the broker released and deliver it.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
-Entry points: `python -m bridges.telegram run | login | keys | --plist`, `python -m bridges.email run | keys | --plist`, and `python -m bridges.local run | open | --plist`.
+Entry points: `python -m bridges.telegram run | login | keys | --plist`, `python -m bridges.email run | keys | --plist`, `python -m bridges.slack run | keys | manifest | --plist`, and `python -m bridges.local run | open | --plist`.
 
-Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, [docs/bridges/email.md](../docs/bridges/email.md), and [docs/bridges/local.md](../docs/bridges/local.md).
+Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, [docs/bridges/email.md](../docs/bridges/email.md), [docs/bridges/slack.md](../docs/bridges/slack.md), and [docs/bridges/local.md](../docs/bridges/local.md).
 
 ## Imports
 
