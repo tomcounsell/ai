@@ -457,7 +457,10 @@ def test_a_long_send_is_three_posts_and_a_kill_after_the_first_finishes_the_rest
     with w.bridge() as proc:
         w.emu.control(faults=[{"method": "chat.postMessage", "kind": "pause", "nth": 2, "seconds": 600}])
         effect = w.release(send(w.ops, _long(9000)))
-        wait_for(lambda: len(w.own(w.ops)) == 1)
+        # Killed with part 2's request held in the emulator, so the restart's
+        # posts are calls 3 and 4.
+        wait_for(lambda: w.emu.state()["calls"].get("chat.postMessage") == 2)
+        assert len(w.own(w.ops)) == 1
         proc.kill()
         proc.wait(10)
     with w.bridge():
