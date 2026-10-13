@@ -407,6 +407,50 @@ None open. See "Tom's answers".
   and changing which of his messages start work is a port change for
   every channel, outside 2.5.
 
+## Patch round 1
+
+Review round 1 (of 2) asked for changes; the docs check and the test
+check each left one note. Each was taken, each with a test that fails
+without its fix:
+
+1. A read Slack refused (`thread_not_found` for a deleted root,
+   `channel_not_found` for a channel Valor was taken out of) ended the
+   whole gap-fill pass on every tick, so no later chat was ever filled.
+   A refused thread read is logged and that thread dropped; a refused
+   chat read drops that chat's pass, keeps its seen `ts`, and the pass
+   goes on. Tests: a deleted root, and a removed channel, in the operator
+   chat; the client channel's missed message is still recorded.
+2. A pass moved its page cursor, newest `ts` and history-done flag before
+   the page was recorded, so a failed ledger read lost the page. They now
+   move only after the page is recorded and the thread list read. Tests:
+   the bridge child fails one `recorded` (two-message pages) or one
+   `threads` read; nothing is lost.
+3. Lookup's text match missed a post holding `<@U..>`, `<#C..>` or
+   `<!..>`, which Slack keeps as written. The requested text has those
+   sequences unwrapped as the stored text has (or every `<...>`, when it
+   wrote its links that way). The emulator keeps them; the no-metadata
+   lookup test sends a mention and a channel link.
+4. A lowercase `VALOR_OPERATOR_CHAT` left the Slack operator chat
+   unowned. Settings name it as its channel names chats, uppercase on
+   Slack.
+5. Docs check: `VALOR_OPERATOR_SLACK_IDS` reached only the Slack job, but
+   `notices._to_tom` reads it in whichever process records a send. The
+   kernel's, email's and Telegram's jobs carry it, and `MACHINE_ONLY`
+   drops it; a test reads all four plists.
+6. Test check: `owned("email")` gained the operator chat when the operator
+   channel is email. That was not intended: email is never the operator
+   channel. Restored to Tom's addresses and project threads, with a test.
+
+Suite (`VALOR_TEST_DB=valor_rebuild_test_25build`,
+`VALOR_TEST_PORTS=7200-7399`): 2015 passed, 112 skipped, 4 failed, 65
+errors, against base 1963 passed, 4 failed, 65 errors. The 65 errors and
+the mailserver failure are dovecot, the backup and credential-push
+failures are this Mac's, as at base; the fourth, the Telegram SIGTERM
+test (five own posts where one was expected, a test this round does not
+touch), passed in 5 runs alone and 2 under load beside the Telegram and
+Slack tests, as base's fourth (a Telegram lock test) did. `ruff check`
+passes; `ruff format` flags only the three base files it flags at base.
+
 ## Critique rounds
 
 ### Round 1 (of 2): revise
