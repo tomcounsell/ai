@@ -438,9 +438,10 @@ notice comes back, and a send leaves at request and is shown once.
 ### 2.5 Slack
 
 Stakes: sender verification and the kernel's declarations, and sends to
-real people under Valor's name, critique 2 and review 2. Plan (draft,
-waiting on Tom's identity and workspace answers):
-[m2-5-slack.md](m2-5-slack.md).
+real people under Valor's name, critique 2 and review 2. Plan:
+[m2-5-slack.md](m2-5-slack.md). Valor joins clients' workspaces as itself
+(a user token, not a bot); who may talk to it is configured as on
+Telegram; the first workspace is `yudame.slack.com`.
 
 `bridges/slack/` over Socket Mode, to the same port: a `message` event is
 acked only after `intake.receive` commits, gap fill reads
@@ -448,7 +449,7 @@ acked only after `intake.receive` commits, gap fill reads
 a metadata marker that `lookup` finds after a crash (OpenClaw's design;
 Slack has no `random_id`).
 
-**Done.** In a test window on Valor's workspace: Tom's DM starts a task,
+**Done.** In a test window on `yudame.slack.com`: Tom's DM starts a task,
 his thread reply binds to a question, and a crash between intent and
 outcome does not post twice.
 

@@ -2,7 +2,7 @@
 tracking: none
 slug: m2-5-slack
 type: build
-status: draft
+status: planned
 critique_rounds: 2
 review_rounds: 2
 governance_grant: none
@@ -74,7 +74,9 @@ calls):
   skipped, and the token is never sent there.
 - The suite and both ruff checks are green.
 
-Live, in a test window on a workspace Valor's account belongs to: Tom
+Live, in a test window on `yudame.slack.com`: a message from a
+non-whitelisted DM is not received, and one in an owned channel from any
+member is recorded; Tom
 DMs Valor and a task starts; a question reaches him in Slack and his
 thread reply binds to it; a forced crash between the intent and the
 outcome does not post twice; and the bridge's RSS after a day connected
@@ -97,26 +99,40 @@ is measured.
   goes only to `slack.com`, `*.slack.com` and `*.slack-files.com`, with
   each redirect checked by hand (Hermes, `adapter.py` 6255-6340).
 
-## Decisions for Tom (questions 1 and 2 change the build)
+## Tom's answers (2026-10-13)
 
-1. **Which identity posts.** Recommended: **Valor's own Slack user
-   account, through a user token (`xoxp`)** of a single-workspace app
-   that Valor installs. Valor's messages then come from Valor, a member
-   like any other, and one identity holds, for the reason telegram.md
-   gives for using a user account over a bot. The other choice, a bot
-   user (`xoxb`, what Hermes and OpenClaw use), shows an "APP" badge,
-   must be invited into each channel, and cannot read a DM between Tom
-   and Valor the person.
-2. **Which workspaces.** The app must be installed in each workspace it
-   reads. In a client's workspace where Valor is a guest, that needs the
-   client admin's approval. Recommended: start with one workspace that
-   Valor or Tom administers, and add client workspaces, one per project,
-   as `chats` entries.
-3. **Slack as Tom's operator channel?** Assumed: no. Tom's verified Slack
-   messages start work and bind replies, the same as on Telegram. Notices
-   that concern no Slack message stay on the operator channel set in
-   settings, Telegram today. `VALOR_OPERATOR_CHANNEL=slack` is supported
-   for when Tom wants it.
+- **Purpose: a teammate in client workspaces.** Valor is a member of
+  clients' Slack workspaces under its own name, reading project channels
+  and posting there. So the identity is **Valor's own user account
+  through a user token (`xoxp`)**, not a bot: one identity, as on
+  Telegram. Each workspace installs a small internal app once, with its
+  admin's approval.
+- **Who may talk to Valor: the same as Telegram.** Some people are
+  whitelisted for DMs, each against a project. Otherwise, membership of a
+  channel is the whitelist for chat in that channel. In the port's terms:
+  - a project's `chats` lists `slack:<team id>/<channel id>` for each
+    channel it owns, and the bridge records every member's message there;
+  - a whitelisted DM is `slack:<team id>/<user id>` in that project's
+    `chats`. A DM's `chat_id` is the other person's user id, as a
+    Telegram DM's is, and the bridge maps the IM channel to it;
+  - a DM from anyone else, and any channel no project lists, is not
+    received.
+
+  What a non-Tom message may then do is the kernel's, and it is the same
+  for every channel: today it is recorded as context. Widening that
+  belongs to gap G1 in [cutover-data.md](cutover-data.md), and Slack
+  follows whatever G1 decides for Telegram, with no Slack-specific rule.
+- **First workspace: `yudame.slack.com`.** Valor is already signed in
+  there on the desktop app. The live test windows run there.
+- **Notices** stay on the operator channel in settings (Telegram).
+  `VALOR_OPERATOR_CHANNEL=slack` is supported but not set. (Decided by
+  default: Tom chose the teammate purpose, not "another line to Tom".)
+
+Before the live window, signed in as Valor, at api.slack.com: create the
+app in `yudame` from `python -m bridges.slack manifest`, turn on Socket
+Mode, install it to Valor's account, and put `SLACK_APP_TOKEN` and
+`SLACK_USER_TOKEN` in the vault `.env`. If the workspace requires app
+approval, the yudame admin approves the install.
 
 ## What is built
 
@@ -133,7 +149,8 @@ is measured.
 - `notices.py`: `_to_tom` knows a send to Tom's Slack DM.
 - `settings.py`: `VALOR_OPERATOR_SLACK_ID`, and `slack` as an operator
   channel.
-- `workspace.py`: project `chats` accept `slack:<team id>/<channel id>`.
+- `workspace.py`: project `chats` accept `slack:<team id>/<channel id>`
+  for a channel and `slack:<team id>/<user id>` for a whitelisted DM.
 
 ### `bridges/slack/`, about 1,300 lines (Telegram's is about 2,500)
 
@@ -229,10 +246,7 @@ particular to Slack. Updates to `bridges/README.md`, the port table in
 
 ## Questions for Tom
 
-Questions 1 to 3 are under "Decisions for Tom" above. Also:
-
-4. A Slack account for Valor, and the workspace for test windows: only
-   Tom can create or invite these.
+None open. See "Tom's answers".
 
 ## Decided by default
 
