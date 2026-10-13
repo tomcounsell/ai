@@ -1,0 +1,29 @@
+# cuttlefish: served by the Captain (the old fleet's owner; one Mac per
+# client). No kernel runs as "Valor the Captain" until that Mac's own
+# install, so this spec and its chat are inert until then. Its client is
+# open for Tom. Built from docs/plans/cutover-data.md, section 2.1; the
+# suite has not run in the kernel.
+name = "cuttlefish"
+repo = "https://github.com/yudame/cuttlefish.git"
+kind = "django"
+# Unconfirmed: assumed to be the default branch.
+branch = "main"
+merge_url = "https://github.com/yudame/cuttlefish.git"
+# Redis: its pyproject.toml lists django-redis.
+services = ["postgres", "redis"]
+# Its bookworm migration creates `vector`, which the task's `app` role,
+# not a superuser, cannot.
+extensions = ["vector"]
+# psycopg2's build needs pg_config and the SDK headers.
+setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen --extra test"]
+# The Makefile's `test` target (pytest, DJANGO_SETTINGS_MODULE=settings)
+# over its testpaths, less apps/podcast/tests/e2e, whose conftest imports
+# playwright, which the `test` extra does not install.
+suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --junitxml={junit} apps"
+# "Eng: Cuttlefish".
+chats = ["telegram:-1003801797780"]
+machine = "Valor the Captain"
+
+[env]
+UV_PYTHON = "3.12"
+DJANGO_SETTINGS_MODULE = "settings"

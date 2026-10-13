@@ -1,0 +1,20 @@
+# popoto, the Redis ORM: an internal Yudame project, on the Cowboy with
+# valor (one Mac per client). From the draft in
+# docs/plans/cutover-data.md, section 2.1.
+name = "popoto"
+client = "yudame"
+repo = "https://github.com/tomcounsell/popoto.git"
+kind = "python-uv"
+branch = "main"
+merge_url = "https://github.com/tomcounsell/popoto.git"
+services = ["redis"]
+setup = ["uv sync --frozen --extra dev"]
+# tests/test_connection.py points popoto's client at localhost:6379 and
+# tests/postgres imports numpy at collection; both are left out.
+suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --ignore=tests/postgres --junitxml={junit} tests"
+# "Eng: Popoto".
+chats = ["telegram:-5189826365"]
+machine = "Valor the Cowboy"
+
+[env]
+UV_PYTHON = "3.12"
