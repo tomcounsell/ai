@@ -62,9 +62,9 @@ outside the model is AI Control [4].
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Reports to Tom | `report` and `delivered` notices over the bridges, and `python -m core status` | in use |
-| Bridges | Telegram, email, and local chat modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`); local chat in use (`aiohttp`) |
-| Scheduling | launchd: the kernel's LaunchAgent, the email and local bridges', and the backup job; routines | in use |
-| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |
+| Bridges | Telegram, email, Slack, and local chat modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`); Slack on `slack-sdk`, built; local chat in use (`aiohttp`) |
+| Scheduling | launchd: the kernel's LaunchAgent, the email, Slack, and local bridges', and the backup job; routines | in use |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the Slack tokens, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |
 | Dashboard | read-only views over `core/` read models | in use: `ui/`, aiohttp, loopback only |
 | Run and view the app | `look`, a headless Chromium (Playwright's `chrome-headless-shell`) in the workspace | chosen, built |
 | Machine | one install per Mac, four Macs, one per client; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -501,16 +501,17 @@ terminal through a bridge. Status: **in use**. A grant is given with
 `python -m core grant`; giving one from a phone, and whether it then needs
 a passkey signature verified by the kernel, is **open**.
 
-**Bridges.** Telegram, email, and a local chat page, each a self-contained module in `bridges/`
+**Bridges.** Telegram, email, Slack, and a local chat page, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
 as an `act` through the broker. The Telegram bridge is built in
 `bridges/telegram/` on **Telethon** (pinned in `uv.lock`), a user account
 over MTProto, with the library confined to `bridges/telegram/wire.py`.
+The Slack bridge is built in `bridges/slack/` on **slack-sdk** (`slack-sdk>=3.45.0` in `pyproject.toml`, pinned in `uv.lock`), Socket Mode for events and the Web API for sends, with the library confined to `bridges/slack/wire.py`.
 Email is **in use**, on the standard library's `imaplib` and `smtplib`,
 tested against Dovecot and a local SMTP server. The local chat is **in use**,
 on `aiohttp`, serving one page on `127.0.0.1`. What each bridge does
 is [bridges/telegram.md](bridges/telegram.md),
-[bridges/email.md](bridges/email.md), and [bridges/local.md](bridges/local.md).
+[bridges/email.md](bridges/email.md), [bridges/slack.md](bridges/slack.md), and [bridges/local.md](bridges/local.md).
 
 **Dashboard.** Read-only views over `core/` read models: tasks, spend, the
 ledger, the attention log, and each routine's last run
@@ -534,7 +535,7 @@ token sits there as `github-keys`, from `python -m core github-key`; it
 belongs to Valor's own account, `valorengels`, a collaborator only on the
 repositories Valor builds, and that reach is the bound on where a merge
 can land ([machine.md](machine.md), Where a merge lands). Status: **in use**. Telegram's keys and
-session sit there too (**in use**), and email's `mail-keys`, written by
+session sit there too (**in use**), as do Slack's `slack-keys`, written by `python -m bridges.slack keys` ([slack.md](bridges/slack.md)), email's `mail-keys`, written by
 `python -m bridges.email keys` ([email.md](bridges/email.md)), and the local chat's `local-token`, made by `python -m bridges.local run` ([local.md](bridges/local.md)). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.

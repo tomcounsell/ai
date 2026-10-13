@@ -11,7 +11,7 @@ worker thread, so the gateway's streams never wait on a push. The composition
 root builds a `broker.Performers` for each task from its Brief and passes it
 to every broker call, so one task's performer never acts for another.
 
-A bridge's send types (`telegram.send_message`, `email.send`) are declared in
+A bridge's send types (`telegram.send_message`, `email.send`, `slack.send_message`) are declared in
 `core/bridge.py`; the kernel sizes each file a send names in the task's
 workspace without reading it and refuses an impossible send at request time.
 The bridge's `perform` reads each file once and refuses one whose sha256
@@ -74,6 +74,7 @@ known yet.
 | GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | read: the `conditions` routine fetches each business's repository, private ones included, to read `decisions/conditions.toml` ([routines.md](routines.md), Watched conditions) | no; a read under the routine's `propose` ceiling | one `repository.fetched` row per repository, naming the key, never its value |
 | Telegram, Valor's user account, by `telegram-keys` and `telegram.session` | this install | `telegram.send_message`; receiving, which marks messages read | sends yes; receive no | a send is `effect.held`, `release.requested`, and the bridge's outcome; each message taken is `message.received`; marking it read has no row |
 | Gmail, Valor's mailbox, by `mail-keys` | this install | `email.send` over SMTP; receiving over IMAP, which sets `\Seen` | sends yes; receive no | as Telegram's; setting `\Seen` has no row |
+| Slack, Valor's user account, by `slack-keys` | this install | `slack.send_message`; receiving over the Socket Mode connection | sends yes; receive no | as Telegram's, less the read mark: a send is `effect.held`, `release.requested`, and the bridge's outcome; each message taken is `message.received` |
 | Anthropic, by `claude-token` or Claude Code's login | this install | frontier turns' model calls | no; the gateway | `gateway.opened` and `gateway.charged` per call; spend on `turn.ended` |
 | OpenAI, by `openai-key` | this install | model calls on the OpenAI route | no; the gateway | `gateway.opened` and `gateway.charged` per call |
 | TypeSafe (Jev) and OpenRouter, by `judgement-keys` | this install | judgement calls from the kernel | no; the gateway | `gateway.opened` and `gateway.charged` with `route: judgement`; `judgement.answered` or `judgement.failed` |

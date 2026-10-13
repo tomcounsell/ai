@@ -53,6 +53,7 @@ nothing else.
 | The kernel process | The control loop, the model gateway, and the broker in one Python process | Constraint "bounded authority, metered spending": every model call passes the gateway, every effect the broker | Python with `core` imported, the gateway listening, one kernel connection open: 41 MB (56 MB RSS). Bare Python 3.14: 16 MB RSS | 150 MB (estimate; streaming calls and the broker's effects in flight add to the idle figure) |
 | Telegram bridge | One Telethon client: receive, normalize, hand to `core/`; deliver what the broker releases | Mission item 1 (Tom talks to one place); constraint "one identity" (every message leaves as Valor) | Telethon imported and a client built, not connected: 80 MB (223 MB RSS) | 250 MB (estimate; a connected client caches entities and grows) |
 | Email bridge | IMAP receive, SMTP deliver, same port | Mission item 1; constraint "one identity" | Python with psycopg, imaplib, smtplib, and ssl imported: 31 MB (45 MB RSS) | 100 MB (estimate) |
+| Slack bridge | One Socket Mode connection and Web API client: receive, normalize, hand to `core/`; deliver what the broker releases | Mission item 1; constraint "one identity" | Not measured | 100 MB (estimate; measured after a day connected in the live window) |
 
 Resident total: about 760 MB above macOS. macOS itself, with its system
 services and no user apps, is estimated at 3.5 GB on a 16 GB Air.
@@ -64,7 +65,8 @@ lives in it and outlives any one task. The email bridge is in
 `bridges/email/`, kept alive by its own LaunchAgent
 (`python -m bridges.email --plist` prints it); the Telegram bridge is in
 `bridges/telegram/`, kept alive the same way (`python -m bridges.telegram
---plist`); the local chat bridge is in
+--plist`); the Slack bridge is in `bridges/slack/`, kept alive the same
+way (`python -m bridges.slack --plist`); the local chat bridge is in
 `bridges/local/`, kept alive the same way (`python -m bridges.local --plist`).
 
 ## What runs on demand
@@ -353,7 +355,7 @@ the gateway is for visibility and honest metering, not a hard wall.
 `valor_memory`, and the owner role on the kernel databases live in a libpq
 password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
-the judgement keys in `judgement-keys`, the mail credentials in `mail-keys`, the OpenAI key in `openai-key`, and the optional long-lived Claude
+the judgement keys in `judgement-keys`, the mail credentials in `mail-keys`, the Slack tokens in `slack-keys`, the OpenAI key in `openai-key`, and the optional long-lived Claude
 token in `claude-token` beside it, paths derived from the password file's
 so the sandbox deny, derived from the same setting, cannot drift from
 them. A Keychain item is readable by a turn through `security`,
@@ -500,6 +502,7 @@ Each estimate above is a gap until measured on the Air:
 
 - macOS's own resident memory on a 16 GB Air.
 - A connected Telegram bridge after a week of traffic.
+- A connected Slack bridge after a day in the live window.
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
 - A Django suite's peak in the VM with every test reaching its database (the base image holds pgvector, and a project's `extensions` make it in the task's Postgres).

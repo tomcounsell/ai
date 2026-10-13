@@ -23,7 +23,8 @@ workspaces for (`python -m core start ... --project NAME`).
   start tasks names it (`valor` names the rebuild's branch); `start
   --branch` overrides it for one task.
 - `chats` lists the chats whose messages start tasks under the project
-  (`telegram:<chat id>`, `email:<sender address>`), and `machine` the
+  (`telegram:<chat id>`, `email:<sender address>`,
+  `slack:<team id>/<channel or user id>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so
   each chat has one owner.
 - `knowledge_base` names the business's folder in `~/work-vault`, where its

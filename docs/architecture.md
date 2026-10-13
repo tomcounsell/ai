@@ -190,8 +190,9 @@ table, with the gaps, is [performers.md](performers.md).
   `gateway.charged` row; a judgement is also a `judgement.answered` or
   `judgement.failed` row.
 - **Through a bridge's receive, not the broker**: the Telegram bridge reads
-  and marks read Valor's Telegram messages, and the email bridge reads the
-  mailbox over IMAP and sets `\Seen`. Each message taken is one
+  and marks read Valor's Telegram messages, the email bridge reads the
+  mailbox over IMAP and sets `\Seen`, and the Slack bridge reads Valor's
+  Slack messages over its socket. Each message taken is one
   `message.received` row; marking it read writes no row of its own.
 - **Through a routine's read, not the broker**: the `conditions` routine
   fetches each business's repository, private ones included, through
@@ -228,7 +229,7 @@ note to Tom the delivering turn wrote above the `---` line of `done.md`,
 and links the task's status page, where the checks and findings are; a
 reply to it is feedback. No
 report is written for a push (a step inside the task), for a send that
-itself reached Tom (a Telegram send to the operator, an email only to Tom's
+itself reached Tom (a Telegram or Slack send to the operator, an email only to Tom's
 addresses, any local chat send), or for a replay task. A replay task is
 built with the kernel performers only, so a send it asks for is refused
 `no performer`.
@@ -564,7 +565,7 @@ by email. The kernel side of the port is built (`core/intake.py`,
 inbound message, bound by the kernel to start, steer, answer, feedback,
 stop, or none; notices owed by the fold; and an outbox that hands
 each bridge the sends the broker released. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
-email in `bridges/email/` ([bridges/email.md](bridges/email.md)), and a local chat page in `bridges/local/` ([bridges/local.md](bridges/local.md)), each a process of its own.
+email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `bridges/slack/` ([bridges/slack.md](bridges/slack.md)), and a local chat page in `bridges/local/` ([bridges/local.md](bridges/local.md)), each a process of its own.
 
 ## How a task flows from request to merge
 

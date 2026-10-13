@@ -20,6 +20,8 @@ The rule: integration first, no mocks.
 
 The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) lives in `tests/emulator/`, a package run as modules (`python -m tests.emulator.replay`), never collected by pytest. Its stand-in and judge calls go through the kernel's gateway onto an emulator task's spending. `tests/emulator/replay.py` forces its `bare` and `clarify` arms by running `tests/judgement_upstream.py` (`python -m tests.judgement_upstream --answer precise|thin`) and pointing the kernel's judgement legs at it.
 
+The Slack bridge's tests run Slack as a local server in its own process (`tests/slack_emulator.py`, which serves the Web API, the Socket Mode connection, and file downloads, and stores text the way Slack does), kill the bridge by its pid in `tests/slack_child.py`, and run over the real port and the test database in `tests/test_slack_bridge.py`. The real wire runs in `tests/test_live_slack.py`, skipped without `slack-keys` and `VALOR_SLACK_TEST_CHANNEL`.
+
 The Telegram bridge's tests run Telegram as a local server in its own process (`python -m tests.telegram_emulator`, which binds a free port and prints it) reached through `EmulatorWire`, kill the bridge by its pid in `tests/telegram_child.py`, and run over the real port and the test database through `tests/telegram_port.py`, which gives each test chat ids of its own; `tests/test_telegram_pipeline.py` carries Tom's replies through the bridge to the kernel's binding. The real wire runs on Telegram's test servers in `tests/test_live_telegram_dc.py` (`VALOR_LIVE=1`, `VALOR_TELEGRAM_TEST_DC=1`) and on Valor's account only in Tom's window (`VALOR_TELEGRAM_WINDOW=1`).
 
 ## Running in parallel
