@@ -2354,3 +2354,19 @@ def test_from_a_turn_launchctl_submit_is_refused(tmp_path):
         assert listed.returncode != 0
     finally:
         subprocess.run(["/bin/launchctl", "remove", label], capture_output=True, check=False)
+
+
+def test_project_chats_take_each_channels_shape_and_case():
+    spec = kws.Spec.from_dict(
+        {
+            "name": "x",
+            "repo": "r",
+            "kind": "plain",
+            "suite": "true",
+            "chats": ["telegram:-100Ab", "email:Tom@Example.COM", "slack:t0abc/c0def"],
+        }
+    )
+    assert spec.chats == ("telegram:-100Ab", "email:tom@example.com", "slack:T0ABC/C0DEF")
+    for bad in ("slack:C0DEF", "slack:T0/C0/x", "local:local", "sms:123", "telegram:", 5):
+        with pytest.raises(kws.Refused, match="slack:<team id>/<channel or user id>"):
+            kws.Spec.from_dict({"name": "x", "repo": "r", "kind": "plain", "suite": "true", "chats": [bad]})

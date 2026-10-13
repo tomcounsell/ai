@@ -406,9 +406,14 @@ class Settings:
     operator_email: tuple[str, ...] = field(
         default_factory=lambda: _addresses(_env("VALOR_OPERATOR_EMAIL", ""))
     )
+    # Tom's Slack ids, `<team id>/<user id>` (comma-separated, one per
+    # workspace he is a member of), as Slack writes them: uppercase.
+    operator_slack_ids: tuple[str, ...] = field(
+        default_factory=lambda: tuple(a.upper() for a in _addresses(_env("VALOR_OPERATOR_SLACK_IDS", "")))
+    )
     # Where operator notices go: the channel, and the chat on it (the
     # Telegram group "Valor rebuild", by its -100... id; `local` for the
-    # local chat page).
+    # local chat page; `<team id>/<channel id>` on Slack).
     operator_channel: str = field(default_factory=lambda: _env("VALOR_OPERATOR_CHANNEL", "telegram"))
     operator_chat: str | None = field(default_factory=_operator_chat)
     # Where the bridges write inbound files, by channel, named by sha256.

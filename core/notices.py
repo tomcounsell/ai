@@ -313,6 +313,11 @@ def _to_tom(effect: dict[str, Any]) -> bool:
         if settings.operator_channel == "telegram":
             own.add(settings.operator_chat)
         return target in own - {None}
+    if kind == "slack.send_message":
+        own = set(settings.operator_slack_ids)
+        if settings.operator_channel == "slack":
+            own.add(settings.operator_chat)
+        return target.upper() in own - {None}
     if kind == "email.send":
         sent = [*(payload.get("to") or []), *(payload.get("cc") or [])]
         mine = {a.casefold() for a in settings.operator_email}

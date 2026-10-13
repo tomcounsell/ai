@@ -7,18 +7,20 @@ stop, a steer of a running task, or a new task. A task a message starts
 runs at ceiling `act`. A bridge holds
 no binding logic.
 
-`verified` is set here, not by the bridge: every Telegram record is
-verified (MTProto authenticates the sender); a local record is verified
-(the local bridge writes one only for a request carrying its token, and
-the local chat has one member, Tom); an email record is not. Whether the
-sender is the operator is decided at bind.
+`verified` is set here, not by the bridge, from the channel table
+(`core/channels.py`): every Telegram record is verified (MTProto
+authenticates the sender), and every Slack record (the socket
+authenticates it); a local record is verified (the local bridge writes
+one only for a request carrying its token, and the local chat has one
+member, Tom); an email record is not. Whether the sender is the operator
+is decided at bind.
 
 Ownership: this machine's bridges receive the operator's own chat and
-addresses, and the chats a project spec lists (`chats`) whose `machine`
-is this one; a spec naming no machine belongs to
-`settings.default_machine`. The operator chat is the bridge's whose
-channel is `settings.operator_channel`: the Telegram operator chat, or the
-one local chat, `local`.
+addresses (Tom's email addresses, his Slack ids), and the chats a project
+spec lists (`chats`) whose `machine` is this one; a spec naming no
+machine belongs to `settings.default_machine`. The operator chat is the
+bridge's whose channel is `settings.operator_channel`: the Telegram
+operator chat, a Slack chat, or the one local chat, `local`.
 
 The binding table, first match wins:
 
@@ -28,7 +30,7 @@ The binding table, first match wins:
 | A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
 | A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
 | A reply to a merged or stopped task | `none`, with a notice |
-| A Telegram or local reply to a task's notice or send, exactly `stop` | `stop` |
+| A reply on a channel where Tom replies (not email), exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
 | A reply to the delivered notice, task in `merge` | `feedback` |
 | Any other reply to a task's notice or send | `steer` |
@@ -37,9 +39,17 @@ The binding table, first match wins:
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
 and owes a notice; by email, `stop` always steers, and the notice says it
-comes by reply on the operator channel. A binding notice
-goes back in reply in the message's own chat on Telegram and the local
-chat; about an email, it goes to the operator channel and chat. A binding that raises is rolled back
+comes by reply on the operator channel.
+
+On a threaded channel (Slack) a reply names its thread's root, not the
+message it answers, so a reply binds to the newest of Valor's posts in
+that thread that is older than it (the root included), read from the
+ledger's `sent` entries.
+
+A binding notice goes back in reply only in Tom's own chat: the operator
+chat, or his DM on a channel where he replies. About any other message
+(a project group, a client channel, an email) it goes to the operator
+channel and chat, so kernel text never reaches anyone else. A binding that raises is rolled back
 and bound `none` with the error, owing a notice; later messages never wait
 behind it. `message.bound` is the first row a binding writes, so a
 second binder of the same message stops there and writes nothing.
@@ -52,25 +62,28 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import ledger, machine, notices, session, tasks, workspace
+from core import channels, ledger, machine, notices, session, tasks, workspace
 from core.machine import State
 from core.settings import resolve_seat, settings
 
 
 @dataclass(frozen=True)
 class Inbound:
-    channel: str  # "telegram", "email", or "local"
-    chat_id: str  # Telegram: marked peer id as text (-100... for groups); email: the thread root
+    channel: str  # "telegram", "email", "local", or "slack"
+    # Telegram: marked peer id as text (-100... for groups); email: the
+    # thread root; Slack: `<team>/<channel>`, or for a DM the other
+    # person's `<team>/<user>`.
+    chat_id: str
     chat_kind: str  # "dm", "group", or "email"
-    message_id: str  # Telegram: message id as text; email: Message-ID
-    sender_id: str  # Telegram: user id as text; email: From address, lowercased
+    message_id: str  # Telegram: message id as text; email: Message-ID; Slack: `ts`
+    sender_id: str  # Telegram: user id as text; email: From address, lowercased; Slack: `<team>/<user>`
     sender_name: str
     sent_at: str  # ISO 8601, UTC
     kind: str = "message"
     text: str = ""  # email: the subject, a blank line, then the body
-    reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To
+    reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To; Slack: thread root
     thread: list[dict] = field(default_factory=list)  # {id, text, attachments}, oldest first
-    topic_id: str | None = None  # Telegram forum topic
+    topic_id: str | None = None  # Telegram forum topic; Slack: `thread_ts`
     attachments: list[dict] = field(default_factory=list)  # {name, mime, bytes, path} or {..., skipped}
     headers: dict[str, str | list[str]] = field(default_factory=dict)
 
@@ -81,32 +94,31 @@ class Received:
     duplicate: bool  # this (channel, chat_id, message_id) is already recorded
 
 
-def _verified_telegram(inbound: Inbound) -> bool:
+def _verified(inbound: Inbound) -> bool:
     return True
 
 
-def _verified_email(inbound: Inbound) -> bool:
+def _unverified(inbound: Inbound) -> bool:
     return False
 
 
-def _verified_local(inbound: Inbound) -> bool:
-    return True
+# Whether a record is verified, by channel, from the channel table.
+VERIFY = {c.name: _verified if c.verified else _unverified for c in channels.CHANNELS.values()}
 
-
-VERIFY = {"telegram": _verified_telegram, "email": _verified_email, "local": _verified_local}
-
-# The channels where Tom replies to a message, so `stop` binds and a
-# binding notice goes back in reply.
-REPLIES = ("telegram", "local")
 # The local chat page's one chat.
 LOCAL_CHAT = "local"
-# Where Tom replies, as the near miss notice for an email names it.
-_WHERE = {"telegram": "in Telegram", "local": "on the local chat page"}
+
+
+def _replies(channel: str) -> bool:
+    """Whether Tom replies on `channel`, so `stop` binds there."""
+    row = channels.get(channel)
+    return row is not None and row.replies
 
 
 def _where() -> str:
     channel = settings.operator_channel
-    return _WHERE.get(channel, f"on {channel}")
+    row = channels.get(channel)
+    return row.where if row is not None else f"on {channel}"
 
 
 async def receive(conn, inbound: Inbound) -> Received:
@@ -165,6 +177,75 @@ async def lowest(conn, channel: str, chat_id: str) -> int | None:
     return None if row[0] is None else int(row[0])
 
 
+# A Slack `ts`: ten digits, a dot, six digits, so text order is time order.
+_TS = "^[0-9]{10}[.][0-9]{6}$"
+
+
+async def lowest_ts(conn, channel: str, chat_id: str) -> str | None:
+    """The smallest Slack `ts` recorded for the chat, compared as text:
+    where a gap fill of a chat with no seen entry starts."""
+    row = await (
+        await conn.execute(
+            "SELECT min(payload->>'message_id' COLLATE \"C\") FROM events WHERE type = 'message.received' "
+            "AND task_id = %s AND payload->>'chat_id' = %s AND payload->>'message_id' ~ %s",
+            (channel, chat_id, _TS),
+        )
+    ).fetchone()
+    return row[0]
+
+
+# Every `sent` entry of a send's outcome or a notice, one row each.
+_SENT = (
+    "FROM events, jsonb_array_elements(COALESCE(payload->'sent', payload->'result'->'sent')) e "
+    "WHERE type IN ('notice.sent', 'effect.outcome') "
+    "AND jsonb_typeof(COALESCE(payload->'sent', payload->'result'->'sent')) = 'array' "
+)
+
+
+async def threads(conn, channel: str, chat_id: str, since: str) -> set[str]:
+    """The roots of the chat's threads with ledger activity at or after
+    `since` (ISO 8601): Valor's sends and notices there (a top-level post
+    is a root itself), and the threads of messages recorded there."""
+    sent = await (
+        await conn.execute(
+            f"SELECT COALESCE(e->>'thread_ts', e->>'message_id') {_SENT}"
+            "AND e->>'channel' = %s AND e->>'chat_id' = %s AND at >= %s",
+            (channel, chat_id, since),
+        )
+    ).fetchall()
+    got = await (
+        await conn.execute(
+            "SELECT payload->>'topic_id' FROM events WHERE type = 'message.received' "
+            "AND task_id = %s AND payload->>'chat_id' = %s AND payload->>'topic_id' IS NOT NULL AND at >= %s",
+            (channel, chat_id, since),
+        )
+    ).fetchall()
+    return {r[0] for r in [*sent, *got] if r[0]}
+
+
+async def root_of(conn, channel: str, chat_id: str, ts: str) -> str | None:
+    """The root of the thread `ts` is in, from the ledger: a recorded
+    message's `topic_id`, else its own `ts`; a sent entry's `thread_ts`,
+    else its `ts`. None when the ledger has neither."""
+    row = await (
+        await conn.execute(
+            "SELECT COALESCE(payload->>'topic_id', payload->>'message_id') FROM events "
+            "WHERE type = 'message.received' AND task_id = %s AND payload->>'chat_id' = %s "
+            "AND payload->>'message_id' = %s LIMIT 1",
+            (channel, chat_id, ts),
+        )
+    ).fetchone()
+    if row is None:
+        row = await (
+            await conn.execute(
+                f"SELECT COALESCE(e->>'thread_ts', e->>'message_id') {_SENT}"
+                "AND e->>'channel' = %s AND e->>'chat_id' = %s AND e->>'message_id' = %s LIMIT 1",
+                (channel, chat_id, ts),
+            )
+        ).fetchone()
+    return None if row is None else row[0]
+
+
 async def recorded(conn, channel: str, chat_id: str, ids: list[str]) -> set[str]:
     """Which of `ids` are already received in the chat."""
     rows = await (
@@ -181,11 +262,7 @@ async def claimed(conn, channel: str, chat_id: str) -> set[str]:
     """The message ids recorded as sent in the chat, by a send or a notice."""
     rows = await (
         await conn.execute(
-            "SELECT e->>'message_id' FROM events, "
-            "jsonb_array_elements(COALESCE(payload->'sent', payload->'result'->'sent')) e "
-            "WHERE type IN ('notice.sent', 'effect.outcome') "
-            "AND jsonb_typeof(COALESCE(payload->'sent', payload->'result'->'sent')) = 'array' "
-            "AND e->>'channel' = %s AND e->>'chat_id' = %s",
+            f"SELECT e->>'message_id' {_SENT}AND e->>'channel' = %s AND e->>'chat_id' = %s",
             (channel, chat_id),
         )
     ).fetchall()
@@ -211,12 +288,16 @@ def _project_chats(channel: str) -> list[tuple[str, workspace.Spec]]:
 def owned(channel: str) -> list[str]:
     """Every id this machine's bridge on `channel` receives."""
     ids: list[str] = []
-    if channel == "telegram" and settings.operator_channel == "telegram" and settings.operator_chat:
-        ids.append(settings.operator_chat)
-    if channel == "local" and settings.operator_channel == "local":
-        ids.append(LOCAL_CHAT)
     if channel == "email":
         ids.extend(settings.operator_email)
+    if channel == "slack":
+        ids.extend(settings.operator_slack_ids)
+    if channel == "local" and settings.operator_channel == "local":
+        ids.append(LOCAL_CHAT)
+    elif (
+        channel == settings.operator_channel and settings.operator_chat and settings.operator_chat not in ids
+    ):
+        ids.append(settings.operator_chat)
     for ident, _ in _project_chats(channel):
         if ident not in ids:
             ids.append(ident)
@@ -224,7 +305,8 @@ def owned(channel: str) -> list[str]:
 
 
 def owns(channel: str, id: str) -> bool:
-    return (id.lower() if channel == "email" else id) in owned(channel)
+    row = channels.get(channel)
+    return (row.normal(id) if row is not None else id) in owned(channel)
 
 
 def _from_operator(p: dict[str, Any]) -> bool:
@@ -234,6 +316,8 @@ def _from_operator(p: dict[str, Any]) -> bool:
         return settings.operator_telegram_id is not None and p["sender_id"] == settings.operator_telegram_id
     if p["channel"] == "email":
         return p["sender_id"].lower() in settings.operator_email
+    if p["channel"] == "slack":
+        return p["sender_id"] in settings.operator_slack_ids
     return p["channel"] == "local"
 
 
@@ -310,17 +394,35 @@ async def _bind_failed(conn, p: dict[str, Any], exc: Exception) -> str | None:
 
 async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     """The task a reply belongs to and what it replies to: a notice
-    (`{"notice": <notice.requested payload>}`) or a send (`{"send": ...}`)."""
+    (`{"notice": <notice.requested payload>}`) or a send (`{"send": ...}`).
+
+    On a threaded channel `reply_to` is the thread's root, so the newest
+    of Valor's posts in the thread older than the reply binds, the root
+    included; on any other, the post `reply_to` names."""
     if not p.get("reply_to"):
         return None, None
-    sent = Jsonb([{"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["reply_to"]}])
-    row = await (
-        await conn.execute(
-            "SELECT task_id, type, payload FROM events WHERE type IN ('notice.sent', 'effect.outcome') "
-            "AND COALESCE(payload->'sent', payload->'result'->'sent') @> %s ORDER BY id LIMIT 1",
-            (sent,),
-        )
-    ).fetchone()
+    row = None
+    kind = channels.get(p["channel"])
+    if kind is not None and kind.threaded and p.get("topic_id"):
+        row = await (
+            await conn.execute(
+                f"SELECT task_id, type, payload {_SENT}"
+                "AND e->>'channel' = %s AND e->>'chat_id' = %s "
+                "AND (e->>'thread_ts' = %s OR e->>'message_id' = %s) "
+                "AND (e->>'message_id') COLLATE \"C\" < %s "
+                "ORDER BY (e->>'message_id') COLLATE \"C\" DESC, id LIMIT 1",
+                (p["channel"], p["chat_id"], p["topic_id"], p["topic_id"], p["message_id"]),
+            )
+        ).fetchone()
+    if row is None:
+        sent = Jsonb([{"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["reply_to"]}])
+        row = await (
+            await conn.execute(
+                "SELECT task_id, type, payload FROM events WHERE type IN ('notice.sent', 'effect.outcome') "
+                "AND COALESCE(payload->'sent', payload->'result'->'sent') @> %s ORDER BY id LIMIT 1",
+                (sent,),
+            )
+        ).fetchone()
     if row is None:
         return None, None
     task_id, type_, payload = row
@@ -335,16 +437,31 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
     return task_id, {"notice": notice[0] if notice else {}}
 
 
+def _toms_own(p: dict[str, Any]) -> bool:
+    """Whether the message came from Tom's own chat on a channel where he
+    replies: the operator chat, or his DM."""
+    channel, chat = p["channel"], p["chat_id"]
+    if not _replies(channel):
+        return False
+    if channel == settings.operator_channel and chat == settings.operator_chat:
+        return True
+    if channel == "telegram":
+        return settings.operator_telegram_id is not None and chat == settings.operator_telegram_id
+    if channel == "slack":
+        return chat in settings.operator_slack_ids
+    return channel == "local" and chat == LOCAL_CHAT
+
+
 async def _notice(conn, task_id: str, p: dict[str, Any], text: str, suffix: str = "") -> None:
-    replies = p["channel"] in REPLIES
+    replies = _toms_own(p)
     await notices.request(
         conn,
         task_id,
         kind="binding",
         about_key=f"reply:{p['received_id']}{suffix}",
         text=text,
-        # One in reply in the chat the message came from; one about an
-        # email to the operator channel and chat.
+        # In reply in Tom's own chat; about any other message, to the
+        # operator channel and chat.
         reply_to=p["message_id"] if replies else None,
         chat_id=p["chat_id"] if replies else None,
         channel=p["channel"] if replies else None,
@@ -365,7 +482,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     f = machine.fold(rows)
     text = (p.get("text") or "").strip()
     exact = text.casefold()
-    replies = p["channel"] in REPLIES
+    replies = _replies(p["channel"])
     via = p["channel"]
     notice = (replied.get("notice") or {}) if "notice" in replied else {}
     kind, about = notice.get("kind"), notice.get("about_key") or ""

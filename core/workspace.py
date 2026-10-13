@@ -73,7 +73,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, credentials, git, runs
+from core import binaries, channels, credentials, git, runs
 from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
@@ -211,7 +211,9 @@ class Spec:
     kernel runs to decide red or pass; a candidate never chooses it.
 
     `chats` lists the chats whose messages start tasks under this project
-    (`"telegram:<chat id>"`, `"email:<sender address>"`), and `machine` the
+    (`"telegram:<chat id>"`, `"email:<sender address>"`,
+    `"slack:<team id>/<channel or user id>"`; each id normalised as
+    `core/channels.py` says), and `machine` the
     machine whose bridges receive them; none means
     `settings.default_machine`, so each chat has one owner.
 
@@ -274,10 +276,13 @@ class Spec:
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise Refused("a project's env maps names to strings")
         chats = tuple(raw.get("chats") or ())
+        normal = []
         for chat in chats:
             channel, _, ident = chat.partition(":") if isinstance(chat, str) else ("", "", "")
-            if channel not in ("telegram", "email") or not ident:
-                raise Refused(f"chat {chat!r} is not telegram:<chat id> or email:<sender address>")
+            row = channels.get(channel)
+            if row is None or not ident or not row.listable(ident):
+                raise Refused(f"chat {chat!r} is not {channels.hints()}")
+            normal.append(f"{channel}:{row.normal(ident)}")
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
@@ -304,7 +309,7 @@ class Spec:
             target_branch=raw.get("target_branch"),
             env=dict(env),
             max_output_tokens=cap,
-            chats=tuple(c if c.startswith("telegram:") else c.lower() for c in chats),
+            chats=tuple(normal),
             machine=machine,
             knowledge_base=kb,
             client=client,

@@ -7,6 +7,7 @@ dependencies = [
     "aiohttp>=3.12",
     "popoto[postgres]==1.10.0",
     "psycopg[binary]>=3.2",
+    "slack-sdk>=3.45.0",
     "telethon>=1.40",
 ]
 

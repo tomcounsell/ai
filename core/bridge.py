@@ -1,6 +1,6 @@
 """The bridge port: what a channel's bridge process builds against.
 
-A bridge (Telegram, email) is a process of its own. It receives messages
+A bridge (Telegram, email, Slack, local) is a process of its own. It receives messages
 and records them through `core.intake`, and it sends what the outbox
 yields: a send a task requested, or an operator notice. It decides
 nothing: the kernel binds every message, refuses or releases every send at
@@ -35,6 +35,9 @@ impossible send at request time without importing a bridge:
   size 25 MB), counted as 25,000,000 bytes of the whole encoded message.
   `message_bytes` measures it with `core.mail`, the builder the email
   bridge's performer sends from, so the size refused is the size sent.
+- Slack: 4,000 characters per post (Slack's stated guidance for
+  `chat.postMessage`, which truncates past 40,000); 1 GB per file (its
+  file upload limit).
 - Local: none. The local chat page shows any text and no files.
 """
 
@@ -82,6 +85,7 @@ LIMITS: dict[str, ChannelLimits] = {
         message_bytes=_email_message_bytes,
     ),
     "local": ChannelLimits(max_text=None, text_units="chars", max_file_bytes=None),
+    "slack": ChannelLimits(max_text=4000, text_units="chars", max_file_bytes=1_000_000_000),
 }
 
 
@@ -207,6 +211,18 @@ async def _refuse_telegram(conn, action: broker.Action) -> str | None:
     return None
 
 
+async def _refuse_slack(conn, action: broker.Action) -> str | None:
+    # Any chat Valor's account can reach is a target, owned or not, as on
+    # Telegram (docs/business.md, Business item 8).
+    if not _strings(action.payload, ("text", "reply_to")):
+        return "the text and reply_to must each be a string or null"
+    text = action.payload.get("text") or ""
+    files = action.payload.get("files") or []
+    if not split_text("slack", text) and not files:
+        return "the text and the files are both empty: Slack would post nothing"
+    return None
+
+
 async def _refuse_email(conn, action: broker.Action) -> str | None:
     if not _strings(action.payload, ("subject", "body", "in_reply_to"), ("to", "cc", "references")):
         return EMAIL_SHAPE
@@ -237,7 +253,7 @@ class Declared:
     action_type: str
     effect_class: str
     usage: str
-    owner: str  # "telegram", "email", or "local"
+    owner: str  # "telegram", "email", "slack", or "local"
     check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
     workspace: str | None = None
 
@@ -271,6 +287,18 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="email",
         check=_refuse_email,
+    ),
+    "slack.send_message": Declared(
+        action_type="slack.send_message",
+        effect_class="act",
+        usage=(
+            "`slack.send_message`: target `<team id>/<channel id>`, or `<team id>/<user id>` for a DM, payload "
+            '`{"text": "...", "reply_to": null, "files": [{"path": "...", "sha256": "..."}]}`; a `reply_to` '
+            "(a message's ts) posts in that message's thread; each path absolute and inside your workspace; "
+            "it leaves when you request it."
+        ),
+        owner="slack",
+        check=_refuse_slack,
     ),
     "local.send_message": Declared(
         action_type="local.send_message",

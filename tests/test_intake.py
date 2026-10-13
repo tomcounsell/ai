@@ -160,7 +160,7 @@ def test_binding_table(dsn, op, tmp_path, monkeypatch):
         mailed = await a_send(dsn, task, "email", "thread-1")
         out["email_stop"] = await say(dsn, msg("stop", reply_to=mailed, **mail))
         out["email_approve"] = await say(dsn, msg("approve", reply_to=mailed, **mail))
-        monkeypatch.setitem(intake.VERIFY, "email", intake._verified_email)
+        monkeypatch.setitem(intake.VERIFY, "email", intake._unverified)
         # A reply `approve` to a send is plain steering: nothing waits on a tap.
         sent = await held_send(dsn, task)
         out["approve"] = await say(dsn, msg("approve", reply_to=await a_send(dsn, task)))
@@ -691,6 +691,188 @@ def test_highest_and_lowest_are_scoped_by_chat(dsn, op):
     empty, found = run(go())
     assert empty == (None, None)
     assert found == (7, 300)
+
+
+TEAM = "T0ABC"
+TOM_SLACK = f"{TEAM}/U0TOM"
+
+
+def slack(text, ts, *, chat=TOM_SLACK, sender=TOM_SLACK, root=None):
+    """A Slack record: a thread reply names the root as `reply_to` and
+    `topic_id`."""
+    return intake.Inbound(
+        channel="slack",
+        chat_id=chat,
+        chat_kind="dm" if chat == sender else "group",
+        message_id=ts,
+        sender_id=sender,
+        sender_name="Tom",
+        sent_at="2026-10-03T00:00:00Z",
+        text=text,
+        reply_to=root,
+        topic_id=root,
+    )
+
+
+async def slack_sent(dsn, task, chat, ts, thread_ts=None, *, notice=None) -> None:
+    """Valor's post in a Slack chat: a send's outcome, or a notice's."""
+    entry = [{"channel": "slack", "chat_id": chat, "message_id": ts, "thread_ts": thread_ts}]
+    async with await db.connect(dsn) as conn:
+        if notice is None:
+            payload = {
+                "effect_id": ledger.new_id(),
+                "idempotency_key": "k",
+                "kind": "done",
+                "result": {"sent": entry},
+                "error": None,
+            }
+            await ledger.append(conn, task, "effect.outcome", payload)
+        else:
+            await ledger.append(conn, task, "notice.sent", {"notice_id": notice, "sent": entry})
+
+
+@pytest.fixture
+def slack_op(op):
+    with bridges.configure(operator_slack_ids=(TOM_SLACK,)):
+        yield op
+
+
+def test_slack_operator_ids_are_verified_owned_and_start_work(dsn, slack_op, tmp_path):
+    """Tom's Slack DM is owned whatever the operator channel; his record
+    starts a task; the same text from anyone else is context."""
+    assert intake.owns("slack", TOM_SLACK) and intake.owns("slack", TOM_SLACK.lower())
+    assert not intake.owns("slack", f"{TEAM}/U0ELSE")
+    with bridges.configure(operator_channel="slack", operator_chat=f"{TEAM}/C0OPS"):
+        assert intake.owned("slack") == [TOM_SLACK, f"{TEAM}/C0OPS"]
+    (tmp_path / "projects" / "s.toml").write_text(
+        'name = "s"\nrepo = "/r"\nkind = "plain"\nsuite = "true"\nchats = ["slack:t0abc/c0proj"]\n'
+    )
+    assert intake.owned("slack") == [TOM_SLACK, f"{TEAM}/C0PROJ"]
+
+    async def go():
+        tom = await say(dsn, slack("add a footer", "1760000000.000100", chat=f"{TEAM}/C0PROJ"))
+        other = await say(dsn, slack("add a footer", "1760000000.000200", sender=f"{TEAM}/U0ELSE"))
+        (rec,) = await of_type(dsn, "message.received", received_id=tom["received_id"])
+        return tom, other, rec
+
+    tom, other, rec = run(go())
+    assert rec["verified"] and tom["as"] == "start" and other["as"] == "none"
+    assert intake._project_for(rec).name == "s"
+
+
+def test_a_slack_thread_reply_binds_to_the_newest_of_valors_posts_before_it(dsn, slack_op):
+    """A reply names the root; it binds to the newest post of Valor's in
+    the thread older than itself, found in the ledger with no cap, so a
+    notice 58 replies deep still binds."""
+
+    async def go():
+        older, newer = await new_task(dsn), await new_task(dsn)
+        root = "1760000000.000001"
+        await say(dsn, slack("start something", root))
+        await slack_sent(dsn, older, TOM_SLACK, "1760000000.000010", root)
+        await slack_sent(dsn, newer, TOM_SLACK, "1760000000.000058", root)
+        await slack_sent(dsn, older, TOM_SLACK, "1760000000.000070", root)  # after the reply
+        reply = await say(dsn, slack("more like this", "1760000000.000060", root=root))
+        top = "1760000001.000001"  # Valor's own top-level post is its thread's root
+        await slack_sent(dsn, older, TOM_SLACK, top)
+        on_top = await say(dsn, slack("thanks", "1760000001.000005", root=top))
+        return older, newer, reply, on_top
+
+    older, newer, reply, on_top = run(go())
+    assert (reply["task_id"], reply["as"]) == (newer, "steer")
+    assert (on_top["task_id"], on_top["as"]) == (older, "steer")
+
+
+def test_slack_stop_binds_and_a_near_miss_steers_with_a_notice(dsn, slack_op):
+    async def go():
+        task = await new_task(dsn)
+        await slack_sent(dsn, task, TOM_SLACK, "1760000002.000001")
+        near = await say(dsn, slack("stop please", "1760000002.000002", root="1760000002.000001"))
+        stop = await say(dsn, slack("Stop", "1760000002.000003", root="1760000002.000001"))
+        return task, near, await binding_notices(dsn, near["received_id"]), stop
+
+    task, near, said, stop = run(go())
+    assert near["as"] == "steer" and stop["as"] == "stop" and stop["task_id"] == task
+    (n,) = said
+    assert n["channel"] == "slack" and n["chat_id"] == TOM_SLACK and n["reply_to"] == "1760000002.000002"
+
+
+@pytest.mark.parametrize(
+    ("channel", "chat", "sender", "own"),
+    [
+        ("telegram", OPERATOR_CHAT, OPERATOR, True),  # the operator chat
+        ("telegram", OPERATOR, OPERATOR, True),  # Tom's DM
+        ("telegram", "-1009", OPERATOR, False),  # a project group
+        ("slack", TOM_SLACK, TOM_SLACK, True),  # Tom's DM
+        ("slack", f"{TEAM}/C0CLIENT", TOM_SLACK, False),  # a client channel
+    ],
+)
+def test_a_binding_notice_goes_in_reply_only_in_toms_own_chat(dsn, slack_op, channel, chat, sender, own):
+    """A reply to a stopped task owes a notice: in reply where the chat is
+    Tom's own, else to the operator channel and chat, so kernel text
+    never reaches a group or a client."""
+
+    async def go():
+        task = await new_task(dsn)
+        target = uuid.uuid4().hex
+        entry = {"channel": channel, "chat_id": chat, "message_id": target}
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "notice.sent", {"notice_id": uuid.uuid4().hex, "sent": [entry]})
+            await tasks.stop(conn, task, reason="test")
+        inbound = dataclasses.replace(
+            msg("one more thing", reply_to=target, channel=channel, sender=sender, chat=chat),
+            topic_id=None,
+        )
+        bound = await say(dsn, inbound)
+        return bound, await binding_notices(dsn, bound["received_id"])
+
+    bound, (n,) = run(go())
+    assert bound["as"] == "none"
+    if own:
+        assert (n["channel"], n["chat_id"]) == (channel, chat) and n["reply_to"]
+    else:
+        assert (n["channel"], n["chat_id"], n["reply_to"]) == ("telegram", OPERATOR_CHAT, None)
+
+
+def test_slack_ledger_reads(dsn, slack_op):
+    """`lowest_ts` compares a `ts` as text; `threads` lists the roots with
+    recent activity; `root_of` resolves a message or a post to its root."""
+    chat = f"{TEAM}/C{uuid.uuid4().hex[:8].upper()}"
+
+    async def go():
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            empty = await intake.lowest_ts(conn, "slack", chat)
+            for ts in ("1760000009.000002", "1759999999.999999", "1760000010.000001"):
+                await intake.receive(conn, slack("x", ts, chat=chat, root=None))
+            await intake.receive(conn, slack("r", "1760000011.000001", chat=chat, root="1760000009.000002"))
+            await intake.receive(conn, msg("t", mid="1", chat=chat))
+        await slack_sent(dsn, task, chat, "1760000012.000001")
+        await slack_sent(dsn, task, chat, "1760000013.000001", "1760000010.000001")
+        async with await db.connect(dsn) as conn:
+            return (
+                empty,
+                await intake.lowest_ts(conn, "slack", chat),
+                await intake.threads(conn, "slack", chat, "2000-01-01T00:00:00Z"),
+                await intake.threads(conn, "slack", chat, "2999-01-01T00:00:00Z"),
+                [
+                    await intake.root_of(conn, "slack", chat, ts)
+                    for ts in ("1760000011.000001", "1760000010.000001", "1760000013.000001", "9.1")
+                ],
+            )
+
+    empty, low, recent, none, roots = run(go())
+    assert empty is None and low == "1759999999.999999"
+    assert recent == {"1760000009.000002", "1760000012.000001", "1760000010.000001"} and none == set()
+    assert roots == ["1760000009.000002", "1760000010.000001", "1760000010.000001", None]
+
+
+def test_a_slack_send_to_tom_owes_no_report(slack_op):
+    to_tom = {"action_type": "slack.send_message", "target": TOM_SLACK.lower()}
+    assert notices._to_tom(to_tom)
+    assert not notices._to_tom({**to_tom, "target": f"{TEAM}/C0CLIENT"})
+    with bridges.configure(operator_channel="slack", operator_chat=f"{TEAM}/C0OPS"):
+        assert notices._to_tom({**to_tom, "target": f"{TEAM}/C0OPS"})
 
 
 def test_highest_and_lowest_skip_ids_past_a_bigint(dsn, op):
