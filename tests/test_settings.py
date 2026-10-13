@@ -52,6 +52,18 @@ def test_programs_are_named_by_fixed_path_whatever_is_first_on_path(monkeypatch,
     assert s.pg_scratch == str(tmp_path / "keys" / "run")
 
 
+@pytest.mark.parametrize(
+    ("channel", "chat", "normal"),
+    [("slack", "t0abc/c0ops", "T0ABC/C0OPS"), ("telegram", "-1001234", "-1001234"), ("local", "x", "local")],
+)
+def test_the_operator_chat_is_named_as_its_channel_names_chats(monkeypatch, channel, chat, normal):
+    """Slack's ids are uppercase wherever they are compared, so a
+    lowercase operator chat on Slack is the same chat."""
+    monkeypatch.setenv("VALOR_OPERATOR_CHANNEL", channel)
+    monkeypatch.setenv("VALOR_OPERATOR_CHAT", chat)
+    assert Settings().operator_chat == normal
+
+
 def test_a_connection_string_names_the_password_file_and_holds_no_password():
     dsn = settings.dsn()
     assert f"passfile={settings.pg_passfile}" in dsn and "password=" not in dsn

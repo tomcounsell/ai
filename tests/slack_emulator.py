@@ -9,8 +9,12 @@ the file upload URL, and file downloads; a test drives it through
 `/control`, `/inject`, and `/state`.
 
 Like Slack it:
-- stores a post's text the way Slack does: `&`, `<` and `>` as entities,
-  each URL wrapped as `<url>`, the ends trimmed;
+- stores a post's text the way Slack does: mentions, channel links and
+  special mentions (`<@U..>`, `<#C..>`, `<!..>`) as written, every other
+  `&`, `<` and `>` as an entity, each URL wrapped as `<url>`, the ends
+  trimmed;
+- answers `channel_not_found` for a channel `/control` `remove`d (Valor
+  taken out of it) and `thread_not_found` for a deleted thread root;
 - keeps a post's `metadata` and returns it with `include_all_metadata`,
   unless told to drop it (`keep_metadata: false`);
 - echoes every post, Valor's own included, as a `message` event;
@@ -55,10 +59,20 @@ from tests.ports import listen
 _URL = re.compile(r"https?://[^\s<>]+")
 
 
+_CONTROL = re.compile(r"(<[@#!][^<>]*>)")
+
+
 def slack_text(text: str) -> str:
-    """Text as Slack stores a post of it."""
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return _URL.sub(lambda m: f"<{m.group(0)}>", text).strip()
+    """Text as Slack stores a post of it: a mention, channel link or
+    special mention (`<@U..>`, `<#C..>`, `<!..>`) kept as written, every
+    other `&`, `<`, `>` an entity, and a bare URL wrapped."""
+
+    def plain(part: str) -> str:
+        part = part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return _URL.sub(lambda m: f"<{m.group(0)}>", part)
+
+    parts = _CONTROL.split(text)
+    return "".join(p if n % 2 else plain(p) for n, p in enumerate(parts)).strip()
 
 
 def _bool(v) -> bool:
@@ -420,6 +434,8 @@ def make_app() -> web.Application:
                 await ws.close()
         for channel in b.get("channels", []):
             s.channels.setdefault(channel, [])
+        for channel in b.get("remove", []):
+            s.channels.pop(channel, None)
         return ok()
 
     async def inject(request):

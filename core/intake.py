@@ -295,7 +295,10 @@ def owned(channel: str) -> list[str]:
     if channel == "local" and settings.operator_channel == "local":
         ids.append(LOCAL_CHAT)
     elif (
-        channel == settings.operator_channel and settings.operator_chat and settings.operator_chat not in ids
+        channel in ("telegram", "slack")
+        and channel == settings.operator_channel
+        and settings.operator_chat
+        and settings.operator_chat not in ids
     ):
         ids.append(settings.operator_chat)
     for ident, _ in _project_chats(channel):

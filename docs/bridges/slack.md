@@ -61,7 +61,8 @@ the send decides (below).
 
 - Tom's DMs, owned through `VALOR_OPERATOR_SLACK_IDS` (a comma list of
   `<team>/<user>`, one per workspace), whatever the operator channel;
-- the operator chat, when `VALOR_OPERATOR_CHANNEL=slack`;
+- the operator chat, when `VALOR_OPERATOR_CHANNEL=slack`
+  (`VALOR_OPERATOR_CHAT`, uppercased like every Slack id);
 - every member's message in a channel a project spec on this machine lists
   as `slack:<team>/<channel>`, and a DM a spec lists as
   `slack:<team>/<user>`.
@@ -122,6 +123,15 @@ index makes each replay land once.
 - Reads are budgeted per method, 50 calls a minute each for history and
   replies, shared across chats. A spent budget ends the pass, and the next
   tick resumes it where it stopped.
+- A pass's place in a chat (its page cursor, its newest `ts`, its thread
+  list) moves only once the page it read is recorded. A failed ledger read
+  ends the pass, and the next tick reads that page again.
+- A read Slack refuses does not stop the pass. A deleted thread root
+  (`thread_not_found`) is logged and its thread dropped. A chat whose
+  history or DM Slack refuses (`channel_not_found`, `not_in_channel`, when
+  Valor was taken out of the channel) is logged, its pass dropped, its
+  seen `ts` kept, and the pass goes on to the next chat; the next tick
+  tries it again.
 
 **Local state.** `slack-seen.json` in the key directory holds, per chat,
 `{"ts", "inclusive"}`, written whole, flushed, and renamed into place. A
@@ -193,11 +203,15 @@ are the split text, then the files. For each part in order:
    this part number;
 2. otherwise the earliest kept post after the previous part whose text,
    decoded from Slack's stored form, equals the part's, and whose thread
-   is the send's. Slack stores `&`, `<` and `>` as entities, wraps a URL
-   as `<url>` (or `<url|label>`), and trims the ends; the decoding undoes
-   exactly that, and the part's own text is only trimmed, so a literal
-   `<this>` or `&amp;` in the sent text still matches. A file part matches
-   on name and size.
+   is the send's. Slack keeps a mention, channel link or special mention
+   (`<@U..>`, `<#C..>`, `<!..>`) as written, stores every other `&`, `<`
+   and `>` as an entity, wraps a URL as `<url>` (or `<url|label>`), and
+   trims the ends. The stored text is decoded: each `<x|label>` to
+   `label`, each `<x>` to `x`, the entities back to characters. The
+   part's own text is not decoded, so a literal `<this>` or `&amp;` in it
+   still matches; its mentions and channel links are unwrapped the same
+   way (or every `<...>` in it, when it wrote its links that way too). A
+   file part matches on name and size.
 
 All parts found is done. A found prefix means the rest are posted, then
 done. A part found after a missing one, or two candidates for one part, is
@@ -224,7 +238,9 @@ send killed before its intent is still in the outbox. launchd runs the
 bridge as a resident process (`com.valor.kernel.slack`, logs in
 `log_dir/slack.log`) and restarts it if it exits; its job carries the
 database, machine, and operator settings, `VALOR_OPERATOR_SLACK_IDS`
-among them.
+among them. The kernel's job and the Telegram and email bridges' jobs
+carry `VALOR_OPERATOR_SLACK_IDS` too, since a send to Tom's Slack DM is a
+message to Tom in whichever process records it.
 
 ## What the bridge never does
 

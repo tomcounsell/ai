@@ -25,7 +25,11 @@ listed thread is read, and is held at the `ts` of any receive still
 running or failed, read again with `inclusive`. A chat with no seen
 entry starts at its lowest recorded `ts`; with no rows either, its seen
 `ts` is set to its newest and nothing is recorded. The pass is budgeted
-per method (`gap.Budget`) and resumes where it stopped.
+per method (`gap.Budget`) and resumes where it stopped. Its place in a
+chat moves only once the page it read is recorded, so a failed ledger
+read leaves the page to be read again. Slack refusing a read (a deleted
+thread root, a channel Valor was taken out of) drops that thread, or
+that chat's pass, and the pass goes on.
 
 On SIGTERM an in-flight perform and its outcome finish before `run`
 returns; receives still running are stopped, unacked, and Slack or the
@@ -44,7 +48,7 @@ from typing import Any
 from bridges.slack import gap, inbound
 from bridges.slack.send import Sender
 from bridges.slack.state import Seen
-from bridges.slack.wire import SlackWire, WireError
+from bridges.slack.wire import Refused, SlackWire, WireError
 
 log = logging.getLogger("valor.slack")
 
@@ -198,7 +202,13 @@ class SlackBridge:
                 for chat in self.kernel.owned("slack"):
                     if chat.partition("/")[0] != self.wire.team_id:
                         continue  # a chat in a workspace this bridge does not serve
-                    await self._fill_chat(chat)
+                    try:
+                        await self._fill_chat(chat)
+                    except Refused as e:
+                        # Valor was taken out of the channel, or it is gone:
+                        # this chat's pass ends, and the next tick tries it again.
+                        self._passes.pop(chat, None)
+                        log.warning("gap fill skipped %s: %s", chat, e)
             except gap.OutOfBudget as e:
                 log.info("gap fill paused: the %s budget is spent; the next tick resumes it", e)
                 return False
@@ -221,32 +231,43 @@ class SlackBridge:
             if p is None:
                 return
             self._passes[chat] = p
+        # The pass's place (cursor, top, history done, the thread list) moves
+        # only once what it read is recorded: a failure leaves it where the
+        # next tick reads the same page again.
         while not p.history_done:
             self.budget.take("history")
-            page, p.cursor = await self.wire.history(
+            page, cursor = await self.wire.history(
                 p.channel, oldest=p.start, inclusive=p.inclusive, cursor=p.cursor
             )
+            await self._receive_found(chat, p, dm, page)
             for m in sorted(page, key=lambda m: m["ts"]):
                 if not p.after(m["ts"]):
                     continue
                 p.top = max(p.top, m["ts"])
                 if m.get("latest_reply") and m["latest_reply"] > p.start and m["ts"] not in p.threads:
                     p.threads.append(m["ts"])
-            await self._receive_found(chat, p, dm, page)
-            if p.cursor is None:
-                p.history_done = True
+            if cursor is None:
                 since = (datetime.now(UTC) - timedelta(days=gap.THREAD_DAYS)).isoformat()
                 async with self.kernel.conn() as conn:
                     listed = await self.kernel.threads(conn, "slack", chat, since)
                 roots = {r for (c, _), r in self._failed.items() if c == chat}
                 p.threads += sorted((listed | roots) - set(p.threads))
+                p.history_done = True
+            p.cursor = cursor
         while p.threads:
             self.budget.take("replies")
-            page, p.thread_cursor = await self.wire.replies(
-                p.channel, p.threads[0], oldest=p.start, inclusive=p.inclusive, cursor=p.thread_cursor
-            )
+            try:
+                page, cursor = await self.wire.replies(
+                    p.channel, p.threads[0], oldest=p.start, inclusive=p.inclusive, cursor=p.thread_cursor
+                )
+            except Refused as e:
+                # The root was deleted: nothing in its thread can be read.
+                log.warning("gap fill dropped thread %s in %s: %s", p.threads.pop(0), chat, e)
+                p.thread_cursor = None
+                continue
             await self._receive_found(chat, p, dm, page)
-            if p.thread_cursor is None:
+            p.thread_cursor = cursor
+            if cursor is None:
                 p.threads.pop(0)
         del self._passes[chat]
         top, inclusive = p.top, False

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, fields
 from datetime import date
 from pathlib import Path
 
+from core import channels
+
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
@@ -51,11 +53,15 @@ def _addresses(raw: str) -> tuple[str, ...]:
 
 
 def _operator_chat() -> str | None:
-    """The operator chat: `local` whenever the operator channel is the local
-    chat page, which has one chat, so the chat has one name."""
-    if _env("VALOR_OPERATOR_CHANNEL", "telegram") == "local":
+    """The operator chat, named as its channel names chats (Slack's ids
+    uppercase): `local` whenever the operator channel is the local chat
+    page, which has one chat, so the chat has one name."""
+    channel = _env("VALOR_OPERATOR_CHANNEL", "telegram")
+    if channel == "local":
         return "local"
-    return _env("VALOR_OPERATOR_CHAT", "") or None
+    chat = _env("VALOR_OPERATOR_CHAT", "")
+    row = channels.get(channel)
+    return (row.normal(chat) if row is not None else chat) or None
 
 
 def _pi() -> str:

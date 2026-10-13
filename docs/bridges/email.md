@@ -257,9 +257,9 @@ message is fetched again and lands once; a send killed after its intent is
 found or not found by `lookup`; a send killed before its intent is still in
 the outbox. launchd runs the bridge as a resident process and restarts it if
 it exits. Its job carries the operator settings the kernel's job carries
-(`VALOR_OPERATOR_TELEGRAM_ID`, `VALOR_OPERATOR_EMAIL`, `VALOR_OPERATOR_CHANNEL`,
-`VALOR_OPERATOR_CHAT`), so a report notice reaches the operator from the bridge
-too.
+(`VALOR_OPERATOR_TELEGRAM_ID`, `VALOR_OPERATOR_EMAIL`, `VALOR_OPERATOR_SLACK_IDS`,
+`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`), so a report notice reaches the
+operator from the bridge too.
 
 ## What the bridge never does
 

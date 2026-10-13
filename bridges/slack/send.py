@@ -54,16 +54,29 @@ log = logging.getLogger("valor.slack")
 EVENT_TYPE = "valor_send"
 SKEW = timedelta(minutes=5)
 _LINK = re.compile(r"<([^<>|]*)(?:\|([^<>]*))?>")
+# Slack keeps a mention, channel link or special mention as written.
+_CONTROL = re.compile(r"<([@#!][^<>|]*)(?:\|([^<>]*))?>")
+
+
+def _unlink(pattern: re.Pattern, text: str) -> str:
+    return pattern.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(1), text)
 
 
 def normal(text: str) -> str:
-    """A post's text as Slack stores it, back to the text that was sent:
-    `<url|label>` to `label`, `<url>` to `url`, `&lt;` `&gt;` `&amp;`
-    decoded, ends stripped. Lookup compares it with the requested text,
-    ends stripped: the requested text is plain, so decoding it too would
-    turn a literal `<this>` or `&amp;` into something else."""
-    text = _LINK.sub(lambda m: m.group(2) if m.group(2) is not None else m.group(1), text)
-    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
+    """A post's text as Slack stores it, back to plain text: `<x|label>`
+    to `label`, `<x>` to `x`, `&lt;` `&gt;` `&amp;` decoded, ends
+    stripped."""
+    return _unlink(_LINK, text).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
+
+
+def same(stored: str, requested: str) -> bool:
+    """Whether a post Slack stored as `stored` is the text `requested`.
+    The requested text is not decoded (a literal `&amp;` stays), but the
+    sequences Slack keeps as written in it are unwrapped the way `normal`
+    unwraps them: the mentions and channel links, or every `<...>` when
+    the text wrote its links that way too."""
+    plain = normal(stored)
+    return plain in (_unlink(_CONTROL, requested).strip(), _unlink(_LINK, requested).strip())
 
 
 def marker(key: str) -> str:
@@ -323,7 +336,7 @@ def _thread(m: dict) -> str | None:
 
 def _matches(m: dict, exp: Part) -> bool:
     if exp.kind == "text":
-        return not m.get("files") and normal(m.get("text") or "") == exp.text.strip()
+        return not m.get("files") and same(m.get("text") or "", exp.text)
     return any(
         f.get("name") == exp.name and (exp.size is None or f.get("size") == exp.size)
         for f in m.get("files") or []

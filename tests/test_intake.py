@@ -760,6 +760,14 @@ def test_slack_operator_ids_are_verified_owned_and_start_work(dsn, slack_op, tmp
     assert intake._project_for(rec).name == "s"
 
 
+def test_email_owns_toms_addresses_and_project_threads_and_never_an_operator_chat(op):
+    """Email is never the operator channel: an operator chat set with the
+    channel named email adds nothing to what the email bridge owns."""
+    with bridges.configure(operator_channel="email", operator_chat="thread-ops"):
+        assert intake.owned("email") == [OPERATOR_EMAIL]
+        assert not intake.owns("email", "thread-ops")
+
+
 def test_a_slack_thread_reply_binds_to_the_newest_of_valors_posts_before_it(dsn, slack_op):
     """A reply names the root; it binds to the newest post of Valor's in
     the thread older than itself, found in the ledger with no cap, so a

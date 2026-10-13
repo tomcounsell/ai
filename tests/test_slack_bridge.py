@@ -345,6 +345,50 @@ def test_the_seen_ts_waits_until_every_listed_thread_is_read(w):
     assert w.seen(w.ops)["ts"] >= before["ts"]
 
 
+@pytest.mark.parametrize("refused", ["thread", "channel"])
+def test_a_refused_read_drops_its_thread_or_chat_and_the_pass_goes_on(w, refused):
+    """In the operator chat, which the pass reads before the client
+    channel, a sent notice's root was deleted (`thread_not_found`) or Valor
+    was taken out of the channel (`channel_not_found`): the client's
+    missed message is still recorded, and every pass completes."""
+    task = run(bridges.new_task(w.dsn))
+    with w.bridge():
+        pass
+    if refused == "thread":
+        _sent_notice(w, w.ops, f"{time.time() - 60:.6f}", task)
+    else:
+        w.emu.control(remove=["C0OPS"])
+    missed = w.say(w.client, "while the bridge was down", user=OTHER, live=False)
+    with w.bridge():
+        w.recorded(w.client, missed)
+        w.filled_again()
+    assert w.ids(w.client) == [missed]
+
+
+@pytest.mark.parametrize("fails", ["recorded", "threads"])
+def test_a_ledger_read_failing_mid_pass_loses_no_page_and_no_thread(w, fails):
+    """Postgres fails one ledger read of a pass: the client channel's
+    check of a history page (two messages a page here) against the
+    ledger, or the operator chat's list of threads. The next tick reads
+    that page or lists those threads again, though a later message in
+    the operator chat would have moved its seen ts past the reply."""
+    task = run(bridges.new_task(w.dsn))
+    root = w.say(w.ops, "a notice from three days ago", user=ME, live=False, ago=3 * 86400)
+    _sent_notice(w, w.ops, root, task)
+    with w.bridge():
+        pass
+    reply = w.say(w.ops, "a reply in its thread", user=OTHER, live=False, thread_ts=root)
+    later = w.say(w.ops, "a message after the reply", user=OTHER, live=False)
+    missed = [w.say(w.client, f"missed {n}", user=OTHER, live=False) for n in range(3)]
+    chat = w.client if fails == "recorded" else w.ops
+    with w.bridge("--fail-first", fails, chat, "--page", "2", filled=False):
+        w.recorded(w.ops, later)
+        w.recorded(w.ops, reply)
+        wait_for(lambda: set(missed) <= set(w.ids(w.client)))
+        w.filled_again()
+    assert sorted(w.ids(w.client)) == missed
+
+
 def test_a_receive_running_through_a_pass_holds_the_seen_ts_and_a_kill_loses_nothing(w):
     with w.bridge("--receive", "hold"):
         ts = w.say(w.ops, "held while a pass runs")
@@ -425,9 +469,10 @@ def test_a_send_carries_its_marker_and_a_reply_goes_under_the_threads_root(w):
 @pytest.mark.parametrize("keep_metadata", [True, False])
 def test_killed_after_slack_accepted_the_post_lookup_settles_it_done(w, keep_metadata):
     """With its marker, or without (Slack dropped the metadata): then the
-    post is matched by its text, which Slack stored with the URL wrapped
-    and `&`, `<`, `>` as entities."""
-    text = "see https://example.com/a?b=1&c=2\nand <this> & &amp; that "
+    post is matched by its text, which Slack stored with the mention and
+    channel link as written, the URL wrapped, and `&`, `<`, `>` as
+    entities."""
+    text = "<@U0OTHER> see https://example.com/a?b=1&c=2 in <#C0CLIENT>\nand <this> & &amp; that "
     w.emu.control(keep_metadata=keep_metadata)
     with w.bridge() as proc:
         w.emu.control(faults=[{"method": "chat.postMessage", "kind": "accept_then_pause", "seconds": 600}])
@@ -438,7 +483,7 @@ def test_killed_after_slack_accepted_the_post_lookup_settles_it_done(w, keep_met
     assert run(of_type(w.dsn, "effect.intent", effect_id=effect))
     assert run(outcome(w.dsn, effect)) is None
     [post] = w.own(w.ops)
-    assert "<https://example.com/a?b=1&amp;c=2>" in post["text"]
+    assert post["text"].startswith("<@U0OTHER> see <https://example.com/a?b=1&amp;c=2> in <#C0CLIENT>")
     stored = w.emu.call("api/conversations.history", channel="C0OPS", include_all_metadata=True)
     assert ("metadata" in stored["messages"][0]) is keep_metadata
     with w.bridge():
@@ -621,3 +666,26 @@ def test_a_binding_notice_about_a_client_channel_goes_to_the_operator_chat(w):
     [binding] = w.own(w.ops)
     assert "stop" in binding["text"] and "thread_ts" not in binding
     assert [p["ts"] for p in w.own(w.client)] == [root]
+
+
+# -- settings ----------------------------------------------------------------
+
+
+def test_toms_slack_ids_travel_wherever_the_operator_settings_do(monkeypatch):
+    """A notice to Tom's Slack DM is a report reaching Tom in whichever
+    process sends it: the kernel and every bridge job carrying Tom's ids
+    on other channels carry his Slack ids too, and the tests drop them
+    from the shell as they drop the other operator settings."""
+    import plistlib
+
+    from bridges.email import __main__ as email
+    from bridges.slack import __main__ as slack
+    from bridges.telegram import __main__ as telegram
+    from core import serve
+    from tests.conftest import MACHINE_ONLY
+
+    monkeypatch.setenv("VALOR_OPERATOR_SLACK_IDS", "T0ABC/U0TOM")
+    for job in (serve, email, telegram, slack):
+        env = plistlib.loads(job.plist(python="/usr/bin/python3"))["EnvironmentVariables"]
+        assert env["VALOR_OPERATOR_SLACK_IDS"] == "T0ABC/U0TOM", job.__name__
+    assert "VALOR_OPERATOR_SLACK_IDS" in MACHINE_ONLY
