@@ -47,7 +47,9 @@ REB=$(git branch --show-current)     # the rebuild branch, before step 6
 The old jobs: `com.valor.bridge` (Telegram), `worker`,
 `reflection-worker`, `bridge-watchdog`, `update`, `email-bridge`. The new
 jobs: `com.valor.kernel`, `kernel.telegram`, `email`, `routine.expiry`,
-`routine.emulator`, `backup`. Left as they are: `caffeinate`, `log-rotate`,
+`routine.emulator`, `routine.verify`, `routine.conditions`, `backup`. The
+routines run at their own times: `verify` 02:00, `expiry` 04:00,
+`conditions` 05:00 daily, `emulator` Sunday 01:00. Left as they are: `caffeinate`, `log-rotate`,
 `brew-nightly`, `nightly-tests`, the machine Postgres, and the old Redis
 (it holds the way back and the Memory records).
 
@@ -56,42 +58,58 @@ jobs: `com.valor.kernel`, `kernel.telegram`, `email`, `routine.expiry`,
 Valor does these on any earlier day, on the rebuild branch. They change
 nothing live: no bridge receives a listed chat until step 9.
 
-**0.1 The kernel is at the tip, with memory.** A1, A2, A3, B1, and C7
-are merged and rolled out, and B1's rollout by hand
-([b1-memory.md](b1-memory.md), "Rollout, by hand") was done on this Mac:
-`valor_memory` exists with its password lines, and the backfill ran.
+**0.1 The kernel is at the tip, with memory.** B1's rollout by hand
+([b1-memory.md](b1-memory.md), "Rollout, by hand") was done on this Mac.
+Two schema changes since the rollout of 2026-10-09 need `migrate` run by
+hand with the kernel stopped: the verdict constraint (`ended`, `rebase`),
+and the memory schema, whose store `migrate` drops and the next ingest
+rebuilds when `memory.ingested` lacks the `ledger` column. The kernel's job
+also gains `VALOR_BACKUP_DIR`, so a later rollout's backup before a schema
+change lands on PINK. The memory store stays on this Mac's own Postgres
+(`VALOR_MEMORY_DSN` unset: the schema `memory` in `valor_rebuild`); a second
+Mac reaching it is the Captain's later install.
 
 ```
-git fetch && git status -sb | head -1
-$PY -m core settings | grep -E "SETTING_(MACHINE|PROJECTS_DIR|BACKUP_DIR|MEMORY)="
+launchctl bootout $D/com.valor.kernel
+git pull --ff-only && git status -sb | head -1
+uv sync --frozen
+$PY -m core migrate
+plutil -replace EnvironmentVariables.VALOR_BACKUP_DIR -string "$VALOR_BACKUP_DIR" $LA/com.valor.kernel.plist
+launchctl bootstrap $D $LA/com.valor.kernel.plist
+sleep 10; launchctl print $D/com.valor.kernel | grep -E "state =|pid ="
+$PY -m core settings | grep -E "SETTING_(MACHINE|PROJECTS_DIR|BACKUP_DIR|MEMORY|MEMORY_DSN)="
 cut -d: -f1-4 ~/.config/valor-kernel/pgpass | grep -c valor_memory
 $PY -m core memory ingest
+$SQL "select count(*) from events e where e.type in ('task.started','question.answered','feedback.given','correction.recorded','turn.ended','memory.marked') and (e.task_id in ('corrections','memory') or exists (select 1 from events t where t.task_id = e.task_id and t.type = 'turn.started'))"
 ```
 
-Check: the first line names the branch with no `ahead` or `behind`; the
-settings print without an error and `SETTING_MEMORY=on`; the count is 2 (the
-kernel database and its test database); the ingest prints
-`{"rows": 0, "records": 0}` or the few rows written since, and no error. A
-missing `valor_memory` line or role is `python -m core migrate` run by hand
-with the kernel stopped, as B1's rollout says, not part of this runbook.
+Check: the `git status` line names the branch with no `ahead` or `behind`;
+`uv sync` and `migrate` end with no error; `state = running` with a pid; the
+settings print without an error, `SETTING_MEMORY=on` and
+`SETTING_MEMORY_DSN=''`; the count is 2 (the kernel database and its test
+database); the ingest prints `{"rows": N, "records": M}` with no error (not
+`skipped` and not `"memory": "off"`), N close to the last count, since the
+store is rebuilt from every row it takes (a turn the kernel ran since its
+restart has had its rows taken already).
 
-**0.2 The project specs are written and committed** (cutover-data.md
-section 2.1, G1, G2, G3, G9). In `projects/`:
+**0.2 The project specs are committed** on the rebuild branch
+(cutover-data.md section 2.1, G1, G3, G9; one Mac per client, Tom,
+2026-10-11). In `projects/`:
 
-- `valor.toml`: `machine = "Valor the Cowboy"`; `chats` gains
-  `"telegram:179144806"` (Tom's own DM, G2) beside the operator group
-  `telegram:-1003890616618` and the Eng group `telegram:-1003449100931`;
-  `branch = "main"` once step 6 is done (it stays the rebuild branch until
-  then).
-- `popoto.toml`: the draft in cutover-data.md, `machine` changed to
-  `"Valor the Cowboy"`, `chats = ["telegram:-5189826365"]`.
-- `psyoptimal.toml` and `cuttlefish.toml`: the drafts, `machine` changed
-  the same way, and **no `chats` line yet**. Their groups are read by the
-  Captain's old bridge, which this runbook cannot stop (G11, Tom's item 5 in
-  [cutover-runbook-tom.md](cutover-runbook-tom.md)). Tasks for them start by `core start --project NAME` until the
-  Captain's bridge is off; then a one-line edit adds the group
-  (`telegram:-1003743854645` for psyoptimal, `telegram:-1003801797780` for
-  cuttlefish). `branch` for psyoptimal is `main`, its default branch.
+- `popoto.toml`: `machine = "Valor the Cowboy"`, `client = "yudame"`
+  (internal Yudame work, on the Cowboy with valor),
+  `chats = ["telegram:-5189826365"]`.
+- `psyoptimal.toml` and `cuttlefish.toml`: `machine = "Valor the
+  Captain"`, which served them in the old fleet, with their groups in
+  `chats` (`telegram:-1003743854645`, `telegram:-1003801797780`) and no
+  `client` (open for Tom). No kernel runs with that machine name, so both
+  are inert here: no bridge on the Cowboy reads their groups and the
+  `conditions` routine does not fetch their repositories. They wait for the
+  Captain's own install (G11); until then the Captain's old bridge keeps
+  their groups. `branch` is `main` for both; cuttlefish's is unconfirmed.
+- `valor.toml` is not edited here. Its `machine` and `chats` change in step
+  7, with the plists: the Cowboy's running kernel calls itself `Mac` until
+  then, and an earlier edit would move the operator group off it.
 - No other spec. The teammate and customer-service groups, the thirteen
   other DM users, and the email contacts and domains stay out of every spec
   on purpose (G1): a chat in no spec is not read at all. Cyndra, royop,
@@ -106,12 +124,14 @@ for p in valor popoto psyoptimal cuttlefish; do
 $PY -c "from core import intake; print(intake.owned('telegram'))"
 ```
 
-Check: four names print with no `Refused`; the list holds the operator
-group, `-1003449100931`, `-5189826365`, and `179144806` (bare ids, with
-`VALOR_MACHINE` exported as above).
+Check: four names print with no `Refused`; the list is `['-5189826365']`
+(with `VALOR_MACHINE` exported as above, `valor.toml` still says `Mac` until
+step 7, and the Captain's two groups are not this Mac's).
 
-**0.3 The jobs and keys exist.** `ls $LA | grep -cE "com.valor.(kernel|kernel.telegram|email|routine.expiry|routine.emulator|backup).plist"`
-prints 6, and `ls ~/.config/valor-kernel` lists `claude-token`,
+**0.3 The jobs and keys exist.** `ls $LA | grep -cE "com.valor.(kernel|kernel.telegram|email|routine.expiry|routine.emulator|routine.verify|routine.conditions|backup).plist"`
+prints 8 (a missing routine job is printed by `$PY -m core routine NAME
+--plist > $LA/com.valor.routine.NAME.plist`, run with the environment
+`com.valor.routine.expiry` carries), and `ls ~/.config/valor-kernel` lists `claude-token`,
 `github-keys`, `judgement-keys`, `mail-keys`, `openai-key`, `pgpass`,
 `telegram-keys`, `telegram.session`. A missing key is copied with its
 command (`core judgement-keys`, `core openai-key`, `core github-key`,
@@ -131,7 +151,7 @@ cp ~/.config/valor-kernel/telegram-seen.json $CUT/kernel/
 ```
 
 Check: the newest dump in `$VALOR_BACKUP_DIR` has a time from the last
-minute, `ls $CUT/launchagents | wc -l` is at least 14, and `$PY -m core
+minute, `ls $CUT/launchagents | wc -l` is at least 16, and `$PY -m core
 restore <that dump>` finishes with its manifest check passing (it uses a
 scratch cluster, so the ledger is untouched). The dump does not hold the
 schema `memory`; after any restore into the live ledger, `$PY -m core
@@ -307,19 +327,34 @@ git fetch && git switch main 2>/dev/null || git switch -c main origin/main
 git status -sb | head -1
 ```
 
-Check: the first line reads `## main...origin/main`. Set `branch = "main"`
-in `projects/valor.toml`, commit and push, and `$PY -c "from core.workspace
-import Spec; print(Spec.load('valor').branch)"` prints `main`.
+Check: the first line reads `## main...origin/main`. Then every `branch`
+line that names the rebuild branch moves to `main`: the valor spec and the
+`emulator`, `expiry`, and `verify` routines (`conditions` names none; it
+reads each business on its own branch).
+
+```
+sed -i '' "s/^branch = \"$REB\"$/branch = \"main\"/" projects/valor.toml routines/emulator/routine.toml routines/expiry/routine.toml routines/verify/routine.toml
+grep -n "^branch" projects/valor.toml routines/*/routine.toml
+git commit -qam "Cutover: valor and its routines land on main" && git push origin main
+$PY -c "from core.workspace import Spec; print(Spec.load('valor').branch)"
+```
+
+Check: four lines `branch = "main"` and none naming `$REB`; the push
+succeeds; the last line prints `main`.
 
 ## 7. Point the jobs at the Cowboy and the cutover date (G3, G7)
 
 Settings are read when a process starts, so each new job is booted out,
 edited, and bootstrapped again in steps 8 and 9. `VALOR_MACHINE` is the
 name the specs' `machine` lines match and the turn-slot lock carries; every
-job on the Mac holds the same value.
+job on the Mac holds the same value. The valor spec moves in the same step
+(0.2): in `projects/valor.toml`, `machine = "Valor the Cowboy"` and
+`chats = ["telegram:-1003890616618", "telegram:-1003449100931",
+"telegram:179144806"]` (the operator group, the Eng group, and Tom's own
+DM, G2), committed and pushed to `main`.
 
 ```
-for J in kernel kernel.telegram email routine.expiry routine.emulator backup; do
+for J in kernel kernel.telegram email routine.expiry routine.emulator routine.verify routine.conditions backup; do
   launchctl bootout $D/com.valor.$J 2>/dev/null
   plutil -replace EnvironmentVariables.VALOR_MACHINE -string "Valor the Cowboy" $LA/com.valor.$J.plist
 done
@@ -329,17 +364,21 @@ plutil -replace EnvironmentVariables.VALOR_EMAIL_SINCE -string "$DAY" $LA/com.va
 Check:
 
 ```
-for J in kernel kernel.telegram email routine.expiry routine.emulator backup; do
+for J in kernel kernel.telegram email routine.expiry routine.emulator routine.verify routine.conditions backup; do
   printf "%s " $J; plutil -extract EnvironmentVariables.VALOR_MACHINE raw $LA/com.valor.$J.plist; done
 plutil -extract EnvironmentVariables.VALOR_EMAIL_SINCE raw $LA/com.valor.email.plist
 plutil -extract EnvironmentVariables.VALOR_OPERATOR_TELEGRAM_ID raw $LA/com.valor.kernel.plist
 plutil -extract EnvironmentVariables.VALOR_OPERATOR_CHAT raw $LA/com.valor.kernel.telegram.plist
 plutil -lint $LA/com.valor.*.plist | grep -v OK
+git status -sb | head -1
+$PY -c "from core import intake; print(intake.owned('telegram'))"
 ```
 
-Check: six lines ending `Valor the Cowboy`; the cutover date; `179144806`
-(Tom's id, not the window stand-in's `8833713379`); `-1003890616618`;
-`plutil -lint` prints no line that is not `OK`.
+Check: eight lines ending `Valor the Cowboy`; the cutover date; `179144806`
+(Tom's id); `-1003890616618`; `plutil -lint` prints no line that is not
+`OK`; `## main...origin/main` with no `ahead`; the list holds
+`-1003890616618`, `-1003449100931`, `179144806`, and `-5189826365`, and
+neither of the Captain's groups.
 
 ## 8. Grants and the kernel
 
@@ -364,7 +403,7 @@ access (by hand, GitHub collaborator).
 
 ```
 launchctl enable $D/com.valor.kernel; launchctl bootstrap $D $LA/com.valor.kernel.plist
-for J in routine.expiry routine.emulator backup; do
+for J in routine.expiry routine.emulator routine.verify routine.conditions backup; do
   launchctl enable $D/com.valor.$J; launchctl bootstrap $D $LA/com.valor.$J.plist; done
 sleep 10
 ```
@@ -379,7 +418,8 @@ $PY -m core settings | grep SETTING_MACHINE
 ```
 
 Check: `state = running` with a pid; the log's last lines show no `serve
-refused:`; both routines are listed; `SETTING_MACHINE` is read in this shell
+refused:`; the four routines (`conditions`, `emulator`, `expiry`,
+`verify`) are listed; `SETTING_MACHINE` is read in this shell
 from `VALOR_MACHINE` and prints `Valor the Cowboy`.
 
 ## 9. Enable the new bridges
@@ -429,24 +469,18 @@ mark in the second line at least as high as its step 5 value. A message
 the old bridge answered (`tail ~/src/ai/logs/bridge.log`) that also
 appears in the ledger is a double: write it down as a defect.
 
-**10.3 A request is bound and answered.** Valor drives it as the windows
-did, with the stand-in bot `@valor_window_standin_bot` (token in
-`~/.config/valor-kernel/window-bot`, a member of the operator group): set
-`VALOR_OPERATOR_TELEGRAM_ID` to its id (`plutil -replace
-EnvironmentVariables.VALOR_OPERATOR_TELEGRAM_ID -string ID`) in the kernel
-and Telegram plists, boot both out and bootstrap them, send one request
-from the stand-in, wait for the task's notice, then set the id back to
-`179144806` the same way and boot out and bootstrap both again. (The copies
-in `$CUT/launchagents/` predate step 7 and lack the machine name, so they
-are not the way to restore.)
+**10.3 A request is bound and answered.** Only a sender whose id is
+`VALOR_OPERATOR_TELEGRAM_ID` starts a task, and no stand-in account exists
+that the bridge would take for Tom, so this is read on Tom's first request
+after step 9 (10.5's task, or any other). Until it arrives, 10.2 shows the
+bridge receiving.
 
 ```
-$SQL "select id, type from events where type in ('message.received','message.bound','notice.sent') order by id desc limit 6"
-plutil -extract EnvironmentVariables.VALOR_OPERATOR_TELEGRAM_ID raw $LA/com.valor.kernel.plist
+$SQL "select id, type from events where type in ('message.received','message.bound','notice.sent') and at > '$(cat $CUT/cutover-at.txt)' order by id limit 6"
 ```
 
 Check: a `message.received`, a `message.bound` (`start`), and a
-`notice.sent` appear in order; the last line prints `179144806` again.
+`notice.sent` appear in order.
 
 **10.4 The mailbox.**
 
@@ -459,10 +493,10 @@ Check: the log shows the poll reaching the mailbox and no old backlog
 received (every received message is dated on or after the cutover date).
 
 **10.5 A task reaches a merge on each project's merge URL.** One small task
-per project, started by a message in its group (`core start ... --project
-NAME` for psyoptimal and cuttlefish until their chats are added). The
-live window records the first run; at cutover one real task from Tom's
-backlog is enough.
+per project placed on the Cowboy (valor and popoto), started by a message
+in its group. psyoptimal and cuttlefish wait for the Captain's own install
+(0.2). The live window records the first run; at cutover one real task from
+Tom's backlog is enough.
 
 ```
 $PY -m core start "TEXT" --project popoto
@@ -481,8 +515,11 @@ $PY -m core routines
 launchctl kickstart $D/com.valor.backup; sleep 30; ls -t $VALOR_BACKUP_DIR | head -1
 ```
 
-Check: both routines list a run date from the last day (the expiry job
-runs at 04:00) and a new dump appears.
+Check: each routine's last run is from its own latest scheduled time since
+step 8: `verify` 02:00, `expiry` 04:00, and `conditions` 05:00 each day,
+`emulator` Sunday 01:00. A routine whose time has not yet come since step 8
+shows `never run` or an older run, and is read again after that time. A new
+dump appears.
 
 **10.7 Memory serves a later task.** After the tasks of 10.3 and 10.5 have
 run a turn, memory has taken their rows, and a later task of the same
@@ -490,19 +527,24 @@ project (the spec's `repo`) is shown them.
 
 ```
 $PY -m core memory ingest
-$SQL "select count(*) filter (where payload->>'brief' like '%Memory: unavailable%'), count(*) from events where type='turn.started' and at > '$(cat $CUT/cutover-at.txt)'"
+$SQL "select count(*) filter (where payload->>'brief' like '%Memory: unavailable%'), count(*) filter (where payload->>'brief' like '%Memory: recall skipped%'), count(*) from events where type='turn.started' and at > '$(cat $CUT/cutover-at.txt)'"
 ```
 
 Check: the ingest prints a row count and no error (a second run prints
-`{"rows": 0, "records": 0}`); the first number is 0, so no turn's Brief says
-`Memory: unavailable`. A Brief with a Remembered section appears once a
+`{"rows": 0, "records": 0}`); the first two numbers are 0, so no turn's
+Brief says `Memory: unavailable` or `Memory: recall skipped`. A Brief with a Remembered section appears once a
 second task of the same project has started after the first one's turn.
 
 **Rolling the kernel after cutover.** The kernel rolls itself forward to its
-own merges (`core/rollout.py`). A merge that changes `uv.lock`,
-`pyproject.toml` or `core/schema.sql` stops the rollout before the
-fast-forward; that merge is rolled out by hand as B1's rollout is
-([b1-memory.md](b1-memory.md), "Rollout, by hand").
+own merges (`core/rollout.py`): a merge that changes `core/schema.sql` is
+backed up first (to `VALOR_BACKUP_DIR`, which the kernel's job carries from
+0.1), one that changes `uv.lock` or `pyproject.toml` runs `uv sync
+--frozen`, and every restart migrates. It stops only when the checkout
+holds an uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql`
+(step `uncommitted`) or the fast-forward would be refused; it is tried
+again each wake, and the merge's notice names the step after three
+failures. Commit or remove that edit in `~/src/valor-rebuild` and the next
+wake rolls it.
 
 ## 11. The way back
 
@@ -519,10 +561,32 @@ so.
 | Gap | Where it is handled |
 |---|---|
 | G1 other people's messages | Step 0.2 (left out of every spec; one operator by design) |
-| G2 Tom's DM, G3 machine names | Step 0.2 (`telegram:179144806` in `valor.toml`, `machine` in every spec) and step 7; checks in 0.2, 7, 8.3, 10.3 |
+| G2 Tom's DM, G3 machine names | Step 0.2 (`machine` in every new spec) and step 7 (`telegram:179144806` and `machine` in `valor.toml`, `VALOR_MACHINE` in every job); checks in 0.2, 7, 8.3, 10.3 |
 | G4 handover between bridges, G5 in-flight old work | Steps 2.2, 3.2, 4, 5.1; check in 10.2; open requests are re-asked by message |
 | G6 branch is not `main`, G7 mailbox backlog | Step 6 and Tom's items 3 and 4; steps 4, 5.2, 7, check in 10.4 |
 | G8 Memory and upkeep | Steps 0.1 and 10.7 (the new memory); step 2.1 exports the old records, which nothing imports yet; no upkeep routine is added until an incident names the need |
 | G9 fields with no home, G10 third-party keys, G12 Google tokens | Left open on purpose: the spec carries only what the kernel acts on, a turn's sandbox denies the vault (one key is copied when a task needs it), the kernel does not read the Google files |
-| G11 the other three Macs | Open for the Captain, Bald, Pirate; Cowboy only; Tom's item 5 |
+| G11 the other three Macs | Cowboy only. psyoptimal and cuttlefish are placed on the Captain and wait for its own install (step 0.2); the Bald and the Pirate stay open |
 | Q3 | the operator group stays the operator chat (step 7 check) |
+
+## Decided by default
+
+Each is Valor's call, with its reason. The way back's are in
+[cutover-runbook-back.md](cutover-runbook-back.md), the move of `main`'s in
+[cutover-runbook-tom.md](cutover-runbook-tom.md).
+
+1. **popoto on the Cowboy, psyoptimal and cuttlefish on the Captain** (0.2).
+   Reason: one Mac per client (Tom, 2026-10-11); popoto is internal Yudame
+   work like valor, and the Captain served the other two in the old fleet.
+2. **`valor.toml`'s `machine` and `chats` change in step 7, not 0.2.**
+   Reason: until step 7 the Cowboy's running kernel calls itself `Mac`, so
+   an earlier edit moves the operator group off it.
+3. **The memory store stays on the Cowboy's own Postgres** (0.1,
+   `VALOR_MEMORY_DSN` unset). Reason: it is where the kernel's memory is
+   today, and no second Mac reaches it before the Captain's install.
+4. **The Cowboy's backups go to `/Volumes/PINK/valor_temp`**, by
+   `VALOR_BACKUP_DIR` in the backup job and the kernel's job; the settings
+   default is unchanged. Reason: PINK is the disk the handoff and B1 used,
+   and the rollout's backup before a schema change runs in the kernel's job.
+5. **10.3 is read on Tom's first request, with no stand-in.** Reason: no
+   stand-in account exists, and only Tom's id starts a task.

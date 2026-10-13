@@ -25,17 +25,17 @@ $SQL "select distinct task_id from events where type = 'task.started' and task_i
 ```
 
 Check: for each task id printed, `$PY -m core status TASK_ID`; every
-one not `merged` or `stopped` is stopped with `$PY -m core stop TASK_ID
+one not `merged`, `stopped`, or `ended` is stopped with `$PY -m core stop TASK_ID
 --reason "go back"`. Then stop the kernel, the bridges, and the routines:
 
 ```
-for J in kernel.telegram email kernel routine.expiry routine.emulator backup; do
+for J in kernel.telegram email kernel routine.expiry routine.emulator routine.verify routine.conditions backup; do
   launchctl disable $D/com.valor.$J; launchctl bootout $D/com.valor.$J 2>/dev/null; done
-launchctl list | grep -E "com.valor.(kernel|kernel.telegram|email|routine.expiry|routine.emulator|backup)\b" ; echo "loaded: $?"
+launchctl list | grep -E "com.valor.(kernel|kernel.telegram|email|routine.expiry|routine.emulator|routine.verify|routine.conditions|backup)\b" ; echo "loaded: $?"
 ```
 
-Check: `loaded: 1`. Every task shown by `core status` is `merged` or
-`stopped`.
+Check: `loaded: 1`. Every task shown by `core status` is `merged`,
+`stopped`, or `ended`.
 
 ## B2. Put the old branch back, if step 6 ran
 
@@ -50,8 +50,10 @@ git push origin $(cat $CUT/old-main.txt):main --force-with-lease=main:$NEWTIP
 ```
 
 In the kernel checkout, switch to the tag, not to `$REB`: `git fetch --tags
-&& git switch --detach new-system-$DAY`. Set the `branch` line of
-`projects/valor.toml` back to `$REB`'s name.
+&& git switch --detach new-system-$DAY`. Set the `branch` lines that step 6
+moved to `main` back to `$REB`'s name: `projects/valor.toml` and
+`routines/{emulator,expiry,verify}/routine.toml`
+(`sed -i '' "s/^branch = \"main\"$/branch = \"$REB\"/"` on those four files).
 
 Check: `git ls-remote https://github.com/tomcounsell/ai.git refs/heads/main
 refs/tags/new-system-$DAY` prints the old hash for `main` and `$NEWTIP` for

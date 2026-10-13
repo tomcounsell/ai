@@ -14,7 +14,8 @@ setup.
 
 The only places a person is in the path; none is a tap on work Valor started.
 
-1. **Writes the cutover date** at the top of this file.
+1. **Writes the cutover date** at the top of
+   [cutover-runbook.md](cutover-runbook.md), on its `Cutover date` line.
 2. **Keeps the push token's reach to Valor's repositories** (adding a
    collaborator is each repository owner's grant, and Tom owns these;
    the account is Valor's own, [machine.md](../machine.md), Keychain): `valorengels`, whose token is `GITHUB_PUSH_TOKEN`, is a
@@ -26,7 +27,7 @@ The only places a person is in the path; none is a tap on work Valor started.
 3. **Makes the rebuild branch `main`** (G6), after step 4 has printed its
    checks. First, the four open pull requests against `main` (#3607, #3598,
    #3596, #3593) are closed or relabeled as aimed at the old system, since
-   they are Tom's and would show diverged diffs. Then the old tip is kept
+   they would show diverged diffs. Then the old tip is kept
    under a tag:
 
    ```
@@ -58,13 +59,13 @@ The only places a person is in the path; none is a tap on work Valor started.
    ```
 
    prints `disabled`.
-5. **Stops the Captain's old bridge, worker, and email bridge** (G11), or
-   says which person or session holds that Mac, so psyoptimal and
-   cuttlefish chats can be added to their specs. On the Captain, as
-   `valorengels`, the same lines as step 4 with that Mac's labels. Until
-   then those two projects run by `core start --project`. The Captain's old
-   email bridge also polls Tom's mailbox for the cuttlefish contacts list;
-   until it stops, it marks his mail seen.
+5. **Nothing on the Captain** (G11). psyoptimal and cuttlefish are placed
+   on the Captain with their chats and wait for its own install; which Mac
+   hosts bridges is Valor's to choose ([rebuild-handoff.md](rebuild-handoff.md)),
+   so stopping the Captain's old bridge, worker, and email bridge goes with
+   that install. Until then the Captain's old system keeps their groups,
+   and its old email bridge keeps polling Tom's mailbox for the cuttlefish
+   contacts list.
 6. **Any governance grant** a diff in the final merges carries
    (`python -m core grant TASK_ID INSTANCE --note TEXT`), one per instance.
    Nothing else is held for him: an `act`-class effect from a task he

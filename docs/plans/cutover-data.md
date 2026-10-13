@@ -54,6 +54,13 @@ kernel, a ledger (`valor_rebuild`), and the key directory
 with `machine`, and a Mac's bridge receives only the chats its specs list for
 that Mac (`core/intake.py`, `owned`).
 
+**Placement at cutover** (decided; [cutover-runbook.md](cutover-runbook.md),
+step 0.2 and Decided by default): one Mac per client (Tom, 2026-10-11).
+valor and popoto, internal Yudame work (`client = "yudame"`), are on the
+Cowboy. psyoptimal and cuttlefish are placed on the Captain, which served
+them in the old fleet; their specs carry their chats and are inert until
+the Captain's own install. Their `client` is open for Tom.
+
 How the machine name matches: the old system compared `machine` with
 `scutil --get ComputerName`. The new kernel compares a spec's `machine` with
 the setting `machine`, which is `VALOR_MACHINE` or else the short hostname.
@@ -149,9 +156,9 @@ fields decide where a merge lands.
 | Project | Old GitHub repo | Old kind of work | Spec in `projects/` | How it gets there |
 |---|---|---|---|---|
 | valor | tomcounsell/ai | Python, Claude Agent SDK | Exists: `valor.toml` (branch is the rebuild branch, chat is the operator group) | Edit a file at cutover (G6) |
-| popoto | tomcounsell/popoto | Python, Redis ORM | None | Edit a file. Draft below |
-| psyoptimal | yudame/psyoptimal | Django, PostgreSQL | None | Edit a file. Draft below |
-| cuttlefish | yudame/cuttlefish | Django, Python, MCP | None | Edit a file. Draft below, suite unproven |
+| popoto | tomcounsell/popoto | Python, Redis ORM | Exists: `popoto.toml`, on the Cowboy | Committed from the draft below |
+| psyoptimal | yudame/psyoptimal | Django, PostgreSQL | Exists: `psyoptimal.toml`, on the Captain | Committed from the draft below |
+| cuttlefish | yudame/cuttlefish | Django, Python, MCP | Exists: `cuttlefish.toml`, on the Captain | Committed from the description below, suite unproven |
 | cyndra | Cyndra-AI/cyndra-consulting | TypeScript, Bun monorepo | None | Edit a file, kind `node`, suite not known |
 | royop | yudame/royop | Python (Django layout) | None | Edit a file, suite not known |
 | mondayflowers | yudame/mondayflowers | Django, HTMX | None | Edit a file, suite not known |
@@ -187,6 +194,7 @@ setup = ["uv sync --frozen --extra dev"]
 suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --ignore=tests/postgres --junitxml={junit} tests"
 chats = ["telegram:-5189826365"]
 machine = "Mac"
+client = "yudame"
 [env]
 UV_PYTHON = "3.12"
 ```
@@ -234,8 +242,9 @@ no extension, and popoto's pgvector tests sit in `tests/postgres`, which its
 suite leaves out.
 
 The `machine` value in these drafts is `"Mac"` because that is what the
-Cowboy's setting says today. Gap G3 recommends changing it everywhere
-together.
+Cowboy's setting said when they were drafted. The committed specs carry the
+placement above: `"Valor the Cowboy"` for popoto, `"Valor the Captain"` for
+psyoptimal and cuttlefish (G3, G11).
 
 ## 3. Operator identity
 
@@ -299,7 +308,8 @@ and the key directory. Gap G10.
 
 The old scheduler (`reflections.yaml`, forty-one entries, all enabled)
 runs inside the old worker. The new system runs routines
-(`routines/<name>/routine.toml`) as launchd jobs; two exist.
+(`routines/<name>/routine.toml`) as launchd jobs; four exist: `conditions`,
+`emulator`, `expiry`, and `verify`.
 
 | Old reflection or job | New home |
 |---|---|
@@ -421,10 +431,10 @@ Bald has been offline 138 days; only the Pirate is reachable besides the
 Cowboy. Each needs the whole handoff (`docs/plans/rebuild-handoff.md`) before
 its projects can move. Recommendation: cut over the Cowboy only (valor and
 popoto). Leave the other Macs on the old system; its single-machine
-ownership keeps them from reading the Cowboy's chats. Move psyoptimal,
-cuttlefish, and royop to the Cowboy by changing `machine` in their specs once
-Tom wants them on the new system, since Tom's backlog work targets
-psyoptimal, popoto, and cuttlefish. Cyndra's owner has been offline for 138
+ownership keeps them from reading the Cowboy's chats. psyoptimal and
+cuttlefish stay with the Captain, one Mac per client (Tom, 2026-10-11):
+their specs name it and wait for its own install (section 1.1, Placement).
+Cyndra's owner has been offline for 138
 days, so its three groups have no reader today; leave it out of every spec.
 
 **G12. The Google Workspace tokens and calendar files** (`google_token*.json`,
