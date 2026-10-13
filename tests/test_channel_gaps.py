@@ -59,7 +59,7 @@ def test_a_telegram_topic_reply_binds_the_post_it_names_not_the_newest_in_the_to
         inbound = dataclasses.replace(msg("hm", reply_to="100"), message_id="300", topic_id="100")
         return a, b, await say(dsn, inbound)
 
-    a, b, bound = run(go())
+    a, _b, bound = run(go())
     assert bound["task_id"] == a
 
 
