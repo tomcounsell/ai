@@ -2,11 +2,11 @@
 checked against the business's own data (docs/routines.md, Watched
 conditions; docs/business.md, item 7).
 
-For every project spec, the runner reads `decisions/conditions.toml` from
-the business's repository on its committed branch (`core.conditions`),
-fetching a remote repository as Valor's GitHub account when the composition
-root gives it the key file, so a private repository Valor's account can read
-is read. Each repository fetched is a `repository.fetched` row (the
+For every project spec placed on this Mac (`Spec.here`), the runner reads
+`decisions/conditions.toml` from the business's repository on its committed
+branch (`core.conditions`), fetching a remote repository as Valor's GitHub
+account when the composition root gives it the key file, so a private
+repository Valor's account can read is read. Each repository fetched is a `repository.fetched` row (the
 business, the repository, the commit, and the name of the key the fetch
 carried, never its value), on the run, or on the objective when the firing
 starts no run. The run is a node under the routine's objective, and each condition checked is a
@@ -61,7 +61,7 @@ async def _check(
 def runner(
     adapters: Mapping[str, Adapter],
     *,
-    projects: Callable[[], list[workspace.Spec]] = workspace.Spec.all,
+    projects: Callable[[], list[workspace.Spec]] = workspace.Spec.here,
     work: Callable[[], Path] = workspace.work_dir,
     credential: str | Path | None = None,
     loopback: bool = False,

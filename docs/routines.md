@@ -95,7 +95,8 @@ The four routines the kernel holds:
   has its exit code and output appended at once to
   `$VALOR_DEMO/results/<replay>.driver.log`, beside its result file.
 - **conditions** (05:00 daily, ceiling `propose`): checks each committed
-  decision's watched conditions in every business's own repository and puts
+  decision's watched conditions in the own repository of every business
+  placed on this Mac and puts
   each one met on the next strategy meeting's agenda. Described below.
 - **verify** (02:00 daily, ceiling `act`): runs the suite at the head of the
   routine's branch in the kernel's check sandbox, on a workspace the kernel
@@ -245,7 +246,9 @@ client's business repository, beside the decision they belong to, and the
 run reads them from there. The kernel's `routine.toml` names the runner, the
 schedule, and the ceiling, and holds no business's conditions.
 
-The businesses are the project specs in `settings.projects_dir`. For each,
+The businesses are the project specs in `settings.projects_dir` placed on
+this Mac (a spec's `machine`, or the default machine when it names none;
+one Mac per client, [machine.md](machine.md)). For each,
 the run fetches the spec's `repo` into the kernel's cache with its trusted
 git, as provisioning does, and reads `decisions/conditions.toml` on the
 branch commitments merge to: the spec's `branch`, else the repository's

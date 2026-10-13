@@ -496,3 +496,21 @@ def test_a_local_repository_carries_no_credential_and_a_firing_with_no_run_recor
         "commit": git(repo, "rev-parse", "main"),
         "credential": None,
     }
+
+
+def test_the_businesses_read_are_the_specs_placed_on_this_mac(tmp_path, monkeypatch):
+    """One Mac per client (docs/machine.md): a spec placed on another
+    machine is not read here; a spec with no `machine` is the default
+    machine's."""
+    for name, line in (("here", 'machine = "Cowboy"'), ("there", 'machine = "Captain"'), ("unplaced", "")):
+        (tmp_path / f"{name}.toml").write_text(
+            f'name = "{name}"\nrepo = "/x"\nkind = "plain"\nsuite = "true"\n{line}\n'
+        )
+    moved = dataclasses.replace(
+        settings, projects_dir=str(tmp_path), machine="Cowboy", default_machine="Cowboy"
+    )
+    monkeypatch.setattr(workspace, "settings", moved)
+    assert [s.name for s in workspace.Spec.here()] == ["here", "unplaced"]
+    assert [s.name for s in workspace.Spec.all()] == ["here", "there", "unplaced"]
+    monkeypatch.setattr(workspace, "settings", dataclasses.replace(moved, default_machine="Captain"))
+    assert [s.name for s in workspace.Spec.here()] == ["here"]

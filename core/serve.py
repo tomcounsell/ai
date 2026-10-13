@@ -990,6 +990,10 @@ PLIST_ENV = (
     "VALOR_PG_OWNER",
     "VALOR_PG_BIN",
     "VALOR_PG_PASSFILE",
+    # Where the rollout's backup before a schema change goes, and how many
+    # dumps it keeps: the same as the backup job's (`backup.PLIST_ENV`).
+    "VALOR_BACKUP_DIR",
+    "VALOR_BACKUP_KEEP",
     "VALOR_MEMORY",
     "VALOR_CLAUDE",
     "VALOR_GIT",

@@ -323,6 +323,12 @@ class Spec:
         return found
 
     @classmethod
+    def here(cls) -> list[Spec]:
+        """`all`, less the specs placed on another machine: this Mac's
+        projects (a spec with no `machine` is the default machine's)."""
+        return [s for s in cls.all() if (s.machine or settings.default_machine) == settings.machine]
+
+    @classmethod
     def load(cls, name_or_path: str) -> Spec:
         path = Path(name_or_path)
         if not path.suffix:

@@ -409,3 +409,29 @@ def test_the_default_plist_carries_no_backup_path(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     env = plistlib.loads(backup.plist())["EnvironmentVariables"]
     assert set(env) == {"HOME", "PATH"}
+
+
+def test_the_kernel_job_backs_up_where_the_backup_job_does(tmp_path, monkeypatch):
+    """The rollout's backup before a schema change runs in the kernel's
+    launchd job: run in exactly that environment, the backup folder and the
+    dumps kept are the ones the backup job was printed with."""
+    from core import serve
+
+    monkeypatch.setenv("VALOR_BACKUP_DIR", str(tmp_path))
+    monkeypatch.setenv("VALOR_BACKUP_KEEP", "3")
+    kernel = plistlib.loads(serve.plist(python=sys.executable))["EnvironmentVariables"]
+    job = plistlib.loads(backup.plist())["EnvironmentVariables"]
+    assert {k: job[k] for k in ("VALOR_BACKUP_DIR", "VALOR_BACKUP_KEEP")}.items() <= kernel.items()
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from core.settings import settings; print(settings.backup_dir, settings.backup_keep)",
+        ],
+        env=kernel,
+        cwd=backup.ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.split() == [str(tmp_path), "3"]
