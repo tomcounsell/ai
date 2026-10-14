@@ -202,6 +202,6 @@ def test_provisioning_from_a_spec_targets_its_branch_or_the_source_s_default(tmp
     )
 
 
-def test_the_valor_spec_names_the_rebuild_branch():
+def test_the_valor_spec_names_main():
     spec = kws.Spec.load(str(ROOT / "projects" / "valor.toml"))
-    assert spec.branch == "valor-cori-rebuild" and spec.target_branch is None
+    assert spec.branch == "main" and spec.target_branch is None

@@ -20,7 +20,7 @@ workspaces for (`python -m core start ... --project NAME`).
 - `branch` is the branch a task's clone, bare origin, and merge target use;
   without it the remote's default branch is used. A
   task started by a message has no `--branch`, so a project whose messages
-  start tasks names it (`valor` names the rebuild's branch); `start
+  start tasks names it (`valor` names `main`); `start
   --branch` overrides it for one task.
 - `chats` lists the chats whose messages start tasks under the project
   (`telegram:<chat id>`, `email:<sender address>`,

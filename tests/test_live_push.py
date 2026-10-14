@@ -2,8 +2,8 @@
 kernel-owned bare repository, pushes a commit to `valor/push-check` of
 `https://github.com/tomcounsell/ai.git` with the real key file, and
 `holds` confirms it. The commit's parent is that branch's head, or, when
-the branch does not exist, the head of the branch this checkout is on (the
-rebuild branch, in the kernel checkout).
+the branch does not exist, the head of the branch this checkout is on (`main`,
+in the kernel checkout).
 
 The branch stays on GitHub afterwards.
 

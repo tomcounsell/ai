@@ -121,11 +121,7 @@ def toy(tmp_path, monkeypatch) -> Toy:
     toml.parent.mkdir(parents=True)
     t = Toy(dsn, src, work, "verify", toml)
     t.spec()
-    toml.write_text(
-        text.replace('project = "valor"', f'project = "{tmp_path / "toy.toml"}"').replace(
-            'branch = "valor-cori-rebuild"', 'branch = "main"'
-        )
-    )
+    toml.write_text(text.replace('project = "valor"', f'project = "{tmp_path / "toy.toml"}"'))
     return t
 
 
@@ -585,6 +581,6 @@ def test_a_hand_start_refuses_a_bare_key_an_empty_field_and_unreadable_evidence(
 @pytest.mark.parametrize("name", ["verify", "emulator"])
 def test_the_real_tomls_name_the_valor_spec_and_print_a_plist(name):
     r = routines.load(name, REPO / "routines")
-    assert r.project == "valor" and r.branch == "valor-cori-rebuild"
+    assert r.project == "valor" and r.branch == "main"
     assert workspace.Spec.load(r.project).name == "valor"
     assert plistlib.loads(routines.plist(r))["Label"].endswith(name)
