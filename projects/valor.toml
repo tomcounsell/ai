@@ -6,7 +6,7 @@
 name = "valor"
 # An internal Yudame project: its memory records carry this client.
 client = "yudame"
-branch = "valor-cori-rebuild"
+branch = "main"
 repo = "https://github.com/tomcounsell/ai.git"
 kind = "python-uv"
 services = ["postgres"]

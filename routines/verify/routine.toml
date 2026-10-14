@@ -9,7 +9,7 @@ need = [
 ]
 created = 2026-10-12
 project = "valor"
-branch = "valor-cori-rebuild"
+branch = "main"
 instruction = "Run the project's suite at the head of its branch in the check sandbox, and start one fix task for each group of red tests that no task already holds."
 
 [schedule]
