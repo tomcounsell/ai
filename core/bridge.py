@@ -376,6 +376,18 @@ class NoticeDue:
     at: str  # the notice.requested row's at
 
 
+@dataclass(frozen=True)
+class ReactionDue:
+    reaction_id: str
+    task_id: str
+    received_id: str
+    chat_id: str
+    message_id: str
+    emoji: str  # the exact code points (`core/reactions.py`)
+    stage: str  # `seen` (👀) or `shape`, which replaces it
+    at: str  # the reaction.requested row's at
+
+
 class Bridge(Protocol):
     channel: str
 
@@ -393,8 +405,9 @@ class Bridge(Protocol):
 class Outbox:
     """What the bridge sends, from the ledger. Iterating yields, oldest
     first, every release requested for this channel with no intent,
-    outcome, or refusal, then every notice on this channel not yet sent;
-    then waits for a row of either kind, or `settings.serve_tick_s`, and on
+    outcome, or refusal, then every notice on this channel not yet sent,
+    then every reaction on this channel not yet placed or failed; then
+    waits for a row of any of these kinds, or `settings.serve_tick_s`, and on
     that wake reconciles this channel's dangling sends, calls the bridge's
     `tick`, and yields again."""
 
@@ -415,10 +428,10 @@ class Outbox:
         self.perform_conn = perform_conn
         self.listener = listener
 
-    def __aiter__(self) -> AsyncIterator[Release | NoticeDue]:
+    def __aiter__(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
         return self._items()
 
-    async def _items(self) -> AsyncIterator[Release | NoticeDue]:
+    async def _items(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
         while True:
             for item in await self.due():
                 yield item
@@ -450,7 +463,7 @@ class Outbox:
         `conn`, the outbox's connection when None."""
         return await broker.reconcile(conn or self.conn, self.performers, effect_id)
 
-    async def due(self) -> list[Release | NoticeDue]:
+    async def due(self) -> list[Release | NoticeDue | ReactionDue]:
         releases = await (
             await self.conn.execute(
                 "SELECT r.payload->>'effect_id', r.at FROM events r WHERE r.type = 'release.requested' "
@@ -469,16 +482,60 @@ class Outbox:
                 (self.channel,),
             )
         ).fetchall()
-        return [Release(e, at.isoformat()) for e, at in releases] + [
-            NoticeDue(p["notice_id"], t, p["chat_id"], p["text"], p.get("reply_to"), at.isoformat())
-            for t, p, at in notices
-        ]
+        return (
+            [Release(e, at.isoformat()) for e, at in releases]
+            + [
+                NoticeDue(p["notice_id"], t, p["chat_id"], p["text"], p.get("reply_to"), at.isoformat())
+                for t, p, at in notices
+            ]
+            + await self._reactions()
+        )
+
+    async def _reactions(self) -> list[ReactionDue]:
+        """This channel's reactions with no result, oldest first. A `seen`
+        reaction whose message already has a `shape` reaction is never
+        yielded: it is closed here, `reaction.placed` with `superseded`
+        and nothing sent, so a 👀 retried after a flood wait never lands
+        over its shape. The shape's own placement replaces whatever 👀 is
+        on screen."""
+        rows = await (
+            await self.conn.execute(
+                "SELECT r.task_id, r.payload, r.at, EXISTS (SELECT 1 FROM events h "
+                "WHERE h.type = 'reaction.requested' AND h.payload->>'stage' = 'shape' "
+                "AND h.payload->>'received_id' = r.payload->>'received_id') "
+                "FROM events r WHERE r.type = 'reaction.requested' AND r.payload->>'channel' = %s "
+                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type IN ('reaction.placed', 'reaction.failed') "
+                "AND e.payload->>'reaction_id' = r.payload->>'reaction_id') ORDER BY r.id",
+                (self.channel,),
+            )
+        ).fetchall()
+        due = []
+        for task_id, p, at, shaped in rows:
+            item = ReactionDue(
+                p["reaction_id"],
+                task_id,
+                p["received_id"],
+                p["chat_id"],
+                p["message_id"],
+                p["emoji"],
+                p["stage"],
+                at.isoformat(),
+            )
+            if p["stage"] == "seen" and shaped:
+                await self.reacted(item, superseded=True)
+            else:
+                due.append(item)
+        return due
 
     async def wait(self) -> None:
-        """Until a release or notice row is written, or the tick."""
+        """Until a release, notice, or reaction row is written, or the tick."""
         try:
             async for note in self.listener.notifies(timeout=settings.serve_tick_s):
-                if json.loads(note.payload).get("type") in ("release.requested", "notice.requested"):
+                if json.loads(note.payload).get("type") in (
+                    "release.requested",
+                    "notice.requested",
+                    "reaction.requested",
+                ):
                     return
         except psycopg.OperationalError:
             # The listening connection died: wait the tick, then listen on a
@@ -509,6 +566,23 @@ class Outbox:
                 await ledger.append(
                     self.conn, item.task_id, "notice.sent", {"notice_id": item.notice_id, "sent": sent}
                 )
+        except psycopg.errors.UniqueViolation:
+            pass
+
+    async def reacted(self, item: ReactionDue, error: str | None = None, *, superseded: bool = False) -> None:
+        """The reaction's one result: `reaction.failed` with `error`, else
+        `reaction.placed`. A second result (another bridge, a retry) is
+        skipped by the index. A reaction left in doubt (a flood wait, a lost
+        connection) gets no result here, so it is yielded again."""
+        kind = "reaction.failed" if error is not None else "reaction.placed"
+        payload: dict[str, Any] = {"reaction_id": item.reaction_id, "received_id": item.received_id}
+        if error is not None:
+            payload["error"] = error
+        if superseded:
+            payload["superseded"] = True
+        try:
+            async with self.conn.transaction():
+                await ledger.append(self.conn, item.task_id, kind, payload)
         except psycopg.errors.UniqueViolation:
             pass
 

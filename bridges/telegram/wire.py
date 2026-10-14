@@ -25,12 +25,15 @@ next one's starts.
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+log = logging.getLogger("valor.telegram")
 
 
 class WireError(Exception):
@@ -126,6 +129,9 @@ class Wire(Protocol):
         ...
 
     async def mark_read(self, chat_id: int, max_id: int) -> None: ...
+    async def react(self, chat_id: int, msg_id: int, emoji: str) -> None:
+        """Set the account's reaction on the message to `emoji` alone,
+        replacing any it had. Setting is idempotent, so a repeat is safe."""
 
 
 # Telegram's test data centre, for the live suite on test accounts.
@@ -153,6 +159,7 @@ class TelethonWire:
         if test_dc:
             self.client.session.set_dc(*TEST_DC)
         self._handlers: list[Handler] = []
+        self.premium: bool | None = None  # read once on connect
 
     # -- connection --------------------------------------------------------
 
@@ -169,6 +176,15 @@ class TelethonWire:
         if not authorized:
             await self.client.disconnect()
             raise Refused("the session is not signed in; run `python -m bridges.telegram login`")
+        if self.premium is None:
+            # Whether the account has Premium, logged once: the reactions it
+            # places are all on the standard list, so they need none.
+            try:
+                me = await self.client.get_me()
+                self.premium = bool(getattr(me, "premium", False))
+                log.info("telegram account premium: %s", self.premium)
+            except (errors.RPCError, ConnectionError, OSError, TimeoutError) as e:
+                log.info("telegram account premium: unknown (%s)", type(e).__name__)
 
     async def disconnect(self) -> None:
         await self.client.disconnect()
@@ -223,6 +239,14 @@ class TelethonWire:
 
     async def mark_read(self, chat_id: int, max_id: int) -> None:
         await self._call(self.client.send_read_acknowledge(chat_id, max_id=max_id))
+
+    async def react(self, chat_id: int, msg_id: int, emoji: str) -> None:
+        from telethon.tl.functions.messages import SendReactionRequest
+        from telethon.tl.types import ReactionEmoji
+
+        peer = await self._call(self.client.get_input_entity(chat_id))
+        # Sends no message, so a failure is definite and a repeat sets the same list.
+        await self._call(self.client(SendReactionRequest(peer, msg_id, reaction=[ReactionEmoji(emoji)])))
 
     # -- sending -----------------------------------------------------------
 

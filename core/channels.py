@@ -15,6 +15,8 @@ A row says:
 - `threaded`: whether a reply names its thread's root, not the message it
   answers (Slack), so binding falls back to the newest of Valor's posts
   in the thread.
+- `reacts`: whether Valor can put a reaction on a message there (Telegram,
+  Slack), so a message bound to a task gets one (`core/reactions.py`).
 - `chat`: the pattern of the id in a project's `chats` entry
   (`<channel>:<id>`), or None when a project cannot list one (the local
   chat has one chat, Tom's).
@@ -34,6 +36,7 @@ class Channel:
     verified: bool
     replies: bool
     threaded: bool
+    reacts: bool
     chat: str | None
     case: str  # "keep", "lower", or "upper"
     hint: str
@@ -58,6 +61,7 @@ CHANNELS: dict[str, Channel] = {
         verified=True,
         replies=True,
         threaded=False,
+        reacts=True,
         chat=r".+",
         case="keep",
         hint="telegram:<chat id>",
@@ -68,6 +72,7 @@ CHANNELS: dict[str, Channel] = {
         verified=False,
         replies=False,
         threaded=False,
+        reacts=False,
         chat=r".+",
         case="lower",
         hint="email:<sender address>",
@@ -78,6 +83,7 @@ CHANNELS: dict[str, Channel] = {
         verified=True,
         replies=True,
         threaded=False,
+        reacts=False,
         chat=None,
         case="keep",
         hint="",
@@ -90,6 +96,7 @@ CHANNELS: dict[str, Channel] = {
         verified=True,
         replies=True,
         threaded=True,
+        reacts=True,
         chat=r"[A-Z0-9]+/[A-Z0-9]+",
         case="upper",
         hint="slack:<team id>/<channel or user id>",

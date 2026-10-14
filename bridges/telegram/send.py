@@ -350,6 +350,32 @@ class Sender:
     def _entry(self, chat: int, message_id: int) -> dict[str, str]:
         return {"channel": "telegram", "chat_id": str(chat), "message_id": str(message_id)}
 
+    # -- reactions ---------------------------------------------------------
+
+    async def react(self, item, outbox) -> None:
+        """Set one due reaction, which replaces the account's earlier one
+        on the message. As a notice: a flood wait is held and the reaction
+        left unmarked, as is a lost connection, so the outbox yields it
+        again on a later wake; only Telegram's refusal is a result
+        (`reaction.failed`), since it would refuse a repeat too."""
+        try:
+            chat, msg_id = int(item.chat_id), int(item.message_id)
+        except ValueError:
+            await outbox.reacted(item, f"not a Telegram message: {item.chat_id}/{item.message_id}")
+            return
+        await self.flood.wait()
+        try:
+            await self.wire.react(chat, msg_id, item.emoji)
+        except Refused as e:
+            await outbox.reacted(item, str(e))
+            return
+        except WireError as e:
+            if isinstance(e, FloodWait):
+                self.flood.hit(e.seconds)
+            self._log_once(f"reaction:{item.reaction_id}", f"reaction {item.reaction_id} not placed: {e}")
+            return
+        await outbox.reacted(item)
+
     def _log_once(self, notice_id: str, text: str) -> None:
         if notice_id not in self._logged:
             self._logged.add(notice_id)

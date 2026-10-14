@@ -1,7 +1,8 @@
 """`SlackBridge`: the `Bridge` the port's `serve` runs.
 
 `run(outbox)` connects (`auth.test`, then the socket), and iterates the
-outbox: a `Release` goes to `outbox.perform`, a `NoticeDue` is sent here.
+outbox: a `Release` goes to `outbox.perform`, a `NoticeDue` is sent here,
+and a `ReactionDue` is placed here.
 `tick()`, which `serve` calls on every `serve_tick_s` wake, fills the
 gap; so does each new socket session (Slack's `hello`). `slack_sdk`'s
 session monitor keeps the socket up.
@@ -112,8 +113,10 @@ class SlackBridge:
             try:
                 if isinstance(item, self.kernel.Release):
                     await outbox.perform(item)
-                else:
+                elif isinstance(item, self.kernel.NoticeDue):
                     await self.sender.notice(item, outbox)
+                elif isinstance(item, self.kernel.ReactionDue):
+                    await self.sender.react(item, outbox)
             finally:
                 self._busy = False
 

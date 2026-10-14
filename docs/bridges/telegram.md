@@ -159,6 +159,28 @@ member, is an `act` effect. Each notice is also an attention item: the
 Evidence section counts "decisions escalated to Tom per finished task", and
 `notice.sent` rows are where that count starts.
 
+### Reactions
+
+The kernel marks a message it acts on (`core/reactions.py`,
+docs/plans/3624532d-reactions.md). Binding writes `reaction.requested`
+with 👀 on a message bound to a task, and the `response.shape` judgement
+then writes the reaction for the shape of the ideal response, which
+replaces it; a `stop` gets 👌 at once. The outbox yields each as a
+`ReactionDue`, and the bridge sets it with `Wire.react`
+(`SendReactionRequest` with one `ReactionEmoji`). Setting the account's
+list replaces its earlier reaction, so the message shows one. Every emoji is
+on Telegram's standard reaction list, as the exact code points the list
+holds, so the account needs no Premium; the wire logs on connect whether it
+has it. Like a notice, a reaction is not an effect: no approval, no report.
+
+A reaction is marked through `outbox.reacted`: `reaction.placed`, or
+`reaction.failed` with Telegram's refusal (`REACTION_INVALID`, a chat
+that limits reactions). A flood wait is held and a lost connection logged,
+and either leaves the reaction unmarked, so the outbox yields it again.
+A 👀 whose message already has its shape reaction is never sent: the
+outbox closes it `superseded`, so a 👀 delayed by a flood wait never
+lands over the shape.
+
 ### The port in code
 
 ```python
@@ -198,7 +220,8 @@ password file), which every turn's sandbox denies.
 
 **What arrives.** New messages in the chats this machine owns
 (`intake.owned("telegram")`). The bridge delivers each as one `Inbound`
-record. Edits, reactions, and deletions are not part of the port.
+record. Edits, reactions, and deletions are not part of the port: Tom's
+reactions are not read.
 
 **Reply chains.** When a message replies to another, the bridge fetches the
 ancestors through the API, back to the root of the chain, and puts them in
@@ -405,9 +428,10 @@ Its resident memory counts against the RAM plan in
 - **Persona rewriting.** It does not draft, rephrase, shorten, prefix, or
   add links to outbound text.
 - **Retries.** A failed send stays failed until a new request.
-- **Lifecycle signalling.** It posts no acknowledgement reactions, typing
-  indicators, or progress messages of its own. Progress Tom needs comes as a
-  notice from `core/`.
+- **Lifecycle signalling.** It posts no typing indicators or progress
+  messages of its own, and places no reaction the kernel did not request.
+  Progress Tom needs comes as a notice from `core/`; the reactions above
+  are rows `core/` writes.
 - **State of its own.** It keeps no queue, deduplication store, session map,
   or message history outside the ledger. Its only local state is the
   MTProto session, the two files under Receiving, the downloaded files,
@@ -461,10 +485,10 @@ job `com.valor.kernel.telegram` that `--plist` prints.
 
 | Module | Does |
 |---|---|
-| `wire.py` | The only module importing Telethon: one client with sequential updates, no automatic flood sleep, reconnect, or request retry; raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, no parse mode, no link preview |
+| `wire.py` | The only module importing Telethon: one client with sequential updates, no automatic flood sleep, reconnect, or request retry; raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, no parse mode, no link preview; `SendReactionRequest` for a reaction |
 | `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain to its root, files by sha256 with no timer of their own |
 | `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message, and runs a message with a file as its own task; one `serve_tick_s` between connects after a failure; the outbox loop; dropping settled send records; SIGTERM lets an in-flight send and its outcome finish |
-| `send.py` | `telegram.send_message` perform and lookup, and the notice send to the row's `chat_id`, marked through `outbox.sent` |
+| `send.py` | `telegram.send_message` perform and lookup, the notice send to the row's `chat_id`, marked through `outbox.sent`, and a reaction, marked through `outbox.reacted` |
 | `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send in flight and the newest id in its chat before its first message), each written whole, flushed, and renamed into place; an unreadable one set aside |
 | `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
 | `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them; `--test-dc` signs in on Telegram's test servers), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |

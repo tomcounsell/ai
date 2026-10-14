@@ -22,7 +22,9 @@ On start it recovers (`recover`) what a killed kernel left:
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
-(`intake.bind`), requests the notices each task owes (`notices.owe`),
+(`intake.bind`), starts a job for each message's shape judgement
+(`reactions.pending`; kept in `shaping`, apart from the task jobs, so a
+task's step never waits on one), requests the notices each task owes (`notices.owe`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
 (`router.step`), a provisioning, or the collection recover could not
@@ -85,9 +87,11 @@ from core import (
     db,
     git,
     intake,
+    judgement,
     ledger,
     machine,
     notices,
+    reactions,
     rollout,
     router,
     runs,
@@ -106,7 +110,6 @@ PROVISION_TRIES = 3
 PROVISION_BACKOFF_S = 60.0
 HARNESS = {State.CLARIFY, State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 AT_ONCE = {State.JUDGE, State.MERGE}
-QUIET = ledger.QUIET
 LABEL = "com.valor.kernel"
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -393,6 +396,7 @@ class Kernel:
         credential: str | Path | None = None,
         sync: Callable[[], None] | None = None,
         backup: Callable[[str], None] | None = None,
+        judgement_port: judgement.JudgementPort | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
         # The checkout this process runs from and its commit then; with no
@@ -410,6 +414,10 @@ class Kernel:
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
         self.jobs: dict[str, asyncio.Task] = {}
+        # Shape judgements by `received_id` (`core/reactions.py`), apart
+        # from `jobs`: a task's step is scheduled while its message is judged.
+        self.judgement_port = judgement_port
+        self.shaping: dict[str, asyncio.Task] = {}
         self.harness: str | None = None  # the foreground task whose harness job runs
         self.background: str | None = None  # the background task whose harness job runs
         self.services: dict[str, router._Services] = {}
@@ -430,6 +438,7 @@ class Kernel:
             self.waiting.clear()
             self.parked_at = now
         await intake.bind(conn)
+        await self.shape(conn)
         for task_id in await self.active(conn):
             try:
                 await notices.owe(conn, task_id)
@@ -443,6 +452,29 @@ class Kernel:
             self.restart_due = None
             _log(f"rollout failed: {exc!r}")
         await self.schedule(conn)
+
+    async def shape(self, conn) -> None:
+        """A job of its own for each pending shape judgement not already
+        running (`reactions.pending`); none without a judgement port."""
+        if self.judgement_port is None:
+            return
+        for seen in await reactions.pending(conn):
+            rid = seen["received_id"]
+            if rid in self.shaping:
+                continue
+            job = asyncio.create_task(self._shape(seen))
+            self.shaping[rid] = job
+
+            def finished(job, rid=rid):
+                self.shaping.pop(rid, None)
+                if not job.cancelled() and job.exception() is not None:
+                    _log(f"reaction for message {rid}: shape failed: {job.exception()!r}")
+
+            job.add_done_callback(finished)
+
+    async def _shape(self, seen: dict[str, Any]) -> None:
+        async with await db.connect(self.dsn) as conn:
+            await reactions.shape(self.judgement_port, conn, seen, self.dsn)
 
     def _holding(self) -> bool:
         """A job other than the background turn's is running."""
@@ -683,7 +715,7 @@ class Kernel:
         if f.legacy or f.calibration or f.state in (State.MERGED, State.ENDED, State.STOPPED):
             await self.settle(task_id)
             return None
-        latest = max((r["id"] for r in rows if r["type"] not in QUIET), default=0)
+        latest = max((r["id"] for r in rows if not ledger.quiet(r)), default=0)
         if task_id in self.parked:
             if latest <= self.parked[task_id]:
                 return None
@@ -824,7 +856,7 @@ class Kernel:
             # Seen: the rows the step read, and the rows it wrote up to the
             # first another writer added while it ran, which steps it again.
             for r in rows:
-                if r["id"] <= latest or r["type"] in QUIET:
+                if r["id"] <= latest or ledger.quiet(r):
                     continue
                 if r["id"] not in written:
                     break
@@ -844,9 +876,10 @@ class Kernel:
                 await services.close()
 
     async def close(self) -> None:
-        for job in list(self.jobs.values()):
+        jobs = [*self.jobs.values(), *self.shaping.values()]
+        for job in jobs:
             job.cancel()
-        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+        await asyncio.gather(*jobs, return_exceptions=True)
         for task_id in list(self.services):
             await self.settle(task_id)
 
@@ -909,6 +942,7 @@ async def serve(
     checkout: Path | None = ROOT,
     migrate: Callable[[str], None] | None = None,
     credential: str | Path | None = None,
+    judgement_port: judgement.JudgementPort | None = None,
 ) -> None:
     """Run the kernel until killed, or until a rollout of its own merge
     raises `rollout.Restart`. `checkout` is the checkout it runs from and
@@ -944,6 +978,7 @@ async def serve(
             started=started,
             migrate=migrate,
             credential=credential if credential is not None else settings.github_keyfile,
+            judgement_port=judgement_port,
         )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))

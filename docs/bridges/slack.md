@@ -35,7 +35,8 @@ and an internal app keeps Tier 3, which gap fill assumes.
 The manifest asks for these user scopes: `channels:history`,
 `groups:history`, `im:history`, `mpim:history`, `channels:read`,
 `groups:read`, `im:read`, `mpim:read`, `im:write`, `chat:write`,
-`files:read`, `files:write`, `users:read`; and these user events:
+`files:read`, `files:write`, `users:read`, `reactions:write`; and these
+user events:
 `message.channels`, `message.groups`, `message.im`, `message.mpim`.
 
 **The tokens.** `python -m bridges.slack keys` copies `SLACK_APP_TOKEN`
@@ -226,6 +227,18 @@ the notice id, with `since` the request row's time: a notice already posted
 is found and marked sent, not posted again. A notice that cannot be sent is
 logged once and tried on the next wake.
 
+**Reactions.** The kernel marks a message it acts on (`core/reactions.py`;
+the Telegram port's Reactions section says when). The outbox yields each
+`reaction.requested` row as a `ReactionDue`; the bridge adds it by its
+Slack name (`eyes`, then `zap`, `technologist`, `writing_hand`,
+`thinking_face`, `ok_hand`, or `shrug`) with `reactions.add`, and a
+shape reaction then removes `eyes`, so the message carries one.
+`already_reacted` and `no_reaction` count as done. Slack's refusal
+(`missing_scope` until the app is reinstalled with `reactions:write`) is
+written as `reaction.failed`; a 429 or a lost connection leaves the
+reaction for the next wake, as a notice. A 👀 whose message already has its
+shape reaction is closed `superseded` by the outbox and never added.
+
 ## Stop and recovery
 
 A stopped task's released sends are refused by the broker, as on every
@@ -248,7 +261,8 @@ message to Tom in whichever process records it.
   the specs'; what a message means is `core/`'s.
 - **Formatting.** Text is sent verbatim with `mrkdwn: false`; no markdown
   to mrkdwn, no Block Kit. `<!channel>` and `<!here>` are not escaped.
-- **Progress of its own.** No streaming, status lines, or reactions.
+- **Progress of its own.** No streaming or status lines, and no reaction
+  the kernel did not request.
 - **Edits, deletions, slash commands, or buttons.** Answers and stops bind
   by reply text, as on every channel.
 - **Retries of a write.** A post is retried only by waiting out a 429 on a
@@ -262,7 +276,7 @@ message to Tom in whichever process records it.
 | `bridges/slack/inbound.py` | One message to the `Inbound` fields; `person`, the one function that builds a person's id |
 | `bridges/slack/bridge.py` | `SlackBridge`: connect, the live handler and its acks, gap fill, the outbox loop, and SIGTERM |
 | `bridges/slack/gap.py` | The per-method budget and a chat's pass in progress |
-| `bridges/slack/send.py` | `slack.send_message` perform and lookup, and the notice send |
+| `bridges/slack/send.py` | `slack.send_message` perform and lookup, the notice send, and reactions |
 | `bridges/slack/state.py` | `slack-seen.json` |
 | `bridges/slack/kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.broker`, `core.db`, `core.intake`, `core.settings`, and `core.credentials` |
 | `bridges/slack/__main__.py` | The verbs `run`, `keys`, `manifest`, and `--plist` |

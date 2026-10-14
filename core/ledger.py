@@ -51,6 +51,22 @@ QUIET = (
     "gateway.charged",
 )
 
+# Judgement sites whose rows sit beside a task's work without moving it:
+# `response.shape` picks a reaction for a message and decides nothing.
+QUIET_SITES = ("response.shape",)
+
+
+def quiet(row: dict[str, Any]) -> bool:
+    """Whether a row was written beside a task without anything having
+    happened to it: a `QUIET` type, a reaction row, or a judgement of a
+    `QUIET_SITES` site. The readers that ask for a task's latest row (its
+    retry, its failed step, the resident loop's scheduling) skip these."""
+    kind = row["type"]
+    if kind in QUIET or kind.startswith("reaction."):
+        return True
+    return kind.startswith("judgement.") and (row.get("payload") or {}).get("site") in QUIET_SITES
+
+
 DATA_REFUSED = ("22", "54")  # SQLSTATE classes: data exception, program limit exceeded
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store it"
 

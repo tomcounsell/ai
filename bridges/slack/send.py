@@ -1,4 +1,4 @@
-"""`slack.send_message`: perform, lookup, and the notice send.
+"""`slack.send_message`: perform, lookup, the notice send, and reactions.
 
 A payload is `{text, reply_to, files: [{path, sha256}]}`; the target is
 `<team>/<channel>`, or `<team>/<user>` for a DM. Text is split by the
@@ -81,6 +81,19 @@ def same(stored: str, requested: str) -> bool:
 
 def marker(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
+
+
+# Each reaction's Slack name, by the exact emoji `core/reactions.py` writes.
+SEEN_NAME = "eyes"
+REACTION_NAMES = {
+    "\U0001f440": SEEN_NAME,  # 👀
+    "\u26a1": "zap",  # ⚡
+    "\U0001f468\u200d\U0001f4bb": "technologist",  # 👨‍💻
+    "\u270d": "writing_hand",  # ✍
+    "\U0001f914": "thinking_face",  # 🤔
+    "\U0001f44c": "ok_hand",  # 👌
+    "\U0001f937": "shrug",  # 🤷
+}
 
 
 def notice_key(notice_id: str) -> str:
@@ -316,6 +329,37 @@ class Sender:
                 log.warning("notice %s not sent: %s", item.notice_id, e)
             return
         await outbox.sent(item, sent)
+
+    # -- reactions ---------------------------------------------------------
+
+    async def react(self, item, outbox) -> None:
+        """Add one due reaction by its Slack name; a `shape` reaction then
+        removes `eyes`, so the message carries one. A 429 or a lost
+        connection leaves it unmarked for a later wake, as a notice is;
+        Slack's refusal (`missing_scope`, `message_not_found`) is its
+        result."""
+        name = REACTION_NAMES.get(item.emoji)
+        if name is None:
+            await outbox.reacted(item, f"no Slack name for {item.emoji!r}")
+            return
+        try:
+            channel = await self._channel(self._target(item.chat_id))
+            await self.wire.react(channel, item.message_id, name)
+            if item.stage == "shape" and name != SEEN_NAME:
+                await self.wire.unreact(channel, item.message_id, SEEN_NAME)
+        except self.kernel.Failed as e:
+            await outbox.reacted(item, str(e))
+            return
+        except Refused as e:
+            await outbox.reacted(item, e.error)
+            return
+        except WireError as e:
+            key = f"reaction:{item.reaction_id}"
+            if key not in self._logged:
+                self._logged.add(key)
+                log.warning("reaction %s not placed: %s", item.reaction_id, e)
+            return
+        await outbox.reacted(item)
 
 
 def entry(chat: str, ts: str, root: str | None) -> dict[str, Any]:

@@ -271,10 +271,10 @@ PROGRESS = frozenset(
 
 def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
     """Whether the kernel should step a task again whose latest step failed:
-    its latest row (but for notices and gateway rows) is `step.failed`, and
+    its latest row (but for quiet rows, `ledger.quiet`) is `step.failed`, and
     the delay after it, doubling from `STEP_BACKOFF_S` with each failure in
     a row, has passed. The task ends at `STEP_TRIES` failures (`_failed`)."""
-    last = next((r for r in reversed(rows) if r["type"] not in ledger.QUIET), None)
+    last = next((r for r in reversed(rows) if not ledger.quiet(r)), None)
     if last is None or last["type"] != "step.failed":
         return False
     tries = failures(rows)

@@ -336,7 +336,7 @@ async def _serve() -> None:
     from core import rollout
 
     try:
-        await serve.serve(runners(judgement_port), _performers)
+        await serve.serve(runners(judgement_port), _performers, judgement_port=judgement_port)
     except rollout.Restart as exc:
         raise SystemExit(str(exc)) from None  # status 1: launchd starts the merged code
 

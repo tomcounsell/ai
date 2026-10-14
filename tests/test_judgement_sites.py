@@ -31,7 +31,7 @@ from core import (
     verdicts,
 )
 from core.gateway import Gateway
-from core.judgement_tasks import GOVERNANCE, JUDGE
+from core.judgement_tasks import GOVERNANCE, JUDGE, SHAPE
 from core.machine import Check, State
 from tests import judgement_upstream, scripted
 from tests.conftest import TEST_DB
@@ -1390,6 +1390,56 @@ def test_the_record_rechecks_the_estimate_against_billed_input(dsn, tmp_path):
     jev, ow = record["legs"]["jev"]["estimate"], record["legs"]["open_weight"]["estimate"]
     assert jev["n"] == 2 and jev["over_estimate"] == 1 and jev["max_ratio"] > 100
     assert ow["over_estimate"] == 0 and 0 < ow["median_ratio"] < 1
+
+
+SHAPES = list(SHAPE.questions[0].labels)
+
+
+def _shape(label: str, other: str | None = None, p: float = 0.9) -> dict:
+    """A shape answer: `p` on `label`, the rest on `other` (or spread)."""
+    rest = [x for x in SHAPES if x != label]
+    probs = {x: (1 - p) / len(rest) for x in rest}
+    if other is not None:
+        probs = {x: 0.0 for x in rest} | {other: 1 - p}
+    return {"shape": {label: p, **probs}}
+
+
+def _shape_case(label: str, source: str = "tom") -> dict:
+    return {"id": label, "inputs": {"message": f"a message wanting {label}", "thread": "", "bound_as": "start"},
+            "label": label, "source": source}  # fmt: skip
+
+
+def test_shape_calibration_scores_the_picked_label_and_needs_every_label(dsn, tmp_path):
+    cases = [_shape_case(label) for label in SHAPES]
+    right = [_shape(label) for label in SHAPES for _ in ("jev", "open_weight")]
+    record = _calibrate(tmp_path, "response.shape", cases, right, dsn)
+    jev = record["legs"]["jev"]
+    assert jev["per_question"]["shape"]["wrong"] == 0 and jev["per_question"]["shape"]["n"] == len(SHAPES)
+    assert jev["per_question"]["shape"]["labels"] == {label: 1 for label in SHAPES}
+    assert record["entry_check"] is True
+    assert record["cases"][0]["jev"]["questions"]["shape"]["action"] == SHAPES[0]
+    # (0.9 - 1)^2 on every case: the top label's probability against whether it was the label.
+    assert jev["brier"] == 0.01
+    # A wrong pick on the primary and an abstain on the fallback: each is wrong, and each fails its leg.
+    wrong = list(right)
+    wrong[0] = _shape(SHAPES[1])
+    wrong[3] = _shape(SHAPES[1], SHAPES[2], p=0.5)
+    record = _calibrate(tmp_path, "response.shape", cases, wrong, dsn)
+    assert record["legs"]["jev"]["per_question"]["shape"]["confusion"][SHAPES[0]] == {SHAPES[1]: 1}
+    assert record["legs"]["open_weight"]["per_question"]["shape"]["confusion"][SHAPES[1]] == {"abstain": 1}
+    assert (
+        record["legs"]["jev"]["entry_check"] is False
+        and record["legs"]["open_weight"]["entry_check"] is False
+    )
+    # A case set missing a label never passes, however right the legs are.
+    record = _calibrate(tmp_path, "response.shape", cases[1:], right[2:], dsn)
+    assert record["legs"]["jev"]["per_question"]["shape"]["wrong"] == 0 and record["entry_check"] is False
+
+
+def test_a_shape_case_names_one_of_the_shapes_with_a_source(tmp_path):
+    bad = _shape_case("short_answer") | {"label": "long_answer"}
+    with pytest.raises(ValueError, match="a shape label is one of"):
+        judgement_sites.check_calibration(_cases_file(tmp_path, "response.shape", [bad]))
 
 
 RATE_LIMITED = {"status": 429, "text": "{}"}

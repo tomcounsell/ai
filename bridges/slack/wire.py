@@ -297,6 +297,24 @@ class SlackWire:
         )
         return out["ts"]
 
+    async def react(self, channel: str, ts: str, name: str) -> None:
+        """`reactions.add`; a reaction already there (`already_reacted`)
+        counts as added, so a repeat is safe."""
+        try:
+            await self._write("reactions_add", channel=channel, timestamp=ts, name=name)
+        except Refused as e:
+            if e.error != "already_reacted":
+                raise
+
+    async def unreact(self, channel: str, ts: str, name: str) -> None:
+        """`reactions.remove`; a reaction not there (`no_reaction`)
+        counts as removed."""
+        try:
+            await self._write("reactions_remove", channel=channel, timestamp=ts, name=name)
+        except Refused as e:
+            if e.error != "no_reaction":
+                raise
+
     async def upload(self, channel: str, name: str, data: bytes, *, thread_ts: str | None) -> str:
         """The two-step upload, shared to `channel`; the file id."""
         got = await self._write("files_getUploadURLExternal", filename=name, length=len(data))

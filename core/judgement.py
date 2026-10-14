@@ -55,6 +55,10 @@ LOOPBACK_KEY = "loopback-no-key"
 class Kind(StrEnum):
     CHOICE = "choice"
     BOOLEAN = "boolean"
+    # A label-only question: the top label is the answer when it meets the
+    # floor, else the leg abstains; never caution. Every label is in its
+    # `proceed` set, and the label is recorded as `picked`.
+    PICK = "pick"
 
 
 @dataclass(frozen=True)
@@ -200,7 +204,13 @@ def normalize(probs: Mapping[str, float]) -> dict[str, float] | None:
 
 def decide(question: Question, probs: Mapping[str, float], floor: float) -> dict[str, Any]:
     """One question's answer from one leg: the gate on the summed probability
-    of the labels that proceed."""
+    of the labels that proceed. A `pick` question is gated on its top
+    label's probability instead, and abstains under the floor."""
+    label = max(sorted(probs), key=lambda k: probs[k])
+    if question.kind is Kind.PICK:
+        p = round(probs[label], 9)
+        decision = "proceed" if p >= floor else "abstain"
+        return {"label": label, "probabilities": dict(probs), "p_proceed": round(p, 6), "decision": decision}
     # Rounded so float sums never land a hair under the floor they meet.
     p = round(sum(v for k, v in probs.items() if k in question.proceed), 9)
     if p >= floor:
@@ -209,7 +219,6 @@ def decide(question: Question, probs: Mapping[str, float], floor: float) -> dict
         decision = "caution"
     else:
         decision = "abstain"
-    label = max(sorted(probs), key=lambda k: probs[k])
     return {"label": label, "probabilities": dict(probs), "p_proceed": round(p, 6), "decision": decision}
 
 
@@ -475,6 +484,9 @@ class JudgementPort:
             payload.update(
                 {"answers": answers, "action": action, "abstained": abstained, "leg": leg, "model": model}
             )
+            picked = _picked(task, answers)
+            if picked:
+                payload["picked"] = picked
         async with _connect(dsn) as conn:
             event_id = await ledger.append(conn, task_id, kind, payload)
         return Judgement(
@@ -527,6 +539,17 @@ def _merge(task, attempts) -> tuple[dict | None, list[str]]:
         if merged[q.id]["decision"] == "abstain":
             abstained.append(q.id)
     return merged, abstained
+
+
+def _picked(task, answers: dict[str, Any]) -> dict[str, str]:
+    """Each `pick` question's label, from the answer that proceeded. The
+    merged answer is the fallback's wherever the primary abstained, so the
+    label is never an abstaining leg's argmax."""
+    return {
+        q.id: answers[q.id]["label"]
+        for q in task.questions
+        if q.kind is Kind.PICK and answers[q.id]["decision"] == "proceed"
+    }
 
 
 def _single(task, attempt) -> tuple[dict | None, list[str]]:

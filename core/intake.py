@@ -52,7 +52,9 @@ chat, or his DM on a channel where he replies. About any other message
 channel and chat, so kernel text never reaches anyone else. A binding that raises is rolled back
 and bound `none` with the error, owing a notice; later messages never wait
 behind it. `message.bound` is the first row a binding writes, so a
-second binder of the same message stops there and writes nothing.
+second binder of the same message stops there and writes nothing. Last in
+the same transaction, a message bound to a task on a channel that reacts
+gets its reaction row (`reactions.on_bound`).
 """
 
 import re
@@ -62,7 +64,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import channels, ledger, machine, notices, session, tasks, workspace
+from core import channels, ledger, machine, notices, reactions, session, tasks, workspace
 from core.machine import State
 from core.settings import resolve_seat, settings
 
@@ -348,6 +350,7 @@ async def bind(conn) -> list[tuple[str, str]]:
         try:
             async with conn.transaction():
                 bound = await _bind(conn, p)
+                await _react(conn, p)
         except AlreadyBound:
             continue
         except Exception as exc:  # noqa: BLE001  one message's error never blocks the next
@@ -355,6 +358,20 @@ async def bind(conn) -> list[tuple[str, str]]:
         if bound is not None:
             done.append((p["received_id"], bound))
     return done
+
+
+async def _react(conn, p: dict[str, Any]) -> None:
+    """The reaction the binding owes (`reactions.on_bound`), read from the
+    `message.bound` row it just wrote, after the rows it starts a task with."""
+    row = await (
+        await conn.execute(
+            "SELECT payload->>'task_id', payload->>'as' FROM events "
+            "WHERE type = 'message.bound' AND payload->>'received_id' = %s",
+            (p["received_id"],),
+        )
+    ).fetchone()
+    if row is not None:
+        await reactions.on_bound(conn, p, row[0], row[1])
 
 
 class AlreadyBound(Exception):

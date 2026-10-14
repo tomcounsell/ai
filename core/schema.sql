@@ -103,6 +103,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice
     ON events (task_id, (payload->>'about_key')) WHERE type = 'notice.requested';
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice_sent
     ON events ((payload->>'notice_id')) WHERE type = 'notice.sent';
+-- One reaction per message and stage (`seen` 👀, then its `shape`), and one
+-- result per reaction, so a second kernel or bridge writes nothing twice.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_reaction
+    ON events ((payload->>'received_id'), (payload->>'stage')) WHERE type = 'reaction.requested';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_reaction_result
+    ON events ((payload->>'reaction_id')) WHERE type IN ('reaction.placed', 'reaction.failed');
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_release
     ON events ((payload->>'effect_id')) WHERE type = 'release.requested';
 CREATE INDEX IF NOT EXISTS events_sent_messages

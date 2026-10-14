@@ -29,7 +29,7 @@ to 5, 7, 9, and 10 are design, and each section says which.
 | router | The pure function that, for a judgement task, names the primary leg and the fallback leg |
 | calibration record | The measurement that lets a judgement task land: both legs, the same labelled inputs, the same run |
 | abstain | A leg's answer to a question whose summed probability for the `proceed` action lies between one minus the leg's floor and the floor. The consumer takes the task's declared abstain route |
-| use shape | One of the ten kinds of question the tier answers, listed below |
+| use shape | One of the eleven kinds of question the tier answers, listed below |
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls. TypeSafe's Jev is the
@@ -83,7 +83,7 @@ table is next to the question, so a reader sees what a label can and cannot caus
 | Field | Meaning |
 |---|---|
 | `site` | A stable dotted id, `intake.underspecified`. Keys the calibration records and the ledger rows |
-| `questions` | One or more questions asked in one call. Each has an id, its text as sent, a `kind` (`choice` or `boolean`), its closed `labels` with a one-line rubric each, and the `proceed` set: the labels whose kernel action is `proceed`; every other label is `caution` |
+| `questions` | One or more questions asked in one call. Each has an id, its text as sent, a `kind` (`choice`, `boolean`, or `pick`), its closed `labels` with a one-line rubric each, and the `proceed` set: the labels whose kernel action is `proceed`; every other label is `caution`. A `pick` question proceeds on every label (Confidence gating) |
 | `inputs` | The named input fields and where the kernel reads each from |
 | `error_cost` | `high`, `medium`, or `low`: what a wrong label costs at this site |
 | `floor` | Per leg, a value in (0.5, 1) that the summed probability of an action must reach (see "Confidence gating") |
@@ -250,6 +250,15 @@ argmax decides nothing: `precise` at .45 against thin labels at .20, .20, and .1
 never a bare build. Serves: constraint "Three tiers" ("confidence-gated to a human") and Mission
 item 6.
 
+A `pick` question is the one exception, for a site whose answer is a label and not an action
+(`response.shape`): the gate is on the top label's normalized probability against the leg's floor.
+At or above it the question proceeds with that label; under it the leg abstains; a leg never answers
+a pick with caution. The label of the answer that proceeded is recorded as `picked` on the
+`judgement.answered` row: the fallback's wherever the primary abstained, never an abstaining leg's
+argmax. A pick both legs abstain on has no `picked`, and its consumer does nothing with it. The
+calibration scorer scores a pick by its label against the case's, and its entry check wants a human
+case for every label.
+
 Gating to a human spends Tom's attention, which Mission item 6 counts like
 money, so every abstain route names what it costs Tom:
 
@@ -353,7 +362,7 @@ needs Tom's tap through a `governance_grant`, and it is ledgered as a guard with
 mission item, and a ninety-day expiry. A guard that has not fired by expiry is deleted by default.
 The guard ledger itself is described in `docs/architecture.md`.
 
-## The ten use shapes
+## The eleven use shapes
 
 Each row is one kind of question the tier answers. "Gate" marks a shape that
 holds or redirects work, and so needs a grant. Status says where each stands.
@@ -370,6 +379,7 @@ holds or redirects work, and so needs a grant. Status says where each stands.
 | 8 | Test breadth | Three booleans in one call: does the change leave unexercised a record in a non-obvious state (`gap_state`), a member of an enumeration the code branches on (`gap_enum`), or an existing test whose bounds encode the old behavior (`gap_bound`)? | `boolean` each | yes | Mission 1 | Built (`checks.test.breadth`), an SDLC stage by Tom's decision of 2026-10-01; its floors are provisional until 1.4's calibration record |
 | 9 | Emulator proxy | On a replayed case, where does the result fall on each scored proxy? | a closed scale per proxy | no | Evidence: independent checks | Owned by `docs/emulator.md` |
 | 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
+| 11 | Response shape | What shape would the ideal response to this message take? | `short_answer`, `code_change`, `written_report`, `question_back`, `acknowledge`, `decline` (a `pick`) | no | Mission 6 | Built (`response.shape`); floors provisional, uncalibrated |
 
 Notes per shape:
 
@@ -446,8 +456,15 @@ Notes per shape:
     "Kernel findings", 3: `EPERM` at row 179) is the kind a deterministic
     signal names. This shape stays a candidate until a failure arrives that
     the deterministic signals could not classify.
+11. Asked once for each Telegram or Slack message bound to a task as a start,
+    an answer, feedback, or a steer (`core/reactions.py`), with the message,
+    its reply chain, and what it was bound as. It judges the response, not
+    the message. The picked label names the reaction that replaces 👀 on the
+    message, and nothing reads it for anything else: it holds, redirects, and
+    refuses nothing. Its rows sit on the bound task and are quiet there
+    (`ledger.quiet`), so they never step the task or hide a failed step.
 
-Shapes 2 to 5 and 9 to 10 label and route; they add no governance. Shapes 6 to 8 are checks the plan
+Shapes 2 to 5, 9 to 10, and 11 label and route; they add no governance. Shapes 6 to 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier

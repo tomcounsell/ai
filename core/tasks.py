@@ -737,8 +737,8 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 def failed_step(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The task's latest failed step, which the kernel tries again
     (`router.retry_due`): its payload, row id and time, while it is the
-    latest row but for notices and gateway rows; else None."""
-    last = next((r for r in reversed(rows) if r["type"] not in ledger.QUIET), None)
+    latest row but for quiet rows (`ledger.quiet`); else None."""
+    last = next((r for r in reversed(rows) if not ledger.quiet(r)), None)
     if last is None or last["type"] != "step.failed":
         return None
     return {**last["payload"], "row": last["id"], "at": str(last.get("at"))}

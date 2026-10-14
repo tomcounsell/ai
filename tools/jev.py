@@ -50,7 +50,7 @@ class Jev:
     def body(self, task: JudgementTask, inputs: Mapping[str, str]) -> dict:
         questions = {}
         for q in task.questions:
-            if q.kind is Kind.CHOICE:
+            if q.kind in (Kind.CHOICE, Kind.PICK):
                 questions[q.id] = {
                     "type": "choice",
                     "instructions": f"{q.text}\n\n{DATA_ONLY}",
@@ -134,7 +134,7 @@ def decode(task: JudgementTask, raw: bytes, model: str) -> LegAnswer | LegError:
         a = answers.get(q.id)
         if not isinstance(a, dict):
             return LegError("malformed", billed, status=200, usage=usage, what=f"no answer to {q.id}")
-        if q.kind is Kind.CHOICE:
+        if q.kind in (Kind.CHOICE, Kind.PICK):
             probs = a.get("probabilities")
             if not isinstance(probs, dict):
                 return LegError(

@@ -116,7 +116,7 @@ class LocalBridge:
             async for item in outbox:
                 if isinstance(item, bridge.Release):
                     await outbox.perform(item)
-                else:
+                elif isinstance(item, bridge.NoticeDue):
                     await outbox.sent(item, _sent(item.notice_id)["sent"])
         finally:
             await self.close()

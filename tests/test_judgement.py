@@ -28,8 +28,8 @@ from hypothesis import strategies as st
 from psycopg.types.json import Jsonb
 
 from core import credentials, db, judgement, ledger, spending, tasks
-from core.judgement import DATA_ONLY, LOOPBACK_KEY, JudgementPort
-from core.judgement_tasks import BREADTH, GOVERNANCE, JUDGE, TASKS
+from core.judgement import DATA_ONLY, LOOPBACK_KEY, JudgementPort, Kind
+from core.judgement_tasks import BREADTH, GOVERNANCE, JUDGE, SHAPE, TASKS
 from core.settings import JEV_MODEL, JEV_URL, OPEN_WEIGHT_CONTEXT, OPEN_WEIGHT_PIN, OPEN_WEIGHT_URL
 from core.settings import settings as config
 from harnesses import claude_code
@@ -130,6 +130,73 @@ def test_breadth_asks_three_booleans_so_a_point_six_gap_is_never_covered_and_two
     assert j.action == {"gap_state": "caution", "gap_enum": "caution", "gap_bound": "proceed"}
     assert j.abstained == ("gap_state",)
     assert len(seen) == 2 and len(seen[0]["body"]["questions"]) == 3  # one Jev call carries all three
+
+
+SHAPE_IN = {"message": "can you add a dark mode toggle?", "thread": "", "bound_as": "start"}
+
+
+def shape_probs(**given):
+    return {"shape": {label: given.get(label, 0.0) for label in SHAPE.questions[0].labels}}
+
+
+@pytest.mark.parametrize(
+    ("role", "top", "decision"),
+    [("primary", 0.55, "proceed"), ("primary", 0.549, "abstain"), ("fallback", 0.60, "proceed"),
+     ("fallback", 0.599, "abstain"), ("primary", 0.17, "abstain")],
+)  # fmt: skip
+def test_a_pick_proceeds_with_its_top_label_at_the_floor_and_is_never_cautious(role, top, decision):
+    q = SHAPE.questions[0]
+    probs = {label: (1 - top) / (len(q.labels) - 1) for label in q.labels}
+    probs["code_change"] = top
+    a = judgement.decide(q, judgement.normalize(probs), SHAPE.floor[role])
+    assert a["decision"] == decision and a["decision"] != "caution"
+    assert a["label"] == "code_change" and a["p_proceed"] == round(top, 6)
+
+
+def test_a_pick_the_primary_makes_is_recorded_and_the_fallback_is_unused(dsn):
+    j, task, seen = ask(dsn, {"probs": shape_probs(written_report=0.8, short_answer=0.2)}, task_kind=SHAPE,
+                        inputs=SHAPE_IN)  # fmt: skip
+    assert [r["leg"] for r in seen] == ["jev"]
+    assert j.payload["picked"] == {"shape": "written_report"} and j.action == {"shape": "proceed"}
+    (row,) = run(rows(dsn, task, "judgement.answered"))
+    assert (
+        row["payload"]["picked"] == {"shape": "written_report"} and row["payload"]["site"] == "response.shape"
+    )
+
+
+def test_a_pick_only_the_fallback_makes_carries_the_fallbacks_label_not_the_primarys_argmax(dsn):
+    j, _, seen = ask(
+        dsn,
+        # The primary's argmax is short_answer, at .5: under its floor, an abstain.
+        {"probs": shape_probs(short_answer=0.5, code_change=0.3, question_back=0.2)},
+        {"probs": shape_probs(code_change=0.8, short_answer=0.2)},
+        task_kind=SHAPE,
+        inputs=SHAPE_IN,
+    )
+    assert [r["leg"] for r in seen] == ["jev", "open_weight"]
+    assert j.payload["picked"] == {"shape": "code_change"} and j.leg == "fallback"
+
+
+def test_a_pick_both_legs_abstain_on_records_no_label(dsn):
+    half = {"probs": shape_probs(short_answer=0.5, acknowledge=0.5)}
+    j, task, _ = ask(dsn, half, half, task_kind=SHAPE, inputs=SHAPE_IN)
+    assert j.answered and j.abstained == ("shape",) and j.action == {"shape": "caution"}
+    assert "picked" not in j.payload
+    (row,) = run(rows(dsn, task, "judgement.answered"))
+    assert "picked" not in row["payload"]
+
+
+def test_a_pick_is_its_own_task_digest_and_both_adapters_render_it_as_a_choice():
+    as_choice = dataclasses.replace(
+        SHAPE, questions=(dataclasses.replace(SHAPE.questions[0], kind=Kind.CHOICE),)
+    )
+    port = UP.port(fixed="precise")
+    assert judgement.task_sha256(SHAPE, port.signature()) != judgement.task_sha256(
+        as_choice, port.signature()
+    )
+    for leg in port.legs.values():
+        assert leg.body(SHAPE, SHAPE_IN) == leg.body(as_choice, SHAPE_IN)
+    assert port.legs["jev"].body(SHAPE, SHAPE_IN)["questions"]["shape"]["type"] == "choice"
 
 
 def test_a_confident_caution_is_not_second_guessed_by_the_fallback(dsn):
@@ -529,13 +596,21 @@ def test_judgement_keys_copies_by_digest_and_prints_no_value(tmp_path):
 
 
 def test_every_declaration_is_whole():
-    assert [t.site for t in TASKS] == ["intake.underspecified", "checks.test.breadth", "governance.adds"]
+    assert [t.site for t in TASKS] == [
+        "intake.underspecified",
+        "checks.test.breadth",
+        "governance.adds",
+        "response.shape",
+    ]
     for t in TASKS:
         assert set(t.consumer) == {"proceed", "caution"} and t.on_abstain == "caution"
         assert t.on_failure in ("caution", "no_verdict") and t.guard
         assert all(0.5 < f < 1 for f in t.floor.values()) and set(t.floor) == {"primary", "fallback"}
         for q in t.questions:
-            assert q.proceed and q.proceed < set(q.labels)
+            # A pick question proceeds on every label; any other has a cautious one.
+            assert (
+                q.proceed == set(q.labels) if q.kind is Kind.PICK else q.proceed and q.proceed < set(q.labels)
+            )
         assert judgement.route(t) == ("jev", "open_weight")
     assert GOVERNANCE.guard.startswith("the CLAUDE.md governance paragraph")
     with pytest.raises(judgement.NotRouted):

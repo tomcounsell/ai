@@ -205,6 +205,7 @@ class Only:
                 if (
                     getattr(item, "effect_id", None) in self.wanted
                     or getattr(item, "notice_id", None) in self.wanted
+                    or getattr(item, "reaction_id", None) in self.wanted
                 ):
                     yield item
             await asyncio.sleep(0.05)

@@ -197,5 +197,49 @@ GOVERNANCE = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, GOVERNANCE)
+_SHAPES = {
+    "short_answer": "a short direct answer in a sentence or a few lines: a fact, a yes or no, a quick opinion",
+    "code_change": "a change to code, a configuration, or a running system, delivered as the work itself",
+    "written_report": "a written report, research, an analysis, or a document longer than a few lines",
+    "question_back": "a question back to the sender, because the message cannot be acted on as it stands",
+    "acknowledge": "an acknowledgement and nothing more: thanks, an approval, a go-ahead, a stop, a remark",
+    "decline": "a refusal or an explanation that it cannot be done",
+}
+SHAPE = JudgementTask(
+    site="response.shape",
+    questions=(
+        Question(
+            id="shape",
+            text=(
+                "What shape would the ideal response to this message take? Judge the response Valor "
+                "should give, not the message: a long message can want a short answer, and a one-line "
+                "request can want a change to code. `bound_as` says what the message is to its task: a "
+                "new request (`start`), an answer to Valor's question, feedback on a delivery, or a "
+                "steer of running work."
+            ),
+            kind=Kind.PICK,
+            labels=dict(_SHAPES),
+            proceed=frozenset(_SHAPES),
+        ),
+    ),
+    inputs={
+        "message": "the message's text, from its message.received row",
+        "thread": "the earlier messages of its reply chain, oldest first, one per line",
+        "bound_as": "what message.bound bound it as: start, answer, feedback, or steer",
+    },
+    error_cost="low",
+    # Floors set from human labels once real messages have produced thirty or more rows.
+    floor={"primary": 0.55, "fallback": 0.60},
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": "the picked shape's reaction replaces 👀 (core/reactions.py)",
+        "caution": "no shape reaction; 👀 stays",
+    },
+    serves="Mission item 6",
+    guard="none: a label, no gate",
+    calibrated=None,
+)
+
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, GOVERNANCE, SHAPE)
 BY_SITE = {t.site: t for t in TASKS}

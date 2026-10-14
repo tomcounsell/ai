@@ -368,7 +368,9 @@ lines) not carried.
   Redis outbox loop becomes LISTEN on released effects plus unsent notices;
   operator notices go only to Tom's chat from settings, with no approval.
 - **Not carried:** routing, the drafter, promise gate, catch-up and
-  reconciler state, hibernation, `/update`, reactions, dead letters, polls.
+  reconciler state, hibernation, `/update`, dead letters, polls. Reactions
+  were left out here and came back later as kernel rows a bridge places
+  (docs/plans/3624532d-reactions.md).
 - **Gap fill.** On reconnect, `history_fetch` backfills each chat from the
   highest message id in `message.received`, through the idempotent intake.
   No local cursor.

@@ -36,8 +36,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from core import db, git, judgement, ledger, machine, tasks
-from core.judgement import UNANSWERED_RUNS, JudgementPort
-from core.judgement_tasks import BREADTH, BY_SITE, GOVERNANCE, JUDGE
+from core.judgement import UNANSWERED_RUNS, JudgementPort, Kind
+from core.judgement_tasks import BREADTH, BY_SITE, GOVERNANCE, JUDGE, SHAPE
 from core.machine import State
 
 DIFF = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color")
@@ -442,11 +442,22 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
 
     - judge: `{"id", "request" or "item", "label": precise|thin, "sub_label", "source"}`;
     - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`;
-    - governance: `{"id", "inputs": {"path", "hunk", "paths"}, "label": true|false, "source", "evidence"}`.
+    - governance: `{"id", "inputs": {"path", "hunk", "paths"}, "label": true|false, "source", "evidence"}`;
+    - shape: `{"id", "inputs": {"message", "thread", "bound_as"}, "label": <a shape>, "source"}`.
 
     A label `false` expects proceed and `true` caution (each question's own
-    `proceed` set). Raises `ValueError` naming what is wrong."""
+    `proceed` set); a `pick` question expects its label itself. Raises
+    `ValueError` naming what is wrong."""
     task = BY_SITE[site]
+    if site == SHAPE.site:
+        q = task.questions[0]
+        inputs = c.get("inputs")
+        if not isinstance(inputs, dict) or set(inputs) != set(task.inputs):
+            raise ValueError(f"case {c.get('id')}: inputs are {sorted(task.inputs)}")
+        if c.get("label") not in q.labels or not c.get("source"):
+            raise ValueError(f"case {c.get('id')}: a shape label is one of {sorted(q.labels)}, with a source")
+        expected = {q.id: Expected(c["label"], c["label"], str(c["source"]))}
+        return {k: str(v) for k, v in inputs.items()}, expected
     if site == JUDGE.site:
         if c.get("label") not in JUDGE_LABELS:
             raise ValueError(f"case {c.get('id')}: a judge label is precise or thin")
@@ -554,11 +565,15 @@ async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> di
 
 def _scored(task, j, expected, *, asked_again: int) -> dict[str, Any]:
     """One leg's answer to one case, every question scored against its label;
-    a failed ask is `caution`."""
+    a failed ask is `caution`. A `pick` question's action is the label it
+    picked, or `abstain` (`failed` when not answered), scored against the
+    case's label."""
     questions = {}
     for q in task.questions:
         a = j.answers.get(q.id) if j.answered else None
         action = j.action.get(q.id) if j.answered else "caution"
+        if q.kind is Kind.PICK:
+            action = "failed" if a is None else (a["label"] if a["decision"] == "proceed" else "abstain")
         e = expected[q.id]
         questions[q.id] = {
             "expected": e.label,
@@ -646,20 +661,22 @@ def _record(task, port, results, task_id, calls) -> dict[str, Any]:
             answers = [r["questions"][q.id] for r in rs]
             human = [a for a in answers if a["source"] != DRAFTED]
             counts = _counts(human)
-            directions = {d: sum(a["wants"] == d for a in human) for d in ("proceed", "caution")}
+            # A pick question's entry wants a human case for every label.
+            wanted = tuple(q.labels) if q.kind is Kind.PICK else ("proceed", "caution")
+            directions = {d: sum(a["wants"] == d for a in human) for d in wanted}
             counts["labels"] = directions
             per_question[q.id] = counts
             drafted[q.id] = _counts([a for a in answers if a["source"] == DRAFTED])
             entry = entry and counts["wrong"] == 0 and all(directions.values())
+        # Each answered question as (the probability it gave the outcome it
+        # forecast, whether that outcome happened): proceed for a gated
+        # question, its top label for a pick.
         scored = [
-            (a["p_proceed"], a["wants"]) for r in rs if r["answered"]
+            (a["p_proceed"], (a["label"] == a["wants"]) if q.kind is Kind.PICK else (a["wants"] == "proceed"))
+            for r in rs if r["answered"]
             for q in task.questions for a in [r["questions"][q.id]]
         ]  # fmt: skip
-        brier = (
-            sum(((1 - p) - (1.0 if want == "caution" else 0.0)) ** 2 for p, want in scored) / len(scored)
-            if scored
-            else None
-        )
+        brier = sum((p - float(hit)) ** 2 for p, hit in scored) / len(scored) if scored else None
         confusion: dict[str, dict[str, int]] = {}
         sub: dict[str, dict[str, int]] = {}
         for r, c in zip(rs, results, strict=True):

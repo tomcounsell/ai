@@ -18,6 +18,7 @@ class Kernel:
     Inbound: type
     Release: type
     NoticeDue: type
+    ReactionDue: type
     Unknown: type
     split_text: Any  # text -> parts within Telegram's limit
     receive: Any
@@ -49,6 +50,7 @@ def from_core(dsn: str | None = None) -> Kernel:
         Inbound=intake.Inbound,
         Release=bridge.Release,
         NoticeDue=bridge.NoticeDue,
+        ReactionDue=bridge.ReactionDue,
         Unknown=broker.Unknown,
         split_text=lambda text: bridge.split_text("telegram", text),
         receive=intake.receive,

@@ -2,7 +2,8 @@
 
 `run(outbox)` connects, registers the live handler, fills the gap, and
 iterates the outbox: a `Release` goes to `outbox.perform`, a `NoticeDue`
-is sent here. `tick()`, which `serve` calls on every `serve_tick_s` wake,
+is sent here, and a `ReactionDue` is set here. `tick()`, which `serve`
+calls on every `serve_tick_s` wake,
 fills the gap again and drops the record of every send the ledger has
 settled. The bridge keeps the connection up itself and fills the gap on
 every connect.
@@ -106,8 +107,10 @@ class TelegramBridge:
             try:
                 if isinstance(item, self.kernel.Release):
                     await outbox.perform(item)
-                else:
+                elif isinstance(item, self.kernel.NoticeDue):
                     await self.sender.notice(item, outbox)
+                elif isinstance(item, self.kernel.ReactionDue):
+                    await self.sender.react(item, outbox)
             finally:
                 self._busy = False
 

@@ -20,6 +20,8 @@ Like Slack it:
 - echoes every post, Valor's own included, as a `message` event;
 - sends `hello` on each socket session and redelivers an envelope not
   acked within `redeliver_s` (3 s), up to `redeliver_max` (3) times;
+- keeps reactions on a message as Slack lists them (`reactions`: name,
+  users, count), answering `already_reacted` and `no_reaction`;
 - shares an uploaded file at once, after `share_delay_s`, or never in
   `files.info` (`share_mode` `now`, `delay`, `unlisted`), while the file
   message is in the history from the upload on.
@@ -367,6 +369,33 @@ def make_app() -> web.Application:
         out["shares"] = shares
         return ok({"file": out})
 
+    async def reactions_add(request, p):
+        m = s.find(p["channel"], p["timestamp"])
+        if m is None:
+            return err("message_not_found")
+        r = next((r for r in m.setdefault("reactions", []) if r["name"] == p["name"]), None)
+        if r is not None and s.me in r["users"]:
+            return err("already_reacted")
+        if r is None:
+            r = {"name": p["name"], "users": [], "count": 0}
+            m["reactions"].append(r)
+        r["users"].append(s.me)
+        r["count"] += 1
+        return ok()
+
+    async def reactions_remove(request, p):
+        m = s.find(p["channel"], p["timestamp"])
+        if m is None:
+            return err("message_not_found")
+        r = next((r for r in m.get("reactions", []) if r["name"] == p["name"]), None)
+        if r is None or s.me not in r["users"]:
+            return err("no_reaction")
+        r["users"].remove(s.me)
+        r["count"] -= 1
+        if not r["count"]:
+            m["reactions"].remove(r)
+        return ok()
+
     METHODS = {
         "auth.test": auth_test,
         "apps.connections.open": connections_open,
@@ -378,6 +407,8 @@ def make_app() -> web.Application:
         "files.getUploadURLExternal": upload_url,
         "files.completeUploadExternal": complete_upload,
         "files.info": files_info,
+        "reactions.add": reactions_add,
+        "reactions.remove": reactions_remove,
     }
 
     async def upload(request):

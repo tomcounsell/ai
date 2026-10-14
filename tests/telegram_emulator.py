@@ -9,7 +9,9 @@ whitespace. A test injects messages from others (with or without a live
 update), flood waits, a lost connection, a send accepted and its answer
 dropped, a send lost before Telegram takes it, and a pause after a send
 is accepted. `send_after` lets that many sends through before a send fault
-applies.
+applies. A reaction sets the account's list on a message, refused as
+`REACTION_INVALID` for an emoji outside `STANDARD_REACTIONS`; a test can
+inject a flood wait on the next one (`flood_react`).
 
     python -m tests.telegram_emulator
 
@@ -49,6 +51,87 @@ from tests.ports import listen
 
 ME = 1000
 
+# Telegram's standard reactions (`messages.getAvailableReactions`, the ones
+# any account may set), as exact code points: no U+FE0F variation
+# selectors, which Telegram refuses as REACTION_INVALID.
+STANDARD_REACTIONS = frozenset(
+    [
+        "👍",
+        "👎",
+        "❤",
+        "🔥",
+        "🥰",
+        "👏",
+        "😁",
+        "🤔",
+        "🤯",
+        "😱",
+        "🤬",
+        "😢",
+        "🎉",
+        "🤩",
+        "🤮",
+        "💩",
+        "🙏",
+        "👌",
+        "🕊",
+        "🤡",
+        "🥱",
+        "🥴",
+        "😍",
+        "🐳",
+        "❤\u200d🔥",
+        "🌚",
+        "🌭",
+        "💯",
+        "🤣",
+        "⚡",
+        "🍌",
+        "🏆",
+        "💔",
+        "🤨",
+        "😐",
+        "🍓",
+        "🍾",
+        "💋",
+        "🖕",
+        "😈",
+        "😴",
+        "😭",
+        "🤓",
+        "👻",
+        "👨\u200d💻",
+        "👀",
+        "🎃",
+        "🙈",
+        "😇",
+        "😨",
+        "🤝",
+        "✍",
+        "🤗",
+        "🫡",
+        "🎅",
+        "🎄",
+        "☃",
+        "💅",
+        "🤪",
+        "🗿",
+        "🆒",
+        "💘",
+        "🙉",
+        "🦄",
+        "😘",
+        "💊",
+        "🙊",
+        "😎",
+        "👾",
+        "🤷\u200d♂",
+        "🤷",
+        "🤷\u200d♀",
+        "😡",
+    ]
+)
+
 # -- the server --------------------------------------------------------------
 
 
@@ -64,6 +147,7 @@ class State:
         self.lose_send_next = False
         self.flood_connect = 0
         self.flood_history = 0
+        self.flood_react = 0
         self.drop_reply_next = False
         self.pause_next = 0.0
         self.down = False
@@ -136,6 +220,7 @@ def make_app() -> web.Application:
             "lose_send_next",
             "flood_connect",
             "flood_history",
+            "flood_react",
             "drop_reply_next",
             "pause_next",
             "down",
@@ -250,6 +335,22 @@ def make_app() -> web.Application:
             raise web.HTTPServiceUnavailable()
         return ok({"id": m["id"]})
 
+    async def react(request):
+        # Sets the account's reaction list on a message; a list of one
+        # replaces any reaction it had.
+        guard()
+        b = await body(request)
+        if s.flood_react:
+            secs, s.flood_react = s.flood_react, 0
+            return err("FLOOD_WAIT", seconds=secs)
+        if b["emoji"] not in STANDARD_REACTIONS:
+            return err("REACTION_INVALID")
+        m = s.chat(b["chat"])["msgs"].get(b["id"])
+        if m is None:
+            return err("MESSAGE_ID_INVALID")
+        m["reactions"] = [b["emoji"]]
+        return ok({})
+
     async def download(request):
         guard()
         b = await body(request)
@@ -285,6 +386,7 @@ def make_app() -> web.Application:
         ("send", send),
         ("download", download),
         ("read", read),
+        ("react", react),
         ("state", state),
     ]:
         app.router.add_post(f"/{name}", fn)
@@ -452,6 +554,9 @@ class EmulatorWire:
     async def mark_read(self, chat_id: int, max_id: int) -> None:
         await self._post("read", {"chat": chat_id, "max_id": max_id})
 
+    async def react(self, chat_id: int, msg_id: int, emoji: str) -> None:
+        await self._post("react", {"chat": chat_id, "id": msg_id, "emoji": emoji})
+
 
 # -- the test's handle -------------------------------------------------------
 
@@ -505,6 +610,10 @@ class Emulator:
 
     def own(self, chat: int) -> list[dict]:
         return [m for m in self.messages(chat) if m.get("out")]
+
+    def reactions(self, chat: int, msg_id: int) -> list[str]:
+        """The account's reactions on a message, as Telegram shows them."""
+        return next((m.get("reactions") or [] for m in self.messages(chat) if m["id"] == msg_id), [])
 
 
 def main() -> None:
