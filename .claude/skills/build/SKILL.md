@@ -86,34 +86,47 @@ this session. Run every ready task's next stage in one message of Agent
 calls, so they run together. There is no cap on how many run; spending is
 metered, never a reason to wait.
 
-**Waves.** Milestones 1 to 4 are merged. The run that finishes the
-rebuild (`docs/plans/rebuild-finish-prompt.md`, Tom's ruling of 2026-10-09
-in `valor-rebuild-feedback.md`) carries these:
+**Waves.** Milestones 1 to 7 and 2.5 (Slack) are merged, and milestone 7's
+proof that the loop carries its own work to merged is met (verify run
+6c621f57d9ff's fix be63436b888e, merged 2026-10-14 with no hand). What is
+left is the cutover, then the gaps, carried by the new system itself:
 
-| Task | Starts | Merges after |
+| Track | What | Who carries it |
 |---|---|---|
-| A1 autonomous act (stakes 2) | now | first of the core changes |
-| A2 the advisor (stakes 2) | now | A1 |
-| A3 the docs stage's runner (stakes 2) | now, calibration on a test database | A1 |
-| B1 memory, milestone 6 (stakes 2) | now, on popoto 1.10.0's Postgres backend | A1; hand rollout |
-| C1 email idle drop (stakes 1) | now | any time (bridge code only) |
-| C2 plan housekeeping | now, by the lead | n/a |
-| D1, D2 Pi carries popoto #633, one review per harness | now (D2 on D1's candidate) | n/a |
-| D3 persona evidence (pso-c, #894) | now | n/a |
-| E1 the old system's data, E2 the cutover runbook | now (E2 after E1) | n/a |
-| The live window | A1 and A3 rolled out | n/a |
-| D4 the cutover sweep | A1, A2, A3 merged | n/a |
+| X, the cutover | `docs/plans/cutover-runbook.md` on this Mac, from the session prompt `~/src/valor-build-notes/cutover/prompt.md` | One lead session; Tom only for his items in `cutover-runbook-tom.md` |
+| F, live features | The live system's features the rebuild does not carry yet (`~/src/valor-build-notes/m7/live-features-gap.md`) | After cutover, the new Valor itself: it raises them with Tom in the operator group on Telegram, and each one Tom keeps is a task Tom's reply starts |
+| L, the loop backlog | The kernel tasks in `~/src/valor-build-notes/m7/state.md` | The resident kernel, unattended; nobody polls it |
 
-A1, A2, A3, and B1 all touch `core/`: build in parallel, merge one at a
-time in that order, each later one rebasing and rerunning its checks.
+Order:
+
+- **X first.** Nothing in L or F waits for the lead before it. The
+  readiness page (`https://claude.ai/code/artifact/db7e7380-cd8e-4b37-8142-036db9d3fbd7`;
+  read it, then republish to the same URL) is updated at the end of the
+  cutover.
+- **F after step 10 of the runbook passes.** The lead does not build
+  features from this session; it starts one kernel task whose work is to
+  bring Tom the gap list over Telegram, and the rest follows from his replies.
+- **L.** Re-bootstrap `com.valor.routine.emulator` only after
+  `backlog:emulator-weekly-limit` merges (Tom: at most $140 a week on
+  re-sweeps). Until then a firing runs only by hand with a stopper that
+  calls `core stop` at $130 (`m7/sweep-stop.py`). When
+  `backlog:check-tmp-leak` merges, kill the interim cleaner by the PID in
+  `m7/clean-check-tmp.pid`. When `backlog:review-base-after-rebase`
+  merges, send image-prune, exemplar and replay-spin `core feedback` so
+  review reruns; their refused instances were never theirs.
+
+The kernel runs one turn at a time (`core/serve.py`), foreground before
+background, so a dozen tasks take a day or more. Never poll it or step in to
+speed it up; step in only when the kernel cannot run its pipeline, and
+record that repair as a task.
 
 **Models.** Pass `model` on every Agent call:
 
 | Role | Model |
 |---|---|
 | plan, critique, review | `opus` |
-| build, patch, stakes 2 (the kernel, money, stored data, migrations, auth; 1.4b, 1.4d, 1.5, 2.1, the OpenAI route, 4.1, A1, A2, A3, B1) | `opus` |
-| build, patch, stakes 0 or 1 (2.2, 2.3, Pi, 4.2, 4.3, C1) | `sonnet` |
+| build, patch, stakes 2 (the kernel, money, stored data, migrations, auth) | `opus` |
+| build, patch, stakes 0 or 1 (bridges, docs-only, tools) | `sonnet` |
 | test, docs | `sonnet` |
 
 A builder keeps its model across stages when resumed, since its context
