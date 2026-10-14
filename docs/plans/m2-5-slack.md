@@ -569,3 +569,21 @@ The lead checked the governance paragraph against CLAUDE.md byte for byte in bri
 The lead's decision: merge. Every check passed on 41264e84e; the head adds only the test check's commit. Valor-cori-rebuild was fast-forwarded to it.
 
 Rollout on this Mac: `uv sync` in the rollout checkout for `slack_sdk`, after a `pg_dump -Fc` of `valor_rebuild` to `~/valor-backups/` (no backup disk is set). No Slack job is loaded: the app, Socket Mode, the install to Valor's account and the two tokens are Tom's, set out in Tom's answers. The first live fact is whether `chat.postMessage` keeps `metadata` on a user-token post; if not, lookup matches on text and `thread_ts` alone, which the tests already cover.
+
+## Live window (2026-10-14)
+
+Done in Valor's browser session on api.slack.com, on Tom's pointer to the yudame app pages:
+
+- The app "Valor" (A0C97117R5F) in Yudame (T0B6E8JPE3C), from `python -m bridges.slack manifest`. Socket Mode is on from the manifest.
+- The app-level token `valor-socket`, scope `connections:write`.
+- Installed to Valor's own account (U0B6C6J735L, `valor`) with the manifest's user scopes.
+- Both tokens went from Slack's Copy buttons straight into `~/Desktop/Valor/.env` as `SLACK_APP_TOKEN` and `SLACK_USER_TOKEN`, never printed. `python -m bridges.slack keys` wrote `T0B6E8JPE3C_SLACK_APP_TOKEN` and `T0B6E8JPE3C_SLACK_USER_TOKEN`.
+
+The first live fact: `tests/test_live_slack.py` passed on Valor's DM with itself (D0B6HSN666Q). Slack keeps `metadata` on a user-token post and returns it with `include_all_metadata`, so lookup finds a sent part by its marker; the text match stays the path for file parts. The stored text wraps the URL in `<...>` and writes `&` as `&amp;`; `same` matches it.
+
+Decided by default:
+
+- The live test runs in Valor's DM with itself: no one else sees the posts, and it needs only `im:write` and `im:history`, which the app has.
+- Tom named the 1Password vault Yudame Secrets as a place for these secrets. The `valor-local` service account can read it but is refused a write (`Permission (101)`), so the tokens are in the vault `.env` only for now. Once that account can write there, they go in as `VALOR_SLACK_APP_TOKEN` and `VALOR_SLACK_USER_TOKEN`, following the vault's names for the other Slack app.
+
+No Slack job is loaded yet; that waits for the kernel's live run on this Mac (judgement keys, `claude-token`, the valor-demo items and `VALOR_BACKUP_DIR` are not set up here).
