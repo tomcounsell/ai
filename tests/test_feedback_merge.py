@@ -15,6 +15,7 @@ import pytest
 from core import git as kgit
 from core import session, tasks
 from core import workspace as kws
+from tests import denials
 
 pytestmark = pytest.mark.macos
 
@@ -108,6 +109,9 @@ def merged_rows(head: str) -> list[dict]:
     ]  # fmt: skip
 
 
+# Under the denial the failure shows only in the returned note, which the
+# conftest cannot match.
+@pytest.mark.skipif(denials.met(denials._nested), reason=denials.NESTED)
 def test_the_session_brings_the_merged_head_in_and_tells_the_turn_when_it_cannot(tmp_path):
     lay, profile, cand, head = layout(tmp_path, merged_to_origin=False)
     b = brief(lay, profile)
