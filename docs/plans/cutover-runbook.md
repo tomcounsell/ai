@@ -596,6 +596,5 @@ sweep stopped at 3.1 (ten arms done, nine held); 18 stale notices closed, 3
 sent. Step 4 at 10:44:03Z on Tom's yes, bridges up 10:46:46Z; at 6 `main`
 was fast-forwarded to a commit origin's `$REB` had past the checkout. 8.1 is
 open (`valorengels` writes far more than the four). 10.1, 10.2, 10.4, the
-backup pass. 10.3 on Tom's first request at 11:05Z: bound `start`, question
-sent 11:40Z, late because an idle task held the turn slot (finding filed).
-10.5, 10.7, the routines: on Tom's next tasks, nights.
+backup pass. 10.3 at 11:05Z (`start`; question 11:40Z, an idle task held the
+turn slot, finding filed). 10.5, 10.7, the routines: Tom's next tasks, nights.
