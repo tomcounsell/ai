@@ -1,6 +1,5 @@
-# This repository, as the kernel builds it after takeover. The rebuild lands
-# on `branch` until cutover; a task started by a message has no `--branch`,
-# so the spec names it, and `python -m core start ... --project valor
+# This repository, as the kernel builds it. A task started by a message has
+# no `--branch`, so the spec names it, and `python -m core start ... --project valor
 # --branch B` still overrides it. The merge lands on merge_url at that
 # branch, from the kernel mirror with the GitHub credential.
 name = "valor"
@@ -15,9 +14,10 @@ setup = ["uv sync --frozen"]
 suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
 merge_url = "https://github.com/tomcounsell/ai.git"
-# The operator group "Valor rebuild", received on the build Mac.
-chats = ["telegram:-1003890616618"]
-machine = "Mac"
+# The operator group, the Eng group, and Tom's own DM, received on the
+# Cowboy.
+chats = ["telegram:-1003890616618", "telegram:-1003449100931", "telegram:179144806"]
+machine = "Valor the Cowboy"
 
 [env]
 VALOR_PGHOST = "127.0.0.1"
