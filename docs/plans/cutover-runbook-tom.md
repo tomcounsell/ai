@@ -24,8 +24,8 @@ The only places a person is in the path; none is a tap on work Valor started.
    must not write. Each project spec's `merge_url` and branch are where its
    merges land (the cuttlefish branch is assumed `main`; if its deploy
    branch differs, the spec carries that one). No task waits on this.
-3. **Makes the rebuild branch `main`** (G6), after step 4 has printed its
-   checks. First, the four open pull requests against `main` (#3607, #3598,
+3. **Says yes to making the rebuild branch `main`** (G6), to one plain
+   message; Valor then does it, after step 4 has printed its checks. First, the four open pull requests against `main` (#3607, #3598,
    #3596, #3593) are closed or relabeled as aimed at the old system, since
    they would show diverged diffs. Then the old tip is kept
    under a tag:

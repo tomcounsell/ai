@@ -8,15 +8,16 @@ description: Continue the Valor rebuild from wherever it stopped. Reads the rebu
 Carry the rebuild forward, many pipelines at once, from what the
 repository records, until every task left is merged, stopped by the lead, or waiting on
 another task. Work in `~/src/valor-rebuild`
-on branch `valor-cori-rebuild`. Never switch `~/src/ai` off `main`: the live
-old system runs from it.
+on branch `main`, which this system became at the cutover of 2026-10-14
+(the old system is the tag `old-system`). Never touch `~/src/ai`: it is the
+old system's checkout, kept for the way back, and is never pulled.
 
 **Tom pushes here too** (Tom, 2026-10-05). Tom runs this system on his
 own Mac, set up from `docs/plans/rebuild-handoff.md` "Setup", and pushes
-his commits to `valor-cori-rebuild` from there. So `origin` is the
+his commits to `main` from there. So `origin` is the
 branch's truth, not this checkout:
 
-- `git fetch` and fast-forward `valor-cori-rebuild` to `origin` before
+- `git fetch` and fast-forward `main` to `origin` before
   orienting, before cutting any worktree, and before every merge; rebase a
   merge branch onto the fetched tip, and when that brings in Tom's
   commits, run the lead suite again on the result.
@@ -89,23 +90,20 @@ metered, never a reason to wait.
 **Waves.** Milestones 1 to 7 and 2.5 (Slack) are merged, and milestone 7's
 proof that the loop carries its own work to merged is met (verify run
 6c621f57d9ff's fix be63436b888e, merged 2026-10-14 with no hand). What is
-left is the cutover, then the gaps, carried by the new system itself:
+left is carried by the new system itself; the cutover is done (2026-10-14,
+recorded in `docs/plans/cutover-runbook.md`):
 
 | Track | What | Who carries it |
 |---|---|---|
-| X, the cutover | `docs/plans/cutover-runbook.md` on this Mac, from the session prompt `~/src/valor-build-notes/cutover/prompt.md` | One lead session; Tom only for his items in `cutover-runbook-tom.md` |
-| F, live features | The live system's features the rebuild does not carry yet (`~/src/valor-build-notes/m7/live-features-gap.md`) | After cutover, the new Valor itself: it raises them with Tom in the operator group on Telegram, and each one Tom keeps is a task Tom's reply starts |
+| X, the cutover | Done on the Cowboy. Open: Tom's items in `cutover-runbook-tom.md` (the token's reach), and the other three Macs | Tom, then a lead session per Mac |
+| F, live features | The old system's features this one lacks (`~/src/valor-build-notes/m7/live-features-gap.md`) | Runs in chat: Valor raised them with Tom in the operator group (task 8ab23532a169), and each one Tom keeps is a task his own message starts. Never built from a `/build` session |
 | L, the loop backlog | The kernel tasks in `~/src/valor-build-notes/m7/state.md` | The resident kernel, unattended; nobody polls it |
 
 Order:
 
-- **X first.** Nothing in L or F waits for the lead before it. The
-  readiness page (`https://claude.ai/code/artifact/db7e7380-cd8e-4b37-8142-036db9d3fbd7`;
-  read it, then republish to the same URL) is updated at the end of the
-  cutover.
-- **F after step 10 of the runbook passes.** The lead does not build
-  features from this session; it starts one kernel task whose work is to
-  bring Tom the gap list over Telegram, and the rest follows from his replies.
+- **F and L run in the kernel.** A `/build` session neither builds a
+  feature nor speeds a task; it repairs the kernel only when the kernel
+  cannot run its pipeline.
 - **L.** Re-bootstrap `com.valor.routine.emulator` only after
   `backlog:emulator-weekly-limit` merges (Tom: at most $140 a week on
   re-sweeps). Until then a firing runs only by hand with a stopper that
@@ -150,15 +148,15 @@ and its reports say whose they are.
   which a run with no span takes;
 - `unset VIRTUAL_ENV` and only its worktree's own `.venv`.
 
-**Plan files live on `valor-cori-rebuild`.** A builder commits its plan
+**Plan files live on `main`.** A builder commits its plan
 and its records on its task branch; this session cherry-picks those
-plan-file-only commits onto `valor-cori-rebuild` as they land, so section
+plan-file-only commits onto `main` as they land, so section
 3 reads every task's stage from one branch. No two tasks share a plan file.
 
 **Shared files.** The kernel is one `core/` and one `core/schema.sql`.
 Tasks that both change them build in parallel but merge one at a time, in
 the order of the waves table. Before its checks, a builder rebases onto
-the current `valor-cori-rebuild`; after an earlier task merges, every
+the current `main`; after an earlier task merges, every
 later task touching the same files rebases and its checks run again on
 the new head. A builder that needs another task's interface reads that
 task's plan, never its unmerged branch.
@@ -233,7 +231,7 @@ builder's narration.
   line of the plan file. A task gets at most one extra patch round, ever,
   and only for a finding that breaks a Done item.
 - **Merge**, the lead's call (Tom, 2026-10-03: merges are not tapped):
-  fast-forward `valor-cori-rebuild` to the docs
+  fast-forward `main` to the docs
   head, push, run the plan's rollout steps (back up first with
   `python -m core backup`), record them under "Merged", set
   `status: merged`, remove the task's worktrees. A merge the kernel
@@ -248,7 +246,7 @@ builder's narration.
 Once 1.5's takeover gate is merged, new tasks start through the kernel
 where it can carry them; tasks already running with subagents finish
 there. Start a kernel task with:
-`.venv/bin/python -m core start "<instruction>" --project valor --branch valor-cori-rebuild`,
+`.venv/bin/python -m core start "<instruction>" --project valor`,
 then `.venv/bin/python -m core run <task>` until it stops on a question or
 a stop. Valor decides stops itself against the task's objective; relay to Tom only a question in Tom's queue below,
 and record his answers with `core answer`. Step in with subagents only to repair the kernel when it

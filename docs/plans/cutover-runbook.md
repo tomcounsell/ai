@@ -14,7 +14,7 @@ Q3) are in [cutover-data.md](cutover-data.md); the machine's parts are in
 [rebuild-handoff.md](rebuild-handoff.md); what only Tom does is
 [cutover-runbook-tom.md](cutover-runbook-tom.md).
 
-**Cutover date: ______ (Tom writes it here.)** Everything runs on the Cowboy
+**Cutover date: 2026-10-14 (Tom's date, asked through the architect).** Everything runs on the Cowboy
 (`Valor the Cowboy`, user `valorengels`), by Valor, in one sitting. The
 Captain, the Bald, and the Pirate are not touched (G11).
 
@@ -44,14 +44,12 @@ OLDPY=~/src/ai/.venv/bin/python      # read only use: PYTHONDONTWRITEBYTECODE=1,
 REB=$(git branch --show-current)     # the rebuild branch, before step 6
 ```
 
-The old jobs: `com.valor.bridge` (Telegram), `worker`,
-`reflection-worker`, `bridge-watchdog`, `update`, `email-bridge`. The new
-jobs: `com.valor.kernel`, `kernel.telegram`, `email`, `routine.expiry`,
-`routine.emulator`, `routine.verify`, `routine.conditions`, `backup`. The
-routines run at their own times: `verify` 02:00, `expiry` 04:00,
-`conditions` 05:00 daily, `emulator` Sunday 01:00. Left as they are: `caffeinate`, `log-rotate`,
-`brew-nightly`, `nightly-tests`, the machine Postgres, and the old Redis
-(it holds the way back and the Memory records).
+The old jobs: `com.valor.bridge` (Telegram), `worker`, `reflection-worker`,
+`bridge-watchdog`, `update`, `email-bridge`. The new jobs: `com.valor.kernel`,
+`kernel.telegram`, `email`, and `backup`, and the routines `verify` (02:00),
+`expiry` (04:00), `conditions` (05:00 daily), and `emulator` (Sunday 01:00),
+each `routine.NAME`. Left as they are: `caffeinate`, `log-rotate`,
+`brew-nightly`, `nightly-tests`, the machine Postgres, and the old Redis.
 
 ## 0. Before the day
 
@@ -107,9 +105,7 @@ restart has had its rows taken already).
   `conditions` routine does not fetch their repositories. They wait for the
   Captain's own install (G11); until then the Captain's old bridge keeps
   their groups. `branch` is `main` for both; cuttlefish's is unconfirmed.
-- `valor.toml` is not edited here. Its `machine` and `chats` change in step
-  7, with the plists: the Cowboy's running kernel calls itself `Mac` until
-  then, and an earlier edit would move the operator group off it.
+- `valor.toml` is not edited here; it changes in step 7 (decided 2).
 - No other spec. The teammate and customer-service groups, the thirteen
   other DM users, and the email contacts and domains stay out of every spec
   on purpose (G1): a chat in no spec is not read at all. Cyndra, royop,
@@ -206,9 +202,8 @@ c=collections.Counter(json.loads(l)['project_key'] for l in open('$CUT/memory.js
 print(dict(c))"
 ```
 
-Check: 3,447 lines when this was written, and the script prints the count
-it wrote. Project counts are about valor 1,454, company 783, cyndra 572,
-satsol 360, psyoptimal 116, gato-os and gato 103, popoto 45, cuttlefish 12.
+Check: the line count is the one the script prints (3,461 at cutover:
+valor 1,464, company 783, cyndra 572, satsol 360, psyoptimal 116).
 
 **2.2 The newest Telegram message the old system recorded, per chat**
 (G4) is taken in step 5, after the old bridge has stopped, by
@@ -223,9 +218,14 @@ $SQL "select count(*) from events r where r.type = 'release.requested' and not e
 $SQL "select count(*) from events where at > now() - interval '10 minutes' and type not like 'routine.%'"
 ```
 
-Check: the first count lists no send waiting for a bridge, and the second is 0. If a task is mid
-turn, wait for its turn to end (`core status TASK_ID`); do not stop it.
-Notices not yet sent are fine: the new bridge sends them in step 9.
+Check: the first count lists no send waiting for a bridge. The second is
+0 or, with a backlog running, the running turn has ended (`core status
+TASK_ID`); then go straight on. Never stop a task: the kernel's recovery
+covers a restart between turns. A running emulator sweep is stopped before
+this step (`core stop RUN`, then its watchers by pid); its finished arms
+are recorded and the rest held. Notices not yet sent go out in step 9;
+before it, one Tom should not get (a question answered, a refusal on a
+guard nobody adds) is closed with `scripts/cutover_close_notice.py`.
 
 **3.2 The old worker has no live turn** (G5). The old sessions are not
 imported; open requests are re-asked as messages afterwards.
@@ -277,10 +277,11 @@ Steps 5 to 9 are kept short for that reason.
 **5.1 Telegram.** The new bridge's first pass in a chat with no mark
 records only the newest message as its starting point. The old system's
 last handled id, written as the mark, makes the first pass receive exactly
-the messages the old one did not.
+the messages the old one did not. The valor spec gains its chats only in
+step 7, so they are named here by hand.
 
 ```
-IDS=$($PY -c "from core import intake; print(' '.join(intake.owned('telegram')))")
+IDS="$($PY -c "from core import intake; print(' '.join(intake.owned('telegram')))") -1003890616618 -1003449100931 179144806"
 cd /tmp && SEEN=$(PYTHONDONTWRITEBYTECODE=1 $OLDPY -I ~/src/valor-rebuild/scripts/cutover_seed_seen.py $IDS); cd ~/src/valor-rebuild
 echo "$SEEN" > $CUT/seed-seen.json
 $PY - <<PYEOF
@@ -299,18 +300,19 @@ The command keeps the larger of the old and new mark, so the operator
 group's mark is never lowered.
 
 Check: the printed map has an id for each listed chat the old system had
-records for (popoto's `-5189826365` has none and keeps the newest-message
-start, so a message there between step 4 and step 9 is not received), and
+records for (a chat with none keeps the newest-message start), and
 `ls -l ~/.config/valor-kernel/telegram-seen.json` shows `-rw-------`.
 
 **5.2 The mailbox start** (G7). The old email bridge is off, so its unread
 mail stays unseen. The new bridge receives only mail on or after
 `VALOR_EMAIL_SINCE`, which step 7 sets to the cutover date.
 
-## 6. Tom's step: the branch becomes `main` (G6)
+## 6. Tom's yes: the branch becomes `main` (G6)
 
-Tom does this (item 3 of [cutover-runbook-tom.md](cutover-runbook-tom.md)); Valor waits. Every old service is off
-on the Cowboy, so nothing here pulls the old `main`.
+Tom answers one plain yes or no; on his yes Valor does item 3 of
+[cutover-runbook-tom.md](cutover-runbook-tom.md) (`valorengels` can push, `main` is unprotected), after
+`git fetch`, since a merge may have moved origin's `$REB` past the checkout.
+Every old service is off on the Cowboy, so nothing here pulls the old `main`.
 
 Check:
 
@@ -403,10 +405,13 @@ access (by hand, GitHub collaborator).
 
 ```
 launchctl enable $D/com.valor.kernel; launchctl bootstrap $D $LA/com.valor.kernel.plist
-for J in routine.expiry routine.emulator routine.verify routine.conditions backup; do
+for J in routine.expiry routine.verify routine.conditions backup; do
   launchctl enable $D/com.valor.$J; launchctl bootstrap $D $LA/com.valor.$J.plist; done
 sleep 10
 ```
+
+`routine.emulator` stays booted out until task 3406a39ecec9 (the weekly
+spend limit in code) merges, Tom's condition; then it is enabled the same way.
 
 Check:
 
@@ -548,13 +553,8 @@ wake rolls it.
 
 ## 11. The way back
 
-It is in [cutover-runbook-back.md](cutover-runbook-back.md): stop the new
-system (grants off, tasks stopped, kernel stopped), keep the new `main` tip
-under a tag before Tom rewinds `main`, write the messages the new system
-handled into the old dedup, re-enable the old jobs with the update job
-last, and settle unsent notices before cutting over again. Use it if a
-check in steps 8 to 10 fails and cannot be fixed in place, or when Tom says
-so.
+[cutover-runbook-back.md](cutover-runbook-back.md), used if a check in steps 8 to 10 fails and
+cannot be fixed in place, or when Tom says so.
 
 ## 12. Gaps, each with its step or why it is open
 
@@ -588,5 +588,12 @@ Each is Valor's call, with its reason. The way back's are in
    `VALOR_BACKUP_DIR` in the backup job and the kernel's job; the settings
    default is unchanged. Reason: PINK is the disk the handoff and B1 used,
    and the rollout's backup before a schema change runs in the kernel's job.
-5. **10.3 is read on Tom's first request, with no stand-in.** Reason: no
-   stand-in account exists, and only Tom's id starts a task.
+
+## Record, 2026-10-14
+
+Output of every check: `~/src/valor-build-notes/cutover-2026-10-14/`. The
+sweep stopped at 3.1 (ten arms done, nine held); 18 stale notices closed, 3
+sent. Step 4 at 10:44:03Z on Tom's yes, bridges up 10:46:46Z; at 6 `main`
+was fast-forwarded to a commit origin's `$REB` had past the checkout. 8.1 is
+open (`valorengels` writes far more than the four). 10.1, 10.2, 10.4, the
+backup pass; 10.3, 10.5, 10.7, the routines: on Tom's first tasks, nights.

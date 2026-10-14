@@ -74,23 +74,10 @@ starts nothing, until spoofed mail gives the incident.
 
 ## Execution: who builds what
 
-**Phase A, session-driven (milestone 1).** The new system cannot run its
-own pipeline until milestone 1 builds it. So milestone 1 is built by agents
-driven from a Claude Code session in `~/src/valor-rebuild`, playing the
-same stages by hand:
-
-| Stage | Who runs it in phase A |
-|---|---|
-| judge, clarify | the driving session reads the task and asks Tom only what changes the plan |
-| plan | the builder agent writes the plan file in the repo and commits it |
-| critique | a fresh agent that never saw the builder's context |
-| build | one builder agent per task |
-| test, review, docs | three fresh agents in parallel on the same commit; review is Opus |
-| patch | the same builder agent, resumed with every finding at once |
-| merge | a push to the rebuild branch, performed at request when the predicate holds |
-
-The driving session keeps no findings log beyond the plan file and the
-verdicts in each commit message.
+**Phase A, session-driven (milestone 1).** The new system could not run
+its own pipeline until milestone 1 built it, so agents driven from a Claude
+Code session in `~/src/valor-rebuild` played the same stages by hand, with
+a fresh critic, review on Opus, and a push to the rebuild branch at merge.
 
 **The takeover point.** When milestone 1 is done, Valor builds everything
 after it through its own kernel. Tom starts each task, and each merge leaves
@@ -589,20 +576,15 @@ counts and failing ids.
 **Leaves out.** Any controller, research cycle, arena, promotion step, or merge path or gate of
 the loop's own; container tests in `verify`.
 
-## Before cutover
+## Cutover
 
-Cutover is Tom's to plan. These must be true first:
-
-- Milestones 1 to 4 are done and their evidence holds on the merged branch.
-- A real task, not a replay, has gone from a Telegram message to a merged
-  change Tom used, with its attention logged.
-- The emulator's last sweep shows no baseline item worse than its bare
-  run.
-- Nightly backups run and one restore has been rehearsed.
-- RAM on the target Mac measured under a working turn, with the bridges
-  connected.
-- The old system's data the new one needs (projects, chat ownership,
-  operator identity) is listed, with where each comes from.
+Done on 2026-10-14 on the Cowboy, by [cutover-runbook.md](cutover-runbook.md), whose record
+holds every check. `main` is this system; the old one is the tag
+`old-system`, its jobs on the Cowboy disabled and kept. The new Telegram
+and email bridges serve Tom. The emulator routine stays off until its
+weekly spend limit merges. Open: the GitHub token's reach (Tom's), the
+other three Macs, and the old system's features this one lacks, which Tom
+picks and orders in the operator group, one task each.
 
 ## Decided by default
 
