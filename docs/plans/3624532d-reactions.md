@@ -8,7 +8,7 @@ defaults I named in the question: these are status reactions on the message
 Valor acts on, in Telegram and Slack, in the chats this machine owns. Tom's
 own reactions stay data, not input.
 
-Revision 1 answers the first critique. Its changes are marked (r1).
+Revision 1 answers the first critique and revision 2 the second. Their changes are marked (r1) and (r2).
 
 ## The reading of "premium"
 
@@ -135,9 +135,22 @@ state as evidence.
    - **The outbox.** `core/bridge.py` gains `ReactionDue(reaction_id,
      task_id, chat_id, message_id, emoji, stage, at)`. `Outbox.due` yields
      one for each of this channel's `reaction.requested` rows that has no
-     `reaction.placed` or `reaction.failed`, in row order, so 👀 is placed
-     before its shape. `Outbox.reacted(item, error=None)` writes one of the
-     two. `wait` also wakes on `reaction.requested`. A bridge reacts with
+     `reaction.placed` or `reaction.failed`, in row order.
+     `Outbox.reacted(item, error=None)` writes one of the two. `wait` also
+     wakes on `reaction.requested`.
+   - **(r2) A shape supersedes its 👀.** Order within one pass does not
+     survive a retry: a 👀 that hits a flood wait is yielded again on a
+     later wake, after its shape may have been placed, and would put 👀
+     back (Telegram replaces the list; Slack adds `eyes` beside the shape).
+     So `Outbox.due` never yields a `seen` reaction once a `shape`
+     `reaction.requested` exists for the same `received_id`. Instead it
+     closes that `seen` row itself with `reaction.placed` carrying
+     `superseded: true` (nothing sent), in a savepoint, so the result
+     index still holds one result per `reaction_id` and a second outbox
+     racing it writes nothing. The shape's own placement does the
+     replacing: Telegram's list set to the shape alone, and Slack's
+     `reactions.remove` of `eyes` answered `no_reaction` when 👀 never
+     landed, which counts as done. A bridge reacts with
      its own account, as it sends notices. There is no broker effect,
      approval, or report: the reaction is a reversible mark in a chat Tom
      owns and carries no text.
@@ -161,16 +174,25 @@ state as evidence.
        as a send's do: `FloodWait` and `Refused` (for
        `REACTION_INVALID`, `REACTION_EMPTY`, and a chat that limits its
        reactions). Telethon stays inside `wire.py`.
-     - **The sender.** `Sender.react` in `bridges/telegram/send.py` holds a
-       flood wait like a send. It records `reaction.failed` with the
-       refusal, and `reaction.placed` on success.
+     - **(r2) The sender.** `Sender.react` in `bridges/telegram/send.py`
+       follows `Sender.notice` (send.py:246-250), not a send's hold: it
+       awaits `self.flood.wait()` before `wire.react`; on `FloodWait` it
+       calls `self.flood.hit(e.seconds)`, logs once, writes nothing, and
+       returns, so the outbox yields it again on a later wake. Any other
+       transient `WireError` (`NotConnected`, `InDoubt`) is handled the
+       same way: logged, unmarked, retried. Only `Refused` writes
+       `reaction.failed`, with Telegram's error; success writes
+       `reaction.placed`. A flood wait never writes `reaction.failed`,
+       which the result index would make final.
      - **One reaction at a time.** Setting the list replaces the account's
        earlier reaction, so the shape replaces 👀 in one call.
    - **Slack** (`bridges/slack/send.py`): `Sender.react` calls
      `reactions.add` with the new name. For a `shape` reaction it then
      calls `reactions.remove` with `eyes`.
      - **Answers.** `already_reacted` and `no_reaction` count as done, so a
-       retry is harmless. Any other error is recorded as `reaction.failed`.
+       retry is harmless. (r2) A 429 or a lost connection is left unmarked
+       and retried on a later wake, as the Slack sender's notices are; any
+       other error is recorded as `reaction.failed`.
      - **Addressing.** A DM's `<team>/<user>` resolves to its conversation
        id the way the sender already resolves it.
      - **The scope.** `reactions:write` joins `SCOPES` in
@@ -271,6 +293,9 @@ Critique rounds: 2. Review rounds: 1.
 - **`tests/test_bridge.py`**
   - `Outbox.due` yields a reaction until it is placed or failed, in row
     order, and only on its own channel.
+  - (r2) Given a message's `seen` and `shape` both unplaced, `Outbox.due`
+    yields only the shape and closes the `seen` row with `reaction.placed`
+    `superseded: true`; two outboxes doing so at once write one result.
   - `reacted` writes once; the index skips a second write.
   - `wait` wakes on `reaction.requested`.
   - The local bridge's loop, handed a reaction row on another channel,
@@ -279,11 +304,18 @@ Critique rounds: 2. Review rounds: 1.
   - 👀 then the shape leaves exactly one reaction, the shape.
   - An emoji outside the standard list (✍ with U+FE0F) is refused and
     recorded as `reaction.failed`, and the task's reply still sends.
-  - A flood wait on a reaction delays it without dropping it.
+  - A flood wait on a reaction delays it without dropping it: no
+    `reaction.failed` is written, and after the wait it is placed.
+  - (r2) With 👀 and the shape both due, 👀 hits a flood wait, the shape is
+    placed, and after the wait the message shows only the shape.
+  - (r2) `NotConnected` on a reaction leaves it unmarked and it is placed on
+    the next wake.
 - **Slack (emulator)**
   - Add-then-remove leaves only the shape.
   - `already_reacted` and `no_reaction` count as done.
   - `missing_scope` records `reaction.failed`, and the reply still posts.
+  - (r2) With 👀 and the shape both due, 👀 hits a 429, the shape is placed,
+    and after the wait the message carries only the shape's name.
 - **The whole suite** runs, with pre-existing failures named apart from new
   ones.
 
