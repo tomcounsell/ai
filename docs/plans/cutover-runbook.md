@@ -594,7 +594,6 @@ Each is Valor's call, with its reason. The way back's are in
 Output of every check: `~/src/valor-build-notes/cutover-2026-10-14/`. Sweep
 stopped at 3.1 (ten arms done, nine held); 18 stale notices closed, 3 sent.
 Step 4 10:44:03Z on Tom's yes, bridges up 10:46:46Z; at 6 `main` fast-forwarded
-to a commit origin's `$REB` had past the checkout. 8.1 open (`valorengels`
-writes far more than the four). 10.1, 10.2, 10.4, backup pass; 10.3 11:05Z
-(`start`; question 11:40Z, late: an idle task held the turn slot, finding
-filed). 10.5, 10.7, the routines: Tom's next tasks, nights.
+to a commit origin's `$REB` had past the checkout. 8.1 open. 10.1, 10.2, 10.4,
+backup pass; 10.3 11:05Z (question 11:40Z, late: an idle task held the turn
+slot, finding filed). 10.5, 10.7, the routines: Tom's next tasks, nights.
