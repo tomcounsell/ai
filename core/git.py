@@ -29,9 +29,7 @@ import asyncio
 import contextlib
 import contextvars
 import functools
-import hashlib
 import io
-import json
 import os
 import re
 import signal
@@ -664,8 +662,8 @@ def replay(
     it, its message, author, and committer kept, so the same replay always
     makes the same ids. No path either side changes is one the other
     changes, so `tip` holds each of the candidate's paths as `base` did and
-    the patch `tip..head'` is `base..head` byte for byte: every hunk, and
-    every governance instance id, is the one the checks read. `kernel` names a repository only the kernel writes
+    the patch `tip..head'` is `base..head` byte for byte: every hunk is the
+    one the checks read. `kernel` names a repository only the kernel writes
     (`trusted`), else it is a workspace a turn writes (`out`, its config
     checked first). Returns the replay and None, or None and why not.
     Raises `GitError`."""
@@ -718,78 +716,3 @@ def replay(
                 "commit-tree", tree, "-p", parent, "-m", message, extra_env=ident
             )
     return Replayed(base, tip, replayed[sha], parent), None
-
-
-# -- governance instances --------------------------------------------------------
-
-HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@ ?(.*)$")
-
-
-@dataclass(frozen=True)
-class Hunk:
-    path: str
-    start: int
-    length: int
-    context: str
-    added: tuple[str, ...]
-    removed: tuple[str, ...] = ()
-
-    def id(self) -> str:
-        """The instance id: the path, the hunk header's function context, the
-        added lines, and the removed lines when there are any, without line
-        numbers, so the same hunk on a later candidate keeps its id and a
-        changed one gets a new id. A hunk that only adds lines digests
-        [path, context, added]."""
-        lines = [list(self.added), list(self.removed)] if self.removed else [list(self.added)]
-        body = json.dumps([self.path, self.context, *lines], separators=(",", ":"))
-        return hashlib.sha256(body.encode()).hexdigest()[:16]
-
-
-def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk]:
-    """The hunks of one path's diff between two commits, as git computes
-    them (three lines of context, so the header carries function context).
-    `path` is read as a file name only (`--literal-pathspecs`), never as a
-    pathspec with magic or a glob, and a directory (`.`, `hooks`) is no
-    file of the diff, so it has no hunks."""
-    diff = ("--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames")
-    named = [n for n in out(workspace, *diff, "--name-only", "-z", older, newer, "--", path).split("\0") if n]
-    if named != [path]:
-        return []
-    text = out(workspace, *diff, "--no-color", older, newer, "--", path)
-    found: list[Hunk] = []
-    current = None
-    for line in text.splitlines():
-        m = HUNK.match(line)
-        if line.startswith("diff --git "):
-            # A typechange (a file to a symlink) is two sections for one
-            # path; each opens with its own `---` and `+++` headers.
-            current = None
-        elif m:
-            current = {
-                "start": int(m.group(1)),
-                "length": int(m.group(2) if m.group(2) is not None else 1),
-                "context": m.group(3).strip(),
-                "added": [],
-                "removed": [],
-            }
-            found.append(current)  # type: ignore[arg-type]
-        # A section's `---` and `+++` headers come before its first `@@`, so
-        # a line inside a hunk is a line, whatever its text starts with.
-        elif current is not None and line.startswith("+"):
-            current["added"].append(line[1:])
-        elif current is not None and line.startswith("-"):
-            current["removed"].append(line[1:])
-    return [
-        Hunk(path, h["start"], h["length"], h["context"], tuple(h["added"]), tuple(h["removed"]))  # type: ignore[index]
-        for h in found
-    ]
-
-
-def hunk_at(workspace: str | Path, older: str, newer: str, path: str, line: int) -> Hunk | None:
-    """The hunk whose new range holds `line`. A hunk that only removes lines
-    has its context lines as its new range, and a deleted or emptied file's
-    one hunk is read at line 0."""
-    for h in hunks(workspace, older, newer, path):
-        if h.start <= line < h.start + max(h.length, 1):
-            return h
-    return None

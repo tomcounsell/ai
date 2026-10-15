@@ -14,6 +14,4 @@ your commits), `no_change`, or `changes` (a doc states something the code
 should still honor and the candidate breaks it, or a doc cannot be made
 true without a code change), your findings, and `head`, the full 40-character
 commit id your clone ends at, as `git rev-parse HEAD` prints it. The
-kernel keeps your commits on top of the candidate only while each touches doc paths alone, with regular file modes, and
-judges governance itself over the diff it kept, since a doc can add a
-rule. A commit it drops is a finding of kind `changes`.
+kernel keeps your commits on top of the candidate only while each touches doc paths alone, with regular file modes. A commit it drops is a finding of kind `changes`.

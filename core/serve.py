@@ -842,10 +842,7 @@ class Kernel:
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, task_id)
         self.seen[task_id] = latest
-        if out.get("preempted"):
-            # Nothing moved: the step is ready again, behind the foreground.
-            self.seen.pop(task_id, None)
-        elif out.get("status") == "parked":
+        if out.get("status") == "parked":
             # Asked again on the next row or the next `serve_tick_s` wake.
             self.seen.pop(task_id, None)
             self.parked[task_id] = latest

@@ -5,8 +5,7 @@ A run is a node (no `sdlc` marker) on a workspace the kernel provisions from
 the routine's project spec, a child of the routine's objective with the
 marker `{"objective": NAME, "kernel_tip": SHA}`. Its Brief's `base_sha` is
 the branch head it tests, so the suite never runs in the kernel's own
-checkout. The runner holds `run:<run>` and the turn slot (background work,
-so Tom's turns preempt it) while `checks.suite` runs, appends the usable
+checkout. The runner holds `run:<run>` and a turn slot while `checks.suite` runs, appends the usable
 payload as `suite.ran`, starts each finding through `findings.start_fix`,
 and removes the workspace last.
 """
@@ -265,8 +264,6 @@ async def _run(ctx: Context, run_id: str) -> Ran:
                 async with checks.stop_heard(cc) as stop:
                     payload = await checks.suite(cc, lay, b, b.base_sha, ROLE, stop, digest=digest)
             except checks._Stopped:
-                if (await checks.interrupted(cc)).get("preempted"):
-                    return Ran(run_id, "running", "preempted by foreground work; the next firing resumes it")
                 return await _stopped(ctx, run_id, b)
         if payload["cause"] == "kernel":
             await _remove(ctx.conn, run_id, b)

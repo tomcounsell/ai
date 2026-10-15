@@ -56,11 +56,11 @@ VERDICTS: dict[State | Check, frozenset[str]] = {
     State.CRITIQUE: frozenset({"sound", "revise"}),
     State.BUILD: frozenset({"candidate", "asked", "idle", "failed"}),
     State.PATCH: frozenset({"candidate", "asked", "ended", "idle", "failed"}),
-    State.MERGE: frozenset({"released", "feedback", "governance_granted", "rebase"}),
+    State.MERGE: frozenset({"released", "feedback", "rebase"}),
     State.MERGED: frozenset({"feedback"}),
     State.ENDED: frozenset({"feedback"}),
     Check.TEST: frozenset({"pass", "red", "gaps"}),
-    Check.REVIEW: frozenset({"pass", "changes", "governance_refused"}),
+    Check.REVIEW: frozenset({"pass", "changes"}),
     Check.DOCS: frozenset({"updated", "no_change", "changes"}),
 }
 
@@ -80,7 +80,6 @@ TRANSITIONS: dict[tuple[State, str], State] = {
     (State.PATCH, "ended"): State.ENDED,  # Valor stopped the work
     (State.MERGE, "released"): State.MERGED,
     (State.MERGE, "feedback"): State.PATCH,
-    (State.MERGE, "governance_granted"): State.CHECKS,  # review reruns alone
     (State.MERGE, "rebase"): State.PATCH,  # the target moved; spends no round
     (State.MERGED, "feedback"): State.PATCH,
     (State.ENDED, "feedback"): State.PATCH,
@@ -179,25 +178,11 @@ class Finding:
 
 
 @dataclass(frozen=True)
-class Instance:
-    """One governance instance a review or docs verdict named: a hunk of the
-    diff, identified by `git.Hunk.id`."""
-
-    id: str
-    path: str
-    summary: str = ""
-    incident: str | None = None
-    mission_item: str | None = None
-    line: int | None = None  # where in the path's diff the reviewer named it
-
-
-@dataclass(frozen=True)
 class CheckVerdict:
     check: Check
     candidate: Candidate
     verdict: str
     findings: tuple[Finding, ...]
-    instances: tuple[Instance, ...]
     event_id: int
     payload: dict[str, Any]
 
@@ -212,7 +197,7 @@ class Loops:
 class JoinResult:
     row: int  # the join table's row, 1 to 6
     target: State
-    outcome: str | None  # for MERGE: passed, gaps, governance_refused; for ENDED: did_not_pass
+    outcome: str | None  # for MERGE: passed, gaps; for ENDED: did_not_pass
     spends: str | None  # "round" (the plan's) or "last" (Valor's one more) for a send-back
     findings: tuple[Finding, ...]
 
@@ -238,7 +223,6 @@ class Fold:
     entry_finished: bool = False
     join: JoinResult | None = None
     delivery: dict[str, Any] | None = None
-    granted: set[str] = field(default_factory=set)
     merge_effect: dict[str, Any] | None = None
     # `verdicts.carried` rows applied, oldest first: each moved the verified
     # candidate onto a moved target's new tip.
@@ -269,19 +253,6 @@ class Fold:
             min(REVIEW_MAX, max(int(plan.get("review_rounds", 0)), self.raised["review_rounds"])),
         )
 
-    def instances(self) -> list[Instance]:
-        """Every governance instance the current candidate's review and docs
-        verdicts name."""
-        found: dict[str, Instance] = {}
-        for check in (Check.REVIEW, Check.DOCS):
-            if check in self.checks:
-                for i in self.checks[check].instances:
-                    found.setdefault(i.id, i)
-        return list(found.values())
-
-    def ungranted(self) -> list[Instance]:
-        return [i for i in self.instances() if i.id not in self.granted]
-
     def summary(self) -> dict[str, Any]:
         """The fold as `status` shows it: plain JSON."""
         return {
@@ -304,14 +275,8 @@ class Fold:
             "join": {"row": self.join.row, "goes_to": self.join.target.value, "outcome": self.join.outcome}
             if self.join
             else None,
-            "governance": [
-                {"id": i.id, "path": i.path, "summary": i.summary, "granted": i.id in self.granted}
-                for i in self.instances()
-            ],
             "merge_effect": self.merge_effect,
-            "carried": [
-                {k: c.get(k) for k in ("from", "to", "tip", "verdicts", "grants")} for c in self.carried
-            ],
+            "carried": [{k: c.get(k) for k in ("from", "to", "tip", "verdicts")} for c in self.carried],
             "ignored": len(self.ignored),
         }
 
@@ -330,24 +295,9 @@ def _findings(source: str, payload: dict[str, Any]) -> tuple[Finding, ...]:
     return tuple(out)
 
 
-def _instances(payload: dict[str, Any]) -> tuple[Instance, ...]:
-    gov = payload.get("governance") or {}
-    return tuple(
-        Instance(
-            str(i["id"]),
-            str(i.get("path", "")),
-            str(i.get("summary", "")),
-            i.get("incident"),
-            i.get("mission_item"),
-            i.get("line"),
-        )
-        for i in gov.get("instances") or []
-    )
-
-
 def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]) -> JoinResult:
-    """The join table, read in its order, first match wins. Row 2 reads
-    review only. The docs verdict holds no row: docs run, and their
+    """The join table, read in its order, first match wins (rows 1 and 3
+    to 6). The docs verdict holds no row: docs run, and their
     findings go on the delivery. One round count: a review `changes`, a
     red test, and test gaps each send the work back inside the plan's
     `review_rounds` (row 3). Once those are spent, gaps alone merge with
@@ -358,8 +308,6 @@ def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]
     found = tuple(f for c in (Check.TEST, Check.REVIEW, Check.DOCS) for f in checks[c].findings)
     if r == "pass" and t == "pass":
         return JoinResult(1, State.MERGE, "passed", None, found)
-    if r == "governance_refused":
-        return JoinResult(2, State.MERGE, "governance_refused", None, found)
     if counts["review_rounds"] < loops.review_rounds:
         return JoinResult(3, State.PATCH, None, "round", found)
     if r == "pass" and t == "gaps":
@@ -539,7 +487,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if p["verdict"] not in VERDICTS[check]:
             return "verdict outside its enum"
         f.checks[check] = CheckVerdict(
-            check, candidate, p["verdict"], _findings(check.value, p), _instances(p), row.get("id") or 0, p
+            check, candidate, p["verdict"], _findings(check.value, p), row.get("id") or 0, p
         )
         if len(f.checks) == 3:
             result = join(f.checks, f.loops, f.counts)
@@ -585,20 +533,6 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         return None
     if kind == "verdicts.carried":
         return _carry(f, p)
-    if kind == "guard.granted":
-        if p.get("instance_id"):
-            f.granted.add(str(p["instance_id"]))
-        if (
-            s is State.MERGE
-            and f.join is not None
-            and f.join.outcome == "governance_refused"
-            and Check.REVIEW in f.checks
-            and all(i.id in f.granted for i in f.checks[Check.REVIEW].instances)
-        ):
-            del f.checks[Check.REVIEW]
-            f.join = None
-            _enter(f, State.CHECKS, entry)
-        return None
     if kind in ("effect.held", "effect.intent", "effect.outcome", "effect.refused"):
         return _merge_effect(f, kind, p, entry)
     return None
@@ -609,8 +543,7 @@ def _carry(f: Fold, p: dict[str, Any]) -> str | None:
     moved target's new tip with an identical patch (`verdicts._carry`):
     the replayed sha becomes the current candidate, carrying the test,
     review, and docs verdicts (the docs head the replayed one) and the
-    delivery, so the merge predicate reads them for it, and its grants,
-    which bind the same hunk ids. The task stays in `merge` with no merge
+    delivery, so the merge predicate reads them for it. The task stays in `merge` with no merge
     effect for the new sha; it spends no rebase."""
     if f.state is not State.MERGE:
         return f"verdicts carried in {f.state}"
@@ -658,7 +591,6 @@ def _merge_effect(f: Fold, kind: str, p: dict[str, Any], entry: dict[str, Any]) 
             "state": state,
             "candidate": {"sha": named.sha, "turn_id": named.turn_id},
             "payload_sha256": p.get("payload_sha256"),
-            "grants": len(f.granted),  # the grants that stood when it was requested
             **({"at": p["at"]} if kind == "effect.refused" and p.get("at") else {}),
         }
         return None

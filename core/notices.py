@@ -14,9 +14,6 @@ and has not requested, to `settings.operator_channel` and
 `settings.operator_chat`:
 
 - `question` (`about_key` `question:<id>`): the open question.
-- `delivered` (`delivered:<sha>`): a delivery whose merge waits on Tom's
-  grant of a governance instance: each named, with its `path:line` and its
-  `python -m core grant` command.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
   what did not pass, and why it stopped. It asks for nothing; a reply to
   it is feedback.
@@ -43,7 +40,6 @@ notice's short id, so a bridge's lookup matches the sent message exactly.
 The bridge sends notices as they come.
 """
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -139,18 +135,6 @@ async def owe(conn, task_id: str) -> list[str]:
                     text=f"Task {task_id} asks:\n\n{asked.get('text', '')}\n\nReply to this message to answer.",
                 )
             )
-    if f.delivery and f.state is State.MERGE:
-        owed = _delivered_owed(f)
-        if owed is not None:
-            made.append(
-                await request(
-                    conn,
-                    task_id,
-                    kind="delivered",
-                    about_key=owed,
-                    text=delivered_text(task_id, f.delivery, f.ungranted(), await headline(conn, task_id)),
-                )
-            )
     if f.state is State.ENDED and f.entry is not None:
         made.append(
             await request(
@@ -162,20 +146,6 @@ async def owe(conn, task_id: str) -> list[str]:
             )
         )
     return [m for m in made if m]
-
-
-def _delivered_owed(f: machine.Fold) -> str | None:
-    """The `delivered` notice's `about_key` while the current delivery's
-    merge waits on Tom's grant of a governance instance, else None (a merge
-    that lands has its report; one that cannot ends the task)."""
-    sha = ((f.delivery.get("candidate") or {}).get("sha")) or ""
-    current = f.candidate is not None and (f.delivery.get("candidate") or {}) == {
-        "sha": f.candidate.sha,
-        "turn_id": f.candidate.turn_id,
-    }
-    if current and f.delivery.get("outcome") in ("passed", "gaps", "governance_refused") and f.ungranted():
-        return f"delivered:{sha}"
-    return None
 
 
 def report_link(task_id: str) -> str:
@@ -364,33 +334,3 @@ def _unstorable(task_id: str, kind: str, about_key: str, why: str, notice_id: st
         f"Task {task_id} has a notice ({kind}, {about_key}) whose text the ledger's JSON (Postgres jsonb) "
         f"cannot store: {why}. The task's ledger holds what it is about.\n\n{tag(notice_id)}"
     )
-
-
-def delivered_text(
-    task_id: str,
-    delivery: dict[str, Any],
-    waiting: Sequence[machine.Instance] = (),
-    head: str | None = None,
-) -> str:
-    """The `delivered` notice: the merge waits on Tom's grant of each
-    governance instance named, where it sits in the diff, and the command
-    that grants it. Under autonomous act this is the one question about
-    that merge."""
-    lines = [
-        lead(
-            head,
-            "it is ready, and it adds a check or approval step, which needs your grant before it can merge.",
-        ),
-    ]
-    built = note(delivery.get("summary"))
-    if built:
-        lines += ["", built]
-    lines.append("")
-    for i in waiting:
-        where = f"{i.path}:{i.line}" if i.line is not None else i.path
-        lines += [
-            f"- governance instance {i.id} at {where}" + (f" ({i.summary})" if i.summary else ""),
-            f'  grant with: python -m core grant {task_id} {i.id} --note "..."',
-        ]
-    lines += ["", f"The details are on its status page: {report_link(task_id)}"]
-    return "\n".join(lines)

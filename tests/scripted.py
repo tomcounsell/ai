@@ -9,8 +9,8 @@ Also: a workspace (a work branch at the base, a bare origin whose HEAD names `ma
 task started on it and judged by the real judge runner against the local
 judgement upstream (`tests/judgement_upstream.py`), the router with the
 working-session runner, and scripted verdicts: session-leg rows with a
-scripted turn id and model, their breadth and governance judgements asked
-of the local upstream.
+scripted turn id and model, a test's breadth judgement asked of the local
+upstream.
 """
 
 import json
@@ -250,25 +250,12 @@ async def critique(dsn: str, task: str, verdict: str = "sound", **kw) -> None:
 
 
 async def judgements(dsn: str, task: str, which: Check, answer: str = "false", **kw) -> dict:
-    """The judgements a scripted check verdict names, asked of the local
-    upstream with every question answered `answer`: breadth for test
-    (`true` lists every gap), governance for every hunk of review's or
-    docs' diff (`true` makes each an instance)."""
+    """The judgement a scripted test verdict names, asked of the local
+    upstream with every question answered `answer` (`true` lists every
+    gap)."""
     up = judgement_upstream.shared()
     if which is Check.TEST and "breadth" not in kw:
         kw["breadth"] = await judgement_sites.breadth(up.port(fixed=answer), dsn, task)
-    if which in (Check.REVIEW, Check.DOCS) and "governance_from" not in kw:
-        async with await db.connect(dsn) as conn:
-            b = await tasks.brief(conn, task)
-            f = machine.fold(await ledger.read(conn, task))
-        older, newer = (
-            (b.base_sha, f.candidate.sha) if which is Check.REVIEW else (f.candidate.sha, kw.get("head"))
-        )
-        kw["governance_from"] = (
-            await judgement_sites.governance(up.port(fixed=answer), dsn, task, older, newer)
-            if newer and newer != older
-            else []
-        )
     return kw
 
 
@@ -290,7 +277,7 @@ async def checks(
     dsn: str, task: str, test: str = "pass", review: str = "pass", docs: str = "no_change", **kw
 ):
     await check(dsn, task, "test", test)
-    await check(dsn, task, "review", review, governance=kw.pop("governance", ()))
+    await check(dsn, task, "review", review)
     return await check(dsn, task, "docs", docs, **kw)
 
 

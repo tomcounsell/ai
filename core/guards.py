@@ -2,18 +2,14 @@
 incident it prevents, the mission item it serves, and a ninety-day expiry.
 
 The four granted with the pipeline on 2026-10-01 are seeded by `db.migrate`
-on the `guards` stream, once each. A governance instance Tom grants on a
-task (one hunk that adds a check, gate, hook, round, or review step) is a
-`guard.granted` row on that task, bound to the instance's id: an unchanged
-hunk stays granted across patches, a changed or moved hunk is a new
-instance. This module records; the expiry routine (`core/routines.py`) reads the
+on the `guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
 rows and proposes the deletion of what is due.
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
-from core import ledger, machine
+from core import machine
 
 STREAM = "guards"
 GRANTED = date(2026, 10, 1)
@@ -109,117 +105,3 @@ def seed(conn) -> int:
                 )
                 written += 1
     return written
-
-
-class GrantRefused(LookupError):
-    pass
-
-
-async def grant(
-    conn,
-    task_id: str,
-    instance_id: str,
-    *,
-    note: str,
-    incident: str | None = None,
-    mission_item: str | None = None,
-    via: str = "the command line",
-) -> str:
-    """Tom's tap on one governance instance of the task's current candidate.
-    It is Tom's: written `by: tom`, never role-played. Incident and mission
-    item default to what the verdict naming the instance gave; a grant
-    missing either is refused (the governance paragraph: "missing either, it
-    is not added"). On an expiry sweep's task, `instance_id` may instead be a
-    grant id the sweep listed: Tom keeps it, and a new grant row (fresh id,
-    new expiry, the old row's incident and mission items) is written on the
-    task the old grant was given on. Returns the guard id."""
-    note = note.strip()
-    if not note:
-        raise GrantRefused("a grant carries Tom's message")
-    async with conn.transaction():
-        await ledger.lock(conn, f"task:{task_id}")
-        rows = await ledger.read(conn, task_id)
-        f = machine.fold(rows)
-        if f.legacy:
-            raise GrantRefused(f"task {task_id} predates the state machine")
-        if f.calibration:
-            raise GrantRefused(f"task {task_id} is a calibration task")
-        if f.state is not machine.State.MERGE:
-            raise GrantRefused(f"task {task_id} is in {f.state}; a grant is given in merge")
-        listed = {
-            str(item["id"])
-            for r in rows
-            if r["type"] == "task.started" and r["payload"].get("sweep") == "expiry"
-            for item in r["payload"].get("due", ())
-            if item.get("kind") == "grant"
-        }
-        if instance_id in listed:
-            return await _keep(conn, instance_id, note=note, via=via)
-        instance = next((i for i in f.instances() if i.id == instance_id), None)
-        if instance is None:
-            raise GrantRefused(f"the current candidate names no governance instance {instance_id}")
-        if instance_id in f.granted:
-            raise GrantRefused(f"instance {instance_id} is already granted")
-        incident = incident or instance.incident
-        mission_item = mission_item or instance.mission_item
-        if not incident or not mission_item:
-            raise GrantRefused(
-                "a grant names the incident and the mission item; missing either, it is not added"
-            )
-        now = datetime.now(UTC)
-        guard_id = f"grant-{ledger.new_id()}"
-        await ledger.append(
-            conn,
-            task_id,
-            "guard.granted",
-            {
-                "guard_id": guard_id,
-                "name": instance.summary or f"governance in {instance.path}",
-                "instance_id": instance_id,
-                "path": instance.path,
-                "candidate": {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}
-                if f.candidate
-                else None,
-                "incident": incident,
-                "mission_items": [mission_item],
-                "granted_at": now.date().isoformat(),
-                "expires": (now.date() + timedelta(days=90)).isoformat(),
-                "note": note,
-                "provenance": ledger.provenance("tom", via, False),
-            },
-        )
-    return guard_id
-
-
-async def _keep(conn, old_id: str, *, note: str, via: str) -> str:
-    """A kept grant: the old row's incident and mission items under a
-    fresh guard id and instance id and a new ninety-day expiry, on the old row's own task so
-    it keeps its project."""
-    cur = await conn.execute(
-        "SELECT task_id, payload FROM events WHERE type = 'guard.granted' "
-        "AND payload->>'guard_id' = %s ORDER BY id LIMIT 1",
-        (old_id,),
-    )
-    found = await cur.fetchone()
-    if found is None:
-        raise GrantRefused(f"no grant {old_id}")
-    origin, old = found
-    await ledger.lock(conn, f"task:{origin}")
-    now = datetime.now(UTC)
-    guard_id = f"grant-{ledger.new_id()}"
-    await ledger.append(
-        conn,
-        origin,
-        "guard.granted",
-        {
-            **old,
-            "guard_id": guard_id,
-            "kept": old_id,
-            "instance_id": f"{old['instance_id']}+{guard_id}",  # one grant row per instance and task
-            "granted_at": now.date().isoformat(),
-            "expires": (now.date() + timedelta(days=90)).isoformat(),
-            "note": note,
-            "provenance": ledger.provenance("tom", via, False),
-        },
-    )
-    return guard_id
