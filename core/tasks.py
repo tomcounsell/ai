@@ -698,7 +698,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 
     The state machine's fold (`machine.Fold.summary`: `state`, `legacy`,
     `return_to`, `plan`, `loops`, `counts`, `candidate`, `checks`, `join`,
-    `governance`, `merge_effect`), its metered spending, every turn and effect, and
+    `governance`, `merge_effect`, `carried`), its metered spending, every turn and effect, and
     the attention log. `attention` lists every point where Tom acted on the
     task, in ledger order, each labelled by `kind`: a question with his
     answer, feedback on a delivery, an approval of a held effect, a manual

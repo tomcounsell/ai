@@ -1128,6 +1128,79 @@ def test_a_merge_the_moved_target_rejects_goes_back_to_rebase_spending_no_round_
         r["payload"] for r in written if r["type"] == "notice.requested" and r["payload"]["kind"] == "ended"
     ]
     assert "could not merge it" in report["text"]
+    assert all("paths the candidate changes" in r["not_carried"] for r in rebases)
+    assert not [r for r in written if r["type"] == "verdicts.carried"]
+
+
+def _move_target_elsewhere(tmp_path, origin, path: str) -> str:
+    """The target moves on under the push by a commit to `path` alone, made
+    from a clone of the target as another writer would."""
+    other = tmp_path / f"other-{path.replace('/', '-')}"
+    if not other.exists():
+        git(tmp_path, "clone", "-q", str(origin), str(other))
+    git(other, "pull", "-q", "origin", "main")
+    (other / path).parent.mkdir(parents=True, exist_ok=True)
+    (other / path).write_text(f"{path} moved\n")
+    git(other, "add", path)
+    git(other, "commit", "-q", "-m", f"moved {path}")
+    git(other, "push", "-q", "origin", "HEAD:main")
+    return git(other, "rev-parse", "HEAD")
+
+
+@pytest.mark.macos
+def test_a_merge_the_target_moved_under_disjointly_carries_its_verdicts_and_lands_with_no_check_rerun(
+    dsn, tmp_path
+):
+    """A target moved by commits touching no path the candidate touches:
+    the kernel replays the candidate onto the new tip, the verdicts carry
+    to the replayed sha in one `verdicts.carried` row, and the merge
+    lands at once with no patch turn, no check rerun and no rebase spent."""
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        before = await fold(dsn, task)
+        moved = _move_target_elsewhere(tmp_path, origin, "elsewhere.txt")
+        await drive(dsn, task)
+        return before, moved, await rows(dsn, task)
+
+    before, moved, written = run(go())
+    (carried,) = [r for r in written if r["type"] == "verdicts.carried"]
+    p = carried["payload"]
+    assert p["tip"] == moved and p["from"]["sha"] == before.candidate.sha
+    assert p["to"]["sha"] != before.candidate.sha
+    assert set(p["verdicts"]) == {c.value for c in Check}
+    assert not [r for r in written if r["type"] == "rebase.requested"]
+    after = written[written.index(carried) + 1 :]
+    assert not [r for r in after if r["type"].endswith(".decided") or r["type"] == "turn.started"]
+    f = machine.fold(written)
+    assert f.state is State.MERGED and f.counts["rebases"] == 0
+    assert git(origin, "rev-parse", "main") == p["to"]["head"]
+    assert git(origin, "merge-base", moved, "main") == moved
+    assert git(origin, "show", "main:elsewhere.txt") == "elsewhere.txt moved"
+
+
+@pytest.mark.macos
+@pytest.mark.parametrize("path", ["pyproject.toml", "sub/uv.lock", "core/schema.sql"])
+def test_a_merge_the_target_moved_under_by_a_dependency_or_schema_file_rebases_instead_of_carrying(
+    dsn, tmp_path, path
+):
+    """The target's new commits touch a dependency or schema file: nothing
+    carries, the work goes back through `rebase.requested` naming why."""
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        _move_target_elsewhere(tmp_path, origin, path)
+        await drive(dsn, task)
+        return await rows(dsn, task)
+
+    written = run(go())
+    assert not [r for r in written if r["type"] == "verdicts.carried"]
+    (rebase, *_) = [r["payload"] for r in written if r["type"] == "rebase.requested"]
+    assert path in rebase["not_carried"]
 
 
 async def _failed_merge(dsn, task, error: str) -> dict:

@@ -519,10 +519,12 @@ def merge_action(f: machine.Fold, b: tasks.Brief) -> broker.Action | None:
 # A merge that failed is requested again, after a delay that doubles from
 # `MERGE_BACKOFF_S` up to `MERGE_BACKOFF_MAX_S`, until `MERGE_TRIES`
 # failures; then the task ends with a report. Two failures take their own
-# path: a push rejected because the target moved sends the work back to be
-# rebased (`machine.REBASES` per loop window, spending no round), and one
-# that needs the push credential asks Tom for it, the one thing only he
-# holds, and is tried again every `CREDENTIAL_RETRY_S` until it lands.
+# path: a push rejected because the target moved carries the verified
+# candidate onto the new tip when the target's new commits change none of
+# its paths (`_carry`), else sends the work back to be rebased
+# (`machine.REBASES` per loop window, spending no round), and one that
+# needs the push credential asks Tom for it, the one thing only he holds,
+# and is tried again every `CREDENTIAL_RETRY_S` until it lands.
 MERGE_TRIES = 5
 MERGE_BACKOFF_S = 60.0
 MERGE_BACKOFF_MAX_S = 3600.0
@@ -533,6 +535,15 @@ MOVED = ("[rejected]", "non-fast-forward", "fetch first")
 # and the merge performer's words for a refused one (`tools/push_branch.py`,
 # `ROTATE`).
 CREDENTIAL = (credentials.GITHUB_KEY, "refused the credential")
+# What the target's new commits may not change for a carry: the files the
+# checks' environment is built from, the dependencies and the schema.
+CARRY_BLOCKED = ("uv.lock", "pyproject.toml", "core/schema.sql")
+# Where a carried head is kept in the repository the merge pushes from.
+CARRIED_REF = "refs/valor/carried/"
+
+
+def carry_blocked(path: str) -> bool:
+    return any(path == b or path.endswith("/" + b) for b in CARRY_BLOCKED)
 
 
 @dataclass(frozen=True)
@@ -617,7 +628,9 @@ async def ensure_merge(
     racing steps make one intent.
 
     A merge that did not land is acted on by why (`merge_failure`): a
-    moved target writes `rebase.requested`, while rebases remain; a
+    moved target first carries the verified candidate onto the new tip
+    (`_carry`, `verdicts.carried`) and requests its merge at once, else
+    writes `rebase.requested` while rebases remain; a
     credential asks Tom for it once per candidate (`notices.credential`)
     and is tried again every `CREDENTIAL_RETRY_S`; a transient failure is
     tried again after `_backoff`; a refusal, a transient failure past
@@ -652,9 +665,13 @@ async def ensure_merge(
     # is granted now, so the request below is a fresh one.
     if last is not None and merge_failure(last) != "governance":
         why = merge_failure(last)
-        if why == "moved" and f.counts["rebases"] < machine.REBASES:
-            await _rebase(conn, task_id, b, last)
-            return None
+        if why == "moved":
+            not_carried = await _carry(conn, task_id, b, f, last)
+            if not_carried is None:
+                return await ensure_merge(conn, performers, task_id, now=now)
+            if f.counts["rebases"] < machine.REBASES:
+                await _rebase(conn, task_id, b, last, not_carried)
+                return None
         transient = [t for t in tries if merge_failure(t) == "transient"]
         if why in ("moved", "refused") or (why == "transient" and len(transient) >= MERGE_TRIES):
             await end(conn, task_id, "merge", _first_line(last.reason), effect_id=last.effect_id)
@@ -679,16 +696,74 @@ def _first_line(text: str, limit: int = 300) -> str:
     return line if len(line) <= limit else line[: limit - 3] + "..."
 
 
-async def _rebase(conn, task_id: str, b: tasks.Brief, failed: MergeTry) -> None:
-    """Send the work back to rebase onto the target's new tip, which the
-    merge's lookup fetched into the kernel mirror (`git.LOOKUP_REF`)."""
+async def _tip(repo: str | None) -> str | None:
+    """The target's new tip, which the merge's lookup fetched into the
+    repository the merge pushes from (`git.LOOKUP_REF`), or None."""
+    if not repo:
+        return None
+    try:
+        return await git.threaded(git.trusted, repo, "rev-parse", "--verify", "-q", git.LOOKUP_REF) or None
+    except git.GitError:
+        return None
+
+
+async def _carry(conn, task_id: str, b: tasks.Brief, f: machine.Fold, failed: MergeTry) -> str | None:
+    """Carry the verified candidate onto the moved target's new tip, with no
+    turn: the kernel replays the candidate and its docs head onto the tip
+    (`git.replay`), which applies only when the target's new commits change
+    no path the candidate changes and no `CARRY_BLOCKED` file, and leaves
+    the patch identical, hunk for hunk. Then `verdicts.carried` moves the
+    candidate's test, review, and docs verdicts, its delivery, and the
+    grants on its instances (the same hunks, so the same ids) to the
+    replayed sha; the fold reads them there, so the merge predicate holds
+    for it. It spends no rebase. Returns None when carried, else why not."""
     repo = b.mirror or b.workspace
-    tip = None
-    if repo:
-        try:
-            tip = await git.threaded(git.trusted, repo, "rev-parse", "--verify", "-q", git.LOOKUP_REF)
-        except git.GitError:
-            tip = None
+    docs, c = f.checks.get(Check.DOCS), f.candidate
+    tip = await _tip(repo)
+    if not repo or docs is None or c is None or tip is None:
+        return "no fetched tip of the target to carry the candidate onto"
+    head = docs.payload.get("head") or c.sha
+    try:
+        done, why = await git.threaded(
+            git.replay, repo, c.sha, head, tip, carry_blocked, kernel=bool(b.mirror)
+        )
+        if done is not None:
+            await git.threaded(git.trusted if b.mirror else git.out, repo, "update-ref",
+                               CARRIED_REF + c.turn_id, done.head)  # fmt: skip
+    except git.GitError as exc:
+        return f"the replay failed: {_first_line(str(exc))}"
+    if done is None:
+        return why
+    instances = {i.id for i in f.instances()}
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        now = machine.fold(await ledger.read(conn, task_id))
+        if now.state is not State.MERGE or now.candidate != c or now.merge_effect != f.merge_effect:
+            return "the task moved on while the candidate was replayed"
+        await ledger.append(
+            conn,
+            task_id,
+            "verdicts.carried",
+            {
+                "effect_id": failed.effect_id,
+                "target_branch": b.target_branch,
+                "tip": tip,
+                "base": done.base,
+                "from": {"sha": c.sha, "turn_id": c.turn_id, "head": head},
+                "to": {"sha": done.sha, "turn_id": c.turn_id, "head": done.head},
+                "verdicts": {ch.value: v.event_id for ch, v in f.checks.items()},
+                "grants": sorted(instances & f.granted),
+                "reason": _first_line(failed.reason),
+            },
+        )
+    return None
+
+
+async def _rebase(conn, task_id: str, b: tasks.Brief, failed: MergeTry, not_carried: str) -> None:
+    """Send the work back to rebase onto the target's new tip, which the
+    merge's lookup fetched into the kernel mirror (`git.LOOKUP_REF`),
+    naming why the kernel could not carry the candidate itself."""
+    tip = await _tip(b.mirror or b.workspace)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         if machine.fold(await ledger.read(conn, task_id)).state is not State.MERGE:
@@ -700,8 +775,9 @@ async def _rebase(conn, task_id: str, b: tasks.Brief, failed: MergeTry) -> None:
             {
                 "effect_id": failed.effect_id,
                 "target_branch": b.target_branch,
-                "tip": tip or None,
+                "tip": tip,
                 "reason": _first_line(failed.reason),
+                "not_carried": not_carried,
             },
         )
 

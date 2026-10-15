@@ -341,6 +341,27 @@ def test_a_rebase_sends_a_merge_back_to_patch_spending_no_round():
     assert "rebase requested in checks" in led.fold().ignored[-1]["why"]
 
 
+def test_carried_verdicts_and_grants_make_the_replayed_sha_the_merged_candidate_spending_no_rebase():
+    led = Ledger().to_checks()
+    led.check("test", "pass").check("review", "pass", instances=["i1"]).check("docs", "updated", head="d1")
+    led.add("guard.granted", {"instance_id": "i1"})
+    led.add("task.delivered", {"candidate": led.candidate, "outcome": "passed"})
+    old = led.candidate
+    carried = {"from": {**old, "head": "d1"}, "to": {"sha": "r1", "turn_id": old["turn_id"], "head": "rd1"},
+               "tip": "tip1", "verdicts": {}, "grants": ["i1"]}  # fmt: skip
+    led.add("verdicts.carried", {**carried, "from": {**old, "head": "other"}})
+    assert "not the current one" in led.fold().ignored[-1]["why"]
+    led.add("verdicts.carried", carried)
+    f = led.fold()
+    new = {"sha": "r1", "turn_id": old["turn_id"]}
+    assert f.state is State.MERGE and f.counts["rebases"] == 0 and f.merge_effect is None
+    assert f.delivery["candidate"] == new and f.summary()["carried"][0]["tip"] == "tip1"
+    assert machine.merge_predicate(f, {"candidate": new, "head_sha": "rd1"}) == []
+    assert [t[0] for t in machine.merge_predicate(f, {"candidate": old, "head_sha": "d1"})] == ["1", "4"]
+    led.add("verdicts.carried", carried)
+    assert "not the current verified one" in led.fold().ignored[-1]["why"]
+
+
 def test_feedback_after_merged_patches_and_review_rounds_are_available_again():
     led = Ledger(review_rounds=1).to_checks()
     led.checks("pass", "changes", "no_change").build().checks("pass", "pass", "no_change")
@@ -508,6 +529,8 @@ payloads = st.fixed_dictionaries(
         "review_rounds": st.sampled_from([0, 1, 2, 3, None]),
         "raised": st.sampled_from([{}, {"critique_rounds": 2}, {"review_rounds": "x"}, None]),
         "instance_id": st.sampled_from(["i1", "i2"]),
+        "from": st.sampled_from([{**c, "head": c["sha"]} for c in CANDIDATES] + ["x", {}]),
+        "to": st.sampled_from([{**c, "head": "h"} for c in CANDIDATES] + [{"sha": "s"}]),
         "governance": st.sampled_from(
             [None, {"adds": True, "instances": [{"id": "i1"}]}, {"instances": "x"}]
         ),
@@ -524,7 +547,7 @@ TYPES = [
     "task.started", "task.stopped", "judge.decided", "turn.started", "turn.ended", "turn.collected",
     "question.asked", "question.answered", "plan.written", "critique.decided", "test.decided",
     "review.decided", "docs.decided", "task.delivered", "feedback.given", "guard.granted",
-    "task.ended", "rebase.requested", "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
+    "task.ended", "rebase.requested", "verdicts.carried", "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
 ]  # fmt: skip
 MISSING = object()  # a row with no payload key at all
 RAISED = st.sampled_from(

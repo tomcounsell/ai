@@ -15,7 +15,7 @@ Pure code: the standard library only, no I/O.
 
 import hashlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import PurePosixPath as Path
 from typing import Any
@@ -240,6 +240,9 @@ class Fold:
     delivery: dict[str, Any] | None = None
     granted: set[str] = field(default_factory=set)
     merge_effect: dict[str, Any] | None = None
+    # `verdicts.carried` rows applied, oldest first: each moved the verified
+    # candidate onto a moved target's new tip.
+    carried: list[dict[str, Any]] = field(default_factory=list)
     session: str | None = None
     last_collected: dict[str, Any] | None = None
     turn_states: dict[str, str] = field(default_factory=dict)
@@ -306,6 +309,9 @@ class Fold:
                 for i in self.instances()
             ],
             "merge_effect": self.merge_effect,
+            "carried": [
+                {k: c.get(k) for k in ("from", "to", "tip", "verdicts", "grants")} for c in self.carried
+            ],
             "ignored": len(self.ignored),
         }
 
@@ -571,13 +577,16 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         _enter(f, State.ENDED, entry)
         return None
     if kind == "rebase.requested":
-        # The merge's push was rejected because the target moved: the
+        # The merge's push was rejected because the target moved and the
+        # kernel could not carry the candidate onto it (`_carry`): the
         # working session rebases onto it. Spends no round.
         if s is not State.MERGE:
             return f"rebase requested in {s}"
         f.counts["rebases"] += 1
         _enter(f, State.PATCH, entry)
         return None
+    if kind == "verdicts.carried":
+        return _carry(f, p)
     if kind == "guard.granted":
         if p.get("instance_id"):
             f.granted.add(str(p["instance_id"]))
@@ -594,6 +603,42 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         return None
     if kind in ("effect.held", "effect.intent", "effect.outcome", "effect.refused"):
         return _merge_effect(f, kind, p, entry)
+    return None
+
+
+def _carry(f: Fold, p: dict[str, Any]) -> str | None:
+    """The kernel replayed the verified candidate and its docs head onto a
+    moved target's new tip with an identical patch (`verdicts._carry`):
+    the replayed sha becomes the current candidate, carrying the test,
+    review, and docs verdicts (the docs head the replayed one) and the
+    delivery, so the merge predicate reads them for it, and its grants,
+    which bind the same hunk ids. The task stays in `merge` with no merge
+    effect for the new sha; it spends no rebase."""
+    if f.state is not State.MERGE:
+        return f"verdicts carried in {f.state}"
+    old, new = p["from"], p["to"]
+    if f.candidate is None or _candidate(old) != f.candidate or len(f.checks) != 3:
+        return "carried from a candidate that is not the current verified one"
+    if f.checks[Check.DOCS].payload.get("head") != old["head"]:
+        return "carried from a docs head that is not the current one"
+    moved, head = _candidate(new), str(new["head"])
+    named = {"sha": moved.sha, "turn_id": moved.turn_id}
+    f.checks = {
+        c: replace(
+            v,
+            candidate=moved,
+            payload={**v.payload, "candidate": named, **({"head": head} if c is Check.DOCS else {})},
+        )
+        for c, v in f.checks.items()
+    }
+    f.candidate = moved
+    if f.delivery is not None and f.delivery.get("candidate") == {
+        "sha": old["sha"],
+        "turn_id": old["turn_id"],
+    }:
+        f.delivery = {**f.delivery, "candidate": named}
+    f.merge_effect = None
+    f.carried.append(p)
     return None
 
 
@@ -702,7 +747,9 @@ def merge_predicate(f: Fold, payload: dict[str, Any]) -> list[str]:
     """The four terms of the merge predicate over a merge effect's payload.
     Returns each term that does not hold, named; empty means the merge may
     be performed. Each term reads a row: what a docs head holds was read
-    once, when the docs runner kept it (`fresh.kept_prefix`)."""
+    once, when the docs runner kept it (`fresh.kept_prefix`). A candidate
+    the kernel carried onto a moved target (`verdicts.carried`) is the
+    current one, its verdicts and docs head the carried ones."""
     failed = []
     named = payload.get("candidate") or {}
     current = f.candidate

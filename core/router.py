@@ -263,6 +263,7 @@ PROGRESS = frozenset(
         "guard.granted",
         "task.delivered",
         "rebase.requested",
+        "verdicts.carried",
         "workspace.provisioned",
         "task.ended",
     }

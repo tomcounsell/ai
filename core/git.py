@@ -843,6 +843,99 @@ def holds(
     return is_ancestor(workspace, sha, LOOKUP_REF)
 
 
+# -- a verified candidate onto a moved target ----------------------------------------
+
+_IDENT = re.compile(r"^(author|committer) (.*) <(.*)> (\d+ [+-]\d{4})$")
+
+
+@dataclass(frozen=True)
+class Replayed:
+    """A candidate and the head above it, replayed onto a moved target's
+    `tip` from their common `base`: `sha` is the candidate's commit and
+    `head` the replayed head."""
+
+    base: str
+    tip: str
+    sha: str
+    head: str
+
+
+def _changed(call, older: str, newer: str) -> set[str]:
+    """Every path any one commit in `older..newer` changes (`log`, not the
+    net diff, so a change made and undone still counts)."""
+    listed = call("log", "--no-renames", "--format=", "--name-only", "-z", f"{older}..{newer}")
+    return {p.strip("\n") for p in listed.split("\0") if p.strip("\n")}
+
+
+def replay(
+    repo: str | Path, sha: str, head: str, tip: str, blocked, *, kernel: bool
+) -> tuple[Replayed | None, str | None]:
+    """Replay the commits of `base..head` (base: `head`'s merge base with
+    `tip`; `sha` one of them, the candidate) onto `tip` with no merge, when
+    no path any of them changes is one a commit of `base..tip` changes and
+    `blocked(path)` holds for no path the target changed. Each replayed
+    commit is the target's tree with that commit's own entries written over
+    it, its message, author, and committer kept, so the same replay always
+    makes the same ids. The patch `tip..head'` must then equal `base..head`
+    byte for byte, so every hunk, and every governance instance id, is the
+    one the checks read. `kernel` names a repository only the kernel writes
+    (`trusted`), else it is a workspace a turn writes (`out`, its config
+    checked first). Returns the replay and None, or None and why not.
+    Raises `GitError`."""
+
+    def call(*args: str, extra_env: dict[str, str] | None = None) -> str:
+        if kernel:
+            return trusted(repo, *args, extra_env=extra_env)
+        return out(repo, *args, extra_env=extra_env)
+
+    base = call("merge-base", head, tip)
+    if call("rev-list", "--merges", f"{base}..{head}"):
+        return None, "the candidate holds a merge commit"
+    ours, theirs = _changed(call, base, head), _changed(call, base, tip)
+    both = sorted(ours & theirs)
+    if both:
+        return None, "the target's new commits change paths the candidate changes: " + ", ".join(both[:5])
+    held = sorted(p for p in theirs if blocked(p))
+    if held:
+        return None, "the target's new commits change dependency or schema files: " + ", ".join(held[:5])
+    commits = call("rev-list", "--reverse", f"{base}..{head}").split()
+    if sha not in commits:
+        return None, "the candidate is not one of the commits above its base"
+    replayed: dict[str, str] = {}
+    parent = tip
+    with tempfile.TemporaryDirectory(prefix="valor-replay-", dir=output_dir()) as tmp:
+        index = {"GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        call("read-tree", tip, extra_env=index)
+        for commit in commits:
+            fields = call("diff-tree", "-r", "--no-renames", "--no-commit-id", "-z", commit).split("\0")
+            for meta, path in zip(fields[0::2], fields[1::2], strict=False):
+                _, mode, _, new, status = meta.removeprefix(":").split()
+                if status == "D":
+                    call("update-index", "--force-remove", "--", path, extra_env=index)
+                else:
+                    call("update-index", "--add", "--cacheinfo", f"{mode},{new},{path}", extra_env=index)
+            tree = call("write-tree", extra_env=index)
+            raw = call("cat-file", "commit", commit)
+            headers, _, message = raw.partition("\n\n")
+            ident: dict[str, str] = {}
+            for line in headers.splitlines():
+                m = _IDENT.match(line)
+                if m:
+                    who = "GIT_AUTHOR" if m.group(1) == "author" else "GIT_COMMITTER"
+                    ident |= {
+                        f"{who}_NAME": m.group(2),
+                        f"{who}_EMAIL": m.group(3),
+                        f"{who}_DATE": m.group(4),
+                    }
+            parent = replayed[commit] = call(
+                "commit-tree", tree, "-p", parent, "-m", message, extra_env=ident
+            )
+    diff = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--full-index")
+    if call(*diff, base, head) != call(*diff, tip, parent):
+        return None, "the replayed patch differs from the verified one"
+    return Replayed(base, tip, replayed[sha], parent), None
+
+
 # -- governance instances --------------------------------------------------------
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@ ?(.*)$")
