@@ -1320,7 +1320,13 @@ def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[
 def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     """Make `.valor/inputs/` in a checkout the kernel just made and write each
     input there, every step relative to a descriptor, nothing followed
-    through a link, and no file overwritten."""
+    through a link. A `.valor/inputs` the checked-out tree already holds (a
+    plan commit that added one) is replaced, as is a `.valor` that is no
+    directory."""
+    valor_path = checkout / VALOR_DIR
+    if valor_path.is_symlink() or (valor_path.exists() and not valor_path.is_dir()):
+        rmtree(valor_path)
+    rmtree(valor_path / "inputs")
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     root = os.open(checkout, flags)
     fds = [root]
