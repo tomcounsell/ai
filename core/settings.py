@@ -390,11 +390,6 @@ class Settings:
     mirror_fetch_max_footprint_mb: int = field(
         default_factory=lambda: int(_env("VALOR_MIRROR_FETCH_MAX_FOOTPRINT_MB", "1024"))
     )
-    # The verification VM's memory and processors (`core/container.py`): it
-    # needs both to start. The memory is set from machine.md's measurement:
-    # a Django suite with Postgres peaked at 2,154 MB and thrashed at 1 GB.
-    verify_memory_mb: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_MEMORY_MB", "4096")))
-    verify_cpus: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_CPUS", "4")))
 
     # How many turns (or checks) run at once on this machine (`core/slot.py`).
     # Set from docs/machine.md's RAM plan with the verification VM gone: a

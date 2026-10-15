@@ -6,8 +6,8 @@ judgement legs costs no suite run. Then it runs the project's own suite
 command (the spec's `suite`, never the candidate's choice) twice: at the
 base the task started from and at the candidate. Each run gets:
 
-- a blind checkout from the kernel mirror under
-  `checks/test-<role>-<sha>/repo` (`workspace.blind_checkout`);
+- a git worktree of the commit from the kernel mirror under
+  `checks/test-<role>-<sha>/repo` (`worktree`);
 - its own copy of the caches, cloned from `checks/seed/` (the base's
   setup output), so nothing one run writes reaches another;
 - fresh Postgres and Redis instances on the task's own ports
@@ -20,8 +20,7 @@ Each run appends `suite.ran`. A run with the same commit, role, command,
 and environment digest, and no `cause`, is reused, so the base runs once per
 task. `cause: "kernel"` (no checkout from the mirror, or a service that would
 not start) is recorded nowhere and the runner returns `failed`, so the
-branch reruns; `cause: "commit"` (a tree holding `.valor`, setup failed,
-or no JUnit report and an exit code saying the runner itself failed) is the
+branch reruns; `cause: "commit"` (setup failed, or no JUnit report and an exit code saying the runner itself failed) is the
 commit's own fault.
 
 The kernel compares the two runs by test id (`compare`) and records
@@ -66,6 +65,13 @@ LOCKFILES = (
     ".python-version",
     ".nvmrc",
 )
+
+
+def worktree(mirror: str | Path, sha: str, dest: Path) -> None:
+    """A clean git worktree of `sha` from the kernel mirror at `dest`, its
+    head detached. A worktree whose directory is gone is pruned first."""
+    git.trusted(mirror, "worktree", "prune")
+    git.trusted(mirror, "worktree", "add", "-q", "--detach", str(dest), sha)
 
 
 # -- JUnit -------------------------------------------------------------------------
@@ -734,10 +740,7 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         return payload
 
     try:
-        await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, sha, checkout)
-    except workspace.ValorInTree as exc:
-        # The commit's own tree: no rerun would ever check it out.
-        return done(cause="commit", why=f"no checkout at {role}: {exc}")
+        await asyncio.to_thread(worktree, b.mirror, sha, checkout)
     except git.GitError as exc:
         # The mirror holds the commit, so a checkout that fails is the kernel's.
         return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")

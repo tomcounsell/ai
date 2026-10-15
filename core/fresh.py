@@ -4,10 +4,9 @@ session. Critique, review, docs, and the advisor run here.
 A fresh session gets:
 
 - a checkout of its own under `<task>/checks/<stage>-<key>/repo`, made from
-  the kernel mirror: for critique (and review) a *blind* checkout holding
-  only two commits the kernel made, the base's tree and the plan's (or the
-  candidate's) tree, so no builder commit message or intermediate commit
-  exists in it; for docs a real clone of the candidate through the pack
+  the kernel mirror: for critique, review, and the advisor a git worktree
+  of the plan's (or the candidate's) commit (`checks.worktree`); for docs
+  a real clone of the candidate through the pack
   protocol, sharing no object file with the mirror, whose commits the
   kernel fetches into the mirror and cuts to the prefix it keeps;
 - for review, a checkout the kernel set up: the seed cache cloned in, the
@@ -16,11 +15,8 @@ A fresh session gets:
   task's own stopped meanwhile;
 - inputs as files under `.valor/inputs/`, written by the kernel from ledger
   rows: the request verbatim, Tom's answers and feedback with provenance,
-  the diff against the base, and the stage's own. A plan or candidate whose
-  tree holds `.valor` is refused, `.valor` must not exist before the kernel
-  makes it, and every input is written relative to a descriptor with no
-  link followed and no file overwritten, so nothing committed can redirect
-  a write or plant a verdict;
+  the diff against the base, and the stage's own, each written relative to
+  a descriptor with no link followed and no file overwritten;
 - its own sandbox profile, `TMPDIR`, and Claude Code config directory, with
   the whole work directory, `/private/tmp`, `/private/var/tmp`,
   `/private/var/folders`, and the user's Claude Code state denied, so it
@@ -52,7 +48,6 @@ from typing import Any
 
 from core import (
     checks,
-    container,
     db,
     git,
     judgement_sites,
@@ -193,27 +188,9 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
         check_dir = workspace.fresh_dir(lay.checks / f"critique-{plan_sha[:12]}")
         checkout = check_dir / "repo"
         try:
-            made = workspace.blind_checkout(b.mirror, b.base_sha, f.plan["commit"], checkout)
-            diff = git.trusted(checkout, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                               made["base"], made["candidate"])  # fmt: skip
-        except workspace.ValorInTree as exc:
-            # The plan commit's own tree: no rerun would ever check it out,
-            # so the plan goes back with the reason, as any revise does.
-            if not await ctx.alive():
-                return {"status": "lock lost"}
-            try:
-                async with await db.connect(ctx.dsn) as conn:
-                    await verdicts.record_critique(
-                        conn,
-                        ctx.task_id,
-                        "revise",
-                        findings=[{"kind": "commit", "text": f"no critique checkout: {exc}"}],
-                        leg="kernel",
-                        plan_sha256=plan_sha,
-                    )
-            except verdicts.VerdictRefused as refused:
-                return {"status": "failed", "state": state, "turn": {"result": f"verdict refused: {refused}"}}
-            return {"status": "moved"}
+            checks.worktree(b.mirror, f.plan["commit"], checkout)
+            diff = git.trusted(b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                               b.base_sha, f.plan["commit"])  # fmt: skip
         except git.GitError as exc:
             return {"status": "failed", "state": state, "turn": {"result": f"critique checkout: {exc}"}}
         try:
@@ -321,7 +298,7 @@ def _look(b: tasks.Brief, turn_id: str) -> tuple[str | None, list[str], str | No
 def advise(fresh_for: FreshFor):
     """The advisor, for `session.run`: one fresh session at `advisor_seat`
     on the asking turn's question (`asked`, its `turn.collected` payload),
-    in a blind checkout of the working session's committed head, its answer
+    in a worktree of the working session's committed head, its answer
     read from its final message and appended as `advice.given`. The advisor
     holds nothing and decides nothing: an advisor that cannot answer is
     recorded with the reason, and the next working turn is told it. Returns
@@ -365,14 +342,13 @@ def advise(fresh_for: FreshFor):
         check_dir = workspace.fresh_dir(lay.checks / f"advice-{turn_id}")
         checkout = check_dir / "repo"
         try:
-            made = await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, head, checkout)
+            await asyncio.to_thread(checks.worktree, b.mirror, head, checkout)
             diff = await asyncio.to_thread(
-                git.trusted, checkout, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                made["base"], made["candidate"],
+                git.trusted, b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, head,
             )  # fmt: skip
             files = _advice_files(rows, f, b, asked, diff, left)
             await asyncio.to_thread(workspace.write_inputs, checkout, files)
-        except (workspace.ValorInTree, git.GitError, OSError, ValueError) as exc:
+        except (git.GitError, OSError, ValueError) as exc:
             return await record(error=f"the advisor's checkout: {exc}")
         harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
         if not await alive():
@@ -426,11 +402,8 @@ def docs_clone(mirror: str | Path, candidate: str, dest: Path, key: str) -> None
     """A real clone of the candidate from the mirror at `dest`, made through
     the pack protocol (`file://`), so it shares no object file with the
     mirror. A temporary branch names the candidate in the mirror for the
-    clone and is deleted after it. A candidate whose tree holds `.valor` is
-    refused (`workspace.ValorInTree`)."""
+    clone and is deleted after it."""
     mirror = Path(mirror)
-    if workspace.tree_has_valor(mirror, candidate, trusted=True):
-        raise workspace.ValorInTree(candidate)
     ref = f"refs/heads/valor-docs/{key}"
     git.trusted(mirror, "update-ref", ref, candidate)
     try:
@@ -459,7 +432,7 @@ def _entries(mirror: str | Path, sha: str) -> list[tuple[str, str, str]]:
 
 def _why_dropped(mirror: str | Path, sha: str) -> list[str]:
     """What makes a docs commit one the kernel will not keep: a path no docs
-    commit may touch, a `.valor` entry, or an entry that is not a regular
+    commit may touch, or an entry that is not a regular
     file (a symlink or a gitlink). Empty when it is kept."""
     bad = []
     for old_mode, new_mode, path in _entries(mirror, sha):
@@ -468,8 +441,6 @@ def _why_dropped(mirror: str | Path, sha: str) -> list[str]:
             bad.append(f"{path} (not a docs path)")
         elif not regular:
             bad.append(f"{path} (mode {new_mode if new_mode != NO_FILE else old_mode}, not a regular file)")
-    if workspace.tree_has_valor(mirror, sha, trusted=True):
-        bad.append(".valor")
     return bad
 
 
@@ -657,20 +628,6 @@ async def _docs_turn(
     try:
         docs_clone(b.mirror, c.sha, checkout, f"{ctx.task_id}-{c.sha[:12]}")
         files = docs_inputs(checkout, rows, f, b, b.mirror)
-    except workspace.ValorInTree as exc:
-        # The candidate's own tree: no rerun would ever clone it, so docs
-        # says `changes` with the reason and the join moves on.
-        if not await ctx.alive():
-            return {"status": "lock lost"}
-        try:
-            async with await db.connect(ctx.dsn) as conn:
-                await verdicts.record_check(
-                    conn, ctx.task_id, machine.Check.DOCS, "changes", head=c.sha, leg="kernel",
-                    findings=[{"kind": "commit", "text": f"no docs clone: {exc}"}],
-                )  # fmt: skip
-        except verdicts.VerdictRefused as refused:
-            return {"status": "failed", "state": state, "turn": {"result": f"verdict refused: {refused}"}}
-        return {"status": "moved"}
     except (git.GitError, OSError, ValueError) as exc:
         return {"status": "failed", "state": state, "turn": {"result": f"docs checkout: {exc}"}}
     env = {**b.harness.get("env", {}), **DOCS_IDENTITY}
@@ -742,7 +699,6 @@ async def _docs_turn(
 
 # -- review ----------------------------------------------------------------------------------
 
-VERIFY = "verify.ran"
 REVIEW_COMPARED = "review.compared"
 
 
@@ -812,7 +768,7 @@ def governance_input(
 
 
 def review_inputs(
-    rows: list[dict], f: machine.Fold, b: tasks.Brief, verify: dict[str, Any], governance: dict[str, Any],
+    rows: list[dict], f: machine.Fold, b: tasks.Brief, setup: dict[str, Any], governance: dict[str, Any],
 ) -> dict[str, str]:  # fmt: skip
     """The reviewer's inputs, by file name. `plan.md` is the stakes header
     and the plan file's bytes at the commit critique read, from the mirror,
@@ -837,7 +793,7 @@ def review_inputs(
         "diff.patch": git.trusted(
             b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, f.candidate.sha
         ),
-        "verify.json": json.dumps(verify, indent=2),
+        "setup.json": json.dumps(setup, indent=2),
         "governance.json": json.dumps(governance, indent=2),
         "effects.md": _effects(rows),
     }
@@ -1011,10 +967,10 @@ def undecided_answers(said: dict[str, bool], undecided: list[dict[str, Any]]) ->
 
 def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str = SEATS["review"]):
     """The runner for `Check.REVIEW`: governance per hunk first (the hunks it
-    leaves undecided go to the reviewer, whose `undecided` answers them), then the
-    kernel's own base and head runs with the lint (`verify.ran`), then one
-    blind session in a checkout the kernel set up, inside fresh services,
-    whose final message is its verdict (`final_verdict`).
+    leaves undecided go to the reviewer, whose `undecided` answers them), then one
+    fresh session in a worktree of the candidate the kernel set up, inside
+    fresh services, where it may run the suite; its final message is its
+    verdict (`final_verdict`).
     The recorded verdict is computed from the reviewer's `pass` or
     `changes`, the instances, and the grants (`verdicts.review_verdict`).
     At the registered seat it records `review.decided`; at any other seat
@@ -1073,38 +1029,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
         except git.GitError as exc:
             return failed(f"the diff: {exc}")
 
-        # 2. The kernel's own base and head runs and lint, each in a fresh
-        # VM (`core/container.py`).
-        try:
-            head_key = (await asyncio.to_thread(container.keys, b, candidate))["head"]
-        except git.GitError as exc:
-            return failed(f"the manifests: {exc}")
-        kept = container.reusable(rows, candidate, head_key)
-        if kept is None:
-            if not await ctx.alive():
-                return {"status": "lock lost"}
-
-            async def record(verify: dict[str, Any]) -> dict[str, Any]:
-                if not await ctx.alive():
-                    return {"status": "lock lost"}
-                async with await db.connect(ctx.dsn) as conn, conn.transaction():
-                    await ledger.lock(conn, f"task:{ctx.task_id}")
-                    if await tasks.is_stopped(conn, ctx.task_id):
-                        return {"status": "stopped"}
-                    return {"verify": verify, "id": await ledger.append(conn, ctx.task_id, VERIFY, verify)}
-
-            try:
-                async with checks.stop_heard(ctx) as stop:
-                    got = await container.verify(ctx, lay, b, candidate, rows, stop, record)
-            except checks._Stopped:
-                return await checks.interrupted(ctx)
-            if "verify" not in got:
-                return failed(got["turn"]["result"]) if got["status"] == "failed" else got
-            verify, verify_id = got["verify"], got["id"]
-        else:
-            verify, verify_id = kept["payload"], kept["id"]
-
-        # 3. The reviewer's checkout, set up by the kernel, and the turn,
+        # 2. The reviewer's worktree, set up by the kernel, and the turn,
         # both inside fresh services.
         harness_name, seat_model = resolve_seat(seat)
         model = model_ or seat_model
@@ -1122,16 +1047,14 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                 async with await db.connect(ctx.dsn) as conn:
                     await verdicts.record_check(
                         conn, ctx.task_id, machine.Check.REVIEW, "changes", governance_from=ids,
-                        findings=[{"kind": "commit", "text": why}], verify=verify_id, leg="kernel",
+                        findings=[{"kind": "commit", "text": why}], leg="kernel",
                     )  # fmt: skip
             except verdicts.VerdictRefused as refused:
                 return failed(f"verdict refused: {refused}")
             return {"status": "moved"}
 
         try:
-            await asyncio.to_thread(workspace.blind_checkout, b.mirror, b.base_sha, candidate, checkout)
-        except workspace.ValorInTree as exc:
-            return await commits_own(f"no review checkout: {exc}")
+            await asyncio.to_thread(checks.worktree, b.mirror, candidate, checkout)
         except git.GitError as exc:
             return failed(f"review checkout: {exc}")
         seed = lay.checks / checks.SEED
@@ -1164,18 +1087,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                     )  # fmt: skip
             except checks._Stopped:
                 return await checks.interrupted(ctx)
-            # Setup ran before the inputs exist, so it can plant none, and
-            # its profile kept it out of the session's own directories and
-            # the checkout's repository. What it left in the checkout that
-            # the session must not start with, and any error the kernel
-            # meets there now, is the commit's own: every rerun meets it.
-            try:
-                left = await asyncio.to_thread(workspace.setup_left, checkout)
-            except OSError as exc:
-                return await commits_own(f"the checkout after setup: {exc}")
-            if left:
-                return await commits_own(left)
-            seen = {**verify, "reviewer_setup_exit": setup["commands"][-1]["exit"] if commands else None}
+            seen = {"setup_exit": setup["commands"][-1]["exit"] if commands else None}
             try:
                 inputs = review_inputs(rows, f, b, seen, governance)
             except (OSError, ValueError, git.GitError) as exc:
@@ -1237,7 +1149,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                         conn, ctx.task_id, machine.Check.REVIEW, fields["verdict"], governance_from=ids,
                         governance=specs, notes=notes, findings=findings, undecided=fields["undecided"],
                         predicted_failure=fields["predicted_failure"], requirements=fields["requirements"],
-                        verify=verify_id, leg="session", turn_id=ended["turn_id"], model=model, usd_micros=usd,
+                        leg="session", turn_id=ended["turn_id"], model=model, usd_micros=usd,
                     )  # fmt: skip
             except verdicts.VerdictRefused as exc:
                 async with await db.connect(ctx.dsn) as conn:
@@ -1272,7 +1184,6 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                 "findings": verdicts._findings([*findings, *added]),
                 "instances": instances,
                 "predicted_failure": fields["predicted_failure"],
-                "verify": verify_id,
                 "turn_id": ended["turn_id"],
                 "usd_micros": usd,
             }

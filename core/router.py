@@ -48,7 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from core import broker, container, db, git, ledger, machine, spending, tasks, verdicts, workspace
+from core import broker, db, git, ledger, machine, spending, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -345,18 +345,12 @@ class _Services:
         self.names, self.ports, self.lay = fresh.names, fresh.ports, fresh.lay
 
     async def sweep(self) -> None:
-        """At the start of every run: stop what a killed kernel left up, and
-        the verification VMs and builder a killed kernel of this database
-        left (`container.reap`)."""
+        """At the start of every run: stop what a killed kernel left up."""
         async with await db.connect(self.dsn) as conn:
             reaped = await workspace.sweep(conn, self.task_id, self.lay.root.parent if self.lay else None)
             if reaped:
                 async with conn.transaction():
                     await ledger.append(conn, self.task_id, "services.reaped", {"processes": reaped})
-            gone = await asyncio.to_thread(container.reap, self.dsn)
-            if gone:
-                async with conn.transaction():
-                    await ledger.append(conn, self.task_id, "containers.reaped", {"containers": gone})
 
     async def up(self) -> str | None:
         """Start them if they are not up; why not, or None."""
