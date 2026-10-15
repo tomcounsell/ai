@@ -12,8 +12,7 @@ against the task and carries no credential of the turn's.
 - Its agent directory is the turn's own (`PI_CODING_AGENT_DIR`, from
   `harness["pi_agent_dir"]`), and the kernel writes its `models.json` and
   `settings.json` before every turn: one provider, `valor`, whose base URL is
-  the gateway and whose key is the placeholder the gateway replaces. The
-  machine user's `~/.pi` is denied to every turn profile.
+  the gateway and whose key is the placeholder the gateway replaces.
 - The system prompt is always passed (`--system-prompt`), so a project's
   `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it, and
   `--no-context-files` keeps `AGENTS.md` and `CLAUDE.md` out of it, in the
