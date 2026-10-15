@@ -33,12 +33,12 @@ This plan reads that request as three parts:
    fold it into a task that already covers it, supersede a narrower task, or
    split it.
 2. **The writer confirms.** The proposal goes back to whoever wrote the
-   ask, with the scope restated, the importance the reconciler assumes, and
+   ask, with the scope restated, where the ask should sit in the queue, and
    only the questions that would change the decision. The writer confirms or
-   amends it, adding context and importance.
+   amends it, adding context and a placement.
 3. **Backpressure.** A project has a bounded number of asks in flight.
-   Asks past the bound wait in a queue, ordered by importance, and are
-   reconciled again when a place frees.
+   Tom ruled out a cap for now (2026-10-15). The backpressure built is
+   visibility, folding, and an explicit queue order.
 
 ## Freshness check
 
@@ -75,7 +75,7 @@ row carries provenance. No routine answers.
 (`core/intake.py:542-556`). The kernel never stops a task itself. Stops
 come from Tom (`core/tasks.py:534-576`).
 
-**Scheduling has no importance.** One foreground and one background
+**Scheduling has no priority.** One foreground and one background
 harness job run per process (`core/serve.py:425-426`). Each takes the
 ready task with the oldest latest activity (`core/serve.py:706-712`).
 Routine and replay subtrees are background (`core/tasks.py:473-488`).
@@ -94,7 +94,7 @@ the earlier invented caps. The steering inbox in
 The reconciler is a guard, because it can hold an ask for the writer's
 confirmation, and `governance.adds` counts "judging a request too thin and
 sending it back" (`core/judgement_tasks.py:137-138`). A hard cap on asks in
-flight would be a guard too. Importance ordering is not one: it changes
+flight would be a guard too. Queue order is not one: it changes
 which ready task runs next and never refuses one.
 
 **Mission items.** Item 6 (spend attention as carefully as money) and
@@ -153,7 +153,7 @@ ask written ──> task.started ──> RECONCILE ──> judge ──> clarify
      overlaps T / split ────────────┴─> shape.proposed to the writer
                                           │
                        writer confirms or amends (shape.confirmed,
-                       with context and importance) ──> the decision runs
+                       with context and a placement) ──> the decision runs
 ```
 
 `task.started` stays the first row of every ask, so the ask is recorded
@@ -193,12 +193,13 @@ legacy.
 | `overlaps` | Both should go ahead, but they touch the same code. Names T. |
 | `split` | The ask holds parts that belong to different tasks. Names the parts. |
 
-It also returns the scope restated in one or two sentences, the importance
-it assumes (`low`, `normal`, `high`) with one line of reasoning, and at
-most two questions whose answers would change the decision.
+It also returns the scope restated in one or two sentences, a proposed
+placement when the order matters (`before T` or `after T`, naming an open
+task, with one line of reasoning; none means the back of the queue), and
+at most two questions whose answers would change the decision.
 
 **Exit evidence.** `reconcile.decided` on the task: the decision, the
-named tasks, the restated scope, the assumed importance, the questions,
+named tasks, the restated scope, the proposed placement, the questions,
 the judgement id, and the cost. An abstain or a failure of both legs
 reads as `distinct` with a note: the reconciler never holds an ask
 because it could not answer.
@@ -213,14 +214,14 @@ Any other decision writes `shape.proposed` and moves the task to
 
 - **Tom (chat).** The proposal is sent as one notice in the chat the ask
   came from. It restates the scope, names the overlapping task and the
-  proposed action, states the assumed importance, and asks at most two
+  proposed action, states the proposed placement, and asks at most two
   questions. Tom's reply binds as `answer` (`core/intake.py:533-536`). If
   the judge would also send the ask to clarify, clarify's questions travel
   in the same notice. One ask costs Tom at most one interruption, as today.
 - **An agent at the command line** (`core start`, `routine --finding`).
   The command prints the proposal and the task id, and exits. The agent
   answers with `python -m core shape TASK --confirm` or
-  `--amend "TEXT" [--importance high]`, which writes `shape.confirmed` with
+  `--amend "TEXT"`, with `--before T` or `--after T` to place it, which writes `shape.confirmed` with
   provenance. No notice goes to Tom. An unanswered proposal waits; `status`
   lists it under `attention`.
 - **A routine.** A routine has no context to add. The proposal is applied
@@ -237,7 +238,7 @@ inputs. The second answer is applied as it stands.
 | `distinct` | to `judge` |
 | `covered`, T open | The ask's text goes to T as `ask.folded` (consumed like `message.steered`, `core/machine.py:418-439`), and the new task ends with outcome `folded` naming T. |
 | `covered`, T in `merge`, `merged`, or `ended` | The ask goes to T as `feedback.given` through `session.feedback`, and the new task ends `folded`. |
-| `supersedes` | T is stopped through `tasks.stop_tree`, carrying the writer's provenance. The new task goes to `judge`. Only Tom or an agent writer can confirm this. |
+| `supersedes` | T is stopped through `tasks.stop_tree`, carrying the writer's provenance. The new task goes to `judge`. Tom or Valor (as an agent writer) confirms it; a routine cannot. |
 | `overlaps` | Both tasks get an `ask.folded` note naming the other, so their plans know who else touches the code. The new task goes to `judge`. |
 | `split` | The writer starts the parts, each reconciled on its own. The original ends `split`. |
 
@@ -246,38 +247,55 @@ of T's next turn, the same way it reads a steer. The kernel gains no new
 power to stop work on its own: a stop happens only on a writer's confirmed
 `supersedes`.
 
-### Importance
+### Queue order: first in, first out, placed by the writer
 
-`shape.confirmed` carries `importance`. When the writer gives none, the
-reconciler's assumption stands, and a `distinct` ask records the
-assumption on `reconcile.decided`. The scheduler's key at
-`core/serve.py:706-712` becomes (foreground first, importance high to low,
-oldest latest activity, task id). Importance orders ready work and never
-refuses any. A writer can change it later with
-`python -m core shape TASK --importance X`.
+Tom ruled (2026-10-15) that Valor is the PM and manages his own
+priorities. The order is therefore relative, not a score:
+
+- **The default is start order.** A task's queue position is the id of
+  its `task.started` row. Background work runs oldest first and finishes
+  before newer work starts.
+- **The writer places an ask.** `shape.confirmed` may carry `before: T`
+  or `after: T`, naming an open task. The ask then sits immediately before
+  or after T. Valor can move any open task later with
+  `python -m core shape TASK --before T` (a `task.placed` row).
+- **The reconciler only proposes.** It proposes a placement when the
+  order matters to the overlap, for example "after T, which lands the
+  shared change first". The proposal applies only when the writer gives
+  none.
+- **A placement naming a terminal task** falls back to start order.
+
+The scheduler's key at `core/serve.py:706-712` becomes (foreground first,
+queue position, task id). Order decides which ready task runs next and
+never refuses one.
+
+A numeric 1 to 10 score was considered and not chosen. Scores are
+absolute, so they drift: nothing anchors one writer's 7 to another's, and
+over time most asks score high. A placement says exactly what the writer
+means ("this before that"), can be checked against what ran, and needs no
+calibration.
 
 ### Backpressure
 
-Tom asked for backpressure on the inbox for asks. This plan builds the
-part that has evidence behind it and leaves the hard cap to Tom's ruling
-(Open questions):
+Tom asked for backpressure on the inbox for asks, and ruled out a cap
+for now (2026-10-15). What is built:
 
 1. **The writer sees the queue.** Every proposal, and the line a
    `distinct` ask prints at the command line, says how many tasks are open
-   on the project, how many are ahead of this one at its importance, and
+   on the project, how many are ahead of this one in the queue, and
    which tasks are waiting on Tom. On 2026-10-15 nine tasks sat in `merge`
    waiting on Tom's grants, one since 2026-10-13. A writer who sees that
    can hold an ask back.
 2. **Folding shrinks the queue.** `covered` asks become notes on existing
    tasks rather than new tasks.
-3. **Importance decides who waits.** With ordering, a `low` routine
-   finding waits behind `high` work rather than behind whatever happened to
-   be touched least recently.
+3. **The writer decides who waits.** Valor, as PM, places an ask
+   before or after named tasks, so urgent work does not wait behind
+   whatever happened to be touched least recently.
 
-A hard cap (asks past N per project held as `queued` and reconciled again
-when a place frees) is designed in Open questions but not built. It needs
-an incident, and the audit found none: the 2026-10-14 starvation came from
-an idle turn loop.
+No cap is built. It would need an incident, and the audit found none: the
+2026-10-14 starvation came from an idle turn loop. What would count as
+one: a foreground ask that waited longer than an hour behind background
+work, or a week in which Tom's open grants exceed ten.
 
 ### Docs
 
@@ -286,7 +304,7 @@ an idle turn loop.
   the new rows in the model table.
 - `docs/judgement-layer.md`: the `intake.overlap` site.
 - `core/README.md`: `reconcile`, `shape`, `ask.folded`, and the
-  scheduler's importance key.
+  scheduler's queue order.
 - `docs/machine.md:179`: the "queued task" sentence says what is built.
 
 ## No-Gos (Out of Scope)
@@ -316,6 +334,14 @@ an idle turn loop.
   one costs him one notice, merged with clarify's when both apply. The
   measure is Tom's interruptions per ask, before and after, read from the
   attention log.
+- **First in, first out lets an old task hold the background slot.**
+  Today's key rotates tasks by least recent activity. Under start order,
+  the oldest ready task takes every turn until it finishes or waits. That
+  is the intent: finish before starting. A task stuck in a loop now blocks
+  the queue rather than sharing it, as `623c4901e1d5`'s 906 turns did on
+  2026-10-14. The queue line that writers see names the task holding the
+  slot and how long it has held it, so Valor can place work before it or
+  stop it.
 - **Cost.** One judgement call per ask, about the price of the judge
   (`133f2ae0965b`'s judge cost 46 micros). The open-task list is cut so
   the call fits one leg's window. A project with more open tasks than fit
@@ -339,7 +365,10 @@ Each test names the behavior it asserts, in the suite's style:
 - `test_a_folded_ask_reaches_a_merged_task_as_feedback`
 - `test_a_confirmed_supersedes_stops_the_named_task_with_the_writers_provenance`
 - `test_an_amend_reruns_the_reconciler_once`
-- `test_ready_work_runs_by_importance_then_oldest_activity`
+- `test_ready_background_work_runs_in_start_order`
+- `test_a_task_placed_before_another_runs_first`
+- `test_a_placement_naming_a_terminal_task_falls_back_to_start_order`
+- `test_the_reconcilers_placement_applies_only_when_the_writer_gives_none`
 - `test_the_cfb1_5172_pair_reads_as_covered`: the two instructions from
   incident 1, replayed through the scripted judgement upstream, decide
   `covered` naming the first task.
@@ -358,7 +387,7 @@ A new state between intake and `judge` changes every test that expects
   `intake.overlap` answer, so each test changes in one place.
 - [ ] `tests/test_judgement_sites.py`: UPDATE. The new site is declared,
   with its labels and failure behavior.
-- [ ] `tests/test_serve.py`: UPDATE. The scheduling key adds importance.
+- [ ] `tests/test_serve.py`: UPDATE. The scheduling key becomes queue position (start order, then placements) instead of oldest latest activity.
 - [ ] `tests/test_emulator_metering.py::test_every_stage_the_state_machine_schedules_has_a_runner`:
   UPDATE. `reconcile` has a runner.
 - [ ] `tests/test_findings.py`: UPDATE. `start_fix` returns the proposal
@@ -377,7 +406,7 @@ A new state between intake and `judge` changes every test that expects
    scratch origins decides `distinct`.
 3. A `distinct` ask from Tom produces no notice that today's flow would
    not.
-4. Ready tasks run in importance order, checked on `status` and the
+4. Ready tasks run in queue order, checked on `status` and the
    scheduler's log line.
 5. The suite is green and ruff is clean.
 
@@ -388,7 +417,7 @@ site's answer is information only:
 
 1. **Shadow.** `reconcile.decided` is recorded and shown to the writer
    (the command line prints it; Tom's ask shows it on `status`), but every
-   ask proceeds to `judge` as if `distinct`. Importance ordering is live
+   ask proceeds to `judge` as if `distinct`. Queue order is live
    from this step, since it refuses nothing.
 2. **Calibrate.** A calibration record over labelled pairs from the
    ledger: incidents 1 and 2 (overlap), the disk reclaim group
@@ -415,7 +444,7 @@ integration surface:
 - `python -m core start` and `python -m core routine NAME --finding` print
   the reconciler's decision, the restated scope, the queue line, and, when
   the ask waits, the `core shape` command to confirm or amend it.
-- `python -m core shape TASK (--confirm | --amend TEXT) [--importance X]`
+- `python -m core shape TASK (--confirm | --amend TEXT) [--before T | --after T]`
   is new. It writes `shape.confirmed` with `--by` and `--role-played`
   provenance, like `answer`.
 - The lead's filing instructions in `docs/plans/m7-improvement-loop.md`
@@ -438,25 +467,22 @@ The docs check reviews them on the candidate. There is no
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Incident 1 replays as overlap | `.venv/bin/python -m pytest tests -q -k cfb1_5172` | exit code 0 |
 
-## Open questions
+## Decided
 
-1. **The hard cap.** Tom asked for backpressure. The evidence supports
-   showing the queue, folding, and importance, and does not yet support
-   refusing asks: no incident shows harm from volume. The design, if Tom
-   wants it now despite that: per project, background asks past N open
-   tasks wait as `queued` (after `reconcile`, before `judge`), ordered by
-   importance, and are reconciled again when a task on the project reaches
-   a terminal state. Tom's own asks are never queued. Recommendation:
-   leave it out until an incident, and name now what would count as one: a
-   foreground ask that waited longer than an hour behind background work,
-   or a week in which Tom's open grants exceed ten.
-2. **Supersede from an agent writer.** Should an agent at the command
-   line be able to confirm a stop of someone else's task, or only Tom?
-   Recommendation: only Tom. An agent's `supersedes` notices Tom in the
-   same message as any other question.
-3. **Importance levels.** Three levels (`low`, `normal`, `high`) are
-   assumed. Tom may want an explicit "drop everything" level that runs as
-   foreground.
+Tom's answers, 2026-10-15:
+
+1. **No cap for now.** Backpressure is visibility, folding, and queue
+   order (Backpressure).
+2. **Valor is the PM and manages his own priorities.** Valor, as an
+   agent writer, confirms `supersedes` and places work without asking Tom.
+   He can delegate and run agents in parallel. The kernel's limit is one
+   background turn slot per machine (`core/slot.py`), and queue order
+   governs only that contention.
+3. **Order is first in, first out, placed by the writer**, with the
+   reconciler proposing a placement when the writer gives none. Tom offered
+   three options: first in, first out with a reconciler override; ordering
+   forced by the writer between other tasks; or a 1 to 10 score. The plan
+   combines the first two and drops the score (Queue order).
 
 ## Record
 
