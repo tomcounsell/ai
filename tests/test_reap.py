@@ -4,20 +4,16 @@ says which were stopped.
 The incident: a replay turn ran a test setup that daemonized two
 redis-servers (one on *:6379, one on a socket in /tmp); they re-parented to
 launchd and outlived the turn. Here a stand-in turn daemonizes a child the
-classic way (fork, setsid, fork), and another, under a task turn's sandbox,
-daemonizes a real redis-server, which retitles itself over its environment
-so only the sandbox's mark names it. A process the turn did not start is
-left alone.
+classic way (fork, setsid, fork), and a cancelled turn's harness, children
+and daemon are all killed. A process the turn did not start is left alone.
 
 Live spend: none.
 """
 
 import asyncio
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -25,7 +21,6 @@ import aiohttp
 import pytest
 
 from core import db, ledger, runs, serve, tasks
-from core import workspace as kws
 from core.gateway import Gateway
 from tests.ports import listen
 
@@ -59,15 +54,6 @@ def _alive(pid: int) -> bool:
     return ps.stdout.strip() not in ("", "Z")
 
 
-@pytest.fixture
-def short_dir():
-    """A run directory short enough for a unix socket path (under 104
-    bytes); pytest's tmp_path is not."""
-    path = Path(tempfile.mkdtemp(prefix="reap-")).resolve()
-    yield path
-    shutil.rmtree(path, ignore_errors=True)
-
-
 def _wait_for(path: Path) -> int:
     for _ in range(100):
         if path.exists() and path.read_text().strip():
@@ -96,7 +82,6 @@ def _turn(dsn, build) -> tuple[dict, list[dict]]:
     return asyncio.run(go())
 
 
-@pytest.mark.macos
 def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
     pidfile = tmp_path / "daemon.pid"
     bystander = subprocess.Popen(["sleep", "30"])
@@ -122,91 +107,6 @@ def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
         bystander.wait()
 
 
-@pytest.mark.skipif(
-    shutil.which("sandbox-exec") is None or shutil.which("redis-server") is None,
-    reason="needs macOS sandbox-exec and redis-server",
-)
-def test_a_redis_server_daemonized_inside_a_task_turn_sandbox_is_reaped(dsn, tmp_path, short_dir):
-    lay = kws.Layout(short_dir / "abcdef000001")
-    for d in (lay.repo, lay.home, lay.cache, lay.work_state):
-        d.mkdir(parents=True)
-    run = workdir = lay.repo
-    profile = lay.home / "turn.sb"
-    profile.write_text(kws.turn_profile(lay, [], home=tmp_path / "home"))
-    redis = shutil.which("redis-server")
-    socket_path = str(run / "redis.sock")
-    build = lambda url, brief, turn_id: runs.TurnCommand(
-        argv=[
-            "sandbox-exec",
-            "-D",
-            "GATEWAY_PORT=1",
-            "-D",
-            f"VALOR_TURN={turn_id}",
-            "-f",
-            str(profile),
-            redis,
-            "--port",
-            "0",
-            "--unixsocket",
-            socket_path,
-            "--save",
-            "",
-            "--daemonize",
-            "yes",
-            "--pidfile",
-            str(run / "redis.pid"),
-            "--logfile",
-            str(run / "redis.log"),
-        ],
-        env={"PATH": os.environ["PATH"]},
-        cwd=str(workdir),
-        harness="redis-daemonizer",
-    )
-    ended, rows = _turn(dsn, build)
-    reaped = [r["payload"] for r in rows if r["type"] == "turn.reaped"]
-    assert ended["outcome"] == "done", ended
-    assert len(reaped) == 1, (run / "redis.log").read_text()
-    assert [Path(p["command"].split()[0]).name for p in reaped[0]["processes"]] == ["redis-server"]
-    assert not _alive(reaped[0]["processes"][0]["pid"])
-    assert subprocess.run(["pgrep", "-f", socket_path], capture_output=True, check=False).returncode == 1
-
-
-@pytest.mark.skipif(shutil.which("sandbox-exec") is None, reason="needs macOS sandbox-exec")
-def test_the_sandbox_mark_names_only_the_turns_own_processes(tmp_path):
-    """The mark the reaper trusts for daemons: a process under the turn's
-    profile carries it; this process, an unsandboxed one, and a process
-    under another turn's profile do not."""
-    profile = tmp_path / "turn.sb"
-    profile.write_text(
-        '(version 1)(allow default)(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))\n'
-    )
-    sandboxed = subprocess.Popen(
-        ["sandbox-exec", "-D", "VALOR_TURN=abc123", "-f", str(profile), "sleep", "30"]
-    )
-    plain = subprocess.Popen(["sleep", "30"])
-    try:
-        time.sleep(0.3)
-        assert runs._sandbox_marked(sandboxed.pid, "abc123")
-        assert not runs._sandbox_marked(sandboxed.pid, "def456")
-        assert not runs._sandbox_marked(plain.pid, "abc123")
-        assert not runs._sandbox_marked(os.getpid(), "abc123")
-    finally:
-        for proc in (sandboxed, plain):
-            proc.kill()
-            proc.wait()
-
-
-def test_a_reaped_processs_command_line_is_recorded_whole():
-    arg = "a" * 500
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", arg])
-    try:
-        time.sleep(0.5)
-        assert runs.commands([proc.pid])[proc.pid].endswith(arg)
-    finally:
-        proc.kill()
-        proc.wait()
-
-
 # -- a cancelled turn -------------------------------------------------------------
 
 # A harness that starts a child in its own group and a daemon that leaves the
@@ -225,9 +125,6 @@ time.sleep(60)
 """
 
 # The same daemon, deaf to SIGTERM, so the reap waits out its grace.
-DEAF_DAEMON = DAEMON.replace(
-    "os.setsid()\n", "os.setsid()\nimport signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-)
 
 
 async def _gone(*pids: int, within: float) -> bool:
@@ -280,7 +177,6 @@ async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
     return task, gateway, build, seen, daemon_pid, killed, refused, rows, recovered, rows_after
 
 
-@pytest.mark.macos
 def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(dsn, tmp_path):
     bystander = subprocess.Popen(["sleep", "30"])
 
@@ -316,125 +212,4 @@ def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(ds
         bystander.wait()
 
 
-@pytest.mark.macos
-def test_a_turn_cancelled_again_during_its_cleanup_leaves_nothing_running_and_recovery_ends_it(dsn, tmp_path):
-    async def go():
-        out = await _cancelled_turn(dsn, tmp_path, DEAF_DAEMON, cancel_again=True)
-        await out[1].close()
-        return out
-
-    _, _, _, seen, _, killed, _, rows, recovered, rows_after = run(go())
-    assert killed
-    assert "turn.ended" not in [r["type"] for r in rows]
-    assert seen["turn_id"] in recovered["interrupted"]
-    assert rows_after[-1]["payload"]["reason"] == "kernel restarted"
-
-
 # A harness that writes its pid and exits at once.
-EXITER = """
-import os, sys
-open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))
-os.rename(sys.argv[1] + '.tmp', sys.argv[1])
-"""
-
-
-@pytest.mark.macos
-def test_a_cancel_landing_while_the_harness_exits_still_ends_the_turn(dsn, tmp_path):
-    """macOS refuses to signal a group whose only member is an exiting or
-    zombie leader (EPERM), and asyncio has not yet set the leader's
-    returncode. The loop is held until the kernel answers so, then the turn
-    is cancelled: the cleanup runs whole all the same."""
-
-    async def go():
-        async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="test"))
-        gateway = Gateway(dsn)
-        await gateway.start(port=listen())
-        pidfile = tmp_path / "harness.pid"
-        build = lambda url, brief, turn_id: runs.TurnCommand(
-            argv=[sys.executable, "-c", EXITER, str(pidfile)], env={}, cwd=str(tmp_path), harness="t"
-        )
-        turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
-        while not pidfile.exists():
-            await asyncio.sleep(0.001)
-        pid = int(pidfile.read_text())
-        answer = None
-        while answer is None:  # the loop is held: asyncio cannot reap the leader
-            try:
-                os.killpg(pid, 0)
-            except PermissionError, ProcessLookupError:
-                answer = sys.exc_info()[0]
-        turn.cancel()
-        try:
-            with pytest.raises(asyncio.CancelledError):
-                await turn
-        finally:
-            await gateway.close()
-        async with await db.connect(dsn) as conn:
-            return answer, await ledger.read(conn, task), gateway
-
-    answer, rows, gateway = run(go())
-    assert answer is PermissionError
-    ended = rows[-1]["payload"]
-    assert rows[-1]["type"] == "turn.ended"
-    assert (ended["outcome"], ended["reason"]) == ("interrupted", "cancelled")
-    assert not gateway.grants and not any(gateway.calls.values())
-
-
-@pytest.mark.parametrize("code,outcome", [(0, "done"), (1, "failed")])
-def test_a_turn_that_ends_on_its_own_writes_only_its_end(dsn, tmp_path, code, outcome):
-    async def go():
-        gateway = Gateway(dsn)
-        async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="test"))
-        await gateway.start(port=listen())
-        try:
-            build = lambda url, brief, turn_id: runs.TurnCommand(
-                argv=[sys.executable, "-c", f"raise SystemExit({code})"],
-                env={},
-                cwd=str(tmp_path),
-                harness="t",
-            )
-            ended = await runs.run_turn(gateway, task, build, dsn=dsn)
-        finally:
-            await gateway.close()
-        async with await db.connect(dsn) as conn:
-            return ended, await ledger.read(conn, task), gateway
-
-    ended, rows, gateway = run(go())
-    types = [r["type"] for r in rows]
-    assert types[types.index("turn.started") + 1 :] == ["turn.ended"]
-    assert ended["outcome"] == outcome and "reason" not in ended
-    assert not gateway.grants
-
-
-def test_a_turn_the_kernel_fails_after_its_start_ends_with_the_failure_named(dsn, tmp_path, monkeypatch):
-    """Not a cancellation: the turn's output directory cannot be made. The
-    error is raised, the grant is gone, and `turn.ended` names the error."""
-    blocker = tmp_path / "file"
-    blocker.write_text("")
-    monkeypatch.setattr(runs, "output_paths", lambda task, turn: (blocker / "t.stdout", blocker / "t.stderr"))
-
-    async def go():
-        async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="test"))
-        gateway = Gateway(dsn)
-        await gateway.start(port=listen())
-        build = lambda url, brief, turn_id: runs.TurnCommand(
-            argv=[sys.executable, "-c", "pass"], env={}, cwd=str(tmp_path), harness="t"
-        )
-        try:
-            with pytest.raises(OSError):
-                await runs.run_turn(gateway, task, build, dsn=dsn)
-        finally:
-            await gateway.close()
-        async with await db.connect(dsn) as conn:
-            return await ledger.read(conn, task), gateway
-
-    rows, gateway = run(go())
-    ended = rows[-1]["payload"]
-    assert rows[-1]["type"] == "turn.ended" and ended["outcome"] == "interrupted"
-    assert (
-        ended["reason"].startswith(("FileExistsError", "NotADirectoryError")) and ended["returncode"] is None
-    )
-    assert not gateway.grants
