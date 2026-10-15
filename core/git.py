@@ -322,11 +322,6 @@ async def interrupt(held: Interruptible, job: asyncio.Future) -> None:
         job.exception()
 
 
-def hostile(*_args, **_kwargs) -> list[str]:
-    """Kept only so callers outside this file still import; the kernel refuses no config."""
-    return []
-
-
 def commit_named(workspace: str | Path, name: str, profile: str | Path, mark: str) -> str | None:
     """The full id of the one commit `name` (a commit id or an abbreviation
     of one, hex only) names in a workspace a turn owns, or None. The read

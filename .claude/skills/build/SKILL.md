@@ -205,8 +205,9 @@ builder's narration.
   - **review** (Opus, blind): judges from the request, the plan, the diff,
     the docs, and runs of its own, never the builder's narration. Checks the
     Done items against the plan's threat model; a finding that the kernel
-    reads turn-owned state is one finding, "remove the read". Answers the
-    governance boolean. Verdict `pass`, `changes`, or `governance_refused`.
+    reads turn-owned state is one finding, "remove the read". A diff that
+    adds governance with no grant from Tom in the plan file fails. Verdict
+    `pass` or `changes`.
   - **docs**: on branch `m<id>-docs`, commits Markdown only so no doc says
     something the candidate made untrue. Verdict `updated`, `no_change`, or
     `changes`.
