@@ -66,9 +66,7 @@ holder's. Removing a provisioned task's workspace takes no such lock: once its
 `workspace.failed` is provisioned again on Tom's next steer.
 
 **The mirror's fetch** brings one commit from the builder's clone into `kernel.git`: the sending
-side runs inside the turn's profile under the turn's mark, the receiving git with fsck. A tree
-holding a top-level `.valor` (any case) is refused, since the kernel makes `.valor` itself for a
-fresh session's inputs, written through descriptors that follow no link and overwrite no file.
+side runs inside the turn's profile under the turn's mark, the receiving git with fsck.
 
 ## Per-task services
 
@@ -126,8 +124,3 @@ the removal fails. No run sees what another run, or the working session, wrote.
 
 **A reviewer's setup.** Review sets up its checkout from the same check
 services, then runs the project's setup commands there under the turn profile.
-Afterwards the kernel reads the checkout through descriptors with no link
-followed (`workspace.setup_left`): no directory where the checkout was, a
-`.valor` or `.pi` entry in it, or an error reading or writing it, is treated
-as the candidate's, and review records `changes` naming it (leg `kernel`, no
-session, no reviewer's verdict).

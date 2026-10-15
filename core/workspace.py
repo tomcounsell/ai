@@ -31,8 +31,8 @@ socket). It marks what runs under it with a mach name the profile denies,
 also after the kernel died.
 
 The kernel mirror is fed from the builder's clone by `fetch_into_mirror`:
-a tree holding `.valor` refused, the sending side run inside the turn's own
-sandbox, the receiving side with fsck.
+the sending side run inside the turn's own sandbox, the receiving side with
+fsck.
 """
 
 import atexit
@@ -1236,36 +1236,6 @@ def bring_merged(
 VALOR_DIR = ".valor"
 
 
-def tree_has_valor(
-    repo: str | Path, rev: str, *, trusted: bool, extra_env: dict[str, str] | None = None
-) -> bool:
-    """Whether the commit's tree holds a top-level `.valor` entry, in any
-    letter case (this Mac's file system ignores case). A committed `.valor`
-    would sit where the kernel writes a fresh session's inputs and reads its
-    verdict, so no such plan or candidate counts."""
-    args = ("ls-tree", "--name-only", "-z", rev)
-    listing = (
-        git.trusted(repo, *args, extra_env=extra_env, text=False)
-        if trusted
-        else git.out(repo, *args, text=False)
-    )  # a tree entry's name is any bytes but NUL and `/`
-    return any(
-        name.decode(errors="surrogateescape").casefold() == VALOR_DIR for name in listing.split(b"\0") if name
-    )
-
-
-# -- fresh checkouts -----------------------------------------------------------------------------
-
-KERNEL_IDENTITY = {
-    "GIT_AUTHOR_NAME": "Valor kernel",
-    "GIT_AUTHOR_EMAIL": "kernel@valor.invalid",
-    "GIT_COMMITTER_NAME": "Valor kernel",
-    "GIT_COMMITTER_EMAIL": "kernel@valor.invalid",
-    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
-    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
-}
-
-
 def fresh_dir(check_dir: Path) -> Path:
     """Remove and make a fresh session's directory with `rmtree`, so a
     read-only entry a sandboxed run left goes too, never following a link."""
@@ -1273,56 +1243,6 @@ def fresh_dir(check_dir: Path) -> Path:
     for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi"):
         d.mkdir(parents=True)
     return check_dir
-
-
-class ValorInTree(git.GitError):
-    """A commit's tree holds a `.valor` entry: the commit's own doing, so
-    no checkout of it ever succeeds."""
-
-    def __init__(self, rev: str):
-        super().__init__(f"{rev[:12]}'s tree holds a .valor entry")
-        self.rev = rev
-
-
-# Paths (a directory or a link) a blind checkout leaves out of the working
-# tree, for every harness: Pi reads `<cwd>/.pi/settings.json` whatever flags it is given, and
-# a candidate must not set what the verifier's session runs with.
-BLIND_LEFT_OUT = (".pi",)
-
-
-def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[str, str]:
-    """A repository at `dest` holding exactly two commits the kernel made:
-    `base` (the base's tree) and `candidate` (`rev`'s tree), with only the
-    objects those trees reach, so no builder commit message, intermediate
-    commit, or object outside the two trees exists in it. A `rev` whose
-    tree holds `.valor` raises `ValorInTree`; the base's tree is never
-    checked out, so its entries do not count."""
-    mirror = Path(mirror)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    git.trusted(dest.parent, "init", "-q", "-b", "main", str(dest))
-    borrow = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects"), **KERNEL_IDENTITY}
-    if tree_has_valor(dest, rev, trusted=True, extra_env=borrow):
-        raise ValorInTree(rev)
-    base_tree = git.trusted(dest, "rev-parse", f"{base}^{{tree}}", extra_env=borrow)
-    rev_tree = git.trusted(dest, "rev-parse", f"{rev}^{{tree}}", extra_env=borrow)
-    first = git.trusted(dest, "commit-tree", base_tree, "-m", "base", extra_env=borrow)
-    second = git.trusted(dest, "commit-tree", rev_tree, "-p", first, "-m", "candidate", extra_env=borrow)
-    git.trusted(dest, "update-ref", "refs/heads/main", second, extra_env=borrow)
-    git.trusted(dest, "repack", "-a", "-d", "-q", extra_env=borrow)
-    # What a harness reads from the project, to steer the session it runs
-    # there (Pi's `.pi/settings.json` has no flag against it), is left out of
-    # the working tree. Both commits keep it, so the diff the reviewer is
-    # given still shows a candidate's change to it.
-    git.trusted(dest, "config", "core.sparseCheckout", "true")
-    git.trusted(dest, "config", "core.sparseCheckoutCone", "false")
-    (dest / ".git" / "info").mkdir(exist_ok=True)
-    (dest / ".git" / "info" / "sparse-checkout").write_text(
-        "/*\n" + "".join(f"!/{d}\n" for d in BLIND_LEFT_OUT)
-    )
-    git.trusted(dest, "checkout", "-q", "-f", "main")
-    with (dest / ".git" / "info" / "exclude").open("a") as f:
-        f.write(".valor/\n")
-    return {"base": first, "candidate": second}
 
 
 def check_harness(
@@ -1362,39 +1282,16 @@ def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[
     return harness
 
 
-def setup_left(checkout: Path) -> str | None:
-    """What a setup left that no session may start in, read through
-    descriptors with no link followed: the checkout gone or not a directory,
-    or a `.valor` or `BLIND_LEFT_OUT` entry in it. None when there is
-    nothing. Either is the candidate's own doing, so every rerun meets it."""
-    try:
-        root = os.open(checkout, DIR_FLAGS)
-    except OSError as exc:
-        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
-            return "the setup left no directory where the checkout was"
-        raise
-    try:
-        for name in (VALOR_DIR, *BLIND_LEFT_OUT):
-            try:
-                os.stat(name, dir_fd=root, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            return f"the setup left {name} in the checkout"
-        return None
-    finally:
-        os.close(root)
-
-
 def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     """Make `.valor/inputs/` in a checkout the kernel just made and write each
-    input there, every step relative to a descriptor: `.valor` must not
-    exist yet, nothing is followed through a link, and no file is
-    overwritten. So nothing committed in the tree can redirect a write."""
+    input there, every step relative to a descriptor, nothing followed
+    through a link, and no file overwritten."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     root = os.open(checkout, flags)
     fds = [root]
     try:
-        os.mkdir(VALOR_DIR, 0o755, dir_fd=root)  # FileExistsError if the tree brought one
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(VALOR_DIR, 0o755, dir_fd=root)
         valor = os.open(VALOR_DIR, flags, dir_fd=root)
         fds.append(valor)
         os.mkdir("inputs", 0o755, dir_fd=valor)
