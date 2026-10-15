@@ -257,23 +257,13 @@ async def ensure(conn, r: Routine, *, restart: bool = False) -> tuple[str, str |
 async def spend(
     conn, roots: list[str], *, since: datetime | None = None, until: datetime | None = None
 ) -> dict[str, Any]:
-    """The metered spending under `roots` (each root's subtree, and the
-    calibration tasks whose `emulator.item_task` is in those subtrees):
+    """The metered spending under `roots` (each root's subtree):
     `spent_usd_micros` over the charges with `at` after `since` and not after
     `until`, `charges`, and `open_calls` listed apart. A report."""
     nodes: list[str] = []
     for root in roots:
         nodes += [root, *await tasks.subtree(conn, root)]
     metered = list(roots)
-    if nodes:
-        found = await (
-            await conn.execute(
-                "SELECT task_id FROM events WHERE type = 'task.started' "
-                "AND payload->'emulator'->>'item_task' = ANY(%s)",
-                (nodes,),
-            )
-        ).fetchall()
-        metered += [r[0] for r in found]
     charges: list[dict[str, Any]] = []
     open_calls: dict[str, Any] = {}
     for task_id in metered:
@@ -442,10 +432,7 @@ async def run(
     the first run, and stop at once, writing nothing, when Tom stopped it
     (`restart` begins a fresh one). Otherwise the routine's runner starts or
     continues the run, and `routine.ran` and the printed line record it. An
-    expiry firing holds the session lock `routine:expiry` throughout, so two
-    firings at once start one sweep; the emulator's runner holds `run:<run>`
-    for its hours-long sweep instead, and a second firing says `already
-    running`."""
+    expiry firing holds the session lock `routine:expiry` throughout."""
     r = load(name, directory)
     if r.runner not in runners:
         raise Refused(
@@ -709,7 +696,7 @@ async def _used(conn, objectives: list[str], cutoff: datetime) -> bool:
 
 
 def render(found: dict[str, list[dict[str, Any]]], r: Routine) -> str:
-    """The sweep task's instruction: the routine's own text, then each item
+    """The expiry report: the routine's own text, then each item
     with its incident, mission item, grant date, expiry, and last firing."""
 
     def entry(i: dict[str, Any]) -> str:
@@ -732,28 +719,10 @@ def render(found: dict[str, list[dict[str, Any]]], r: Routine) -> str:
 
 
 async def expiry_runner(ctx: Context) -> Ran:
-    """Continue the open sweep; else fold `due` and, with something due,
-    start one task on the routine's project for the deletion. Nothing due
-    starts no task and runs no turn."""
-    open_ = await open_run(ctx)
-    if open_:
-        return Ran(open_, "continued", f"sweep {open_} is open")
+    """Report what is past its ninety days to Tom, as the run's summary. It
+    starts no task and deletes nothing: a deletion is Tom's to ask for."""
     found = await due(ctx.conn, ctx.now)
     unread = "".join(f"; not read, {m}" for m in found["malformed"])
     if not found["items"]:
         return Ran(None, "nothing_due", f"nothing due{unread}")
-    if ctx.start_project is None or not ctx.routine.project:
-        raise Refused(f"routine {ctx.routine.name} starts a project task; none is given")
-    listed = [{"kind": i["kind"], "id": i["id"]} for i in [*found["items"], *found["outside"]]]
-    run_id = await ctx.start_project(
-        ctx.conn,
-        parent=ctx.objective,
-        instruction=render(found, ctx.routine),
-        routine=ctx.routine.name,
-        ceiling=ctx.routine.ceiling,
-        model=ctx.routine.model,
-        project=ctx.routine.project,
-        branch=ctx.routine.branch,
-        marker={"sdlc": 1, "sweep": EXPIRY_RUNNER, "due": listed},
-    )
-    return Ran(run_id, "started", f"{len(found['items'])} due, {len(found['outside'])} outside{unread}")
+    return Ran(None, "listed", render(found, ctx.routine) + unread)
