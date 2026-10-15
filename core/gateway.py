@@ -10,7 +10,8 @@ calls, passes through here.
   `POST /v1/messages`, recorded `route: "gateway"`.
 - **The OpenAI route** (tails starting `openai/`, the prefix removed)
   speaks the Responses API to `settings.openai_upstream` and is metered
-  on `POST v1/responses`, recorded `route: "openai"`.
+  on `POST v1/responses`, recorded `route: "openai"`; any other POST
+  (chat completions among them) is answered 400, not metered.
 
 For each metered call the gateway:
 
@@ -513,8 +514,12 @@ class Gateway:
             headers["authorization"] = "Bearer " + key
         url = self.openai_upstream + "/" + tail + query
         source = "kernel" if key is not None else "turn"
-        if request.method == "POST":  # only v1/responses takes POST
+        if request.method == "POST" and tail == "v1/responses":
             return await self._call(grant, self._metered_openai(request, grant, url, headers, body, source))
+        if request.method == "POST":
+            # Chat completions, embeddings, batches and the rest report usage
+            # in shapes the meter does not read.
+            return _openai_error(400, "invalid_request_error", f"POST {tail} is not metered")
         return await self._forward(request, url, headers, body, openai=source)
 
     async def _forward(self, request, url, headers, body, openai: str | None = None) -> web.StreamResponse:
