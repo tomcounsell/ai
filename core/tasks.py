@@ -56,7 +56,7 @@ class Brief:
     instruction: str
     max_effect_class: str = "act"
     workspace: str | None = None
-    model: str = resolve_model("light")
+    model: str = resolve_model("frontier")
     harness_name: str = "claude_code"
     harness: dict[str, Any] = field(default_factory=dict)
     target_branch: str | None = None

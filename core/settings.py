@@ -96,6 +96,8 @@ PRICES: dict[str, Price] = {
     "claude-opus-4-8": Price(5.00, 25.00, 6.25, 10.00, 0.50, date(2026, 10, 1)),
     "claude-sonnet-5-5": Price(2.00, 10.00, 2.50, 4.00, 0.20, date(2026, 10, 1)),
     "claude-sonnet-5": Price(2.00, 10.00, 2.50, 4.00, 0.20, date(2026, 10, 1)),
+    # Haiku 5.5 rates hold to 100K input tokens; past that, $0.50 input and $2.50 output.
+    "claude-haiku-5-5": Price(0.10, 0.50, 0.125, 0.20, 0.01, date(2026, 10, 15)),
     "claude-haiku-4-5": Price(1.00, 5.00, 1.25, 2.00, 0.10, date(2026, 10, 1)),
 }
 
@@ -182,7 +184,7 @@ OPENAI_LOOPING_TOOLS = frozenset({"web_search", "file_search", "mcp"})
 SEATS: dict[str, tuple[str, str]] = {
     "frontier": ("claude_code", "claude-opus-5-5"),
     "reviewer": ("claude_code", "claude-opus-5-5"),
-    "light": ("claude_code", "claude-haiku-4-5"),
+    "light": ("claude_code", "claude-haiku-5-5"),
     "reviewer_openai": ("pi", "gpt-6.1-sol"),
 }
 

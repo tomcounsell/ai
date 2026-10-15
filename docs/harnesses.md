@@ -87,7 +87,7 @@ marketplace Claude Code keeps under `~/.claude/plugins/marketplaces/`), each pas
 `--plugin-dir` when it exists.
 
 It defaults to the light seat's pinned model id
-(`claude-haiku-4-5`), as does a Brief, never an alias: the installed CLI
+(`claude-haiku-5-5`), and a Brief to the frontier seat's, never an alias: the installed CLI
 resolves an alias, and may resolve it to a model the gateway has no price
 for, which the gateway charges at a stand-in price marked `unpriced`.
 

@@ -869,7 +869,7 @@ def main() -> None:
     start.add_argument("--ceiling", choices=list(tasks.EFFECT_RANK))
     start.add_argument("--parent", help="start a child of this task, at or below its ceiling")
     start.add_argument("--workspace")
-    start.add_argument("--model", default="light")
+    start.add_argument("--model", default="frontier")
     start.add_argument("--harness", choices=("claude_code", "pi"))
     start.add_argument("--harness-config")
     start.add_argument("--target-branch")

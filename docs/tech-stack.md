@@ -264,9 +264,10 @@ reviewer_openai; the judgement legs are pinned beside the seats.
 - **Frontier**: the newest model, for turns. A task Tom starts from a
   message runs on it (`core/intake.py`), the same seat a kernel task's
   build lead runs on.
-- **Light**: Haiku, the default of `python -m core start --model`. A task
-  started from a message does not run on it: the SDLC stages are frontier
-  work, which the light model does not hold.
+- **Light**: Haiku 5.5, the default of a bare builder turn. No task runs on
+  it unless started with `--model light`: the SDLC stages are frontier work,
+  which the light model does not hold, so `python -m core start --model`
+  and a Brief default to frontier.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
   frontier model itself in a fresh session, or an Opus-class model
   from another vendor through another harness. What a weaker judge loses is
