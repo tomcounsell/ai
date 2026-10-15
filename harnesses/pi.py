@@ -51,7 +51,7 @@ from core import binaries, spending
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import settings
-from harnesses.claude_code import KEEP_ENV, Unsandboxed
+from harnesses.claude_code import Unsandboxed, environment
 
 # The release the contract suite ran on. The turn row records what ran.
 PINNED = "0.73.1"
@@ -302,16 +302,11 @@ def workspace_turn(
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         write_config(agent_dir, {"models.json": models_json(base_url, model, max_output_tokens),
                                  "settings.json": settings_json(model)})  # fmt: skip
-        env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
+        env = environment()
         env.update(harness.get("env", {}))
         env["PI_CODING_AGENT_DIR"] = agent_dir
         env["PI_OFFLINE"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
-        if harness.get("gitconfig"):
-            env["GIT_CONFIG_GLOBAL"] = harness["gitconfig"]
-            env["GIT_CONFIG_NOSYSTEM"] = "1"
-        if harness.get("gh_config_dir"):
-            env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
         if harness.get("tmpdir"):
             env["TMPDIR"] = harness["tmpdir"]
         argv = [

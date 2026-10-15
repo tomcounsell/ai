@@ -23,7 +23,7 @@ The port is one value, `TurnCommand`, built fresh for each turn:
 | Field | What it carries |
 |---|---|
 | `argv` | the command line that runs one turn |
-| `env` | the turn's whole environment; nothing is inherited past it |
+| `env` | the turn's whole environment |
 | `cwd` | the workspace the turn works in |
 | `harness` | the harness's name, recorded in `turn.started` |
 | `harness_version` | the installed release, read from its files and recorded in `turn.started` |
@@ -81,32 +81,25 @@ Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a t
 
 ## The Claude Code wrapper
 
-`harnesses/claude_code.py` builds two kinds of turn.
+`harnesses/claude_code.py` builds `workspace_turn`, one turn of a task that works in a directory.
+It runs as a developer's Claude Code would there: the project's CLAUDE.md, settings, hooks, skills,
+MCP servers and web tools all load, and so do the plugin directories in `settings.plugin_dirs`
+(`VALOR_PLUGIN_DIRS`, colon-separated; by default the yudame and yudame-dev plugins of the yudame
+marketplace Claude Code keeps under `~/.claude/plugins/marketplaces/`), each passed as
+`--plugin-dir` when it exists.
 
-**`turn`** is one self-contained call: no tools by default, no session
-persistence, safe mode and `--setting-sources ""` as below, a system prompt of the dispatched text (persona, then Brief).
-The live tests use it. It copies the kernel's environment minus Claude Code's
-own variables and every libpq (`PG*`) and `VALOR_PG*` variable, and carries
-the placeholder credential a workspace turn does, so it never reads the
-machine user's own Claude Code login: the gateway supplies the kernel's. It runs under no sandbox profile, so it can read whatever the machine's user can, the
-kernel's password file included; it must not be given tools without one.
-
-Both builders default to the light seat's pinned model id
+It defaults to the light seat's pinned model id
 (`claude-haiku-4-5`), as does a Brief, never an alias: the installed CLI
 resolves an alias, and may resolve it to a model the gateway has no price
 for, which the gateway charges at a stand-in price marked `unpriced`.
 
-**`workspace_turn`** is one turn of a task that works in a directory, and is
-what a real task runs. Its arguments:
+Its arguments:
 
 | Argument | What it does | Serves |
 |---|---|---|
 | `-p --output-format json` | one non-interactive turn; one JSON result on stdout | the port's `parse` |
-| `--safe-mode` | no hooks, skills, plugins, or `CLAUDE.md` from this machine | bounded authority: the prompt layer of the machine holds no authority over a turn |
-| `--setting-sources ""` | no settings file is read: not a `.claude/settings.json` or `settings.local.json` in the working directory, and not the `settings.json` of the turn's own config directory, which the turn and everything it runs can write and which Claude Code re-reads mid-turn; so nothing the turn runs can set the model URL, environment, model, permissions, or an `apiKeyHelper`. The kernel puts nothing in that file: the gateway supplies the credential and the environment is the kernel's | metered spending: every model call goes through the gateway; a candidate's code does not set what its reviewer runs with |
-| `--strict-mcp-config` | no MCP servers | bounded authority; least privilege [11] |
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
-| `--disallowedTools WebFetch WebSearch` | no web tools | independent checks: a replay cannot fetch its own answer (rebuild-baseline.md, Caveats); retrieved pages carry no instructions into the turn [7] |
+| `--plugin-dir DIR`, once per existing `settings.plugin_dirs` entry | loads the yudame plugins | developer parity (C18) |
 | `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
 | `--session-id ID` or `--resume SESSION` | a new session under an id the kernel chose, or the task's session continued | Mission item 1 (see below); the kernel knows which transcript is the turn's |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
@@ -115,11 +108,11 @@ The demonstration checked the system-prompt row: every `turn.started` row carrie
 the Brief and in the `--append-system-prompt` argument that reached `claude -p`
 (rebuild-demonstration.md, Correction 1 rendering).
 
-**The environment** is an allowlist [11]: `HOME`, `USER`, `LOGNAME`, `PATH`,
-`SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`, plus the workspace's own
-variables from the task's harness settings. Tokens, SSH and 1Password agent
-sockets, and Claude Code's own session variables stay behind. The wrapper
-then sets:
+**The environment** is the operator's, less the kernel's own secrets
+(`claude_code.DROP_PREFIXES` and `DROP_NAMES`: Anthropic and Claude Code variables, the kernel's
+provider and GitHub keys, the libpq password variables), plus the workspace's own variables from the
+task's harness settings. So the turn has Valor's `gh` login, git credential helper and SSH agent.
+The wrapper then sets:
 
 - `ANTHROPIC_BASE_URL`: the gateway URL issued for this turn.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: set only when the task's harness
@@ -132,17 +125,17 @@ then sets:
   Two of three turns of a baseline run ended idle waiting on killed
   background tests before this (rebuild-baseline.md, Caveats). Mission
   item 1: tests that ran are tests that finished.
-- `GIT_TERMINAL_PROMPT=0`; `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM=1`
-  when the task gives a git config; `GH_CONFIG_DIR` when it gives a gh
-  config directory.
-- `DISABLE_AUTOUPDATER=1`; `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
+- `GIT_TERMINAL_PROMPT=0`.
+- `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
   `tmpdir`; from its `claude_config_dir`, `CLAUDE_CONFIG_DIR` (its own Claude
-  Code state, no login) and a placeholder `CLAUDE_CODE_OAUTH_TOKEN`.
+  Code state, no login) and a placeholder `CLAUDE_CODE_OAUTH_TOKEN`, which wins over a Keychain
+  login (checked 2026-10-15 on Claude Code 2.1.300: every call reached a logging base URL carrying
+  the placeholder).
 - `VALOR_TURN`, set by the kernel: the turn's id, which the reaper uses.
 
 **The task's harness settings** come from provisioning (`python -m core
 start --project`) or from `--harness-config FILE`, and are stored on the
-task: `sandbox_profile`, `gitconfig`, `gh_config_dir`, `tmpdir`,
+task: `sandbox_profile`, `tmpdir`,
 `claude_config_dir`, `env`, and `max_output_tokens`.
 `sandbox_profile` is required: `workspace_turn` raises `Unsandboxed` for a
 task without one, before anything is spawned, and `python -m
@@ -592,10 +585,7 @@ spending). A harness on another format needs a route that meters it first.
 
 Each wrapper will turn a versioned skill into what its harness loads. The
 skill system is deferred until Tom's requirements are gathered
-(`skills/README.md`). Until then a workspace turn loads no skills from this
-machine (safe mode). The stage instructions are plain files in
+(`skills/README.md`). A workspace turn loads the plugins in
+`settings.plugin_dirs` and the project's own skills. The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
-text, so they need nothing harness-specific. A repository's own `CLAUDE.md`
-and `.claude/` stay in the clone as files the turn can read, as they did in
-the baseline (rebuild-baseline.md, Setup); Claude Code itself loads neither
-(safe mode, `--setting-sources ""`).
+text, so they need nothing harness-specific.
