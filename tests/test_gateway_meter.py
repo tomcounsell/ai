@@ -16,6 +16,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 from aiohttp import web
+from yarl import URL
 
 from core import db, ledger, tasks
 from core.gateway import Gateway
@@ -50,7 +51,7 @@ async def _upstream(body: bytes, *, content_type: str):
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
 
-def _call(dsn, body: bytes, *, content_type: str):
+def _call(dsn, body: bytes, *, content_type: str, path: str = "/v1/messages"):
     async def go():
         runner, url = await _upstream(body, content_type=content_type)
         async with await db.connect(dsn) as conn:
@@ -58,7 +59,7 @@ def _call(dsn, body: bytes, *, content_type: str):
         gateway = Gateway(dsn, upstream=url)
         await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
-        async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=BODY) as r:
+        async with aiohttp.ClientSession() as http, http.post(URL(base + path, encoded=True), json=BODY) as r:
             got = (r.status, await r.read())
         await gateway.drain(task)
         await gateway.close()
@@ -91,6 +92,6 @@ def test_a_recorded_stream_is_charged_what_the_provider_reported(dsn):
     assert result[3]["usage"]["input_tokens"] == 14 and result[3]["usage"]["output_tokens"] == 4
 
 
-def test_a_recorded_whole_response_is_charged_the_same(dsn):
-    result = _call(dsn, WHOLE, content_type="application/json")
+def test_a_recorded_whole_response_is_charged_the_same_on_an_unnormal_path(dsn):
+    result = _call(dsn, WHOLE, content_type="application/json", path="/v1/.//messages")
     _check(result, body=WHOLE, usd=COMPLETE)
