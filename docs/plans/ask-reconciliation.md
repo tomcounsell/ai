@@ -447,7 +447,7 @@ integration surface:
 - `python -m core shape TASK (--confirm | --amend TEXT) [--before T | --after T]`
   is new. It writes `shape.confirmed` with `--by` and `--role-played`
   provenance, like `answer`.
-- The lead's filing instructions in `docs/plans/m7-improvement-loop.md`
+- The lead's filing instructions in the m7 plan (in git history)
   ("Starting a finding by hand") gain one line: read the printed proposal
   and confirm or amend it.
 

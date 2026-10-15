@@ -21,7 +21,7 @@ items and results at `~/src/valor-demo`, `GITHUB_PUSH_TOKEN` in the
 vault, and the nightly backup job loaded against `/Volumes/PINK/valor_temp`
 (a USB disk; the job carries `VALOR_PG_BIN` because launchd's PATH has no
 Postgres). The popoto #191 trial run (task `75c0902b6e25`) is done and held at
-its merge, not released (m1-4-checks.md). Next is 1.4b, then 1.4d. The review's
+its merge, not released. Next is 1.4b, then 1.4d. The review's
 rerun (1.4c) needs Apple's `container`, which Valor's Mac and Tom's Mac
 both have. On this Mac a non-interactive shell finds
 Postgres 15 first on `PATH` and has neither `VALOR_BACKUP_DIR` nor
@@ -152,7 +152,7 @@ off it. Its enforcement stays disabled: every commit and PR merge on `main`
 lands under `valorengels`, and a merge may land on `main` (Tom,
 2026-10-11), so an active rule would refuse Valor's merges there. The push
 token is settled: Valor's classic `repo`-scope token, in the vault as
-`GITHUB_PUSH_TOKEN` (m1-4-checks.md, Questions, 3).
+`GITHUB_PUSH_TOKEN`.
 
 Which Mac hosts the new bridges, and the test windows in which its old
 bridge, email bridge, and worker are disabled, are Valor's to choose.
