@@ -29,9 +29,9 @@ rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
 (`router.step`), a provisioning, or the collection recover could not
 make; one job per
-task at a time, and one harness job at a time in this process. A turn also
-holds the machine's turn slot (`core/slot.py`), which `python -m core run`
-shares.
+task at a time, and at most `settings.max_turns` harness jobs at once,
+foreground first. A turn also holds one of the machine's turn slots
+(`core/slot.py`), which `python -m core run` shares.
 
 A task is stepped again when it moved, or when a row it did not write
 lands on its stream (an answer, a steer, a stop, an effect's outcome). A
@@ -422,8 +422,8 @@ class Kernel:
         # by `received_id`: asked again up to `judgement.UNANSWERED_RUNS`
         # times in this process, as a failed judgement is, then left with 👀.
         self.shape_errors: dict[str, int] = {}
-        self.harness: str | None = None  # the foreground task whose harness job runs
-        self.background: str | None = None  # the background task whose harness job runs
+        self.harness: set[str] = set()  # the foreground tasks whose harness jobs run
+        self.background: set[str] = set()  # the background tasks whose harness jobs run
         self.services: dict[str, router._Services] = {}
         self.swept: set[str] = set()
         self.seen: dict[str, int] = {}  # the latest row a step of the task read or wrote
@@ -482,8 +482,8 @@ class Kernel:
             await reactions.shape(self.judgement_port, conn, seen, self.dsn)
 
     def _holding(self) -> bool:
-        """A job other than the background turn's is running."""
-        return any(t != self.background for t in self.jobs)
+        """A job other than a background turn's is running."""
+        return any(t not in self.background for t in self.jobs)
 
     async def roll(self, conn) -> None:
         """Roll the kernel forward to its due merge, if any (module
@@ -554,13 +554,13 @@ class Kernel:
         _log(f"rolled out {m.sha} with no restart")
 
     async def _apply(self, conn, plan: rollout.Plan) -> None:
-        """Cancel the background turn, back up, fast-forward, sync, migrate,
+        """Cancel the background turns, back up, fast-forward, sync, migrate,
         and raise `Restart`; every other job has ended."""
         m = plan.target
-        job = self.jobs.get(self.background) if self.background else None
-        if job is not None:
+        running = [self.jobs[t] for t in self.background if t in self.jobs]
+        for job in running:
             job.cancel()
-            await asyncio.gather(job, return_exceptions=True)
+        await asyncio.gather(*running, return_exceptions=True)
         steps = list(plan.steps)
         database = psycopg.conninfo.conninfo_to_dict(self.dsn).get("dbname") or settings.database
         if plan.backup and m.effect_id not in self.backed_up:
@@ -699,16 +699,10 @@ class Kernel:
                 continue
             if found is not None:
                 ready.append(found)
-        # A foreground step starts beside a background one: it waits for
-        # the slot and preempts the background turn holding it.
-        foreground = [r for r in ready if not r[0]]
-        if self.harness is None and foreground:
-            _, latest, task_id = min(foreground)
-            self.harness = task_id
-            self._start(task_id, self._step(task_id, latest), latest)
-        elif self.harness is None and self.background is None and ready:
-            _, latest, task_id = min(ready)
-            self.background = task_id
+        # Foreground before background, then the oldest, up to the limit.
+        free = settings.max_turns - len(self.harness) - len(self.background)
+        for background, latest, task_id in sorted(ready)[: max(free, 0)]:
+            (self.background if background else self.harness).add(task_id)
             self._start(task_id, self._step(task_id, latest), latest)
 
     async def _ready(self, conn, task_id: str) -> tuple[bool, int, str] | None:
@@ -749,10 +743,8 @@ class Kernel:
 
         def finished(_):
             self.jobs.pop(task_id, None)
-            if self.harness == task_id:
-                self.harness = None
-            if self.background == task_id:
-                self.background = None
+            self.harness.discard(task_id)
+            self.background.discard(task_id)
             if not job.cancelled() and job.exception() is not None:
                 _log(f"task {task_id}: job failed: {job.exception()!r}")
                 self.parked[task_id] = latest
