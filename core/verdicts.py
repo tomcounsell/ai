@@ -535,15 +535,20 @@ MOVED = ("[rejected]", "non-fast-forward", "fetch first")
 # and the merge performer's words for a refused one (`tools/push_branch.py`,
 # `ROTATE`).
 CREDENTIAL = (credentials.GITHUB_KEY, "refused the credential")
-# What the target's new commits may not change for a carry: the files the
-# checks' environment is built from, the dependencies and the schema.
-CARRY_BLOCKED = ("uv.lock", "pyproject.toml", "core/schema.sql")
+# A project's schema file, by name at any depth: what its stored data is
+# built from, which no carry may take a change to untested.
+SCHEMA_FILES = ("schema.sql",)
 # Where a carried head is kept in the repository the merge pushes from.
 CARRIED_REF = "refs/valor/carried/"
 
 
 def carry_blocked(path: str) -> bool:
-    return any(path == b or path.endswith("/" + b) for b in CARRY_BLOCKED)
+    """A path the target's new commits may not change for a carry: a file
+    setup installs from (`checks.LOCKFILES`, at the top level) or the
+    project's schema (`SCHEMA_FILES`)."""
+    from core import checks
+
+    return path in checks.LOCKFILES or path.rsplit("/", 1)[-1] in SCHEMA_FILES
 
 
 @dataclass(frozen=True)
@@ -670,7 +675,7 @@ async def ensure_merge(
             if not_carried is None:
                 return await ensure_merge(conn, performers, task_id, now=now)
             if f.counts["rebases"] < machine.REBASES:
-                await _rebase(conn, task_id, b, last, not_carried)
+                await _rebase(conn, task_id, b, f.candidate, last, not_carried)
                 return None
         transient = [t for t in tries if merge_failure(t) == "transient"]
         if why in ("moved", "refused") or (why == "transient" and len(transient) >= MERGE_TRIES):
@@ -711,7 +716,7 @@ async def _carry(conn, task_id: str, b: tasks.Brief, f: machine.Fold, failed: Me
     """Carry the verified candidate onto the moved target's new tip, with no
     turn: the kernel replays the candidate and its docs head onto the tip
     (`git.replay`), which applies only when the target's new commits change
-    no path the candidate changes and no `CARRY_BLOCKED` file, and leaves
+    no path the candidate changes and no `carry_blocked` file, and leaves
     the patch identical, hunk for hunk. Then `verdicts.carried` moves the
     candidate's test, review, and docs verdicts, its delivery, and the
     grants on its instances (the same hunks, so the same ids) to the
@@ -738,6 +743,8 @@ async def _carry(conn, task_id: str, b: tasks.Brief, f: machine.Fold, failed: Me
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         now = machine.fold(await ledger.read(conn, task_id))
+        if now.carried and now.carried[-1]["from"]["sha"] == c.sha:
+            return None  # a racing step carried it first
         if now.state is not State.MERGE or now.candidate != c or now.merge_effect != f.merge_effect:
             return "the task moved on while the candidate was replayed"
         await ledger.append(
@@ -759,14 +766,18 @@ async def _carry(conn, task_id: str, b: tasks.Brief, f: machine.Fold, failed: Me
     return None
 
 
-async def _rebase(conn, task_id: str, b: tasks.Brief, failed: MergeTry, not_carried: str) -> None:
-    """Send the work back to rebase onto the target's new tip, which the
-    merge's lookup fetched into the kernel mirror (`git.LOOKUP_REF`),
-    naming why the kernel could not carry the candidate itself."""
+async def _rebase(
+    conn, task_id: str, b: tasks.Brief, c: machine.Candidate, failed: MergeTry, not_carried: str
+) -> None:
+    """Send the work on candidate `c` back to rebase onto the target's new
+    tip, which the merge's lookup fetched into the kernel mirror
+    (`git.LOOKUP_REF`), naming why the kernel could not carry `c` itself;
+    nothing once the task left `merge` or a racing step carried `c`."""
     tip = await _tip(b.mirror or b.workspace)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
-        if machine.fold(await ledger.read(conn, task_id)).state is not State.MERGE:
+        now = machine.fold(await ledger.read(conn, task_id))
+        if now.state is not State.MERGE or now.candidate != c:
             return
         await ledger.append(
             conn,

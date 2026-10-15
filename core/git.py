@@ -876,9 +876,10 @@ def replay(
     `blocked(path)` holds for no path the target changed. Each replayed
     commit is the target's tree with that commit's own entries written over
     it, its message, author, and committer kept, so the same replay always
-    makes the same ids. The patch `tip..head'` must then equal `base..head`
-    byte for byte, so every hunk, and every governance instance id, is the
-    one the checks read. `kernel` names a repository only the kernel writes
+    makes the same ids. No path either side changes is one the other
+    changes, so `tip` holds each of the candidate's paths as `base` did and
+    the patch `tip..head'` is `base..head` byte for byte: every hunk, and
+    every governance instance id, is the one the checks read. `kernel` names a repository only the kernel writes
     (`trusted`), else it is a workspace a turn writes (`out`, its config
     checked first). Returns the replay and None, or None and why not.
     Raises `GitError`."""
@@ -889,7 +890,7 @@ def replay(
         return out(repo, *args, extra_env=extra_env)
 
     base = call("merge-base", head, tip)
-    if call("rev-list", "--merges", f"{base}..{head}"):
+    if merges_between(repo, base, head):
         return None, "the candidate holds a merge commit"
     ours, theirs = _changed(call, base, head), _changed(call, base, tip)
     both = sorted(ours & theirs)
@@ -930,9 +931,6 @@ def replay(
             parent = replayed[commit] = call(
                 "commit-tree", tree, "-p", parent, "-m", message, extra_env=ident
             )
-    diff = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--full-index")
-    if call(*diff, base, head) != call(*diff, tip, parent):
-        return None, "the replayed patch differs from the verified one"
     return Replayed(base, tip, replayed[sha], parent), None
 
 

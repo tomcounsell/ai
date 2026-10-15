@@ -1182,7 +1182,7 @@ def test_a_merge_the_target_moved_under_disjointly_carries_its_verdicts_and_land
 
 
 @pytest.mark.macos
-@pytest.mark.parametrize("path", ["pyproject.toml", "sub/uv.lock", "core/schema.sql"])
+@pytest.mark.parametrize("path", ["uv.lock", "package.json", "core/schema.sql"])
 def test_a_merge_the_target_moved_under_by_a_dependency_or_schema_file_rebases_instead_of_carrying(
     dsn, tmp_path, path
 ):
@@ -1201,6 +1201,42 @@ def test_a_merge_the_target_moved_under_by_a_dependency_or_schema_file_rebases_i
     assert not [r for r in written if r["type"] == "verdicts.carried"]
     (rebase, *_) = [r["payload"] for r in written if r["type"] == "rebase.requested"]
     assert path in rebase["not_carried"]
+
+
+@pytest.mark.macos
+def test_a_step_that_lost_the_race_to_carry_neither_carries_again_nor_sends_the_carried_work_to_rebase(
+    dsn, tmp_path
+):
+    """Two steps read the same moved-target failure; the first carries and
+    merges. The second, acting on its stale fold, finds its candidate
+    carried: no second carry, no `rebase.requested`, no end."""
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await checks_only(dsn, task)
+        _move_target_elsewhere(tmp_path, origin, "elsewhere.txt")
+        git(ws, "fetch", "-q", str(origin), f"+main:{kgit.LOOKUP_REF}")
+        await _failed_merge(dsn, task, "GitError('git push: ! [rejected] main -> main (fetch first)')")
+        stale = await fold(dsn, task)
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, task)
+            (last,) = verdicts.merge_tries(await ledger.read(conn, task), stale.candidate)
+            first = await verdicts.ensure_merge(conn, await scripted._of(conn, task), task)
+            second = await verdicts._carry(conn, task, b, stale, last)
+            await verdicts._rebase(conn, task, b, stale.candidate, last, "lost the race")
+        return first, second, await rows(dsn, task)
+
+    first, second, written = run(go())
+    assert first.kind == "done" and second is None
+    assert len([r for r in written if r["type"] == "verdicts.carried"]) == 1
+    assert not [r for r in written if r["type"] in ("rebase.requested", "task.ended")]
+    f = machine.fold(written)
+    assert f.state is State.MERGED and f.counts["rebases"] == 0
+    (report,) = [
+        r["payload"] for r in written if r["type"] == "notice.requested" and r["payload"]["kind"] == "report"
+    ]
+    assert f"merged at {f.candidate.sha[:12]}" in report["text"]
 
 
 async def _failed_merge(dsn, task, error: str) -> dict:

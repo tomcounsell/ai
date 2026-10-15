@@ -123,14 +123,16 @@ patch carrying every finding of the three branches together.
   and why it stopped; it asks for nothing, and feedback by reply opens a new loop window in `patch`.
   The decision is Valor's, not Tom's, under Tom's rulings of 2026-10-03 ("Valor decides who stops
   and who gets more budget") and 2026-10-09.
-- **Rebases.** A merge whose push the target rejects because its branch moved is first carried: the
-  kernel, with no turn, replays the verified candidate and its docs commits onto the new tip
-  (`git.replay`) when the replay applies cleanly, the target's new commits touch no path the
-  candidate touches, and none of them touch `uv.lock`, `pyproject.toml`, or `core/schema.sql`
-  (`verdicts.CARRY_BLOCKED`). The replayed patch is the verified one byte for byte, so the checks'
-  verdicts and Tom's grants (instance ids digest the hunks, not a review's grouping) carry to the
-  replayed sha in one `verdicts.carried` row (the verdicts and grants, from which sha and head to
-  which, and the target's tip), and the merge is requested again at once. A carry is not a rebase.
+- **Rebases.** A merge whose push the target rejects because its branch moved is carried when the
+  move is clean and disjoint: the kernel, with no turn, replays the verified candidate and its docs
+  commits onto the new tip (`git.replay`) when the target's new commits touch no path the candidate
+  touches, no file setup installs from (`checks.LOCKFILES`), and no schema file
+  (`verdicts.SCHEMA_FILES`). The replayed patch is then the verified one byte for byte, so the
+  checks' verdicts and Tom's grants (instance ids digest the hunks, not a review's grouping) carry
+  to the replayed sha in one `verdicts.carried` row (the verdicts and grants, from which sha and
+  head to which, and the target's tip), and the merge is requested again at once. The merged sha
+  then sits on a tip whose other commits were never tested with the candidate; the merge report
+  says so, naming the sha it was tested at and the sha it merged at. A carry is not a rebase.
   Otherwise the work goes to `patch` to rebase onto the new tip (`rebase.requested`, naming why it
   did not carry). A rebase is mechanical and spends no round; at most two happen per loop window,
   and the next such rejection ends the task.
