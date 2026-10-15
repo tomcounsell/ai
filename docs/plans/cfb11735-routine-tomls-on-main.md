@@ -2,7 +2,7 @@
 tracking: none
 slug: cfb11735-routine-tomls-on-main
 type: plan
-status: planned
+status: superseded
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -59,3 +59,11 @@ None added.
 ## Loops
 
 0 critique, 0 review: small, reversible, test-only.
+
+## Outcome
+
+Superseded on rebase: 611404ce2 ("Tests and docs name main as the valor
+branch after the cutover") landed the same two changes to
+`tests/test_verify.py`, and also fixed `tests/test_targets.py`,
+`tests/test_live_push.py` and `projects/README.md`. The test commit
+dropped as already upstream; only this record remains.
