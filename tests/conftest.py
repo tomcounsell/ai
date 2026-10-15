@@ -121,6 +121,11 @@ def dsn() -> str:
     memory.reset()
 
 
+@pytest.fixture(scope="session")
+def owner_dsn(dsn) -> str:
+    return settings.dsn(owner=True, database=TEST_DB)
+
+
 @pytest.fixture(autouse=True)
 def release_ports(request):
     """After a test that used the ledger, stop the services of every task
