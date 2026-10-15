@@ -279,10 +279,6 @@ async def _append(conn, task_id: str, kind: str, payload: dict[str, Any]) -> int
     return event_id
 
 
-def re_sha(value: str) -> bool:
-    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
-
-
 def _delivery(f: machine.Fold, rows: list[dict], event_id: int) -> dict[str, Any]:
     c = f.candidate
     done = next(

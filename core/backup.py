@@ -18,7 +18,6 @@ fill the boot disk. Names carry no colons, since the disk is exFAT, and
 exFAT's `._` AppleDouble files never match a dump's name.
 """
 
-import contextlib
 import fcntl
 import hashlib
 import json
@@ -30,7 +29,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -292,17 +290,6 @@ def stop_cluster(cluster: Cluster, pg_bin: str | Path | None = None) -> None:
         check=False,
     )
     shutil.rmtree(cluster.root, ignore_errors=True)
-
-
-@contextlib.contextmanager
-def scratch_cluster(
-    pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-", port: int | None = None
-) -> Iterator[Cluster]:
-    cluster = start_cluster(pg_bin, tcp=tcp, prefix=prefix, port=port)
-    try:
-        yield cluster
-    finally:
-        stop_cluster(cluster, pg_bin)
 
 
 def restore(

@@ -526,16 +526,6 @@ async def open_node(ctx: Context) -> str | None:
     return None
 
 
-async def open_run(ctx: Context) -> str | None:
-    """The objective's latest run task when it is neither merged nor
-    stopped."""
-    for row in reversed(ctx.ran):
-        if row.get("run"):
-            state = await state_of(ctx.conn, row["run"])
-            return None if state in ("merged", "ended", "stopped") else row["run"]
-    return None
-
-
 # -- the expiry sweep -----------------------------------------------------------
 
 
