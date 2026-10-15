@@ -43,7 +43,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from core import broker, db, git, ledger, machine, mail, outcomes, runs, signals, slot, tasks, workspace
+from core import broker, db, git, ledger, machine, mail, outcomes, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
@@ -123,8 +123,6 @@ async def run(
             )
         except tasks.TaskStopped:
             return {"status": "stopped"}
-        if ended["outcome"] == "preempted":
-            return dict(slot.PREEMPTED)
         found = (
             await asyncio.to_thread(signals.collect, b.workspace, ended["turn_id"])
             if b.workspace
