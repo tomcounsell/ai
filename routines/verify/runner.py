@@ -27,7 +27,7 @@ COLLECTION = "collection failure"  # pytest's JUnit message for a module that di
 
 @dataclass
 class CheckContext:
-    """What `checks.suite`, `checks.stop_heard` and `checks.interrupted` read
+    """What `checks.suite` and `checks.stop_heard` read
     from a check's context, for a routine's run: the run's id and the dsn.
     A run has no task lock to lose, so `alive` is always true."""
 

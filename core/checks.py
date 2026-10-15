@@ -857,8 +857,8 @@ async def stop_heard(ctx):
 
 
 def test_runner(port):
-    """The runner for `Check.TEST`. The check holds the turn slot
-    (`core/slot.py`) throughout, so no turn runs beside a suite."""
+    """The runner for `Check.TEST`. The check holds a turn slot
+    (`core/slot.py`) throughout, so a suite counts against `max_turns`."""
 
     async def run(ctx) -> dict[str, Any]:
         async with slot.held(ctx.task_id, ctx.dsn):
