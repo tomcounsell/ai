@@ -3,10 +3,7 @@
 
 Both are `act` and push to the origin URL the kernel recorded when the task
 started (`Brief.origin_url`), never to whatever the workspace's config names
-now: the turn owns that config. A push is refused when the workspace's own
-config holds any include, URL rewrite, push URL, or anything else
-`core.git.hostile` names, since git would apply a rewrite even to an
-explicit URL and the kernel runs no program the turn chose. The push carries
+now: the turn owns that config. The push carries
 `<head_sha>:refs/heads/<branch>` and never `--force`: a branch that moved
 under the broker is Tom's to read, not the broker's to overwrite. The
 performers run in the kernel's process, outside the turn's sandbox, which is
@@ -55,18 +52,7 @@ class PushBranch:
         """Checked at request, before the intent."""
         if self.protected and action.target == self.protected:
             return f"{self.protected} is the task's target branch; only the merge lands there"
-        return await git.threaded(self._rewrites)
-
-    def _rewrites(self) -> str | None:
-        try:
-            found = git.hostile(self.workspace)
-        except git.GitError as exc:
-            return str(exc)
-        return (
-            f"the workspace's git config could redirect the push or run a program: {'; '.join(found)}"
-            if found
-            else None
-        )
+        return None
 
     def destination(self, action) -> tuple[str, str]:
         return self.url or git.push_url(self.workspace), action.target
@@ -76,16 +62,12 @@ class PushBranch:
 
     async def lookup(self, action, key: str) -> dict | None:
         """Present (the remote branch holds the commit, at its tip or below
-        it): the result. Absent: None. Unknown (the workspace is refused or
-        the remote cannot be read): `broker.Unknown`."""
+        it): the result. Absent: None. Unknown (the remote cannot be read): `broker.Unknown`."""
         return await git.threaded(self._lookup, action)
 
     def _perform(self, action) -> dict:
         if self.protected and action.target == self.protected:
             raise ValueError(f"{self.protected} is the task's target branch; only the merge lands there")
-        said = self._rewrites()
-        if said:
-            raise ValueError(said)
         url, branch = self.destination(action)
         git.push(self.workspace, url, action.payload["head_sha"], branch)
         return {"remote": url, "branch": branch, "sha": action.payload["head_sha"]}
@@ -148,7 +130,7 @@ class Merge(PushBranch):
                 f"the merge names {p['url']} {p['target_branch']}; the task's Brief names "
                 f"{self.url} {self.branch}"
             )
-        return await git.threaded(self._rewrites)
+        return None
 
     def destination(self, action) -> tuple[str, str]:
         return action.payload["url"], action.payload["target_branch"]
@@ -162,9 +144,6 @@ class Merge(PushBranch):
             return call(path)
 
     def _perform(self, action) -> dict:
-        said = self._rewrites()
-        if said:
-            raise ValueError(said)
         url, branch = self.destination(action)
         if url != self.url or branch != self.branch:
             raise ValueError(

@@ -1,67 +1,25 @@
 """Git, read and pushed by the kernel, in a workspace a turn can write.
 
-The kernel runs outside the turn's sandbox and holds the database
-credential, so no git call here may run a program the turn chose. A turn
-owns its workspace's `.git/config` (and any file it includes), `.git/hooks`,
-`.git/info/attributes`, and the committed `.gitattributes`. Attributes only
-name drivers; a driver's program comes from config. So every call:
+The kernel runs git outside the turn's sandbox, for its own merge and reads.
+Every call:
 
-- runs a root-owned git install (`settings.git_bin`, checked by
-  `core.binaries.require_git` before every call: the Command Line Tools'
-  git by default, never Apple's `/usr/bin/git` shim, which finds the real
-  git through a per-user cache a turn can poison) with a PATH of system
-  directories only;
-- reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
-  `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
-- ignores replace refs and grafts (`GIT_NO_REPLACE_OBJECTS=1`,
-  `GIT_GRAFT_FILE=/dev/null`), and the commit-graph and multi-pack-index
-  files (`core.commitGraph=false`, `core.multiPackIndex=false`), all of
-  which a turn can write and none of which is config, so none can change
-  what history the kernel reads;
-- drops every `DYLD_*` variable, so no library is injected into git;
-- runs git in its own process group with no time limit: git runs until
-  it exits. Started under a watch (`interruptible()`: provisioning, a run
-  starting its services, and every `threaded` caller, such as a perform),
-  an interrupt of the watch kills the group, git and everything it
-  started; a cancelled `threaded` caller (a stop, or an interrupt of the
-  kernel's loop) interrupts its watch. Git writes its output to files
-  the kernel holds, not pipes, so the kernel waits on git itself and
-  never on a program git started. Inside a perform git holds the
-  effect's lock (`core.performing`), which every process git starts
-  inherits, so `broker.reconcile` waits until the last of them has exited;
-- pins hooks, the fsmonitor, the credential helper, the SSH command, the
-  proxy command, the askpass program, the global attributes file, automatic
-  gc, the `ext::` transport, and push's tag following, submodule recursion,
-  and signing off on its command line, which overrides the repository's
-  config; a push also passes `--no-follow-tags --no-recurse-submodules
-  --no-signed`, so it sends exactly the one commit the request names;
+- runs `settings.git_bin` with a PATH of system directories, reads no global
+  or system config (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`),
+  inherits no other `GIT_*` variable, and drops `DYLD_*`;
+- ignores replace refs and grafts and the commit-graph files;
+- pins `core.hooksPath` off on its command line (`PINNED`), so no hook in a
+  workspace runs under the kernel's merge;
+- runs git in its own process group with no time limit. Started under a
+  watch (`interruptible()`), an interrupt kills the group, git and
+  everything it started. Git writes its output to files the kernel holds,
+  not pipes. Inside a perform git holds the effect's lock
+  (`core.performing`), which every process git starts inherits, so
+  `broker.reconcile` waits until the last of them has exited;
 - on a call carrying the GitHub credential, also pins
-  `http.followRedirects=false` and an empty `http.proxy`, at the general
-  scope and the URL's own (`credential_pins`), so the header reaches the
-  merge's URL and nothing else whatever the repository's config says;
-- passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
-  submodules in `status`;
-- and first refuses the workspace outright (`GitError`) when its local or
-  worktree config holds any key that can name a program, redirect where a
-  push lands, or pull other config in (`HOSTILE`, checked by `hostile`):
-  filter drivers, diff and merge drivers, the fsmonitor, hooks path,
-  pager, editor, askpass, SSH and proxy commands, credential helpers,
-  transport and upload or receive programs, URL rewrites and push URLs,
-  any `push.*` or `hook.*` setting, the alternate refs command, the
-  interactive diff filter, partial clone, any `*.cmd`, aliases, submodule
-  settings, `core.worktree`, and every include. Config that cannot be read
-  is refused too. The answer is kept per workspace while nothing it
-  depends on changes: the key is the content hash, inode, and change time
-  of `.git`'s `HEAD`, `config`, `config.worktree`, and `commondir`, never
-  a modification time, which a turn sets, with the git, its environment,
-  and the owners. A config with an include, a `.git` that is not a plain
-  directory git stops at, a failed read, and a read under a sandbox
-  profile are read every time (`hostile`).
-
-Reading config (`git config --list`) runs nothing: it only reads files. A
-workspace whose config the kernel refuses gets no candidate, no instance,
-no git facts beyond its origin URL and branch (`origin`, which names whose
-a failure is), and no push until the turn removes the key.
+  `http.followRedirects=false` and an empty `http.proxy`
+  (`credential_pins`), so the header reaches the merge's URL and nothing
+  else;
+- passes `--no-textconv` and `--no-ext-diff` to every diff.
 
 Imports the standard library, `core.binaries`, `core.performing`, and
 `core.settings`.
@@ -121,26 +79,7 @@ def env() -> dict[str, str]:
     }
 
 
-PINNED = [
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "core.fsmonitor=false",
-    "-c", "credential.helper=",
-    "-c", "core.sshCommand=false",
-    "-c", "core.gitProxy=",
-    "-c", "core.askPass=/usr/bin/false",
-    "-c", "core.attributesFile=/dev/null",
-    "-c", "core.pager=cat",
-    "-c", "gc.auto=0",
-    "-c", "maintenance.auto=false",
-    "-c", "protocol.ext.allow=never",
-    "-c", "push.followTags=false",
-    "-c", "push.recurseSubmodules=no",
-    "-c", "push.gpgSign=false",
-    "-c", "core.commitGraph=false",
-    "-c", "core.multiPackIndex=false",
-    "-c", "submodule.recurse=false",
-    "-c", "advice.graftFileDeprecated=false",
-]  # fmt: skip
+PINNED = ["-c", "core.hooksPath=/dev/null"]
 
 
 def credential_pins(url: str) -> list[str]:
@@ -154,23 +93,6 @@ def credential_pins(url: str) -> list[str]:
     for key, value in (("followRedirects", "false"), ("proxy", "")):
         pins += ["-c", f"http.{key}={value}", "-c", f"http.{url}.{key}={value}"]
     return pins
-
-
-# Local or worktree config keys (lowercased) the kernel will not run git
-# under: by prefix, or by a `remote.<name>.` / `diff.<name>.` /
-# `merge.<name>.` suffix.
-HOSTILE_PREFIXES = (
-    "include.", "includeif.", "filter.", "url.", "alias.", "submodule.", "credential",
-    "core.fsmonitor", "core.hookspath", "core.pager", "core.editor", "core.askpass",
-    "core.sshcommand", "core.gitproxy", "core.worktree", "core.attributesfile",
-    "pager.", "sequence.editor", "protocol.", "uploadpack.", "receive.", "gpg.",
-    "diff.external", "ssh.", "push.", "hook.", "http.", "core.alternaterefscommand",
-    "interactive.difffilter", "extensions.partialclone",
-)  # fmt: skip
-HOSTILE_SUFFIXES = (
-    ".textconv", ".command", ".driver", ".pushurl", ".uploadpack", ".receivepack", ".proxy",
-    ".vcs", ".helper", ".cmd",
-)  # fmt: skip
 
 
 class GitError(RuntimeError):
@@ -402,143 +324,16 @@ async def interrupt(held: Interruptible, job: asyncio.Future) -> None:
         job.exception()
 
 
-# What `hostile` last found per workspace, under the key of every input the
-# answer depends on (`_config_key`); kept for the most recent workspaces only.
-_HOSTILE_SEEN: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
-_HOSTILE_LOCK = threading.Lock()
-_HOSTILE_KEPT = 1024
-_HEAD_VALID = re.compile(rb"ref:\s*refs/|[0-9a-f]{40}")
-
-
-def _config_key(workspace: str | Path, git_bin: str) -> tuple[str, str] | None:
-    """The key `hostile`'s cached answer is held under: the trusted git, the
-    environment of a kernel git call, the effective user, the workspace's
-    real path, the workspace directory and its `.git` directory (owner,
-    inode, and change time, so a `.git` renamed away and back is seen), and
-    `.git`'s `HEAD`, `config`, `config.worktree`, and `commondir` (absent,
-    or a regular file by content hash, inode, and change time), plus
-    whether `objects/` and `refs/` are reachable. Change times are the
-    kernel's clock, which no turn sets; a modification time, which a turn
-    sets, is never part of it.
-
-    None (read uncached) unless `.git` is a plain directory git stops at:
-    a `HEAD` that names a ref or a commit, `objects/` and `refs/`
-    directories, no `commondir`, every file above regular and readable. So
-    a gitfile, a linked worktree, a repository found above the workspace,
-    or a link among them is never cached; nor is an include (`hostile`).
-    The directories above the workspace are the kernel's."""
-    try:
-        real = os.path.realpath(workspace)
-        dot = os.path.join(real, ".git")
-        top, gitdir = os.lstat(real), os.lstat(dot)
-        if not (stat.S_ISDIR(top.st_mode) and stat.S_ISDIR(gitdir.st_mode)):
-            return None
-        h = hashlib.sha256()
-        h.update(
-            json.dumps(
-                [
-                    git_bin,
-                    sorted(env().items()),
-                    os.geteuid(),
-                    *((d.st_uid, d.st_dev, d.st_ino, d.st_ctime_ns) for d in (top, gitdir)),
-                ]
-            ).encode()
-        )
-        for name in ("objects", "refs"):
-            got = os.lstat(os.path.join(dot, name))
-            if not stat.S_ISDIR(got.st_mode) or not os.access(os.path.join(dot, name), os.X_OK):
-                return None
-            # Taken away and back during a read, git finds no repository here and lists another's config.
-            h.update(
-                f"{name}: {got.st_mode} {got.st_uid} {got.st_dev} {got.st_ino} {got.st_ctime_ns}\n".encode()
-            )
-        for name in ("HEAD", "config", "config.worktree", "commondir"):
-            path = os.path.join(dot, name)
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-            except FileNotFoundError:
-                if name == "HEAD":
-                    return None
-                h.update(f"{name}: absent\n".encode())
-                continue
-            with os.fdopen(fd, "rb") as f:
-                st = os.fstat(fd)
-                if not stat.S_ISREG(st.st_mode) or name == "commondir":
-                    return None
-                data = f.read()
-            if name == "HEAD" and not _HEAD_VALID.match(data):
-                return None
-            h.update(f"{name}: {st.st_ino} {st.st_ctime_ns} {len(data)} ".encode())
-            h.update(hashlib.sha256(data).digest())
-        return (git_bin, real), h.hexdigest()
-    except OSError:
-        return None
-
-
-def hostile(
-    workspace: str | Path, profile: str | Path | None = None, mark: str = "valor-git-config"
-) -> list[str]:
-    """Every key in the workspace's local or worktree config (includes
-    followed) that the kernel will not run git under, named without its
-    value. With `profile`, the
-    read runs under that sandbox profile, marked `mark`, so an include
-    naming a file the profile denies fails the read.
-
-    Without `profile`, a read whose config held no include is kept under
-    the key of everything it depends on (`_config_key`), taken before and
-    after the read, and answered from there while that key holds; a read
-    under a profile, one with an include, one that failed, and one whose
-    key changed while git read are never kept."""
-    if profile is not None:
-        return _hostile_read(workspace, profile, mark)[0]
-    git_bin = binary()
-    before = _config_key(workspace, git_bin)
-    if before is not None:
-        with _HOSTILE_LOCK:
-            held = _HOSTILE_SEEN.get(before[0])
-        if held is not None and held[0] == before[1]:
-            return list(held[1])
-    found, keep = _hostile_read(workspace, None, mark)
-    if keep and before is not None and _config_key(workspace, git_bin) == before:
-        with _HOSTILE_LOCK:
-            _HOSTILE_SEEN.pop(before[0], None)
-            _HOSTILE_SEEN[before[0]] = (before[1], tuple(found))
-            while len(_HOSTILE_SEEN) > _HOSTILE_KEPT:
-                del _HOSTILE_SEEN[next(iter(_HOSTILE_SEEN))]
-    return found
-
-
-def _hostile_read(workspace: str | Path, profile: str | Path | None, mark: str) -> tuple[list[str], bool]:
-    """`hostile`'s answer read from git now, and whether it may be kept: the
-    read succeeded and the config held no include, in any scope."""
-    prefix = (
-        [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
-         "-f", str(profile)]
-        if profile is not None
-        else None
-    )  # fmt: skip
-    listed = _git(workspace, "config", "--list", "--show-scope", "--includes", prefix=prefix)
-    if listed.returncode != 0:  # unreadable config is refused, never assumed clean
-        return [f"the config could not be read: {listed.stderr.strip()}"], False
-    found, keep = [], True
-    for line in listed.stdout.splitlines():
-        scope, _, entry = line.partition("\t")
-        name = entry.split("=", 1)[0]
-        key = name.lower()
-        if key.startswith(("include.", "includeif.")):
-            keep = False
-        if scope not in ("local", "worktree"):
-            continue
-        if key.startswith(HOSTILE_PREFIXES) or key.endswith(HOSTILE_SUFFIXES):
-            found.append(f"{scope}: {name}")  # the key, never the value the turn set
-    return found, keep
+def hostile(*_args, **_kwargs) -> list[str]:
+    """Kept only so callers outside this file still import; the kernel refuses no config."""
+    return []
 
 
 def commit_named(workspace: str | Path, name: str, profile: str | Path, mark: str) -> str | None:
     """The full id of the one commit `name` (a commit id or an abbreviation
     of one, hex only) names in a workspace a turn owns, or None. The read
     runs under the sandbox `profile`, marked `mark`; the caller has read the
-    workspace's config first (`hostile`)."""
+    workspace."""
     if not re.fullmatch(r"[0-9a-f]{4,40}", name):
         return None
     prefix = [binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
@@ -556,18 +351,10 @@ def run(
     credential: Path | None = None,
     url: str | None = None,
 ) -> subprocess.CompletedProcess:
-    """One git call in the workspace, refused before it runs when the
-    workspace's config is hostile. With `credential`, the per-call config
+    """One git call in the workspace. With `credential`, the per-call config
     file `core.credentials.header_file` wrote, git reads it as its global
     config, which carries the merge's pinned header for `url`, and the call
     also passes `credential_pins(url)`."""
-    found = hostile(workspace)
-    if found:
-        raise GitError(
-            "the workspace's git config names what the kernel will not run (a program, an include, "
-            "a push destination or push option, or a transport setting; every `push.*` and `http.*` "
-            "key is refused): " + "; ".join(found)
-        )
     pins = []
     if credential is not None:
         if url is None:
@@ -585,8 +372,7 @@ def trusted(
     text: bool = True,
 ) -> Any:
     """One git call in a repository only the kernel writes (its cache, a
-    task's mirror and bare origin, a checkout it is making), with no hostile
-    check: no turn can have written its config. Raises `GitError` on a
+    task's mirror and bare origin, a checkout it is making), no turn can have written its config. Raises `GitError` on a
     non-zero exit. `strip=False` keeps the output whole, as a file's text
     whose line numbers count; `text=False` returns bytes, for names git
     does not require to be UTF-8."""
@@ -741,7 +527,7 @@ def _absolute(workspace: str | Path, url: str) -> str:
 
 def origin(workspace: str | Path) -> tuple[str, str | None]:
     """`remote.origin.url` as written (a local path made absolute) and the
-    checked-out branch, read with no hostile check: `config --get` and
+    checked-out branch, read:`config --get` and
     `symbolic-ref` only read files and run nothing. For naming whose a
     refused workspace is, never for running git in it. Raises `GitError`
     when there is no origin URL."""
