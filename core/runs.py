@@ -54,7 +54,6 @@ import functools
 import os
 import platform
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -62,7 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core import binaries, db, git, ledger, machine, memory, slot, spending, tasks, transcripts
+from core import db, git, ledger, machine, memory, slot, spending, tasks, transcripts
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -385,22 +384,11 @@ def sandboxed_pids(name: str, control: str) -> list[int]:
     denies = _sandbox_check()
     if not denies:
         return []
-    listing = subprocess.run(
-        [binaries.require(binaries.PS), "-A", "-o", "pid=,uid="], capture_output=True, text=True, check=True
-    ).stdout
-    pids = []
-    for line in listing.splitlines():
-        fields = line.split()
-        if len(fields) != 2 or int(fields[1]) != os.getuid() or int(fields[0]) == os.getpid():
-            continue
-        pid = int(fields[0])
-        if denies(pid, name) and not denies(pid, control):
-            pids.append(pid)
-    return pids
+    return [pid for pid in own_processes() if denies(pid, name) and not denies(pid, control)]
 
 
 def commands(pids: list[int]) -> dict[int, str]:
-    return _commands(pids) if pids else {}
+    return {pid: command(pid) for pid in pids}
 
 
 def marked_services(task_ids: list[str]) -> set[str]:
@@ -409,81 +397,144 @@ def marked_services(task_ids: list[str]) -> set[str]:
     denies = _sandbox_check()
     if not denies or not task_ids:
         return set()
-    listing = subprocess.run(
-        [binaries.require(binaries.PS), "-A", "-o", "pid=,uid="], capture_output=True, text=True, check=True
-    ).stdout
     found: set[str] = set()
-    for line in listing.splitlines():
-        fields = line.split()
-        if len(fields) != 2 or int(fields[1]) != os.getuid() or denies(int(fields[0]), "valor.service.none"):
-            continue
-        found.update(t for t in task_ids if t not in found and denies(int(fields[0]), f"valor.service.{t}"))
+    for pid in own_processes():
+        if not denies(pid, "valor.service.none"):
+            found.update(t for t in task_ids if t not in found and denies(pid, f"valor.service.{t}"))
     return found
 
 
 def _stop(pids: list[int]) -> list[dict[str, Any]]:
     if not pids:
         return []
-    names = _commands(pids)
+    names = commands(pids)
     for pid in pids:
         _signal(pid, signal.SIGTERM)
     deadline = time.monotonic() + settings.reap_grace_s
-    alive = set(pids)
-    while alive and time.monotonic() < deadline:
+    left = set(pids)
+    while left and time.monotonic() < deadline:
         time.sleep(0.05)
-        alive = {pid for pid in alive if _signal(pid, 0)}
-    for pid in alive:
+        left = {pid for pid in left if alive(pid)}
+    for pid in left:
         _signal(pid, signal.SIGKILL)
     return [
-        {"pid": pid, "command": names.get(pid, ""), "signal": "SIGKILL" if pid in alive else "SIGTERM"}
+        {"pid": pid, "command": names.get(pid, ""), "signal": "SIGKILL" if pid in left else "SIGTERM"}
         for pid in sorted(pids)
     ]
 
 
 def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
-    """This user's processes in `pgid`, or carrying the turn's mark in their
-    initial environment: read with `ps -E` on macOS, from
-    `/proc/<pid>/environ` elsewhere (procps has no `-E`)."""
+    """This user's processes in `pgid`, carrying the turn's mark as an entry
+    of their initial environment, or under the turn's sandbox mark."""
     mark = f"{TURN_ENV}={turn_id}"
-    darwin = sys.platform == "darwin"
-    show_env = ["-E"] if darwin else []
-    listing = subprocess.run(
-        [binaries.require(binaries.PS), "-A", *show_env, "-ww", "-o", "pid=,pgid=,uid=,command="],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    found = []
-    for line in listing.splitlines():
-        fields = line.split()
-        if len(fields) < 3 or int(fields[2]) != os.getuid() or int(fields[0]) == os.getpid():
-            continue
-        pid = int(fields[0])
-        marked = mark in fields[3:] if darwin else _environ_marked(pid, mark)
-        if int(fields[1]) == pgid or marked or _sandbox_marked(pid, turn_id):
-            found.append(pid)
+    return [
+        pid
+        for pid, group in own_processes().items()
+        if group == pgid or mark in _arguments(pid)[1] or _sandbox_marked(pid, turn_id)
+    ]
+
+
+# -- the process table ------------------------------------------------------------
+#
+# Read in-process through libproc and sysctl, not `/bin/ps`: it is setuid,
+# and a sandboxed caller (a turn, the check's suite) may not exec it. For
+# this user's processes neither read needs a privilege. A process that has
+# exited, a zombie included, reads as absent.
+
+_SHORTBSDINFO = 13  # PROC_PIDT_SHORTBSDINFO: struct proc_bsdshortinfo, 64 bytes
+_KERN_PROCARGS2 = (1, 49)  # CTL_KERN, KERN_PROCARGS2
+
+
+@functools.cache
+def _libc():
+    lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.proc_listallpids.restype = ctypes.c_int
+    lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    lib.proc_pidinfo.restype = ctypes.c_int
+    lib.sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p, ctypes.c_size_t,
+    ]  # fmt: skip
+    lib.sysctl.restype = ctypes.c_int
+    return lib
+
+
+def _all_pids() -> list[int]:
+    lib = _libc()
+    count = lib.proc_listallpids(None, 0)
+    buf = (ctypes.c_int * (count + 64))()
+    count = lib.proc_listallpids(buf, ctypes.sizeof(buf))
+    return [pid for pid in buf[: max(count, 0)] if pid > 0]
+
+
+def owner_and_group(pid: int) -> tuple[int, int] | None:
+    """The process's uid and process group, or None when it is gone."""
+    buf = ctypes.create_string_buffer(64)
+    if _libc().proc_pidinfo(pid, _SHORTBSDINFO, 0, buf, 64) != 64:
+        return None
+    pgid = int.from_bytes(buf.raw[8:12], "little")  # pbsi_pid, pbsi_ppid, pbsi_pgid
+    uid = int.from_bytes(buf.raw[36:40], "little")  # after pbsi_status, pbsi_comm[16], pbsi_flags
+    return uid, pgid
+
+
+def own_processes() -> dict[int, int]:
+    """This user's running processes but the caller, each with its process
+    group."""
+    me, uid = os.getpid(), os.getuid()
+    found = {}
+    for pid in _all_pids():
+        info = owner_and_group(pid) if pid != me else None
+        if info and info[0] == uid:
+            found[pid] = info[1]
     return found
 
 
-def _environ_marked(pid: int, mark: str) -> bool:
-    """Whether the entry `mark` is in the process's initial environment; a
-    process gone or unreadable since the listing carries none."""
-    try:
-        environ = Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return mark.encode() in environ.split(b"\0")
+def alive(pid: int) -> bool:
+    """Running: neither gone nor a zombie waiting to be collected."""
+    return owner_and_group(pid) is not None
 
 
-def _commands(pids: list[int]) -> dict[int, str]:
-    listing = subprocess.run(
-        [binaries.require(binaries.PS), "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, pids))],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout
-    rows = (line.strip().split(None, 1) for line in listing.splitlines() if line.strip())
-    return {int(row[0]): (row[1] if len(row) > 1 else "") for row in rows}
+def _arguments(pid: int) -> tuple[list[str], list[str]]:
+    """The process's argv and initial environment entries (`KERN_PROCARGS2`:
+    argc, the executable path, NUL padding, argv, the environment up to an
+    empty entry, then the kernel's own strings), or two empty lists when it
+    is gone or unreadable. A platform binary shows no environment to
+    another process."""
+    lib = _libc()
+    mib = (ctypes.c_int * 3)(*_KERN_PROCARGS2, pid)
+    size = ctypes.c_size_t(0)
+    if lib.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 4:
+        return [], []
+    buf = ctypes.create_string_buffer(size.value)
+    if lib.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return [], []
+    raw = buf.raw[: size.value]
+    argc = int.from_bytes(raw[:4], "little")
+    at = raw.find(b"\0", 4)
+    if at < 0:
+        return [], []
+    while at < len(raw) and raw[at] == 0:
+        at += 1
+    strings = []
+    while at < len(raw):
+        end = raw.find(b"\0", at)
+        end = len(raw) if end < 0 else end
+        strings.append(raw[at:end].decode(errors="replace"))
+        at = end + 1
+    argv = strings[:argc]
+    env = []
+    for entry in strings[argc:]:
+        if not entry:
+            break
+        env.append(entry)
+    return argv, env
+
+
+def command(pid: int) -> str:
+    """The process's argv joined by spaces, as `ps -o command` shows it; empty
+    when it is gone or unreadable."""
+    return " ".join(_arguments(pid)[0])
 
 
 def _signal(pid: int, sig: int) -> bool:

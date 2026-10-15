@@ -6,7 +6,6 @@ import shutil
 from pathlib import Path
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
-PS = "/bin/ps"
 SECURITY = "/usr/bin/security"
 
 

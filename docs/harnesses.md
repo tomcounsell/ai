@@ -429,11 +429,16 @@ When a turn ends, by exit or by stop, `core.runs.reap` finds every process
 of this user that matches any of three marks:
 
 1. in the turn's process group;
-2. `VALOR_TURN=<turn id>` in its environment (read with `ps -E` on macOS, from `/proc/<pid>/environ` elsewhere);
+2. `VALOR_TURN=<turn id>` as an entry of its initial environment;
 3. running under a sandbox that denies the mach name `valor.turn.<turn id>`
    and not `valor.turn.none` (an App Sandbox denies every such name, so the
    second check keeps unrelated apps out). The check is libsandbox's
    `sandbox_check`, without logging.
+
+The process table is read in-process (libproc for each pid's owner and group, `sysctl` `KERN_PROCARGS2` for its
+arguments and environment), not with `/bin/ps`: that is setuid, and a sandboxed caller, such as the suite
+under the verify check, may not run it. A process that has exited, a zombie not yet collected included,
+reads as gone.
 
 Each gets SIGTERM, then SIGKILL after two seconds, and a `turn.reaped` row lists pid, command, and
 signal. The sandbox mark is the one a daemon cannot shed: it survives `setsid`, re-parenting to

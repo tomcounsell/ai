@@ -26,6 +26,7 @@ from core import (
     ledger,
     machine,
     rollout,
+    runs,
     serve,
     signals,
     tasks,
@@ -107,13 +108,6 @@ async def gateway_for(dsn) -> Gateway:
     return g
 
 
-def gone(pid: int) -> bool:
-    out = subprocess.run(
-        ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
-    ).stdout
-    return out.strip() == "" or out.strip().startswith("Z")
-
-
 def send(text: str) -> dict:
     return {"action_type": "telegram.send_message", "target": OPERATOR_CHAT, "payload": {"text": text}}
 
@@ -158,7 +152,7 @@ def test_kill_mid_turn(fresh, op, tmp_path):
             os.kill(kernel.pid, signal.SIGKILL)
             kernel.wait()
             sleeper = int(pidfile.read_text())
-            assert not gone(sleeper)
+            assert runs.alive(sleeper)
             kernel = kernel_child(tmp_path, fresh, "scripted", log)
             run(until(critiqued, 90))
         finally:
@@ -172,7 +166,7 @@ def test_kill_mid_turn(fresh, op, tmp_path):
     started = typed(written, "turn.started")
     first = typed(written, "turn.ended", turn_id=started[0]["turn_id"])
     assert first[0]["outcome"] == "interrupted" and first[0]["reason"] == "kernel restarted"
-    assert gone(sleeper)
+    assert not runs.alive(sleeper)
     assert started[0]["brief_sha256"] == started[1]["brief_sha256"]
 
     async def audit():

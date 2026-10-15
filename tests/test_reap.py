@@ -48,12 +48,6 @@ time.sleep(60)
 """
 
 
-def _alive(pid: int) -> bool:
-    """Running, not merely a zombie waiting for launchd to collect it."""
-    ps = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
-    return ps.stdout.strip() not in ("", "Z")
-
-
 def _wait_for(path: Path) -> int:
     for _ in range(100):
         if path.exists() and path.read_text().strip():
@@ -95,7 +89,7 @@ def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
         ended, rows = _turn(dsn, build)
         daemon = _wait_for(pidfile)
         assert ended["outcome"] == "done"
-        assert not _alive(daemon)
+        assert not runs.alive(daemon)
         assert bystander.poll() is None
         reaped = [r["payload"] for r in rows if r["type"] == "turn.reaped"]
         assert len(reaped) == 1 and reaped[0]["turn_id"] == ended["turn_id"]
@@ -130,10 +124,10 @@ time.sleep(60)
 async def _gone(*pids: int, within: float) -> bool:
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
-        if not any(_alive(p) for p in pids):
+        if not any(runs.alive(p) for p in pids):
             return True
         await asyncio.sleep(0.05)
-    return not any(_alive(p) for p in pids)
+    return not any(runs.alive(p) for p in pids)
 
 
 async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
@@ -163,7 +157,7 @@ async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
     if cancel_again:
         assert await _gone(harness_pid, child, within=5)
         await asyncio.sleep(0.2)
-        assert _alive(daemon_pid)  # the reap is still in its grace
+        assert runs.alive(daemon_pid)  # the reap is still in its grace
         turn.cancel()
     with pytest.raises(asyncio.CancelledError):
         await turn
@@ -212,4 +206,84 @@ def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(ds
         bystander.wait()
 
 
-# A harness that writes its pid and exits at once.
+# -- the process table --------------------------------------------------------------
+#
+# Read in-process, since a sandboxed caller may not exec the setuid `/bin/ps`:
+# this suite runs under the turn's profile in the verify check.
+
+SLEEP = "import time; time.sleep(30)"
+
+
+def _child(env: dict[str, str] | None = None, *, own_session: bool = True) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", SLEEP],
+        env={"PATH": os.environ["PATH"], **(env or {})},
+        start_new_session=own_session,
+    )
+
+
+def _ended(*procs: subprocess.Popen) -> None:
+    for p in procs:
+        p.kill()
+        p.wait()
+
+
+def test_the_process_table_reads_a_childs_group_and_owner_and_lists_only_this_users_others():
+    leader, member = _child(), _child(own_session=False)
+    try:
+        table = runs.own_processes()
+        assert table[leader.pid] == os.getpgid(leader.pid) == leader.pid
+        assert table[member.pid] == os.getpgid(member.pid) == os.getpgrp()
+        assert runs.owner_and_group(leader.pid) == (os.getuid(), leader.pid)
+        assert runs.owner_and_group(1) == (0, 1)  # launchd, root's
+        assert 1 not in table and os.getpid() not in table
+    finally:
+        _ended(leader, member)
+
+
+def test_reap_finds_a_turns_process_by_its_exact_environment_entry_alone():
+    """A process in a session of its own, under no turn sandbox, carrying
+    `VALOR_TURN=<turn>`: found by that entry. A turn whose id has this one as
+    a prefix, and a variable whose value holds the entry, are left alone."""
+    turn = ledger.new_id()
+    marked = _child({runs.TURN_ENV: turn})
+    longer = _child({runs.TURN_ENV: turn + "0"})
+    quoted = _child({"OTHER": f"{runs.TURN_ENV}={turn}"})
+    try:
+        time.sleep(0.3)  # the interpreter re-executes itself once on macOS
+        reaped = runs.reap(turn)
+        assert [r["pid"] for r in reaped] == [marked.pid]
+        assert reaped[0]["signal"] == "SIGTERM"
+        assert reaped[0]["command"].split(" ", 1)[1] == f"-c {SLEEP}"
+        assert marked.wait(5) == -15
+        assert longer.poll() is None and quoted.poll() is None
+    finally:
+        _ended(marked, longer, quoted)
+
+
+def test_reap_finds_a_turns_process_by_its_group_alone():
+    child = _child()
+    try:
+        reaped = runs.reap(ledger.new_id(), child.pid)
+        assert [(r["pid"], r["signal"]) for r in reaped] == [(child.pid, "SIGTERM")]
+        assert child.wait(5) == -15
+    finally:
+        _ended(child)
+
+
+def test_a_zombie_or_a_collected_pid_is_not_alive_and_has_no_command():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    deadline = time.monotonic() + 5
+    while runs.alive(child.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not runs.alive(child.pid) and child.returncode is None  # exited, not collected
+    assert child.pid not in runs.own_processes()
+    child.wait()
+    assert not runs.alive(child.pid)
+    assert runs.command(child.pid) == "" and runs.commands([child.pid]) == {child.pid: ""}
+    assert runs.commands([]) == {} and runs.reap(ledger.new_id()) == []
+    running = _child()
+    try:
+        assert runs.alive(running.pid)
+    finally:
+        _ended(running)

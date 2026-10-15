@@ -1179,12 +1179,7 @@ def footprint(pid: int) -> int:
 
 
 def _group(pgid: int) -> list[int]:
-    listing = subprocess.run(
-        [binaries.require(binaries.PS), "-A", "-o", "pid=,pgid="], capture_output=True, text=True, check=False
-    ).stdout
-    return [
-        int(p) for p, g in (line.split() for line in listing.splitlines() if line.strip()) if int(g) == pgid
-    ]
+    return [pid for pid, group in runs.own_processes().items() if group == pgid]
 
 
 def fetch_into_mirror(
