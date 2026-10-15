@@ -42,9 +42,12 @@ existing ctypes idiom), with one public `alive(pid)` the tests use. Then:
    in the environment, the mach-name sandbox mark) are unchanged.
 2. `workspace._group` (the check's peak-footprint sampler) reads the same
    table.
-3. Delete `binaries.PS`, and the off-macOS `/proc/<pid>/environ` branch
-   (`_environ_marked`, the `darwin` switch): `docs/tech-stack.md` says no
-   Linux assumptions, and libproc is macOS-only, as `_sandbox_check` is.
+3. Delete `binaries.PS`. Off macOS (the kernel's verification VM) the same
+   table is read from `/proc`: `stat` for group and zombie state, the
+   directory's owner for uid, `cmdline` and `environ` for argv and the turn
+   mark. As first built this branch was deleted, on the reading that
+   `docs/tech-stack.md` rules out Linux; the verification VM's run then went
+   red on every test that reaps, so it was kept.
 4. `tests/test_reap.py:_alive` and `tests/test_serve.py:gone` use
    `runs.alive` instead of exec'ing `ps`.
 5. `docs/harnesses.md` mark 2 says where the environment is read from;
@@ -75,12 +78,14 @@ check's environment, and the full suite run once at the end:
     session (`setsid`) is found by `reap` by the environment mark alone,
     and its argv is the `command` in the reaped row;
   - a child in the turn's process group with no mark is found by pgid;
-  - a process of another user (pid 1, root) is never listed, whatever its
-    group;
+  - a process of another user is never listed, whatever its group (the
+    test does not assume launchd at pid 1);
   - the caller's own pid is never listed;
   - `alive` is false for an exited-but-unwaited child (zombie) and for a
     reaped pid, true for a running one;
-  - an empty pid list gives no commands and does not fail.
+  - an empty pid list gives no commands and does not fail;
+  - the `/proc` reader, against a planted tree on both platforms, takes
+    group, owner, arguments, and environment, and reads a zombie as gone.
 - Grep: no `ps` exec remains in `core/` or `tests/`.
 
 ## Stakes
