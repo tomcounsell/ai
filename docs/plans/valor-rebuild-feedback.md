@@ -103,3 +103,31 @@ What this changes, beyond the 2026-10-03 ruling that merges are Valor's:
   hook, round, review step, or guard still needs its incident, mission
   item, and Tom's grant (`python -m core grant`). Removing an approval step
   is not adding one and needs no grant.
+
+## Tom's ruling on the yudame plugins (2026-10-15)
+
+> yudame/skills is live Claude plugin marketplace ... we have that for
+> everyone on the yudame team, including Valor, so that should be
+> automatically loaded in and kept recent
+
+What this changes:
+
+- Valor's turns carry `yudame` and `yudame-dev`, refreshed from
+  `yudame/skills` at each task's start
+  ([c18-yudame-plugins.md](c18-yudame-plugins.md)).
+- Part of the open item "Skill system requirements" is answered: shared
+  skills live in `yudame/skills`, not in this repository.
+- Unchanged: safe mode, and authority in `core/`. A plugin brings skill
+  text only.
+
+## Tom's ruling on Sentry (2026-10-15)
+
+> for Sentry, we should have the Sentry CLI auth connected for projects
+> that use it
+
+What this changes:
+
+- A turn on a project that reports to Sentry can run `sentry-cli` against
+  it, read-only, through the gateway with the kernel's token
+  ([c19-sentry-route.md](c19-sentry-route.md)).
+- Unchanged: a turn holds no credential.

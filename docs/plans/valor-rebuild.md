@@ -611,6 +611,9 @@ Cutover is Tom's to plan. These must be true first:
 ## Open items
 
 - Skill system requirements (before `skills/` grows past `skills/sdlc/`).
+  Shared skills come from `yudame/skills` (Tom, 2026-10-15;
+  [c18-yudame-plugins.md](c18-yudame-plugins.md)); what else the system
+  needs is still open.
 
 ## Tom's feedback
 
