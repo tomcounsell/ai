@@ -3,7 +3,7 @@ starts, from a project spec the kernel reads (never the candidate).
 
     <work_dir>/
       cache/<name>.git     bare clone per repository, fetched by the kernel
-      bin/                 shared tools (uv), read-only to every sandbox
+      bin/                 shared tools
       <task_id>/
         repo/              the builder's clone: the working session's cwd
         origin.git/        local bare origin: push_branch's target, and the
@@ -11,39 +11,28 @@ starts, from a project spec the kernel reads (never the candidate).
                            writes it
         kernel.git/        the kernel mirror: the base, plan commits,
                            candidates, docs heads; no turn writes it
-        home/              gitconfig, empty gh config, pgpass, profiles/*.sb
+        home/              pgpass, profiles/*.sb
         cache/             the builder's uv and npm caches
-        state/work/        the working session's own TMPDIR and Claude Code
-                           config directory (so its session files)
+        state/work/        the working session's Claude Code config directory
         checks/<name>/     a fresh session's repo/, tmp/, claude/
         pg/data            the task's Postgres cluster (TCP on loopback only)
         redis/             the task's redis-server, when the project asks
         ports.json         the task's service ports, written when they are
                            chosen, so no other start takes them
 
-Every program the kernel starts here that is not root's alone runs inside a
-sandbox-exec profile written by this module: the working session's
-(`turn.sb`), a fresh session's (`<stage>-<key>.sb`), and the services'
-(`service.sb`). Profiles start from `(allow default)` and deny before they
-allow. Each denies the whole work directory and allows back only its own
-paths, so a fresh session cannot read the builder's clone, its TMPDIR, its
-Claude Code state, or its transcripts (what the builder writes elsewhere in
-the user's home, a cache for one, is outside this; see harnesses.md, Known
-openings); each denies writes to the user's startup places (launch
-agents, shell rc files, `~/.local/bin`, Claude Code's install, git's global
-config, Homebrew's prefix), which narrows, and does not close, the opening
-that a turn leaves a program for a later unsandboxed process of the user.
-
-The services (`initdb`, `pg_ctl`, `postgres`, `redis-server`) are Homebrew's,
-in the user's own prefix, so they only ever run under `service.sb`, marked by
-the mach name `valor.service.<task_id>`, which is how they are found and
-stopped, also after the kernel died.
+Every program the kernel starts here runs inside a sandbox-exec profile
+written by this module: the turn's (`turn.sb`, also every fresh session's)
+and the services' (`service.sb`). A profile allows by default and denies
+four things: the kernel key directory, the machine cluster's data
+directory, the backup disk, and the machine cluster on loopback (port and
+socket). It marks what runs under it with a mach name the profile denies,
+`valor.turn.<VALOR_TURN>` or `valor.service.<task_id>`, which is how
+`core.runs` finds a turn's or a task's services' processes and stops them,
+also after the kernel died.
 
 The kernel mirror is fed from the builder's clone by `fetch_into_mirror`:
-the clone's config checked first, a gitfile, alternates, and shallow clones
-refused, a tree holding `.valor` refused,
-the sending side run inside the turn's own sandbox, the receiving side with
-fsck, one pack file under a file-size limit, and a footprint watchdog.
+a tree holding `.valor` refused, the sending side run inside the turn's own
+sandbox, the receiving side with fsck.
 """
 
 import atexit
@@ -58,7 +47,6 @@ import re
 import secrets
 import shlex
 import shutil
-import signal
 import socket
 import stat
 import struct
@@ -78,123 +66,9 @@ from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
 SERVICES = ("postgres", "redis")
-DEV_PORTS = range(8000, 8010)
 HOME = Path.home()
-GITCONFIG = "[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n[init]\n\tdefaultBranch = main\n"
-# The businesses' knowledge bases, one folder each, under the user's home. A
-# working task's profile allows its project's folder back (`knowledge_base`).
+# The businesses' knowledge bases, one folder each, under the user's home.
 VAULT = "work-vault"
-# Read and write denied to every workspace sandbox, under the user's home.
-HOME_DENIED = (
-    "src",
-    VAULT,
-    "Desktop",
-    "Documents",
-    "Downloads",
-    "Dropbox",
-    "Library/CloudStorage",
-    "Library/Mobile Documents",
-    "Library/Mail",
-    "Library/Messages",
-    ".ssh",
-    ".config/gh",
-    ".pi",
-)
-# Writes denied to every workspace sandbox: where a later unsandboxed
-# process of the user would run what a turn left.
-HOME_WRITE_DENIED = (
-    "Library/LaunchAgents",
-    ".local/bin",
-    ".local/share/claude",
-    ".claude",
-    ".config/git",
-    "Library/Caches/ms-playwright",
-    ".cache/uv",
-    ".local/share/uv",
-)
-HOME_WRITE_DENIED_FILES = (
-    ".zshrc",
-    ".zprofile",
-    ".zshenv",
-    ".zlogin",
-    ".bash_profile",
-    ".bashrc",
-    ".profile",
-    ".claude.json",
-    ".gitconfig",
-)
-SYSTEM_WRITE_DENIED = ("/opt/homebrew",)
-
-
-def _program_dirs(spelled: str) -> list[Path]:
-    """The directories that hold a program's code: the directory above the
-    first `node_modules` of the resolved target (the target's own directory
-    when it has none), and the directory that holds the program as spelled,
-    with its symlinked components resolved but not the link itself."""
-    resolved = Path(os.path.realpath(spelled))
-    parts = resolved.parts
-    above = [Path(*parts[:i]) for i, name in enumerate(parts) if name == "node_modules"][:1]
-    held = Path(os.path.realpath(os.path.dirname(os.path.join(os.getcwd(), spelled))))
-    return [*(above or [resolved.parent]), held]
-
-
-def pi_install() -> list[str]:
-    """The directories every turn profile denies writing wherever `VALOR_PI`
-    and `VALOR_NODE` put Pi and the interpreter that runs it, because the
-    next turn, and a reviewer's, runs what is there."""
-    dirs = [*_program_dirs(settings.pi), *_program_dirs(settings.node)]
-    return list(dict.fromkeys(str(p) for p in dirs))
-
-
-# macOS follows at most 32 symlinks in one path lookup (MAXSYMLINKS in
-# <sys/param.h>); past that the kernel itself answers ELOOP.
-MAXSYMLINKS = 32
-
-
-def _links_on_the_way(spelled: str) -> set[str]:
-    """Every symlink the kernel follows to reach `spelled`, by its physical
-    spelling. The path is walked one component at a time as the kernel does:
-    from `/`, `..` goes to the parent of the directory already reached, and a
-    link is recorded and its target's components put in front of the rest."""
-    found: set[str] = set()
-    cur = Path("/")
-    rest = list(reversed(Path(os.path.join(os.getcwd(), spelled)).parts[1:]))
-    hops = 0
-    while rest:
-        name = rest.pop()
-        if name == "..":
-            cur = cur.parent
-            continue
-        nxt = cur / name
-        if not nxt.is_symlink():
-            cur = nxt
-            continue
-        found.add(str(nxt))
-        hops += 1
-        if hops > MAXSYMLINKS:
-            break
-        target = Path(os.readlink(nxt))
-        if target.is_absolute():
-            cur = Path("/")
-        rest.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
-    return found
-
-
-def pi_install_held() -> list[str]:
-    """The paths whose own entry a turn must not rename or replace, or it
-    could put its own tree where the install was: every ancestor of each
-    directory `pi_install` denies, and every symlink on the way from
-    `VALOR_PI` and `VALOR_NODE` to the program, hop by hop, with each such
-    link's ancestors. Denied as `literal`, so a turn still creates entries
-    inside an ancestor."""
-    held: set[str] = set()
-    for d in pi_install():
-        held.update(str(a) for a in Path(d).parents)
-    for spelled in (settings.pi, settings.node):
-        for link in _links_on_the_way(spelled):
-            held.add(link)
-            held.update(str(a) for a in Path(link).parents)
-    return sorted(held - {"/"})
 
 
 class Refused(ValueError):
@@ -416,12 +290,9 @@ def layout(task_id: str, base: Path | None = None) -> Layout:
 
 def kernel_paths() -> list[Path]:
     """What no workspace sandbox may read or write: the kernel key
-    directory, the effect lock files and the kernel's output files
-    (`settings.performing_dir`, in the key directory unless moved), the
-    machine cluster's data directory, the backup disk."""
+    directory, the machine cluster's data directory, the backup disk."""
     return [
         Path(settings.pg_passfile).parent,
-        Path(settings.performing_dir),
         Path(settings.pg_data_dir),
         Path(settings.backup_dir),
     ]
@@ -444,215 +315,46 @@ def _ancestors(paths) -> list[str]:
     return sorted(found)
 
 
-def profile(
-    *,
-    rw: list[Path],
-    ro: list[Path] = (),
-    ports: list[int] = (),
-    work: Path | None = None,
-    home: Path = HOME,
-    fresh: bool = False,
-    tmp: bool = True,
-    kernel: list[Path] | None = None,
-    service: str | None = None,
-    bind_ports: list[int] = (),
-) -> str:
-    """A sandbox-exec profile. `rw` and `ro` are allowed back after the
-    denies; `work` (the work directory) is denied as a whole first. A
-    profile without `tmp` denies the shared temp directories
-    (`/private/tmp`, `/private/var/tmp`, `/private/var/folders`), so nothing
-    passes between runs through them; its `TMPDIR` is its own. A `fresh`
-    profile denies them too, and the user's Claude Code state, since a
-    fresh session has its own. A
-    `service` profile is marked by the mach name `valor.service.<service>`
-    and may bind `bind_ports` only; a turn's profile is marked by
-    `valor.turn.<VALOR_TURN>`, may bind the dev ports, and reaches the
-    gateway (`GATEWAY_PORT`) and `ports` on loopback."""
-    from core import container  # imports this module
-
-    denied = [home / d for d in HOME_DENIED]
-    if work is not None:
-        denied.append(work)
-    hidden = [*denied, home / ".claude" / "projects", home / ".claude" / "history.jsonl"]
+def profile(*, service: str | None = None, kernel: list[Path] | None = None) -> str:
+    """The one sandbox-exec profile: allow by default; deny the kernel paths
+    (`kernel_paths`, as written and with symlinks resolved, since the
+    sandbox matches the resolved path), renaming any directory above them,
+    and the machine cluster on loopback, its port and its socket (the
+    demonstration's Postgres trust hole). A `service` profile is marked by
+    the mach name `valor.service.<service>`; a turn's by
+    `valor.turn.<VALOR_TURN>`, which `core.runs` reaps by."""
+    kernel = kernel if kernel is not None else kernel_paths()
+    forms = sorted({f for p in kernel for f in (str(p), os.path.realpath(p))})
+    if service:
+        mark = f'(deny mach-lookup (global-name "valor.service.{service}"))'
+    else:
+        mark = '(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))'
     lines = [
         "(version 1)",
         "(allow default)",
         "(deny file-read* file-write*",
-        *_paths("subpath", denied),
-        f'    (subpath "{home / ".claude" / "projects"}")',
-        f'    (literal "{home / ".claude" / "history.jsonl"}"))',
-    ]
-    if fresh or not tmp:
-        hidden += [Path("/private/tmp"), Path("/private/var/tmp"), Path("/private/var/folders")]
-        lines += [
-            "(deny file-read* file-write*",
-            '    (subpath "/private/tmp")',
-            '    (subpath "/private/var/tmp")',
-            '    (subpath "/private/var/folders")',
-        ]
-        if fresh:
-            hidden += [home / ".claude", home / ".claude.json"]
-            lines += [f'    (subpath "{home / ".claude"}")', f'    (literal "{home / ".claude.json"}")']
-        lines[-1] += ")"
-    kernel = kernel if kernel is not None else kernel_paths()
-    write_denied = [home / d for d in HOME_WRITE_DENIED] + [home / f for f in HOME_WRITE_DENIED_FILES]
-    write_denied += [Path(p) for p in SYSTEM_WRITE_DENIED]
-    lines += [
+        *_paths("subpath", forms),
+        ")",
         "(deny file-write*",
-        *_paths("subpath", [home / d for d in HOME_WRITE_DENIED]),
-        *_paths("literal", [home / f for f in HOME_WRITE_DENIED_FILES]),
-        *_paths("subpath", [*SYSTEM_WRITE_DENIED, *pi_install()]),
-        *_paths("literal", pi_install_held()),
-        ")",
-        "(allow file-read* file-write*",
-        *_paths("subpath", rw),
-        ")",
-    ]
-    if ro:
-        lines += ["(allow file-read*", *_paths("subpath", ro), ")"]
-    ancestors = sorted({str(a) for p in [*rw, *ro] for a in Path(p).parents})
-    lines += ["(allow file-read-metadata", *_paths("literal", ancestors), ")"]
-    lines += [
-        # Each kernel path as written and with symlinks resolved: the
-        # sandbox matches the resolved path, so `/var/...` alone denies
-        # nothing under `/private/var/...`.
-        "(deny file-read* file-write*",
-        *_paths("subpath", sorted({f for p in kernel for f in (str(p), os.path.realpath(p))})),
-        ")",
-        # Every directory above a denied path, itself and not its entries:
-        # renaming one would move the denied path's contents to a name no
-        # rule covers, and a turn could put its own directory in its place.
-        "(deny file-write*",
-        *_paths("literal", _ancestors([*hidden, *write_denied, *kernel])),
-        ")",
-        # A mount over a denied path does the same, and one at its own
-        # `/Volumes/<label>` can stand in for the backup disk, so none is
-        # allowed: no mount call and no diskarbitrationd (`hdiutil attach`,
-        # `diskutil mount`). `open` hands a disk image, or an app the turn
-        # wrote, to a process outside the sandbox; it fails without the
-        # Launch Services database, the quarantine resolver, and Apple
-        # events. `launchservicesd` itself stays: Claude Code hangs without it.
-        "(deny file-mount)",
-        "(deny mach-lookup",
-        '    (global-name "com.apple.DiskArbitration.diskarbitrationd")',
-        '    (global-name "com.apple.coreservices.quarantine-resolver")',
-        '    (global-name "com.apple.coreservices.appleevents")',
-        r'    (global-name-regex #"^com\.apple\.lsd\."))',
-        '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
-        # Apple's `container`: its CLI and helpers, its mach services, its
-        # data directory (which holds its launch-agent plists), and the
-        # kernel's machine lock and image records.
-        "(deny process-exec",
-        *_paths("literal", [binaries.CONTAINER, binaries.CONTAINER_HELPERS[0]]),
-        f'    (subpath "{binaries.CONTAINER_LIBEXEC}"))',
-        f'(deny mach-lookup (global-name-prefix "{container.MACH_PREFIX}"))',
-        "(deny file-read* file-write*",
-        *_paths("subpath", [home / container.DATA_DIR, home / container.STATE_DIR]),
-        ")",
-    ]
-    if service:
-        lines += [
-            f'(deny mach-lookup (global-name "valor.service.{service}"))',
-            "(deny network-bind network-inbound)",
-            "(allow network-bind network-inbound",
-            *[f'    (local ip "localhost:{p}")' for p in bind_ports],
-            *[f'    (local unix-socket (subpath "{p}"))' for p in rw],
-            ")",
-            "(deny network-outbound",
-            '    (remote ip "*:*"))',
-            "(allow network-outbound",
-            *[f'    (remote unix-socket (subpath "{p}"))' for p in rw],
-            ")",
-        ]
-        return "\n".join(lines) + "\n"
-    lines += [
-        '(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))',
-        "(deny network-bind network-inbound)",
-        "(allow network-bind network-inbound",
-        *(f'    (local ip "localhost:{p}")' for p in DEV_PORTS),
-        *[f'    (local unix-socket (subpath "{p}"))' for p in rw],
+        *_paths("literal", _ancestors(kernel)),
         ")",
         "(deny network-outbound",
-        '    (remote ip "localhost:*")',
         f'    (remote ip "localhost:{settings.pgport}")',
         f'    (remote unix-socket (path-literal "{settings.pg_socket_real}"))',
         f'    (remote unix-socket (path-literal "{settings.pg_socket}")))',
-        "(allow network-outbound",
-        '    (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))',
-        *(f'    (remote ip "localhost:{p}")' for p in [*DEV_PORTS, *ports]),
+        mark,
     ]
-    lines[-1] += ")"
     return "\n".join(lines) + "\n"
 
 
-def turn_profile(
-    lay: Layout,
-    ports: list[int],
-    *,
-    home: Path = HOME,
-    kernel: list[Path] | None = None,
-    tmp: bool = False,
-    rw: list[Path] = (),
-) -> str:
-    """The working session's (and provisioning setup's) profile: its clone,
-    its caches, its own state; its task's home and origin read-only; no
-    shared temp directory. Provisioning passes the project's knowledge base
-    folder in `rw`. The emulator's verification passes `tmp` and its own
-    tree in `rw`, to run as its baseline did."""
-    return profile(
-        rw=[lay.repo, lay.cache, lay.work_state, *rw],
-        ro=[lay.home, lay.origin, lay.root.parent / "bin"],
-        ports=ports,
-        work=lay.root.parent,
-        home=home,
-        tmp=tmp,
-        kernel=kernel,
-    )
+def turn_profile(*, kernel: list[Path] | None = None) -> str:
+    """The profile of every turn, setup command, and fresh session."""
+    return profile(kernel=kernel)
 
 
-def check_profile(
-    lay: Layout, check_dir: Path, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
-) -> str:
-    """A fresh session's profile: its own checkout, tmp, and Claude Code
-    config, and nothing else of the work directory. The output files the
-    kernel opens for its steps beside the check directory
-    (`<check_dir>.<step>.out`) are its stdout and stderr: their metadata is
-    readable, since pytest takes a descriptor it cannot `fstat` for closed
-    and replaces it with `/dev/null`."""
-    text = profile(
-        rw=[check_dir],
-        ro=[lay.root.parent / "bin"],
-        ports=ports,
-        work=lay.root.parent,
-        home=home,
-        fresh=True,
-        kernel=kernel,
-    )
-    forms = sorted({str(check_dir), os.path.realpath(check_dir)})
-    outs = [f'    (regex #"^{_sb_regex(f)}\\.[^/]+\\.out$")' for f in forms]
-    return text + "\n".join(["(allow file-read-metadata", *outs, ")"]) + "\n"
-
-
-def service_profile(
-    lay: Layout,
-    task_id: str,
-    ports: list[int],
-    *,
-    work: Path,
-    home: Path = HOME,
-    kernel: list[Path] | None = None,
-) -> str:
-    """The services' profile: their data directories, the whole work
-    directory `work` denied first. `work` is passed, never derived from
-    `lay`: a check's service layout sits under the task's `checks/`."""
-    return profile(
-        rw=[lay.pg, lay.redis],
-        work=work,
-        home=home,
-        kernel=kernel,
-        service=task_id,
-        bind_ports=ports,
-    )
+def service_profile(task_id: str, *, kernel: list[Path] | None = None) -> str:
+    """The services' profile, marked `valor.service.<task_id>`."""
+    return profile(service=task_id, kernel=kernel)
 
 
 def sandboxed(profile_path: Path, mark: str, *argv: str) -> list[str]:
@@ -844,53 +546,6 @@ class Provisioned:
         return asdict(self)
 
 
-MKTEMP = """#!/bin/sh
-# Written by the kernel. macOS mktemp makes its file in the user temp
-# directory, which no turn can write, whatever TMPDIR says; given no directory
-# and no template, it is given the turn's TMPDIR. The arguments are read as
-# its getopt_long reads them: options anywhere, `-t` and `-p` take the rest of
-# their word or the next one, `--` ends the options, long names may be cut.
-[ -n "$TMPDIR" ] || exec /usr/bin/mktemp "$@"
-skip=
-ended=
-for a in "$@"; do
-    if [ -n "$skip" ]; then skip=; continue; fi
-    if [ -n "$ended" ]; then exec /usr/bin/mktemp "$@"; fi
-    case "$a" in
-        --) ended=1 ;;
-        --*)
-            name=${a#--}
-            case tmpdir in "${name%%=*}"*) exec /usr/bin/mktemp "$@" ;; esac
-            ;;
-        -?*)
-            rest=${a#-}
-            while [ -n "$rest" ]; do
-                c=${rest%"${rest#?}"}
-                rest=${rest#?}
-                case "$c" in
-                    p) exec /usr/bin/mktemp "$@" ;;
-                    t) [ -n "$rest" ] || skip=1; break ;;
-                esac
-            done
-            ;;
-        *) exec /usr/bin/mktemp "$@" ;;
-    esac
-done
-exec /usr/bin/mktemp -p "$TMPDIR" "$@"
-"""
-
-
-def write_tools(bin_dir: Path) -> None:
-    """The shared `bin/` the turn's PATH starts with: `mktemp`, which on
-    macOS ignores TMPDIR, made to use it. Written whole and swapped in, so a
-    turn of another task never runs half a file."""
-    bin_dir.mkdir(exist_ok=True)
-    part = bin_dir / f".mktemp.{os.getpid()}"
-    part.write_text(MKTEMP)
-    part.chmod(0o755)
-    os.replace(part, bin_dir / "mktemp")
-
-
 def harness_env(
     lay: Layout,
     spec: Spec,
@@ -901,17 +556,13 @@ def harness_env(
     passfile: Path,
 ) -> dict[str, str]:
     """The turn's environment for this project: tools (`bin_dir`, the work
-    directory's `bin/`) first on PATH, then the trusted git's directory (the
-    developer tools, so `git` and `python3` are not `/usr/bin`'s shims, which
-    write a cache to the user temp directory no turn can write), the caches
-    under `lay`, the database and Redis it was given, `passfile` as the
+    directory's `bin/`) first on PATH, the caches under `lay`, the database and Redis it was given, `passfile` as the
     Postgres password file, and the business's knowledge base folder
     (`VALOR_KNOWLEDGE_BASE`) when the spec names one. The directories are
     passed, never derived from `lay`, so a check's own service layout gets
     the task's `bin/`."""
-    git_dir = Path(git.binary()).parent
     env = {
-        "PATH": f"{bin_dir}:{git_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
         "VALOR_BROWSER": settings.browser,
         "UV_CACHE_DIR": str(lay.cache / "uv"),
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
@@ -996,10 +647,9 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
-    for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
-              lay.work_state / "claude", lay.work_state / "pi", lay.checks):  # fmt: skip
+    for d in (lay.repo.parent, lay.home, lay.profiles, lay.cache, lay.work_state / "claude",
+              lay.work_state / "pi", lay.checks, lay.root.parent / "bin"):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
-    write_tools(lay.root.parent / "bin")
     _install_tools(lay.root.parent / "bin")
     # The clone: history up to the base only, no tags, one work branch.
     ref = f"refs/heads/valor-base/{task_id}"
@@ -1029,17 +679,12 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     # The kernel mirror, seeded with the base from the kernel's own cache.
     git.trusted(lay.root, "init", "-q", "--bare", str(lay.mirror))
     git.trusted(lay.mirror, "fetch", "-q", "--no-tags", f"file://{cache}", f"{base_sha}:refs/valor/base")
-    # Home: identity, empty gh, the profiles.
-    (lay.home / "gitconfig").write_text(GITCONFIG)
-    service_ports = [ports[s] for s in spec.services]
+    # Home: the profiles.
     kb = knowledge_base(spec)
-    opened = sorted({str(kb), os.path.realpath(kb)}) if kb else []
-    (lay.profiles / "turn.sb").write_text(turn_profile(lay, service_ports, rw=[Path(p) for p in opened]))
+    (lay.profiles / "turn.sb").write_text(turn_profile())
     passwords: dict[str, str] = {}
     if spec.services:
-        (lay.profiles / "service.sb").write_text(
-            service_profile(lay, task_id, service_ports, work=lay.root.parent)
-        )
+        (lay.profiles / "service.sb").write_text(service_profile(task_id))
     if "postgres" in spec.services:
         passwords = _init_postgres(lay, task_id, spec, ports["postgres"])
     if "redis" in spec.services:
@@ -1049,9 +694,6 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     )
     harness = {
         "sandbox_profile": str(lay.profiles / "turn.sb"),
-        "gitconfig": str(lay.home / "gitconfig"),
-        "gh_config_dir": str(lay.home / "gh"),
-        "tmpdir": str(lay.work_state / "tmp"),
         "claude_config_dir": str(lay.work_state / "claude"),
         "pi_agent_dir": str(lay.work_state / "pi"),
         "env": env,
@@ -1104,10 +746,9 @@ def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> di
     the turn's environment; a failure is recorded, never fatal. A command
     ends when its own process ends, and the child it leaves running is
     reaped by the command's mark. Its stdout and stderr are one pipe, which
-    the kernel copies whole into `<task root>/setup/<n>.log`, at a path no
-    turn can read or write, until EOF, which comes once the reap has ended
-    every process of the command: node aborts at startup when its stdout is
-    a file at a path it cannot read. Each result names that file. There is no time limit; provisioning under
+    the kernel copies whole into `<task root>/setup/<n>.log` until EOF,
+    which comes once the reap has ended every process of the command. Each
+    result names that file. There is no time limit; provisioning under
     `git.interruptible()` ends it when interrupted."""
     out: list[dict[str, Any]] = []
     lay.setup.mkdir(parents=True, exist_ok=True)
@@ -1148,17 +789,10 @@ def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[lis
 
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
     """The environment a sandboxed step of the task gets: the allowlist the
-    harness uses, the task's own, its TMPDIR, no credential."""
+    harness uses and the task's own."""
     keep = ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     env.update(harness.get("env", {}))
-    if harness.get("tmpdir"):
-        env["TMPDIR"] = harness["tmpdir"]
-    if harness.get("gitconfig"):
-        env["GIT_CONFIG_GLOBAL"] = harness["gitconfig"]
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-    if harness.get("gh_config_dir"):
-        env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
@@ -1258,7 +892,7 @@ def _make_cluster(lay: Layout, task_id: str, data: Path) -> str:
     The first cluster a process makes for a Postgres (`_pg_template_key`)
     is initdb'd under the task's service profile with a random password
     held in memory only, then cloned (`cp -c`) into a template under
-    `settings.performing_dir`, which no workspace sandbox can read; the
+    `settings.performing_dir`; the
     template is removed when the process exits. Each later cluster is a
     clone of the template. Where cloning fails (a volume that is not
     APFS), every cluster is initdb'd as before."""
@@ -1516,51 +1150,6 @@ def _group(pgid: int) -> list[int]:
     ]
 
 
-def bounded(
-    argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int
-) -> tuple[int | str, str]:
-    """Run `argv` in its own process group (`git.start`) with a file-size
-    limit until it exits, killing the whole group when its summed footprint
-    passes `max_footprint`. There is no time limit: an interrupt of the
-    watch it runs under (`git.threaded`, a stopped caller) ends it, and
-    `git.Interrupted` is raised. Its stderr goes to a file the kernel holds
-    (`git.output_file`), so it ends when the command exits, whatever a
-    program it started holds. The file-size limit covers that file too, so
-    a command whose stderr passes `max_bytes` is killed (SIGXFSZ). Returns
-    the exit code (or `footprint`) and its stderr, up to `max_bytes`."""
-
-    # The file-size limit is set by /bin/bash (root's) before it execs the
-    # command, since a preexec function is unsafe in a threaded process.
-    # bash counts `ulimit -f` in 1024-byte blocks.
-    blocks = max(1, max_bytes // 1024)
-    wrapped = ["/bin/bash", "-c", f'ulimit -f {blocks} && exec "$@"', "bash", *argv]
-    held = git.watch()
-    why: int | str | None = None
-    with git.output_file() as err:
-        proc = git.start(wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=err)
-        try:
-            while proc.poll() is None:
-                if sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
-                    why = "footprint"
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    break
-                time.sleep(0.5)
-            proc.wait()
-        except BaseException:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            raise
-        finally:
-            if held:
-                held.finished(proc)
-        if held and held.interrupted:
-            raise git.Interrupted()
-        stderr = git.read_output(err).decode(errors="replace")
-    return (why or proc.returncode), stderr
-
-
 def fetch_into_mirror(
     mirror: str | Path,
     source: str | Path,
@@ -1568,26 +1157,16 @@ def fetch_into_mirror(
     ref: str,
     turn_profile_path: str | Path,
     mark: str,
-    *,
-    max_bytes: int | None = None,
-    max_footprint: int | None = None,
 ) -> str:
     """Fetch one commit from a clone a turn controls into the kernel mirror,
     under `ref`, and return its full id. `sha` is the commit's id or an
-    abbreviation of it, resolved in the clone under the turn's profile after
-    its config is read. Raises `FetchRefused` with the reason."""
+    abbreviation of it, resolved in the clone under the turn's profile.
+    Raises `FetchRefused` with the reason."""
     source, mirror = Path(source), Path(mirror)
     if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
         raise FetchRefused(f"{sha!r} is not a commit id")
     if not ref.startswith("refs/valor/"):
         raise FetchRefused(f"{ref} is not a mirror ref")
-    _no_borrowed_objects(source)
-    try:
-        found = git.hostile(source, turn_profile_path, mark)
-    except git.GitError as exc:
-        raise FetchRefused(str(exc)) from None
-    if found:
-        raise FetchRefused("the clone's git config names what the kernel will not run: " + "; ".join(found))
     if len(sha) < 40:
         try:
             full = git.commit_named(source, sha, turn_profile_path, mark)
@@ -1604,30 +1183,19 @@ def fetch_into_mirror(
             "-f", str(turn_profile_path), git_bin, "-c", "uploadpack.allowAnySHA1InWant=true", "upload-pack",
         ]
     )  # fmt: skip
-    argv = [
-        git_bin, "-C", str(mirror), *git.PINNED,
-        "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "fetch.unpackLimit=1",
-        "-c", "transfer.unpackLimit=1", "-c", "protocol.file.allow=always",
-        "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
-        f"--upload-pack={upload}", str(source), f"+{sha}:{ref}",
-    ]  # fmt: skip
-    code, err = bounded(
-        argv,
-        cwd=mirror,
-        env=git.env(),
-        max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
-        max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
-    )
-    runs.reap(mark)
-    if code != 0:
-        try:
-            git.trusted(mirror, "update-ref", "-d", ref)
-        except git.GitError:
-            pass
-        clean_partial(mirror)
-        if code == "footprint":
-            raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
-        raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
+    try:
+        done = git._git(
+            mirror,
+            "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "protocol.file.allow=always",
+            "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+            f"--upload-pack={upload}", str(source), f"+{sha}:{ref}",
+        )  # fmt: skip
+    finally:
+        runs.reap(mark)
+    if done.returncode != 0:
+        raise FetchRefused(
+            f"the fetch into the kernel mirror failed ({done.returncode}): {done.stderr.strip()}"
+        )
     return sha
 
 
@@ -1646,12 +1214,8 @@ def bring_merged(
     the head from the mirror to the bare origin's `target` (already there
     when the merge landed on that origin), then git in `repo` fetches it and
     fast-forwards the work branch, under the turn's own profile. Raises
-    `git.GitError` with the reason when the clone's config is one the
-    kernel will not run git under, or the branch cannot fast-forward."""
+    `git.GitError` with the reason when the branch cannot fast-forward."""
     git.trusted(mirror, "push", "-q", "--no-verify", str(origin), f"{head}:refs/heads/{target}")
-    found = git.hostile(repo, turn_profile_path, mark)
-    if found:
-        raise git.GitError("the clone's git config names what the kernel will not run: " + "; ".join(found))
     prefix = [
         binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
         "-f", str(turn_profile_path),
@@ -1667,61 +1231,6 @@ def bring_merged(
                 raise git.GitError(f"git {args[0]}: {done.stderr.strip()}")
     finally:
         runs.reap(mark)
-
-
-def _no_borrowed_objects(source: Path) -> None:
-    """Refuse a clone whose `.git` is not a plain directory, or that has
-    alternates, a shallow file, or a common directory, every lookup relative
-    to a descriptor and never through a link. With no `.git`, the clone is
-    bare and the names are looked up in it."""
-    try:
-        root = os.open(source, DIR_FLAGS)
-    except OSError as exc:
-        raise FetchRefused(f"the clone is not a plain directory ({exc.strerror})") from None
-    try:
-        dotgit, why = open_turn_dir(root, ".git")
-        if why:
-            raise FetchRefused("the clone's .git is not a directory (a gitfile moves the real one elsewhere)")
-        gitdir = root if dotgit is None else dotgit
-        try:
-            for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow", "commondir"):
-                if _present(gitdir, name):
-                    raise FetchRefused(f"the clone has {name}, which the kernel will not fetch from")
-        finally:
-            if dotgit is not None:
-                os.close(dotgit)
-    finally:
-        os.close(root)
-
-
-def _present(dir_fd: int, relpath: str) -> bool:
-    """Whether `relpath` names an entry: a link or a non-directory at a
-    directory component counts, as does any entry at the last one."""
-    head, _, last = relpath.rpartition("/")
-    parent = dir_fd
-    if head:
-        parent, why = open_turn_dir(dir_fd, head)
-        if parent is None:
-            return why is not None
-    try:
-        os.stat(last, dir_fd=parent, follow_symlinks=False)
-        return True
-    except FileNotFoundError:
-        return False
-    finally:
-        if parent != dir_fd:
-            os.close(parent)
-
-
-def clean_partial(repo: Path) -> None:
-    """Delete what a refused or killed fetch left in the repository: the
-    temporary pack and index files and the quarantine directories."""
-    objects = Path(repo) / "objects"
-    for p in [*objects.glob("pack/tmp_*"), *objects.glob("incoming-*"), *objects.glob("tmp_objdir-*")]:
-        if p.is_dir() and not p.is_symlink():
-            shutil.rmtree(p, ignore_errors=True)
-        else:
-            p.unlink(missing_ok=True)
 
 
 VALOR_DIR = ".valor"
@@ -1819,18 +1328,16 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
 def check_harness(
     lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str], *, services: bool = False
 ) -> dict[str, Any]:
-    """The harness settings of one fresh session: its own profile, TMPDIR,
-    Claude Code config directory, uv cache, and the trusted git first on
-    PATH. A
-    session that runs nothing against the task's services (critique) gets
-    none of their ports and only the PATH of the task's environment, so no
-    database credential. With `services` (test, review) the session gets
-    the environment `check_services` made for its fresh instances, those
-    ports, and its caches under `<check_dir>/cache/`."""
-    name = check_dir.name
-    path = lay.profiles / f"{name}.sb"
-    path.write_text(check_profile(lay, check_dir, ports if services else []))
-    git_dir = str(Path(git.binary()).parent)
+    """The harness settings of one fresh session: the turn profile, its own
+    Claude Code config directory. A session that runs nothing against the
+    task's services (critique) gets none of their ports and only the PATH
+    of the task's environment, so no database credential. With `services`
+    (test, review) the session gets the environment `check_services` made
+    for its fresh instances and its caches under `<check_dir>/cache/`."""
+    path = lay.profiles / "turn.sb"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(turn_profile())
     if services:
         # The check's own copy of the caches, never the builder's.
         cache = check_dir / "cache"
@@ -1842,62 +1349,17 @@ def check_harness(
         }
     else:
         fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
-    fresh_env["PATH"] = f"{git_dir}:{fresh_env.get('PATH', '/usr/bin:/bin')}"
-    # uv's own cache and managed Pythons (`~/.cache/uv`, `~/.local/share/uv`)
-    # are write-denied, since the user's later `uv sync` installs from the
-    # one and runs the other; a fresh session's uv keeps both under its tmp.
-    fresh_env["UV_CACHE_DIR"] = str(check_dir / "tmp" / "uv")
-    fresh_env["UV_PYTHON_INSTALL_DIR"] = str(check_dir / "tmp" / "python")
     return {
         "sandbox_profile": str(path),
-        "tmpdir": str(check_dir / "tmp"),
         "claude_config_dir": str(check_dir / "claude"),
         "pi_agent_dir": str(check_dir / "pi"),
         "env": fresh_env,
     }
 
 
-SETUP_TMP = "setup-tmp"
-
-
-def _sb_regex(path: str) -> str:
-    return re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", path)
-
-
-def setup_profile(lay: Layout, check_dir: Path, ports: list[int]) -> str:
-    """The profile of a fresh session's setup: it writes the checkout,
-    `cache/`, and `setup-tmp/`, and reads the services' password file in
-    the session's tmp. The checkout's repository is the kernel's, so the
-    setup writes no `.git` anywhere in the checkout (any case, as written
-    and resolved), and does not rename, remove, or change the mode, flags,
-    or ACL of the checkout directory itself, so no other directory with its
-    own `.git` takes its place."""
-    repo = check_dir / "repo"
-    text = profile(
-        rw=[repo, check_dir / "cache", check_dir / SETUP_TMP],
-        ro=[lay.root.parent / "bin", check_dir / "tmp" / "pgpass"],
-        ports=ports,
-        work=lay.root.parent,
-        fresh=True,
-    )
-    forms = sorted({str(repo), os.path.realpath(repo)})
-    git_dirs = [f'    (regex #"^{_sb_regex(r)}/(.+/)?\\.[Gg][Ii][Tt](/|$)")' for r in forms]
-    return text + "\n".join(["(deny file-write*", *_paths("literal", forms), *git_dirs, ")"]) + "\n"
-
-
 def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[str, Any]) -> dict[str, Any]:
-    """The harness a fresh session's setup runs with: the session's own
-    `harness` under `setup_profile`, with `setup-tmp/` as its TMPDIR,
-    holding uv's cache and managed Pythons. The setup is candidate code and
-    runs before the session, so it must not write what the session reads
-    at start: its Claude Code and Pi directories, its TMPDIR, and the
-    checkout's repository."""
-    tmp = check_dir / SETUP_TMP
-    tmp.mkdir()
-    path = lay.profiles / f"{check_dir.name}.setup.sb"
-    path.write_text(setup_profile(lay, check_dir, ports))
-    env = {**harness["env"], "UV_CACHE_DIR": str(tmp / "uv"), "UV_PYTHON_INSTALL_DIR": str(tmp / "python")}
-    return {**harness, "sandbox_profile": str(path), "tmpdir": str(tmp), "env": env}
+    """The harness a fresh session's setup runs with: the session's own."""
+    return harness
 
 
 def setup_left(checkout: Path) -> str | None:
@@ -2205,9 +1667,7 @@ def check_services(
         passfile = check_dir / "tmp" / "pgpass"
         if names:
             svc.profiles.mkdir(parents=True)
-            (svc.profiles / "service.sb").write_text(
-                service_profile(svc, task_id, [ports[n] for n in names], work=work)
-            )
+            (svc.profiles / "service.sb").write_text(service_profile(task_id))
         if "postgres" in names:
             passwords = _init_postgres(svc, task_id, spec, ports["postgres"])
             copy_new(svc.home / "pgpass", passfile)
