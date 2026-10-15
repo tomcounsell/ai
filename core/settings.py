@@ -396,6 +396,12 @@ class Settings:
     verify_memory_mb: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_MEMORY_MB", "4096")))
     verify_cpus: int = field(default_factory=lambda: int(_env("VALOR_VERIFY_CPUS", "4")))
 
+    # How many turns (or checks) run at once on this machine (`core/slot.py`).
+    # Set from docs/machine.md's RAM plan with the verification VM gone: a
+    # turn with its work, cluster, and Redis is about 4,450 MB over a 4,356 MB
+    # resident base, so two fit 16 GB with about 2.6 GB of cache and three do not.
+    max_turns: int = field(default_factory=lambda: int(_env("VALOR_MAX_TURNS", "2")))
+
     # -- the resident kernel and the bridges (docs/plans/m2-1-port.md) -------
     # This machine's name: the kernel's and the turn slot's lock keys, and
     # which project chats this machine's bridges receive.

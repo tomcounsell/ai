@@ -197,3 +197,38 @@ def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_a
     assert intent["payload"] == {"text": "hello"} and intent["effect_class"] == "propose"
     assert intent["payload_sha256"] == ledger.digest({"text": "hello"}) and "approval_id" not in intent
     assert settled.kind == "done" and owner == task
+
+
+# -- turns run at once up to the machine's limit ---------------------------------
+
+
+def test_max_turns_holders_run_at_once_and_the_next_waits_for_one(dsn, monkeypatch):
+    import dataclasses
+    import uuid
+
+    from core import slot
+
+    monkeypatch.setattr(
+        slot, "settings", dataclasses.replace(slot.settings, max_turns=2, machine=uuid.uuid4().hex)
+    )
+
+    async def go():
+        inside: list[str] = []
+        release = asyncio.Event()
+
+        async def hold(name: str) -> None:
+            async with slot.held(name, dsn):
+                inside.append(name)
+                await release.wait()
+
+        first = [asyncio.create_task(hold(n)) for n in ("a", "b")]
+        while len(inside) < 2:
+            await asyncio.sleep(0.05)
+        third = asyncio.create_task(hold("c"))
+        await asyncio.sleep(3 * slot.POLL_S)
+        assert sorted(inside) == ["a", "b"]
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*first, third), timeout=10)
+        assert sorted(inside) == ["a", "b", "c"]
+
+    run(asyncio.wait_for(go(), timeout=15))

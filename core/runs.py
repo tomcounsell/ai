@@ -107,7 +107,7 @@ async def run_turn(
     session. `offered` is the usage lines of the task's performers, which
     the working session's Brief lists. Returns the `turn.ended` payload.
 
-    The turn holds the turn slot (`core/slot.py`) from before its Brief is
+    The turn holds a turn slot (`core/slot.py`) from before its Brief is
     rendered until `turn.ended` is written. Memory ingests once the slot is
     released, so no other turn waits on it."""
     async with slot.held(task_id, dsn or gateway.dsn):
@@ -204,18 +204,12 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
                 finished = asyncio.create_task(proc.wait())
                 stopped = asyncio.create_task(_stop_heard(listener, task_id))
                 waiters += [finished, stopped]
-                moved = slot.preempting()
-                preempted = asyncio.create_task(moved.wait()) if moved is not None else None
-                if preempted is not None:
-                    waiters.append(preempted)
                 done, _ = await asyncio.wait(set(waiters), return_when=asyncio.FIRST_COMPLETED)
-                if preempted is not None:
-                    preempted.cancel()
-                if stopped in done or preempted in done:
+                if stopped in done:
                     gateway.revoke(task_id)
                     _kill_group(proc.pid)
                     await finished
-                    outcome = "stopped" if stopped in done else "preempted"
+                    outcome = "stopped"
                     stopped.cancel()
                 else:
                     stopped.cancel()
@@ -236,7 +230,7 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
         "turn_id": turn_id,
         "outcome": outcome,
         "returncode": proc.returncode,
-        "result": command.parse(out_path.read_bytes()) if outcome not in ("stopped", "preempted") else {},
+        "result": command.parse(out_path.read_bytes()) if outcome != "stopped" else {},
         "stdout": str(out_path),
         "stderr": str(err_path),
     }
