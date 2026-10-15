@@ -436,10 +436,11 @@ def _turn_processes(turn_id: str, pgid: int | None) -> list[int]:
 
 # -- the process table ------------------------------------------------------------
 #
-# Read in-process through libproc and sysctl, not `/bin/ps`: it is setuid,
-# and a sandboxed caller (a turn, the check's suite) may not exec it. For
-# this user's processes neither read needs a privilege. A process that has
-# exited, a zombie included, reads as absent.
+# Read in-process, not through `/bin/ps`: it is setuid, and a sandboxed
+# caller (a turn, the check's suite) may not exec it. On macOS through
+# libproc and sysctl, elsewhere (the verification VM) from `/proc`; for this
+# user's processes neither needs a privilege. A process that has exited, a
+# zombie included, reads as absent.
 
 _SHORTBSDINFO = 13  # PROC_PIDT_SHORTBSDINFO: struct proc_bsdshortinfo, 64 bytes
 _KERN_PROCARGS2 = (1, 49)  # CTL_KERN, KERN_PROCARGS2
@@ -460,7 +461,13 @@ def _libc():
     return lib
 
 
+PROC = Path("/proc")
+_DARWIN = sys.platform == "darwin"
+
+
 def _all_pids() -> list[int]:
+    if not _DARWIN:
+        return [int(n) for n in os.listdir(PROC) if n.isdigit()]
     lib = _libc()
     count = lib.proc_listallpids(None, 0)
     buf = (ctypes.c_int * (count + 64))()
@@ -470,6 +477,8 @@ def _all_pids() -> list[int]:
 
 def owner_and_group(pid: int) -> tuple[int, int] | None:
     """The process's uid and process group, or None when it is gone."""
+    if not _DARWIN:
+        return _proc_owner_and_group(pid)
     buf = ctypes.create_string_buffer(64)
     if _libc().proc_pidinfo(pid, _SHORTBSDINFO, 0, buf, 64) != 64:
         return None
@@ -501,6 +510,8 @@ def _arguments(pid: int) -> tuple[list[str], list[str]]:
     empty entry, then the kernel's own strings), or two empty lists when it
     is gone or unreadable. A platform binary shows no environment to
     another process."""
+    if not _DARWIN:
+        return _proc_arguments(pid)
     lib = _libc()
     mib = (ctypes.c_int * 3)(*_KERN_PROCARGS2, pid)
     size = ctypes.c_size_t(0)
@@ -529,6 +540,32 @@ def _arguments(pid: int) -> tuple[list[str], list[str]]:
             break
         env.append(entry)
     return argv, env
+
+
+def _proc_owner_and_group(pid: int) -> tuple[int, int] | None:
+    """From `/proc/<pid>/stat`: the fields after the command's closing
+    parenthesis (the command may hold one) are state, ppid, pgrp; the owner
+    is the directory's. A zombie (`Z`) or a dead task (`X`) is gone."""
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+        uid = (PROC / str(pid)).stat().st_uid
+    except OSError:
+        return None
+    fields = stat.rpartition(")")[2].split()
+    if len(fields) < 3 or fields[0] in ("Z", "X"):
+        return None
+    return uid, int(fields[2])
+
+
+def _proc_arguments(pid: int) -> tuple[list[str], list[str]]:
+    def entries(name: str) -> list[str]:
+        try:
+            raw = (PROC / str(pid) / name).read_bytes()
+        except OSError:
+            return []
+        return [e.decode(errors="replace") for e in raw.split(b"\0") if e]
+
+    return entries("cmdline"), entries("environ")
 
 
 def command(pid: int) -> str:

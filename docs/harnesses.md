@@ -435,9 +435,10 @@ of this user that matches any of three marks:
    second check keeps unrelated apps out). The check is libsandbox's
    `sandbox_check`, without logging.
 
-The process table is read in-process (libproc for each pid's owner and group, `sysctl` `KERN_PROCARGS2` for its
-arguments and environment), not with `/bin/ps`: that is setuid, and a sandboxed caller, such as the suite
-under the verify check, may not run it. A process that has exited, a zombie not yet collected included,
+The process table is read in-process, not with `/bin/ps`: that is setuid, and a sandboxed caller, such as
+the suite under the verify check, may not run it. On macOS libproc gives each pid's owner and group and
+`sysctl` `KERN_PROCARGS2` its arguments and environment; in the verification VM the same come from
+`/proc/<pid>/stat`, the directory's owner, `cmdline`, and `environ`. A process that has exited, a zombie not yet collected included,
 reads as gone.
 
 Each gets SIGTERM, then SIGKILL after two seconds, and a `turn.reaped` row lists pid, command, and

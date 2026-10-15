@@ -209,7 +209,9 @@ def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(ds
 # -- the process table --------------------------------------------------------------
 #
 # Read in-process, since a sandboxed caller may not exec the setuid `/bin/ps`:
-# this suite runs under the turn's profile in the verify check.
+# this suite runs under the turn's profile in the verify check on macOS, and
+# from `/proc` in the verification VM. The tests below hold on both; the
+# `/proc` reader is also run against a planted tree, so the Mac exercises it.
 
 SLEEP = "import time; time.sleep(30)"
 
@@ -235,8 +237,10 @@ def test_the_process_table_reads_a_childs_group_and_owner_and_lists_only_this_us
         assert table[leader.pid] == os.getpgid(leader.pid) == leader.pid
         assert table[member.pid] == os.getpgid(member.pid) == os.getpgrp()
         assert runs.owner_and_group(leader.pid) == (os.getuid(), leader.pid)
-        assert runs.owner_and_group(1) == (0, 1)  # launchd, root's
-        assert 1 not in table and os.getpid() not in table
+        others = [
+            p for p in runs._all_pids() if (runs.owner_and_group(p) or (os.getuid(),))[0] != os.getuid()
+        ]
+        assert not set(others) & set(table) and os.getpid() not in table
     finally:
         _ended(leader, member)
 
@@ -287,3 +291,34 @@ def test_a_zombie_or_a_collected_pid_is_not_alive_and_has_no_command():
         assert runs.alive(running.pid)
     finally:
         _ended(running)
+
+
+def test_the_proc_reader_takes_group_owner_arguments_and_environment_and_reads_a_zombie_as_gone(
+    tmp_path, monkeypatch
+):
+    def plant(pid: int, stat: str, cmdline: bytes = b"", environ: bytes = b"") -> None:
+        d = tmp_path / str(pid)
+        d.mkdir()
+        (d / "stat").write_text(stat)
+        (d / "cmdline").write_bytes(cmdline)
+        (d / "environ").write_bytes(environ)
+
+    turn = ledger.new_id()
+    plant(
+        41,
+        "41 (a) b) c) S 1 4100 4100 0 -1",
+        b"python3\0-c\0pass\0",
+        f"{runs.TURN_ENV}={turn}\0A=b\0".encode(),
+    )
+    plant(42, "42 (z) Z 1 4200 4200 0 -1", b"", b"")
+    (tmp_path / "self").mkdir()
+    monkeypatch.setattr(runs, "_DARWIN", False)
+    monkeypatch.setattr(runs, "PROC", tmp_path)
+    assert sorted(runs._all_pids()) == [41, 42]
+    assert runs.owner_and_group(41) == (os.getuid(), 4100)
+    assert runs.own_processes() == {41: 4100}
+    assert not runs.alive(42) and not runs.alive(43)
+    assert runs.command(41) == "python3 -c pass" and runs.command(43) == ""
+    assert runs._arguments(41)[1] == [f"{runs.TURN_ENV}={turn}", "A=b"]
+    assert runs._turn_processes(turn, None) == [41]
+    assert runs._turn_processes(turn + "0", 4100) == [41] and runs._turn_processes(turn + "0", None) == []
