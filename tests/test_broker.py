@@ -54,6 +54,6 @@ def test_a_merge_the_predicate_refuses_is_not_performed(dsn, tmp_path):
     f, refused, written = run(go())
     assert f.state is State.PATCH and f.merge_effect is None
     assert refused.kind == "refused" and refused.error.startswith(PREDICATE), refused
-    assert [t[0] for t in refused.error.removeprefix(PREDICATE).split("; ")] == ["1", "3"]
+    assert [t[0] for t in refused.error.removeprefix(PREDICATE).split("; ")] == ["1", "2"]
     assert not [r for r in written if r["type"] == "effect.intent"]
     assert git(origin, "rev-parse", "main") == before

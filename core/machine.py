@@ -345,26 +345,24 @@ def _instances(payload: dict[str, Any]) -> tuple[Instance, ...]:
     )
 
 
-DOCS_PASS = ("updated", "no_change")
-
-
 def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]) -> JoinResult:
     """The join table, read in its order, first match wins. Row 2 reads
-    review only. One round count: a review `changes`, a red test, test
-    gaps, and docs `changes` each send the work back inside the plan's
+    review only. The docs verdict holds no row: docs run, and their
+    findings go on the delivery. One round count: a review `changes`, a
+    red test, and test gaps each send the work back inside the plan's
     `review_rounds` (row 3). Once those are spent, gaps alone merge with
     the gaps listed (row 4); anything else gets one more round, in which
     Valor decides to patch or stop (row 5), and after it the task ends
     (row 6)."""
-    r, t, d = (checks[c].verdict for c in (Check.REVIEW, Check.TEST, Check.DOCS))
+    r, t = (checks[c].verdict for c in (Check.REVIEW, Check.TEST))
     found = tuple(f for c in (Check.TEST, Check.REVIEW, Check.DOCS) for f in checks[c].findings)
-    if r == "pass" and t == "pass" and d in DOCS_PASS:
+    if r == "pass" and t == "pass":
         return JoinResult(1, State.MERGE, "passed", None, found)
     if r == "governance_refused":
         return JoinResult(2, State.MERGE, "governance_refused", None, found)
     if counts["review_rounds"] < loops.review_rounds:
         return JoinResult(3, State.PATCH, None, "round", found)
-    if r == "pass" and t == "gaps" and d in DOCS_PASS:
+    if r == "pass" and t == "gaps":
         return JoinResult(4, State.MERGE, "gaps", None, found)
     if counts["last_rounds"] < LAST_ROUNDS:
         return JoinResult(5, State.PATCH, None, "last", found)
@@ -744,26 +742,26 @@ def is_doc_path(path: str) -> bool:
 
 
 def merge_predicate(f: Fold, payload: dict[str, Any]) -> list[str]:
-    """The four terms of the merge predicate over a merge effect's payload.
+    """The three terms of the merge predicate over a merge effect's payload.
     Returns each term that does not hold, named; empty means the merge may
-    be performed. Each term reads a row: what a docs head holds was read
-    once, when the docs runner kept it (`fresh.kept_prefix`). A candidate
-    the kernel carried onto a moved target (`verdicts.carried`) is the
-    current one, its verdicts and docs head the carried ones."""
+    be performed. The docs verdict is no term: docs run, and the merge
+    lands the head they kept, or the candidate when they kept none. A
+    candidate the kernel carried onto a moved target (`verdicts.carried`)
+    is the current one, its verdicts and docs head the carried ones."""
     failed = []
     named = payload.get("candidate") or {}
     current = f.candidate
     checks = f.checks
+    docs = checks.get(Check.DOCS)
+    head = (docs.payload.get("head") if docs else None) or (current.sha if current else None)
     if (
         f.state is not State.MERGE
         or current is None
         or named != {"sha": current.sha, "turn_id": current.turn_id}
         or len(checks) != 3
+        or payload.get("head_sha") != head
     ):
-        failed.append("1: one current candidate with a test, review, and docs verdict, named by this merge")
-    review = checks.get(Check.REVIEW)
-    if review is None or review.verdict != "pass" or any(i.id not in f.granted for i in review.instances):
-        failed.append("2: review passed, and every governance instance it named is granted by Tom")
+        failed.append("1: one current candidate with its checks decided, named by this merge")
     test = checks.get(Check.TEST)
     gaps_ok = (
         test is not None
@@ -772,13 +770,8 @@ def merge_predicate(f: Fold, payload: dict[str, Any]) -> list[str]:
         and (f.delivery or {}).get("outcome") == "gaps"
     )
     if test is None or not (test.verdict == "pass" or gaps_ok):
-        failed.append("3: test passed, or gaps with the plan's rounds spent and the gaps on the delivery")
-    docs = checks.get(Check.DOCS)
-    if (
-        docs is None
-        or docs.verdict not in DOCS_PASS
-        or docs.payload.get("head") != payload.get("head_sha")
-        or any(i.id not in f.granted for i in docs.instances)
-    ):
-        failed.append("4: docs updated or unchanged at this head, any governance it named granted by Tom")
+        failed.append("2: test passed, or gaps with the plan's rounds spent and the gaps on the delivery")
+    review = checks.get(Check.REVIEW)
+    if review is None or review.verdict != "pass":
+        failed.append("3: review passed")
     return failed

@@ -14,13 +14,6 @@ digest). Anything else inside the ceiling leaves at once: a kernel
 performer's effect is performed, and a bridge's declared type is handed to
 its bridge. No effect waits for a person.
 
-Whether an action adds governance (a check, gate, hook, validator, review
-round, or approval step) is the broker's to compute, never the requester's
-to say: a `merge` adds governance when the review or docs verdict for the
-candidate it names answered the governance boolean yes. Such a merge is
-refused while any instance it names lacks Tom's tap (`guard.granted`); the
-Brief's `governance_grant` does not stand in for the tap.
-
 A `merge` leaves only when the merge predicate holds
 (`machine.merge_predicate`): `request` evaluates it over the task's rows in
 the same transaction, under the task's lock, that writes the intent, so
@@ -98,13 +91,12 @@ class Action:
         whole = {"action_type": self.action_type, "target": self.target, "payload": self.payload}
         return f"{ledger.digest(whole)[:16]}:{effect_id}"
 
-    def describe(self, effect_class: str, adds_governance: bool, effect_id: str) -> dict[str, Any]:
+    def describe(self, effect_class: str, effect_id: str) -> dict[str, Any]:
         return {
             "action_type": self.action_type,
             "effect_class": effect_class,
             "target": self.target,
             "payload": self.payload,
-            "adds_governance": adds_governance,
             "idempotency_key": self.key(effect_id),
             "payload_sha256": ledger.digest(self.payload),
         }
@@ -168,24 +160,6 @@ def declared(performer: Any) -> bool:
     return getattr(performer, "owner", None) is not None and not hasattr(performer, "perform")
 
 
-def _governance(f: machine.Fold, action: Action) -> tuple[bool, list[machine.Instance]]:
-    """Whether the action adds governance, and the instances still lacking
-    Tom's tap. Only a merge carries a diff onto the target branch, so only
-    a merge can; it does when the review or docs verdict for the candidate
-    it names answered the governance boolean yes."""
-    if action.action_type != "merge":
-        return False, []
-    named = action.payload.get("candidate") or {}
-    if f.candidate is None or named != {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}:
-        return False, []
-    adds = any(
-        (v.payload.get("governance") or {}).get("adds")
-        for c, v in f.checks.items()
-        if c in (machine.Check.REVIEW, machine.Check.DOCS)
-    )
-    return adds, f.ungranted() if adds else []
-
-
 @asynccontextmanager
 async def _performing(conn, effect_id: str):
     """A session lock on one effect, held from before its intent until its
@@ -238,9 +212,8 @@ async def _request(
         brief = await tasks.brief(conn, task_id)
         task_rows = await ledger.read(conn, task_id)
         f = machine.fold(task_rows)
-        adds, ungranted = _governance(f, action)
-        effect_class = "act" if adds else getattr(performer, "effect_class", "act")
-        described = action.describe(effect_class, adds, effect_id)
+        effect_class = getattr(performer, "effect_class", "act")
+        described = action.describe(effect_class, effect_id)
         if request_id is not None:
             described["request_id"] = request_id
         reason = None
@@ -251,8 +224,6 @@ async def _request(
             reason = "task stopped"
         elif EFFECT_RANK[effect_class] > EFFECT_RANK[brief.max_effect_class]:
             reason = f"{effect_class} is above the task's ceiling {brief.max_effect_class}"
-        elif ungranted:
-            reason = UNGRANTED + ", ".join(f"{i.id} ({i.path})" for i in ungranted)
         elif refuse is not None and (said := await refuse(conn, action)):
             reason = said
         landed = None
@@ -292,7 +263,7 @@ NO_PERFORMER = "no performer for this action type"
 UNGRANTED = "adds governance with no grant from Tom for instance "
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store the request"
 # The fields of an effect row the kernel made, none of them the turn's.
-BARE_FIELDS = ("effect_class", "adds_governance", "payload_sha256", "request_id")
+BARE_FIELDS = ("effect_class", "payload_sha256", "request_id")
 
 
 def _bare(effect_id: str, described: dict[str, Any], reason: str, **more: Any) -> dict[str, Any]:
@@ -473,7 +444,6 @@ def _intent_row(effect_id: str, described: dict[str, Any]) -> dict[str, Any]:
         "effect_id": effect_id,
         "idempotency_key": described["idempotency_key"],
         **{f: described[f] for f in INTENT_FIELDS},
-        "adds_governance": described.get("adds_governance", False),
         **({"request_id": described["request_id"]} if described.get("request_id") else {}),
     }
 

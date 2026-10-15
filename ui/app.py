@@ -10,9 +10,6 @@ write a row.
                        and its ledger
     /attention         the attention log across tasks
     /routines          each routine: period spending, last run, runs
-    /audit             the audit list (blind: no verdict, no count by
-                       verdict, no link to the task page, which shows it)
-    /audit/scores      the verifier's scores
 """
 
 import html
@@ -24,7 +21,7 @@ from typing import Any
 import psycopg
 from aiohttp import web
 
-from core import audit_sample, ledger, outcomes, routines, tasks
+from core import ledger, outcomes, routines, tasks
 from core.settings import settings
 
 STYLE = (
@@ -62,7 +59,6 @@ def layout(title: str, body: str) -> web.Response:
             ("/", "tasks"),
             ("/attention", "attention"),
             ("/routines", "routines"),
-            ("/audit", "audit"),
         )
     )
     text = (
@@ -240,44 +236,6 @@ async def routines_page(conn) -> web.Response:
     return layout("Routines", body or "<p>No routines.</p>")
 
 
-async def audit_page(conn) -> web.Response:
-    """The list as `python -m core audit` gives it, and nothing else. A task
-    id here is text, not a link: the task page shows the verdict. The scores
-    are on their own page, as `audit scores` is its own command: a stratum's
-    counts beside the list can show how many listed candidates hold each
-    verdict, and with one listed candidate, which verdict it holds."""
-    found = await audit_sample.sample(conn)
-    listing = (
-        table(
-            ["task", "instruction", "base", "candidate", "read the work"],
-            [
-                [
-                    esc(c["task_id"]),
-                    esc(c["instruction"]),
-                    esc(c["base_sha"]),
-                    esc(c["sha"]),
-                    f"<pre>{esc(c['read'])}</pre>",
-                ]
-                for c in found
-            ],
-        )
-        if found
-        else f"<p>{esc(audit_sample.render_list(found))}</p>"
-    )
-    body = (
-        "<p>Label with <code>python -m core audit label TASK SHA pass|changes</code>. "
-        'The verifier\'s scores are on <a href="/audit/scores">their own page</a>.</p>'
-        f"{listing}"
-    )
-    return layout("Audit", body)
-
-
-async def audit_scores_page(conn) -> web.Response:
-    """The scores as `python -m core audit scores` prints them."""
-    scored = audit_sample.render_scores(await audit_sample.scores(conn))
-    return layout("Audit scores", f"<pre>{esc(scored)}</pre>")
-
-
 def make_app(dsn: str | None = None) -> web.Application:
     """The application. Each request opens its own read-only session."""
     dsn = dsn or settings.dsn()
@@ -297,8 +255,6 @@ def make_app(dsn: str | None = None) -> web.Application:
         ("/task/{task_id}", task_page),
         ("/attention", attention_page),
         ("/routines", routines_page),
-        ("/audit", audit_page),
-        ("/audit/scores", audit_scores_page),
     ):
         app.router.add_get(path, view(page), allow_head=False)
     return app

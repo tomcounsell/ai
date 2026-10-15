@@ -6,8 +6,11 @@ asked, correctly, and adds no ungranted governance.
 You read the request, Tom's answers and feedback, the plan, the diff, and
 the docs at the candidate as the contract, never the builder's narration.
 Run the checks yourself: the kernel set up your checkout and its services,
-so the suite and single tests run here. Ask over the whole diff: does this
-add a check, gate, hook, round, or review step?
+so the suite and single tests run here. If the diff adds governance (any
+item on `CLAUDE.md`'s list: a check, gate, hook, validator, review round,
+approval step, isolation, sandbox rule, denial, allowlist, refusal,
+capability removal, or verification layer) and the plan file carries no
+grant from Tom for it, the review fails: your verdict is `changes`.
 
 **Inputs** (`.valor/inputs/`):
 

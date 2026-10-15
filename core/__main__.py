@@ -75,13 +75,10 @@ feedback TASK_ID TEXT [--by B] [--role-played]
                                next run patches in the same session. `--by`
                                names who wrote it (default tom); `--role-played`
                                marks a stand-in speaking for Tom
-grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
-                               Tom's tap on one governance instance of the
-                               delivery; always his, never role-played
 status TASK_ID                 the task as a fold over its ledger: its state,
                                loops, candidate, checks, metered spending, and
                                the attention log (questions, answers, feedback,
-                               approvals, grants) and its counts;
+                               approvals) and its counts;
                                its parent, its children's reports, and the
                                metered spending of its whole subtree; and
                                what came after each merge (feedback after it,
@@ -104,17 +101,6 @@ correct TEXT [--by] [--via] [--record RECORD]
                                fact in another client's Brief came from, which
                                memory then recalls for its own client only
 corrections                    every correction, in force for every turn
-audit                          the reviewed candidates with no label from Tom,
-                               in the list's weighted order, each with the git
-                               command that shows the work and never the
-                               verifier's verdict
-audit label TASK_ID SHA pass|changes [--note T] [--by B] [--via V] [--role-played]
-                               Tom's label on a candidate the verifier
-                               reviewed, written on the audit stream; anyone
-                               but Tom, Valor's sessions included, labels with
-                               --role-played
-audit scores                   the verifier's calibration: false accepts, false
-                               rejects, and Brier score per model, each with n
 serve [--plist]                the resident kernel: binds Tom's messages, owes
                                notices, and runs every task's next step as
                                rows land, until killed; `--plist` prints its
@@ -142,7 +128,6 @@ from pathlib import Path
 
 from core import (
     agenda,
-    audit_sample,
     backup,
     broker,
     checks,
@@ -152,7 +137,6 @@ from core import (
     findings,
     fresh,
     git,
-    guards,
     judgement,
     judgement_sites,
     ledger,
@@ -294,11 +278,6 @@ def _status_line(task_id: str, out: dict) -> str:
         ]
         for f in d.get("findings") or []:
             lines.append(f"- [{f['source']}, {f['kind']}] {f['text']}")
-        for i in [g for g in state.get("governance", []) if not g["granted"]]:
-            lines.append(
-                f"\ngovernance awaiting Tom: instance {i['id']} in {i['path']}\n"
-                f'  grant with: python -m core grant {task_id} {i["id"]} --note "..."'
-            )
         return "\n".join(lines)
     if status == "calibration task":
         return f"CALIBRATION TASK (task {task_id}): a calibration task runs no stage"
@@ -730,20 +709,6 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"feedback {feedback_id} recorded; continue with: python -m core run {args.task_id}")
-        elif args.command == "grant":
-            try:
-                guard_id = await guards.grant(
-                    conn,
-                    args.task_id,
-                    args.instance,
-                    note=args.note,
-                    incident=args.incident,
-                    mission_item=args.mission_item,
-                    via=args.via,
-                )
-            except LookupError as exc:
-                raise SystemExit(str(exc.args[0])) from None
-            print(f"granted {args.instance} as {guard_id}; continue with: python -m core run {args.task_id}")
         elif args.command == "memory" and args.memory_command == "mark":
             try:
                 row = await memory.mark(conn, args.record, by=args.by, via=args.via)
@@ -795,36 +760,6 @@ async def _run(args) -> None:
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
-        elif args.command == "audit":
-            print(await _audit(conn, args))
-
-
-async def _audit(conn, args) -> str:
-    """The list (no subcommand), `label`, and `scores`."""
-    if args.audit_command == "scores":
-        return audit_sample.render_scores(await audit_sample.scores(conn))
-    if args.audit_command is None:
-        return audit_sample.render_list(await audit_sample.sample(conn))
-    try:
-        await tasks.brief(conn, args.task_id)
-    except KeyError:
-        raise SystemExit(f"audit label refused: no task {args.task_id}") from None
-    if not await audit_sample.reviewed(conn, args.task_id, args.sha):
-        raise SystemExit(
-            f"audit label refused: task {args.task_id} has no verifier's review of {args.sha}; "
-            "`python -m core audit` lists what can be labelled"
-        )
-    row = await audit_sample.record(
-        conn,
-        args.task_id,
-        args.sha,
-        args.label,
-        note=args.note,
-        by=args.by,
-        via=args.via,
-        role_played=args.role_played,
-    )
-    return f"labelled {args.task_id} {args.sha} {args.label}, ledger row {row['event_id']}"
 
 
 def _secure_login() -> dict:
@@ -964,13 +899,6 @@ def main() -> None:
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
-    grant = sub.add_parser("grant")
-    grant.add_argument("task_id")
-    grant.add_argument("instance")
-    grant.add_argument("--note", required=True)
-    grant.add_argument("--incident")
-    grant.add_argument("--mission-item")
-    grant.add_argument("--via", default="the command line")
     for name in ("answer", "feedback"):
         reply = sub.add_parser(name)
         reply.add_argument("task_id")
@@ -1001,16 +929,6 @@ def main() -> None:
     correct.add_argument("--via", default="the command line")
     correct.add_argument("--record", help="the memory record (<ledger>/<key>) the correction confines")
     sub.add_parser("corrections")
-    audit_cmd = sub.add_parser("audit").add_subparsers(dest="audit_command", parser_class=_Parser)
-    label = audit_cmd.add_parser("label")
-    label.add_argument("task_id")
-    label.add_argument("sha")
-    label.add_argument("label", choices=audit_sample.LABELS)
-    label.add_argument("--note")
-    label.add_argument("--by", default="tom")
-    label.add_argument("--via", default="the command line")
-    label.add_argument("--role-played", action="store_true")
-    audit_cmd.add_parser("scores")
     sub.add_parser("secure-login")
     memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)
     memory_cmd.add_parser("ingest")
