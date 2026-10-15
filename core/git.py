@@ -253,10 +253,10 @@ def _git(
 def output_dir() -> Path:
     """Where `output_file` makes its files, and `dirty` its index: `output/` in the effect lock
     directory (`settings.performing_dir`), made by the kernel with mode
-    0700. A file has a path there between its creation and its unlink, and
-    every task profile denies this directory (`workspace.kernel_paths`),
-    so no turn, setup command, or service can open, list, or truncate one;
-    the temp directory is open to all of them. It moves with
+    0700. A file has a path there between its creation and its unlink. By
+    default the directory sits in the kernel key directory, which a task's
+    sandbox profile denies (`workspace.kernel_paths`); the temp directory is
+    open to a turn. It moves with
     `VALOR_PERFORMING_DIR`, so the test suite writes nothing under the
     kernel key directory."""
     d = Path(settings.performing_dir)
