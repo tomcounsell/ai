@@ -108,9 +108,11 @@ async def run_turn(
     the working session's Brief lists. Returns the `turn.ended` payload.
 
     The turn holds a turn slot (`core/slot.py`) from before its Brief is
-    rendered until `turn.ended` is written. Memory ingests once the slot is
-    released, so no other turn waits on it."""
-    async with slot.held(task_id, dsn or gateway.dsn):
+    rendered until `turn.ended` is written, except a clarify turn (a
+    question to Tom), which never waits on one. Memory ingests once the slot
+    is released, so no other turn waits on it."""
+    held = contextlib.nullcontext() if state == "clarify" else slot.held(task_id, dsn or gateway.dsn)
+    async with held:
         ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered)
     await memory.after_turn(dsn or gateway.dsn)
     return ended
