@@ -7,7 +7,7 @@ critique_rounds: 0
 review_rounds: 0
 ---
 
-# C18: every working turn carries the yudame plugins, kept current
+# C18: turns drop safe mode, read the project's own instructions, and carry the yudame plugins
 
 Stakes: critique 1, review 1. From Tom's ruling of 2026-10-15
 ([valor-rebuild-feedback.md](valor-rebuild-feedback.md), "Tom's ruling on
@@ -24,6 +24,27 @@ Every Claude Code turn runs with `--safe-mode` and `--setting-sources ""`
 mode drops installed plugins, so neither `yudame` nor `yudame-dev` reaches
 a turn, though both are installed on the machine. Safe mode still loads a
 plugin named by `--plugin-dir` (`claude --help`, `--safe-mode`).
+
+## Safe mode goes
+
+`--safe-mode` was in the first harness commit (55ddc09c2, 2026-10-01) with
+"bounded authority" as its reason and no incident. Prompt text holds no
+authority in this design: the sandbox profile, the allowlisted
+environment, the broker, and the gateway do. Its cost is real: it drops
+the project's own `CLAUDE.md`, `.claude/skills/`, and `.claude/agents/`,
+so a turn on cuttlefish, psyoptimal, or popoto never reads the
+instructions those repositories keep for their own work. What safe mode
+was said to keep out is already kept out by other means: the turn has its
+own `CLAUDE_CONFIG_DIR`, so nothing user-level from this machine loads;
+`--setting-sources ""` reads no settings file, so no hook, permission, or
+environment from any `.claude/settings.json` loads; `--strict-mcp-config`
+loads no MCP server.
+
+0. **Drop `--safe-mode`** from `workspace_turn` and from fresh sessions,
+   and from the emulator's tool-less calls only if their recorded runs do
+   not change (`docs/plans/m1-5-emulator.md`). `--setting-sources ""` and
+   `--strict-mcp-config` stay: the first is what keeps a candidate from
+   pointing its turn's model calls past the gateway.
 
 ## What changes
 
@@ -55,6 +76,11 @@ plugin named by `--plugin-dir` (`claude --help`, `--safe-mode`).
    skill change.
 
 ## Done
+
+- A turn on cuttlefish names its `CLAUDE.md` among the instructions it
+  read (transcript), and no model call from it leaves except through the
+  gateway (the gateway's rows match the transcript's calls), with Claude
+  Code free to read the Keychain once safe mode is off.
 
 - A test: a working turn's command names both plugin directories at the
   Brief's commit; a fresh session's names none.
