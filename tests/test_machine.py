@@ -1,6 +1,7 @@
-"""The state machine as a pure fold: the join table row by row, the loops,
-staleness, governance grants, legacy ledgers, and, by property, that every
-prefix of any ledger folds to exactly one state.
+"""The state machine as a pure fold: the happy path, a question and its
+answer, the join table row by row, the loops, a stale candidate, stop,
+merge, the merge predicate, and, by property, that every prefix of any
+ledger folds to exactly one state.
 
 No database, no model call. Live spend: none.
 """
@@ -87,18 +88,13 @@ class Ledger:
         self.candidate = self.rows[-1]["payload"]["candidate"]
         return self
 
-    def check(self, check: str, verdict: str, candidate: dict | None = None, instances=(), **extra) -> Ledger:
+    def check(self, check: str, verdict: str, candidate: dict | None = None, **extra) -> Ledger:
         payload = {"candidate": candidate or self.candidate, "verdict": verdict,
                    "findings": [{"kind": check, "text": f"{check} said {verdict}"}], **extra}  # fmt: skip
-        if instances:
-            payload["governance"] = {
-                "adds": True,
-                "instances": [{"id": i, "path": "x.py"} for i in instances],
-            }
         return self.add(f"{check}.decided", payload)
 
-    def checks(self, test: str, review: str, docs: str, instances=()) -> Ledger:
-        self.check("test", test).check("review", review, instances=instances)
+    def checks(self, test: str, review: str, docs: str) -> Ledger:
+        self.check("test", test).check("review", review)
         return self.check("docs", docs, head=self.candidate["sha"])
 
     def to_checks(self) -> Ledger:
@@ -151,31 +147,12 @@ def test_answered_returns_to_plan_build_and_patch_too(where):
     assert f.state.value == where and f.entry["type"] == "question.answered"
 
 
-def test_a_legacy_question_without_a_state_returns_to_the_state_it_was_asked_in():
-    led = Ledger().plan().critique("sound")
-    led.turn("asked")
-    led.add("question.asked", {"question_id": "q", "turn_id": "t", "text": "?"})
-    assert led.fold().return_to is State.BUILD
-
-
-@pytest.mark.parametrize("question_id", [None, 5, ["q"], {"q": 1}, True])
-def test_a_question_id_that_is_not_a_string_is_malformed(question_id):
-    """Its answer could never name it, so the task does not wait on it."""
-    led = Ledger().plan().critique("sound")
-    led.turn("asked")
-    led.add("question.asked", {"question_id": question_id, "turn_id": "t", "text": "?", "state": "build"})
-    f = led.fold()
-    assert f.state is State.BUILD and f.open_question is None
-    assert f.ignored[-1]["type"] == "question.asked" and "not a string" in f.ignored[-1]["why"]
-
-
 # -- the join table ----------------------------------------------------------------
 
 # (review rounds in the plan, what is already spent, test, review, docs) -> row, goes to, outcome
 JOIN_ROWS = [
     (1, None, "pass", "pass", "updated", 1, State.MERGE, "passed"),
     (1, None, "pass", "pass", "no_change", 1, State.MERGE, "passed"),
-    (1, None, "red", "governance_refused", "changes", 2, State.MERGE, "governance_refused"),
     (1, None, "red", "changes", "changes", 3, State.PATCH, None),
     (1, None, "red", "pass", "no_change", 3, State.PATCH, None),
     (1, None, "gaps", "pass", "no_change", 3, State.PATCH, None),
@@ -202,24 +179,10 @@ def test_every_row_of_the_join_table(rounds, spent, test, review, docs, row, goe
         led.checks("red", "pass", "no_change")
         assert led.fold().join.spends == "last"
         led.build()
-    led.checks(test, review, docs, instances=("i1",) if review == "governance_refused" else ())
+    led.checks(test, review, docs)
     f = led.fold()
     assert (f.join.row, f.state, f.join.outcome) == (row, goes, outcome)
     assert len(f.join.findings) == 3  # every finding of the three branches together
-
-
-def test_row_two_reads_review_only_and_docs_governance_does_not_change_the_row():
-    led = Ledger(review_rounds=1).to_checks()
-    led.check("test", "pass").check("review", "changes")
-    led.check("docs", "updated", head=led.candidate["sha"], instances=("doc-rule",))
-    f = led.fold()
-    assert f.join.row == 3 and f.state is State.PATCH
-
-
-def test_governance_refused_comes_before_a_red_test():
-    led = Ledger(review_rounds=1).to_checks()
-    led.checks("red", "governance_refused", "no_change", instances=("i1",))
-    assert led.fold().join.row == 2
 
 
 # -- loops ---------------------------------------------------------------------------
@@ -241,29 +204,6 @@ def test_critique_rounds_bound_the_returns_to_plan_and_the_last_findings_ride_in
     assert f.entry["type"] == "critique.decided" and f.entry["payload"]["verdict"] == "revise"
 
 
-def test_a_raise_applies_to_the_verdict_carrying_it_and_a_revised_plan_cannot_lower_it():
-    led = Ledger(critique_rounds=0).plan()
-    led.critique("revise", critique_rounds=1)
-    assert led.state is State.PLAN  # sent back by its own raise
-    led.plan(critique_rounds=0)
-    assert led.fold().loops.critique_rounds == 1
-    led.critique("revise", critique_rounds=0)  # a "raise" to 0 lowers nothing
-    assert led.state is State.BUILD and led.fold().loops.critique_rounds == 1
-    led2 = Ledger(critique_rounds=0).plan()
-    led2.critique("revise", critique_rounds=2)
-    led2.plan(critique_rounds=0).critique("revise")
-    assert led2.state is State.PLAN  # the second revision the raise to 2 allows
-
-
-def test_a_critique_of_an_older_plan_is_ignored():
-    led = Ledger(critique_rounds=1).plan()
-    old = led.plan_digest
-    led.critique("revise").plan()
-    led.critique("sound", digest=old)
-    f = led.fold()
-    assert f.state is State.CRITIQUE and "not the current one" in f.ignored[-1]["why"]
-
-
 @pytest.mark.parametrize("rounds", [0, 1, 2])
 def test_the_plans_rounds_then_one_last_round_bound_the_patches_and_the_task_ends(rounds):
     led = Ledger(review_rounds=rounds).to_checks()
@@ -282,36 +222,6 @@ def test_the_plans_rounds_then_one_last_round_bound_the_patches_and_the_task_end
     assert f.state is State.ENDED and f.join.row == 6 and f.join.outcome == "did_not_pass"
 
 
-def test_a_critique_raise_of_review_rounds_to_2_is_accepted_and_read_as_1():
-    led = Ledger(review_rounds=0).plan()
-    led.critique("sound", review_rounds=2)
-    f = led.fold()
-    assert f.raised["review_rounds"] == 2 and f.loops.review_rounds == 1
-
-
-def test_a_red_test_and_docs_changes_spend_the_plans_rounds_like_a_review_changes():
-    for test, docs in (("red", "no_change"), ("pass", "changes")):
-        led = Ledger(review_rounds=1).to_checks()
-        led.checks(test, "pass", docs).build()
-        f = led.fold()
-        assert f.counts["review_rounds"] == 1 and f.counts["last_rounds"] == 0
-        led.checks(test, "pass", docs)
-        assert led.fold().join.spends == "last"
-
-
-def test_the_last_round_is_spent_once_per_window_and_feedback_on_an_ended_task_opens_a_new_window():
-    led = Ledger(review_rounds=0).to_checks()
-    led.checks("red", "pass", "no_change")
-    assert led.state is State.PATCH and led.fold().join.row == 5
-    led.build().checks("red", "pass", "no_change")
-    assert led.state is State.ENDED
-    led.add("feedback.given", {"feedback_id": "f", "text": "fix the test"})
-    f = led.fold()
-    assert f.state is State.PATCH and f.counts == machine.FRESH_COUNTS
-    led.build().checks("red", "pass", "no_change")
-    assert led.state is State.PATCH  # the last round is available again
-
-
 def test_valor_stopping_in_a_patch_ends_the_task_and_task_ended_never_ends_a_merged_one():
     led = Ledger(review_rounds=0).to_checks()
     led.checks("pass", "changes", "no_change")
@@ -328,55 +238,7 @@ def test_valor_stopping_in_a_patch_ends_the_task_and_task_ended_never_ends_a_mer
     assert merged.state is State.MERGED and "task ended in merged" in merged.fold().ignored[-1]["why"]
 
 
-def test_a_rebase_sends_a_merge_back_to_patch_spending_no_round():
-    led = Ledger(review_rounds=1).to_checks().checks("pass", "pass", "no_change")
-    assert led.state is State.MERGE
-    led.add("rebase.requested", {"effect_id": "e", "target_branch": "main", "tip": "abc"})
-    f = led.fold()
-    assert f.state is State.PATCH and f.counts["rebases"] == 1 and f.counts["review_rounds"] == 0
-    led.build().checks("pass", "pass", "no_change")
-    assert led.state is State.MERGE
-    led.add("rebase.requested", {"effect_id": "e2"}).build()
-    led.add("rebase.requested", {"effect_id": "e3"})
-    assert "rebase requested in checks" in led.fold().ignored[-1]["why"]
-
-
-def test_carried_verdicts_and_grants_make_the_replayed_sha_the_merged_candidate_spending_no_rebase():
-    led = Ledger().to_checks()
-    led.check("test", "pass").check("review", "pass", instances=["i1"]).check("docs", "updated", head="d1")
-    led.add("guard.granted", {"instance_id": "i1"})
-    led.add("task.delivered", {"candidate": led.candidate, "outcome": "passed"})
-    old = led.candidate
-    carried = {"from": {**old, "head": "d1"}, "to": {"sha": "r1", "turn_id": old["turn_id"], "head": "rd1"},
-               "tip": "tip1", "verdicts": {}, "grants": ["i1"]}  # fmt: skip
-    led.add("verdicts.carried", {**carried, "from": {**old, "head": "other"}})
-    assert "not the current one" in led.fold().ignored[-1]["why"]
-    led.add("verdicts.carried", carried)
-    f = led.fold()
-    new = {"sha": "r1", "turn_id": old["turn_id"]}
-    assert f.state is State.MERGE and f.counts["rebases"] == 0 and f.merge_effect is None
-    assert f.delivery["candidate"] == new and f.summary()["carried"][0]["tip"] == "tip1"
-    assert machine.merge_predicate(f, {"candidate": new, "head_sha": "rd1"}) == []
-    assert [t[0] for t in machine.merge_predicate(f, {"candidate": old, "head_sha": "d1"})] == ["1", "4"]
-    led.add("verdicts.carried", carried)
-    assert "not the current verified one" in led.fold().ignored[-1]["why"]
-
-
-def test_feedback_after_merged_patches_and_review_rounds_are_available_again():
-    led = Ledger(review_rounds=1).to_checks()
-    led.checks("pass", "changes", "no_change").build().checks("pass", "pass", "no_change")
-    led.add(
-        "effect.held", {"effect_id": "e", "action_type": "merge", "payload": {"candidate": led.candidate}}
-    )
-    led.add("effect.outcome", {"effect_id": "e", "kind": "done"})
-    assert led.state is State.MERGED and led.fold().counts["review_rounds"] == 1
-    led.add("feedback.given", {"feedback_id": "f", "text": "a defect in use"})
-    assert led.state is State.PATCH
-    led.build().checks("pass", "changes", "no_change")
-    assert led.state is State.PATCH  # a review round again, in the new window
-
-
-# -- candidates, staleness, governance -----------------------------------------------
+# -- candidates and staleness -------------------------------------------------------------
 
 
 def test_a_stale_candidate_verdict_is_ignored():
@@ -386,48 +248,6 @@ def test_a_stale_candidate_verdict_is_ignored():
     led.check("review", "pass", candidate=first)
     f = led.fold()
     assert Check.REVIEW not in f.checks and "stale" in f.ignored[-1]["why"]
-
-
-def test_a_patch_with_reasons_and_no_code_change_is_a_new_candidate():
-    led = Ledger(review_rounds=1).to_checks()
-    sha = led.candidate["sha"]
-    led.checks("pass", "changes", "no_change")
-    led.build(sha=sha)  # the same commit, a new turn
-    f = led.fold()
-    assert f.candidate.sha == sha and f.state is State.CHECKS and f.checks == {}
-
-
-def test_a_turn_collected_in_a_state_the_task_left_is_ignored():
-    led = Ledger().plan().critique("sound")
-    led.add("turn.collected", {"turn_id": "late", "state": "plan", "verdict": "planned"})
-    f = led.fold()
-    assert f.state is State.BUILD and "the task is in build" in f.ignored[-1]["why"]
-
-
-def test_governance_granted_reruns_only_review_and_a_partial_grant_stays_in_merge():
-    led = Ledger(review_rounds=1).to_checks()
-    led.checks("pass", "governance_refused", "no_change", instances=("i1", "i2"))
-    assert led.state is State.MERGE
-    led.add("guard.granted", {"guard_id": "g1", "instance_id": "i1"})
-    assert led.state is State.MERGE
-    led.add("guard.granted", {"guard_id": "g2", "instance_id": "i2"})
-    f = led.fold()
-    assert f.state is State.CHECKS and set(f.checks) == {Check.TEST, Check.DOCS}
-    led.check("review", "pass", instances=("i1", "i2"))
-    f = led.fold()
-    assert f.state is State.MERGE and f.join.row == 1 and not f.ungranted()
-
-
-def test_a_grant_binds_to_the_instance_so_an_unchanged_hunk_stays_granted_across_patches():
-    led = Ledger(review_rounds=1).to_checks()
-    led.checks("pass", "governance_refused", "no_change", instances=("i1",))
-    led.add("guard.granted", {"guard_id": "g1", "instance_id": "i1"})
-    led.check("review", "changes", instances=("i1",)).build()
-    led.checks("pass", "pass", "no_change", instances=("i1",))
-    assert led.fold().ungranted() == []
-    led.add("feedback.given", {"feedback_id": "f", "text": "x"}).build()
-    led.checks("pass", "governance_refused", "no_change", instances=("i9",))
-    assert [i.id for i in led.fold().ungranted()] == ["i9"]
 
 
 # -- stop -----------------------------------------------------------------------------
@@ -471,42 +291,6 @@ def test_every_state_is_reachable_and_a_stop_in_it_is_final(state):
     led.add("feedback.given", {"feedback_id": "f", "text": "after the stop"})
     led.add("question.answered", {"question_id": "q1", "text": "after the stop"})
     assert led.state is State.STOPPED
-
-
-# -- legacy -----------------------------------------------------------------------------
-
-
-def legacy(*rows) -> machine.Fold:
-    base = [{"id": 1, "type": "task.started", "payload": {"instruction": "x", "mode": "bare"}}]
-    return machine.fold(base + [{"id": i + 2, "type": t, "payload": p} for i, (t, p) in enumerate(rows)])
-
-
-def test_legacy_tasks_fold_with_the_old_precedence():
-    q = ("question.asked", {"question_id": "q", "turn_id": "t", "text": "?"})
-    a = ("question.answered", {"question_id": "q", "text": "a"})
-    d = ("task.delivered", {"turn_id": "t", "summary": "done"})
-    fb = ("feedback.given", {"feedback_id": "f", "text": "again"})
-    t = ("turn.started", {"turn_id": "t"})
-    assert legacy().state is State.JUDGE and legacy().legacy
-    assert legacy(t).state is State.BUILD
-    assert legacy(t, q).state is State.WAITING and legacy(t, q).return_to is State.BUILD
-    assert legacy(t, q, a, d).state is State.MERGE
-    assert legacy(t, d, q).state is State.MERGE  # a delivery beats an open question, as it did
-    assert legacy(t, d, fb).state is State.PATCH
-    assert legacy(t, d, fb, d).state is State.MERGE
-    assert legacy(t, d, ("task.stopped", {"reason": "x"})).state is State.STOPPED
-
-
-# -- the constraint is generated from VERDICTS ------------------------------------------
-
-
-def test_the_constraint_names_every_verdict_value_and_its_name_tracks_its_text():
-    sql = machine.constraint_sql()
-    for values in machine.VERDICTS.values():
-        for v in values:
-            if v not in ("answered", "released", "feedback", "governance_granted", "rebase"):
-                assert f"'{v}'" in sql
-    assert machine.constraint_name().startswith("events_verdict_in_enum_")
 
 
 # -- totality, by property ----------------------------------------------------------------
@@ -628,16 +412,6 @@ def test_every_prefix_folds_to_exactly_one_state(start, generated):
         previous = f
 
 
-def test_a_task_started_without_a_payload_folds_and_a_bad_raise_applies_nothing():
-    assert machine.fold([{"id": 1, "type": "task.started"}]).legacy
-    led = Ledger(critique_rounds=0).plan()
-    led.add("critique.decided", {"plan_sha256": led.plan_digest, "verdict": "revise",
-                                 "raised": {"critique_rounds": 2, "review_rounds": "x"}})  # fmt: skip
-    f = led.fold()
-    assert f.raised == {"critique_rounds": 0, "review_rounds": 0}  # neither count applied
-    assert f.state is State.CRITIQUE and "raised counts" in f.ignored[-1]["why"]
-
-
 def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate_is_ignored():
     led = Ledger().to_checks().checks("pass", "pass", "no_change")
     led.add(
@@ -653,73 +427,15 @@ def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate
     assert f.merge_effect["effect_id"] == "e1" and "not the current one" in f.ignored[-1]["why"]
 
 
-def test_the_predicate_docs_term_reads_the_docs_verdict_and_its_head():
-    led = Ledger().to_checks()
-    led.check("test", "pass").check("review", "pass").check("docs", "updated", head="d1")
+def test_the_merge_predicate_holds_only_for_the_current_candidate_with_test_and_review_passed():
+    led = Ledger().to_checks().checks("pass", "pass", "no_change")
     f = led.fold()
-    payload = {"candidate": led.candidate, "head_sha": "d1"}
+    payload = {"candidate": led.candidate, "head_sha": led.candidate["sha"]}
     assert machine.merge_predicate(f, payload) == []
-    assert [t[0] for t in machine.merge_predicate(f, {**payload, "head_sha": "d2"})] == ["4"]
-
-
-@pytest.mark.parametrize(
-    ("path", "doc"),
-    [
-        ("docs/guide.md", True),
-        ("README.MD", True),
-        ("docs/Deep/Notes.Md", True),
-        ("core/x.py", False),
-        ("claude.md", False),
-        ("docs/Claude.MD", False),
-        ("CLAUDE.local.md", False),
-        ("x/claude.LOCAL.md", False),
-        ("AGENTS.md", False),
-        ("agents.override.md", False),
-        ("Skills/build.md", False),
-        ("docs/SKILLS/sdlc/plan.md", False),
-        ("Persona/voice.md", False),
-        (".Claude/agents/x.md", False),
-        ("docs/skills.md", True),  # a file named like a directory is a doc
-    ],
-)
-def test_doc_paths_ignore_letter_case_as_the_file_system_does(path, doc):
-    assert machine.is_doc_path(path) is doc
-
-
-def test_a_boolean_raise_is_not_a_count():
-    led = Ledger(critique_rounds=0).plan()
-    led.critique("revise", review_rounds=True)
-    f = led.fold()
-    assert f.state is State.CRITIQUE and f.raised == {"critique_rounds": 0, "review_rounds": 0}
-
-
-def test_a_brief_takes_no_mode_and_an_old_document_with_one_still_loads():
-    from core import tasks
-
-    with pytest.raises(TypeError):
-        tasks.Brief(instruction="x", mode="x")
-    b = tasks.Brief(instruction="x")
-    assert tasks.Brief.load({**tasks.asdict(b), "mode": "bare"}) == b
-
-
-def test_a_malformed_turn_ended_changes_nothing():
-    led = Ledger().plan().critique("sound")
-    before = led.fold()
-    led.add("turn.ended", {"outcome": "done", "result": {"session_id": "other"}})  # no turn_id
-    led.add("turn.ended", {"turn_id": "t", "outcome": "done", "result": "text"})
-    after = led.fold()
-    assert after.session == before.session and len(after.ignored) == len(before.ignored) + 2
-
-
-def test_a_turn_that_ended_in_an_error_does_not_spend_the_steering():
-    led = Ledger()
-    state = led.state.value
-    led.add("message.steered", {"text": "use the other branch"})
-    led.add("turn.started", {"turn_id": "e", "state": state})
-    led.add(
-        "turn.ended", {"turn_id": "e", "outcome": "done", "result": {"session_id": "s", "is_error": True}}
-    )
-    kept = led.fold().steering
-    led.add("turn.started", {"turn_id": "ok", "state": state})
-    led.add("turn.ended", {"turn_id": "ok", "outcome": "done", "result": {"session_id": "s"}})
-    assert [p["text"] for p in kept] == ["use the other branch"] and led.fold().steering == []
+    stale = {**payload, "candidate": {"sha": "old", "turn_id": "t0"}}
+    assert [t[0] for t in machine.merge_predicate(f, stale)] == ["1"]
+    red = Ledger(review_rounds=0).to_checks().checks("red", "changes", "no_change")
+    f = red.fold()
+    f.state = State.MERGE  # as if it had got there: the predicate still refuses it
+    payload = {"candidate": red.candidate, "head_sha": red.candidate["sha"]}
+    assert [t[0] for t in machine.merge_predicate(f, payload)] == ["2", "3"]

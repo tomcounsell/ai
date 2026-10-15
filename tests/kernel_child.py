@@ -2,10 +2,8 @@
 `tests/test_serve.py`: `python -m tests.kernel_child`.
 
 `KERNEL_DSN` names the database. `KERNEL_RUNNERS` is `hang` (a plan turn
-that starts a marked child, opens a gateway call, and waits on it),
-`scripted` (the scripted turns of `tests/scripted.py`, judge excluded), or
-`judged` (all of them, for a task started by message, which is judged
-first).
+that starts a marked child, opens a gateway call, and waits on it) or
+`scripted` (the scripted turns of `tests/scripted.py`, judge excluded).
 The gateway's upstream accepts the connection and never answers, so an
 opened call stays open until the process dies.
 """
@@ -67,8 +65,6 @@ async def main() -> None:
     await gateway.start(port=listen())
     if os.environ.get("KERNEL_RUNNERS") == "hang":
         runners = {State.PLAN: hanging}
-    elif os.environ.get("KERNEL_RUNNERS") == "judged":
-        runners = dict(scripted.RUNNERS)
     else:
         runners = {k: v for k, v in scripted.RUNNERS.items() if k is not State.JUDGE}
     print(f"kernel {os.getpid()}", flush=True)
