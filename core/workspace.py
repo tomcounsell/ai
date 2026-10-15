@@ -556,13 +556,17 @@ def harness_env(
     passfile: Path,
 ) -> dict[str, str]:
     """The turn's environment for this project: tools (`bin_dir`, the work
-    directory's `bin/`) first on PATH, the caches under `lay`, the database and Redis it was given, `passfile` as the
+    directory's `bin/`) first on PATH, then Postgres's, then the operator's; the caches under `lay`, the database and Redis it was given, `passfile` as the
     Postgres password file, and the business's knowledge base folder
     (`VALOR_KNOWLEDGE_BASE`) when the spec names one. The directories are
     passed, never derived from `lay`, so a check's own service layout gets
     the task's `bin/`."""
+    # Postgres's own programs, `pg_config` among them, when the task has a
+    # database: Homebrew links only `pg_config-18`, and a driver such as
+    # psycopg2 builds with it. Then the operator's own PATH.
+    pg = [settings.pg_bin] if "postgres" in spec.services else []
     env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "PATH": os.pathsep.join([str(bin_dir), *pg, os.environ.get("PATH", "/usr/bin:/bin")]),
         "VALOR_BROWSER": settings.browser,
         "UV_CACHE_DIR": str(lay.cache / "uv"),
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
@@ -570,9 +574,6 @@ def harness_env(
     }
     if "postgres" in spec.services:
         port = ports["postgres"]
-        # Postgres's own programs, `pg_config` among them: Homebrew links
-        # only `pg_config-18`, and a driver such as psycopg2 builds with it.
-        env["PATH"] += f":{settings.pg_bin}"
         env.update(
             {
                 "PGHOST": "127.0.0.1",
