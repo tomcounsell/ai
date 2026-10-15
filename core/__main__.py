@@ -494,7 +494,6 @@ async def _routine_project(
 
 def _routine_runners() -> dict:
     from routines.conditions import runner as conditions
-    from routines.emulator import runner as emulator
     from routines.verify import runner as verify
 
     # No business data source is granted yet (Stripe, Google Analytics), so
@@ -503,7 +502,6 @@ def _routine_runners() -> dict:
     # private repository that account can read is read.
     return {
         routines.EXPIRY_RUNNER: routines.expiry_runner,
-        "emulator": emulator.run,
         "conditions": conditions.runner({}, credential=settings.github_keyfile),
         "verify": verify.run,
     }

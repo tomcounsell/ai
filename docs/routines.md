@@ -20,7 +20,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `emulator`, `conditions`, `verify`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -73,27 +73,12 @@ the next launchd firing writes nothing and says the routine is stopped.
 changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending.
 
-The four routines the kernel holds:
+The three routines the kernel holds:
 
-- **expiry** (04:00 daily, ceiling `act`): `routines.due` folds the ledger
-  and, when something is due, starts one task on the `valor` project with
-  the due list on its `task.started`. Nothing due starts no task and runs no
-  turn. An expiry firing holds the session lock `routine:expiry` from
-  before it registers or finds the objective until it has recorded
-  `routine.ran`, so a firing at the same moment waits, with no transaction
-  open, and then continues the open sweep.
-- **emulator** (Sunday 01:00, ceiling `act`): replays every item in
-  `$VALOR_DEMO/items` in the `bare`, `clarify` and `routed` arms, each a
-  child of the run, judged, and writes `$VALOR_DEMO/sweeps/<run>.json` with
-  the baseline, scores, hidden-test exits with each arm's failed count and
-  failing ids, attention, spending and the count of preempted turns. An item
-  worse than its `bare` run then starts a fix task (Findings, below). The runner holds the session lock `run:<run>`, so a
-  second process says `already running`. A run with no report is continued.
-  When a replay is paused before it has an outcome, the run writes no report
-  and says `running` with the count of paused replays; the next firing
-  resumes the same run under the same names. A driver that exits nonzero
-  has its exit code and output appended at once to
-  `$VALOR_DEMO/results/<replay>.driver.log`, beside its result file.
+- **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
+  guards and routines past their ninety days. The list is the run's summary,
+  the report to Tom. The run starts no task and deletes nothing. An expiry
+  firing holds the session lock `routine:expiry` throughout.
 - **conditions** (05:00 daily, ceiling `propose`): checks each committed
   decision's watched conditions in the own repository of every business
   placed on this Mac and puts
@@ -115,8 +100,7 @@ ledger. Constraint: Bounded authority, metered spending.
 
 **Period spending.** The routine's spending over its rolling thirty-day
 period (`settings.routine_period_days`) is the metered charges of every
-objective of the name and their subtrees, plus the calibration tasks that
-meter the emulator's stand-in and judge for items in those subtrees.
+objective of the name and their subtrees.
 Charges are counted by their own `at`. Open `gateway.reserved` calls are
 listed apart and never summed. `python -m core routines` and the status page
 print the same figure. Nothing stops a routine on money: a million dollars
@@ -225,7 +209,7 @@ decision's conditions on its schedule:
   meeting has heard them. The run sends Tom no message; the decision is
   raised at the meeting, where it is made.
 
-Each run is a node under the routine's objective, like the emulator's, and
+Each run is a node under the routine's objective, and
 the rows above are on it. A run that finds no committed decision carrying
 conditions starts no run and records `nothing_due`. A repository the kernel
 cannot fetch, or a conditions file it cannot read, is named in the run's
@@ -366,14 +350,6 @@ like any other: the loop adds no merge path and no gate.
   `verify:suite` finding. A failure of the kernel's own (services that
   did not start) is no finding: the run ends `failed`. Tom's foreground
   work preempts a run, and the next firing resumes it at the same commit.
-- **The emulator.** After each sweep's report, an item whose `clarify` or
-  `routed` arm is worse than this run's `bare` starts one finding, key
-  `emulator:<item>`. Worse means the arm ends short of a merge where bare
-  merged, its judged total is more than one point below bare's, or its
-  hidden test command fails more tests than bare's. The failing ids are
-  evidence only. Colour codes are removed before the summary is read; an
-  arm whose summary gives no count is marked `hidden_unread` and the
-  hidden rule is not applied to it.
 - **By hand.** `python -m core routine NAME --finding TEXT --key KEY
   [--key KEY] [--evidence FILE]` starts a finding under the routine's
   objective, and records `routine.ran` with `run` None, so it never counts
@@ -394,34 +370,21 @@ A first occurrence is a task, not a routine (Mission item 5).
 **Use.** A routine is in use when a run in the last ninety days led to
 something outside itself: an effect performed, a question Tom answered, a
 child task that delivered, or an item put on the strategy meeting's agenda. A routine that has run for ninety days and
-produced only "nothing found" is unused. The emulator sweep's replays
-deliver, so it is in use while it runs.
+produced only "nothing found" is unused.
 
-**Deletion.** An unused routine is deleted by default at ninety days. The
-expiry sweep is itself a routine, and it never lists itself. `routines.due`
-reads kernel-written rows only and proposes:
+**Expiry.** An unused routine is past expiry at ninety days. The expiry
+routine is itself a routine, and it never lists itself. `routines.due`
+reads kernel-written rows only and lists:
 
 - a seeded guard unfired at its expiry, or fired only on background work; a
   guard that fired on Tom's work, ninety days after its last firing and past
   its expiry;
 - an instance grant past its expiry, shown with "no firing record" since no
   hook records one; one on another project's task is listed apart as
-  outside this repository and not removed;
+  outside this repository;
 - a routine whose first registration is over ninety days old and whose runs
   in that window led to no use.
 
-An item a sweep listed is not listed again for ninety days. An instance
-grant in this repository that a merged sweep listed is removed by its grant id
-and never listed again; Tom keeps one with `grant` on the sweep's task, naming the listed grant id
-in place of an instance: a new grant row (fresh id, new expiry, the old row's
-incident and mission items) is written on the old grant's own task and
-expires on its own date. Keeping one takes both, before the merge: his
-feedback, so the branch leaves the grant's hunk, and his `grant` naming the
-listed id; a keep lands before the sweep's delivery passes, since a
-passing delivery is merged at once. A merged sweep's listing of another project's grant removes nothing.
 A routine whose toml cannot be read is reported in the run's line and the rest
-go on. The sweep's one task has the ceiling `act` and opens one branch removing everything due.
-Opening the branch is `propose`. Merging it is `act`. The deletion is the
-default: the merge is performed at request like any other merge. Keeping something past expiry takes a reason in the branch's
-review; the default is the deletion (Mission item 5; the
-governance constraint).
+go on. The routine only reports. Tom decides what to delete and asks for it;
+no merge of a deletion comes from the routine (Mission item 5).

@@ -1,8 +1,7 @@
 """The shared start of the improvement loop: a finding becomes a task.
 
 A finding is a defect a routine measured in Valor's own work: a red test on
-the branch tip (`routines/verify`), an emulator item worse than its bare run
-(`routines/emulator`), or a backlog item Tom's lead starts by hand
+the branch tip (`routines/verify`), or a backlog item Tom's lead starts by hand
 (`python -m core routine NAME --finding`). `start_fix` starts one ordinary
 task for it on the routine's project, unless a task already holds one of
 its dedupe keys. The task then goes through the pipeline like any other:
@@ -15,7 +14,7 @@ What holds a key:
 - never a merged one: a red after its fix starts a new task.
 
 The evidence is text the kernel did not write (the branch's suite output,
-a replay's verification output). It is quoted into the instruction as data
+a verification output). It is quoted into the instruction as data
 in a fence and decides only which findings start and their keys. A
 routine's own evidence is trimmed to the lengths `checks` uses (`MESSAGE`
 for a message, `TAIL` for an output tail); a hand start's is passed whole.

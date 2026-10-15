@@ -5,7 +5,7 @@ Every scheduled task and runner.
 ## Scope
 
 - Each routine is a directory holding `routine.toml`, and a runner module when its work is not a plain task. `python -m core routine NAME --plist` prints the launchd plist; none is committed.
-- Three routines have runner modules: `expiry` (the expiry sweep), `emulator` (the weekly replay sweep, whose worse-than-bare items start fix tasks) and `verify` (the suite at the branch head, whose red groups start fix tasks). Both loop runners start findings through `core/findings.py`.
+- Routines with runner modules: `expiry` (lists what is past ninety days, reports to Tom, deletes nothing) and `verify` (the suite at the branch head, whose red groups start fix tasks through `core/findings.py`).
 - Every routine is an objective in `core/` with an effect ceiling. A routine is never a bare script.
 - Extraction follows the mission rule: a routine exists on a demonstrated second need, and one unused for ninety days is deleted by default.
 
