@@ -867,7 +867,8 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
             f"{p.get('target_branch')} moved on{tip} since this work was based on it. Rebase the work "
             f"onto it (git fetch origin {p.get('target_branch')}, then git rebase "
             f"origin/{p.get('target_branch')}), resolve any conflicts, run the tests, commit, and write "
-            f"done.md.\n\nWhat git said: {p.get('reason') or ''}".strip()
+            f"done.md.\n\nWhy the kernel could not carry it across: {p.get('not_carried') or 'unknown'}"
+            f"\n\nWhat git said: {p.get('reason') or ''}".strip()
         )
     if kind == "turn.collected" and p.get("verdict") == "no_material_question":
         return f"# No material question; on to the plan\n\n{p.get('no_question') or ''}".strip()

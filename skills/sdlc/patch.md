@@ -22,7 +22,9 @@ ends there and Tom gets that note; nothing waits on him. For a second
 opinion before you decide, `.valor/advice.md`.
 
 **When the target branch moved.** The prompt says the merge was refused
-because the target moved on. Rebase the work onto it, resolve conflicts,
-run the tests, and write `done.md` as for any patch; this spends no round.
+because the target moved on, and why the kernel could not carry the work
+across itself (the target's new commits touch your paths, a lockfile, or
+the schema). Rebase the work onto it, resolve conflicts, run the tests, and
+write `done.md` as for any patch; this spends no round.
 
 **Seeing the result.** When the work changes what a page shows, start the dev server on a port from 8000 to 8009, run `look URL` (it writes a screenshot and the page's HTML under `.valor/screens/`), open the screenshot, and name it in `done.md` with what you saw. The kernel files recorded screens away after the turn.

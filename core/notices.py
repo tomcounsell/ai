@@ -340,16 +340,10 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
         f = machine.fold(await ledger.read(conn, task_id))
         branch = payload.get("target_branch") or effect.get("target")
         built = note((f.delivery or {}).get("summary"))
-        carried = next((c for c in reversed(f.carried) if c["to"]["sha"] == f.candidate.sha), None)
-        moved = carried and (
-            f"{branch} moved while it merged, so it was tested at {carried['from']['sha'][:12]} and "
-            f"merged at {carried['to']['sha'][:12]}, on top of commits that were not tested with it."
-        )
         text = "\n\n".join(
             x
             for x in (
                 lead(await headline(conn, task_id), f"it is done and merged into {branch}."),
-                moved,
                 built,
                 f"The details are on its status page: {report_link(task_id)}",
             )

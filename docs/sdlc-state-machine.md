@@ -131,8 +131,8 @@ patch carrying every finding of the three branches together.
   checks' verdicts and Tom's grants (instance ids digest the hunks, not a review's grouping) carry
   to the replayed sha in one `verdicts.carried` row (the verdicts and grants, from which sha and
   head to which, and the target's tip), and the merge is requested again at once. The merged sha
-  then sits on a tip whose other commits were never tested with the candidate; the merge report
-  says so, naming the sha it was tested at and the sha it merged at. A carry is not a rebase.
+  then sits on a tip whose other commits were never tested with the candidate; the status page
+  shows the carry, naming the sha it was tested at and the sha it merged at. A carry is not a rebase.
   Otherwise the work goes to `patch` to rebase onto the new tip (`rebase.requested`, naming why it
   did not carry). A rebase is mechanical and spends no round; at most two happen per loop window,
   and the next such rejection ends the task.

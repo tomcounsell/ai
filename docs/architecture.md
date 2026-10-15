@@ -193,7 +193,7 @@ again after a delay that doubles from a minute, and after five failures the task
 target rejected because its branch moved, cleanly and on paths the candidate does not touch (no
 lockfile, no schema), carries the verdicts and grants to the candidate replayed onto the new tip
 (`verdicts.carried`) and merges at once, its other new commits never tested with the candidate,
-which the merge report names (tested at one sha, merged at another); any other move sends the work
+which the status page shows (tested at one sha, merged at another); any other move sends the work
 to `patch` to rebase onto the new tip, twice at most, spending no review round; a refusal ends the
 task. A merge that needs the push credential is the one case that reaches Tom, as a request for the
 token, and it is tried again on its own until the token works. Each try is one request (`request_id`

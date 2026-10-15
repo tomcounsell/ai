@@ -1236,7 +1236,7 @@ def test_a_step_that_lost_the_race_to_carry_neither_carries_again_nor_sends_the_
     (report,) = [
         r["payload"] for r in written if r["type"] == "notice.requested" and r["payload"]["kind"] == "report"
     ]
-    assert f"merged at {f.candidate.sha[:12]}" in report["text"]
+    assert f.candidate.sha[:12] not in report["text"]  # Tom's report carries no ids
 
 
 async def _failed_merge(dsn, task, error: str) -> dict:
