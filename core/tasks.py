@@ -60,7 +60,7 @@ class Brief:
     """
 
     instruction: str
-    max_effect_class: str = "propose"
+    max_effect_class: str = "act"
     governance_grant: str | None = None
     workspace: str | None = None
     model: str = resolve_model("light")
