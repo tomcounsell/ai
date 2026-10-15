@@ -29,7 +29,7 @@ the ledger never records less than the invoice: on the Anthropic route its
 input as reported plus every output token it was allowed; on the OpenAI
 route, which reports input only at the end, the worst case estimated before
 the call. Other listed paths (token counting, model lists) cost nothing and
-pass through unmetered.
+pass through unmetered; any path on either route is forwarded.
 
 **The Claude credential.** A turn runs with its own Claude Code config
 directory, which holds no login, so it carries a placeholder (`TURN_TOKEN`)
@@ -37,11 +37,9 @@ and the gateway, when given a `credential`, drops whatever `authorization`
 or `x-api-key` the turn sent and sets the kernel's own: a long-lived token
 in the kernel key directory (`claude setup-token`) when one is there,
 otherwise the access token of the machine's Claude Code login, read from
-the Keychain through the root-owned `security` at most once a minute,
+the Keychain through `security` at most once a minute,
 except that the first 401 after a read allows one more (the user's own
-sessions rotate the token). The credential is sent only on the Messages
-API, its token counting, the model list, and one model by an id of
-letters, digits, `.`, `_`, and `-`; any other path is refused. The kernel
+sessions rotate the token). The kernel
 never refreshes that login: refresh tokens rotate, and a refresh here could
 sign out the user's own sessions. An expired login is a 401 naming the
 remedy, never a silent fallback.
@@ -51,23 +49,17 @@ remedy, never a silent fallback.
 `authorization`, `x-api-key`, `openai-organization`, and `openai-project`
 are dropped and the kernel's key set; with no kernel key the turn's own
 `authorization` is forwarded and metered the same way, recorded
-`credential: "turn"`. Only `v1/responses`, `v1/models`, and one model by
-id are forwarded; any other OpenAI path is a 403 whichever key it would
-carry. The Responses API takes only POST and the model paths only GET and
-HEAD; any other method is a 403. An upstream 401 is answered with the
+`credential: "turn"`. An upstream 401 is answered with the
 gateway's own body naming which key was refused, since OpenAI's can echo
 part of the key; a refused kernel key invalidates only the OpenAI key. The
 turn's `proxy-authorization` is dropped on both routes.
 
-Every path is checked as it arrived, undecoded (no percent escape, no
-empty, `.`, or `..` segment), and forwarded byte for byte, never
-re-normalised. No credential is ever in a ledger row, an exception, or a
+The path is forwarded byte for byte, never re-normalised. No credential is ever in a ledger row, an exception, or a
 log line.
 """
 
 import asyncio
 import json
-import re
 import secrets
 import subprocess
 import threading
@@ -235,63 +227,6 @@ class OpenAIKey:
                 value = None
             self._cached = (value, now)
             return value
-
-
-# The upstream paths a turn's calls may take with the kernel's credential:
-# the Messages API, its token counting, and the model list. Any other path
-# is refused rather than sent with the credential.
-CREDENTIALED_PATHS = ("v1/messages", "v1/messages/count_tokens", "v1/models")
-MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-# The OpenAI paths, under the `openai/` prefix: the Responses API and the
-# model list. Retrieval of a stored response, files, batches, and the rest
-# are refused whichever key the call would carry.
-OPENAI_CREDENTIALED_PATHS = ("v1/responses", "v1/models")
-# The methods forwarded on each listed path; a model by id takes the
-# model list's. Any other method is a 403, so a turn cannot delete a
-# fine-tuned model or cancel a response with the kernel's key.
-OPENAI_METHODS = {"v1/responses": {"POST"}, "v1/models": {"GET", "HEAD"}}
-
-
-def safe_tail(tail: str) -> bool:
-    """A path tail as it arrived, undecoded: no percent escape, no
-    backslash, and no empty, `.`, or `..` segment (one trailing slash
-    allowed). The upstream URL is built from it as is, so nothing a client's
-    parser or ours would resolve can move it to another path."""
-    if "%" in tail or "\\" in tail or not tail:
-        return False
-    body = tail.removesuffix("/")
-    return all(seg not in ("", ".", "..") for seg in body.split("/"))
-
-
-def credentialed(tail: str) -> bool:
-    """Whether a safe tail may be sent with the kernel's credential: the
-    three paths, or one model by an id of letters, digits, `.`, `_`, `-`
-    (never `..`)."""
-    if not safe_tail(tail):
-        return False
-    tail = tail.rstrip("/")
-    if tail in CREDENTIALED_PATHS:
-        return True
-    return _one_model(tail)
-
-
-def openai_credentialed(tail: str, method: str) -> bool:
-    """Whether a safe OpenAI tail (the `openai/` prefix removed) is listed
-    for this method: POST on the Responses API, GET or HEAD on the model
-    list or one model by id."""
-    if not safe_tail(tail):
-        return False
-    tail = tail.rstrip("/")
-    if _one_model(tail):
-        tail = "v1/models"
-    return method in OPENAI_METHODS.get(tail, ())
-
-
-def _one_model(tail: str) -> bool:
-    model = tail.removeprefix("v1/models/")
-    return model != tail and MODEL_ID.fullmatch(model) is not None and ".." not in model
 
 
 @dataclass
@@ -513,8 +448,6 @@ class Gateway:
         raw_path, _, raw_query = request.raw_path.partition("?")
         prefix = f"/t/{request.match_info['token']}/"
         tail = raw_path[len(prefix) :] if raw_path.startswith(prefix) else ""
-        if not safe_tail(tail):
-            return _error(400, "invalid_request_error", "the gateway forwards no such path")
         query = f"?{raw_query}" if raw_query else ""
         body = await request.read()
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQUEST}
@@ -523,8 +456,6 @@ class Gateway:
             return await self._openai(request, grant, tail[len(OPENAI_PREFIX) :], query, headers, body)
         path = "/" + tail + query
         if self.credential is not None:
-            if not credentialed(tail):
-                return _error(403, "permission_error", f"the gateway carries no turn to /{tail}")
             headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
             try:
                 headers["authorization"] = "Bearer " + await asyncio.to_thread(self.credential.token)
@@ -565,14 +496,10 @@ class Gateway:
             self.openai_credential.invalidate()
 
     async def _openai(self, request, grant: Grant, tail: str, query: str, headers, body):
-        """The OpenAI route: listed paths only, the turn's credential and
+        """The OpenAI route: the turn's credential and
         account headers dropped, the kernel's key set when it has one and
         the turn's own forwarded when it has none, an upstream 401 answered
         with the gateway's own body."""
-        if not openai_credentialed(tail, request.method):
-            return _openai_error(
-                403, "permission_error", f"the gateway carries no turn to {request.method} openai/{tail}"
-            )
         headers = {k: v for k, v in headers.items() if k.lower() not in OPENAI_ACCOUNT_HEADERS}
         key = None
         if self.openai_credential is not None:

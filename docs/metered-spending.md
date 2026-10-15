@@ -22,8 +22,7 @@ API under `openai/` (`route: openai`). For every call it:
    estimate is only that fallback charge, never a gate.
 
 The OpenAI route sends the kernel's key, or the turn's own (`credential:
-turn`) when the kernel holds none, only as `POST v1/responses` and `GET` or
-`HEAD` on `v1/models` and one model by id; any other path or method is a 403.
+turn`) when the kernel holds none, on any path and method.
 It drops the turn's `proxy-authorization` and answers an upstream 401 with its
 own body naming the key refused. It charges at the reported tier (one the
 table lacks, at the highest, `tier_unpriced`) with cached, cache-write,
