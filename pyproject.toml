@@ -29,8 +29,6 @@ pythonpath = ["."]
 addopts = "--import-mode=importlib -p no:popoto"
 markers = [
     "spend(usd): the money one run of the test is expected to cost",
-    "macos: needs macOS itself; skipped off Darwin",
-    "container: needs Apple's container; skipped where it is not installed",
 ]
 
 [tool.ruff]

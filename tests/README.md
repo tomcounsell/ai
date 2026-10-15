@@ -1,50 +1,26 @@
 # tests
 
-Tests for everything in the repository.
+The suite proves the kernel is solid and that Telegram carries messages both ways, and nothing else. Real Postgres, no mocks: a model provider is a local HTTP upstream speaking its wire format (`scripted_upstream.py`, `judgement_upstream.py`), Telegram is a local server in its own process (`telegram_emulator.py`).
 
-## Scope
+## What it asserts
 
-The rule: integration first, no mocks.
+1. State machine: a task's fold reaches the right state from its rows, including stop, waiting on a question, patch after a failed check, and merge.
+2. Merge predicate: a merge needs one current candidate, a passed test, and a passed review.
+3. Ledger: rows are written once and read back; the ledger role cannot update or delete.
+4. Kernel resident: `python -m core serve` starts, takes a task, runs a scripted turn, collects it, and survives a restart with the task resumed.
+5. Stop: stopping a task kills its turn and everything the turn started.
+6. Telegram in: an operator message reaches the kernel once and starts a task; a reply to Valor's message binds to that task.
+7. Telegram out: a send leaves through the outbox exactly once, across a bridge crash and restart.
+8. End to end: a Telegram message starts a task, a scripted turn builds, check and review pass, the kernel merges, Tom's chat gets the report.
+9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed.
+10. Metering: a turn's model call through the gateway writes its opened and charged rows with the turn's id.
 
-- Real Postgres.
-- Real containers.
-- Real bridges against test accounts. Email's run against Dovecot (Homebrew's on the Macs; in the verification VM, the one `core/images/base/Containerfile` builds), started as the test's user behind a TLS terminator signed by a test CA, and a local SMTP server that files what it accepts in Dovecot's `\Sent` folder (`tests/mailserver.py`; ports from `VALOR_TEST_PORTS` when set). The kill tests run the bridge as a process of its own (`tests/email_child.py`) and kill it by its PID.
-- No mocks, fakes, or patched clients. A model provider is a real local HTTP upstream speaking its wire format, its bodies shaped by responses recorded live (`tests/judgement_upstream.py`, `tests/fixtures/record_judgement.py`).
-- The kernel's bridge-port tests use `tests/bridges.py` (`configure`, which sets the operator's settings for one test, and `FakeBridge`, a bridge with no platform).
-- Local performers the tests register live here (`tests/performers.py`: `workspace_write`, `outbox_send`), never in `tools/`.
-- `VALOR_TEST_PORTS` (`LOW-HIGH`) moves every server the tests start into one span (`tests/ports.py`): `listen()` hands each test server a port of it, turning round the span and passing over ports a live listener holds and ports reserved for a task's services, and the test-started Postgres, Redis, and mail servers draw from it too. A port `ports.service()` gives a task's service stays reserved until the test ends, in a file every process the tests start reads (`VALOR_TEST_RESERVED_PORTS`), so no server takes it before the service starts. Unset, the suite takes 6600 to 6619 (each worker of a parallel run, 20 ports of its own from 6600 up), so no run falls back to a fixed range another test uses. `projects/valor.toml` sets it to the dev ports, 8000 to 8009, the only ports the check and turn profiles let the suite listen on and reach, so the suite runs in a task's workspace.
-- In a task's workspace the kernel runs the suite under the check profile, which denies some of what tests do on the host: `/bin/ps`, a port the OS chooses, the shared `/private/tmp`, a sandbox inside the sandbox, DiskArbitration. A test that fails on one is reported skipped with a reason naming it, only when its traceback, the output of the command whose failure it raised, or its stderr shows the denial's own error and trying the operation in that run meets the same denial (`tests/denials.py`). A test whose failure under a denial carries no error of its own (a disk image that fails to mount, a nested sandbox's error that reaches the test only as a returned note) is skipped up front when trying the operation meets the denial (`denials.met`). On the host nothing is denied, so nothing is skipped this way.
-- Two markers say where a test can run: `macos` (needs macOS itself: sandbox-exec, `sandbox_check`, `ps -E`, `setattrlistat`, the Command Line Tools, `security`; skipped off Darwin, so this repository's suite runs in a verification VM with these skipped) and `container` (needs Apple's `container` at `/usr/local/bin/container`; skipped where it cannot be run, absent or denied by the sandbox the suite runs under: Valor's Mac and Tom's Mac have it, and the check profile denies it). A `container` test shares the machine lock and the runtime with every kernel on the machine, and does its own work on the runtime only while it holds the lock; every other test takes the machine lock in a directory of the session's own and reads the runtime as absent, as under the check profile, so the sweep at the start of a run it makes never stops the machine's runtime under a kernel's verification. Every test names its images under `valor-test` and labels them with `container.owner` of the test database, so a test never deletes, retags, or records an image a kernel built. A `container` test keeps its image records in `~/Library/Caches/valor-test/images.json`, shared by the test sessions on the machine; any other test keeps them in the session's own directory. At session end, under the machine lock, the session keeps the base image and the dependency images it recorded, each tagged by its content, for the next session, and deletes every other image it recorded; a kept image built on another base image (a change to `core/images/base/`) is deleted then too. A parametrized test carries `macos` only on the parameters that need it, and a test the VM cannot pass for any other reason is made portable. One exception, temporary: the tests in `tests/test_session.py` that give a turn oversized output skip off macOS, because turn collection copies that output in memory past the VM's 4 GB; task d823cd5f0214 removes the copies and the skip. Scratch clusters start from `VALOR_PG_BIN`, which the session sets to Debian's PostgreSQL 18 where the Homebrew one is absent. `tests/test_container.py` runs real VMs and builds; its first test builds the base image when no session has kept it.
-- The machine's own settings (`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`, `VALOR_MACHINE`, the mailbox, `VALOR_PROJECTS`, `VALOR_INBOUND`, and the rest `MACHINE_ONLY` in `tests/conftest.py` names) are removed from the environment before the settings load, so a shell that sets them for the kernel changes no test; a test sets the ones it needs. A test that starts a bridge in a process of its own kills it by its PID in `finally`, so a failing test leaks no bridge holding a lock another test waits on.
-- Every test declares its live spend: the money it may cost per run (`pytest.mark.spend`). Live tests run only with `VALOR_LIVE=1`.
+## Running
 
-The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) lives in `tests/emulator/`, a package run as modules (`python -m tests.emulator.replay`), never collected by pytest. Its stand-in and judge calls go through the kernel's gateway onto an emulator task's spending. `tests/emulator/replay.py` forces its `bare` and `clarify` arms by running `tests/judgement_upstream.py` (`python -m tests.judgement_upstream --answer precise|thin`) and pointing the kernel's judgement legs at it.
+    VALOR_TEST_DB=mine VALOR_TEST_PORTS=7600-7799 uv run pytest -q -n auto -p no:cacheprovider
 
-The Slack bridge's tests run Slack as a local server in its own process (`tests/slack_emulator.py`, which serves the Web API, the Socket Mode connection, and file downloads, and stores text the way Slack does), kill the bridge by its pid in `tests/slack_child.py`, and run over the real port and the test database in `tests/test_slack_bridge.py`. The real wire runs in `tests/test_live_slack.py`, skipped without `slack-keys` and `VALOR_SLACK_TEST_CHANNEL`.
+Each xdist worker gets its own database (`<VALOR_TEST_DB>_<worker>`) and an equal slice of `VALOR_TEST_PORTS`; unset, a worker takes 20 ports from 6600. The `MACHINE_ONLY` settings in `conftest.py` are scrubbed from the environment. Every test declares its live spend with `@pytest.mark.spend(usd=...)`; live tests run only with `VALOR_LIVE=1`.
 
-The Telegram bridge's tests run Telegram as a local server in its own process (`python -m tests.telegram_emulator`, which binds a free port and prints it) reached through `EmulatorWire`, kill the bridge by its pid in `tests/telegram_child.py`, and run over the real port and the test database through `tests/telegram_port.py`, which gives each test chat ids of its own; `tests/test_telegram_pipeline.py` carries Tom's replies through the bridge to the kernel's binding. The real wire runs on Telegram's test servers in `tests/test_live_telegram_dc.py` (`VALOR_LIVE=1`, `VALOR_TELEGRAM_TEST_DC=1`) and on Valor's account only in Tom's window (`VALOR_TELEGRAM_WINDOW=1`).
+## Budget
 
-## Running in parallel
-
-`uv run pytest -n auto --dist loadgroup` runs the suite on pytest-xdist workers; a plain `pytest` runs the same suite in one process, as the verification VM and a task's check profile do. Each worker is a session of its own: its test database is `<VALOR_TEST_DB>_<worker>` (`valor_rebuild_test_gw0`, ...), and every name derived from it follows (the image label and repository, the `_expiry`, `_serve`, `_rollout`, `_twice`, `_prio` databases, the advisory locks in them); it listens in an equal slice of `VALOR_TEST_PORTS`, and the task Postgres and Redis ports a kernel it starts chooses are that slice too. A span of 200 gives ten workers 20 ports each. Workers drop nothing of another's, so runs side by side need only their own `VALOR_TEST_DB` and span.
-
-Every `container` test runs on one worker (`xdist_group("container")`, which `--dist loadgroup` honours): the VMs take the machine lock one at a time whichever worker asks, and on one worker the session builds the test base image once instead of once per worker. The rest of the suite runs on the other workers beside them.
-
-Governed by [docs/emulator.md](../docs/emulator.md), [docs/data.md](../docs/data.md) (Test databases), and [docs/tech-stack.md](../docs/tech-stack.md) (Tests).
-
-## Imports
-
-- May import: everything.
-- Imported by: nothing.
-
-## Effect classes
-
-Tests run with the effect classes of what they exercise. A test that performs an `act` does so only against a test account, with the ledger recording it like any other.
-
-## Not here
-
-**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, or approval step is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance is an `act`-class effect: the Brief carries a `governance_grant` field, default none, and a diff that adds any of the above needs Tom's tap, one approval per instance, through the same approval surface as a merge or a send. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is deleted by default. The blind verifier asks one Jev-class boolean over every diff, "does this add a check, gate, hook, round, or review step", and a yes with no grant is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
-
-- Mock or stub modules, however convenient.
-- Tests that assert on prompt text or keyword matches instead of behavior.
-- Tests that exist to police other tests.
+At most 15 test files and 5,000 lines under `tests/`, and no more test lines than production lines. `test_budget.py` fails when either is passed (CLAUDE.md rule 8).

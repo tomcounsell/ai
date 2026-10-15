@@ -11,7 +11,7 @@ kind = "python-uv"
 services = ["postgres"]
 roles = ["valor_kernel", "valor_memory"]
 setup = ["uv sync --frozen"]
-suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
+suite = "uv run pytest -q -n auto -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
 merge_url = "https://github.com/tomcounsell/ai.git"
 # The operator group, the Eng group, and Tom's own DM, received on the
@@ -26,6 +26,3 @@ VALOR_PG_OWNER = "app"
 VALOR_PG_PASSFILE = "{passfile}"
 VALOR_PG_SCRATCH = "/tmp"
 VALOR_TEST_DB = "app_test"
-# The dev ports: the only ones the check and turn profiles let the suite
-# listen on and reach.
-VALOR_TEST_PORTS = "8000-8009"
