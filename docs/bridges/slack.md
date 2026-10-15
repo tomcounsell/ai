@@ -272,7 +272,7 @@ message to Tom in whichever process records it.
 
 | Module | Holds |
 |---|---|
-| `bridges/slack/wire.py` | The only module importing `slack_sdk`: the socket, the read and write clients, the IM and name caches, uploads, and downloads with the host check |
+| `bridges/slack/wire.py` | The only module importing `slack_sdk`: the socket, the read and write clients, the IM and name caches, uploads, downloads with the host check, and `reactions.add` and `reactions.remove` |
 | `bridges/slack/inbound.py` | One message to the `Inbound` fields; `person`, the one function that builds a person's id |
 | `bridges/slack/bridge.py` | `SlackBridge`: connect, the live handler and its acks, gap fill, the outbox loop, and SIGTERM |
 | `bridges/slack/gap.py` | The per-method budget and a chat's pass in progress |

@@ -83,8 +83,10 @@ state as evidence.
      `kind.value`, so a pick task gets its own digest with no change. The
      calibration scorer in `core/judgement_sites.py` (`calibrate`) scores a
      pick question by `picked` against the case's label, where it scores
-     every other question by action. `tools/jev.py` and
-     `tools/open_weight.py` render a pick exactly as a `choice`.
+     every other question by action. `tools/jev.py` renders a pick
+     exactly as a `choice`; `tools/open_weight.py` renders every
+     question's labels the same way, whatever its kind, so it needed no
+     change (build record).
    - **Declaration.** `error_cost="low"`; floors 0.55 for the primary and
      0.60 for the fallback, provisional, like breadth's;
      `on_abstain="caution"` and `on_failure="caution"`, which here mean no

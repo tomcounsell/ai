@@ -418,6 +418,10 @@ class Kernel:
         # from `jobs`: a task's step is scheduled while its message is judged.
         self.judgement_port = judgement_port
         self.shaping: dict[str, asyncio.Task] = {}
+        # Shape jobs that raised (an error with no `judgement.failed` row),
+        # by `received_id`: asked again up to `judgement.UNANSWERED_RUNS`
+        # times in this process, as a failed judgement is, then left with 👀.
+        self.shape_errors: dict[str, int] = {}
         self.harness: str | None = None  # the foreground task whose harness job runs
         self.background: str | None = None  # the background task whose harness job runs
         self.services: dict[str, router._Services] = {}
@@ -460,7 +464,7 @@ class Kernel:
             return
         for seen in await reactions.pending(conn):
             rid = seen["received_id"]
-            if rid in self.shaping:
+            if rid in self.shaping or self.shape_errors.get(rid, 0) >= judgement.UNANSWERED_RUNS:
                 continue
             job = asyncio.create_task(self._shape(seen))
             self.shaping[rid] = job
@@ -468,6 +472,7 @@ class Kernel:
             def finished(job, rid=rid):
                 self.shaping.pop(rid, None)
                 if not job.cancelled() and job.exception() is not None:
+                    self.shape_errors[rid] = self.shape_errors.get(rid, 0) + 1
                     _log(f"reaction for message {rid}: shape failed: {job.exception()!r}")
 
             job.add_done_callback(finished)

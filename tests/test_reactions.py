@@ -440,6 +440,34 @@ def test_a_tasks_step_runs_while_its_messages_shape_job_is_in_flight(fresh, op):
     assert cancelled  # close() cancels it
 
 
+def test_a_shape_job_that_raises_is_asked_again_a_bounded_number_of_times(fresh, op):
+    """A judgement that raises writes no `judgement.failed` row, so `pending`
+    keeps listing its message; the kernel asks again only up to the site's
+    limit, then leaves 👀."""
+
+    async def go():
+        ghost = "no-such-task-" + ledger.new_id()  # `spending.open_call` raises KeyError for it
+        port = UP.port(script=UP.script(default={"probs": shape_probs("short_answer")}))
+        kernel = serve.Kernel(None, {}, None, fresh, judgement_port=port)
+        rid = await seen_on(fresh, ghost)
+        try:
+            for _ in range(6):
+                async with await db.connect(fresh) as conn:
+                    await kernel.shape(conn)
+                await settled(kernel)
+        finally:
+            await kernel.close()
+        async with await db.connect(fresh) as conn:
+            still = [s for s in await reactions.pending(conn) if s["received_id"] == rid]
+        return rid, kernel.shape_errors.get(rid), still
+
+    from core import judgement
+
+    _, errors, still = run(go())
+    assert errors == judgement.UNANSWERED_RUNS
+    assert len(still) == 1  # still pending in the ledger; this process stopped asking
+
+
 # -- the outbox ---------------------------------------------------------------------
 
 
