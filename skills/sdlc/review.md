@@ -14,8 +14,7 @@ add a check, gate, hook, round, or review step?
 - `request.md`; `answers.md`, Tom's answers and feedback;
 - `plan.md`, the critiqued plan;
 - `diff.patch`, base to candidate;
-- `verify.json`, the kernel's own run of the suite and the lint at base
-  and candidate, and your checkout's setup exit;
+- `setup.json`, your checkout's setup exit;
 - `governance.json`, each hunk the kernel judged to add governance (id,
   path, lines, the added and removed lines, granted or not), and each
   `undecided` hunk the kernel's judgement could not answer with confidence

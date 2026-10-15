@@ -338,12 +338,10 @@ no ungranted governance.
 
 **What runs.** The registered runner is `fresh.review_runner`, the blind verifier
 ([architecture.md](architecture.md)). The kernel first asks the governance boolean per hunk (use
-shape 6; prose under `docs/` and READMEs is not asked), then runs the suite and the lint itself at
-base and candidate, each in a fresh `container` VM with no network (`verify.ran`, on a Mac with
-`container` installed), then sets up a checkout of the candidate with fresh services and runs one
-fresh session there: the builder's Opus model, or an Opus-class model from another vendor through
+shape 6; prose under `docs/` and READMEs is not asked), then sets up a git worktree of the
+candidate with fresh services and runs one fresh session there, which may run the suite: the builder's Opus model, or an Opus-class model from another vendor through
 another harness, never a cheaper class. It reads the request, Tom's answers and feedback, the plan,
-the diff, the kernel's run, the instances, and the undecided hunks, never the executor's narration,
+the diff, its setup's exit, the instances, and the undecided hunks, never the executor's narration,
 reruns any test itself, and answers `pass` or `changes` as its final message (the object bare, or
 the fenced block that ends the message, prose before it ignored), which the kernel reads from the
 turn's result, not from a file in the checkout; it adds instances, never removes one, and a line it
@@ -398,8 +396,7 @@ are read; the verdict and the merge take its head as kept. No reviewer reads the
 hunk the judgement leaves undecided is no instance there. `updated` or `no_change` passes, at the
 kept head: a dropped commit is a `dropped` finding, noted on the delivery, and the merge goes on at
 what was kept. `changes` means a doc states something the code should still honor and the candidate
-breaks it, a doc cannot be made true without a code change, or the candidate's tree holds `.valor`
-(no clone or session; the kernel records it, leg `kernel`). Docs commits belong to their candidate:
+breaks it, or a doc cannot be made true without a code change. Docs commits belong to their candidate:
 after a send-back they are not merged, and the next docs session reads them as
 `previous-docs.patch`, keeping what holds.
 
