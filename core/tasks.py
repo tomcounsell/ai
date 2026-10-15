@@ -27,9 +27,7 @@ STOP_CHANNEL = "valor_stop"
 class Brief:
     """What the kernel commits to when a task starts.
 
-    `max_effect_class` is the ceiling no effect under this task may exceed. `governance_grant`
-    is Tom's advance word that this task may add a check, gate, hook,
-    validator, review round, or approval step, shown in every turn's Brief.
+    `max_effect_class` is the ceiling no effect under this task may exceed.
 
     `workspace` is the directory a turn works in, `model` the model it runs
     (by default the light seat's pinned id, never an alias),
@@ -57,7 +55,6 @@ class Brief:
 
     instruction: str
     max_effect_class: str = "act"
-    governance_grant: str | None = None
     workspace: str | None = None
     model: str = resolve_model("light")
     harness_name: str = "claude_code"
@@ -184,7 +181,6 @@ async def _write(conn, brief: Brief, marker: dict[str, Any], provenance: dict[st
             **({"parent_id": brief.parent_id} if brief.parent_id is not None else {}),
             "instruction": brief.instruction,
             "max_effect_class": brief.max_effect_class,
-            "governance_grant": brief.governance_grant,
             "target_branch": brief.target_branch,
             "origin_url": brief.origin_url,
             "base_sha": brief.base_sha,
@@ -205,8 +201,8 @@ async def start_child(
     **brief_fields: Any,
 ) -> str:
     """Start a child of `parent_id`, in one transaction under the tree's
-    lock. Its ceiling is `child_ceiling(parent's, ceiling)`; its workspace,
-    `governance_grant`, and `harness` are what `brief_fields` give, never
+    lock. Its ceiling is `child_ceiling(parent's, ceiling)`; its workspace
+    and `harness` are what `brief_fields` give, never
     the parent's. `marker` is laid into `task.started` (`{"sdlc": 1}` when
     None, so a child is an SDLC task by default). Refused, with nothing
     written: an unknown parent (`UnknownParent`), a calibration parent or a
@@ -369,8 +365,7 @@ async def dispatch(
         "# Brief\n\n"
         f"Task: {b.id}\n"
         f"Instruction: {b.instruction}\n"
-        f"Effect ceiling: {b.max_effect_class}\n"
-        f"Governance grant: {b.governance_grant or 'none'}"
+        f"Effect ceiling: {b.max_effect_class}"
     )
     if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"
