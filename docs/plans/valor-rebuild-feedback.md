@@ -63,7 +63,7 @@ in `core/routines.py` and the `docs/routines.md` sentence describing it. The
 Opus reviewer wrote "This is not governance", and since a reviewer cannot
 remove an instance, a confirmed fix waited on a tap.
 
-What this changes ([the plan](80e49c02-governance-adds.md)):
+What this changes (the plan, in git history):
 
 - The question's gloss names a step that judges work, a request, or an
   action and holds, redirects, or refuses it on that judgement, or a step
@@ -114,7 +114,7 @@ What this changes:
 
 - Valor's turns carry `yudame` and `yudame-dev`, refreshed from
   `yudame/skills` at each task's start
-  ([c18-yudame-plugins.md](c18-yudame-plugins.md)).
+  (c18, absorbed by strip.md).
 - Part of the open item "Skill system requirements" is answered: shared
   skills live in `yudame/skills`, not in this repository.
 - Unchanged: safe mode, and authority in `core/`. A plugin brings skill
