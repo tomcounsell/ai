@@ -254,3 +254,16 @@ Each has the default the plan proceeds on if Tom says nothing.
   in `docs/machine.md`.
 - **A small suite misses a regression.** Accepted: the end-to-end test,
   the live round trip and Tom's real use are the measure, not test count.
+
+## Record
+
+- **Baseline (strip-base, 2026-10-15, Tom's MacBook Pro, 10 cores).**
+  Production Python 32,180 lines; tests 50,348 lines in 123 files; 2,257
+  tests (2,206 passed, 47 skipped, 4 failed on the paragraph Phase 0
+  rewrote) in 11 min 22 s at `-n auto`, run beside three wave 1 agents.
+- **Phase 0.** Rules and the widened paragraph committed (55d21d8f6); C18
+  superseded, C19 waiting. The Cowboy freeze was not done: this Mac's SSH
+  key is not authorized on `valor@valor-the-cowboy`, so the freeze and
+  wave 4 hold for the Cowboy.
+- **Wave 1** (5ef42e1c9). 15 test files, 4,249 lines; 83 passed, 1
+  skipped, in 7 s at `-n auto`.
