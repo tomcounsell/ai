@@ -436,9 +436,9 @@ acked only after `intake.receive` commits, gap fill reads
 a metadata marker that `lookup` finds after a crash (OpenClaw's design;
 Slack has no `random_id`).
 
-**Done.** In a test window on `yudame.slack.com`: Tom's DM starts a task,
-his thread reply binds to a question, and a crash between intent and
-outcome does not post twice.
+**Done** (window of 2026-10-15, record in the plan): Tom's DM starts a
+task, and a crash between intent and outcome does not post twice. Open:
+his thread reply binding to a question, and reactions.
 
 **Leaves out (milestone 2).** Other channels.
 

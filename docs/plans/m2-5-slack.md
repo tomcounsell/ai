@@ -586,4 +586,10 @@ Decided by default:
 - The live test runs in Valor's DM with itself: no one else sees the posts, and it needs only `im:write` and `im:history`, which the app has.
 - Tom named the 1Password vault Yudame Secrets as a place for these secrets. The `valor-local` service account can read it but is refused a write (`Permission (101)`), so the tokens are in the vault `.env` only for now. Once that account can write there, they go in as `VALOR_SLACK_APP_TOKEN` and `VALOR_SLACK_USER_TOKEN`, following the vault's names for the other Slack app.
 
-No Slack job is loaded yet; that waits for the kernel's live run on this Mac (judgement keys, `claude-token`, the valor-demo items and `VALOR_BACKUP_DIR` are not set up here).
+## Live window (2026-10-15)
+
+- Tokens: `auth.test` and the scope header pass, no manifest scope missing, and the app token opens a socket. `bridges.slack keys` wrote both to the kernel key dir. `com.valor.kernel.slack` is loaded from `--plist` (KeepAlive) and connected as U0B6C6J735L. For the window the kernel and Slack jobs ran with `VALOR_OPERATOR_CHANNEL=slack` and Tom's Yudame id as the operator chat.
+- Crash: task 825e5c0ae1c3 posted a text and a file to Valor's self DM, and the bridge was SIGKILLed 1.2 s after the intent (row 33352), with only part 0 on Slack. The next tick's reconcile found part 0 by its marker and posted only the file: outcome 33405, `reconciled: true`, each part once.
+- Tom's DM (14:11): `message.received` 34513 on `slack`, `verified: true`; `message.bound` 34515 as `start`; the task's question reached his DM as `notice.sent` 79944f13e792.
+- Open: his thread reply binding to a question (he said to go on without him; his next thread reply settles it), and reactions (task 3624532d04c2, back in checks after Tom's grant; then the app is updated from the new manifest and the reactions checked live).
+- Found: a top-level DM that answers Valor's last post binds as a blind new task, so the task asked Tom what his own reply meant (fix task 133f2ae0965b); a task that never hands in loops idle turns (da3d28405819, twice in this window).
