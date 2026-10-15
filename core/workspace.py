@@ -787,11 +787,24 @@ def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[lis
     return argv, {**turn_environment(harness), runs.TURN_ENV: mark}
 
 
+# The kernel's own credentials and Claude Code's own session state stay
+# behind; the rest of the operator's environment is the turn's.
+DROP_PREFIXES = ("ANTHROPIC_", "CLAUDE", "AI_AGENT")
+DROP_NAMES = ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "GITHUB_PUSH_TOKEN",
+              "PGPASSWORD", "PGPASSFILE", "VALOR_PG_PASSFILE")  # fmt: skip
+
+
+def environment() -> dict[str, str]:
+    """The operator's environment less the kernel's secrets: what a turn,
+    and every sandboxed step of a task, starts from."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
+
+
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
-    """The environment a sandboxed step of the task gets: the allowlist the
-    harness uses and the task's own."""
-    keep = ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM")
-    env = {k: os.environ[k] for k in keep if k in os.environ}
+    """The environment a sandboxed step of the task (setup, suite, lint)
+    gets: the turn's, the operator's less the kernel's secrets, and the
+    task's own."""
+    env = environment()
     env.update(harness.get("env", {}))
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env

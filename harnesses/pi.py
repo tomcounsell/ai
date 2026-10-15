@@ -49,7 +49,8 @@ from core import binaries, spending
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import settings
-from harnesses.claude_code import Unsandboxed, environment
+from core.workspace import environment
+from harnesses.claude_code import Unsandboxed
 
 # The release the contract suite ran on. The turn row records what ran.
 PINNED = "0.73.1"
