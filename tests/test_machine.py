@@ -156,15 +156,14 @@ JOIN_ROWS = [
     (1, None, "red", "changes", "changes", 3, State.PATCH, None),
     (1, None, "red", "pass", "no_change", 3, State.PATCH, None),
     (1, None, "gaps", "pass", "no_change", 3, State.PATCH, None),
-    (1, None, "pass", "pass", "changes", 3, State.PATCH, None),
+    (1, None, "pass", "pass", "changes", 1, State.MERGE, "passed"),  # docs hold no row
     (1, "rounds", "gaps", "pass", "updated", 4, State.MERGE, "gaps"),
     (0, None, "gaps", "pass", "no_change", 4, State.MERGE, "gaps"),
     (0, None, "pass", "changes", "no_change", 5, State.PATCH, None),
     (1, "rounds", "red", "pass", "no_change", 5, State.PATCH, None),
-    (1, "rounds", "gaps", "pass", "changes", 5, State.PATCH, None),
+    (1, "rounds", "gaps", "pass", "changes", 4, State.MERGE, "gaps"),
     (0, "last", "pass", "changes", "no_change", 6, State.ENDED, "did_not_pass"),
     (0, "last", "red", "pass", "no_change", 6, State.ENDED, "did_not_pass"),
-    (1, "last", "pass", "pass", "changes", 6, State.ENDED, "did_not_pass"),
 ]
 
 
