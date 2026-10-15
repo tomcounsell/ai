@@ -216,7 +216,7 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
     """The judgement port with both legs. A leg at its default endpoint
     reads its key from the kernel's key file, and a missing key raises
     `credentials.MissingKey` naming it, so the run refuses to start; a leg
-    pointed at a loopback endpoint (tests, the emulator's forced arms) gets
+    pointed at a loopback endpoint (tests) gets
     a placeholder and needs no key; any other endpoint is refused."""
     from tools.jev import Jev
     from tools.open_weight import OpenWeight

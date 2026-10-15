@@ -64,12 +64,12 @@ Effects have classes. Every capability declares one, and every task carries a ce
 | Class | Meaning | Who authorizes |
 |-------|---------|----------------|
 | `read` | read, no effect | the grant |
-| `propose` | reversible: sandbox writes, drafts, branches, and effects that can be withdrawn, such as a PR or a message draft | the grant; Valor asks first when Tom would want to be asked |
+| `propose` | reversible: workspace writes, drafts, branches, and effects that can be withdrawn, such as a PR or a message draft | the grant; Valor asks first when Tom would want to be asked |
 | `act` | irreversible effect or money: merge, send, pay, deploy | inside the task's ceiling, performed when requested; a report to Tom says what left |
 
 The drive to ask comes from Cooperative Inverse Reinforcement Learning [3]: the human and the agent share a reward the agent does not know, so its best move under uncertainty is to learn and to ask. Valor borrows the shape without claiming the guarantee, since nothing here is trained. The Off-Switch Game [8] shows why the borrow is partial: the incentive to allow shutdown holds only while the uncertainty holds, and later work shows it is fragile [9, 10]. Valor does not rely on the model's incentive. The off switch is in the kernel.
 
-If the model is deceptively aligned [5, 6] and capable enough to find side channels, the ledger records only what it chose to show. Effect ceilings keep damage survivable while the error is discovered, and a human audit sample of verified work is how it is discovered.
+If the model is deceptively aligned [5, 6] and capable enough to find side channels, the ledger records only what it chose to show. Effect ceilings keep damage survivable while the error is discovered, and Tom's reading of the ledger and the work is how it is discovered.
 
 ### Research grounding
 
@@ -80,7 +80,7 @@ Every design assumption maps to published work. An assumption without a source i
 | Alignment has four objectives: robustness, interpretability, controllability, ethicality | Ji et al., 2023 [1] | the four properties, translated into what a kernel can enforce |
 | A corrigible agent cooperates with corrective intervention despite incentives to resist | Soares et al., 2015 [2] | the name, the shutdown framing, and the warning that an agent searching for loopholes is already misaligned |
 | Uncertainty about the human's reward makes learning and asking the rational move | Hadfield-Menell et al., 2016 [3] | beliefs with provenance and uncertainty; questions instead of assumptions |
-| Assume the model may intentionally subvert safety measures; design protocols that hold anyway | Greenblatt et al., 2023 [4] | the whole control stance; blind verification; human audit samples of a cheaper verifier's verdicts |
+| Assume the model may intentionally subvert safety measures; design protocols that hold anyway | Greenblatt et al., 2023 [4] | the whole control stance; blind verification |
 | A learned model can behave aligned during training and defect later | Hubinger et al., 2019 [5]; Hubinger et al., 2024 [6] | effect ceilings keep damage survivable while deception is discovered |
 | Retrieved data can act as instructions to an LLM-integrated application | Greshake et al., 2023 [7] | episodic content never carries a source class; memory grants nothing |
 | An agent's incentive to allow shutdown depends on its uncertainty and is fragile | Hadfield-Menell et al., 2017 [8]; Carey, 2018 [9]; Freedman and Gleave, 2022 [10] | the off switch lives in the kernel, never in the model's incentives |
@@ -95,7 +95,7 @@ The full bibliography is [REFERENCES.md](REFERENCES.md). Numbers here and in `do
 - **Judgement.** A hosted Jev-class model handles every decision that is not authority: classification, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as the fallback. Low-confidence calls go to a human. A classifier decides what a thing is; it never decides what a thing may do.
 - **Agents.** Frontier agents do the hard work, one `claude -p` turn at a time, each inside an effect ceiling set by the kernel, every call metered.
 
-Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for scheduling, `sandbox-exec` for turns and Apple containers for the review's rerun, the Keychain and a kernel key directory no turn can read for secrets, and Postgres as a document store (JSONB documents and an append-only events table) for the kernel's state.
+Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for scheduling, `sandbox-exec` for turns (four denies), the Keychain and a kernel key directory for secrets, and Postgres as a document store (JSONB documents and an append-only events table) for the kernel's state.
 
 ## Directory map
 
@@ -111,8 +111,12 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`ui/`](ui/README.md): the read-only dashboard.
 - [`site/`](site/index.html): the public site.
 - [`docs/`](docs/README.md): the governing docs ([architecture](docs/architecture.md), [mission](docs/mission.md), and the rest listed there), plans, and records.
-- [`tests/`](tests/README.md): integration first, no mocks, real Postgres, real containers, real bridges on test accounts.
+- [`tests/`](tests/README.md): integration first, no mocks, real Postgres, real bridges on test accounts.
 
 ## Status
 
-Setup phase. The branch holds this README, the top-level directories with their scope READMEs, a minimal kernel that bounded one demonstration and a replay baseline, and the docs those showed were needed. The rebuild plan follows from them. The setup plan, the records, and the open questions for Tom live in [docs/plans/](docs/plans/). The previous system lives unchanged on the `main` branch; read any file from it with `git show main:<path>`.
+Setup phase. The branch holds this README, the top-level directories with their scope READMEs, a kernel that bounded one demonstration, and the docs those showed were needed. The plans and records live in [docs/plans/](docs/plans/). The previous system lives unchanged on the `main` branch; read any file from it with `git show main:<path>`.
+
+## Not here
+
+**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.

@@ -29,8 +29,7 @@ workspaces for (`python -m core start ... --project NAME`).
   each chat has one owner.
 - `knowledge_base` names the business's folder in `~/work-vault`, where its
   description lives. A working task's turns read and write that folder
-  (`VALOR_KNOWLEDGE_BASE` names it to them); a replay's never do, since it
-  may hold the reasoning behind the decisions a replay is scored against.
+  (`VALOR_KNOWLEDGE_BASE` names it to them).
 - `client` names the client the project is for. Valor has one Mac per
   client, and an internal Yudame project's client is `yudame`. Every memory
   record ingested from the project's tasks carries it with the project, so

@@ -92,7 +92,7 @@ class Spec:
     `settings.default_machine`, so each chat has one owner.
 
     `knowledge_base` names the business's folder in `~/work-vault`, which a
-    working task's turns read and write; a replay's never do.
+    working task's turns read and write.
 
     `client` names the client the project is for (one Mac per client); every
     memory record ingested from its tasks carries it (docs/memory.md)."""

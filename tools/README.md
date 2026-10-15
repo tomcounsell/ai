@@ -4,7 +4,7 @@ Non-core components and vendor-dependent tooling.
 
 ## Scope
 
-- Anything the core can run without: vendor API clients, sandbox and container helpers, ingestion, search.
+- Anything the core can run without: vendor API clients, ingestion, search.
 - Each tool declares its effect class and reaches the world through the broker. The judgement legs are the exception: `read`-class clients the judgement port calls directly from the kernel process, metered and recorded on the task.
 - A tool is extracted on a demonstrated second need, never on a first. A tool unused for ninety days is deleted by default.
 
@@ -30,7 +30,7 @@ Adapters behind `core/judgement.py`'s `JudgementPort` ([docs/judgement-layer.md]
 
 - Every tool declares one class per operation: `read`, `propose`, or `act`.
 - `read`: queries and fetches with no effect.
-- `propose`: sandbox writes, branches, drafts, anything that can be withdrawn.
+- `propose`: workspace writes, branches, drafts, anything that can be withdrawn.
 - `act`: merge, send, pay, deploy. Performed by the broker when requested inside the task's ceiling, and reported to Tom.
 - A tool that cannot say which class an operation is does not ship.
 

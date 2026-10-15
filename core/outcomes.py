@@ -7,14 +7,12 @@ What a merge landed (`landed`: the head it came after, its own commits, and
 the paths they change) is recorded by the broker on the merge's
 `effect.intent` at request, from the kernel mirror (`landed`), so rework is
 a fold over rows (`done_merges`, `rework`). Git is read only for revert
-and on-branch, on the status surfaces and by the audit scores
-(`core/audit_sample.py`, which label a reverted merge's candidate
-`changes`), from the kernel's cache of the target as last fetched
-(`revert`), never from a network and never from a directory a turn writes.
+and on-branch, on the status surfaces, from the kernel's cache of the
+target as last fetched (`revert`), never from a network and never from a directory a turn writes.
 
-Everything here is shown beside spending and attention, and the revert
-readings are scored as labels. Nothing reads it to decide anything: not
-the router, the broker's decision, the fold, or a verdict. This module imports `ledger`, `machine`, `git`, and `workspace`,
+Everything here is shown beside spending and attention. Nothing reads it
+to decide anything: not the router, the broker's decision, the fold, or a
+verdict. This module imports `ledger`, `machine`, `git`, and `workspace`,
 never `tasks` or `broker`, so both can import it.
 """
 

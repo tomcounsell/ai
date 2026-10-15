@@ -36,7 +36,7 @@ Read, in order: `CLAUDE.md` (the governance paragraph and the tests line
 bind everything), `docs/plans/valor-rebuild.md` (above all "How every
 milestone is built", "How the loops end", "Execution", and the milestone
 you are on), `docs/plans/rebuild-handoff.md`, then every task's plan file
-(`docs/plans/m<milestone>-*.md`). Plan files are the
+(`docs/plans/m<milestone>-*.md`, where they remain). Plan files are the
 state: their frontmatter `status`, and their record sections (one short
 verdict line per round, the delivery, merged), say exactly where work
 stopped. Git history holds the rest; there are no separate round-record
@@ -91,11 +91,11 @@ metered, never a reason to wait.
 proof that the loop carries its own work to merged is met (verify run
 6c621f57d9ff's fix be63436b888e, merged 2026-10-14 with no hand). What is
 left is carried by the new system itself; the cutover is done (2026-10-14,
-recorded in `docs/plans/cutover-runbook.md`):
+recorded in the cutover runbook, now removed):
 
 | Track | What | Who carries it |
 |---|---|---|
-| X, the cutover | Done on the Cowboy. Open: Tom's items in `cutover-runbook-tom.md` (the token's reach), and the other three Macs | Tom, then a lead session per Mac |
+| X, the cutover | Done on the Cowboy. Open: the other three Macs | Tom, then a lead session per Mac |
 | F, live features | The old system's features this one lacks (`~/src/valor-build-notes/m7/live-features-gap.md`) | Runs in chat: Valor raised them with Tom in the operator group (task 8ab23532a169), and each one Tom keeps is a task his own message starts. Never built from a `/build` session |
 | L, the loop backlog | The kernel tasks in `~/src/valor-build-notes/m7/state.md` | The resident kernel, unattended; nobody polls it |
 
@@ -104,17 +104,9 @@ Order:
 - **F and L run in the kernel.** A `/build` session neither builds a
   feature nor speeds a task; it repairs the kernel only when the kernel
   cannot run its pipeline.
-- **L.** Re-bootstrap `com.valor.routine.emulator` only after
-  `backlog:emulator-weekly-limit` merges (Tom: at most $140 a week on
-  re-sweeps). Until then a firing runs only by hand with a stopper that
-  calls `core stop` at $130 (`m7/sweep-stop.py`). When
-  `backlog:check-tmp-leak` merges, kill the interim cleaner by the PID in
-  `m7/clean-check-tmp.pid`. When `backlog:review-base-after-rebase`
-  merges, send image-prune, exemplar and replay-spin `core feedback` so
-  review reruns; their refused instances were never theirs.
 
-The kernel runs one turn at a time (`core/serve.py`), foreground before
-background, so a dozen tasks take a day or more. Never poll it or step in to
+The kernel runs at most `max_turns` turns at once (`core/serve.py`, default 2),
+so a dozen tasks take a day or more. Never poll it or step in to
 speed it up; step in only when the kernel cannot run its pipeline, and
 record that repair as a task.
 

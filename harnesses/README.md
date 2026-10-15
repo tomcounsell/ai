@@ -14,7 +14,7 @@ Governed by [docs/harnesses.md](../docs/harnesses.md).
 
 ## The Claude Code wrapper
 
-`claude_code.py` builds two kinds of turn. `turn` is one self-contained `claude -p` call with no tools by default; it carries the placeholder credential the gateway replaces, never the machine user's own login. Both default to the light seat's pinned model id, never an alias. `workspace_turn` is one turn of a task that works in a directory: it keeps Claude Code's own system prompt and tools, appends the persona and the dispatched Brief re-rendered every turn, resumes the task's session (a fresh session never resumes), edits and runs commands without prompting, and runs with safe mode, no MCP servers, and no web tools. The task's `harness` settings must name the sandbox-exec profile the turn runs under (it refuses a task without one), and may give git and gh their own config, give the turn its own `TMPDIR` and Claude Code config directory (the turn then carries a placeholder credential the gateway replaces), and add the workspace's own variables to the environment. The environment it passes is an allowlist; tokens and agent sockets stay behind.
+`claude_code.py` builds `workspace_turn`: one turn of a task that works in a directory. It runs as a developer's Claude Code would there: Claude Code's own system prompt and tools, the project's own `CLAUDE.md`, settings, hooks, skills and MCP servers, web tools, the yudame plugins (`--plugin-dir` for each of `settings.plugin_dirs`), and the operator's environment less the kernel's secrets, with Valor's own `gh` login, git credentials and SSH agent. It appends the persona and the dispatched Brief re-rendered every turn, resumes the task's session (a fresh session never resumes), and edits and runs commands without prompting. Two things differ from a developer's: every model call goes to the gateway, which meters it and supplies the credential in place of the placeholder the turn carries, and the turn runs under a sandbox-exec profile. The task's `harness` settings must name that profile (it refuses a task without one), and may give the turn its own `TMPDIR` and Claude Code config directory and add the workspace's own variables to the environment.
 
 ## The Pi wrapper
 
@@ -36,4 +36,3 @@ Holds none directly. A harness runs a turn inside the ceiling `core/` issued for
 - Deciding what to run, or when. That is `core/`.
 - Hooks or validators injected into a harness to police the agent. Authority is the kernel's, not the prompt layer's.
 - Skill content. That is `skills/`.
-- Container images and sandbox tooling that are not harness-specific. That is `tools/`.

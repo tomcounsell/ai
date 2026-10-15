@@ -27,9 +27,7 @@ against the task and carries no credential of the turn's.
   (flags), the tools (flags), the system prompt (flags), or the session
   directory (flag), and `--no-extensions` and `--no-skills` keep a settings
   `packages`, `extensions`, or `skills` list from loading anything. The
-  working session's builder owns its clone, so its own settings stand there;
-  a blind checkout leaves `.pi/` out (`workspace.blind_checkout`), so a
-  candidate never sets what the verifier's turn runs with.
+  working session's builder owns its clone, so its own settings stand there.
 
 **The prompt travels on standard input.** The pinned release reads `--` as
 an unknown flag, and a leading `@` on the command line is a file to read
@@ -329,8 +327,8 @@ def workspace_turn(
         if resume:
             argv += ["--session", resume]
         argv += ["--system-prompt", SYSTEM_PROMPT, "--append-system-prompt", brief, "-p"]
-        # The sandbox's own launcher runs outside it, so it is the root-owned
-        # /usr/bin/sandbox-exec by absolute path, as for Claude Code.
+        # The sandbox's own launcher runs outside it: /usr/bin/sandbox-exec
+        # by absolute path, as for Claude Code.
         argv = [
             binaries.require(binaries.SANDBOX_EXEC),
             "-D",

@@ -267,24 +267,19 @@ class Settings:
     # schema `memory` in the kernel database this Mac's kernel is connected to.
     memory_dsn: str = field(default_factory=lambda: _env("VALOR_MEMORY_DSN", ""))
     owner_role: str = field(default_factory=lambda: _env("VALOR_PG_OWNER", getpass.getuser()))
-    # Programs the kernel runs are named by fixed path, never looked up on
-    # PATH: a turn can write to directories on the user's PATH, so a lookup
-    # would run what a turn left there. Each default sits under a directory
-    # every sandbox profile write-denies (`core/workspace.py`), and an
-    # override must name a program inside such a directory too.
+    # Programs the kernel runs, by fixed path.
     pg_bin: str = field(default_factory=lambda: _env("VALOR_PG_BIN", "/opt/homebrew/opt/postgresql@18/bin"))
     pg_data_dir: str = field(default_factory=lambda: _env("VALOR_PG_DATA", "/opt/homebrew/var/postgresql@18"))
     pg_passfile: str = field(default_factory=_passfile)
     # Where `core/backup.py` makes its scratch clusters, which run outside
-    # any sandbox: inside the kernel key directory, which every profile
-    # read- and write-denies, so no turn can edit a cluster before it starts.
+    # any sandbox: inside the kernel key directory, which a turn's profile
+    # denies.
     pg_scratch: str = field(
         default_factory=lambda: _env("VALOR_PG_SCRATCH", str(Path(_passfile()).parent / "run"))
     )
     # The per-effect lock files (`core.performing`). By default in the kernel
-    # key directory, beside `pg_passfile`, which every turn's sandbox profile
-    # denies, so no turn can hold, remove, or plant one; the test suite points
-    # it at its own temporary directory.
+    # key directory, beside `pg_passfile`; the test suite points it at its own
+    # temporary directory.
     performing_dir: str = field(
         default_factory=lambda: _env(
             "VALOR_PERFORMING_DIR",
@@ -337,8 +332,7 @@ class Settings:
         )
     )
 
-    # -- git, as the kernel runs it: a root-owned install, never looked up on
-    # a PATH or through a cache a turn can write (core/binaries.py) -----------
+    # -- git, as the kernel runs it (core/binaries.py) ---------------------------
     git_bin: str = field(default_factory=lambda: _env("VALOR_GIT", _git()))
 
     # -- the judgement legs ----------------------------------------------------

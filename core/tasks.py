@@ -813,7 +813,7 @@ def provenance(row: dict[str, Any]) -> dict[str, Any]:
     A field the row does not carry reads as None, never as a default:
     answers and feedback written before `role_played` existed say nothing
     about it, and approvals written before approvals carried provenance hold
-    only a top-level `by` (unreliable: the replay driver's approvals say
+    only a top-level `by` (unreliable: a driver's approvals may say
     `tom`), so their `at` is the row's own time. No row is rewritten."""
     p = row["payload"]
     recorded = p.get("provenance") or {"by": p.get("by")}
