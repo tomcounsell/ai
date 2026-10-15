@@ -28,7 +28,7 @@ from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import resolve_model, settings
-from core.workspace import environment
+from core.workspace import current_profile, environment
 
 # The model a turn runs when none is given: the light seat's pinned id, never
 # an alias the installed CLI resolves to a model the gateway has no price for
@@ -154,7 +154,7 @@ def workspace_turn(
             "-D",
             f"VALOR_TURN={turn_id}",
             "-f",
-            harness["sandbox_profile"],
+            current_profile(harness["sandbox_profile"]),
             *argv,
         ]
         return TurnCommand(

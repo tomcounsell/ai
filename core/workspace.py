@@ -357,6 +357,26 @@ def service_profile(task_id: str, *, kernel: list[Path] | None = None) -> str:
     return profile(service=task_id, kernel=kernel)
 
 
+def _write(path: Path, text: str) -> None:
+    """Write a profile whole: a sandbox starting beside the write reads the
+    old one or the new one, never half of either."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def current_profile(path: str) -> str:
+    """`path`, a turn's `sandbox_profile`, rewritten from today's `profile()`
+    when it is a kernel-kept one (under `work_dir()`), so a task provisioned
+    before a profile change runs under the current one. A profile the
+    operator named elsewhere is left as it is."""
+    p = Path(path)
+    if p.name == "turn.sb" and p.is_relative_to(work_dir()):
+        _write(p, turn_profile())
+    return path
+
+
 def sandboxed(profile_path: Path, mark: str, *argv: str) -> list[str]:
     """An argv run under `profile_path`, with the turn mark `mark` (a turn
     or a provisioning step). It has no gateway: the profile's gateway
@@ -682,10 +702,10 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     git.trusted(lay.mirror, "fetch", "-q", "--no-tags", f"file://{cache}", f"{base_sha}:refs/valor/base")
     # Home: the profiles.
     kb = knowledge_base(spec)
-    (lay.profiles / "turn.sb").write_text(turn_profile())
+    _write(lay.profiles / "turn.sb", turn_profile())
     passwords: dict[str, str] = {}
     if spec.services:
-        (lay.profiles / "service.sb").write_text(service_profile(task_id))
+        _write(lay.profiles / "service.sb", service_profile(task_id))
     if "postgres" in spec.services:
         passwords = _init_postgres(lay, task_id, spec, ports["postgres"])
     if "redis" in spec.services:
@@ -784,7 +804,7 @@ def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> di
 def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[list[str], dict[str, str]]:
     """One setup command's argv and environment: under the harness's
     profile, marked `mark`, with the turn's environment."""
-    argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+    argv = sandboxed(Path(current_profile(harness["sandbox_profile"])), mark, "/bin/bash", "-c", command)
     return argv, {**turn_environment(harness), runs.TURN_ENV: mark}
 
 
@@ -1097,8 +1117,11 @@ def _connects(port: int) -> bool:
 
 
 def start_services(task_id: str, lay: Layout | None, services, ports: dict[str, int]) -> None:
-    """Start the task's services if they are down (idempotent)."""
+    """Start the task's services if they are down (idempotent), under
+    today's service profile."""
     lay = lay or layout(task_id)
+    if services:
+        _write(lay.profiles / "service.sb", service_profile(task_id))
     if "postgres" in services:
         _start_postgres(lay, task_id)
     if "redis" in services:
@@ -1269,9 +1292,7 @@ def check_harness(
     (test, review) the session gets the environment `check_services` made
     for its fresh instances and its caches under `<check_dir>/cache/`."""
     path = lay.profiles / "turn.sb"
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(turn_profile())
+    _write(path, turn_profile())
     if services:
         # The check's own copy of the caches, never the builder's.
         cache = check_dir / "cache"
