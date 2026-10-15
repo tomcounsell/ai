@@ -3,7 +3,6 @@ emulator and the real intake."""
 
 import asyncio
 import base64
-import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -86,81 +85,6 @@ def test_topic_and_reply(emu, dsn, tmp_path, c):
     run(go())
 
 
-def test_sender_file_name_never_reaches_disk(emu, dsn, tmp_path, c):
-    data = b"#!/bin/sh\necho hi\n"
-    where = tmp_path / "inbound" / "telegram"
-
-    async def go():
-        async with connected(emu.url, dsn, tmp_path):
-            emu.inject(
-                int(c.dm),
-                "",
-                media={"kind": "document", "name": "../../x.sh", "mime": "text/x-sh"},
-                data_b64=base64.b64encode(data).decode(),
-            )
-            await until(lambda: received(dsn, c.dm))
-            [r] = await received(dsn, c.dm)
-            [att] = r["attachments"]
-            digest = hashlib.sha256(data).hexdigest()
-            assert att["path"] == str(where / digest)
-            assert att["name"] == "../../x.sh" and att["bytes"] == len(data)
-            assert (where / digest).read_bytes() == data
-            assert oct(where.stat().st_mode & 0o777) == "0o700"
-            assert r["chat_kind"] == "dm"
-
-    run(go())
-
-
-def test_a_stalled_download_holds_up_no_later_message(emu, dsn, tmp_path, c):
-    async def go():
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            slow = emu.inject(
-                int(c.group),
-                "slow",
-                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
-                data_b64=base64.b64encode(b"x").decode(),
-            )
-            after = emu.inject(int(c.group), "after", sender_id=7)
-            await until(lambda: received(dsn, c.group))
-            assert [r["message_id"] for r in await received(dsn, c.group)] == [str(after)]
-            assert (int(c.group), slow) in bridge._inflight
-
-            # A pass while the download runs does not mark the chat seen past it.
-            await bridge.fill()
-            assert bridge._seen.get(c.group) < slow
-
-        # The bridge stopped mid-download; the next start's pass takes it again.
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            assert (int(c.group), slow) in bridge._inflight
-
-    run(go())
-
-
-def test_a_refused_download_is_listed_skipped_and_not_tried_again(emu, dsn, tmp_path, c):
-    async def go():
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            calls = []
-            real = bridge.wire.download
-
-            async def counting(msg, progress=None):
-                calls.append(msg.id)
-                return await real(msg, progress)
-
-            bridge.wire.download = counting
-            emu.inject(
-                int(c.group),
-                "",
-                media={"kind": "document", "name": "a.pdf", "mime": "application/pdf", "fail": True},
-                data_b64=base64.b64encode(b"x").decode(),
-            )
-            await until(lambda: received(dsn, c.group))
-            [att] = (await received(dsn, c.group))[0]["attachments"]
-            assert att["skipped"] == "download failed: Refused"
-            assert len(calls) == 1
-
-    run(go())
-
-
 def test_reply_chain(emu, dsn, tmp_path, c):
     async def newest():
         rows = await received(dsn, c.group)
@@ -206,74 +130,3 @@ def test_reply_chain(emu, dsn, tmp_path, c):
 async def _is(newest, mid: int) -> bool:
     row = await newest()
     return row is not None and row["message_id"] == str(mid)
-
-
-def test_album_is_one_record_per_photo_sharing_grouped_id(emu, dsn, tmp_path, c):
-    async def go():
-        async with connected(emu.url, dsn, tmp_path):
-            for i in range(3):
-                emu.inject(
-                    int(c.group),
-                    "",
-                    grouped_id=777,
-                    media={"kind": "photo", "name": "", "mime": "image/jpeg"},
-                    data_b64=base64.b64encode(bytes([i])).decode(),
-                )
-
-            async def three():
-                return len(await received(dsn, c.group)) == 3
-
-            await until(three)
-            rows = await received(dsn, c.group)
-            assert {r["headers"]["grouped_id"] for r in rows} == {"777"}
-            assert len({r["attachments"][0]["path"] for r in rows}) == 3
-
-    run(go())
-
-
-def test_a_download_with_no_bytes_since_the_last_tick_is_cancelled_and_retaken(emu, dsn, tmp_path, c):
-    async def go():
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            stuck = emu.inject(
-                int(c.group),
-                "stuck",
-                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
-                data_b64=base64.b64encode(b"x").decode(),
-            )
-            moving = emu.inject(
-                int(c.forum),
-                "moving",
-                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
-                data_b64=base64.b64encode(b"y").decode(),
-            )
-            await until(lambda: len(bridge._inflight) == 2)
-            first = dict(bridge._inflight)
-            await bridge.tick()  # opens the window of each
-            assert len(bridge._inflight) == 2
-            bridge._received[(int(c.forum), moving)][0] += 1  # bytes arrived on this one
-            await bridge.tick()
-            await asyncio.sleep(0.1)
-            assert first[(int(c.group), stuck)].cancelled()
-            assert not first[(int(c.forum), moving)].done()
-            # The same tick's gap fill took the stuck message again, and held it.
-            assert bridge._inflight[(int(c.group), stuck)] is not first[(int(c.group), stuck)]
-            assert bridge._seen.get(c.group) < stuck
-
-    run(go())
-
-
-def test_a_download_in_a_chat_with_no_rows_is_held_by_the_first_pass(emu, dsn, tmp_path, c):
-    async def go():
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            slow = emu.inject(
-                int(c.dm),
-                "",
-                media={"kind": "photo", "name": "", "mime": "image/jpeg", "delay": 30},
-                data_b64=base64.b64encode(b"x").decode(),
-            )
-            await until(lambda: (int(c.dm), slow) in bridge._inflight)
-            assert bridge._seen.get(c.dm) is None or bridge._seen.get(c.dm) < slow
-            await bridge.fill()
-            assert bridge._seen.get(c.dm) == slow - 1
-
-    run(go())

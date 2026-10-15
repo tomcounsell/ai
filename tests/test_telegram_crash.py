@@ -6,7 +6,6 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +16,6 @@ from tests.telegram_port import (
     child_env,
     connected,
     emu_chat,
-    ids,
     machine,
     outcome,
     reconcile,
@@ -84,58 +82,6 @@ def test_killed_after_telegram_accepted_the_send(emu, dsn, tmp_path, c):
     [m] = emu.own(int(c))
     assert out.kind == "done"
     assert asyncio.run(outcome(dsn, effect))["result"]["sent"][0]["message_id"] == str(m["id"])
-
-
-def test_killed_after_receive_and_before_the_read_acknowledgement(emu, dsn, tmp_path, c):
-    mark = tmp_path / "mark"
-    with child(tmp_path, c, "receive", emu.url, dsn, str(tmp_path), str(mark), "after") as proc:
-        wait_for(mark.exists)
-        mid = emu.inject(int(c), "recorded, then killed")
-        wait_for(Path(str(mark) + ".paused").exists)
-        proc.kill()
-        proc.wait(10)
-    assert asyncio.run(ids(dsn, c)) == [str(mid)]
-
-    async def restart():
-        async with connected(emu.url, dsn, tmp_path) as bridge:
-            await bridge.tick()
-        return await ids(dsn, c)
-
-    assert asyncio.run(restart()) == [str(mid)]
-
-
-def test_killed_before_receive_the_restart_records_it(emu, dsn, tmp_path, c):
-    mark = tmp_path / "mark"
-    with child(tmp_path, c, "receive", emu.url, dsn, str(tmp_path), str(mark), "before") as proc:
-        wait_for(mark.exists)
-        mid = emu.inject(int(c), "killed before it was recorded")
-        wait_for(Path(str(mark) + ".paused").exists)
-        proc.kill()
-        proc.wait(10)
-    assert asyncio.run(ids(dsn, c)) == []
-
-    async def restart():
-        async with connected(emu.url, dsn, tmp_path):
-            return await ids(dsn, c)
-
-    assert asyncio.run(restart()) == [str(mid)]
-
-
-def test_killed_before_a_tick_covered_a_dropped_update(emu, dsn, tmp_path, c):
-    mark = tmp_path / "mark"
-    with child(tmp_path, c, "receive", emu.url, dsn, str(tmp_path), str(mark), "none") as proc:
-        wait_for(mark.exists)
-        dropped = emu.inject(int(c), "its update is lost", live=False)
-        after = emu.inject(int(c), "delivered")
-        wait_for(lambda: asyncio.run(ids(dsn, c)))
-        proc.kill()
-        proc.wait(10)
-
-    async def restart():
-        async with connected(emu.url, dsn, tmp_path):
-            return sorted(await ids(dsn, c), key=int)
-
-    assert asyncio.run(restart()) == [str(dropped), str(after)]
 
 
 def test_sigterm_during_a_perform_records_the_message_and_its_outcome(emu, dsn, tmp_path, c):

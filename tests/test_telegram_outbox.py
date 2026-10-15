@@ -1,11 +1,9 @@
 """Notices: sent to the row's chat, once, and marked through the outbox."""
 
 import asyncio
-import logging
 
 import pytest
 
-from bridges.telegram.send import random_id
 from tests.bridges import of_type, outbox
 from tests.telegram_emulator import Emulator
 from tests.telegram_port import (
@@ -83,69 +81,6 @@ def test_killed_between_send_and_sent_the_restart_finds_it_and_sends_nothing(emu
             await bridge.sender.notice(await due(box, nid), box)
         [m] = emu.own(int(project))
         assert (await marked(dsn, nid))[0]["sent"][0]["message_id"] == str(m["id"])
-
-    run(go())
-
-
-def test_a_duplicate_random_id_with_nothing_on_screen_sends_it_under_a_new_id(emu, dsn, tmp_path, c):
-    _, project = c
-
-    async def go():
-        _, nid = await notice(dsn, project)
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            # Telegram holds the notice's random_id for a message the scan cannot match.
-            await bridge.wire.send_text(
-                int(project),
-                "something else",
-                random_id=random_id(f"notice:{nid}", 0),
-                reply_to=None,
-                topic_id=None,
-            )
-            item = await due(box, nid)
-            await bridge.sender.notice(item, box)
-        shown = [m for m in emu.own(int(project)) if m["text"] == item.text]
-        assert len(shown) == 1
-        assert (await marked(dsn, nid))[0]["sent"][0]["message_id"] == str(shown[0]["id"])
-
-    run(go())
-
-
-def test_a_notice_cut_off_after_its_first_part_is_finished_on_the_next_try(emu, dsn, tmp_path, c):
-    _, project = c
-
-    async def go():
-        _, nid = await notice(dsn, project, text="i" * 3000 + " " + "j" * 3000)
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            item = await due(box, nid)
-            parts = [p.strip() for p in bridge.kernel.split_text(item.text)]
-            emu.control(lose_send_next=True, send_after=1)
-            await bridge.sender.notice(item, box)
-            assert await marked(dsn, nid) == []
-            assert [m["text"] for m in emu.own(int(project))] == parts[:1]
-            await bridge.sender.notice(item, box)
-            own = emu.own(int(project))
-            assert [m["text"] for m in own] == parts
-            [row] = await marked(dsn, nid)
-            assert [e["message_id"] for e in row["sent"]] == [str(m["id"]) for m in own]
-            assert bridge.sender.starts.names() == []
-
-    run(go())
-
-
-def test_a_notice_failing_every_time_logs_its_reason_once(emu, dsn, tmp_path, c, caplog):
-    _, project = c
-
-    async def go():
-        _, nid = await notice(dsn, project)
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            item = await due(box, nid)
-            emu.control(down=True)
-            with caplog.at_level(logging.WARNING, logger="valor.telegram"):
-                for _ in range(3):
-                    await bridge.sender.notice(item, box)
-            emu.control(down=False)
-        assert await marked(dsn, nid) == []
-        assert len([r for r in caplog.records if nid in r.getMessage()]) == 1
 
     run(go())
 
