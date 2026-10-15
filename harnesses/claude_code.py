@@ -28,18 +28,7 @@ from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import resolve_model, settings
-
-# The kernel's own credentials and Claude Code's own session state stay
-# behind; the rest of the operator's environment is the turn's.
-DROP_PREFIXES = ("ANTHROPIC_", "CLAUDE", "AI_AGENT")
-DROP_NAMES = ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "GITHUB_PUSH_TOKEN",
-              "PGPASSWORD", "PGPASSFILE", "VALOR_PG_PASSFILE")  # fmt: skip
-
-
-def environment() -> dict[str, str]:
-    """The operator's environment less the kernel's secrets."""
-    return {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
-
+from core.workspace import current_profile, environment
 
 # The model a turn runs when none is given: the light seat's pinned id, never
 # an alias the installed CLI resolves to a model the gateway has no price for
@@ -165,7 +154,7 @@ def workspace_turn(
             "-D",
             f"VALOR_TURN={turn_id}",
             "-f",
-            harness["sandbox_profile"],
+            current_profile(harness["sandbox_profile"]),
             *argv,
         ]
         return TurnCommand(

@@ -357,6 +357,26 @@ def service_profile(task_id: str, *, kernel: list[Path] | None = None) -> str:
     return profile(service=task_id, kernel=kernel)
 
 
+def _write(path: Path, text: str) -> None:
+    """Write a profile whole: a sandbox starting beside the write reads the
+    old one or the new one, never half of either."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def current_profile(path: str) -> str:
+    """`path`, a turn's `sandbox_profile`, rewritten from today's `profile()`
+    when it is a kernel-kept one (under `work_dir()`), so a task provisioned
+    before a profile change runs under the current one. A profile the
+    operator named elsewhere is left as it is."""
+    p = Path(path)
+    if p.name == "turn.sb" and p.is_relative_to(work_dir()):
+        _write(p, turn_profile())
+    return path
+
+
 def sandboxed(profile_path: Path, mark: str, *argv: str) -> list[str]:
     """An argv run under `profile_path`, with the turn mark `mark` (a turn
     or a provisioning step). It has no gateway: the profile's gateway
@@ -556,13 +576,17 @@ def harness_env(
     passfile: Path,
 ) -> dict[str, str]:
     """The turn's environment for this project: tools (`bin_dir`, the work
-    directory's `bin/`) first on PATH, the caches under `lay`, the database and Redis it was given, `passfile` as the
+    directory's `bin/`) first on PATH, then Postgres's, then the operator's; the caches under `lay`, the database and Redis it was given, `passfile` as the
     Postgres password file, and the business's knowledge base folder
     (`VALOR_KNOWLEDGE_BASE`) when the spec names one. The directories are
     passed, never derived from `lay`, so a check's own service layout gets
     the task's `bin/`."""
+    # Postgres's own programs, `pg_config` among them, when the task has a
+    # database: Homebrew links only `pg_config-18`, and a driver such as
+    # psycopg2 builds with it. Then the operator's own PATH.
+    pg = [settings.pg_bin] if "postgres" in spec.services else []
     env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "PATH": os.pathsep.join([str(bin_dir), *pg, os.environ.get("PATH", "/usr/bin:/bin")]),
         "VALOR_BROWSER": settings.browser,
         "UV_CACHE_DIR": str(lay.cache / "uv"),
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
@@ -570,9 +594,6 @@ def harness_env(
     }
     if "postgres" in spec.services:
         port = ports["postgres"]
-        # Postgres's own programs, `pg_config` among them: Homebrew links
-        # only `pg_config-18`, and a driver such as psycopg2 builds with it.
-        env["PATH"] += f":{settings.pg_bin}"
         env.update(
             {
                 "PGHOST": "127.0.0.1",
@@ -681,10 +702,10 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     git.trusted(lay.mirror, "fetch", "-q", "--no-tags", f"file://{cache}", f"{base_sha}:refs/valor/base")
     # Home: the profiles.
     kb = knowledge_base(spec)
-    (lay.profiles / "turn.sb").write_text(turn_profile())
+    _write(lay.profiles / "turn.sb", turn_profile())
     passwords: dict[str, str] = {}
     if spec.services:
-        (lay.profiles / "service.sb").write_text(service_profile(task_id))
+        _write(lay.profiles / "service.sb", service_profile(task_id))
     if "postgres" in spec.services:
         passwords = _init_postgres(lay, task_id, spec, ports["postgres"])
     if "redis" in spec.services:
@@ -783,15 +804,28 @@ def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> di
 def setup_command(harness: dict[str, Any], mark: str, command: str) -> tuple[list[str], dict[str, str]]:
     """One setup command's argv and environment: under the harness's
     profile, marked `mark`, with the turn's environment."""
-    argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+    argv = sandboxed(Path(current_profile(harness["sandbox_profile"])), mark, "/bin/bash", "-c", command)
     return argv, {**turn_environment(harness), runs.TURN_ENV: mark}
 
 
+# The kernel's own credentials and Claude Code's own session state stay
+# behind; the rest of the operator's environment is the turn's.
+DROP_PREFIXES = ("ANTHROPIC_", "CLAUDE", "AI_AGENT")
+DROP_NAMES = ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "GITHUB_PUSH_TOKEN",
+              "PGPASSWORD", "PGPASSFILE", "VALOR_PG_PASSFILE")  # fmt: skip
+
+
+def environment() -> dict[str, str]:
+    """The operator's environment less the kernel's secrets: what a turn,
+    and every sandboxed step of a task, starts from."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
+
+
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
-    """The environment a sandboxed step of the task gets: the allowlist the
-    harness uses and the task's own."""
-    keep = ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM")
-    env = {k: os.environ[k] for k in keep if k in os.environ}
+    """The environment a sandboxed step of the task (setup, suite, lint)
+    gets: the turn's, the operator's less the kernel's secrets, and the
+    task's own."""
+    env = environment()
     env.update(harness.get("env", {}))
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
@@ -1083,8 +1117,11 @@ def _connects(port: int) -> bool:
 
 
 def start_services(task_id: str, lay: Layout | None, services, ports: dict[str, int]) -> None:
-    """Start the task's services if they are down (idempotent)."""
+    """Start the task's services if they are down (idempotent), under
+    today's service profile."""
     lay = lay or layout(task_id)
+    if services:
+        _write(lay.profiles / "service.sb", service_profile(task_id))
     if "postgres" in services:
         _start_postgres(lay, task_id)
     if "redis" in services:
@@ -1255,9 +1292,7 @@ def check_harness(
     (test, review) the session gets the environment `check_services` made
     for its fresh instances and its caches under `<check_dir>/cache/`."""
     path = lay.profiles / "turn.sb"
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(turn_profile())
+    _write(path, turn_profile())
     if services:
         # The check's own copy of the caches, never the builder's.
         cache = check_dir / "cache"
@@ -1285,7 +1320,13 @@ def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[
 def write_inputs(checkout: Path, files: dict[str, str]) -> None:
     """Make `.valor/inputs/` in a checkout the kernel just made and write each
     input there, every step relative to a descriptor, nothing followed
-    through a link, and no file overwritten."""
+    through a link. A `.valor/inputs` the checked-out tree already holds (a
+    plan commit that added one) is replaced, as is a `.valor` that is no
+    directory."""
+    valor_path = checkout / VALOR_DIR
+    if valor_path.is_symlink() or (valor_path.exists() and not valor_path.is_dir()):
+        rmtree(valor_path)
+    rmtree(valor_path / "inputs")
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
     root = os.open(checkout, flags)
     fds = [root]

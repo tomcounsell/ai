@@ -30,7 +30,8 @@ rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`router.step`), a provisioning, or the collection recover could not
 make; one job per
 task at a time, and at most `settings.max_turns` harness jobs at once,
-foreground first. A turn also holds one of the machine's turn slots
+foreground first; a clarify step (a question to Tom) is started whenever
+it is ready, outside that count. A turn also holds one of the machine's turn slots
 (`core/slot.py`), which `python -m core run` shares.
 
 A task is stepped again when it moved, or when a row it did not write
@@ -108,8 +109,10 @@ from core.settings import settings
 
 PROVISION_TRIES = 3
 PROVISION_BACKOFF_S = 60.0
-HARNESS = {State.CLARIFY, State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
-AT_ONCE = {State.JUDGE, State.MERGE}
+HARNESS = {State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
+# Started whenever ready, outside `max_turns`: a question to Tom (clarify)
+# never waits on the build of another task.
+AT_ONCE = {State.JUDGE, State.CLARIFY, State.MERGE}
 LABEL = "com.valor.kernel"
 ROOT = Path(__file__).resolve().parent.parent
 

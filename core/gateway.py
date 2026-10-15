@@ -10,7 +10,8 @@ calls, passes through here.
   `POST /v1/messages`, recorded `route: "gateway"`.
 - **The OpenAI route** (tails starting `openai/`, the prefix removed)
   speaks the Responses API to `settings.openai_upstream` and is metered
-  on `POST v1/responses`, recorded `route: "openai"`.
+  on `POST v1/responses`, recorded `route: "openai"`; any other POST
+  (chat completions among them) is answered 400, not metered.
 
 For each metered call the gateway:
 
@@ -28,8 +29,9 @@ that ends without its final usage (cut, or the client died) is charged so
 the ledger never records less than the invoice: on the Anthropic route its
 input as reported plus every output token it was allowed; on the OpenAI
 route, which reports input only at the end, the worst case estimated before
-the call. Other listed paths (token counting, model lists) cost nothing and
-pass through unmetered; any path on either route is forwarded.
+the call. Other paths (token counting, model lists) cost nothing and pass
+through unmetered; `POST v1/messages/batches`, a model call the gateway
+cannot meter, is answered 400.
 
 **The Claude credential.** A turn runs with its own Claude Code config
 directory, which holds no login, so it carries a placeholder (`TURN_TOKEN`)
@@ -54,18 +56,21 @@ gateway's own body naming which key was refused, since OpenAI's can echo
 part of the key; a refused kernel key invalidates only the OpenAI key. The
 turn's `proxy-authorization` is dropped on both routes.
 
-The path is forwarded byte for byte, never re-normalised. No credential is ever in a ledger row, an exception, or a
+The path is matched and forwarded in one normal form (`_normal`), so what
+is metered is what is forwarded. No credential is ever in a ledger row, an exception, or a
 log line.
 """
 
 import asyncio
 import json
+import posixpath
 import secrets
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import aiohttp
 from aiohttp import web
@@ -443,11 +448,9 @@ class Gateway:
         grant = self.grants.get(request.match_info["token"])
         if grant is None or grant.task_id in self.revoked:
             return _error(403, "permission_error", "turn token revoked or unknown")
-        # The tail as the client sent it, undecoded, so what is checked is
-        # what is forwarded.
         raw_path, _, raw_query = request.raw_path.partition("?")
         prefix = f"/t/{request.match_info['token']}/"
-        tail = raw_path[len(prefix) :] if raw_path.startswith(prefix) else ""
+        tail = _normal(raw_path[len(prefix) :] if raw_path.startswith(prefix) else "")
         query = f"?{raw_query}" if raw_query else ""
         body = await request.read()
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQUEST}
@@ -461,8 +464,10 @@ class Gateway:
                 headers["authorization"] = "Bearer " + await asyncio.to_thread(self.credential.token)
             except CredentialUnavailable as exc:
                 return _error(401, "authentication_error", str(exc))
-        if request.method == "POST" and tail.rstrip("/") == "v1/messages":
+        if request.method == "POST" and tail == "v1/messages":
             return await self._call(grant, self._metered(request, grant, path, headers, body))
+        if request.method == "POST" and tail.startswith("v1/messages/batches"):
+            return _error(400, "invalid_request_error", "batches are not metered")
         return await self._forward(request, self.upstream + path, headers, body)
 
     async def _call(self, grant: Grant, coro) -> web.StreamResponse:
@@ -509,8 +514,12 @@ class Gateway:
             headers["authorization"] = "Bearer " + key
         url = self.openai_upstream + "/" + tail + query
         source = "kernel" if key is not None else "turn"
-        if request.method == "POST":  # only v1/responses takes POST
+        if request.method == "POST" and tail == "v1/responses":
             return await self._call(grant, self._metered_openai(request, grant, url, headers, body, source))
+        if request.method == "POST":
+            # Chat completions, embeddings, batches and the rest report usage
+            # in shapes the meter does not read.
+            return _openai_error(400, "invalid_request_error", f"POST {tail} is not metered")
         return await self._forward(request, url, headers, body, openai=source)
 
     async def _forward(self, request, url, headers, body, openai: str | None = None) -> web.StreamResponse:
@@ -760,6 +769,13 @@ def _ended(exc: BaseException | None, openai: str | None = None) -> web.Response
     return fail(
         502, "api_error", f"the provider's connection ended before it answered ({type(exc).__name__})"
     )
+
+
+def _normal(tail: str) -> str:
+    """The tail in the one form it is matched and forwarded in: decoded,
+    its empty, `.` and `..` segments collapsed, encoded again. So
+    `v1//messages` and `v1/./messages` are metered as `v1/messages`."""
+    return quote(posixpath.normpath("/" + unquote(tail)).lstrip("/"), safe="/:@!$&'()*+,;=-._~")
 
 
 def _error(status: int, kind: str, message: str) -> web.Response:

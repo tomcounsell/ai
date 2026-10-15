@@ -31,7 +31,8 @@ or the error goes on, so the task's record says why. The resident kernel
 steps it again itself once `retry_due` says so, and the next turn opens
 with the reason (`session.next_prompt`); at `STEP_TRIES` failures in a row
 of the same state and check, `task.ended` is written with the last one and
-Tom gets a report of what failed (`notices.owe`).
+Tom gets a report of what failed (`notices.owe`), except for docs, which
+decide `no_change` with the reason as a finding and never hold the merge.
 
 A task's services (its Postgres, its Redis) are held under the session lock
 `services:<task>` while up, on the services handle's own connection. `run`
@@ -212,7 +213,14 @@ async def _failed(
         rows = await ledger.read(conn, task_id)
         tries = failures(rows)
         f = machine.fold(rows)
-        if tries >= STEP_TRIES and not (f.legacy or f.calibration) and f.state not in SETTLED:
+        if tries >= STEP_TRIES and payload["check"] == Check.DOCS.value and f.state is State.CHECKS:
+            # Docs never hold the merge: a docs runner that keeps failing
+            # decides `no_change`, its reason a finding on the delivery.
+            await verdicts.record_check(
+                conn, task_id, Check.DOCS, "no_change", leg="kernel",
+                findings=[{"kind": "docs failed", "text": payload["reason"]}],
+            )  # fmt: skip
+        elif tries >= STEP_TRIES and not (f.legacy or f.calibration) and f.state not in SETTLED:
             await ledger.append(
                 conn,
                 task_id,

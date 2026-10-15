@@ -554,8 +554,7 @@ def remote_head(workspace: str | Path, url: str, credential: Path | None = None)
 
 
 def push(workspace: str | Path, url: str, sha: str, branch_name: str, credential: Path | None = None) -> None:
-    """Push one commit to one branch at an explicit URL, never with force.
-    `run` refuses a workspace whose config could rewrite where it lands."""
+    """Push one commit to one branch at an explicit URL, never with force."""
     if run(workspace, "check-ref-format", "--branch", branch_name).returncode != 0:
         raise ValueError(f"branch name {branch_name!r} is malformed")
     if run(workspace, "cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:

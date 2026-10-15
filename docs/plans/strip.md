@@ -47,7 +47,7 @@ tests. 9. A bug fix is a commit. 10. Reuse before writing.
 | Turn accounts | The Anthropic credential only in the gateway (metering) | Every other credential block: the turn gets Valor's own `gh` login, git credential helper, SSH agent, and `sentry-cli` auth |
 | Plugins | | Absent today; added: `yudame` and `yudame-dev` via `--plugin-dir` from a kernel-kept clone of `yudame/skills`, refreshed at task start (absorbs C18) |
 | Sandbox (`core/workspace.py`) | One profile per turn and service that denies the kernel key directory, the Postgres data directory, the backup disk, and loopback 5432 (the one incident: the Postgres trust hole) | Every other deny: `~/src`, vault, Documents and the rest; startup-place writes; shared temp and the `mktemp` wrapper; Apple events, `open`, mount; container denies; port bind limits; `pi_install`'s denies; the check and setup profiles |
-| Processes | Reaping everything a turn started (the leaked redis incident); `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (the killed-tests incident) | The single machine-wide turn slot (`core/slot.py`), replaced by a concurrency limit read from settings, default 3 |
+| Processes | Reaping everything a turn started (the leaked redis incident); `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (the killed-tests incident) | The single machine-wide turn slot (`core/slot.py`), replaced by a concurrency limit read from settings, default 2 (the RAM plan in `docs/machine.md`: each turn with its work, cluster and Redis is about 4.4 GB, so two fit a 16 GB Mac and three do not) |
 | Review | A fresh session reviews the candidate in a clean worktree of its own and can run the suite there | The Apple `container` VM verifier (`core/container.py`, `core/images/`), the blind checkout's two-commit history rewrite, the `.valor`-in-tree refusal |
 | Governance | The governance paragraph as text, widened by rule 3; the four seeded guards in `core/guards.py` with their expiry | The `governance.adds` classifier site, the broker's grant refusal, merge-predicate grant terms, `python -m core grant`, `core/audit_sample.py` |
 | Merge predicate (`core/machine.py`) | One current candidate; test passed (or gaps with rounds spent); review passed | "Every governance instance granted" in terms 2 and 4; the docs verdict as a merge term (docs still run, they no longer hold the merge) |
@@ -181,7 +181,7 @@ budget. The lead merges T3, then T1, then T2.
 | C review | Opus | `core/fresh.py`, `core/container.py`, `core/images/`, `core/router.py` (container reap), `core/checks.py` (container use) | Delete the VM verifier; the review session gets a clean worktree of the candidate and may run the suite; delete the blind two-commit checkout and the `.valor` refusal |
 | D governance | Opus | `core/judgement_sites.py` (governance site), `core/broker.py`, `core/machine.py` (`merge_predicate`), `core/audit_sample.py`, `ui/app.py`, `core/__main__.py` (grant command hunk) | Delete the classifier site, the broker's grant refusal and `UNGRANTED`, the grant terms; delete `audit_sample.py` and its page; the request judge and breadth sites stay |
 | E git | Sonnet | `core/git.py`, `tools/push_branch.py`, `tools/README.md` | Delete `hostile` and the refusals; cut `PINNED` to hooks off; `push_branch` keeps only "not the target branch, no force" |
-| F concurrency | Opus | `core/slot.py`, `core/runs.py`, `core/session.py` (slot use), `core/settings.py` (one setting) | Replace the single slot with a limit of concurrent turns (default 3); a question to Tom never waits on a slot |
+| F concurrency | Opus | `core/slot.py`, `core/runs.py`, `core/session.py` (slot use), `core/settings.py` (one setting) | Replace the single slot with a limit of concurrent turns (default 2: each turn with its work, cluster and Redis is about 4.4 GB, so two fit a 16 GB Mac); a question to Tom never waits on a slot |
 | G routines and emulator | Sonnet | `routines/emulator/`, `routines/expiry/`, `core/routines.py`, `core/findings.py`, `core/__main__.py` (emulator hunk), `docs/emulator.md`, `docs/routines.md` | Delete the emulator routine and docs; the expiry routine lists, never deletes; `findings` stops reading emulator reports |
 | H binaries and gateway | Sonnet | `core/binaries.py`, `core/gateway.py`, `docs/metered-spending.md` | Drop the root-owned rule; drop the gateway's path allowlists, keep metering and the credential swap |
 
@@ -249,9 +249,9 @@ Each has the default the plan proceeds on if Tom says nothing.
   answer; if the Keychain token wins, the turn's `CLAUDE_CONFIG_DIR` keeps
   an `apiKeyHelper`-free config with the placeholder forced, and the
   check is rerun.
-- **Concurrent turns and RAM.** Three turns at about 1 GB each with the
-  bridges fits the target Macs; F's default is set from the RAM recorded
-  in `docs/machine.md`.
+- **Concurrent turns and RAM.** A turn with its work, cluster and Redis
+  is about 4.4 GB (the RAM plan in `docs/machine.md`), so F's default is
+  2: two fit a 16 GB Mac and three do not.
 - **A small suite misses a regression.** Accepted: the end-to-end test,
   the live round trip and Tom's real use are the measure, not test count.
 
