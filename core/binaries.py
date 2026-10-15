@@ -8,16 +8,6 @@ from pathlib import Path
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 PS = "/bin/ps"
 SECURITY = "/usr/bin/security"
-# Apple's `container` (core/container.py).
-CONTAINER = "/usr/local/bin/container"
-CONTAINER_LIBEXEC = "/usr/local/libexec/container"
-CONTAINER_HELPERS = (
-    "/usr/local/bin/container-apiserver",
-    "/usr/local/libexec/container/plugins/container-core-images/bin/container-core-images",
-    "/usr/local/libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet",
-    "/usr/local/libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux",
-    "/usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver",
-)
 
 
 class Untrusted(RuntimeError):

@@ -95,6 +95,7 @@ from tests import ports
 
 atexit.register(ports.release)
 
+
 def pytest_configure(config):
     """The controller of a parallel run starts no test: it hands its
     workers the ports it was given, which each worker slices."""
