@@ -10,7 +10,7 @@ governance_grant: required, one tap per instance through python -m core grant
 
 # Asks: reconciled before they start, and an inbox with backpressure
 
-(draft: sections being filled)
+
 
 ## The request
 
@@ -289,16 +289,179 @@ an idle turn loop.
   scheduler's importance key.
 - `docs/machine.md:179`: the "queued task" sentence says what is built.
 
-## Out of scope
+## No-Gos (Out of Scope)
+
+- **A hard cap on asks in flight.** It has no incident (Governance). Its
+  design is in Open questions.
+- **Work done outside the kernel.** `be563fe5b49b` duplicated a phase the
+  lead had built on a hand branch. The reconciler reads open tasks and
+  commits already on the target branch, never unpushed hand branches.
+- **Message binding.** Which open task a chat message belongs to is
+  `623c4901e1d5`'s scope. This plan starts from a `task.started` row and
+  does not change `bind`.
+- **Rebase churn between disjoint siblings.** `b1149181f1e2` and
+  `50e55630c4bc` own that.
+- **Kernel-initiated stops.** The kernel stops a task only on a writer's
+  confirmed `supersedes`, never on its own reading.
 
 ## Stakes
 
+- **A wrong `covered` loses an ask.** The ask becomes a note on a task that
+  does not do it. Two things bound this. A writer other than a routine
+  confirms every `covered` before it applies. A folded ask stays readable
+  on both tasks, and `status` of the ended task names where it went.
+- **A wrong `supersedes` stops good work.** Only Tom or an agent writer can
+  confirm it. A routine's `supersedes` becomes `overlaps`.
+- **Tom's attention.** A `distinct` ask costs Tom nothing. An overlapping
+  one costs him one notice, merged with clarify's when both apply. The
+  measure is Tom's interruptions per ask, before and after, read from the
+  attention log.
+- **Cost.** One judgement call per ask, about the price of the judge
+  (`133f2ae0965b`'s judge cost 46 micros). The open-task list is cut so
+  the call fits one leg's window. A project with more open tasks than fit
+  sends the most recently active ones and says how many it left out.
+
 ## Tests
 
-## Done
+Each test names the behavior it asserts, in the suite's style:
+
+- `test_a_started_ask_enters_reconcile_before_judge`: `task.started` with
+  `sdlc` folds to `reconcile`. A calibration task, a legacy task, and a
+  child of an open parent do not.
+- `test_a_distinct_ask_goes_to_judge_with_no_notice`
+- `test_an_abstain_or_both_legs_failing_reads_as_distinct`
+- `test_a_covered_ask_from_tom_waits_for_his_answer_in_the_chat_it_came_from`
+- `test_one_notice_carries_both_the_shape_and_clarifys_questions`
+- `test_a_cli_writer_confirms_with_core_shape_and_tom_gets_no_notice`
+- `test_a_routines_covered_finding_folds_without_waiting`
+- `test_a_routines_supersedes_downgrades_to_overlaps`
+- `test_a_folded_ask_reaches_an_open_task_at_its_next_turn`
+- `test_a_folded_ask_reaches_a_merged_task_as_feedback`
+- `test_a_confirmed_supersedes_stops_the_named_task_with_the_writers_provenance`
+- `test_an_amend_reruns_the_reconciler_once`
+- `test_ready_work_runs_by_importance_then_oldest_activity`
+- `test_the_cfb1_5172_pair_reads_as_covered`: the two instructions from
+  incident 1, replayed through the scripted judgement upstream, decide
+  `covered` naming the first task.
+
+## Test Impact
+
+A new state between intake and `judge` changes every test that expects
+`task.started` to fold straight to `judge`:
+
+- [ ] `tests/test_machine.py`: UPDATE. Fold expectations after
+  `task.started` gain the `reconcile` step.
+- [ ] `tests/test_pipeline.py`, `tests/test_kernel.py`,
+  `tests/test_step_failed.py`, `tests/test_reactions.py`: UPDATE. Scripted
+  runs get a `distinct` `reconcile.decided` before the judge.
+  `tests/scripted.py` and `tests/kernel_child.py` gain the scripted
+  `intake.overlap` answer, so each test changes in one place.
+- [ ] `tests/test_judgement_sites.py`: UPDATE. The new site is declared,
+  with its labels and failure behavior.
+- [ ] `tests/test_serve.py`: UPDATE. The scheduling key adds importance.
+- [ ] `tests/test_emulator_metering.py::test_every_stage_the_state_machine_schedules_has_a_runner`:
+  UPDATE. `reconcile` has a runner.
+- [ ] `tests/test_findings.py`: UPDATE. `start_fix` returns the proposal
+  with the task id.
+- [ ] `tests/test_migrate_history.py`: UPDATE if it asserts the state
+  enum.
+
+## Success Criteria
+
+1. Every `sdlc` task started after rollout has one `reconcile.decided`
+   row before `judge.decided`.
+2. Replaying the instructions of `cfb11735ee36` and `5172ae8d8b4f` through
+   the live `intake.overlap` site decides `covered` (or `overlaps`) naming
+   the other. Replaying `d734763cd94e` and `85abb1026556` decides
+   `overlaps` or `covered`. Replaying two emulator replay arms on separate
+   scratch origins decides `distinct`.
+3. A `distinct` ask from Tom produces no notice that today's flow would
+   not.
+4. Ready tasks run in importance order, checked on `status` and the
+   scheduler's log line.
+5. The suite is green and ruff is clean.
 
 ## Rollout
 
+The site lands with `calibrated=None`. Like breadth, an uncalibrated
+site's answer is information only:
+
+1. **Shadow.** `reconcile.decided` is recorded and shown to the writer
+   (the command line prints it; Tom's ask shows it on `status`), but every
+   ask proceeds to `judge` as if `distinct`. Importance ordering is live
+   from this step, since it refuses nothing.
+2. **Calibrate.** A calibration record over labelled pairs from the
+   ledger: incidents 1 and 2 (overlap), the disk reclaim group
+   `87fd35370d9c`, `8426bdd16707`, `e0063d753740` (overlaps), the
+   emulator replay arms (distinct), and two weeks of shadow decisions Tom
+   or the lead labels. The site's floors come from that record.
+3. **Live.** With a passing record, the site's `calibrated` hash is set,
+   and proposals hold asks for confirmation as designed.
+
+## Update System
+
+The kernel picks up the change through its own rollout: merging to `main`
+fast-forwards the Cowboy's checkout and restarts `com.valor.kernel`
+(`core/rollout.py`). `db.migrate` applies the new verdict enum values.
+`reconcile.decided`, `shape.proposed`, `shape.confirmed`, and `ask.folded`
+are new row kinds with no backfill: tasks started before rollout never
+enter `reconcile`, because their fold already passed it.
+
+## Agent Integration
+
+Agents file asks through the command line, so the command line is the
+integration surface:
+
+- `python -m core start` and `python -m core routine NAME --finding` print
+  the reconciler's decision, the restated scope, the queue line, and, when
+  the ask waits, the `core shape` command to confirm or amend it.
+- `python -m core shape TASK (--confirm | --amend TEXT) [--importance X]`
+  is new. It writes `shape.confirmed` with `--by` and `--role-played`
+  provenance, like `answer`.
+- The lead's filing instructions in `docs/plans/m7-improvement-loop.md`
+  ("Starting a finding by hand") gain one line: read the printed proposal
+  and confirm or amend it.
+
+## Documentation
+
+The Design's Docs list is the set: `docs/sdlc-state-machine.md`,
+`docs/judgement-layer.md`, `core/README.md`, and `docs/machine.md:179`.
+The docs check reviews them on the candidate. There is no
+`docs/features/` tree in this repository.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `.venv/bin/python -m pytest tests -x -q` | exit code 0 |
+| Lint clean | `.venv/bin/python -m ruff check .` | exit code 0 |
+| Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
+| Incident 1 replays as overlap | `.venv/bin/python -m pytest tests -q -k cfb1_5172` | exit code 0 |
+
 ## Open questions
 
+1. **The hard cap.** Tom asked for backpressure. The evidence supports
+   showing the queue, folding, and importance, and does not yet support
+   refusing asks: no incident shows harm from volume. The design, if Tom
+   wants it now despite that: per project, background asks past N open
+   tasks wait as `queued` (after `reconcile`, before `judge`), ordered by
+   importance, and are reconciled again when a task on the project reaches
+   a terminal state. Tom's own asks are never queued. Recommendation:
+   leave it out until an incident, and name now what would count as one: a
+   foreground ask that waited longer than an hour behind background work,
+   or a week in which Tom's open grants exceed ten.
+2. **Supersede from an agent writer.** Should an agent at the command
+   line be able to confirm a stop of someone else's task, or only Tom?
+   Recommendation: only Tom. An agent's `supersedes` notices Tom in the
+   same message as any other question.
+3. **Importance levels.** Three levels (`low`, `normal`, `high`) are
+   assumed. Tom may want an explicit "drop everything" level that runs as
+   foreground.
+
 ## Record
+
+- 2026-10-15: drafted from the request in a lead session. Two read-only
+  spikes: an overlap audit of the ledger (the incidents above, the volume,
+  and the 2026-10-14 starvation from an idle turn loop) and a code map of
+  every path that writes `task.started`, the judge's inputs, the clarify
+  and answer flow, and the scheduler.
