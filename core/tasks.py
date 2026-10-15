@@ -55,8 +55,7 @@ class Brief:
     once, so a node's parent and ceiling never change.
 
     `routine` names the routine a task belongs to (its objective, its runs,
-    and what they start); `replay` marks a task the emulator drives. Either
-    makes the task, and every task under it, background work
+    and what they start). It makes the task, and every task under it, background work
     (`background`): the kernel runs Tom's tasks first.
     """
 
@@ -75,7 +74,6 @@ class Brief:
     project: dict[str, Any] | None = None
     parent_id: str | None = None
     routine: str | None = None
-    replay: bool = False
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -111,13 +109,8 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
     try:
         if not git.is_repo(workspace):
             return {}
-        found_hostile = git.hostile(workspace)
     except git.GitError as exc:
         raise WorkspaceRefused(str(exc)) from None
-    if found_hostile:
-        raise WorkspaceRefused(
-            "the workspace's git config names what the kernel will not run: " + "; ".join(found_hostile)
-        )
     if git.branch(workspace) is None:
         raise WorkspaceRefused(f"{workspace} is on a detached HEAD; check out a branch first")
     found: dict[str, str | None] = {"base_sha": git.head(workspace)}
@@ -264,7 +257,7 @@ async def start_calibration(
     `calibration`, and every SDLC writer refuses it, so it is a task that
     only meters. `detail` is merged into the `task.started` payload (its
     `instruction`, when given, names the task); `via` is the command its
-    provenance records. The emulator meters its stand-in and judge on one."""
+    provenance records."""
     detail = dict(detail or {})
     b = Brief(instruction=detail.pop("instruction", f"calibrate {site}"), max_effect_class="read")
     async with conn.transaction():
@@ -472,7 +465,7 @@ async def subtree(conn, task_id: str) -> list[str]:
 
 async def background(conn, task_id: str) -> bool:
     """Whether the task is background work: it or an ancestor carries
-    `Brief.routine` or `Brief.replay`. An unknown task is foreground."""
+    `Brief.routine`. An unknown task is foreground."""
     row = await (
         await conn.execute(
             "WITH RECURSIVE up (id) AS ("
@@ -481,7 +474,7 @@ async def background(conn, task_id: str) -> bool:
             "  SELECT d.body->>'parent_id' FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
             "  WHERE d.body->>'parent_id' IS NOT NULL"
             ") SELECT 1 FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
-            " WHERE d.body->>'routine' IS NOT NULL OR (d.body->>'replay')::boolean IS TRUE LIMIT 1",
+            " WHERE d.body->>'routine' IS NOT NULL LIMIT 1",
             (task_id,),
         )
     ).fetchone()

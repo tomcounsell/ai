@@ -32,8 +32,6 @@ start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] ...
                                start it; the merge lands on the spec's
                                merge_url, else on its own origin, at the
                                target branch recorded at start
-start ... --replay             background work: a foreground task's step takes
-                               the turn slot first
 routine NAME [--restart]       run a routine (routines/NAME/routine.toml): the
                                first run registers its objective; stops at once
                                when Tom stopped it; --restart begins a fresh one
@@ -179,8 +177,7 @@ from core.settings import (
 
 def _performers(b: tasks.Brief) -> broker.Performers:
     """The task's own performers, built from its Brief, and every channel's
-    declared send (`core/bridge.py`). A replay task (`Brief.replay`) gets the
-    kernel performers only, so a send it asks for is refused `no performer`.
+    declared send (`core/bridge.py`).
     push_branch goes to the task's own bare
     origin; the merge pushes to the Brief's origin URL, from the kernel mirror
     with the GitHub credential when the kernel provisioned the task, and from
@@ -200,8 +197,6 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
-    if b.replay:
-        return broker.Performers(*kernel)
     return broker.Performers(*kernel, *declared_performers(b.workspace))
 
 
@@ -388,10 +383,8 @@ START_REFUSED = (ValueError, tasks.UnknownParent, tasks.TaskStopped, tasks.Calib
 
 async def _start_task(conn, args, **fields) -> str:
     """Start a root, or with `--parent` a child (`tasks.start_child`).
-    `--replay` marks it background work; `marker` is laid into `task.started`."""
+    `marker` is laid into `task.started`."""
     marker = fields.pop("marker", None)
-    if getattr(args, "replay", False):
-        fields["replay"] = True
     if args.parent:
         return await tasks.start_child(
             conn,
@@ -420,10 +413,6 @@ async def _start_project(conn, args) -> str:
         spec = workspace.Spec.load(args.project)
         if args.branch:
             spec = dataclasses.replace(spec, branch=args.branch, target_branch=args.branch)
-        if getattr(args, "replay", False):
-            # The knowledge base may hold the reasoning behind the decisions a
-            # replay is scored against, so a replay's turns never reach it.
-            spec = dataclasses.replace(spec, knowledge_base=None)
     except workspace.Refused as exc:
         raise SystemExit(f"start refused: {exc}") from None
     task_id = ledger.new_id()
@@ -486,7 +475,6 @@ async def _routine_project(
         instruction=instruction,
         model=model,
         harness=None,
-        replay=False,
         extra={"routine": routine, "marker": marker},
     )
     return await _start_project(conn, args)
@@ -956,9 +944,6 @@ def main() -> None:
     )
     start.add_argument("--base", help="with --project: the base commit (default: the branch's head)")
     start.add_argument("--branch", help="with --project: the branch to start from and merge onto")
-    start.add_argument(
-        "--replay", action="store_true", help="background work: a foreground task's step goes first"
-    )
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
