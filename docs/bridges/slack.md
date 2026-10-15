@@ -281,13 +281,6 @@ message to Tom in whichever process records it.
 | `bridges/slack/kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.broker`, `core.db`, `core.intake`, `core.settings`, and `core.credentials` |
 | `bridges/slack/__main__.py` | The verbs `run`, `keys`, `manifest`, and `--plist` |
 
-Its tests run the bridge as its own process, killed by its pid, against
-`tests/slack_emulator.py` (Socket Mode, the Web API methods the bridge
-calls, and file downloads, storing text the way Slack does) and a real
-Postgres. `tests/test_live_slack.py` posts to a test channel on the real
-wire, skipped without `slack-keys` and `VALOR_SLACK_TEST_CHANNEL`, and
-reports whether Slack kept the marker on a user-token post.
-
 ## Gaps
 
 - **Metadata on a user-token post** is unverified until the live window.

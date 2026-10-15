@@ -37,10 +37,6 @@ What the seed set can and cannot show:
   "Your call" on every question is evidence of precise, and a bare build
   whose first PM feedback changed the scope is a missed thin label
   (rebuild-baseline.md, "Appendix").
-- **The emulator measures the saving.** The demonstration's estimate ($1.40
-  to $1.80 of $2.97 saved, plus both review rounds) is an estimate. The
-  emulator replays the seed cases with and without the classifier and
-  reports the difference in money and in PM rounds (`docs/emulator.md`).
 
 **The record.** Run 5 of 2026-10-02 is the record the declaration names:
 both legs right on all seven cases, Brier 0.0114 (Jev) and 0.0040
@@ -51,5 +47,5 @@ runs. Runs 2 to 4 rewrote it after seeing which cases failed (the listed
 fixes in `precise` and the short label in `one_line_ask` exist because
 #893 and #188 failed); run 3 also rewrote the fallback's system prompt and
 run 4 added a `notes` field its answer writes before the probabilities;
-run 5 changed none. Only the emulator and live
-labels can show whether it generalizes (`docs/plans/m1-3-judgement.md`).
+run 5 changed none. Only live labels can show whether it
+generalizes.

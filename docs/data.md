@@ -41,7 +41,7 @@ verdict enum, is generated from `core/machine.py` (`VERDICTS`) and applied by
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | `bigint` identity | The order of the ledger. Every reader orders by it |
-| `task_id` | `text` | The stream the row belongs to: a task's id, or a named stream (`corrections`, `guards`, `judgement`, `audit`) |
+| `task_id` | `text` | The stream the row belongs to: a task's id, or a named stream (`corrections`, `guards`, `judgement`) |
 | `type` | `text` | The event type, `noun.verb` (`turn.started`, `effect.held`) |
 | `payload` | `jsonb` | The event's fields. Ids of what the row regards live here |
 | `at` | `timestamptz` | `clock_timestamp()`, the wall time of the insert |
@@ -57,7 +57,7 @@ A **stream** is the set of rows sharing a `task_id`. A task's stream holds
 everything that happened to it. The `corrections` stream holds every
 correction Tom has given, numbered from one, and applies to every task.
 The `guards` stream holds the seeded guards, and the `judgement` stream
-every calibration record. The `audit` stream holds Tom's labels on candidates the blind verifier reviewed.
+every calibration record.
 
 ### documents
 
@@ -71,7 +71,7 @@ every calibration record. The `audit` stream holds Tom's labels on candidates th
 The primary key is `(kind, id)`. A document is what the kernel commits to
 once and never changes. The `task` document is the Brief as the task
 started: instruction, effect ceiling,
-`governance_grant`, workspace, model, harness settings, and where a merge
+workspace, model, harness settings, and where a merge
 goes: the target branch, the merge's URL (`origin_url`: the project's
 `merge_url` when the spec names one, else the task's own origin), and the
 workspace's head at start (`core/tasks.py`, `Brief`); for a task the kernel
@@ -106,7 +106,7 @@ payload carries the ids listed; a reader relies on nothing else.
 
 | Writer | Type | Payload | Serves |
 |---|---|---|---|
-| `core/tasks.py` | `task.started` | `sdlc: 1` (or the marker `start_child` was given), `parent_id` for a child, instruction, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority, metered spending |
+| `core/tasks.py` | `task.started` | `sdlc: 1` (or the marker `start_child` was given), `parent_id` for a child, instruction, `max_effect_class`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority, metered spending |
 | `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), `leg: judgement`, `judgement_id`, `answered`, `p_precise`, label, `abstained`, model, `usd_micros`, `guard_id` when thin. Rows from before the judge ran carry `leg: manual` and provenance | Mission items 3 and 6 |
 | `core/judgement.py` | `judgement.answered` | `judgement_id`, site, `task_sha256`, `calibrated_sha256`, `inputs_sha256`, `ref`, `usd_micros`, attempts (per leg: model, endpoint host, outcome, `call_id`, charge, latency, and on failure a reason, status, and fixed sentence), answers (per question: label, probabilities, `p_proceed`, decision, the provider's pick, leg, model), action, `abstained`, leg, model; `picked` (each `pick` question that proceeded, its label) | Mission item 6; the routing a judgement causes is legible |
 | `core/judgement.py` | `judgement.failed` | as `judgement.answered` without answers, action, leg, or model; plus `on_failure` and `too_large` | As above |
@@ -122,23 +122,22 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/session.py` | `turn.collected` | `turn_id`, the state it ran in and its verdict, what the turn left under `.valor/` (question, no-question statement, plan signal, delivery note, advice question when it counted, effect requests), the screens `look` kept (`{name, bytes}` each, or `{name, refused}`; no digest), the candidate (head sha and turn id) when the verdict is `candidate`, and `errors`: the signals that did not count and why (a signal or effect request Postgres jsonb refuses to store in this row included, alone or with the rest, recorded with Postgres's reason and without its contents), those the kernel refused to read (a link, a FIFO, a hard link, a sparse file) and entries that vanished before they were read included. Judged again where it is written: an error or effect entry jsonb refuses there is replaced by kernel text with Postgres's reason, and if the row is still refused, the largest part left is dropped, then the next, until the row is stored (an effect entry keeps its `effect_id`, `kind` and `file` and gains an error; an error becomes kernel text with the reason; any other part is null, the screens an empty list), with the verdict `idle` (or `failed`), no candidate, no `question.asked` or `plan.written` beside it, and one error naming the parts dropped and the reason; if none is, it holds no turn content (no signals or effects) and one error with the reason | Legibility; the state machine |
 | `core/session.py` | `question.asked` | `question_id` (a string; a row whose id is not one is malformed and changes nothing), `turn_id`, text, the state the answer returns to | Mission item 6 |
 | `core/session.py` | `plan.written` | `turn_id`, path, commit, `sha256` of the file at that commit, stakes, `critique_rounds`, `review_rounds`, scope additions | Mission items 1 and 3 |
-| `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg (`session` from the fresh critique session, `kernel` when the plan's tree holds `.valor`, or `manual` in older rows), model, `usd_micros`, `turn_id` of the fresh turn (none for `kernel`), `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
+| `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg (`session` from the fresh critique session, `kernel`, or `manual` in older rows), model, `usd_micros`, `turn_id` of the fresh turn (none for `kernel`), `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
 | `core/router.py` | `services.reaped` | the processes of workspace services the run stopped for other tasks, or for task directories a provisioning that died left with no task row (pid, command, task, `orphan`, and signal: `stopped` when Postgres shut down cleanly, else `SIGTERM` or `SIGKILL`) | Lossless stop; 16 GB |
 | `core/router.py` | `step.failed` | `state`, `check` (`test`, `review`, `docs`, or null outside `checks`), `reason` (text: the runner's reason, a turn's outcome and what the harness said, or a raised exception's line), `turn_id` (null when no turn ran); written by a step that failed or raised, while it holds `run:<task>` and the task is not stopped. `tasks.status` shows it as `failed_step` while it is the task's latest row but for quiet rows (`ledger.quiet`: notices, gateway rows, reactions, and `response.shape` judgements) | A stall is in the record |
 | `core/__main__.py` | `workspace.removed` | the removed task directory, provenance | Frees the task's service ports |
-| `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg (`kernel` for test, `session` for a review or docs session, `manual` in older rows; docs and review add `kernel`, with no turn: the runner's `changes` when the candidate's tree holds `.valor`, or for review when its setup leaves `.valor`, `.pi`, or no checkout, or the kernel meets an error reading or writing the checkout after setup; for docs it names no judgement either), model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`, and, when a breadth judgement was given, `breadth` (its `judgement_id`, actions, abstained, model, `usd_micros`, `guard_id`); review and docs add the governance answer and its instances (id, path, line, function context, summary, incident, mission item), and, when governance judgements were given, their ids and `undecided` (each hunk the judgement abstained on, found too large for both legs, or both legs failed on: id, path, why, and the reviewer's answer, null on a docs or `kernel` verdict); a review recorded by a session adds `reviewer_verdict` (the reviewer's `pass` or `changes`, from which the kernel computes the verdict), `predicted_failure` (read by the audit scores as the forecast their Brier score is taken on), and `requirements`, and one recorded by a session or the kernel adds `verify`, the id of the `verify.ran` row it read; docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
-| `core/fresh.py` | `review.compared` | a review at a seat other than the registered one: seat, model, the candidate, the computed verdict, `reviewer_verdict`, findings, instances, `predicted_failure`, `verify`, `turn_id`, `usd_micros`. Information only: the fold never reads it | Evidence "Independent checks" |
+| `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg (`kernel` for test, `session` for a review or docs session, `manual` in older rows; docs and review add `kernel`, with no turn), model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`, and, when a breadth judgement was given, `breadth` (its `judgement_id`, actions, abstained, model, `usd_micros`, `guard_id`); a review recorded by a session adds `reviewer_verdict` (the reviewer's `pass` or `changes`, from which the kernel computes the verdict), `predicted_failure`, and `requirements`; docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
+| `core/fresh.py` | `review.compared` | a review at a seat other than the registered one: seat, model, the candidate, the computed verdict, `reviewer_verdict`, findings, `predicted_failure`, `turn_id`, `usd_micros`. Information only: the fold never reads it | Evidence "Independent checks" |
 | `core/fresh.py` | `advice.given` | the advisor's answer to a working turn's `.valor/advice.md`: `asked_turn_id`, seat, model, the head it read, `usd_micros`, `advisor_turn_id` when its turn ran, and `answer`, or `error` naming why there is none (a failed or empty turn, a checkout it could not make, an answer Postgres jsonb refuses, with the reason). The working session's next turn opens with it, quoted; the fold never reads it | Tom's ruling of 2026-10-09: second opinions go to the advisor |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
 | `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
 | `core/outcomes.py` | `delivery.used` | `used_id`, `delivery_event_id` (the `task.delivered` row it names: the one the task's latest done merge carried, else the latest, or the one `--delivery` names), the candidate, `effect_id` and `head_sha` of the done merge that carried that delivery (null with none), note, provenance (`by` names who used the work). Written only by `python -m core used`; the fold ignores it. A role-played mark is listed and not counted as use | Evidence "Working results in real use" |
-| `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`, `governance_refused`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions, the instances awaiting Tom's tap. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
-| `core/guards.py` | `guard.granted` | `guard_id`, name, incident, mission items, `granted_at`, `expires` (ninety days on), Tom's note, provenance; on a task also `instance_id`, path, and the candidate it was granted on. A grant Tom kept past an expiry sweep also carries `kept` (the earlier grant's id), and its `instance_id` is the earlier one plus `+` and the new guard id, since a task holds one grant row per instance id; it sits on the earlier grant's own task. The seeded guards sit on the `guards` stream | The governing constraint |
-| `core/audit_sample.py` | `audit.labelled` | on the `audit` stream: `task_id`, `candidate_sha`, `label` (`pass` or `changes`), note, provenance. Real when `role_played` is false, whatever `by` names; the latest real label on a candidate is in force. A label of a reverted merge's candidate is read from git when the scores are asked for and is never a row | Evidence "Independent checks" |
-| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts): an effect a bridge performs, waiting for that bridge | An effect is performed by its owner |
-| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason; when jsonb refuses the request's fields, only `effect_id`, effect class, `adds_governance`, `payload_sha256`, `request_id` and a reason naming Postgres's refusal; `at: release` when the bridge's release was refused (a stopped task, no performer, a performer's refusal); `at: migrate` for an effect the migration found held for an approval, with the reason that it is to be requested again | Bounded authority |
+| `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
+| `core/guards.py` | `guard.granted` | `guard_id`, name, incident, mission items, `granted_at`, `expires` (ninety days on), Tom's note, provenance; the seeded guards sit on the `guards` stream | The governing constraint |
+| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key: an effect a bridge performs, waiting for that bridge | An effect is performed by its owner |
+| `core/broker.py` | `effect.refused` | as `effect.held`, plus reason; when jsonb refuses the request's fields, only `effect_id`, effect class, `payload_sha256`, `request_id` and a reason naming Postgres's refusal; `at: release` when the bridge's release was refused (a stopped task, no performer, a performer's refusal); `at: migrate` for an effect the migration found held for an approval, with the reason that it is to be requested again | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`). No code writes it; the attention fold reads the rows a ledger holds | Attention spent |
-| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, the action (`action_type`, target, payload, `payload_sha256`, `effect_class`), `adds_governance`, and `request_id` when the request had one. Older rows also hold an `approval_id`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
+| `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, the action (`action_type`, target, payload, `payload_sha256`, `effect_class`), and `request_id` when the request had one. Older rows also hold an `approval_id`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error; a performer's answer jsonb refuses is written with an empty result and an error naming Postgres's reason | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance, and `memory_record` when it confines a memory record to its client | Corrections are first-class and carry provenance |
 | `core/memory.py` | `memory.marked` | on the `memory` stream: `record` (`<ledger>/<key>`), provenance | Valor's judgement that a record is a standard of working, kept through a rebuild of the store |
@@ -222,7 +221,6 @@ the kernel code does.
 | `events_one_reaction_result` | `payload->>'reaction_id'` | `reaction.placed`, `reaction.failed` | One reaction placed twice, or both placed and failed |
 | `events_one_release` | `payload->>'effect_id'` | `release.requested` | One effect released twice |
 | `events_one_guard` | `payload->>'guard_id'` | `guard.granted` | A guard granted twice |
-| `events_one_instance_grant` | `(task_id, payload->>'instance_id')` | `guard.granted` with an instance | One governance instance granted twice on a task |
 
 ### Verdicts refused at write
 
@@ -259,8 +257,9 @@ have.
 
 Session locks (`pg_advisory_lock`, held on a connection until it closes or
 the process dies) name the processes that must be single:
-`kernel:<machine>` (the resident kernel), `turn-slot:<machine>` (one
-harness turn at a time), `bridge:<channel>:<machine>`, `run:<task>`,
+`kernel:<machine>` (the resident kernel), `turn-slot:<machine>:<i>` (`i` below
+`max_turns`, one per concurrent
+harness turn), `bridge:<channel>:<machine>`, `run:<task>`,
 `services:<task>` (the task's Postgres and Redis, held by whoever started
 them until it stops them, so no sweep stops them meanwhile),
 `provision:<task>`, and `workspace:ports`.
@@ -303,7 +302,7 @@ returns nothing only when the platform can no longer record the send, and
 raises `Unknown` while it still might. Present is written `done`,
 absent `failed`. Unknown writes nothing, and the effect stays in flight. For `email.send` the target is Sent Mail: present is a message there with the effect's `Message-ID`; a miss, or a mailbox that cannot be read, is unknown, since Gmail files a sent message after a delay no document gives, so an `email.send` in doubt is never written `failed` by reconcile. Either outcome is marked `reconciled`. The router does this for a
 task's merge on its next run; other dangling intents stay listed by
-`tasks.audit` (`docs/architecture.md`, the broker).
+`tasks.audit` (`docs/architecture.md`, Stop).
 
 ## State is a fold over events
 
@@ -311,7 +310,7 @@ The kernel stores no status field. A task's state is computed by reading
 its stream in `id` order and folding: `core/machine.py`, `fold`, gives the
 state machine's state (one of eleven; `docs/sdlc-state-machine.md`), and
 `core/tasks.py`, `status`, returns it with the plan, loop counts, the
-current candidate and its checks, the governance instances, metered
+current candidate and its checks, metered
 spending (charges and open calls), every turn and its
 outcome, every effect and its state, the latest delivery, and the
 attention log. The harness session a turn resumes is folded the same way,
@@ -342,9 +341,7 @@ before approvals carried provenance hold only a top-level `by` and read
 `via` and `role_played` as null, with `at` from the row's own column. The
 rule is that the reader carries the old shape forward, never a migration
 over the ledger. A table change is additive (a nullable column, a new
-index) and rewrites no row; `tests/test_migrate_history.py` applies one to
-a copy of the kernel database and checks every row's `xmin` and each
-table's file node.
+index) and rewrites no row.
 
 **Scale.** Folding a whole stream on every read assumes a task's stream
 stays small. The demonstration's task, four turns and three deliveries,
@@ -414,7 +411,7 @@ as project manager). `tasks.status` counts each kind apart in
 `attention_counts` (total, role-played, unknown), so approvals never add to
 the questions and feedback counted as interruptions. The `by` on rows
 written before this shape is unreliable: every earlier approval says
-`tom`, those the replay driver wrote included.
+`tom`.
 
 The attention cost of a task is counted in the design
 (`docs/architecture.md`, The attention log); the attention it spent is the
@@ -431,7 +428,7 @@ four reasons that follow from the constraints:
    is the thing the constraint forbids. Facts that change are new events;
    facts that never change are documents.
 2. **Integrity lives where the decision is made.** Whether an answer has an
-   open question to answer, whether a merge's verdicts and grants are on
+   open question to answer, whether a merge's verdicts are on
    its candidate, whether a task can take feedback: the kernel checks each
    against the fold, under the task's lock, in the transaction that writes
    the row. A foreign key could check only that an id exists, which is the
@@ -441,7 +438,7 @@ four reasons that follow from the constraints:
 3. **New facts need no migration.** A new event type or document kind is
    a new string. Feedback, provenance, and `role_played` needed no schema
    change; the one index beyond the first schema is correction numbering,
-   and the demonstration and thirteen replay runs ran on it
+   and the demonstration and thirteen baseline runs ran on it
    (rebuild-baseline.md).
 4. **Nothing cascades.** There is no delete to cascade and no row whose
    removal could orphan another.
@@ -509,23 +506,15 @@ different clusters, and a turn cannot reach the kernel's.
   and `pg_read_all_settings` for `SHOW data_directory`. Never the roles
   that reach the server's files or run its programs.
   Each task the kernel provisions gets one of its own on a port from 5440
-  to 5599 (replays included); the demonstration's ran on `127.0.0.1:5439`.
+  to 5599; the demonstration's ran on `127.0.0.1:5439`.
 - The turn's sandbox denies port 5432 and the machine socket, the password
   file's directory, the machine cluster's data directory, and the backup
-  disk; it allows the workspace cluster's port and denies the workspace
-  cluster's data directory. `tests/test_demo_sandbox.py` probes it: the
-  gateway reachable at any port, 5432 and its socket refused, the
-  password file, `pg_hba.conf`, and the dumps unreadable and unwritable.
-  `tests/test_credentials.py` shows a login without the password refused
-  on a scratch cluster secured the same way.
-
-How the sandbox is built, and which work runs under `sandbox-exec` and
-which in an Apple container, is `docs/sandbox.md`'s.
+  disk ([workspace.md](workspace.md)).
 
 **What is met, and what still rests on the sandbox.** Met: no role logs
 into a kernel database without the password, and a workspace turn can read
 neither the password file, the cluster's data directory, nor the dumps,
-because every workspace turn runs under a sandbox profile
+because every workspace turn runs under the sandbox profile
 (`harnesses/claude_code.py`, `workspace_turn`, refuses a task without
 one). A bare `turn` runs under no profile and has no tools; it must not be
 given tools without one. Still on
@@ -552,16 +541,12 @@ role password, password file, or `pg_hba.conf`, so a test run leaves the
 machine cluster's credentials as it found them; the credential tests run
 `secure_login` only on scratch clusters.
 
-The rule from `tests/README.md` applies: real Postgres, no mocks, and every
-test marks its live spend (`@pytest.mark.spend(usd=...)`, declared in
-`pyproject.toml`). The ledger tests spend nothing.
+The rule from `tests/README.md` applies: real Postgres, no mocks. The
+ledger tests spend nothing.
 
 The test database shares the kernel's cluster, so it is out of a turn's
-reach by the same sandbox rule. `tests/test_live_turn.py` and
-`tests/test_live_session.py` run real `claude -p` turns through the
-gateway, declare their spend, and run only with `VALOR_LIVE=1`, so a plain
-test run spends nothing; `tests/test_gateway_meter.py` meters a successful
-call in every run by replaying a recorded provider response.
+reach by the same sandbox rule. `tests/test_gateway_meter.py` meters a successful
+call in every run against a scripted provider response.
 
 ## Memory
 

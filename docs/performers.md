@@ -6,7 +6,7 @@ A performer is a Python class with an `action_type`, a fixed
 `effect_class`, and the coroutines `perform` and `lookup` (by idempotency
 key). It may define `async refuse(conn, action)`, checked at request and
 again at release. It runs in the kernel process, outside the turn's
-sandbox, which is what lets it write a remote the turn cannot. Git runs in a
+sandbox. Git runs in a
 worker thread, so the gateway's streams never wait on a push. The composition
 root builds a `broker.Performers` for each task from its Brief and passes it
 to every broker call, so one task's performer never acts for another.
@@ -21,17 +21,12 @@ Status: **in use**.
 
 - **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to
   one branch of the workspace's origin over git, never with `--force`,
-  tags, submodules, or a signature. Git is the Command Line Tools' install
-  (`VALOR_GIT` overrides), checked before each call to be root's alone and
-  a real install, never Apple's `/usr/bin/git` shim (`core/binaries.py`),
-  with a system-only PATH, no `DYLD_*` or global config, git in its own
-  process group, run until it exits and killed whole when its caller is
+  tags, submodules, or a signature. Git is found on `PATH` (`VALOR_GIT`
+  overrides) and run by absolute path (`core/binaries.py`), with a system-only PATH, no `DYLD_*` or
+  global config, git in its own process group, run until it exits and killed whole when its caller is
   stopped or interrupted, its output in files the kernel holds so a call
   ends when git exits, with replace
-  refs, grafts, commit-graph, and multi-pack-index ignored, and hooks,
-  helpers, pagers, and transports pinned off, and refuses a workspace whose
-  own config names a program, redirects a push, sets any `push.*` or
-  `http.*`, or includes other config, because that config is the turn's to write (`core/git.py`). `lookup`
+  refs, grafts, and the commit-graph ignored and `core.hooksPath` off (`core/git.py`). `lookup`
   answers present (the branch holds the commit, at its tip or below),
   absent, or unknown; `broker.reconcile` uses it to settle a dangling merge
   intent: the intent row holds the whole action, so reconcile rebuilds what to look up from it. It pushes to the task's `push_url` (else the origin URL recorded
@@ -79,6 +74,7 @@ known yet.
 | OpenAI, by `openai-key` | this install | model calls on the OpenAI route | no; the gateway | `gateway.opened` and `gateway.charged` per call |
 | TypeSafe (Jev) and OpenRouter, by `judgement-keys` | this install | judgement calls from the kernel | no; the gateway | `gateway.opened` and `gateway.charged` with `route: judgement`; `judgement.answered` or `judgement.failed` |
 | Claude Code's login in the login keychain, read by a turn through `security` | this install | a model call around the gateway | no | none beyond the turn's own transcript. **Gap**, accepted by Tom on 2026-10-01 ([architecture.md](architecture.md), Limits) |
+| Valor's own `gh` login, git credential helper, SSH agent, and `sentry-cli` auth | this install | whatever the account allows, from a turn: pushes to the task's origin, pull requests, issue and Sentry reads | no | none beyond the turn's own transcript. **Gap** |
 | Any other account logged in on the Mac, in the login keychain or a browser session | this install | whatever the account allows, from a turn | no | none beyond the turn's own transcript. **Gap** |
 | Stripe | per business, not yet granted | | | |
 | Google Analytics | per business, not yet granted | | | |

@@ -56,7 +56,7 @@ prompt, for a harness that reads it there), stdout and stderr on pipes, and
 a new process group. The kernel copies both pipes at once, whole, into the
 turn's two output files until EOF, which comes once the reap has ended every
 process of the turn. The harness never holds the files themselves: they sit
-under the work dir, which every turn profile denies, and node aborts at
+under the work dir, and node aborts at
 startup when its stdout or stderr is a file at a path it cannot read. It then
 waits for whichever comes first: the
 process exits, or a stop notification for the task arrives from Postgres. On
@@ -65,8 +65,7 @@ SIGKILL to the whole process group, waits for every call to be charged, and
 writes `turn.ended` with outcome `stopped`. Nothing inside a turn is trusted
 to honor a gentler signal, and nothing the turn owns lives only in the
 process, so the stop loses nothing. The off switch is the kernel's, never the
-model's incentive [8, 9, 10]. `tests/test_live_turn.py` runs one real turn
-through the gateway and a real stop mid-stream.
+model's incentive [8, 9, 10]. `tests/test_serve.py` stops a task mid-turn.
 
 `turn.ended` carries the outcome (`done`, `failed`, `stopped`), the return
 code, the parsed result, the paths of the turn's whole stdout and stderr
@@ -74,10 +73,9 @@ code, the parsed result, the paths of the turn's whole stdout and stderr
 write), and the metered total for the turn, the numeric sum of the charges
 on its calls. A failed turn's status line names its stderr file.
 
-One harness turn runs at a time on the machine. The baseline series ran three replays at once under
-slot locks on a 64 GB machine (rebuild-baseline.md, Infrastructure); the target is a 16 GB MacBook
-Air, where Postgres, the bridges, and one `claude -p` share the RAM. The RAM a turn takes is
-`docs/machine.md`'s to state.
+At most `settings.max_turns` harness turns run at once on the machine (default 2), each holding one
+turn slot. The target is a 16 GB MacBook Air, where Postgres, the bridges, and two `claude -p`
+turns share the RAM. The RAM a turn takes is `docs/machine.md`'s to state.
 
 ## The Claude Code wrapper
 
@@ -190,25 +188,20 @@ an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
 
 The kernel's support today: the working session for every row above, and
-critique as a fresh session (`core/fresh.py`): a blind checkout of the base's
+critique as a fresh session (`core/fresh.py`): a worktree of the base's
 and the plan's trees as two kernel commits from the mirror, inputs under
 `.valor/inputs/`, its own profile, `TMPDIR`, and Claude Code config, the
 verdict channel (`skills/sdlc/verdict.md`) in its Brief, and its verdict
 as its final message. Docs runs the
 same way in its own clone (`fresh.docs_runner`). Review
-(`fresh.review_runner`) runs in a set-up checkout with fresh Postgres and
-Redis, the kernel's suite and lint run in VMs (`verify.ran`) among its
-inputs.
+(`fresh.review_runner`) runs in a worktree of the candidate with fresh Postgres and
+Redis.
 The reviewer runs the candidate's code, and a process that code leaves
 running can rewrite any file in the checkout until the turn is reaped, so
 each stage's verdict is the session's final message, read from the turn's
 result on the harness's stdout, which no process the session starts holds
 (`fresh.final_verdict`).
-Its setup runs under a profile that writes the checkout, its caches,
-and its own `setup-tmp/`, never a `.git` in the checkout or the checkout
-directory itself, and reads the services' password file, so the candidate's setup cannot write the session's Pi or
-Claude Code directory, its `TMPDIR`, or the repository whose config and
-commit subjects Claude Code reads at start.
+Its setup runs under the turn profile.
 Review and docs are registered in the kernel's `runners()`.
 
 Each prompt is followed by what did not count from the previous turn (`errors` on its
@@ -240,8 +233,8 @@ tokens against 35,113 output tokens. Delivery 2 resumed over an hour after deliv
 When it nears the model's context limit it is compacted in place, by
 Claude Code's own compaction, and resumed; it is never swapped for a fresh
 session seeded with a summary. The demonstration and the baseline ran on
-resume throughout (rebuild-baseline.md, Aggregate). Measured live
-(`tests/test_compaction_live.py`): Claude Code's calls fell from 947,155
+resume throughout (rebuild-baseline.md, Aggregate). Measured live:
+Claude Code's calls fell from 947,155
 input tokens to 75,066 at its compaction; Pi's, in `docs/pi.md`.
 
 ## The signal channel: `.valor/`
@@ -257,7 +250,7 @@ workspace, which the kernel reads when the turn ends:
 |---|---|---|
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
-| `.valor/advice.md` | clarify, plan, build, or patch: a question for a second opinion, with its evidence | counts only from an `idle` turn with no other stage signal beside it; the advisor (`fresh.advise`), a blind fresh session on the other vendor's seat, answers in its final message, recorded as `advice.given`, and the next turn opens with the answer, quoted. The working session decides |
+| `.valor/advice.md` | clarify, plan, build, or patch: a question for a second opinion, with its evidence | counts only from an `idle` turn with no other stage signal beside it; the advisor (`fresh.advise`), a fresh session on the other vendor's seat, answers in its final message, recorded as `advice.given`, and the next turn opens with the answer, quoted. The working session decides |
 | `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan is an error, with no `plan.written`, if: the file lacks `path` or `critique_rounds` or `review_rounds`; `path` is not a string; `critique_rounds` or `review_rounds` is not an integer (booleans are not accepted), or is out of range (each must be 0, 1, or 2; a `review_rounds` of 2 is recorded and read as 1); `stakes` (if present) is not a string; `scope` (if present) is not a list; the workspace is not a git repository, the path cannot be passed to git, git itself fails while reading the repository (the error is git's own text), or the plan is not committed at HEAD or is changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD and made in the kernel's `output/` directory, which no task profile reaches, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's). |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one the `turn.collected` row cannot hold (below), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
@@ -318,7 +311,7 @@ one is a deliberate tool call that survives whatever prose follows it, and a
 turn killed midway leaves what it wrote readable. The text of the channel is `skills/sdlc/channel.md`, carried in every
 workspace turn's Brief; it lists the effects the task's own performers
 offer (each performer's `usage` line; the merge offers none) and says
-pushing any other way is unavailable, which the sandbox makes true. The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
+pushing any other way is unavailable. The text inside a signal file grants nothing. A question is shown to Tom; an effect request is classified and bounded by the broker against the task's ceiling. The turn's own words never decide what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is
@@ -368,11 +361,9 @@ The wrapper points the harness at the gateway with `ANTHROPIC_BASE_URL`, carryin
 in the path. Claude Code sends every call through that base URL: the main loop, its own side calls,
 and any subagent it starts inside the turn. The demonstration's 69 model calls all passed the
 gateway, and the gateway and the harness agreed on the total (rebuild-demonstration.md, Money). The
-gateway checks each path as it arrived, undecoded, and forwards it byte for byte; a percent escape,
-a backslash, or an empty, `.`, or `..` segment is a 400. A turn's own Claude Code config directory
+gateway forwards any path on the route byte for byte, and meters `POST v1/messages`. A turn's own Claude Code config directory
 holds no login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`), and the gateway sets the
-kernel's credential, only on `v1/messages`, its `count_tokens`, `v1/models`, and `v1/models/<id>`
-(letters, digits, `.`, `_`, `-`), refusing any other path with a 403: a long-lived token in the
+kernel's credential on every call: a long-lived token in the
 kernel key directory when one is there, else the machine's Claude Code login read from the Keychain
 at most once a minute (the first 401 after a read allows one more, even when the client has already left). A login is used until its stated
 expiry. The kernel never refreshes the login, and an expired one fails the call naming the remedy.
@@ -398,138 +389,36 @@ Two points the harness relies on and has to keep true:
 
 - **Every call takes the base URL.** A harness that reaches a provider by
   another path would spend outside the meter. For Claude Code this held in
-  every run so far; the sandbox does not enforce it, since a turn reaches
-  the public internet (see the sandbox below).
+  every run so far; nothing enforces it, since a turn reaches
+  the public internet.
 - **Corrections reaching subagents.** The Brief, corrections included, is in
   the system prompt of the main session. A subagent Claude Code starts
   inside a turn (`cc_is_subagent=true` on its requests) gets Claude Code's
   own subagent system prompt and only the prompt the parent wrote, so the
-  Brief and the corrections in it stop at the main session. The contract
-  suite pins this (`test_corrections_do_not_reach_a_claude_code_subagent`).
+  Brief and the corrections in it stop at the main session.
   **Gap**: the plan says corrections reach every agent; for Claude Code
   subagents they do not. Pi starts no subagents.
 
 ## The turn sandbox
 
-Serves the constraint **bounded authority, metered spending** (a turn cannot perform an effect
-except through the broker), the constraint **a ledger the system cannot edit**, and the Evidence
-item **independent checks** (a replay cannot read its answer). The stance is AI Control's: the
-protocol holds even if the model tries to get around it [4].
+Serves the constraint **a ledger the system cannot edit**: the kernel's ledger, key directory, and
+backup stay out of a turn's reach.
 
-A workspace turn runs under a sandbox-exec profile written for its workspace
-by `core/workspace.py` (every task the kernel provisions, replays
-included). The profile starts from `(allow default)` and denies what a turn
-must not reach. It runs as the Mac's one macOS user.
+A workspace turn runs under one sandbox-exec profile (`turn.sb`) written for its workspace by
+`core/workspace.py`, as the Mac's one macOS user. The profile starts from `(allow default)` and denies
+four things:
 
-### Files
+- the kernel key directory (`pg_passfile`'s), the effect lock and output files directory
+  (`performing_dir`), the machine cluster's data directory (`pg_data_dir`), and the backup disk
+  (`backup_dir`), read and write, as written and with symlinks resolved;
+- renaming any directory above those paths;
+- the machine cluster on loopback: port 5432 and its unix socket;
+- the mach name `valor.turn.<VALOR_TURN>`, which marks every process of the turn for the reaper.
 
-- **Denied, read and write:** `~/src` (the checkouts on the Mac, which hold the
-  answers), `~/work-vault`, Desktop, Documents, Downloads, Dropbox, iCloud and
-  cloud storage, Mail, Messages, `~/.ssh`, `~/.config/gh`, Claude Code's
-  `~/.claude/projects` and `history.jsonl`, and the whole work directory
-  (`work_dir`), other tasks included.
-- **Allowed back, read and write:** for the working session (`turn.sb`), its
-  clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config), and
-  the project's knowledge base, `~/work-vault/<knowledge_base>` when the spec
-  names one (`VALOR_KNOWLEDGE_BASE` in its environment). A replay's working
-  session never gets it, since the folder may hold the reasoning behind the
-  decisions the replay is scored against, as `~/src` holds the answers; `start
-  --replay` drops the field. With `/private/tmp`, `/private/var/tmp`, and `/private/var/folders` denied,
-  so no two tasks share a temp directory; for a fresh session, its own check
-  directory, the same three and `~/.claude*` denied. Its `UV_CACHE_DIR` is
-  `tmp/uv` and its `UV_PYTHON_INSTALL_DIR` is `tmp/python` in that directory,
-  since `~/.cache/uv` and `~/.local/share/uv` are write-denied. The emulator's
-  verification shares the temp directories and adds its tree, as its baseline did.
-- **Read only:** the shared `bin/` (uv, and the kernel's `mktemp`, which hands
-  macOS `mktemp` the turn's `TMPDIR` when it is given no directory and no
-  template, reading its arguments as macOS `mktemp` does), first on the
-  turn's `PATH`, then the trusted git's directory, so `git` and `python3` are not `/usr/bin`'s shims,
-  which cache in the user temp directory, and, for a project with the
-  `postgres` service, Postgres's own bin directory last (`pg_config`, which
-  a driver such as psycopg2 builds with; Homebrew links only `pg_config-18`); for the working session, its task's
-  `home/` and bare origin. **Stat only:** the allowed directories'
-  ancestors (not listable), so real paths resolve. A fresh session's profile
-  also lets it read the metadata, never the content, of the output files the
-  kernel opens for its steps beside the check directory
-  (`<check directory>.<step>.out`, as written and resolved). Those files are
-  the step's stdout and stderr, and pytest takes a descriptor it cannot
-  `fstat` for closed, so without that read it loses all its output.
-- **Denied entirely:** the kernel's own paths, each named by its setting: the
-  kernel key directory (`pg_passfile`'s), the effect lock and output files
-  directory (`performing_dir`), the machine cluster's data directory
-  (`pg_data_dir`), and the backup disk (`backup_dir`).
-- **Above every denied path:** each directory above a path any rule denies,
-  up to but not including `/`, is denied as itself (not its entries), as
-  written and with symlinks resolved. Otherwise renaming `~/.config` would move the kernel key directory to a name no rule
-  covers, where a turn could read it, and renaming `~/.local` would let a turn
-  put its own `bin/claude` in its place; a disk image mounted over a denied
-  directory would do the same. Entries inside those directories stay writable
-  (`~/.config/<app>`, `~/Library/Caches/<x>`). A directory above a denied path
-  that does not exist when the profile is written cannot be made by a turn.
-  On this Mac each one exists except the backup disk's mount point while the
-  disk is out, which only macOS makes, in root's `/Volumes`; nothing a turn
-  needs lives under any of them.
-- **No mount, no `open`:** a turn can make no mount call and cannot reach
-  `diskarbitrationd`, so `hdiutil attach` and `diskutil mount` mount nothing,
-  with or without a mount point. Otherwise a turn that unmounted the backup
-  disk could mount its own image at `/Volumes/<label>` under the disk's label
-  and catch the next dump. `open` would hand a disk image, or an app the turn
-  wrote, to a process outside the sandbox; the profile denies the Launch
-  Services database (`com.apple.lsd.*`), the quarantine resolver, and Apple
-  events, without which `open` and AppleScript launch nothing.
-  `launchservicesd` itself stays reachable, since Claude Code hangs without it.
-
-### Loopback connects, and rule order
-
-A turn reaches the public internet, so package installs work. On loopback it
-reaches only the gateway (at whatever port the OS gave it, passed in as
-`GATEWAY_PORT`), its own task's service ports (none for critique), and dev
-servers on 8000 to 8009. The machine's own Postgres (5432 and its socket, which hold the
-kernel's ledger) and Redis (6379) are out of reach.
-
-**Denies come first and allows last.** sandbox-exec refused allowed loopback
-ports for roughly two in five port numbers whenever any network-outbound rule
-followed the allow block. The demonstration's second turn failed with
-"Unable to connect to API (EPERM)" because its gateway drew such a port; the
-first turn's port happened to work (rebuild-demonstration.md, Kernel
-findings 3). The profile opens with a deny of all of loopback and the
-machine Postgres sockets, then allows the gateway, the task's services, and
-the dev ports. `tests/test_demo_sandbox.py` expands both profiles and probes
-them under the real sandbox-exec at 24 OS-assigned gateway ports.
-
-### Binding
-
-A turn may listen only on 8000 to 8009 and on unix sockets inside the
-directories it may write.
-sandbox-exec matches a bind rule on the port alone: `localhost:8001` admits
-`0.0.0.0:8001`, `[::]:8001`, and the LAN address, and a literal address does
-not parse. So the dev ports are reachable from the LAN while something
-listens on them, which lasts only as long as the turn (see reaping). Every
-other port, on every address, is refused. The bind rules sit before the
-outbound denies, keeping the outbound allows last.
-
-The bind rules exist because of an incident: during the parallel baseline series, popoto's test
-setup daemonized redis-servers that outlived their turns, one on `*:6379` open to the LAN beside the
-production Redis, one on a socket in `/tmp`, and one on `*:6390` (commit 76b164458, "Keep a turn
-from listening beyond its dev ports and reap what it leaves running").
-
-### Processes and credentials
-
-- git's keychain credential helper (`git-credential-osxkeychain`) cannot be
-  executed. The turn's git config names Valor as author and has no
-  credential helper; gh's config directory is empty, so gh is
-  unauthenticated.
-- The profile denies the mach name `valor.turn.<VALOR_TURN>`, which marks
-  every process of the turn for the reaper.
-- Every profile denies Apple's `container`: its CLI, API server, and
-  `/usr/local/libexec/container/`, its `com.apple.container.*` mach names,
-  its data directory, and plists named like its launch agents in
-  `~/Library/LaunchAgents`. Only the kernel starts VMs.
-
-### Known openings
-
-The openings the sandbox leaves, and what the kernel runs outside it, are in
-[sandbox-openings.md](sandbox-openings.md).
+Everything else on the Mac is open to a turn: the public internet, loopback, its own task's services,
+dev servers on any port, and the operator's files. The one incident behind the four denies is the
+demonstration's Postgres trust hole (rebuild-demonstration.md, Kernel findings 1). The services of a
+task run under the same profile marked `valor.service.<task id>` ([workspace.md](workspace.md)).
 
 ## Reaping what a turn leaves
 
@@ -557,7 +446,7 @@ A task's services, marked `valor.service.<task id>`, stop when its run returns; 
 resident kernel they stay up between steps and stop when the task waits on Tom, reaches merge, or
 is stopped. After a killed kernel, the next run of any task, if `workspace:ports` is free, stops those of tasks whose run is
 not live and of row-less task directories whose provisioning (`provision:<id>`) is not live
-(`services.reaped`). The replay judge's commands run under `turn.sb` with their own mark.
+(`services.reaped`).
 
 ## The workspace
 
@@ -574,8 +463,7 @@ it collects the turn. [browser.md](browser.md) specifies it.
 ## Pi, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`
-mark (`docs/pi.md`). Every harness meets `tests/test_harness_contract.py`,
-run against its real binary. Codex has not been run here.
+mark (`docs/pi.md`). Codex has not been run here.
 
 The gateway meters two formats: Anthropic's Messages API, and OpenAI's
 Responses API at `<gateway>/t/<token>/openai/v1` (architecture.md, Metered

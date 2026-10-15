@@ -19,21 +19,15 @@ screens never enter one. Interaction (clicks, forms, logins) is not part of it.
 
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
-newest in the cache. Every turn profile denies writes to that cache, since
-the user's own Playwright runs outside any sandbox read it. A turn that
+newest in the cache. A turn that
 installs Playwright into its own project sets `PLAYWRIGHT_BROWSERS_PATH` to
 its task cache.
 
 **Sandbox.** Chromium's own sandbox cannot start inside a turn's sandbox-exec
 profile: the GPU process exits with "sandbox initialization failed: Operation
 not permitted" and the browser aborts. `look` runs it with `--no-sandbox`.
-That is acceptable because the turn's profile already bounds the process:
-outbound internet and mach services are open to the turn anyway, loopback is
-limited to the dev ports, the gateway, and service ports, and the turn can
-load any page with its other tools. No profile line changes for the browser.
-Under a fresh session's profile, which denies `/private/tmp` and
-`/private/var/folders`, `look` runs with its user data directory under the
-session's own tmp.
+The turn's profile denies four paths and the machine cluster on loopback, and nothing else, so the
+browser reaches whatever the turn's other tools reach.
 
 **What the kernel records.** When it collects a turn, the kernel moves each
 entry in `.valor/screens/` to `.valor/handled/<turn_id>/screens/` first, by
@@ -58,7 +52,5 @@ one.
 
 **Memory.** Peak resident memory of the browser's process tree over five
 renders of a Django admin login page: 330 to 372 MB ([machine.md](machine.md)).
-
-The emulator can score the UI items (#894, #872, #893) once it exists.
 
 Part of the workspace specified in [harnesses.md](harnesses.md).
