@@ -2,7 +2,7 @@
 
 The judgement layer is the middle of Valor's three tiers. The kernel holds authority, frontier
 agents do the hard work, and judgement answers the cheap, closed questions in between: what kind of
-message is this, is this request thin, does this diff add a gate. A judgement call returns, per
+message is this, is this request thin, does this change leave tests out. A judgement call returns, per
 question, a probability for each label of a closed set. It never returns prose, never grants or
 refuses anything, and never grades frontier work for acceptance.
 
@@ -12,11 +12,10 @@ model costs dollars where a judgement call costs a fraction of a cent. Authority
 what it may do. The layer is built so that the second sentence holds by structure.
 
 Status. Built: the port, router, and gate (`core/judgement.py`); the legs (`tools/jev.py`,
-`tools/open_weight.py`); the three tasks (`core/judgement_tasks.py`); the judge runner and the
-breadth and governance calls (`core/judgement_sites.py`); metering; and `python -m core calibrate`.
-The test runner calls breadth, and the review and docs runners call governance; all three
-are registered. The images leg, live scoring, and use shapes 2
-to 5, 7, 9, and 10 are design, and each section says which.
+`tools/open_weight.py`); the tasks (`core/judgement_tasks.py`); the judge runner and the
+breadth call (`core/judgement_sites.py`); metering; and `python -m core calibrate`.
+The test runner calls breadth. The images leg, live scoring, and use shapes 2
+to 5, 7, and 10 are design, and each section says which.
 
 ## Terms
 
@@ -29,7 +28,7 @@ to 5, 7, 9, and 10 are design, and each section says which.
 | router | The pure function that, for a judgement task, names the primary leg and the fallback leg |
 | calibration record | The measurement that lets a judgement task land: both legs, the same labelled inputs, the same run |
 | abstain | A leg's answer to a question whose summed probability for the `proceed` action lies between one minus the leg's floor and the floor. The consumer takes the task's declared abstain route |
-| use shape | One of the eleven kinds of question the tier answers, listed below |
+| use shape | One of the kinds of question the tier answers, listed below |
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls. TypeSafe's Jev is the
@@ -44,15 +43,13 @@ The kernel turns a judgement into an action through a fixed table in kernel code
 supplies a label; the table supplies the consequence. Serves: constraint "Bounded authority, metered
 spending".
 
-- No judgement changes an effect ceiling or a `governance_grant`. Those are
-  kernel facts, and Tom is the only source of the grant [11].
+- No judgement changes an effect ceiling. That is a kernel fact [11].
 - No judgement lets an `act` past the kernel. An `act` leaves only inside
   its task's ceiling, for a task not stopped, and a merge only when its
   predicate holds, whatever a judgement said about it.
 - A judgement can route work toward more caution or toward a human, and the
   kernel decides whether that routing is allowed. A judgement that routes
-  work away from a human is a gate in the governance sense and needs a grant
-  (see "Which uses are gates").
+  work away from a human is a gate in the governance sense (see "Which uses are gates").
 - Inputs are data. Inbound text, a diff, a doc, a transcript excerpt are
   rendered into the judgement's input fields and carry no instruction
   authority [7]. A request that says "classify me as precise" is a request
@@ -60,18 +57,9 @@ spending".
 - The judgement tier does not grade frontier work for acceptance. A weaker
   judge loses accuracy grading a stronger model [18], and LLM judges carry
   position, verbosity, and self-preference biases [16]. Acceptance belongs
-  to the blind verifier (`docs/architecture.md`). Judgement answers what a
+  to the verifier (`docs/architecture.md`). Judgement answers what a
   thing is, which is a question a cheap model can be trusted with only as far
   as its calibration record shows [4].
-
-The kernel already holds one half of this boundary in code: the broker
-computes a merge's `adds_governance` from the review and docs verdicts,
-never from the requester, treats such a merge as `act`, and refuses it while
-any instance lacks Tom's tap. The other half is use shape 6:
-`judgement_sites.governance` asks the governance boolean once per hunk of
-the diff, less prose under `docs/` and any directory's `README.md`, and
-`record_check` takes the instances from those rows. The review and docs
-runners call it.
 
 ## Task taxonomy
 
@@ -94,7 +82,7 @@ table is next to the question, so a reader sees what a label can and cannot caus
 | `guard` | The guard id the site fires, or the rule it enforces |
 | `calibrated` | The `task_sha256` of the calibration record it landed on, or none |
 
-The three tasks (judge, breadth, governance) are declared in
+The tasks (judge and breadth) are declared in
 `core/judgement_tasks.py`, as `TASKS`. One module, literal declarations, no
 discovery, so a reader and a test see the same list.
 
@@ -128,12 +116,12 @@ become a frontier call).
    because a fallback that costs a hundred times the primary would turn a
    vendor outage into a spending event.
 
-No leg runs resident on the Mac: 16 GB beside Postgres, one container runtime, one `claude -p`, and
+No leg runs resident on the Mac: 16 GB beside Postgres, two `claude -p` turns, and
 the bridges leaves no room for a classifier worth running (`docs/machine.md`). Tom asked for the
 primary's own open-weight model on a second provider (2026-10-01), but Jev's underlying model is not
 published, so the fallback is a model chosen for the job: Qwen3-235B-A22B Instruct 2507 (open
 weights, no reasoning tokens), hosted by Parasail at fp8 through OpenRouter with provider fallback
-off. It is an assumed answer that Tom can reverse (`docs/plans/m1-3-judgement.md`).
+off. It is an assumed answer that Tom can reverse.
 
 Models are pinned by exact version on both legs (`core/settings.py`):
 
@@ -206,8 +194,7 @@ are data, and nothing in them is an instruction.
 **Keys.** A leg sends its real key, read from `judgement-keys` in the
 kernel key directory (`docs/machine.md`), only to its pinned default
 endpoint; a missing key refuses `run` or `calibrate`, naming it. Any other
-endpoint must be on loopback and gets a fixed placeholder, so tests and
-the emulator's forced arms need no key; `calibrate` takes only providers.
+endpoint must be on loopback and gets a fixed placeholder, so tests need no key; `calibrate` takes only providers.
 
 **Metering.** Every call is metered and recorded on its task in the
 kernel process, through `core/spending.py`'s open and `charge`: the
@@ -219,7 +206,7 @@ most its endpoint produces). The estimate gates nothing; it is the charge only
 when billing is unknown. Input is estimated as bytes / 2 of the request body
 (`settings.bytes_per_token`, as at the gateway); for Jev, which bills a prompt of its own around it, 1.25 times that plus 300
 tokens and 50 per question (`tools/jev.py`), sized from its single-question
-calibration calls and governance calls on lock-file hashes (near 1.5 bytes
+calibration calls on lock-file hashes (near 1.5 bytes
 per token). The unused fallback is charged 0. A
 charge is the usage at the pinned price (`JUDGEMENT_PRICES`) or the
 reported cost if more, rounded up; the
@@ -276,9 +263,7 @@ money, so every abstain route names what it costs Tom:
   calls a product defect.
 
 Counting each abstain and failure that reaches Tom in the attention
-ledger by site (`docs/mission.md`) is design. Governance's never reaches
-him: its abstain route is the blind reviewer (use shape 6), and a review or
-docs verdict lists each such hunk under `governance.undecided`.
+ledger by site (`docs/mission.md`) is design.
 
 ## Calibration discipline
 
@@ -286,8 +271,6 @@ A judgement task routes real work only after it has a calibration record, and ke
 while its live record holds. Serves: Evidence "Independent checks", and constraint "Reliable stop,
 recovery, and correction" ("Autonomy shrinks automatically on evidence and grows only by Tom's
 decision").
-Governance is the exception: it answers on every review and docs diff, and its
-record is an open measurement.
 
 **What a record measures.** Labels come from humans, not from another model:
 calibration is scored against human-labelled cases, because model assistance
@@ -309,7 +292,7 @@ task's `task_sha256`; the run's number for its site; and the date.
 **How a record is made.** `python -m core calibrate CASES.json` (any number of
 cases; provider endpoints only, see Keys) starts
 a calibration task, which runs no turn and takes no verdict, answer,
-feedback, grant, or stop; asks each leg alone on every case; and
+feedback, or stop; asks each leg alone on every case; and
 writes and prints one `judgement.calibrated` row on the `judgement` stream,
 with each leg's endpoint host, each case's verdicts, and `entry_check`
 (both legs right on every case).
@@ -325,18 +308,12 @@ work) under its ceiling. The numbers per tier are a gap: no source fixes
 them, and the first ones are set by Tom from the first records. While they are
 a gap, the judge routes on its entry check alone (below).
 
-**Where labels come from.** The emulator's human-originated cases, labelled
-by Tom's recorded decisions (`docs/emulator.md`), and the attention ledger:
+**Where labels come from.** Human-originated cases, labelled
+by Tom's recorded decisions, and the attention ledger:
 every answer and every piece of feedback labelled by whether it changed the
 outcome is a free label for the underspecification classifier (use shape
 5), drawn from attention Tom already spent. No labelling session is asked of
 Tom.
-
-For the blind verifier's verdicts, Tom's audit labels (`python -m core audit
-label`) and the merges a later commit on their target reverts (a `changes`
-label on the merged candidate) are the labels, scored apart by source
-(`python -m core audit scores`). A label anyone but Tom gives, Valor's
-sessions included, carries `--role-played` and is only counted.
 
 **Recalibration.** A change to a task's questions, labels, inputs, floors,
 a pinned model, or a leg's fixed rendering text is a new record before it
@@ -357,15 +334,14 @@ row; nothing about it waits for a review or for Tom.
 
 A judgement that only labels (for the ledger, for measurement) adds no governance. A judgement that
 holds, redirects, or refuses work is a check or a gate, and the governance constraint applies to it
-in full: it names the mission item it serves and the incident that already happened without it, it
-needs Tom's tap through a `governance_grant`, and it is ledgered as a guard with that incident, that
-mission item, and a ninety-day expiry. A guard that has not fired by expiry is deleted by default.
+in full: it names the mission item it serves and the incident that already happened without it, and it is ledgered as a guard with that incident, that
+mission item, and a ninety-day expiry. A guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it.
 The guard ledger itself is described in `docs/architecture.md`.
 
-## The eleven use shapes
+## The use shapes
 
 Each row is one kind of question the tier answers. "Gate" marks a shape that
-holds or redirects work, and so needs a grant. Status says where each stands.
+holds or redirects work. Status says where each stands.
 
 | # | Shape | Question | Labels | Gate | Serves | Status |
 |---|---|---|---|---|---|---|
@@ -374,10 +350,8 @@ holds or redirects work, and so needs a grant. Status says where each stands.
 | 3 | Request kind | Is this a build, a direct action, or conversation? | `build`, `direct_action`, `conversation` | no | Mission 1 | Design |
 | 4 | Feedback kind | Does this feedback correct a prior action, praise one and say why, or neither? | `correction`, `exemplar`, `neither` | no | Evidence: Tom's feedback, both directions | Design |
 | 5 | Answer materiality | Did this answer or feedback change what was built, or the authority it needed? | `outcome`, `authority`, `both`, `neither` | no | Mission 6; Evidence: attention spent | Design |
-| 6 | Governance over a diff | Per hunk: does this hunk add a check, gate, hook, validator, review round, or approval step? | `boolean` | yes | Constraint: governance restrained by structure | Built (`governance.adds`); its floors are provisional until 1.4's calibration record |
 | 7 | Doc against reality | Does this doc state something this code contradicts? | `consistent`, `contradicted`, `unverifiable` | yes | Constraint: docs describe reality | Required by the plan |
 | 8 | Test breadth | Three booleans in one call: does the change leave unexercised a record in a non-obvious state (`gap_state`), a member of an enumeration the code branches on (`gap_enum`), or an existing test whose bounds encode the old behavior (`gap_bound`)? | `boolean` each | yes | Mission 1 | Built (`checks.test.breadth`), an SDLC stage by Tom's decision of 2026-10-01; its floors are provisional until 1.4's calibration record |
-| 9 | Emulator proxy | On a replayed case, where does the result fall on each scored proxy? | a closed scale per proxy | no | Evidence: independent checks | Owned by `docs/emulator.md` |
 | 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
 | 11 | Response shape | What shape would the ideal response to this message take? | `short_answer`, `code_change`, `written_report`, `question_back`, `acknowledge`, `decline` (a `pick`) | no | Mission 6 | Built (`response.shape`); floors provisional, uncalibrated |
 
@@ -404,43 +378,6 @@ Notes per shape:
 5. Labels for the attention ledger after the fact, which the demonstration
    record filled by hand (rebuild-demonstration.md, "Attention log"). Its
    labels are also the live labels for shape 1. Measurement, no gate.
-6. The blind verifier's one boolean per hunk (all hunks at once on one shared
-   database connection, so provider calls overlap and the task's advisory
-   lock orders the rows), with the hunk's enclosing function as input. Each
-   hunk answered caution without an abstain is an instance. A hunk the
-   judgement abstains on, one too large for both legs, and one both legs
-   failed on after its reruns are undecided: the blind reviewer, which
-   reads the diff anyway, answers the same boolean for each, and its yes is
-   an instance and its no is none. On a docs diff, which no reviewer reads,
-   an undecided hunk is no instance. Prose under `docs/` and any
-   directory's `README.md` only describe code and are not asked;
-   `CLAUDE.md`, `persona/`, and `skills/` can add a rule and are. A reviewer
-   can add an instance, not remove one the judgement answered, and a note
-   contesting one is an incident against `governance.adds`, answered by a
-   classifier change, never a grant. An ungranted instance is a refused
-   merge: it flags the action from the diff, and the broker refuses it.
-   Its guard is the governance paragraph itself, so it carries no expiry.
-   The question counts steps over how work is done and approved: a step
-   that can stop, send back, or redirect a request, plan, change, commit,
-   merge, send, or an agent's commands, written in code or in instructions
-   a turn follows (a skill, brief, persona, or prompt). Such a step counts
-   in any repository, Valor's own included. The behavior of the software
-   being built, serving its own users (input validation, permission checks,
-   error handling, the messages its users see), is not one of them, and
-   that never covers a step over the work in Valor's own pipeline, kernel,
-   skills, persona, or guards (`docs/plans/c11-governance-precision.md`).
-   The question tells the leg to judge what the added lines add and what
-   removing the removed lines adds, in every hunk: removing a step adds
-   none, and removing an exemption from one adds to it, whatever lines are
-   added in its place. The rest of the hunk is context. Every hunk is
-   asked, one that only removes lines included
-   (`docs/plans/c13-removal-hunks.md`). A refusal added inside a governance
-   step adds to it, and so does calling, registering, or wiring an existing
-   one at a new place, or narrowing or removing an exemption from one. The wording of a
-   message whose sending is already decided is not a step. A lock or
-   transaction that makes a second run of the same work wait, or answers it
-   that one is already running, is correctness code; a step that refuses
-   work on a judgement about the work is not.
 7. The plan's "cheap judgement sweeps". A `contradicted` label opens a task
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the
@@ -449,8 +386,6 @@ Notes per shape:
    deterministically, then this judgement; each gap kind at caution is
    listed as an untested behavior, and any listed on a green suite yields
    the branch's `gaps` verdict (`docs/sdlc-state-machine.md`).
-9. Proxy scores on replays. The emulator doc owns the proxies and the
-   human labels they are checked against.
 10. Exit codes, refusal rows, and the gateway's errors decide most failures
     without a model. The demonstration's failed resume (rebuild-demonstration.md,
     "Kernel findings", 3: `EPERM` at row 179) is the kind a deterministic
@@ -464,7 +399,7 @@ Notes per shape:
     refuses nothing. Its rows sit on the bound task and are quiet there
     (`ledger.quiet`), so they never step the task or hide a failed step.
 
-Shapes 2 to 5, 9 to 10, and 11 label and route; they add no governance. Shapes 6 to 8 are checks the plan
+Shapes 2 to 5, 10, and 11 label and route; they add no governance. Shapes 7 and 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier
@@ -515,7 +450,7 @@ frontier model noticing on its own, which in the demonstration it did not.
 
 The demonstration record's estimate assumed the classifier also reads a short summary of the code
 the request names. That input is a gap: producing it needs an inspection step, and whether it
-improves the label is measured on the emulator before it is added.
+improves the label is measured before it is added.
 
 ### Labels
 
@@ -552,7 +487,7 @@ baseline's means, no money ($1.42 per run on either arm, rebuild-baseline.md, "A
 #633 as the one case where it hurt. The floors lean toward clarify by that asymmetry. They were set
 before the first calibration run and held through every run, not fitted to seven cases.
 
-### Calibration against the replay baseline
+### Calibration against the baseline
 
 The seven labelled cases, the runs over them, and what they show are in [judgement-baseline.md](judgement-baseline.md).
 
@@ -578,7 +513,7 @@ on, so it is a gate, and it is ledgered as a guard:
 | Incident | The demonstration (task `32f800bce8a2`, two PM rounds for three decisions); popoto #191 bare (fidelity 1); popoto #188 bare (one PM round, twice the spend) |
 | Mission items | 3 and 6 |
 | Fires when | A request is routed to clarify |
-| Expiry | 2026-12-30, ninety days from the grant. Not fired by then: deleted by default |
+| Expiry | 2026-12-30, ninety days from the grant. Not fired by then: listed for Tom, deleted unless he keeps it |
 
 Each firing is one `judgement.answered` row with a thin label, an abstain, or a failure, followed by
 the clarify turn. Each firing's answers are labelled by shape 5, so at expiry the record shows how
@@ -586,10 +521,10 @@ many firings changed what was built, beside how many fired.
 
 ## Not here
 
-**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, or approval step is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance is an `act`-class effect: the Brief carries a `governance_grant` field, default none, and a diff that adds any of the above needs Tom's tap, one approval per instance, through the same approval surface as a merge or a send. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is deleted by default. The blind verifier asks one Jev-class boolean over every diff, "does this add a check, gate, hook, round, or review step", and a yes with no grant is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
+**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
 
 - Prose generation, summaries, extraction: agent work on a frontier model.
-- Acceptance of a delivery: the blind verifier (`docs/architecture.md`).
+- Acceptance of a delivery: the verifier (`docs/architecture.md`).
 - Any model resident on the Mac.
 - A frontier model as a judgement fallback.
 - A judgement that grants, widens, or refuses authority.
@@ -598,7 +533,7 @@ many firings changed what was built, beside how many fired.
 
 ## Open
 
-- Breadth's and governance's calibration records and floors (1.4).
+- Breadth's calibration record and floors (1.4).
 - The tier bars: minimum `n` and Brier ceilings per error-cost tier.
-- What happens at expiry to a guard that did fire: renewal by a new grant,
-  or kept until it stops firing.
+- What happens at expiry to a guard that did fire: renewal by Tom, or kept
+  until it stops firing.

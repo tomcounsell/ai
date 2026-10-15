@@ -15,9 +15,9 @@ and binding), and `core/notices.py` (operator notices), run by the
 resident kernel, `python -m core serve`. The Telegram bridge is built in
 `bridges/telegram/`, run by `python -m bridges.telegram run`; it is live
 only during Tom's test windows. Its tests run over the real port and the
-test database, with a local emulator (`tests/telegram_emulator.py`) as
+test database, with a local fake Telegram server in `tests/` as
 Telegram. Tom also reaches a task through `python -m core` (`answer`,
-`feedback`, `grant`, `stop`, `correct`), and those records
+`feedback`, `stop`, `correct`), and those records
 carry `via: "the command line"`. The section "As built" below says what
 the bridge's code does.
 
@@ -161,8 +161,7 @@ Evidence section counts "decisions escalated to Tom per finished task", and
 
 ### Reactions
 
-The kernel marks a message it acts on (`core/reactions.py`,
-docs/plans/3624532d-reactions.md). Binding writes `reaction.requested`
+The kernel marks a message it acts on (`core/reactions.py`). Binding writes `reaction.requested`
 with 👀 on a message bound to a task, and the `response.shape` judgement
 then writes the reaction for the shape of the ideal response, which
 replaces it; a `stop` gets 👌 at once. The outbox yields each as a
@@ -345,7 +344,7 @@ authority (Tom, 2026-10-01); its pushes, sends, and merge leave at request. It r
 through the SDLC (`core/intake.py`, `_start`).
 
 A correction or exemplar is content, rendered into turns. It never widens a
-ceiling or grants governance. Those change only through
+ceiling. That changes only through
 `core/` commands.
 
 ### Other people
@@ -459,7 +458,7 @@ An implementation conforms to the port when:
    removed.
 5. **It imports only `core/` ports.** No settings module, model, or helper
    from outside `core/`, and nothing from another bridge.
-6. **It passes the integration tests** in `tests/`: the emulator as its
+6. **It passes the integration tests** in `tests/`: the fake Telegram server as its
    own process, the bridge killed by its pid, real Telegram test servers
    with test accounts (`tests/test_live_telegram_dc.py`), and a real
    Postgres. A message replayed after a kill lands

@@ -12,13 +12,11 @@ leaves no verdict and runs no suite; after two such runs it is a behavior.
 While breadth has no passing calibration record, what it lists is
 information shown in the delivery, never a behavior. Then the project's own
 suite command, deterministic, at the task's base commit and then at the
-candidate's head, each in a blind checkout from the kernel mirror with its
-own copy of the caches and fresh Postgres and Redis on the task's ports
+candidate's head, each in a worktree of the commit from the kernel mirror
+(`checks.worktree`) with its own copy of the caches and fresh Postgres and Redis on the task's ports
 (`core/checks.py`). A base run whose setup failed is never reused. No
 setup command or suite has a time limit; a stop ends a running one.
-A candidate whose tree holds a `.valor` entry has no checkout: the run is
-recorded as the commit's own fault, red at head, and never rerun (the base's
-tree is never checked out, so its entries do not count). A JUnit report that
+A JUnit report that
 is not XML, or declares an encoding the parser cannot read, gives no
 per-test result. A test with parameters counts as gone when the diff touches
 what feeds them: its `parametrize` decorators, `pytestmark`, the `params=` of

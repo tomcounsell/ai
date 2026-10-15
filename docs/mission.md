@@ -79,7 +79,7 @@ Mandatory, verified, and never a place to spend surplus energy.
   Autonomy shrinks automatically on evidence and grows only by Tom's
   decision.
 - **Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
-- **Docs describe reality.** Enforced by a blind verifier reading the doc as
+- **Docs describe reality.** Enforced by a verifier reading the doc as
   the contract and by cheap judgement sweeps, never by the model grading its
   own narration.
 
@@ -114,32 +114,20 @@ account a turn reaches through the keychain or a session on the Mac is a gap
 
 ### What the governance constraint means in practice
 
-The kernel holds the constraint as a fact from the first turn: the Brief
-carries `governance_grant`, default none (`core/tasks.py`), and the broker
-computes whether a merge adds governance from the review and docs verdicts
-on its candidate, each of which names every instance by its hunk. A merge
-with an instance Tom has not granted by his own tap (`python -m core
-grant`) is refused; the Brief's field does not stand in for the tap. The
-boolean is a judgement asked over every hunk of a diff
-(`core/judgement_sites.py`), except prose under `docs/` and any directory's
-`README.md`, which only describe what code does; `CLAUDE.md`, the persona,
-and skills are asked, since prompt text can add a rule. A review or docs
-verdict given those answers takes its instances from them; the blind
-verifier, the review runner (`fresh.review_runner`), asks it before its
-session reads anything. Only a yes reaches Tom: a hunk the judgement
-abstains on, too large for both legs, or both legs failed on goes to the
-blind verifier's session, which answers the same boolean, and its yes is
-an instance and its no is none. Tom never adjudicates the classifier
-(Mission item 6).
+The constraint is held in the review. A reviewer reads every diff for governance: a diff that adds a
+check, gate, hook, round, or review step is answered `changes`, and the patch takes it out or the
+change carries Tom's grant in its plan file. A diff that touches only prose under `docs/` and any
+directory's `README.md` describes code and adds none; `CLAUDE.md`, the persona, and skills can add a
+rule and are read.
 
 A guard Tom grants is ledgered with three things: the incident, the mission
-item, and the expiry date ninety days out; a grant missing the incident or
-the mission item is refused (`core/guards.py`). The first guard granted
+item, and the expiry date ninety days out (`core/guards.py`). The first guard granted
 under this constraint is the request judgement step described under
 [First evidence](#first-evidence-the-demonstration-and-the-baseline) below.
 It and the three other checkpoints of Tom's 2026-10-01 pipeline decision
 (the test-breadth check and the critique and review loops) are seeded as
-guards by `python -m core migrate`.
+guards by `python -m core migrate`. At expiry the expiry routine lists a guard
+that has not fired for Tom, and it is deleted unless he keeps it.
 
 ## Evidence
 
@@ -152,8 +140,8 @@ What counts as knowing the mission is being met:
   records work Tom loved and why: an excellent simplification, good taste,
   initiative, unusually complete delivery. Without the second, the system
   learns to avoid mistakes and never learns to build anything exceptional.
-- **Independent checks.** Blind verification, the emulator's human-labelled
-  cases, and the audit sample.
+- **Independent checks.** Verification by a fresh session that did not build, and Tom's
+  feedback on what shipped.
 - **Attention spent.** Decisions escalated to Tom per finished task, logged
   from the first demonstration onward. It is the one outcome number the
   system cannot perform against: escalating less while failing shows up in
@@ -163,7 +151,7 @@ What counts as knowing the mission is being met:
 
 **Working results in real use.** Read per delivery: did it run, did someone
 use it, and was each defect found in use resolved without Tom coordinating.
-A replay of a shipped feature is not real use; it is an emulator case.
+A replay of a shipped feature is not real use.
 `python -m core used TASK --by B` records that someone used a delivery
 (`delivery.used`); a role-played mark is listed and not counted. `status`
 shows, per merge, the feedback given after it, its used marks, other
@@ -183,19 +171,9 @@ current kernel records `direct` corrections from the command line; the
 store is laid out is `docs/architecture.md`; this doc owns what the two
 ledgers count as evidence of.
 
-**Independent checks.** Three, and none is the executor grading itself
-[16]:
-
-- The blind verifier reads the request and the result, never the executor's
-  narration (`docs/architecture.md`).
-- The emulator replays human-originated historical requests, labelled by
-  the human merge or review decision (`docs/emulator.md`). The demonstration
-  and the baseline below are its first cases.
-- The audit sample is Tom reading a fraction of verified work himself,
-  when he chooses to, the only check on the cheaper checks [4, 17].
-  Verifier calibration is scored against it as a Brier score with its
-  sample size [12] (`python -m core audit`, `audit label`, `audit scores`).
-  Labelling is on Tom's lead; nothing waits on it.
+**Independent checks.** The verifier reads the request and the result, never the executor's
+narration (`docs/architecture.md`); it is not the executor grading itself [16]. Calibration is
+scored as a Brier score with its sample size [12].
 
 A judge's score is a proxy, and an optimized proxy drifts from what it
 stands for [14]. No score is reported alone: a fidelity number comes with the
@@ -264,7 +242,7 @@ Each entry is classified on three axes after the task finishes:
 
 1. **Kind of work.** *PM work* is judging and steering the product: an
    answer to a question about intent, feedback that sends a delivery back.
-   *Authority* is a governance grant on one instance, the only tap left;
+   *Authority* is a governance grant, the only tap left;
    an `act` inside its task's ceiling needs none. The two are counted
    separately. A grant is the price of **Bounded authority, metered
    spending** and is not a defect. PM work Valor could have carried is the
@@ -309,8 +287,8 @@ would need an incident and Tom's grant.
 ## First evidence: the demonstration and the baseline
 
 Two records hold the first numbers: the demonstration
-(`docs/plans/rebuild-demonstration.md`) and the baseline
-(`docs/plans/rebuild-baseline.md`). Both ran inside the minimal kernel on
+(rebuild-demonstration.md) and the baseline
+(rebuild-baseline.md). Both ran inside the minimal kernel on
 Claude Opus 5.5 with every model call metered by the gateway, effect ceiling
 `act`, and no governance grant.
 
@@ -394,8 +372,7 @@ serves (3 and 6), and a ninety-day expiry. The classifier is
 `docs/judgement-layer.md`; where it sits in the work is
 `docs/sdlc-state-machine.md`. The demonstration estimated it at well under
 $0.05 per request against a saving of $1.40 to $1.80 and both review rounds
-on #894; the emulator measures that by replaying the case with and without
-it.
+on #894.
 
 The same records are why each stage's instructions are light: neither arm
 wrote a plan document, and both reached fidelity 4 on the items whose old
@@ -420,5 +397,5 @@ one-point judge difference is noise. The stand-in was lenient: every run
 ended accepted, including #191 bare at fidelity 1. Half the answer keys are
 inferred from merged code. No run looked at its result in a browser, so
 "testing actual use" in Mission item 1 is unmeasured. No delivery was used,
-no exemplar was recorded, and no audit label is among the numbers. Of the four kinds of
-evidence, only attention spent and the emulator's first cases have numbers.
+and no exemplar was recorded. Of the four kinds of
+evidence, only attention spent has numbers.

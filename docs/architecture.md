@@ -17,8 +17,8 @@ the evidence that justifies it.
 
 | Tier | Decides | Never decides |
 |---|---|---|
-| Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, governance grant, merge predicate, stop | what a request means |
-| Judgement (a hosted Jev-class model behind one port, open-weight fallback behind the same port) | what a thing is: is this request underspecified, does this diff add governance | whether it may proceed |
+| Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, merge predicate, stop | what a request means |
+| Judgement (a hosted Jev-class model behind one port, open-weight fallback behind the same port) | what a thing is: is this request underspecified | whether it may proceed |
 | Agents (frontier models, one `claude -p` turn at a time) | how to do the work | anything about their own authority |
 
 A classifier decides what a thing is; the kernel decides what it may do. Low-confidence judgement
@@ -38,8 +38,7 @@ prompt layer.
 and the kernel's role `valor_kernel` is granted `SELECT` and `INSERT` only. Grants are the first
 lock, the trigger the second. Unique indexes make every fold total: one opening and one charge per
 model call, one row of each kind per effect, one stop per task, one correction per number, one judge
-verdict per task, one row of each kind per turn, and one grant per guard and per governance
-instance. Writers take a transaction-scoped advisory lock on the task, so two processes racing on
+verdict per task, one row of each kind per turn, and one grant per guard. Writers take a transaction-scoped advisory lock on the task, so two processes racing on
 one task serialise. Storage detail, the event types, and how the kernel's database is kept out of a
 turn's reach are in [data.md](data.md).
 
@@ -57,7 +56,6 @@ workspace's Postgres is its own, with password auth.
 |---|---|
 | `instruction` | the request, verbatim |
 | `max_effect_class` | `read`, `propose`, or `act`; no effect under the task may exceed it |
-| `governance_grant` | Tom's grant for this task to add governance; default none |
 | `workspace` | the directory the task's turns work in |
 | `model`, `harness_name` | the model its turns run (the light seat's pinned id unless given), and the harness (`claude_code` or `pi`) that runs it |
 | `harness` | the harness's settings for the task, its isolation included |
@@ -109,8 +107,7 @@ class; the requester never names a class. For each request the broker, under the
   effects and the key holds nothing the turn wrote; a
   repeated request from one turn file returns the first by `request_id`;
 - refuses, with an `effect.refused` row, an action with no performer, on a
-  stopped task, above the task's ceiling, adding governance without Tom's
-  grant, or one its performer's `refuse` declines;
+  stopped task, above the task's ceiling, or one its performer's `refuse` declines;
 - performs `read`, `propose`, and `act` at request; a send of a type a
   bridge declares is written as `effect.held` with `release.requested` in
   one transaction, and the owning bridge's outbox performs it.
@@ -122,14 +119,11 @@ never a silent effect, and frees the lock. The resident kernel settles a danglin
 in [data.md](data.md)), and a bridge's outbox settles its own sends; the intent carries the action,
 so any dangling intent can be reconciled.
 
-A `merge` adds governance when the review or docs verdict on its candidate answered the governance
-boolean yes, computed by the broker and never said by the requester; it is refused while any
-instance lacks Tom's tap (`guard.granted`), and the Brief's `governance_grant` does not stand in.
-This is the governing constraint as a kernel fact. A `merge` is performed only when the merge
-predicate holds, read in the transaction that writes its intent
-([sdlc-state-machine.md](sdlc-state-machine.md)); a term that does not hold is an `effect.refused`
-naming it. Every term reads a row: what a docs head holds was read once, when the docs runner kept
-it.
+A `merge` is performed only when the merge predicate holds, read in the transaction that writes its
+intent ([sdlc-state-machine.md](sdlc-state-machine.md)); a term that does not hold is an
+`effect.refused` naming it. Every term reads a row: what a docs head holds was read once, when the
+docs runner kept it. A reviewer reads the diff for governance (CLAUDE.md), and a review that finds it
+answers `changes`.
 
 Two performers run in the kernel's process, never forcing: `push_branch` (`act`) pushes one commit
 to one branch, never the target branch, to `push_url` or else the origin URL recorded at start;
@@ -137,10 +131,8 @@ to one branch, never the target branch, to `push_url` or else the origin URL rec
 origin URL, from the kernel mirror with the GitHub token when there is one. The URL and target
 branch are the ones the kernel recorded in the Brief at start, from the project spec, which no turn
 changes; the token's own reach bounds which repositories a merge can land on at all
-([machine.md](machine.md), Where a merge lands). The kernel runs no program a turn chose: its git
-(the Command Line Tools' install), `ps`, and `sandbox-exec` are checked before each run to be root's
-alone (`core/binaries.py`), and its git refuses a workspace whose config names a program, redirects
-a push, sets any `push.*` or `http.*`, or includes other config (`core/git.py`;
+([machine.md](machine.md), Where a merge lands). The kernel finds `git`, `claude`, and `sandbox-exec` on `PATH` and runs them by absolute path
+(`core/binaries.py`), and its own merge runs git with `core.hooksPath` off (`core/git.py`;
 [tech-stack.md](tech-stack.md), the broker's performers).
 
 The constraint it enforces: bounded authority, metered spending.
@@ -180,18 +172,18 @@ per-account table, with the gaps, is [performers.md](performers.md).
   is one `repository.fetched` row ([routines.md](routines.md), Watched
   conditions).
 
-**The gap.** A turn runs as the Mac's one macOS user, can read the login keychain through
-`security`, and reaches the public internet (Limits, below). Any account whose credential is in that
-keychain, or whose session is held on the Mac, can be used by a turn around the broker and the
-gateway, and such a use is recorded only in the turn's transcript, which is the agent's account. The
+**The gap.** A turn runs as the Mac's one macOS user with Valor's own `gh` login, git credential
+helper, SSH agent, and `sentry-cli` auth, can read the login keychain through `security`, and reaches
+the public internet (Limits, below). Any account whose credential is in that keychain, or whose
+session is held on the Mac, can be used by a turn around the broker and the gateway, and such a use is recorded only in the turn's transcript, which is the agent's account. The
 machine's Claude login is the known case; every business account logged in on the Mac is another.
 
 An `act` inside its task's ceiling leaves when it is requested. What bounds it is the ceiling, stop,
-the governance grant, the merge predicate, and each performer's `refuse`; nothing waits for a tap. A
+the merge predicate, and each performer's `refuse`; nothing waits for a tap. A
 merge that does not land is acted on by why (`verdicts.ensure_merge`): one that failed is requested
 again after a delay that doubles from a minute, and after five failures the task ends; a push the
 target rejected because its branch moved, cleanly and on paths the candidate does not touch (no
-lockfile, no schema), carries the verdicts and grants to the candidate replayed onto the new tip
+lockfile, no schema), carries the verdicts to the candidate replayed onto the new tip
 (`verdicts.carried`) and merges at once, its other new commits never tested with the candidate,
 which the status page shows (tested at one sha, merged at another); any other move sends the work
 to `patch` to rebase onto the new tip, twice at most, spending no review round; a refusal ends the
@@ -205,8 +197,7 @@ left. A merge's report names the request, says it is merged into its branch, car
 the delivering turn wrote above the `---` line of `done.md`, and links the task's status page, where
 the checks and findings are; a reply to it is feedback. No report is written for a push (a step
 inside the task), for a send that itself reached Tom (a Telegram or Slack send to the operator, an
-email only to Tom's addresses, any local chat send), or for a replay task. A replay task is built
-with the kernel performers only, so a send it asks for is refused `no performer`.
+email only to Tom's addresses, any local chat send).
 
 `approval.granted` rows the ledger already holds are read and counted; nothing writes one.
 `db.migrate` refuses each effect still held for an approval (`effect.refused`, `at: migrate`),
@@ -231,11 +222,8 @@ that does hear it:
 5. writes `turn.ended` with outcome `stopped`.
 
 `tasks.audit` states what a stop must leave true: every opened call charged, every started turn
-ended, no effect between intent and outcome. `tests/test_live_turn.py` stops a real task mid-turn
+ended, no effect between intent and outcome. `tests/test_serve.py` stops a task mid-turn
 and asserts the audit is empty.
-
-When a sandbox rule failed a turn mid-demonstration, it failed cleanly, metered $0, and lost nothing
-(rebuild-demonstration.md, Kernel findings 3).
 
 Ending is not stopping. When Valor ends a task (`task.ended`: the working session decided to stop
 after the plan's rounds, a step or provisioning kept failing, or a merge cannot land), nothing runs
@@ -256,7 +244,7 @@ and [pi.md](pi.md).
 A task's clarify, plan, build, and patch turns resume one working session, so Valor keeps its
 context across a question, a send-back, and feedback; a patch is that session resumed, never a new
 agent (Tom, 2026-10-01). Critique, review, and docs run in fresh sessions, and so does the advisor:
-a working turn that finishes with only `.valor/advice.md` gets a second opinion from a blind fresh
+a working turn that finishes with only `.valor/advice.md` gets a second opinion from a fresh
 session on the other vendor's seat, and its next turn opens with the answer, quoted. Prompts per
 state are in [harnesses.md](harnesses.md).
 
@@ -302,8 +290,11 @@ reap and which directory a resume belongs to.
 
 ## The turn sandbox and reaping
 
-Each workspace turn runs under a sandbox-exec profile the task names, and the verifier reruns in a
-fresh container; both, and how a turn is reaped, are in [sandbox.md](sandbox.md).
+Each workspace turn runs under a sandbox-exec profile that denies the kernel key directory, the
+machine cluster's data directory, the backup disk, and the machine cluster on loopback; the mach
+name in the profile is how a turn's processes are found and reaped. Review and test checks run in a
+git worktree of the commit from the kernel mirror. Both, and how a turn is reaped, are in
+[workspace.md](workspace.md) and [harnesses.md](harnesses.md).
 
 ## Corrections and exemplars
 
@@ -334,7 +325,7 @@ section calls it "the one outcome number the system cannot perform against".
 
 **Built.** Every question is a `question.asked` row and its answer a `question.answered` row; every
 piece of feedback on a delivery is a `feedback.given` row naming the delivery it answers; every
-governance grant is a `guard.granted` row, and an `approval.granted` row the ledger already holds is
+guard Tom keeps is a `guard.granted` row, and an `approval.granted` row the ledger already holds is
 read with the rest. Each carries provenance: `by`, `via`, `at`, and `role_played`, true when someone
 stood in for Tom. `tasks.status` folds these into the task's attention log, in ledger order,
 labelled by kind (`question`, `feedback`, `approval`, `verdict` for a `leg: manual` row already in a
@@ -361,7 +352,7 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
 
 Each judgement is a Jev call, with an open-weight fallback, through `JudgementPort` in
 [judgement-layer.md](judgement-layer.md) and decides what a thing is, nothing about what it may do.
-The SDLC uses three:
+The SDLC uses two:
 
 1. **Before any plan: is this request thin?** A thin request (a one-line
    ask, one leaning on an example, one naming existing UI without scope)
@@ -376,62 +367,38 @@ The SDLC uses three:
 2. **After the tests: are they broad enough?** The breadth check in
    [sdlc-state-machine.md](sdlc-state-machine.md). **Built:** the call and
    the test verdict read from it. **Design:** the test runner (1.4).
-3. **Over every diff: does this add governance?** The blind verifier's one
-   boolean, "does this add a check, gate, hook, round, or review step",
-   asked per hunk, less prose under `docs/` and READMEs, which only
-   describe code. A yes with no grant is a refused merge, and only a yes:
-   a hunk the judgement abstains on, too large for both legs, or both legs
-   failed on is answered by the blind verifier, whose yes is an instance
-   and whose no is none, so Tom never adjudicates the classifier.
-   **Built:** the judgement, called by the review and docs runners; the
-   review and docs verdicts that take their instances from it; and the
-   broker's refusal of a merge with an instance lacking Tom's tap.
 
 ## Verification
 
-The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md): one blind
+The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md): one
 verification per candidate, beside test and docs, with as many send-backs to patch as the plan
 allows (0 or 1, set by the stakes).
 
 **Built.** `fresh.review_runner` is the verifier, registered in the kernel's `runners()`. The
-emulator's judge (`tests/emulator/judge.py`) runs outside the kernel, metered through the gateway.
-The verifier:
+verifier:
 
 - **Reads** the request, Tom's answers and feedback, the plan, the diff, the
-  deterministic check results, the governance instances and the hunks the
-  judgement left undecided, which it answers, and the task's
-  requested and refused effects, as files the kernel writes. It never reads the
-  agent's narrative (`done.md`, the transcript), so it judges what happened
-  and not what Valor said happened.
-- **Runs deterministic checks first**: the kernel reruns the repository's
-  tests and its linter at base and candidate, each in a fresh VM from an
-  image the kernel built from the commit's manifests, with fresh services
-  and no network, and records `verify.ran` before the verifier reads any
-  prose, so a delivery saying "all tests pass" is judged against the
-  kernel's own record. The verifier's own checkout is set up by the kernel
-  on the host with fresh services, so it reruns any test itself.
+  deterministic check results, and the task's requested and refused effects, as files the kernel
+  writes. It never reads the agent's narrative (`done.md`, the transcript), so it judges what
+  happened and not what Valor said happened. It reads the diff for governance (CLAUDE.md) and
+  answers `changes` for a diff that adds any.
+- **Runs the suite itself**, in a git worktree of the candidate the kernel set up from the mirror,
+  with fresh services, so a delivery saying "all tests pass" is judged against its own run.
 - **Is Opus-class, never cheaper** (Tom, 2026-10-01): the builder's own
-  Opus model in a fresh blind session, or an Opus-class model from another
+  Opus model in a fresh session, or an Opus-class model from another
   vendor through another harness. A weaker judge underestimates a stronger
   executor [18]; the baseline's Sonnet stand-in accepted popoto #191 bare at
   fidelity 1 and #633 clarify with the stale-cache bug moved, not removed
   (rebuild-baseline.md, Review rounds). A model grading its own output
-  prefers it [16]; blindness (no narration, a session that did not build,
-  checks it reran itself) is what counters that when the model is the same.
+  prefers it [16]; no narration, a session that did not build, and checks it
+  reran itself are what counter that when the model is the same.
 - **Returns a typed verdict:** the verifier answers pass or changes, with
-  a result per requirement and a `predicted_failure` probability; the
-  kernel records governance refused for a pass with an ungranted instance.
+  a result per requirement and a `predicted_failure` probability.
   Every verdict is a ledger row from the first one.
 
-**Calibration and autonomy.** A human audit sample of verdicts, weighted toward work that left the
-workspace and every `act`, with a smaller share of failures, is the ground truth [4, 17]. The sample
-is built (`core/audit_sample.py`): `python -m core audit` lists reviewed candidates without a label
-from Tom in a weighted random order and never shows the verdict, `audit label` records his label,
-and `audit scores` prints the verifier's stratified false accept, false reject, and Brier score with
-each `n`, Tom's labels and, apart, labels read from reverted merges. Labelling is available on Tom's
-lead, when he chooses to get technical; nothing waits on it, and nothing reads a label or a score to
-hold or send anything. Calibration is false accept, false reject, and Brier score [12] with sample
-size; raw pass rate is never reported alone [14].
+**Calibration.** Calibration is false accept, false reject, and Brier score [12] with sample size;
+raw pass rate is never reported alone [14]. Tom's feedback on a delivery and a reverted merge are
+the ground truth [4, 17].
 
 **Verify by use.** No run in either experiment looked at a UI result in a browser
 (rebuild-baseline.md, Browser use). A headless browser in the workspace (`look`) is a capability for
@@ -454,9 +421,9 @@ the reason, the turn), which the task's status shows. The kernel steps it again 
 has passed, a minute doubling with each failure in a row (`router.retry_due`), and the next working
 turn opens with the reason; at four failures in a row of the same state and check it writes
 `task.ended`, and Tom gets a report of what failed. A provisioning that fails is tried again the
-same way, and the third failure ends the task with a report. One harness turn or check runs at a
-time on a machine (the turn slot, a Postgres lock that `python -m core run` also takes; the test,
-review, and docs checks hold it throughout); the judge and the merge run beside it. The rendered
+same way, and the third failure ends the task with a report. At most `settings.max_turns` harness turns or checks run at once on a machine (default 2; a turn
+slot is a Postgres lock that `python -m core run` also takes; the test, review, and docs checks hold
+one throughout); the judge and the merge run beside them. The rendered
 context is the same bytes from the same store in any process. The kernel holds no state of its own:
 on restart it charges calls whose holder died at their estimate, ends turns with no end as
 `interrupted` and reaps their processes (a turn the kernel cancels, at a rollout or a shutdown,
@@ -502,8 +469,7 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
 ## How a task flows from request to merge
 
 1. **Intake.** Tom's message reaches the kernel through a bridge, which
-   starts a task: an effect ceiling (`act` for work that pushes),
-   governance grant none, and a provisioned workspace.
+   starts a task: an effect ceiling (`act`) and a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
 3. **Plan.** The working session writes the plan: approach, stakes, the
    critique loop (0 to 2) and the review loop (0 or 1), and related tech
@@ -514,7 +480,7 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
    candidate.
 6. **Test, review, and docs, in parallel,** each on the same candidate in
    a fresh session: the suite at head and base plus the breadth check, the
-   blind verifier, and a docs session committing only doc paths. Their
+   verifier, and a docs session committing only doc paths. Their
    findings go together to one patch in the resumed working session, and
    the three run again on the new candidate, within the loop counts.
 7. **Merge.** A passing delivery merges itself when the merge predicate
@@ -523,9 +489,7 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
    not passed when the plan's rounds are spent gets one last round, in
    which Valor patches once more or stops; when it stops, or that round
    does not pass either, the task ends and Tom gets a report of what was
-   built, what did not pass, and why it stopped. A governance instance
-   awaiting a grant reaches him as the delivered notice, naming each
-   instance and its grant command. Feedback by reply to a report or that
+   built, what did not pass, and why it stopped. Feedback by reply to a report or that
    notice goes to `patch` on the same task; nothing waits for it.
 
 The attention log, the money spent, and every verdict are read from the ledger at every step. The
@@ -537,28 +501,28 @@ states, verdicts, loops, and the merge predicate are owned by
 | Failure | Caught by | Serves |
 |---|---|---|
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
-| Irreversible effect beyond the task's authority | broker reads the class from the performer and refuses an `act` above the task's ceiling or on a stopped task; a replay task has no send performer; every `act` that leaves is reported | bounded authority |
-| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the review and docs runners call it) | governing constraint |
-| A merge on a model's say-so, or redirected by a turn | the merge predicate, four terms read from rows, read with the intent in one transaction; docs commits cut to doc paths once, when the docs runner keeps them; origin's URL and the target branch recorded at start and bound into the merge's payload; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
+| Irreversible effect beyond the task's authority | broker reads the class from the performer and refuses an `act` above the task's ceiling or on a stopped task; every `act` that leaves is reported | bounded authority |
+| Governance added | the reviewer reads the diff for governance and answers `changes` (CLAUDE.md) | governing constraint |
+| A merge on a model's say-so, or redirected by a turn | the merge predicate, three terms read from rows, read with the intent in one transaction; docs commits cut to doc paths once, when the docs runner keeps them; origin's URL and the target branch recorded at start and bound into the merge's payload | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
-| A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
+| A turn writes the ledger | ledger grants and trigger; kernel database denied by the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome, a dangling merge intent reconciled from the target | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, verdicts | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
-| Delivery claims success | blind verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
-| Verifier too lenient | Opus-class blind reviewer, never cheaper (built); human audit sample (built: `python -m core audit`, `/audit`); the autonomy lowering it would drive (design) | Evidence |
+| Delivery claims success | verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
+| Verifier too lenient | Opus-class reviewer, never cheaper (built) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
 
 ## Limits
 
 - **A scheming model.** A deceptively aligned model [5, 6] with a side
   channel leaves in the ledger only what passed the kernel; the effect
-  ceiling keeps the damage survivable while the audit sample finds it.
+  ceiling keeps the damage survivable.
 - **Tool results are the agent's account.** The transcript is written in
-  the sandbox and can be falsified there, so the verifier re-executes.
+  the sandbox and can be falsified there, so the verifier runs the suite itself.
 - **The sandbox runs as the machine's user.** A deliberate keychain read
   through the `security` tool is not fenced (rebuild-demonstration.md,
   Setup, Isolation), and the public internet is reachable, so a turn set
@@ -570,4 +534,4 @@ states, verdicts, loops, and the merge predicate are owned by
   account a turn reaches through the keychain or a session on the Mac is
   the gap named in How an act leaves.
 - **One provider by default.** The reviewer is the builder's model in a
-  blind fresh session; `reviewer_openai` runs it on a second vendor.
+  fresh session; `reviewer_openai` runs it on a second vendor.

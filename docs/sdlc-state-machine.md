@@ -47,10 +47,10 @@ item, and a ninety-day expiry.
 | `build` | a candidate that does what the plan says | working session | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting` |
 | `checks` | test, review, and docs agree on one candidate | three branches at once (see `checks` below) | the join | `merge`, `patch`, or `ended` |
 | `checks.test` | the suite passes at head where it passed at base, and the tests exercise what the diff changes | deterministic suite, then judgement tier | `pass`, `red`, `gaps` | the join |
-| `checks.review` | an independent verdict on the candidate | blind verifier, fresh session | `pass`, `changes`, `governance_refused` | the join |
+| `checks.review` | an independent verdict on the candidate | verifier, fresh session | `pass`, `changes` | the join |
 | `checks.docs` | no doc says something the candidate made untrue | fresh session, doc paths only | `updated`, `no_change`, `changes` | the join |
 | `patch` | every finding from the join resolved, or the work stopped | working session, resumed | `candidate`, `asked`, `ended`, `idle`, `failed` | `checks`, `waiting`, `ended` |
-| `merge` | the delivery merged | kernel and broker | `merged`, `feedback`, `governance_granted`, `rebase` | `merged`, `patch`, `checks`, `ended` |
+| `merge` | the delivery merged | kernel and broker | `merged`, `feedback`, `rebase` | `merged`, `patch`, `checks`, `ended` |
 | `merged` | the change is on the target branch | nothing | `feedback` | `patch` |
 | `ended` | Valor stopped the work without merging; Tom has a report | nothing | `feedback` | `patch` |
 | `stopped` | nothing more happens | nothing, ever again | | none |
@@ -83,7 +83,7 @@ Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`, `buil
 **Tasks from before the machine.** A `task.started` without `sdlc: 1` is legacy and folds read-only
 by the old kernel's precedence (stopped; a delivery not reopened by feedback is `merge`; an
 unanswered question is `waiting`; feedback after a delivery is `patch`; any turn is `build`; else
-`judge`). The router, verdicts, answers, feedback, and grants refuse it; status and stop work.
+`judge`). The router, verdicts, answers, and feedback refuse it; status and stop work.
 
 ## Types
 
@@ -91,7 +91,7 @@ unanswered question is `waiting`; feedback after a delivery is `patch`; any turn
 twelve states above and `Check` the three branches of `checks`. `VERDICTS` maps each to its enum as
 the table lists it; every working-session state also has `idle` and `failed`, since any turn can end
 with neither of its stage's signals or fail. `Candidate` is a head commit and the turn that produced
-it; `CheckVerdict` a check's verdict, findings, and governance instances on one candidate; `Loops`
+it; `CheckVerdict` a check's verdict and findings on one candidate; `Loops`
 the two counts, critique's 0 to 2 and review's 0 or 1 (`REVIEW_MAX`); `Fold` the state with what it
 reads. `TRANSITIONS` is the Next column, with three rules beside it: `checks` leaves only through
 the join; `asked` from a working-session state goes to `waiting`, and `answered` returns to the
@@ -128,8 +128,8 @@ patch carrying every finding of the three branches together.
   commits onto the new tip (`git.replay`) when the target's new commits touch no path the candidate
   touches, no file setup installs from (`checks.LOCKFILES`), and no schema file
   (`verdicts.SCHEMA_FILES`). The replayed patch is then the verified one byte for byte, so the
-  checks' verdicts and Tom's grants (instance ids digest the hunks, not a review's grouping) carry
-  to the replayed sha in one `verdicts.carried` row (the verdicts and grants, from which sha and
+  checks' verdicts carry
+  to the replayed sha in one `verdicts.carried` row (the verdicts, from which sha and
   head to which, and the target's tip), and the merge is requested again at once. The merged sha
   then sits on a tip whose other commits were never tested with the candidate; the status page
   shows the carry, naming the sha it was tested at and the sha it merged at. A carry is not a rebase.
@@ -174,7 +174,7 @@ whose lock connection died returns `lock lost` before its next turn or write.
 | `clarify`, `plan`, `build`, `patch` | frontier agent in the working session | the hard work, in one context from inspection to delivery |
 | `critique`, `checks.docs` | frontier agent in a fresh session | a reading by a session that did not write the work |
 | the suite in `checks.test` | deterministic suite run | running tests decides nothing by judgement |
-| `checks.review` | blind verifier, Opus-class (see [architecture.md](architecture.md)) | an independent check, never the executor grading itself [4, 16] |
+| `checks.review` | verifier, Opus-class (see [architecture.md](architecture.md)) | an independent check, never the executor grading itself [4, 16] |
 | `merge` | kernel and broker | authority |
 
 The judgement port is [judgement-layer.md](judgement-layer.md)'s; session resume and compaction are
@@ -198,7 +198,7 @@ through untouched.
 **What it asks.** One judgement-tier call over the request, the thread (empty until the bridges),
 and the project, against three cues: a one-line ask whose intent lives only in Tom's head; an ask
 leaning on an example that may stand for a wider requirement; an ask naming existing UI or behavior
-without saying what happens to it. A code summary as input is a gap until the emulator measures it.
+without saying what happens to it. A code summary as input is a gap until it is measured.
 
 **Exit evidence.** `judgement.answered` (or `judgement.failed`) at site `intake.underspecified`,
 read by the kernel into the one `judge.decided` (`leg: judgement`, the `judgement_id`, P(precise),
@@ -213,8 +213,7 @@ fidelity 1, 3 of 11 hidden tests; clarify 3 and 7 of 11), and #188 (bare
 built a feature Tom did not want). Counter-evidence: on #872, #646, and
 #893 clarifying changed nothing, and on #633 a wrong-premise question made
 it worse (rebuild-baseline.md, Clarify). Expiry 2026-12-30. **Gap.** n = 1
-per item and arm; the emulator ([emulator.md](emulator.md)) measures
-precision and recall as a Brier score with n [12].
+per item and arm; precision and recall as a Brier score with n [12] are not yet measured.
 
 ### `clarify`: inspect, then ask or proceed
 
@@ -267,8 +266,7 @@ case the tests will miss, scope that does not serve the request, loop counts too
 
 **Exit evidence.** `critique.decided`: the plan digest it read, the verdict, the findings, any
 raised counts, the model and cost. `sound` goes to `build`. `revise` goes back to `plan` while
-critique rounds remain, else to `build` with the findings in the prompt. A plan holding `.valor` has
-no checkout: the kernel records `revise` naming it (leg `kernel`), no rerun.
+critique rounds remain, else to `build` with the findings in the prompt.
 
 **Why.** Mission item 1. Incident: on popoto #633 the clarify arm built on a wrong premise nothing
 read before code existed, and correctness fell from 5 to 2 (rebuild-baseline.md, pop-a).
@@ -280,7 +278,7 @@ may be 0. Guard under Tom's 2026-10-01 grant, expiring ninety days from it.
 **Goal.** A candidate that does what the plan says, with the tests the plan named, committed in the
 workspace.
 
-**What runs.** Frontier turns, one `claude -p` at a time, resuming the working session so Valor
+**What runs.** Frontier turns, resuming the working session so Valor
 keeps its context from inspection on. Each turn gets the Brief rendered from the ledger as it
 starts, corrections included. Effects beyond the workspace are requests to the broker.
 
@@ -317,55 +315,38 @@ one; a failure also leaves `step.failed` naming the branch and why.
 **Stale verdicts.** A branch's verdict is its latest row keyed by the current candidate, the one on
 the latest `candidate` verdict. A row keyed by an older candidate is stale: it stays in the ledger
 with its spend, and the join and the merge predicate ignore it. A later row for the same branch and
-candidate supersedes an earlier one, which is how a review rerun after Tom's governance grant
-replaces the refused review and leaves the other two standing. Keying by the producing turn as well
+candidate supersedes an earlier one. Keying by the producing turn as well
 as the SHA means a patch that answers findings with reasons and no code change still gets fresh
 checks.
 
 **Scheduling.** The three run concurrently when the machine has the slots, and back to back when it
-does not; the join waits for all three either way. On the 16 GB Air the suite and the two agent
-turns each hold the one turn slot ([machine.md](machine.md), Concurrency), so it runs test, review,
-then docs, with judgement calls beside whatever holds the slot.
+does not; the join waits for all three either way. On the 16 GB Air, `max_turns` is 2, the suite and the two agent
+turns each hold a slot, so two run at once and the third waits ([machine.md](machine.md),
+Concurrency), with judgement calls beside them.
 
 #### `checks.test`: the suite, then breadth
 
 The suite at base and at head, then breadth: see [sdlc-checks-test.md](sdlc-checks-test.md).
 
-#### `checks.review`: one blind verification per candidate
+#### `checks.review`: one verification per candidate
 
 **Goal.** An independent verdict on whether the candidate does what was asked, correctly, and adds
-no ungranted governance.
+no governance (CLAUDE.md).
 
-**What runs.** The registered runner is `fresh.review_runner`, the blind verifier
-([architecture.md](architecture.md)). The kernel first asks the governance boolean per hunk (use
-shape 6; prose under `docs/` and READMEs is not asked), then sets up a git worktree of the
-candidate with fresh services and runs one fresh session there, which may run the suite: the builder's Opus model, or an Opus-class model from another vendor through
-another harness, never a cheaper class. It reads the request, Tom's answers and feedback, the plan,
-the diff, its setup's exit, the instances, and the undecided hunks, never the executor's narration,
-reruns any test itself, and answers `pass` or `changes` as its final message (the object bare, or
-the fenced block that ends the message, prose before it ignored), which the kernel reads from the
-turn's result, not from a file in the checkout; it adds instances, never removes one, and a line it
-names in a flagged hunk merges into it. An instance is a hunk the judgement answered yes without an
-abstain. A hunk it abstained on, one too large for both legs, and one both legs failed on in two
-runs are undecided (both legs failing on a run before that leaves no verdict, and the next run asks
-again): the reviewer answers the same boolean for each in its verdict's `undecided`, its yes an
-instance and its no none, and a verdict that leaves one unanswered is refused. The kernel computes
-the recorded verdict: a `pass` with an ungranted instance is `governance_refused`; a `changes` lists
-each such instance as a finding. The spec's setup runs in that checkout under a profile that writes
-the checkout (except the checkout directory itself and every `.git` in it), its caches, and its own
-`setup-tmp/`, and reads the services' password file, never the session's config or `TMPDIR`. A
-candidate whose tree holds a `.valor` entry, or whose setup leaves `.valor`, `.pi`, or no directory
-where the checkout was, or leaves the checkout so the kernel gets an error reading or writing it,
-has no checkout to review: after governance and the kernel's run, the kernel records `changes`
-naming it (leg `kernel`, no session, no reviewer's verdict).
+**What runs.** The registered runner is `fresh.review_runner`, the verifier
+([architecture.md](architecture.md)). The kernel sets up a git worktree of the candidate with fresh
+services and runs one fresh session there, which may run the suite: the builder's Opus model, or an
+Opus-class model from another vendor through another harness, never a cheaper class. It reads the
+request, Tom's answers and feedback, the plan, the diff, and its setup's exit, never the executor's
+narration, reruns any test itself, reads the diff for governance, and answers `pass` or `changes` as
+its final message (the object bare, or the fenced block that ends the message, prose before it
+ignored), which the kernel reads from the turn's result, not from a file in the checkout. The spec's
+setup runs in that worktree under the turn profile.
 
 **Exit evidence.** `review.decided`: the candidate, the verdict and the reviewer's own, the findings
-(each with a kind, `debt` among them), the governance answer, the kernel's run, the predicted
-failure, each requirement met or not, the verifier's model and cost. `governance_refused` means the
-diff adds a check, gate, hook, round, or review step without a grant: the join sends it to Tom in
-`merge` with the hunk named. His grant, one tap per instance, starts the review branch again on the
-same candidate, which reuses the governance answers and the kernel's run; his feedback sends the
-work to `patch` to take it out.
+(each with a kind, `debt` among them), the kernel's run, the predicted failure, each requirement met
+or not, the verifier's model and cost. A `changes` that names added governance goes to `patch` like
+any other finding.
 
 **Why.** Mission item 1 and the Evidence item "Independent checks". One review is a constraint of
 the setup plan with no expiry. Sending work back is the guard `review.loop`, on popoto #633: the
@@ -385,15 +366,12 @@ previous docs commits as a patch, and changes only Markdown that instructs no tu
 
 **Exit evidence.** The session writes a verdict, its findings, and its head: a commit id or an
 abbreviation of one. The kernel resolves an abbreviation in the clone, fetches the commit into the
-mirror under the check profile, and keeps the longest prefix of commits on the candidate that touch
+mirror under the turn profile, and keeps the longest prefix of commits on the candidate that touch
 doc paths alone, with regular file modes (`100644`, `100755`, read from `git diff-tree -r`); a
-merge, a commit off the candidate, a tree holding `.valor`, or a head naming no single commit keeps
-nothing. It records `docs.kept` with the full id, so a rerun asks only governance again, then judges
-governance over the kept diff, less prose under `docs/` and READMEs (a Markdown file elsewhere can
-add a rule), and records `docs.decided`: the candidate, the kept head, the dropped commits and their
-paths, the governance answer, and the verdict it computes. This cut is the one place docs commits
-are read; the verdict and the merge take its head as kept. No reviewer reads the docs diff, so a
-hunk the judgement leaves undecided is no instance there. `updated` or `no_change` passes, at the
+merge, a commit off the candidate, or a head naming no single commit keeps
+nothing. It records `docs.kept` with the full id and `docs.decided`: the candidate, the kept head,
+the dropped commits and their paths, and the verdict it computes. This cut is the one place docs commits
+are read; the verdict and the merge take its head as kept. `updated` or `no_change` passes, at the
 kept head: a dropped commit is a `dropped` finding, noted on the delivery, and the merge goes on at
 what was kept. `changes` means a doc states something the code should still honor and the candidate
 breaks it, or a doc cannot be made true without a code change. Docs commits belong to their candidate:
@@ -410,19 +388,15 @@ loop counts (see Loops), and moves the task once:
 | Review | Test and docs | Rounds | Goes to |
 |---|---|---|---|
 | `pass` | test `pass`; docs `updated` or `no_change` | | `merge`, as a delivery that passed |
-| `governance_refused` | anything | | `merge`, to Tom with the hunk and every other finding |
 | anything else | anything | a plan's round left | `patch`, with every finding |
 | `pass` | test `gaps`, docs passing | none left | `merge`, with the gaps listed |
 | anything else | anything | the last round unspent | `patch`, with every finding, to patch or stop |
 | anything else | anything | the last round spent | `ended`, with a report to Tom |
 
-The rows are read in order and the first match decides, so a review `governance_refused` reaches Tom
-before a red test is looked at. Row 2 reads review only; a docs instance awaiting a tap reaches Tom
-in `merge` and holds the merge until he grants it (predicate term 4). No row records the join. The
+The rows are read in order and the first match decides. No row records the join. The
 verdict that completes a join to `merge` or `ended` writes `task.delivered` with it, and the kernel
 requests the merge for a delivery that passed (or passed with gaps); the router requests it again on
-any run that finds the task in `merge` without one, so a crash between the two strands nothing. A
-delivery whose review refused governance gets no merge request. The findings the join passes to
+any run that finds the task in `merge` without one, so a crash between the two strands nothing. The findings the join passes to
 `patch` are the next turn's prompt.
 
 ### `patch`: the builder resolves the findings
@@ -452,8 +426,7 @@ each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 
 **Goal.** A delivery that passed lands on the target branch, and Tom hears what landed.
 
-**Entry.** The join sent the task here, as a delivery that passed (or passed with gaps), or one
-whose review refused governance.
+**Entry.** The join sent the task here, as a delivery that passed (or passed with gaps).
 
 **What runs.** The kernel writes `task.delivered` with the delivery summary: what was delivered, how
 it was verified, the test, review, and docs verdicts with any breadth gaps, the tech-debt additions,
@@ -461,12 +434,10 @@ and the decisions Valor made that Tom may want to change, the one that most chan
 first. It then requests the merge, and the broker performs it at request when the predicate below
 holds. A done merge owes Tom a `report` notice of what shipped: the note the delivering turn wrote
 above the `---` line of `done.md`, and the task's status page link for the checks; a reply to it is
-`feedback.given`. Only a governance instance awaiting his grant sends him the delivered notice (each
-instance, its `path:line`, and its `python -m core grant` command).
+`feedback.given`.
 
 **Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done` for the merge. `feedback`:
-`feedback.given`, to `patch`. `governance_granted`: Tom's grant on a refused review, back to
-`checks`, where only review reruns. `verdicts.carried`: the target moved disjointly, and the merge
+`feedback.given`, to `patch`. `verdicts.carried`: the target moved disjointly, and the merge
 is requested again for the replayed candidate, staying in `merge` (see Loops). `rebase`: the target
 moved and the candidate did not carry, to `patch`. `ended`: the merge cannot land.
 
@@ -474,28 +445,23 @@ moved and the candidate did not carry, to `patch`. `ended`: the merge cannot lan
 ledger:
 
 1. one candidate `C`, the current one, with a `test.decided`, a
-   `review.decided`, and a `docs.decided` row each keyed by `C`; no
-   verdict for any other candidate counts;
-2. the review verdict `pass`, its governance boolean answered no, or every
-   governance instance it names granted by Tom's own tap (a
-   `guard.granted` bound to the instance); the Brief's `governance_grant`
-   does not stand in for a tap;
-3. the test verdict `pass`, or `gaps` with the plan's rounds spent and the
+   `review.decided`, and a `docs.decided` row each keyed by `C`, the merge naming `C` and the docs
+   head (or `C` when docs kept none); no verdict for any other candidate counts;
+2. the test verdict `pass`, or `gaps` with the plan's rounds spent and the
    gaps on the delivery; never `red`;
-4. the docs verdict `updated` or `no_change`, its head the one being
-   merged, and its governance boolean answered no or each instance
-   granted. What that head holds was read once, when the docs runner cut
-   the docs commits to the doc-path prefix it keeps (`fresh.kept_prefix`:
-   doc paths only, `git diff-tree --no-renames` so a rename out of a code
-   path counts the old path, regular file modes, no merge commit, and
-   descending from `C`).
+3. the review verdict `pass`.
+
+The docs verdict is no term: docs run, and the merge lands the head they kept, or `C` when they kept
+none. What that head holds was read once, when the docs runner cut the docs commits to the doc-path
+prefix it keeps (`fresh.kept_prefix`: doc paths only, `git diff-tree --no-renames` so a rename out of
+a code path counts the old path, regular file modes, no merge commit, and descending from `C`).
 
 A `verdicts.carried` row makes the replayed candidate `C`: the fold rekeys the three verdicts to it
 and the docs head to the replayed head, so the predicate reads the carried verdicts for the replayed
 sha and none for the one it replaced.
 
 Each term is deterministic: a row exists, or not. No model call decides whether a merge may happen.
-The broker checks all four and writes the merge's intent in one transaction under the task's lock. A
+The broker checks all three and writes the merge's intent in one transaction under the task's lock. A
 term that does not hold is an `effect.refused` naming it. A merge that does not land is acted on by
 why (`verdicts.ensure_merge`): a failure is tried again after a delay doubling from a minute, and
 the fifth ends the task; a push the moved target rejected is a carry or a rebase; a refusal ends the
@@ -507,29 +473,19 @@ outcome; a later run settles it from the target once it answers (`broker.reconci
 **Where a merge goes.** At start the kernel records origin's push URL (as an absolute path) and the
 target branch (the flag, or the branch origin's `HEAD` names). The merge's payload carries both with
 the head and the candidate, so the request binds them, and the push goes to that URL whatever the
-workspace's config says later; a workspace whose own config names a program, redirects a push, or
-includes other config is refused (`core/git.py`, `HOSTILE`). For a task the kernel provisioned, the
+workspace's config says later; the kernel's own merge runs git with `core.hooksPath` off (`core/git.py`, `PINNED`). For a task the kernel provisioned, the
 origin is the project spec's `merge_url`, else its own bare one, and the target branch the spec's;
 any branch may be the target. The docs cut and the merge's push read the kernel mirror, which no
 turn writes. A turn cannot request a merge, and its `push_branch` cannot target the target branch.
 
-**Governance instances.** A review or docs verdict names each instance by
-a path and a line inside its hunk; the kernel reads the hunk from the
-candidate's real diff and refuses one it does not find. An instance's id
-digests its path, the hunk header's function context, its added lines,
-and its removed lines when it has any, without line numbers, so the same
-hunk on a rerun or a later candidate keeps its id and its grant; a hunk
-that removes other lines, or a changed, moved, or split hunk, needs a new
-tap, and identical hunks (the same added and removed lines) in one
-function context of one file share an id. After the merge the task is `merged`; a defect found in use comes back as
+After the merge the task is `merged`; a defect found in use comes back as
 `feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects").
 After a merge, `python -m core status` reads what came after it
 (`core/outcomes.py`): the feedback given after it and before the next
 delivery, the `delivery.used` marks, the later merges of other tasks to the
 same url and branch that changed the same paths, and whether the head is
 still on its branch and which later commits revert it, read from the
-kernel's cache of the target as last fetched. The audit scores read a
-revert as a `changes` label on the merged candidate. None of it moves the
+kernel's cache of the target as last fetched. None of it moves the
 fold or decides anything.
 
 **Why.** Mission items 1 and 6; `act` runs inside the ceiling Tom set. Delivery 1 of the

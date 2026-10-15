@@ -131,8 +131,7 @@ Valor says so, with the reason and what it would do instead, before
 building. In the baseline's push-back item (popoto #188), neither arm pushed
 back on its own; the clarify arm reached the right outcome only because the
 answer told it to (rebuild-baseline.md, "Clarify"). This is a persona habit
-the replays did not exhibit unprompted, and the emulator is where it gets
-measured (see `docs/emulator.md`).
+the replays did not exhibit unprompted.
 
 ### Absorb ambiguity, and ask well (Mission items 3 and 6)
 
@@ -172,11 +171,10 @@ channel offers `.valor/question.md`. Once the reading is material,
 neither reversibility nor naming the reading in the delivery is a reason
 to build first; an example whose readings build the same thing is still
 inferred, prototyped, and shown (Mission item 3). In the
-emulator's pso-c bare runs (#894 with the judge forced precise), the plan
+bare runs on #894 with the judge forced precise, the plan
 turn saw the example, chose a reading, and named it among the delivery's
 decisions instead of asking, and the stand-in's two feedback rounds
-carried the scope and the audience one question would have settled
-(c15-persona-894.md).
+carried the scope and the audience one question would have settled.
 
 Routing is not the persona's decision. A Jev-class classifier in the
 judgement step reads each incoming request and sends an underspecified one
@@ -244,7 +242,7 @@ learning and asking is the rational move [3]. Valor borrows the shape and
 not the guarantee. That one batched message with defaults costs less of
 Tom's attention than several rounds is supported by the demonstration and
 the baseline, n = 1 per item; no published source in REFERENCES.md covers
-it, so it is a gap the emulator measures.
+it, so it is a gap.
 
 ### Deliver with the decisions showing (Mission items 1 and 6)
 
@@ -394,9 +392,8 @@ every directory README.
 In the persona it is conduct: when Valor fixes a bug, it fixes the code;
 when a change it is making would add a check, gate, hook, validator, review
 round, or approval step, it names the mission item and the incident, and
-proceeds only under a grant. The enforcement is structural and lives
-elsewhere: the broker's refusal of a merge that adds governance Tom has not
-granted, and the blind verifier's boolean (see `docs/architecture.md`). The persona text is how the rule
+proceeds only under a grant. The enforcement lives
+elsewhere: the reviewer reads the diff for governance (see `docs/architecture.md`). The persona text is how the rule
 reaches the agent; it is never the thing that enforces it.
 
 ## How the persona reaches a turn
@@ -407,7 +404,7 @@ order:
 1. **Persona.** Identity, voice, conduct, the governance paragraphs. Read
    from `persona/`, which changes only by a reviewed diff in git.
 2. **Brief.** The task's commitments: task id, instruction,
-   effect ceiling, governance grant, workspace (`core/tasks.py`,
+   effect ceiling, workspace (`core/tasks.py`,
    `dispatch`).
 3. **Corrections from Tom.** Every correction in force, rendered from the
    ledger as the turn starts, numbered, each with its scope, source class,
@@ -442,8 +439,7 @@ dispatch, from the kernel's own checkout (`settings.persona_dir`, never the
 workspace): "You are Valor Engels.", the identity fields, `turn.md`,
 `voice.md`, `conduct.md`, `governance.md` (which holds the governance
 paragraph and the "Tests are not governance." paragraph in the same words
-as `CLAUDE.md`, `tests/test_governance_paragraph.py` asserting the copies
-match), then `delivery.md`. Rendering reads nothing outside `persona/`, so
+as `CLAUDE.md`), then `delivery.md`. Rendering reads nothing outside `persona/`, so
 a checkout without `CLAUDE.md` still renders every turn. Every fresh
 session (critique, review, docs) gets the same persona. The harness adds
 nothing ahead of the dispatched text. A persona that cannot be read fails

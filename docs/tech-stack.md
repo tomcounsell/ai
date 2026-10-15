@@ -57,8 +57,7 @@ outside the model is AI Control [4].
 | Harness | the `claude` CLI, one `claude -p` per turn; Pi (`docs/pi.md`) as the second | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
-| Sandbox for the verifier | Apple `container` 1.5.0 (hypervisor-isolated Linux VMs), the review's rerun | in use |
-| Which sandbox for which work | owned by [sandbox.md](sandbox.md); containers for turns | open |
+| Review and test checks | a git worktree of the commit from the kernel mirror (`checks.worktree`) | in use |
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Reports to Tom | `report` and `delivered` notices over the bridges, and `python -m core status` | in use |
@@ -82,9 +81,7 @@ two-dependency kernel is one a person can read.
 (pinned to one version) are the dev dependencies, so `uv run ruff` works in a
 task's check environment. Status: **in use**.
 
-**Tests.** pytest against real Postgres, real `claude -p` turns, and real
-sandbox profiles, with no mocks (`tests/README.md`). Every live test declares
-`@pytest.mark.spend(usd)`, the money one run is expected to cost. Status: **in use**.
+**Tests.** pytest against real Postgres and the scripted harness, with no mocks (`tests/README.md`). Status: **in use**.
 Serves the constraint "Docs describe reality": a test that exercises the real
 thing is evidence, and a mocked one is narration.
 
@@ -93,11 +90,7 @@ of calls, charges, and stops, every call is opened once and charged once,
 and a stopped task opens no call. Property tests state that
 directly. Status: **in use** for the state machine: every prefix of a
 generated ledger folds to exactly one state (`tests/test_machine.py`), a dev
-dependency, and for the objective tree: over generated sequences of starts,
-effect requests, calls, charges, stops, and merges, every child's ceiling
-ranks at or below its parent's, every effect at or below the lowest ceiling
-on its path, a fenced node opens no call, and every tree total is the sum of
-its subtree's charges (`tests/test_objective_tree.py`). Serves "Bounded authority, metered spending".
+dependency. Serves "Bounded authority, metered spending".
 
 **Schemas.** The kernel's records (the Brief, `TurnCommand`, the gateway
 `Grant`) are frozen dataclasses and JSON payloads. Status: **in use**.
@@ -108,12 +101,12 @@ port's input needs validation the dataclasses cannot give without hand code.
 
 `python -m core` is the composition root. `python -m core serve` is the
 resident kernel, kept alive by launchd: it binds what the bridges record,
-writes the notices Tom is owed, and schedules every task's turns, one turn
-per machine, waking on each ledger notification. The other commands
-(`start`, `run`, `answer`, `feedback`, `grant`, `stop`,
+writes the notices Tom is owed, and schedules every task's turns, up to
+`max_turns` at once, waking on each ledger notification. The other commands
+(`start`, `run`, `answer`, `feedback`, `stop`,
 `status`, `ledger`, `correct`) are one short process each, and `run` steps
 one task from the command line. All state is in Postgres. The gateway, the
-broker, and the turn runner stay in one process outside every sandbox, so
+broker, and the turn runner stay in one process outside the sandbox, so
 the stop path never crosses a process the turn can reach. Serves "Reliable
 stop, recovery, and correction". Status: **in use**.
 
@@ -122,13 +115,12 @@ stop, recovery, and correction". Status: **in use**.
 Claude credential on every Anthropic call (`claude-token` in the kernel key
 directory, else Claude Code's own Keychain login) and its OpenAI key on the
 OpenAI route. A turn's
-environment is an allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`,
-locale, terminal) with no tokens, no agent sockets, and only a placeholder
-Claude credential. Status: **in use**.
+environment is the operator's less the kernel's secrets, with only a placeholder
+Claude credential, and it has Valor's own `gh` login, git credential helper, SSH agent, and
+`sentry-cli` auth. Status: **in use**.
 
 A turn can still read the machine's Claude login from the Keychain, so it could call the provider
-around the gateway with that credential: the sandbox profile limits loopback but leaves the public
-internet open (section 6). The gateway is the metered path, not the only path. Tom accepted this on
+around the gateway with that credential: the public internet is open to it (section 6). The gateway is the metered path, not the only path. Tom accepted this on
 2026-10-01 and it is not to be closed: the gateway is for visibility and honest metering, not a hard
 wall, and turns run as the machine's user with no separate macOS account.
 
@@ -167,14 +159,12 @@ lives in `core/`, readable line by line. Status: **in use**.
 `migrate`. Events are never rewritten; a reader that meets an older payload
 upcasts it ([data.md](data.md)). An additive change (a nullable column, a
 plain or partial unique index) applies over a populated ledger without
-rewriting a row or a table: `tests/test_migrate_history.py` shows it on a
-copy of the kernel database, row by row (`xmin`) and table by table
-(`pg_relation_filenode`). A migration tool is **open** and is added
+rewriting a row or a table. A migration tool is **open** and is added
 when a change to `documents` needs more than an idempotent statement.
 
 **Which cluster.** The kernel connects over the Unix socket to the Mac's
 own cluster on port 5432 (`core/settings.py`, every value overridable by a
-`VALOR_*` variable). Turns never reach it: the sandbox profiles deny its
+`VALOR_*` variable). Turns never reach it: the sandbox profile denies its
 port, its socket, and its data directory, and every workspace that needs a database gets a
 cluster of its own (section 7). This is the fix for the demonstration's
 first incident, a machine cluster that trusted loopback and could have let a
@@ -195,12 +185,11 @@ next to the system of record would be a dual write. Redis is replaced by
 Postgres (Tom's decision); no Valor component runs Redis, and every popoto
 model memory uses is on popoto's Postgres backend. An app under test may
 need Redis, in which case its workspace starts one of its own, the way
-the replays did (rebuild-baseline.md, Infrastructure fixed during the
+the baseline did (rebuild-baseline.md, Infrastructure fixed during the
 series, item 5). Status: **in use**.
 
-**pgvector.** Not used by the kernel. Built into one replay cluster only,
-because the app under test needed it. The verification VM's base has
-none. Memory searches by BM25 without it; the `pgvector` client arrives
+**pgvector.** Not used by the kernel. Built into one workspace cluster only,
+because the app under test needed it. Memory searches by BM25 without it; the `pgvector` client arrives
 with popoto's extra and is unused. Status: **not used**.
 
 ### Memory
@@ -279,10 +268,10 @@ reviewer_openai; the judgement legs are pinned beside the seats.
   started from a message does not run on it: the SDLC stages are frontier
   work, which the light model does not hold.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
-  frontier model itself in a fresh blind session, or an Opus-class model
+  frontier model itself in a fresh session, or an Opus-class model
   from another vendor through another harness. What a weaker judge loses is
   [18]; the baseline's Sonnet reviewer accepted #191 at fidelity 1. A
-  model's preference for its own output [16] is countered by blindness when
+  model's preference for its own output [16] is countered by a fresh session with no narration when
   the reviewer shares the builder's model.
 - **Reviewer_openai**: the reviewer's second seat, GPT-6.1 on Pi through
   the gateway's OpenAI route ([pi.md](pi.md)).
@@ -300,19 +289,17 @@ same terms (the constraint "Bounded authority, metered spending").
 ## 5. The judgement tier
 
 A hosted Jev-class model handles every decision that is not authority:
-classifying a request, routing, triage, cheap checks, the blind verifier's
-governance boolean. An open-weight equivalent sits behind the same port as
+classifying a request, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as
 the fallback. A low-confidence call takes its judgement task's abstain
 route, which reaches Tom only through a step he would see anyway. A
 classifier decides what a thing is; it never decides what a thing may do. The taxonomy, the port, and
 confidence gating are [judgement-layer.md](judgement-layer.md). Status:
-**in use** for the request judge; the breadth and governance calls are
-built, and the runners that call them are milestone 1.4's.
+**in use** for the request judge and the breadth call.
 
 What the stack fixes:
 
 - **Hosted, not resident.** No local classifier model of any size worth
-  running fits beside Postgres, a container runtime, a `claude -p` turn, and
+  running fits beside Postgres, two `claude -p` turns, and
   the bridges in 16 GB. Any design that assumes a resident local model is
   wrong for this machine.
 - **Metered like every other call.** Judgement calls are opened and
@@ -333,8 +320,7 @@ What the stack fixes:
   and bare building needed a PM round; rebuild-baseline.md, What this says
   about the old SDLC stages). Serves Mission items 3 and 6. The
   demonstration estimated the judge's cost at well under $0.05 a request
-  against $1.40 to $1.80 of frontier spend it would have saved; an estimate,
-  to be measured by replay. Calibration measured about $0.000033 (Jev) and
+  against $1.40 to $1.80 of frontier spend it would have saved; an estimate. Calibration measured about $0.000033 (Jev) and
   $0.00023 (fallback) per call.
 
 **Vendor.** Jev is the primary leg, including for client request text
@@ -364,23 +350,16 @@ workspace turn keeps Claude Code's own system prompt and tools, appends the
 dispatched text (persona, then Brief) re-rendered every turn
 (`--system-prompt-snapshot off`), resumes the task's session, and runs with:
 
-- `--safe-mode` and `--strict-mcp-config`: no hooks, skills, plugins,
-  `CLAUDE.md`, or MCP servers from this machine;
-- `--setting-sources ""`: no settings file, neither a `.claude/` one in
-  the working directory nor the one in the turn's own config directory,
-  which the turn can write and Claude Code re-reads mid-turn, so nothing
-  the turn runs can set its model URL or environment;
-- `--permission-mode bypassPermissions`: the kernel bounds the turn, not a
-  permission prompt nobody is there to answer;
-- `WebFetch` and `WebSearch` disallowed;
+- the project's own `CLAUDE.md`, settings, hooks, skills, and MCP servers, and the yudame plugins
+  from `settings.plugin_dirs`, each passed as `--plugin-dir`: a turn runs as a developer's Claude
+  Code would;
+- `--permission-mode bypassPermissions`: nobody is there to answer a permission prompt;
 - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, because a `-p` turn that stops
   kills what it left running in the background
   (rebuild-baseline.md, Caveats, pso-a);
 - the prompt after `--`, because a request starting with `-` was read as an
   option (rebuild-baseline.md, Infrastructure fixed during the series,
-  item 3);
-- `GIT_CONFIG_GLOBAL` and `GH_CONFIG_DIR` pointed at configs with no
-  credential helper and no token.
+  item 3).
 
 Status: **in use**. Serves Mission item 1 (a turn can inspect, edit, test,
 and commit without Tom) inside "Bounded authority, metered spending". The port is
@@ -391,7 +370,7 @@ resume cost, and the `.valor/` signal files are
 
 **Harness version.** The `claude` CLI is installed per machine and not
 pinned by the repository; the version it runs as is recorded in
-`turn.started`, so a replay compared across months says which release
+`turn.started`, so a turn compared across months says which release
 produced each turn. Pi is pinned in `harnesses/pi.py`. Status: **in use**.
 
 **Other harnesses.** Pi runs behind the same port on GPT-6.1 through the
@@ -407,49 +386,15 @@ specified in [harnesses.md](harnesses.md) (The turn sandbox, Reaping what a turn
 "Bounded authority, metered spending" and "Stop is immediate and lossless".
 
 What `sandbox-exec` gives: no RAM overhead, the Mac's native toolchains
-(Homebrew Postgres, uv, Xcode), and a profile a person can read in a minute.
-What it does not give: the turn runs as the machine's user, so a
-deliberate Keychain read through the `security` tool is not fenced, and the
-public internet is reachable so package installs work
-(rebuild-demonstration.md, Setup, Isolation). Both are accepted (Tom,
-2026-10-01). Apple's man page marks
+(Homebrew Postgres, uv, Xcode), and a profile a person can read in a minute: four denies, the kernel
+key directory, the machine cluster's data directory, the backup disk, and the machine cluster on
+loopback. The turn runs as the machine's user, with the Keychain and the public internet open to it
+(rebuild-demonstration.md, Setup, Isolation; Tom, 2026-10-01). Apple's man page marks
 `sandbox-exec` deprecated; whether that matters on the timescale of this
 system is a gap to check, not a known risk.
 
-### Sandbox: Apple containers
-
-The plan's constraint names Apple containers (`container`, hypervisor
-isolated Linux VMs on Apple silicon) for sandboxes. Each container is its
-own lightweight VM, sharing no kernel, user, or filesystem with the process
-that holds authority. Measured on Apple silicon: boot about one second,
-`exec` 65 to 110 ms, a host-only network set from outside the VM that
-reaches the Mac and nothing else, `kill` confirmed by a probe from outside
-the VM, and the bind-mounted disk retained after a kill in 40 of 40 trials.
-Building images needs Rosetta even for arm64. Status: **in use** for the
-review's rerun (`core/container.py`), release 1.5.0 from Apple's signed
-package, started for each verification and stopped after it. Valor's
-Mac and Tom's Mac have it installed.
-
-What containers give that `sandbox-exec` does not: a separate user and filesystem, so a Keychain
-read is impossible rather than unfenced; a network whose shape is set from outside; a fresh VM per
-verification, so the blind verifier never runs in the executor's environment [4]. What they cost:
-RAM per running VM, Linux toolchains only, and dependencies baked into an image from a lockfile,
-since a run VM has no network at all. Each of those costs lands on the 16 GB
-machine ([machine.md](machine.md)).
-
-### Which sandbox for which work
-
-[sandbox.md](sandbox.md) owns the split: turns run under
-`sandbox-exec`, which runs the app's own toolchain natively at no memory
-cost, and the blind verifier re-executes in a fresh container, which must
-never share the executor's environment [4]. Moving turns on a Linux
-toolchain (Python, Node, Django with Postgres) into containers is
-**open**; work that needs macOS-native tools (Xcode, iOS builds) stays
-under `sandbox-exec`, since no Linux VM can run it. What closes it: one
-replay item run in a container end to end, with its RAM measured beside a
-turn on the 16 GB machine. Serves "Bounded authority, metered spending": a sandbox
-is where the effect ceiling meets the operating system, since credentials
-and reachable hosts are the effect class in practice [11].
+Review and test checks run in a git worktree of the commit from the kernel mirror
+(`checks.worktree`), with fresh services.
 
 ## 7. Workspaces
 
@@ -461,9 +406,7 @@ The kernel provisions a task's workspace from a project spec
   write and the broker pushes to, and the kernel mirror the merge reads;
 - when the app needs them, a Postgres cluster of the task's own on its own
   loopback port with `scram-sha-256` authentication and an `app` role that
-  may create databases and nothing more (a superuser login would be a way
-  out of the sandbox), and a Redis of its own;
-- an empty gh config and a git config with no credential helper.
+  may create databases and nothing more, and a Redis of its own.
 
 Status: **in use** (`python -m core start --project`). Serves Mission item 1 (the turn tests actual
 use against a real database) inside "Bounded authority, metered spending". How a workspace is
@@ -473,33 +416,29 @@ is [machine.md](machine.md).
 **Running and viewing the app.** No turn in the demonstration or the baseline
 looked at a page in a browser, including the two UI items
 (rebuild-demonstration.md, What was delivered; rebuild-baseline.md, Browser
-use). `look`, a headless Chromium in the workspace, reached on the dev ports
-the profile already allows, is a capability for Mission item 1 ("testing
+use). `look`, a headless Chromium in the workspace, reached on a local port, is a capability for Mission item 1 ("testing
 actual use"), not a gate. It takes about 372 MB at peak (machine.md);
 [browser.md](browser.md) specifies it.
 
 ## 8. The broker's performers
 
 A performer is a Python class that runs in the kernel process, outside the
-turn's sandbox, which is what lets it write a remote the turn cannot. Each
+turn's sandbox. Each
 task has its own set, built from its Brief. The set, `push_branch`, `merge`,
 and how the merge authenticates are in [performers.md](performers.md).
 Status: **in use**.
 
-Serves "Bounded authority, metered spending": a sandbox holds no credential capable of an effect
-outside it, and every effect that leaves is a typed action [11]. The effect protocol
+Serves "Bounded authority, metered spending": every effect that leaves is a typed action [11]. The effect protocol
 is [architecture.md](architecture.md).
 
 ## 9. Surfaces
 
 **Command line.** The `python -m core` CLI: `answer`, `feedback --by
---role-played`, `grant`, `stop`, `status`. Status: **in use**. Serves
+--role-played`, `stop`, `status`. Status: **in use**. Serves
 Mission item 6, since `status` shows the attention log.
 
 **From a phone.** Tom answers, gives feedback, and stops away from a
-terminal through a bridge. Status: **in use**. A grant is given with
-`python -m core grant`; giving one from a phone, and whether it then needs
-a passkey signature verified by the kernel, is **open**.
+terminal through a bridge. Status: **in use**.
 
 **Bridges.** Telegram, email, Slack, and a local chat page, each a self-contained module in `bridges/`
 conforming to one port in `core/` (`core/bridge.py`, in use), with sending
@@ -507,8 +446,7 @@ as an `act` through the broker. The Telegram bridge is built in
 `bridges/telegram/` on **Telethon** (pinned in `uv.lock`), a user account
 over MTProto, with the library confined to `bridges/telegram/wire.py`.
 The Slack bridge is built in `bridges/slack/` on **slack-sdk** (`slack-sdk>=3.45.0` in `pyproject.toml`, pinned in `uv.lock`), Socket Mode for events and the Web API for sends, with the library confined to `bridges/slack/wire.py`.
-Email is **in use**, on the standard library's `imaplib` and `smtplib`,
-tested against Dovecot and a local SMTP server. The local chat is **in use**,
+Email is **in use**, on the standard library's `imaplib` and `smtplib`. The local chat is **in use**,
 on `aiohttp`, serving one page on `127.0.0.1`. What each bridge does
 is [bridges/telegram.md](bridges/telegram.md),
 [bridges/email.md](bridges/email.md), [bridges/slack.md](bridges/slack.md), and [bridges/local.md](bridges/local.md).
@@ -526,7 +464,7 @@ a bare script ([routines.md](routines.md)). Status: **in use**. Serves "Bounded 
 is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which
-both turn sandbox profiles deny: the kernel databases' passwords in a libpq
+the sandbox profile denies: the kernel databases' passwords in a libpq
 password file, the judgement keys in `judgement-keys` and the OpenAI key in `openai-key`
 beside it, copied from the vault `.env` by `python -m core judgement-keys` and
 `python -m core openai-key` ([machine.md](machine.md),
@@ -557,11 +495,8 @@ demonstration and the baseline ran on a 64 GB Mac, so no
 memory figure from them carries over; the RAM plan per component is [machine.md](machine.md). What
 the target machine fixes in the stack:
 
-- **One `claude -p` at a time.** The baseline ran replays concurrently, with
-  slot locks and a Redis server and test database per run
-  (rebuild-baseline.md, Infrastructure fixed during the series, item 5).
-  That is a 64 GB practice and does not carry over.
-- **One container runtime.** Apple's, and only while a sandbox is running.
+- **At most `max_turns` `claude -p` turns at once** (default 2). The baseline ran replays
+  three at a time on 64 GB, which does not carry over.
 - **One Postgres server for the kernel**, resident. Workspace clusters start
   with their task and stop with it. The shared memory store is not on this
   list until its host is chosen with a second Mac's install.
@@ -571,7 +506,7 @@ the target machine fixes in the stack:
   components that must be up when Tom is not at the machine. Routines start
   under launchd and exit.
 - **No Linux assumptions.** launchd, not cron or systemd; Keychain, not a
-  secrets daemon; `sandbox-exec` and Apple containers, not Docker.
+  secrets daemon; `sandbox-exec`, not Docker.
 
 ## Limits
 
@@ -580,9 +515,8 @@ the target machine fixes in the stack:
   through the gateway; a turn that deliberately went around it would be
   visible only in the provider's invoice. An accepted risk (Tom,
   2026-10-01).
-- **`sandbox-exec` runs as the machine's user.** It fences paths and
-  loopback ports; it does not fence the Keychain or the internet.
-- **One provider today.** Reviewer independence rests on blindness until
+- **`sandbox-exec` runs as the machine's user.** It denies four things; it does not fence the Keychain or the internet.
+- **One provider today.** Reviewer independence rests on a fresh session until
   another vendor's Opus-class model is metered [16].
 - **One machine per install, no encryption at rest beyond the disk's.** Each
   kernel database is as safe as the Mac it runs on. A client's destruction
@@ -605,4 +539,4 @@ the target machine fixes in the stack:
   exception is the shared memory store, whose host is chosen with a second Mac's install
   ([machine.md](machine.md), The shared memory store).
 - **A resident local model.** It does not fit in 16 GB beside the rest.
-- **Docker.** Apple's container runtime is the one Linux runtime.
+- **Docker.** The Mac runs no Linux containers.

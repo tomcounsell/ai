@@ -1,8 +1,7 @@
 # Routines
 
 A routine is work Valor does on a schedule instead of on request. Each run is
-a task like any other: a Brief with an effect ceiling and a
-governance grant (default none), committed by the kernel before the first
+a task like any other: a Brief with an effect ceiling, committed by the kernel before the first
 turn, metered by the gateway, recorded in the ledger, and stoppable at any
 instant. launchd supplies the time. The kernel supplies everything else. A
 routine is never a bare script, because a script outside the kernel has no
@@ -32,8 +31,8 @@ and its interpreter, which differ per Mac:
 `python -m core routine NAME --plist` prints a plist whose one program is
 `python -m core routine NAME` run by the kernel's own interpreter, with the
 schedule from the toml and the settings that were set when it was printed:
-Postgres and replay (`VALOR_PG*`, `VALOR_DB*`, `VALOR_DEMO`), and the three
-that must match the kernel's so a routine's turns share Tom's turn slot and
+Postgres (`VALOR_PG*`, `VALOR_DB*`), and the three
+that must match the kernel's so a routine's turns share Tom's turn slots and
 resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`). It
 names no script and carries no secret. launchd starts a job missed during sleep once
 on wake and coalesces several missed intervals into one run, so a laptop
@@ -84,11 +83,10 @@ The three routines the kernel holds:
   placed on this Mac and puts
   each one met on the next strategy meeting's agenda. Described below.
 - **verify** (02:00 daily, ceiling `act`): runs the suite at the head of the
-  routine's branch in the kernel's check sandbox, on a workspace the kernel
+  routine's branch, on a workspace the kernel
   provisions, and starts one fix task for each group of red tests that no
   task holds (Findings, below). The runner holds the session lock
-  `run:<run>`; a run Tom's foreground work preempted is resumed by the next
-  firing at the same commit.
+  `run:<run>`.
 
 ## Metered spending and ceiling
 
@@ -112,23 +110,14 @@ objective's Brief, and never widens at run time; a child's ceiling is at or
 below its parent's. Least privilege [11] sets the default: a routine gets the
 lowest class its job needs.
 
-**Attention.** A routine spends Tom's attention only through a question, a
-grant it needs, or a report of an `act` that left, and each is ledgered against the run (Mission item 6). A
+**Attention.** A routine spends Tom's attention only through a question or a report of an `act` that left, and each is ledgered against the run (Mission item 6). A
 routine's attention is counted on the same footing as its money when the
 ninety-day review below asks whether it earned its place.
 
-**One turn at a time, Tom first.** On a 16 GB machine one `claude -p` runs at
-a time (`docs/machine.md`). Work under a task or ancestor with `Brief.routine`
-or `Brief.replay` is background; everything else is foreground. A foreground
-holder of the turn slot takes the shared lock `turn-slot-fg:<machine>` and
-sends `valor_preempt` before it waits. A background holder listens, and when
-it hears the notice or finds the lock held, its turn or check ends: the
-gateway grant is revoked, the process group is killed, the turn ends with
-outcome `preempted`, and no verdict is written. The task is ready again at
-once and runs after Tom's work. The kernel starts a foreground step beside a
-background one for this reason, and starts a background step only when no
-foreground step is ready. A replay run by hand is background too but sends no
-notice.
+**Background work.** Work under a task or ancestor with `Brief.routine` is background; everything
+else is foreground. At most `settings.max_turns` harness jobs run at once (`docs/machine.md`), and
+the kernel starts a foreground step before a background one when the slots are short. Nothing a
+running turn does is interrupted for it.
 
 ## What a routine may do
 
@@ -146,12 +135,11 @@ The kinds of scheduled work this design carries:
 
 - **Verification runs.** The `verify` routine (`routines/verify/`), `act`,
   daily at 02:00. It runs the project's suite at the head of its branch in
-  the kernel's check sandbox, on a workspace the kernel provisions, never
+  a workspace the kernel provisions, never
   in the kernel's own checkout. Each group of red tests starts one fix
   task, carried through the pipeline and merged at request when the
   predicate holds. Its need is Tom's request of 2026-10-12 plus the hand
-  run that found `7c57334f8` had left `test_advisor` red. It does not see
-  container tests, which the sandboxed check skips. Mission item 1
+  run that found `7c57334f8` had left `test_advisor` red.  Mission item 1
   ("resolving discovered defects") and the Evidence item "working results
   in real use".
 - **Failure triage.** Reading error reports from deployed work, grouping
@@ -293,17 +281,16 @@ one's entry is removed in the same commit.
   product defect).
 - Kill or restart other processes on a heuristic. Stop and recovery live in
   `core/`, not in a scheduled sweep.
-- Act as a check on Valor's own process without a grant (next section).
+- Act as a check on Valor's own process without Tom's grant (next section).
 
 ## Routines that are checks
 
 A routine whose job is to look for something wrong and raise it is a guard.
 It falls under the governance constraint, in full: it names the incident that
 already happened without it and the mission item it serves, it is added
-only under a `governance_grant` with Tom's tap, it is ledgered with a
-ninety-day expiry, and it is deleted by default if it has not fired by
-expiry. The blind verifier's boolean ("does this add a check, gate, hook,
-round, or review step") reads a diff that adds such a routine the same way
+only with Tom's grant, it is ledgered with a
+ninety-day expiry, and it is listed for Tom if it has not fired by
+expiry. The reviewer reads a diff that adds such a routine for governance the same way
 it reads any other diff.
 
 A verification run that tests Valor's own deliverables is a check under this
@@ -317,7 +304,7 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 - **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
   `VALOR_UI_PORT`): every task, one task with its ledger, the attention log, and each routine with its last run, its last
   result and its period spending. It is read-only and answers GET only; the
-  address is the loopback one, on a port no sandbox profile opens.
+  address is the loopback one.
 - **Attention.** A question from a routine reaches Tom through the same
   path as any task's question and is ledgered with its answer and
   provenance. An `act` that left reaches Tom as a report.
@@ -348,8 +335,7 @@ like any other: the loop adds no merge path and no gate.
   are `verify:<test id>` with the parametrize suffix removed. A report with
   no usable test list, or a module that did not load, is the one
   `verify:suite` finding. A failure of the kernel's own (services that
-  did not start) is no finding: the run ends `failed`. Tom's foreground
-  work preempts a run, and the next firing resumes it at the same commit.
+  did not start) is no finding: the run ends `failed`.
 - **By hand.** `python -m core routine NAME --finding TEXT --key KEY
   [--key KEY] [--evidence FILE]` starts a finding under the routine's
   objective, and records `routine.ran` with `run` None, so it never counts
@@ -379,9 +365,6 @@ reads kernel-written rows only and lists:
 - a seeded guard unfired at its expiry, or fired only on background work; a
   guard that fired on Tom's work, ninety days after its last firing and past
   its expiry;
-- an instance grant past its expiry, shown with "no firing record" since no
-  hook records one; one on another project's task is listed apart as
-  outside this repository;
 - a routine whose first registration is over ninety days old and whose runs
   in that window led to no use.
 

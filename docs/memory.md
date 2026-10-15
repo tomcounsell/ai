@@ -5,8 +5,7 @@ directions": a preference Tom stated in one task reaches the Brief of a
 later task in the same project that never stated it.
 
 Memory is popoto [20] 1.10.0's Postgres backend, owned by `valor_memory`,
-which holds no privilege on `events` or `documents`
-(docs/plans/b1-memory.md). `VALOR_MEMORY=off` means no import, no ingest,
+which holds no privilege on `events` or `documents`. `VALOR_MEMORY=off` means no import, no ingest,
 and no section.
 
 **Where it lives.** The store moves to the shared Postgres that all four
@@ -25,7 +24,7 @@ Mac's own kernel database, as memory's role.
   a model [7], so nothing read from memory changes a ceiling or a
   grant: the port, `core/memory.py`, returns a string.
 - **Memory never writes the ledger.** The port reads the ledger as
-  `valor_kernel` and hands `memory/` plain data. Once the turn slot is
+  `valor_kernel` and hands `memory/` plain data. Once the turn's slot is
   released, `run_turn` ingests the rows memory has not taken: the
   `task.started`, answers, and feedback of tasks that have run a turn, the
   `corrections` stream (which `core/` owns and renders whole into every

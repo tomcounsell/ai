@@ -14,8 +14,8 @@ design target for one install is a MacBook Air M4 with 16 GB of RAM, Mac
 native. This doc says what runs on it all the time, what runs only while work is in flight,
 how much memory each part may take, how many turns run at once, where
 secrets live, and how launchd starts things. It enforces the plan
-constraint "16 GB of RAM": Postgres, one container runtime, one `claude -p`
-at a time, and the bridges coexist, and no model runs resident.
+constraint "16 GB of RAM": Postgres, up to `max_turns` (default 2) `claude -p`
+turns at a time, and the bridges coexist, and no model runs resident.
 
 Which data lives in Postgres is [data.md](data.md). How a turn is built is
 [harnesses.md](harnesses.md). What a routine is allowed to do is
@@ -76,15 +76,14 @@ The kernel starts and stops these; launchd never does.
 
 | Component | When | Serves | Measured | Planned |
 |---|---|---|---|---|
-| One `claude -p` turn | Each turn of a task: build, clarify, feedback, and the blind verifier's turn | Mission item 1 (the frontier tier does the hard work) | A safe-mode `claude -p` with no model reply yet: 116 MB (235 MB RSS). Two long interactive Claude Code sessions on the same Mac: 150 MB and 233 MB (430 MB and 535 MB RSS) | 1,000 MB (estimate, covering subagents a turn starts and a long session's growth) |
+| One `claude -p` turn | Each turn of a task: build, clarify, feedback, and the verifier's turn | Mission item 1 (the frontier tier does the hard work) | A `claude -p` with no model reply yet: 116 MB (235 MB RSS). Two long interactive Claude Code sessions on the same Mac: 150 MB and 233 MB (430 MB and 535 MB RSS) | 1,000 MB (estimate, covering subagents a turn starts and a long session's growth) |
 | One Pi turn | A turn of a task whose Brief names the `pi` harness, in place of a `claude -p` turn | Mission item 5 (a second harness behind the same port) | A Pi 0.73.1 turn on a scripted one-reply provider, under the turn's sandbox profile: 116 MB (156 MB RSS) | Takes the `claude -p` row's allowance, since it runs in that turn's place |
-| The turn's work | Commands the turn runs: test suites, dev servers on ports 8000 to 8009, package installs, builds | Mission item 1 ("testing actual use") | Not measured | 3,000 MB (estimate; a Django test run with its own Postgres database is the reference load) |
+| The turn's work | Commands the turn runs: test suites, dev servers, package installs, builds | Mission item 1 ("testing actual use") | Not measured | 3,000 MB (estimate; a Django test run with its own Postgres database is the reference load) |
 | The workspace cluster | A Postgres cluster of the workspace's own, separate from the machine cluster, for the app's tests | Constraint "a ledger the system cannot edit": a turn's tests never share a cluster with the kernel's ledger (rebuild-demonstration.md, Kernel findings 1) | Fresh: 36 MB, as above. The replay series' workspace cluster after every run's test suites: 352 MB summed (383 MB RSS), of which the checkpointer and background writer each count the touched shared buffers | 400 MB |
 | A Redis per run | Only when the project under work needs Redis for its tests | Mission item 1 | An idle `redis-server`: 2 MB RSS | 50 MB |
-| One Apple container | The review's rerun of a candidate's suite and lint, in a VM with no network (see Sandboxes) | Constraint "bounded authority, metered spending" | Measured on 2026-10-03 on Valor's 16 GB M4, apple/container 1.5.0, 4 processors: this repository's suite peaks at 418 MB inside the VM, a footprint of 995 MB at a 1 GB limit, 1,095 MB at 2 GB, 1,224 MB at 4 GB; a Django suite with Postgres, Redis, and five test workers peaks at 1,855 MB at 2 GB (footprint 2,215 MB) and 2,154 MB at 4 GB (footprint 2,898 MB), and at 1 GB thrashes without a memory kill. An idle VM 293 to 427 MB. The runtime's daemons 85 to 145 MB RSS while a VM runs. `system start` 0.3 to 1.0 s. Boot about 1 s, an exec 65 to 110 ms, destroy 1.5 s with a one-second grace (1.4.1) | 2,900 (the Django suite's footprint at the 4 GB limit the kernel sets) |
 | A headless browser | When a turn opens the app it built to look at it | Mission item 1 ("testing actual use"); rebuild-demonstration.md, Recommendations; rebuild-baseline.md, Browser use | One page of a Django app's admin login, rendered by `look` (a screenshot run and a page-dump run), five times: peak resident memory of the browser's process tree 372, 343, 344, 330, and 343 MB, summed per process by `ps` so shared pages count more than once | 372 MB |
 | The dashboard (`ui/`) | When Tom opens it | Mission item 6 (the attention log is readable without asking) | Not measured | 100 MB (estimate) |
-| A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's line: a routine's turn takes the turn slot like any other |
+| A routine's run | When launchd fires its schedule | As the routine's objective names | Same as a turn, since a routine is a task | Counted in the turn's line: a routine's turn takes a turn slot like any other |
 | Judgement calls | Every classification, routing, and cheap check | The three-tier constraint: judgement is hosted | HTTP from the kernel process; no local model | Included in the kernel process |
 
 A turn's processes do not outlive it. The kernel names each turn's
@@ -117,84 +116,57 @@ that, which is why it is stopped rather than left up.
 | Email bridge | 100 |
 | Slack bridge (estimate; measured after a day connected in the live window) | 100 |
 | **Resident subtotal** | **4,356** |
-| One `claude -p` turn | 1,000 |
-| The turn's work | 3,000 |
-| Workspace cluster | 400 |
-| Redis per run | 50 |
-| One Apple container | 2,900 |
-| Headless browser | 372 |
+| One turn: `claude -p` 1,000, its work 3,000, workspace cluster 400, Redis 50 | 4,450 |
+| Two turns (`max_turns`) | 8,900 |
+| Headless browser (one turn at a time opens it) | 372 |
 | Dashboard | 100 |
-| **Peak with everything on demand running at once** | **12,178** |
-| **Left of 16,384** | **about 4,000** |
+| **Peak with two turns running** | **13,728** |
+| **Left of 16,384** | **about 2,650** |
 
-The 4 GB left is file cache and memory compression. The machine is
-Valor's, so no desktop apps of Tom's share it. It is not room for a second
-turn: a second turn and its
-work add about 4 GB, which leaves nothing for the cache that keeps
-git, the test runner, and Postgres fast. It is not room for a local model
+The 2.6 GB left is file cache and memory compression. The machine is Valor's, so no desktop apps of
+Tom's share it. A third turn adds another 4,450 MB and leaves about -1,800 MB, which is swap, and a
+turn swapped to disk is slower than two turns run back to back. It is not room for a local model
 either (see Judgement).
 
 ## Concurrency
 
-**One turn at a time.** The kernel runs one `claude -p` turn per machine at
-once, whatever task it belongs to; the blind verifier's turn, a routine's
-turn, and a build turn all take the same slot. A task whose turn is ready
-while the slot is held waits in Postgres, in order. This is a scheduling
-rule, not a check on the agent: it enforces the 16 GB constraint, and it
-serves Mission item 1, since a turn swapped to disk or killed by memory
-pressure is a lost turn Tom has to notice.
+**Two turns at a time.** The kernel runs at most `settings.max_turns` harness turns or checks at
+once on a machine (`VALOR_MAX_TURNS`, default 2, set from the RAM plan above), whatever task they
+belong to; a build turn, the verifier's turn, and a routine's turn take the same slots. A task whose
+turn is ready while every slot is held waits in Postgres, in order, foreground work first. This is a
+scheduling rule, not a check on the agent: it fits the 16 GB constraint, and it serves Mission item
+1, since a turn swapped to disk or killed by memory pressure is a lost turn Tom has to notice.
 
 **The checks after a candidate.** Test, review, and docs run in parallel
-in the design ([sdlc-state-machine.md](sdlc-state-machine.md)), but on
-the Air each takes the one slot: the review and docs turns are turns, and
-the test branch's suite run is turn-sized work (the 3,000 MB line above).
-So the Air runs them back to back, test, review, then docs, with the same
-verdicts and the same join as running them at once. A suite run stops the
-task's own Postgres and Redis and starts fresh ones on the same ports for
-itself, so a check adds no service to the memory budget; its copy of the
-package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
+in the design ([sdlc-state-machine.md](sdlc-state-machine.md)), and on the Air they take the slots
+that are free: the review and docs turns are turns, and the test branch's suite run is turn-sized
+work (the 3,000 MB line above). With two slots, two of them run at once and the third waits, with
+the same verdicts and the same join. A suite run stops the task's own Postgres and Redis and starts
+fresh ones on the same ports for itself, so a check adds no service to the memory budget; its copy
+of the package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
 
-The turn slot is the session advisory lock `turn-slot:<machine>`
-(`core/slot.py`): every harness turn holds it, replay turns included, so a
-second kernel or a `python -m core run` beside `serve` waits for it. It is
-reentrant within the task that holds it. The test, review, and docs checks hold it for their
-whole run, and the turn a review or docs check runs takes it again as a
-no-op.
+A turn slot is one of the session advisory locks `turn-slot:<machine>:<i>`, `i` below `max_turns`
+(`core/slot.py`): every harness turn holds one, so a second kernel or a `python -m core run` beside
+`serve` waits for a free one. It is reentrant within the task that holds it. The test, review, and
+docs checks hold one for their whole run, and the turn a review or docs check runs takes it again as
+a no-op.
 
-**Tom's work first.** Work under a task or ancestor whose Brief has
-`routine` or `replay` is background; the rest is foreground. A foreground
-hold takes the shared lock `turn-slot-fg:<machine>` and sends
-`valor_preempt`. A background turn or check hears it, or finds the lock
-held, and ends: the gateway grant is revoked, the process group is killed,
-the turn ends with outcome `preempted`, and no verdict is written. The
-task is ready again and runs after Tom's work. A background turn hears
-the notice while its process runs, and a check while its suite runs; a
-background step inside a hold that waits elsewhere (the test runner's
-judgement, a review's setup) finishes that wait first. The kernel starts a
-foreground step beside a background one and a background step only when no
-foreground step is ready. A replay run by hand is background and sends no
-notice ([routines.md](routines.md)).
-
-**What runs beside the turn.** Bridges keep receiving and delivering
-released messages while a turn runs; an incoming request becomes a queued
-task. Judgement calls are hosted HTTP and run concurrently with a turn at
-no memory cost, so a request can be classified (and sent to clarify or
-build, per [judgement-layer.md](judgement-layer.md)) while another task's
-turn holds the slot.
+**What runs beside the turns.** Bridges keep receiving and delivering released messages while turns
+run; an incoming request becomes a queued task. Judgement calls are hosted HTTP and run concurrently
+with a turn at no memory cost, so a request can be classified (and sent to clarify or build, per
+[judgement-layer.md](judgement-layer.md)) while other tasks' turns hold the slots.
 
 **What the baseline says about concurrency.** The baseline series
 (rebuild-baseline.md) ran its 13 replay runs on a 64 GB machine, up to
 three at once, each run with one
 Valor turn at a time metered through the kernel's gateway beside its
 stand-in and judge calls, and met no rate limit. That bounds the API side: at this
-account's limits, the Air will not be throttled by running one turn at a
-time, or several. It says nothing about the Air's memory, which is the
-binding limit. Run serially, the same series is about 2.6 hours of turn
-wall time (85 minutes bare and 49 clarify in the Aggregate section, 21
-for the pso-a bare rerun), plus question and feedback waits, which hold no turn slot.
+account's limits, the Air will not be throttled by running two turns at a
+time. It says nothing about the Air's memory, which is the
+binding limit.
 
 **Time on the slot.** A turn that waits on a question or on feedback has
-ended; the slot is free until the answer arrives and the next turn starts.
+ended; its slot is free until the answer arrives and the next turn starts.
 Resume re-sends the whole session (rebuild-demonstration.md, Money: about
 30,000 input tokens on the first call, 109,000 on the last), which costs
 money and wall time, not local memory.
@@ -218,38 +190,12 @@ Air no memory and stays available while a turn holds the slot. A call
 neither leg answers with confidence takes its abstain route, per
 [judgement-layer.md](judgement-layer.md).
 
-## Sandboxes
+## Sandbox
 
-Two isolation mechanisms exist on macOS, and they cost memory differently.
-
-- **sandbox-exec** wraps the turn's process tree in a profile. It costs no
-  memory of its own. The current kernel runs every workspace turn under
-  one: the turn reaches the gateway, the workspace cluster, and ports 8000
-  to 8009 on loopback; the machine cluster's port and socket are denied;
-  denies come before allows, since a network rule after the allows refused
-  allowed gateway ports at random (rebuild-demonstration.md, Kernel
-  findings 3).
-- **Apple containers** run as lightweight Linux VMs, each with its own
-  memory allocation; the kernel uses them for the review's rerun, which runs on any Mac with `container` installed: Valor's Mac and Tom's Mac both have it. The network mode is set on the host and cannot be
-  changed from inside: a host-only network reaches exactly one host, the
-  Mac, where the gateway runs. Reaching a package registry from a
-  host-only network needs a proxy on the Mac beside the gateway. The
-  builder VM needs Rosetta installed even for arm64 builds. A stop must
-  kill rather than stop gracefully: `sleep infinity` as PID 1 ignores
-  SIGTERM, and a graceful stop returned in 2.8 s median with the workload
-  still running for one more step, while a kill returned in 1.7 s and cut
-  the workload's open connection in 265 ms median.
-
-Both serve the constraint "bounded authority, metered spending" by least privilege
-[11]. On the Air, one verification runs at a time on the machine (a lock on
-the container runtime, which kernels and `container`-marked tests all take
-before any runtime work), and a review check holds the turn slot while it
-does. Which work runs under which mechanism is
-[sandbox.md](sandbox.md)'s; this doc only fixes that a
-container costs its workload plus about 0.6 GB and sandbox-exec costs
-nothing. The review's rerun gets a 4 GB limit (`verify_memory_mb`): a
-Django suite with five test workers needed 2.2 GB, and at 1 GB the VM
-thrashed rather than reporting a memory kill.
+**sandbox-exec** wraps the turn's process tree in a profile. It costs no memory of its own. The
+kernel runs every workspace turn under one; the profile denies the kernel key directory, the machine
+cluster's data directory, the backup disk, and the machine cluster on loopback (port 5432 and its
+socket), and allows everything else ([workspace.md](workspace.md)). Denies come before allows.
 
 ## launchd
 
@@ -282,7 +228,7 @@ sleep disabled is Valor's operational call for each Mac, not yet made.
 ## Keychain
 
 Kernel-held secrets live in the kernel key directory, the directory of
-the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which every
+the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which the
 sandbox profile denies. They are not in the Keychain, because a turn
 can read the login keychain (below). A secret is read by name when the
 process that needs it starts; a missing name fails the start with the name
@@ -294,7 +240,7 @@ authority, and a turn holds none.
 |---|---|---|
 | The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |
 | The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run`, `calibrate`, or `serve` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
-| The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on the OpenAI route's listed calls (`POST v1/responses`, `GET` or `HEAD` on `v1/models` and one model by id; any other method is a 403) and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
+| The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on every call of the OpenAI route and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge, at start | `telegram-keys` (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, mode 600) in the kernel key directory, written only by `python -m bridges.telegram keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`; the session is `telegram.session` beside it, mode 600, written by `python -m bridges.telegram login`, which Tom runs and types the code and password into. No output holds any part of the hash |
 | Slack app and user tokens | The Slack bridge, at start | `slack-keys` (`<team>_SLACK_APP_TOKEN`, `<team>_SLACK_USER_TOKEN`, mode 600) in the kernel key directory, written only by `python -m bridges.slack keys`, which copies them from the vault `.env` under the team id `auth.test` names and prints each name with `written`, `kept`, or `missing`. No output holds any part of a token |
 | Mail credentials, `IMAP_USER`, `IMAP_PASSWORD`, `SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password) | The email bridge, at start | `mail-keys` in the kernel key directory (mode 600), written only by `python -m bridges.email keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the bridge's `Config` only, never in `os.environ`, a ledger row, or a log line |
@@ -340,9 +286,9 @@ The kernel also exits with status 1 to run its own merged code
 starts it again, so a rollout restart needs no `kickstart`, and it loads
 the judgement keys again too.
 
-A turn's environment is an allowlist (`HOME`, `USER`, `PATH`, and a few
-more) with no tokens and no agent sockets, git's credential helper is
-blocked in the sandbox, and gh runs with an empty config.
+A turn's environment is the operator's, less the kernel's secrets (the `ANTHROPIC_`, `CLAUDE`, and
+`AI_AGENT` variables, the OpenAI, TypeSafe, OpenRouter, and GitHub push keys, and the `PG*` password
+variables). It carries Valor's own `gh` login, git credential helper, and SSH agent.
 
 A turn runs as the machine's one macOS user, so it can read that user's
 login keychain on purpose through the `security` tool, the machine's Claude
@@ -360,15 +306,14 @@ token in `claude-token` beside it, paths derived from the password file's
 so the sandbox deny, derived from the same setting, cannot drift from
 them. A Keychain item is readable by a turn through `security`,
 and the vault `.env` syncs to iCloud and is loaded into the environment of
-the old system's unsandboxed sessions; this directory is neither, and every
+the old system's unsandboxed sessions; this directory is neither, and the
 sandbox profile denies it. libpq reads the password file for every kernel
 connection, so no kernel process holds the password in a string or its
 environment. `python -m core secure-login` makes it, adds `valor_memory`'s
 lines when it lacks them (written to a file beside it and renamed over it),
 and is the only code that writes it. Tom's own `psql` reaches the kernel databases by
 `export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which no
-turn inherits: `turn` drops every `PG*` variable, and `workspace_turn`
-copies only its allowlist.
+turn inherits: `workspace_turn` drops the `PG*` password variables.
 
 ## Postgres on the machine
 
@@ -397,7 +342,7 @@ secure-login` puts three `scram-sha-256` rules (socket, `127.0.0.1`, `::1`)
 in a marked block ahead of every other rule in `pg_hba.conf`, written to a
 temporary file and renamed into place, and puts the original back without
 reloading if the server would not parse the result. Other databases on the
-cluster keep their `trust` rules. Every workspace sandbox profile denies the
+cluster keep their `trust` rules. The workspace sandbox profile denies the
 cluster's data directory (the `pg_data_dir` setting), so a turn cannot
 edit `pg_hba.conf` or the heap files.
 
@@ -505,4 +450,4 @@ Each estimate above is a gap until measured on the Air:
 - A connected Slack bridge after a day in the live window.
 - A working `claude -p` turn's peak, subagents included, and the peak of
   the work it runs (a Django test suite is the first case to measure).
-- A Django suite's peak in the VM with every test reaching its database (the base image holds pgvector, and a project's `extensions` make it in the task's Postgres).
+- A Django suite's peak with every test reaching its database (a project's `extensions` make it in the task's Postgres).

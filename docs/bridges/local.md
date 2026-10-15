@@ -111,8 +111,7 @@ notice is marked sent with its notice id as the message id.
 
 - `operator_channel` `local` makes the local chat the operator's; then
   `operator_chat` is `local`, and the Telegram operator chat is not owned.
-- `local_port` (`VALOR_LOCAL_PORT`, 8711) sits outside `DEV_PORTS` (8000
-  to 8009) and the Postgres and Redis spans, so a turn cannot connect to it.
+- `local_port` (`VALOR_LOCAL_PORT`, 8711) sits outside the Postgres and Redis spans.
 - `local-token` in the kernel key directory, mode 600, made by `run` when
   it is missing and never rewritten. It is written to a temporary file
   beside it and hard-linked into place, so the name holds a whole token or
@@ -120,26 +119,16 @@ notice is marked sent with its notice id as the message id.
 
 ## Threat model
 
-- **The turn** reaches only the gateway, its own services, and 8000 to
-  8009 on loopback ([harnesses.md](../harnesses.md)), so it cannot reach
-  the bridge's port; that deny alone keeps a turn off this channel. The
-  kernel key directory is denied to every turn, but the token is also in
-  the browser's history.
-- **The browser profiles are an opening of this Mac.** The profiles under
-  `~/Library/Application Support` are neither read- nor write-denied to a
-  turn. A turn can read the token there, and can leave an extension, a
-  pref, or a startup page that Tom's browser loads on its next start and
-  that reaches the port with the token. It can read the profiles' cookies
-  and logins too ([sandbox-openings.md](../sandbox-openings.md)). No deny
-  is added; Tom's answer is pending in
-  [m2-4-local.md](../plans/m2-4-local.md), and accepting it for the proof
-  of concept is assumed.
+- **The turn** reaches the bridge's port on loopback like any local
+  program, and reads the token from the browser's history or profiles
+  under `~/Library/Application Support`; the kernel key directory that
+  holds the token file is denied to it ([workspace.md](../workspace.md)).
 - **A message's text.** A notice or a send is text a turn wrote,
   shown on the page that holds the token and takes stops, so it must
   never run. It is rendered as [above](#the-page): HTML in it escaped,
   the Markdown output sanitized, and inline script refused by the page's
   CSP as a second layer.
-- **Framing.** A page a turn serves on 8000 to 8009 cannot frame the chat
+- **Framing.** A page a turn serves cannot frame the chat
   page: `GET /` sends `frame-ancestors 'none'`.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
   (`/dev/ttys*`), so a terminal chat can be overprinted with a
@@ -149,9 +138,8 @@ notice is marked sent with its notice id as the message id.
   Another macOS user reaches `127.0.0.1` but reads neither the key
   directory nor Tom's browser history. A web page Tom visits cannot send
   the token header without a CORS preflight the bridge never answers. A
-  process of Tom's own user outside the sandbox can read the key directory:
-  the accepted opening of one macOS user
-  ([sandbox-openings.md](../sandbox-openings.md)).
+  process of Tom's own user outside the sandbox can read the key
+  directory.
 
 ## Gaps
 

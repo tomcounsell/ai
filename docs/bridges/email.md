@@ -295,8 +295,7 @@ operator from the bridge too.
 
 The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
 `core.settings`, `core.db`, `core.credentials`, `core.notices`, and
-`core.tasks`, and nothing from the Telegram bridge. Its tests run against Dovecot and a local SMTP server
-(`tests/mailserver.py`) with a real Postgres and no mocks.
+`core.tasks`, and nothing from the Telegram bridge.
 
 ## Gaps
 
