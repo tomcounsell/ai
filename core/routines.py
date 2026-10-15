@@ -556,20 +556,15 @@ async def _sweeps(conn) -> list[dict[str, Any]]:
 
 async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
     """What the expiry sweep proposes to delete at `now`: `items` (each
-    `kind` guard, grant, or routine, with its id, name, incident, mission
-    items, grant and expiry dates, `last_firing`, and whether a firing
-    record exists) and `outside`, the instance grants on tasks of another
-    project, listed and not removed. One fold over kernel-written rows."""
+    `kind` guard or routine, with its id, name, incident, mission items,
+    grant and expiry dates, `last_firing`, and whether a firing record
+    exists). One fold over kernel-written rows."""
     today = _day(now)
     listed: dict[tuple[str, str], date] = {}
-    removed: set[str] = set()  # grants a merged sweep listed; only those in this repository count
     for sweep in await _sweeps(conn):
-        merged = await state_of(conn, sweep["task_id"]) == "merged"
         for item in sweep["payload"]["due"]:
             key = (item["kind"], item["id"])
             listed[key] = max(listed.get(key, date.min), _day(sweep["at"]))
-            if merged and item["kind"] == "grant":
-                removed.add(item["id"])
 
     def listed_recently(key: tuple[str, str]) -> bool:
         return key in listed and today < listed[key] + timedelta(days=USE_DAYS)
@@ -590,7 +585,6 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
             firings[v["guard_id"]] = max(firings.get(v["guard_id"], date.min), _day(v["at"]))
 
     items: list[dict[str, Any]] = []
-    outside: list[dict[str, Any]] = []
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT task_id, payload, at FROM events WHERE type = 'guard.granted' ORDER BY id")
         granted = await cur.fetchall()
@@ -599,41 +593,28 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
         p = row["payload"]
         guard_id = p["guard_id"]
         expires = date.fromisoformat(p["expires"])
-        instance = bool(p.get("instance_id"))
-        kind = "grant" if instance else "guard"
-        if not instance and guard_id not in seeded:
+        if guard_id not in seeded:
             continue  # a seeded guard the checkout no longer holds is gone
-        in_repo = True
-        if instance:
-            try:
-                project = (await tasks.brief(conn, row["task_id"])).project
-            except KeyError:
-                project = None
-            in_repo = (project or {}).get("name") == "valor"
-        if instance and in_repo and guard_id in removed:
-            continue  # the merged sweep removed it; keeping one is a new grant row
         fired = firings.get(guard_id)
-        if instance or fired is None:
+        if fired is None:
             is_due = today > expires
         else:
             is_due = today >= fired + timedelta(days=USE_DAYS) and today > expires
-        if not is_due or listed_recently((kind, guard_id)):
+        if not is_due or listed_recently(("guard", guard_id)):
             continue
-        item = {
-            "kind": kind,
-            "id": guard_id,
-            "name": p.get("name"),
-            "incident": p.get("incident"),
-            "mission_items": p.get("mission_items"),
-            "granted_at": p.get("granted_at"),
-            "expires": p["expires"],
-            "last_firing": fired.isoformat() if fired else None,
-            "firing_record": not instance,
-        }
-        if not in_repo:
-            outside.append(item)
-            continue
-        items.append(item)
+        items.append(
+            {
+                "kind": "guard",
+                "id": guard_id,
+                "name": p.get("name"),
+                "incident": p.get("incident"),
+                "mission_items": p.get("mission_items"),
+                "granted_at": p.get("granted_at"),
+                "expires": p["expires"],
+                "last_firing": fired.isoformat() if fired else None,
+                "firing_record": True,
+            }
+        )
 
     expiry_names = set()
     for name in names():
@@ -670,7 +651,7 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
                 "firing_record": True,
             }
         )
-    return {"items": items, "outside": outside, "malformed": malformed}
+    return {"items": items, "malformed": malformed}
 
 
 async def _used(conn, objectives: list[str], cutoff: datetime) -> bool:
@@ -712,10 +693,7 @@ def render(found: dict[str, list[dict[str, Any]]], r: Routine) -> str:
             f"  granted {i['granted_at']}, expires {i['expires']}, {firing}"
         )
 
-    parts = [r.instruction.strip(), "", "Due now:", *(entry(i) for i in found["items"])]
-    if found["outside"]:
-        parts += ["", "Outside this repository: listed, not removed:", *(entry(i) for i in found["outside"])]
-    return "\n".join(parts)
+    return "\n".join([r.instruction.strip(), "", "Due now:", *(entry(i) for i in found["items"])])
 
 
 async def expiry_runner(ctx: Context) -> Ran:

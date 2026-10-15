@@ -50,7 +50,6 @@ from core import (
     checks,
     db,
     git,
-    judgement_sites,
     ledger,
     machine,
     runs,
@@ -215,8 +214,6 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
             return {"status": "stopped"}
         async with await db.connect(ctx.dsn) as conn:
             now = await tasks.status(conn, ctx.task_id)
-        if ended["outcome"] == "preempted":
-            return dict(slot.PREEMPTED)
         if ended["outcome"] == "stopped":
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
@@ -302,8 +299,8 @@ def advise(fresh_for: FreshFor):
     read from its final message and appended as `advice.given`. The advisor
     holds nothing and decides nothing: an advisor that cannot answer is
     recorded with the reason, and the next working turn is told it. Returns
-    `advised` once the row is written, or `stopped`, `lock lost`, or a
-    preemption, with nothing written."""
+    `advised` once the row is written, or `stopped` or `lock lost`, with
+    nothing written."""
 
     async def run(gateway, task_id: str, dsn: str, alive, asked: dict[str, Any]) -> dict[str, Any]:
         turn_id = asked["turn_id"]
@@ -364,8 +361,6 @@ def advise(fresh_for: FreshFor):
             )
         except tasks.TaskStopped:
             return {"status": "stopped"}
-        if ended["outcome"] == "preempted":
-            return dict(slot.PREEMPTED)
         if ended["outcome"] == "stopped":
             return {"status": "stopped"}
         result = ended["result"]
@@ -534,14 +529,14 @@ def _kept_row(rows: list[dict], candidate: str, mirror: str) -> dict | None:
     return None
 
 
-def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
+def docs_runner(fresh_for: FreshFor, model: str | None = None):
     """The runner for `Check.DOCS`: one fresh docs turn in a real clone of
     the candidate, the commits it made fetched into the mirror and cut to
-    the prefix the kernel keeps, governance over the kept diff, and the
+    the prefix the kernel keeps, and the
     verdict the kernel computes from what was kept: the session's own
     `changes` stands, and a commit the kernel did not keep is a `dropped`
     finding, never `changes`. A `docs.kept` row for the candidate is reused, so a
-    run that died after the turn asks only governance again. The check
+    run that died after the turn runs no second turn. The check
     holds the turn slot throughout; its docs turn takes it again as a
     no-op."""
 
@@ -576,14 +571,6 @@ def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
                 return out
             kept_row = out["kept"]
         kept = kept_row["kept"]
-        try:
-            ids = (
-                await judgement_sites.governance(port, ctx.dsn, ctx.task_id, c.sha, kept)
-                if kept != c.sha
-                else []
-            )
-        except tasks.TaskStopped:
-            return {"status": "stopped"}
         dropped = kept_row["dropped"]
         # A commit the kernel did not keep is noted; the merge goes on at what was kept.
         verdict = (
@@ -601,7 +588,7 @@ def docs_runner(fresh_for: FreshFor, port, model: str | None = None):
         try:
             async with await db.connect(ctx.dsn) as conn:
                 await verdicts.record_check(
-                    conn, ctx.task_id, machine.Check.DOCS, verdict, head=kept, governance_from=ids,
+                    conn, ctx.task_id, machine.Check.DOCS, verdict, head=kept,
                     findings=findings, dropped=dropped, leg="session", model=kept_row["model"],
                     usd_micros=kept_row["usd_micros"], turn_id=kept_row["turn_id"],
                 )  # fmt: skip
@@ -648,8 +635,6 @@ async def _docs_turn(
         return {"status": "stopped"}
     async with await db.connect(ctx.dsn) as conn:
         now = await tasks.status(conn, ctx.task_id)
-    if ended["outcome"] == "preempted":
-        return dict(slot.PREEMPTED)
     if ended["outcome"] == "stopped":
         return {"status": "stopped", "state": now, "turn": ended}
     if ended["outcome"] != "done" or ended["result"].get("is_error"):
@@ -734,42 +719,7 @@ def _effects(rows: list[dict]) -> str:
     return "\n\n".join(out) or "No effect was held or refused."
 
 
-def governance_input(
-    mirror: str, base: str, candidate: str, instances: list[dict[str, Any]], judged: dict[str, Any],
-    granted: set[str],
-) -> dict[str, Any]:  # fmt: skip
-    """`governance.json`: each kernel instance (id, path, start and end line,
-    the hunk's added and removed lines, granted or not), and each undecided
-    hunk (id, path, lines, added and removed lines, why), which the reviewer
-    answers."""
-    hunks: dict[str, git.Hunk] = {}
-    for path in {i["path"] for i in instances} | {h.path for h, _ in judged["undecided"]}:
-        for h in git.hunks(mirror, base, candidate, path):
-            hunks.setdefault(h.id(), h)
-
-    def lines(hid: str) -> dict[str, Any]:
-        h = hunks.get(hid)
-        return {
-            "start": h.start if h else None,
-            "end": h.start + max(h.length, 1) - 1 if h else None,
-            "added": list(h.added) if h else [],
-            "removed": list(h.removed) if h else [],
-        }
-
-    return {
-        "instances": [
-            {"id": i["id"], "path": i["path"], **lines(i["id"]), "granted": i["id"] in granted}
-            for i in instances
-        ],
-        "undecided": [
-            {"id": h.id, "path": h.path, **lines(h.id), "why": why} for h, why in judged["undecided"]
-        ],
-    }
-
-
-def review_inputs(
-    rows: list[dict], f: machine.Fold, b: tasks.Brief, setup: dict[str, Any], governance: dict[str, Any],
-) -> dict[str, str]:  # fmt: skip
+def review_inputs(rows: list[dict], f: machine.Fold, b: tasks.Brief, setup: dict[str, Any]) -> dict[str, str]:
     """The reviewer's inputs, by file name. `plan.md` is the stakes header
     and the plan file's bytes at the commit critique read, from the mirror,
     so an edit the builder made after critique shows only in `diff.patch`."""
@@ -794,7 +744,6 @@ def review_inputs(
             b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, f.candidate.sha
         ),
         "setup.json": json.dumps(setup, indent=2),
-        "governance.json": json.dumps(governance, indent=2),
         "effects.md": _effects(rows),
     }
 
@@ -855,15 +804,11 @@ def _text(value: Any) -> bool:
 
 def _review_fields(data: dict[str, Any]) -> dict[str, Any]:
     """The reviewer's verdict object, checked for shape: `verdict` is `pass`
-    or `changes`, and `undecided` answers the governance boolean by hunk
-    id; anything else, or a malformed field, is `Malformed`."""
+    or `changes`; anything else, or a malformed field, is `Malformed`."""
     verdict = data.get("verdict")
     findings = data.get("findings") or []
-    instances = data.get("governance") or []
-    notes = data.get("notes") or {}
     predicted = data.get("predicted_failure")
     requirements = data.get("requirements") or []
-    undecided = data.get("undecided") or {}
     if verdict not in verdicts.REVIEWER_VERDICTS:
         raise Malformed(f"the verdict is not one of {list(verdicts.REVIEWER_VERDICTS)}")
     if not isinstance(findings, list) or not all(isinstance(x, (dict, str)) for x in findings):
@@ -871,108 +816,26 @@ def _review_fields(data: dict[str, Any]) -> dict[str, Any]:
     for x in findings:
         if isinstance(x, dict) and not isinstance(x.get("text"), str):
             raise Malformed("a finding has no text")
-    if not isinstance(instances, list):
-        raise Malformed("governance is not a list of instances")
-    for i in instances:
-        if (
-            not isinstance(i, dict)
-            or not isinstance(i.get("path"), str)
-            or not isinstance(i.get("line"), int)
-            or isinstance(i.get("line"), bool)
-            or not all(_text(i.get(k)) for k in ("summary", "incident", "mission_item"))
-        ):
-            raise Malformed("a governance instance is not {path, line, summary, incident, mission_item}")
-    if not isinstance(notes, dict) or not all(
-        isinstance(v, dict) and all(_text(v.get(k)) for k in ("summary", "incident", "mission_item"))
-        for v in notes.values()
-    ):
-        raise Malformed("notes is not an object of {summary, incident, mission_item} by instance id")
     if predicted is not None and (
         not isinstance(predicted, (int, float)) or isinstance(predicted, bool) or not 0 <= predicted <= 1
     ):
         raise Malformed("predicted_failure is a number from 0 to 1")
     if not isinstance(requirements, list):
         raise Malformed("requirements is not a list")
-    if not isinstance(undecided, dict) or not all(isinstance(v, bool) for v in undecided.values()):
-        raise Malformed("undecided is not an object of true or false by hunk id")
     return {
-        "undecided": undecided,
         "verdict": verdict,
         "findings": findings,
-        "instances": instances,
-        "notes": notes,
         "predicted_failure": predicted,
         "requirements": requirements,
     }
 
 
-def normalize(
-    mirror: str, base: str, candidate: str, fields: dict[str, Any], known: set[str]
-) -> tuple[list[verdicts.InstanceSpec], dict[str, dict[str, Any]], list]:
-    """The reviewer's instances and notes as the record takes them, so
-    nothing the reviewer writes can refuse it: an instance whose path is not
-    exactly one of the diff's paths, or with no changed hunk at its line, and
-    a note for an id not in `governance.json`, each become a finding of
-    kind `governance`. Returns (instance specs, notes, findings)."""
-    paths = set(git.diff_paths(mirror, base, candidate))
-    specs: list[verdicts.InstanceSpec] = []
-    findings = list(fields["findings"])
-    for i in fields["instances"]:
-        spec = verdicts.InstanceSpec(
-            i["path"], i["line"], i.get("summary") or "", i.get("incident"), i.get("mission_item")
-        )
-        if spec.path in paths and git.hunk_at(mirror, base, candidate, spec.path, spec.line) is not None:
-            specs.append(spec)
-        else:
-            findings.append(
-                {
-                    "kind": "governance",
-                    "text": f"the reviewer named governance at {_quoted(spec.path)} line {spec.line}, "
-                    f"where the diff changes no hunk: {spec.summary or 'no summary'}",
-                }
-            )
-    notes: dict[str, dict[str, Any]] = {}
-    for key, note in fields["notes"].items():
-        if key in known:
-            notes[key] = note
-        else:
-            findings.append(
-                {
-                    "kind": "governance",
-                    "text": f"the reviewer noted {_quoted(key)}, which is not a governance instance here: "
-                    f"{note.get('summary') or 'no summary'}",
-                }
-            )
-    return specs, notes, findings
-
-
-def undecided_answers(said: dict[str, bool], undecided: list[dict[str, Any]]) -> tuple[dict[str, bool], list]:
-    """The reviewer's answers to the undecided hunks of `governance.json`:
-    an answer for a hunk that is not undecided is a finding of kind
-    `governance`, and an undecided hunk left unanswered is `Malformed`.
-    Returns (answers, findings)."""
-    wanted = {u["id"] for u in undecided}
-    missing = sorted(wanted - set(said))
-    if missing:
-        raise Malformed(f"undecided leaves hunks unanswered: {missing}")
-    findings = [
-        {
-            "kind": "governance",
-            "text": f"the reviewer answered {_quoted(k)}, which is not an undecided hunk here",
-        }
-        for k in sorted(set(said) - wanted)
-    ]
-    return {k: v for k, v in said.items() if k in wanted}, findings
-
-
-def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str = SEATS["review"]):
-    """The runner for `Check.REVIEW`: governance per hunk first (the hunks it
-    leaves undecided go to the reviewer, whose `undecided` answers them), then one
+def review_runner(fresh_for: FreshFor, model: str | None = None, seat: str = SEATS["review"]):
+    """The runner for `Check.REVIEW`: one
     fresh session in a worktree of the candidate the kernel set up, inside
     fresh services, where it may run the suite; its final message is its
     verdict (`final_verdict`).
-    The recorded verdict is computed from the reviewer's `pass` or
-    `changes`, the instances, and the grants (`verdicts.review_verdict`).
+    The recorded verdict is the reviewer's `pass` or `changes`.
     At the registered seat it records `review.decided`; at any other seat
     it appends `review.compared` as information and never moves the task.
     `model` overrides the seat's pinned model. The check holds the turn
@@ -1008,28 +871,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
         lay = workspace.Layout(Path(b.mirror).parent)
         project = b.project or {}
 
-        # 1. Governance first, so a judge outage costs no run and no turn.
-        try:
-            ids = await judgement_sites.governance(port, ctx.dsn, ctx.task_id, b.base_sha, candidate)
-        except tasks.TaskStopped:
-            return {"status": "stopped"}
-        except judgement_sites.Unusable as exc:
-            return failed(f"governance: {exc}")
-        async with await db.connect(ctx.dsn) as conn:
-            rows = await ledger.read(conn, ctx.task_id)
-        try:
-            kernel_instances, judged = verdicts.governance_instances(
-                rows, b.mirror, b.base_sha, candidate, ids, [], {}
-            )
-            governance = governance_input(
-                b.mirror, b.base_sha, candidate, kernel_instances, judged, f.granted
-            )
-        except verdicts.VerdictRefused as exc:
-            return failed(f"governance: {exc}")
-        except git.GitError as exc:
-            return failed(f"the diff: {exc}")
-
-        # 2. The reviewer's worktree, set up by the kernel, and the turn,
+        # The reviewer's worktree, set up by the kernel, and the turn,
         # both inside fresh services.
         harness_name, seat_model = resolve_seat(seat)
         model = model_ or seat_model
@@ -1046,7 +888,7 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             try:
                 async with await db.connect(ctx.dsn) as conn:
                     await verdicts.record_check(
-                        conn, ctx.task_id, machine.Check.REVIEW, "changes", governance_from=ids,
+                        conn, ctx.task_id, machine.Check.REVIEW, "changes",
                         findings=[{"kind": "commit", "text": why}], leg="kernel",
                     )  # fmt: skip
             except verdicts.VerdictRefused as refused:
@@ -1086,10 +928,10 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
                         lambda step: lay.checks / f"{check_dir.name}.{step}.out",
                     )  # fmt: skip
             except checks._Stopped:
-                return await checks.interrupted(ctx)
+                return {"status": "stopped"}
             seen = {"setup_exit": setup["commands"][-1]["exit"] if commands else None}
             try:
-                inputs = review_inputs(rows, f, b, seen, governance)
+                inputs = review_inputs(rows, f, b, seen)
             except (OSError, ValueError, git.GitError) as exc:
                 return failed(f"review inputs: {exc}")
             try:
@@ -1116,38 +958,29 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             await asyncio.to_thread(services.__exit__, None, None, None)
         async with await db.connect(ctx.dsn) as conn:
             now = await tasks.status(conn, ctx.task_id)
-        if ended["outcome"] == "preempted":
-            return dict(slot.PREEMPTED)
         if ended["outcome"] == "stopped":
             return {"status": "stopped", "state": now, "turn": ended}
         if ended["outcome"] != "done" or ended["result"].get("is_error"):
             return {"status": "failed", "state": now, "turn": ended}
 
-        # 4 and 5. The verdict, its shape, and what the record takes.
+        # The verdict and its shape.
         data, why = final_verdict(ended["result"].get("text"))
         if data is None:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         try:
             fields = _review_fields(data)
-            known = {i["id"] for i in governance["instances"]}
-            specs, notes, findings = normalize(b.mirror, b.base_sha, candidate, fields, known)
-            fields["undecided"], more = undecided_answers(fields["undecided"], governance["undecided"])
-            findings += more
         except Malformed as exc:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
-        except git.GitError as exc:
-            return {"status": "failed", "state": now, "turn": {**ended, "result": f"the diff: {exc}"}}
         usd = int(ended.get("metered_usd_micros") or 0)
         if not await ctx.alive():
             return {"status": "lock lost"}
 
-        # 6. The record.
+        # The record.
         if registered:
             try:
                 async with await db.connect(ctx.dsn) as conn:
                     await verdicts.record_check(
-                        conn, ctx.task_id, machine.Check.REVIEW, fields["verdict"], governance_from=ids,
-                        governance=specs, notes=notes, findings=findings, undecided=fields["undecided"],
+                        conn, ctx.task_id, machine.Check.REVIEW, fields["verdict"], findings=fields["findings"],
                         predicted_failure=fields["predicted_failure"], requirements=fields["requirements"],
                         leg="session", turn_id=ended["turn_id"], model=model, usd_micros=usd,
                     )  # fmt: skip
@@ -1165,24 +998,12 @@ def review_runner(fresh_for: FreshFor, port, model: str | None = None, seat: str
             await ledger.lock(conn, f"task:{ctx.task_id}")
             if await tasks.is_stopped(conn, ctx.task_id):
                 return {"status": "stopped"}
-            rows = await ledger.read(conn, ctx.task_id)
-            try:
-                instances, _ = verdicts.governance_instances(
-                    rows, b.mirror, b.base_sha, candidate, ids, specs, notes, fields["undecided"]
-                )
-            except (verdicts.VerdictRefused, git.GitError) as exc:
-                return {"status": "failed", "state": now, "turn": {**ended, "result": f"governance: {exc}"}}
-            computed, added = verdicts.review_verdict(
-                fields["verdict"], instances, machine.fold(rows).granted
-            )
             compared = {
                 "seat": seat,
                 "model": model,
                 "candidate": candidate,
-                "verdict": computed,
-                "reviewer_verdict": fields["verdict"],
-                "findings": verdicts._findings([*findings, *added]),
-                "instances": instances,
+                "verdict": fields["verdict"],
+                "findings": verdicts._findings(fields["findings"]),
                 "predicted_failure": fields["predicted_failure"],
                 "turn_id": ended["turn_id"],
                 "usd_micros": usd,

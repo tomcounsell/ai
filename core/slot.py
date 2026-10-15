@@ -26,11 +26,6 @@ from contextvars import ContextVar
 from core import db
 from core.settings import settings
 
-# What a step returns when its background turn or check was preempted.
-# Nothing is preempted since the slot became several; the name stays for
-# the callers that still test for it.
-PREEMPTED = {"status": "moved", "preempted": True}
-
 _HELD: ContextVar[str | None] = ContextVar("turn_slot", default=None)
 
 _TRY = "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))"
@@ -82,12 +77,6 @@ async def held(holder: str, dsn: str | None = None) -> AsyncIterator[None]:
 def holder() -> str | None:
     """Who holds the slot in this context, if anyone."""
     return _HELD.get()
-
-
-def preempting() -> asyncio.Event | None:
-    """The event a preemptible holder's body races its work against. No
-    holder is preempted, so it is always None."""
-    return None
 
 
 def _caffeinate() -> subprocess.Popen | None:

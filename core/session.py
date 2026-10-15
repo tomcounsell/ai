@@ -78,7 +78,7 @@ async def run(
     `stopped`, or `lock lost` (the router's run lock died), with the task's
     `state` from `tasks.status`. Before each turn, a question for the
     advisor that is still pending (`pending_advice`) is put to `advise`
-    (`fresh.advise`); its `lock lost`, `stopped`, or preemption ends the
+    (`fresh.advise`); its `lock lost` or `stopped` ends the
     run as a turn's does, so the question is asked on the next run. Before
     a `patch` turn of a task with a done merge, the merged head is brought
     into the work branch (`merged_into_work`), and before the rebase a
@@ -104,7 +104,7 @@ async def run(
             rows = await ledger.read(conn, task_id) if state is State.PATCH and asked is None else []
         if asked is not None:
             advised = await advise(gateway, task_id, dsn, alive, asked)
-            if advised.get("status") in ("lock lost", "stopped") or advised.get("preempted"):
+            if advised.get("status") in ("lock lost", "stopped"):
                 return advised
             continue
         merged = await asyncio.to_thread(merged_into_work, b, rows) if rows else None

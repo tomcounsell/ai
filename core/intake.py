@@ -534,10 +534,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         as_ = await _bound(conn, p, task_id, "answer")
         await session.answer(conn, task_id, text, by="tom", via=via)
         return as_
-    if kind == "delivered" and f.state is State.MERGE:
-        as_ = await _bound(conn, p, task_id, "feedback")
-        await session.feedback(conn, task_id, text, by="tom", via=via)
-        return as_
 
     as_ = await _bound(conn, p, task_id, "steer")
     await ledger.append(
@@ -561,18 +557,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             else f"Stops come by reply {_where()}; your email steers the task."
         )
         await _notice(conn, task_id, p, said)
-    if f.state is State.MERGE and f.delivery and notices._delivered_owed(f) is not None:
-        await _notice(
-            conn,
-            task_id,
-            p,
-            notices.lead(
-                await notices.headline(conn, task_id),
-                "noted. It waits on your grant of the check it adds; my message about it has the command, "
-                "and a reply to that message changes the work instead.",
-            ),
-            ":waiting",
-        )
     return as_
 
 

@@ -30,10 +30,6 @@ class Brief:
     `max_effect_class` is the ceiling no effect under this task may exceed. `governance_grant`
     is Tom's advance word that this task may add a check, gate, hook,
     validator, review round, or approval step, shown in every turn's Brief.
-    It grants nothing by itself: the broker computes whether a merge adds
-    governance from the review and docs verdicts, and refuses it while any
-    instance they name lacks Tom's own tap (`guard.granted`), Brief grant or
-    not.
 
     `workspace` is the directory a turn works in, `model` the model it runs
     (by default the light seat's pinned id, never an alias),
@@ -681,9 +677,8 @@ def children_text(found: list[dict[str, Any]]) -> str:
 
 
 # Every kind of attention entry, in the order `attention_counts` lists them.
-# A verdict is a `leg: manual` row already in a ledger, a person's; a
-# grant is Tom's tap on one governance instance.
-ATTENTION_KINDS = ("question", "feedback", "approval", "verdict", "grant")
+# A verdict is a `leg: manual` row already in a ledger, a person's.
+ATTENTION_KINDS = ("question", "feedback", "approval", "verdict")
 
 
 async def status(conn, task_id: str) -> dict[str, Any]:
@@ -691,11 +686,11 @@ async def status(conn, task_id: str) -> dict[str, Any]:
 
     The state machine's fold (`machine.Fold.summary`: `state`, `legacy`,
     `return_to`, `plan`, `loops`, `counts`, `candidate`, `checks`, `join`,
-    `governance`, `merge_effect`, `carried`), its metered spending, every turn and effect, and
+    `merge_effect`, `carried`), its metered spending, every turn and effect, and
     the attention log. `attention` lists every point where Tom acted on the
     task, in ledger order, each labelled by `kind`: a question with his
     answer, feedback on a delivery, an approval of a held effect, a manual
-    verdict (an older row), and a governance grant, each with the
+    verdict (an older row), each with the
     provenance it was recorded with (see `provenance`). `attention_counts`
     counts each kind, with how many were role-played and how many are
     unknown (rows that recorded no `role_played`). A question not yet
@@ -792,16 +787,6 @@ def _digest(rows: list[dict[str, Any]]) -> tuple[dict[str, str | None], dict[str
                     "kind": "verdict",
                     "stage": machine.VERDICT_ROWS[kind].value,
                     "verdict": p.get("verdict"),
-                    "provenance": provenance(row),
-                }
-            )
-        elif kind == "guard.granted" and p.get("instance_id"):
-            attention.append(
-                {
-                    "kind": "grant",
-                    "guard_id": p["guard_id"],
-                    "instance_id": p["instance_id"],
-                    "note": p.get("note"),
                     "provenance": provenance(row),
                 }
             )

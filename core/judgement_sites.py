@@ -1,27 +1,17 @@
-"""The kernel's three judgement sites, and calibration.
+"""The kernel's judgement sites, and calibration.
 
 - The judge runner: the `judge` state's runner (`intake.underspecified`).
   The composition root registers `judge_runner(port)` for `State.JUDGE`.
 - `breadth`: the call `checks.test` makes (`checks.test.breadth`). 1.4's
   test runner calls it and passes the id to
   `verdicts.record_check(..., breadth=id)`, which reads the row itself.
-- `governance`: one call per hunk of a diff (`governance.adds`). 1.4's
-  review and docs runners call it and pass the ids to
-  `verdicts.record_check(..., governance_from=ids)`, which recomputes the
-  hunks from git and reads the rows itself.
 
-Breadth runs before the suite; governance before the reviewer's turn, and
-after the docs turn (the docs diff exists only then). So a provider outage
-costs no suite run and no Opus turn, and each reuses an answered row on a
-rerun (breadth by candidate; governance by hunk id and input digest). Both
-read git in the kernel mirror when the task has one, so a builder's clone
-that lost a commit, and a docs head that lives only in the mirror, are
-read the same way. A
-judgement both legs failed leaves its branch without a verdict, to be asked
-again on the next run; after `judgement.UNANSWERED_RUNS` such failures,
-breadth applies caution, and a governance hunk, like one too large for
-both legs or one a judgement abstained on, is undecided and goes to the
-blind reviewer, so no branch waits on a provider for good.
+Breadth runs before the suite, so a provider outage costs no suite run,
+and reuses an answered row for the same candidate on a rerun. It reads
+git in the kernel mirror when the task has one. A judgement both legs
+failed leaves the branch without a verdict, to be asked again on the next
+run; after `judgement.UNANSWERED_RUNS` such failures, breadth applies
+caution, so no branch waits on a provider for good.
 
 `calibrate` runs both legs alone on a labelled case set and writes the
 calibration record (`judgement.calibrated` on the `judgement` stream).
@@ -37,15 +27,10 @@ from typing import Any
 
 from core import db, git, judgement, ledger, machine, tasks
 from core.judgement import UNANSWERED_RUNS, JudgementPort, Kind
-from core.judgement_tasks import BREADTH, BY_SITE, GOVERNANCE, JUDGE, SHAPE
+from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, SHAPE
 from core.machine import State
 
 DIFF = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color")
-HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-# A `git diff -W` hunk longer than this goes to the judgement as its
-# three-line hunk instead, so a vast function does not make a hunk
-# unjudgeable.
-FUNCTION_HUNK_MAX_BYTES = 60_000
 
 
 class Unusable(LookupError):
@@ -222,183 +207,6 @@ def _reasons(p: dict) -> str:
     return "; ".join(f"{a['leg']}: {a.get('reason')}" for a in p.get("attempts") or [] if a.get("reason"))
 
 
-# -- governance ------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DiffHunk:
-    id: str
-    path: str
-    start: int
-    text: str  # what the judgement reads: the `-W` hunk, or the three-line hunk when that is too long
-
-
-def _hunk_texts(diff: str) -> list[tuple[int, int, str]]:
-    """Each hunk of one path's diff: its new start, new length, and lines."""
-    out: list[list] = []
-    inside = False  # past a section's headers, as `git.hunks` reads them
-    for line in diff.splitlines():
-        m = HUNK_HEADER.match(line)
-        if line.startswith("diff --git "):
-            inside = False
-        elif m:
-            inside = True
-            out.append([int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1), [line]])
-        elif inside:
-            out[-1][2].append(line)
-    return [(s, n, "\n".join(lines)) for s, n, lines in out]
-
-
-def diff_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
-    """Every hunk between two commits, one that only removes lines
-    included, once per hunk id. The hunks and their ids are `git.hunks`'s
-    (three lines of context), the ones `git.hunk_at` and the instance ids
-    read. The text the judgement reads is the `git diff -W` hunk holding
-    it, so the enclosing function comes with it: an unchanged hunk in a
-    changed function keeps its id while its input changes."""
-    seen: dict[str, DiffHunk] = {}
-    for path in git.diff_paths(workspace, older, newer):
-        hunks = git.hunks(workspace, older, newer, path)
-        if not hunks:
-            continue
-        plain = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, older, newer, "--", path))
-        wide = _hunk_texts(git.out(workspace, "--literal-pathspecs", *DIFF, "-W", older, newer, "--", path))
-        for h, (_, _, own) in zip(hunks, plain, strict=False):
-            if h.id() in seen:
-                continue
-            text = next((t for s, n, t in wide if s <= h.start and h.start + h.length <= s + max(n, 1)), own)
-            if len(text.encode()) > FUNCTION_HUNK_MAX_BYTES:
-                text = own
-            seen[h.id()] = DiffHunk(h.id(), path, h.start, text)
-    return list(seen.values())
-
-
-def governance_exempt(path: str) -> bool:
-    """Whether the governance question skips a path: Markdown under `docs/`
-    and any directory's `README.md`, prose that describes what code does. A
-    file that instructs a turn (`CLAUDE.md`, anything under `persona/` or
-    `skills/`, `machine.is_doc_path`'s exclusions) is asked, since prompt
-    text can add a rule."""
-    if not machine.is_doc_path(path):
-        return False
-    parts = PurePosixPath(path).parts
-    return parts[0] == "docs" or parts[-1].casefold() == "readme.md"
-
-
-def governance_hunks(workspace: str, older: str, newer: str) -> list[DiffHunk]:
-    """The hunks the governance question is asked over: `diff_hunks` less
-    those at a `governance_exempt` path."""
-    return [h for h in diff_hunks(workspace, older, newer) if not governance_exempt(h.path)]
-
-
-def _governance_inputs(h: DiffHunk, paths: list[str]) -> dict[str, str]:
-    return {"path": h.path, "hunk": h.text, "paths": "\n".join(paths)}
-
-
-async def governance(port: JudgementPort, dsn: str, task_id: str, older: str, newer: str) -> list[str]:
-    """One governance judgement per hunk between `older` and `newer`
-    (review: the base to the candidate; docs: the candidate to the docs
-    head), all at once, writing through one shared connection. A hunk with
-    an answered row for the same id and the same input under the same
-    question (its `task_sha256`) reuses it; a hunk whose reruns under that
-    question are spent reuses its last failure. A reworded question is asked
-    fresh. Every hunk finishes, and its calls are charged, before a stop or
-    other failure is raised. Returns the ids, one per hunk."""
-
-    async def one(h: DiffHunk) -> str:
-        inputs = _governance_inputs(h, paths)
-        digest = ledger.digest(inputs)
-        mine = [
-            r
-            for r in rows
-            if r["type"] in judgement.OUTCOMES
-            and r["payload"].get("site") == GOVERNANCE.site
-            and (r["payload"].get("ref") or {}).get("hunk", {}).get("id") == h.id
-            and r["payload"].get("inputs_sha256") == digest
-            and r["payload"].get("task_sha256") == question
-        ]
-        settled = [r for r in mine if r["type"] == "judgement.answered" or r["payload"].get("too_large")]
-        if settled:
-            return settled[-1]["payload"]["judgement_id"]
-        if len(mine) >= UNANSWERED_RUNS:
-            return mine[-1]["payload"]["judgement_id"]
-        ref = {"hunk": {"id": h.id, "path": h.path, "start": h.start}}
-        j = await port.judge(GOVERNANCE, inputs, task_id=task_id, ref=ref, shared=shared)
-        return j.judgement_id
-
-    question = judgement.task_sha256(GOVERNANCE, port.signature())
-    async with await db.connect(dsn) as conn:
-        rows = await ledger.read(conn, task_id)
-        b = await tasks.brief(conn, task_id)
-        repo = b.mirror or b.workspace
-        hunks = governance_hunks(repo, older, newer)
-        paths = git.diff_paths(repo, older, newer)
-        shared = judgement.Shared(conn)
-        # Every hunk runs to its end while the connection is open, so a stop
-        # that one hunk meets never leaves another's opened call uncharged.
-        done = await asyncio.gather(*(one(h) for h in hunks), return_exceptions=True)
-    for got in done:
-        if isinstance(got, BaseException):
-            raise got
-    return list(done)
-
-
-def governance_outcome(rows: list[dict], ids: list[str], hunks: list[DiffHunk]) -> dict[str, Any]:
-    """What a set of governance rows means for a review or docs verdict.
-    An instance is a hunk the judgement answered caution without an
-    abstain. A hunk it abstained on, one too large for both legs, and one
-    both legs failed after its reruns are `undecided`, each as (hunk, why):
-    the blind reviewer answers the same boolean for those. Refuses a set
-    that skips a hunk, names one twice, or names a hunk the diff does not
-    hold; raises `Unanswered` while any failed hunk has reruns left."""
-    by_hunk: dict[str, dict] = {}
-    for jid in ids:
-        row = judgement.find(rows, jid)
-        if row is None or row["payload"].get("site") != GOVERNANCE.site:
-            raise Unusable(f"{jid} is not a governance judgement on this task")
-        hid = ((row["payload"].get("ref") or {}).get("hunk") or {}).get("id")
-        if hid in by_hunk:
-            raise Unusable(f"hunk {hid} is answered twice")
-        by_hunk[hid] = row
-    wanted = {h.id: h for h in hunks}
-    stray = set(by_hunk) - set(wanted)
-    if stray:
-        raise Unusable(f"governance judgements for hunks the diff does not hold: {sorted(stray)}")
-    missing = set(wanted) - set(by_hunk)
-    if missing:
-        raise Unusable(f"no governance judgement for hunks {sorted(missing)}")
-    instances: list[DiffHunk] = []
-    undecided: list[tuple[DiffHunk, str]] = []
-    for h in hunks:
-        row = by_hunk[h.id]
-        p = row["payload"]
-        if row["type"] == "judgement.answered":
-            if p["action"].get("adds") != "caution":
-                continue
-            if "adds" in (p.get("abstained") or []):
-                undecided.append((h, "the judgement abstained"))
-            else:
-                instances.append(h)
-        elif p.get("too_large"):
-            undecided.append((h, "too large for both judgement legs"))
-        else:
-            spent = judgement.unanswered_count(
-                rows,
-                GOVERNANCE.site,
-                {
-                    "hunk": p["ref"]["hunk"],
-                    "inputs_sha256": p["inputs_sha256"],
-                    "task_sha256": p["task_sha256"],
-                },
-            )
-            if spent < UNANSWERED_RUNS:
-                raise Unanswered(
-                    f"governance unanswered for {h.path} ({_reasons(p)}); the next run asks again"
-                )
-            undecided.append((h, f"both judgement legs failed ({_reasons(p)})"))
-    return {"instances": instances, "undecided": undecided}
-
-
 # -- calibration -----------------------------------------------------------------
 
 STREAM = "judgement"
@@ -442,7 +250,6 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
 
     - judge: `{"id", "request" or "item", "label": precise|thin, "sub_label", "source"}`;
     - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`;
-    - governance: `{"id", "inputs": {"path", "hunk", "paths"}, "label": true|false, "source", "evidence"}`;
     - shape: `{"id", "inputs": {"message", "thread", "bound_as"}, "label": <a shape>, "source"}`.
 
     A label `false` expects proceed and `true` caution (each question's own
@@ -468,10 +275,7 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
     inputs = c.get("inputs")
     if not isinstance(inputs, dict) or set(inputs) != set(task.inputs):
         raise ValueError(f"case {c.get('id')}: inputs are {sorted(task.inputs)}")
-    if site == GOVERNANCE.site:
-        labels = {"adds": {"value": c.get("label"), "source": c.get("source")}}
-    else:
-        labels = c.get("labels") or {}
+    labels = c.get("labels") or {}
     expected = {}
     for q in task.questions:
         lab = labels.get(q.id)

@@ -311,12 +311,8 @@ payloads = st.fixed_dictionaries(
         "critique_rounds": st.sampled_from([0, 1, 2, 3, "x"]),
         "review_rounds": st.sampled_from([0, 1, 2, 3, None]),
         "raised": st.sampled_from([{}, {"critique_rounds": 2}, {"review_rounds": "x"}, None]),
-        "instance_id": st.sampled_from(["i1", "i2"]),
         "from": st.sampled_from([{**c, "head": c["sha"]} for c in CANDIDATES] + ["x", {}]),
         "to": st.sampled_from([{**c, "head": "h"} for c in CANDIDATES] + [{"sha": "s"}]),
-        "governance": st.sampled_from(
-            [None, {"adds": True, "instances": [{"id": "i1"}]}, {"instances": "x"}]
-        ),
         "effect_id": st.sampled_from(["e1", "e2"]),
         "action_type": st.sampled_from(["merge", "push_branch"]),
         "kind": st.sampled_from(["done", "failed"]),
@@ -329,7 +325,7 @@ payloads = st.fixed_dictionaries(
 TYPES = [
     "task.started", "task.stopped", "judge.decided", "turn.started", "turn.ended", "turn.collected",
     "question.asked", "question.answered", "plan.written", "critique.decided", "test.decided",
-    "review.decided", "docs.decided", "task.delivered", "feedback.given", "guard.granted",
+    "review.decided", "docs.decided", "task.delivered", "feedback.given",
     "task.ended", "rebase.requested", "verdicts.carried", "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
 ]  # fmt: skip
 MISSING = object()  # a row with no payload key at all
@@ -374,7 +370,7 @@ def _row(i: int, kind: str, payload) -> dict:
 def _material(f: machine.Fold) -> tuple:
     return (
         f.state, f.return_to, dict(f.raised), dict(f.counts), f.candidate, tuple(sorted(f.checks)),
-        frozenset(f.granted), f.plan and f.plan.get("sha256"), f.join and f.join.row,
+        f.plan and f.plan.get("sha256"), f.join and f.join.row,
     )  # fmt: skip
 
 

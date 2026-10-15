@@ -260,7 +260,6 @@ PROGRESS = frozenset(
         "question.answered",
         "feedback.given",
         "message.steered",
-        "guard.granted",
         "task.delivered",
         "rebase.requested",
         "verdicts.carried",

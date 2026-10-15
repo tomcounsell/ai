@@ -234,9 +234,8 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
-    """The runner for each state and check this kernel can run.
-    Review and docs ask governance through `judgement_port`, as test asks
-    breadth."""
+    """The runner for each state and check this kernel can run. The judge
+    and test (breadth) ask through `judgement_port`."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
@@ -245,8 +244,8 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         State.PATCH: _working,
         State.CRITIQUE: fresh.critique_runner(_fresh_for),
         Check.TEST: checks.test_runner(judgement_port),
-        Check.REVIEW: fresh.review_runner(_fresh_for, judgement_port),
-        Check.DOCS: fresh.docs_runner(_fresh_for, judgement_port),
+        Check.REVIEW: fresh.review_runner(_fresh_for),
+        Check.DOCS: fresh.docs_runner(_fresh_for),
     }
 
 

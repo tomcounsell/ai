@@ -260,7 +260,6 @@ async def _request(
 
 
 NO_PERFORMER = "no performer for this action type"
-UNGRANTED = "adds governance with no grant from Tom for instance "
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store the request"
 # The fields of an effect row the kernel made, none of them the turn's.
 BARE_FIELDS = ("effect_class", "payload_sha256", "request_id")
