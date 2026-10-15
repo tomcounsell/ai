@@ -89,7 +89,205 @@ the earlier invented caps. The steering inbox in
 
 ## Governance: these are guards
 
+**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, or approval step is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance is an `act`-class effect: the Brief carries a `governance_grant` field, default none, and a diff that adds any of the above needs Tom's tap, one approval per instance, through the same approval surface as a merge or a send. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is deleted by default. The blind verifier asks one Jev-class boolean over every diff, "does this add a check, gate, hook, round, or review step", and a yes with no grant is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
+
+The reconciler is a guard, because it can hold an ask for the writer's
+confirmation, and `governance.adds` counts "judging a request too thin and
+sending it back" (`core/judgement_tasks.py:137-138`). A hard cap on asks in
+flight would be a guard too. Importance ordering is not one: it changes
+which ready task runs next and never refuses one.
+
+**Mission items.** Item 6 (spend attention as carefully as money) and
+item 1 (own outcomes across the whole job, which includes knowing what else
+is already being built).
+
+**Incidents that already happened without the reconciler** (read from the
+ledger on 2026-10-15):
+
+1. **Two tasks fixed one cause.** Verify run `91564c7cc2b4` started
+   `cfb11735ee36` and `5172ae8d8b4f` one minute apart on 2026-10-15, under
+   different finding keys. Both reds came from one cause: the cutover moved
+   the valor spec to `main`, and tests still asserted `valor-cori-rebuild`.
+   `5172ae8d8b4f` merged `611404ce2` (row 32505), which also fixed
+   `cfb11735ee36`'s tests. `cfb11735ee36`'s push then failed (row 33201) and
+   it rebased (row 33202), with git dropping its test commit as already
+   applied (row 33498). It still ran review and docs, merged a plan file
+   marked superseded (row 34466), triggered a rollout (row 34468), and sent
+   Tom a notice (row 34467). Cost: $5.43 and one of Tom's interruptions.
+   Exact key dedupe cannot catch this.
+2. **Two open tasks build the same feature.** `d734763cd94e`
+   (grant-by-reply) and `85abb1026556` (notice-ceo-shape) both build
+   approve-by-reply in `core/intake.py` and `core/notices.py`.
+   `85abb1026556` widened its own scope to include it (row 33265) and wrote
+   "whichever lands second rebases". Neither has merged. Their build spend
+   ($10.73 and $16.85) overlaps, and a conflict at merge is certain. This is
+   harm in progress, not yet landed.
+
+**No incident for a hard cap.** The audit found background tasks waiting
+205 to 295 minutes for a first turn on 2026-10-14. The cause was an idle
+turn loop (`8ab23532a169` ran 467 idle turns, then `623c4901e1d5` ran 906),
+which `da3d28405819` fixes, not inbox volume. A cap would not have
+prevented it, so this plan builds no cap. See Backpressure below.
+
+**Grants Tom will be asked for.** Review names the instances. These are
+the expected ones, each pasteable once the landing task exists:
+
+```
+.venv/bin/python -m core grant LANDING_TASK INSTANCE \
+  --incident "(1) cfb11735ee36 and 5172ae8d8b4f fixed one cause; cfb1 merged a superseded plan, rolled out, and noticed Tom (rows 32505, 33201-33498, 34466-34468); (2) d734763cd94e and 85abb1026556 both build approve-by-reply (row 33265)" \
+  --mission-item 6 --mission-item 1 \
+  --note "the ask reconciler: intake.overlap site and the writer's confirmation"
+```
+
 ## Design
+
+### The shape of the flow
+
+```
+ask written ──> task.started ──> RECONCILE ──> judge ──> clarify / plan ...
+                                    │
+                    reconcile.decided (site intake.overlap)
+                                    │
+     distinct ──────────────────────┤  no message, straight to judge
+     covered by T / supersedes T /  │
+     overlaps T / split ────────────┴─> shape.proposed to the writer
+                                          │
+                       writer confirms or amends (shape.confirmed,
+                       with context and importance) ──> the decision runs
+```
+
+`task.started` stays the first row of every ask, so the ask is recorded
+verbatim once (Mission item 1, intake) and every existing path that starts
+a task reaches the reconciler without change. The new state sits between
+intake and `judge`.
+
+### `reconcile`: read the ask against the open tasks
+
+**State.** `State.RECONCILE`, entered by every `task.started` carrying
+`sdlc`. It is `AT_ONCE` (`core/serve.py:112`), like `judge`, and needs no
+harness slot. Calibration and legacy tasks never enter it. A child whose
+parent is open on the same request (a plan's own children) skips it: the
+parent already reconciled the scope.
+
+**What it asks.** One judgement call at a new site, `intake.overlap`,
+declared in `core/judgement_tasks.py` with `calibrated=None`. The inputs:
+
+- the ask's instruction and its project;
+- each open task on the same project: id, state, its instruction (the
+  first `MESSAGE` characters), finding keys, and the paths its candidate
+  changes when it has one (from `effect.intent`'s `landed`, or the
+  candidate diff's names);
+- the subjects of the target branch's commits since the oldest open
+  task's `base_sha`, so work that already landed counts as covered.
+
+"Open" is every task not in `merged`, `ended`, `stopped`, calibration, or
+legacy.
+
+**The answer.** One of:
+
+| Decision | Meaning |
+| --- | --- |
+| `distinct` | No open task shares the scope. |
+| `covered` | Task T already does this. Names T. |
+| `supersedes` | This ask covers T's scope and more. Names T. |
+| `overlaps` | Both should go ahead, but they touch the same code. Names T. |
+| `split` | The ask holds parts that belong to different tasks. Names the parts. |
+
+It also returns the scope restated in one or two sentences, the importance
+it assumes (`low`, `normal`, `high`) with one line of reasoning, and at
+most two questions whose answers would change the decision.
+
+**Exit evidence.** `reconcile.decided` on the task: the decision, the
+named tasks, the restated scope, the assumed importance, the questions,
+the judgement id, and the cost. An abstain or a failure of both legs
+reads as `distinct` with a note: the reconciler never holds an ask
+because it could not answer.
+
+### `shape.proposed`: the writer confirms
+
+`distinct` goes to `judge` with no message. Tom spends no attention on an
+ask that collides with nothing.
+
+Any other decision writes `shape.proposed` and moves the task to
+`waiting`, addressed to the ask's writer, read from `provenance.by`:
+
+- **Tom (chat).** The proposal is sent as one notice in the chat the ask
+  came from. It restates the scope, names the overlapping task and the
+  proposed action, states the assumed importance, and asks at most two
+  questions. Tom's reply binds as `answer` (`core/intake.py:533-536`). If
+  the judge would also send the ask to clarify, clarify's questions travel
+  in the same notice. One ask costs Tom at most one interruption, as today.
+- **An agent at the command line** (`core start`, `routine --finding`).
+  The command prints the proposal and the task id, and exits. The agent
+  answers with `python -m core shape TASK --confirm` or
+  `--amend "TEXT" [--importance high]`, which writes `shape.confirmed` with
+  provenance. No notice goes to Tom. An unanswered proposal waits; `status`
+  lists it under `attention`.
+- **A routine.** A routine has no context to add. The proposal is applied
+  as written (`shape.confirmed` with `by: routine`, `auto: true`), except
+  `supersedes`, which a routine may not apply: it downgrades to `overlaps`.
+
+An amend reruns the reconciler once with the writer's text added to the
+inputs. The second answer is applied as it stands.
+
+### What a confirmed decision does
+
+| Decision | Effect |
+| --- | --- |
+| `distinct` | to `judge` |
+| `covered`, T open | The ask's text goes to T as `ask.folded` (consumed like `message.steered`, `core/machine.py:418-439`), and the new task ends with outcome `folded` naming T. |
+| `covered`, T in `merge`, `merged`, or `ended` | The ask goes to T as `feedback.given` through `session.feedback`, and the new task ends `folded`. |
+| `supersedes` | T is stopped through `tasks.stop_tree`, carrying the writer's provenance. The new task goes to `judge`. Only Tom or an agent writer can confirm this. |
+| `overlaps` | Both tasks get an `ask.folded` note naming the other, so their plans know who else touches the code. The new task goes to `judge`. |
+| `split` | The writer starts the parts, each reconciled on its own. The original ends `split`. |
+
+`ask.folded` is a new row kind that the working session reads at the top
+of T's next turn, the same way it reads a steer. The kernel gains no new
+power to stop work on its own: a stop happens only on a writer's confirmed
+`supersedes`.
+
+### Importance
+
+`shape.confirmed` carries `importance`. When the writer gives none, the
+reconciler's assumption stands, and a `distinct` ask records the
+assumption on `reconcile.decided`. The scheduler's key at
+`core/serve.py:706-712` becomes (foreground first, importance high to low,
+oldest latest activity, task id). Importance orders ready work and never
+refuses any. A writer can change it later with
+`python -m core shape TASK --importance X`.
+
+### Backpressure
+
+Tom asked for backpressure on the inbox for asks. This plan builds the
+part that has evidence behind it and leaves the hard cap to Tom's ruling
+(Open questions):
+
+1. **The writer sees the queue.** Every proposal, and the line a
+   `distinct` ask prints at the command line, says how many tasks are open
+   on the project, how many are ahead of this one at its importance, and
+   which tasks are waiting on Tom. On 2026-10-15 nine tasks sat in `merge`
+   waiting on Tom's grants, one since 2026-10-13. A writer who sees that
+   can hold an ask back.
+2. **Folding shrinks the queue.** `covered` asks become notes on existing
+   tasks rather than new tasks.
+3. **Importance decides who waits.** With ordering, a `low` routine
+   finding waits behind `high` work rather than behind whatever happened to
+   be touched least recently.
+
+A hard cap (asks past N per project held as `queued` and reconciled again
+when a place frees) is designed in Open questions but not built. It needs
+an incident, and the audit found none: the 2026-10-14 starvation came from
+an idle turn loop.
+
+### Docs
+
+- `docs/sdlc-state-machine.md`: a `reconcile` state section in the
+  existing format (goal, what it asks, exit evidence, guard record), and
+  the new rows in the model table.
+- `docs/judgement-layer.md`: the `intake.overlap` site.
+- `core/README.md`: `reconcile`, `shape`, `ask.folded`, and the
+  scheduler's importance key.
+- `docs/machine.md:179`: the "queued task" sentence says what is built.
 
 ## Out of scope
 
