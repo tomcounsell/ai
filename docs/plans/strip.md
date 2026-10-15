@@ -2,7 +2,7 @@
 tracking: none
 slug: strip
 type: build
-status: planned
+status: waves 0-3 merged on main (2026-10-15); wave 4 holds for the Cowboy
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -267,3 +267,40 @@ Each has the default the plan proceeds on if Tom says nothing.
   wave 4 hold for the Cowboy.
 - **Wave 1** (5ef42e1c9). 15 test files, 4,249 lines; 83 passed, 1
   skipped, in 7 s at `-n auto`.
+- **Wave 2.** All eight agents merged (E, H, G, F, D, C, B, A, then D's
+  second pass over the classifier's plumbing and the dead preemption
+  branches). One Opus review found nine issues and no blocker; all fixed
+  as commits: docs never hold the merge (a docs check that fails its tries
+  records `no_change`); the gateway meters by a normal-form path and
+  answers unmeterable calls (batches, OpenAI chat) 400; setup, suite and
+  lint get the operator's environment and PATH, as the turn does; every
+  turn and service rewrites its profile from `profile()`, so tasks in
+  flight lose the old denies; a clarify turn never waits on a slot;
+  `.valor/inputs` in a plan's tree no longer loops critique.
+- **Wave 3.** 92 plan files deleted (8 kept); every doc and README trimmed
+  to what exists; `site/` describes the old system and needed nothing.
+  The exit search finds only what stays: the `sandbox_profile` harness key
+  (it carries the four denies) and `tests/telegram_emulator.py` (the
+  Telegram test double), plus Tom's historical rulings.
+- **Live check on this Mac** (no spend: a dead gateway, the init event
+  read). The real `workspace_turn` command under the cut `turn.sb`, on
+  popoto: WebSearch and WebFetch offered; plugins `yudame` and
+  `yudame-dev` loaded with 51 skills; popoto's own `.claude/skills`
+  (`do-deploy`, `release`, ...) loaded. Under the same profile `gh` is
+  logged in, `gh issue list` and `git ls-remote origin` work, and `~/src`
+  reads. Agent A's local check: with the turn's own `CLAUDE_CONFIG_DIR`,
+  11 of 11 model requests carried the placeholder, never the Keychain
+  login.
+- **Against Done.** Suite: 15 files, 4,268 lines, 83 passed, 1 skipped,
+  8 s at `-n auto`, 34 s serial (from 11 min 22 s). Tests smaller by
+  46,080 lines (bar 43,000: met). Production Python 32,180 to 27,961,
+  smaller by 4,219 (all production files, the VM images included, net
+  -4,654). **The 6,000-line bar is not met**: every row of the Goes column
+  is cut, and what remains of the shortfall is code the Stays column keeps.
+  Rule 6: Tom drops or keeps the bar.
+- **Accepted risk, named by the review.** With the hostile-config refusals
+  gone, the kernel runs `git worktree add` and `git merge` outside the
+  sandbox in a mirror a turn can write; a planted `core.fsmonitor` or
+  filter driver there would run with the kernel's reach. This is the
+  trade the Goes column made.
+- **Still to do, on the Cowboy:** Phase 0's freeze, and all of wave 4.
