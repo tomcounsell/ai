@@ -29,8 +29,7 @@ merge needs (`credential:<sha>`), the one merge failure that reaches him.
 left. A merge's says what shipped; a send's carries its channel,
 recipients, and text. A push owes none (a step inside the task), nor does
 a send that itself reached Tom (to the operator chat or Tom's Telegram id,
-an email only to Tom's addresses, any local send), nor any act of a
-replay task (`Brief.replay`). A reply to a merge's report is feedback.
+an email only to Tom's addresses, any local send). A reply to a merge's report is feedback.
 
 A notice with no channel or chat (the operator's unset) is written with a
 `notice.undeliverable` row beside it, so the ledger shows it was never
@@ -328,12 +327,9 @@ def _to_tom(effect: dict[str, Any]) -> bool:
 async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, Any]) -> str | None:
     """The `report` notice a `done` act owes Tom, inside the caller's
     transaction; None when it owes none (see the module docstring)."""
-    from core import tasks
 
     kind = effect.get("action_type")
     if effect.get("effect_class") != "act" or kind == "push_branch" or _to_tom(effect):
-        return None
-    if (await tasks.brief(conn, task_id)).replay:
         return None
     payload = effect.get("payload") or {}
     if kind == "merge":
