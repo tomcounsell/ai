@@ -2,7 +2,7 @@
 tracking: none
 slug: c18-yudame-plugins
 type: build
-status: planned
+status: superseded (absorbed by strip.md, 2026-10-15)
 critique_rounds: 0
 review_rounds: 0
 ---

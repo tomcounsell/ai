@@ -2,7 +2,7 @@
 tracking: none
 slug: c19-sentry-route
 type: build
-status: planned
+status: waiting (rewritten after strip.md merges as "Valor's Sentry login in the turn")
 critique_rounds: 0
 review_rounds: 0
 ---
