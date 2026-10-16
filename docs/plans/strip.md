@@ -367,5 +367,8 @@ Each has the default the plan proceeds on if Tom says nothing.
   workspaces (67 GB); the kernel now removes one a day after its task
   finishes (186656705). It found popoto's LoCoMo dataset gone from Hugging
   Face.
-- **Waiting on Tom.** Step 6 is done when Tom has used popoto on 2.1.1; the
-  date goes here.
+- **Step 6 not met.** PR 842 changed only popoto's dev `uv.lock`; Valor
+  pins the released popoto 1.10.0, so nothing Tom or Valor runs uses it, and
+  it started from the CLI, not Telegram. Step 6 still needs a popoto change
+  Tom names on Telegram, released, with Valor's pin moved to it; the date
+  Valor first runs on it goes here.
