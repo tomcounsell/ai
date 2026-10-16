@@ -2,7 +2,7 @@
 tracking: none
 slug: strip
 type: build
-status: waves 0-3 merged on main (2026-10-15); wave 4 holds for the Cowboy
+status: waves 0-3 merged; wave 4 steps 1, 2 and 4 done on the Cowboy (2026-10-16); steps 3 and 6 wait on Tom
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -304,3 +304,42 @@ Each has the default the plan proceeds on if Tom says nothing.
   filter driver there would run with the kernel's reach. This is the
   trade the Goes column made.
 - **Still to do, on the Cowboy:** Phase 0's freeze, and all of wave 4.
+
+### Wave 4 (2026-10-16, the Cowboy and the Pirate, by the lead over SSH as `valorengels`)
+
+- **Freeze.** Stopped 12 open `valor` tasks: 11 held in `merge` by the
+  deleted `governance_refused` verdict (e0063d753740, 9e5a7a138db2,
+  f863a0ad2d6b, 6c322e462b93, 85abb1026556, 8426bdd16707, da3d28405819,
+  fad0dd74b313, 50e55630c4bc, 133f2ae0965b, b5233f922bb0) and
+  0be4172ce034 (Tom's runbook link, which a turn cannot open). Four
+  were about what the strip removed (test images, the VM suite, the replay
+  driver, instance ids). The other seven were restarted on the stripped
+  main as 4a54eb8bdf09, 872196c785ab, 32e9c97a0869, e9c307e6cd91,
+  2b1cca5b0610, 80f69f9e52da, 0b11dfcde385.
+- **Why the deployment was broken.** A commit made in the kernel's own
+  checkout (05488bf68, the Haiku 5.5 seat) diverged it from origin, so
+  every rollout failed its fast-forward and logged it every tick. The
+  commit was carried onto main (6af249cee) and the checkout reset to
+  origin; the pending rollout then landed.
+- **Roll.** Backup by the `com.valor.backup` job (SSH cannot write the
+  PINK disk); checkout on main; `/opt/homebrew/bin` added to every
+  `com.valor.*` job's PATH; the emulator routine's job retired to
+  `~/valor-retired/`; kernel and bridges reloaded. Suite on the Cowboy:
+  88 passed, 1 skipped, 11 s. On the Pirate (Postgres 18 on 5433): the same.
+- **Accounts.** `gh` was logged out on both Macs (invalid token); it now
+  uses the kernel's `valorengels` token (step 9 of rebuild-handoff.md).
+  `sentry-cli` installed and logged in on both (C19 done). yudame and
+  yudame-dev plugins installed on both. The Pirate's Slack bridge (a
+  second Socket Mode consumer feeding a ledger no kernel reads) is
+  unloaded and disabled.
+- **Parity turn (step 4), task 40045a9e90da on popoto, ceiling `read`.**
+  The plan turn read popoto's `CLAUDE.md`, ran `gh issue view 829`, ran
+  `WebSearch`, and listed `yudame:de-slop`, `yudame:email`,
+  `yudame:house-style`. Test passed, review passed in its own worktree, docs
+  `no_change`, join passed, merge refused by the `read` ceiling as meant.
+  34 `gateway.opened`, 34 `gateway.charged`, $2.16. It found two parity
+  gaps, fixed in 78471ea5b: a PATH frozen at provisioning (no `gh`, no `uv`)
+  and `gh` not knowing the repository behind the local origin (`GH_REPO`).
+  Started by the lead with `--by tom`; it was the lead's, on Tom's word.
+- **Waiting on Tom.** Step 3 (Tom sends on Telegram, Valor answers) and step
+  6 (a popoto issue Tom names, merged, used).
