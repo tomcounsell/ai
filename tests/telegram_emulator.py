@@ -6,10 +6,8 @@ The server holds chats and their messages, the account's own messages
 by private chats and basic groups (so a chat's ids have gaps), `random_id`
 duplicate detection, and Telegram's trim of leading and trailing
 whitespace. A test injects messages from others (with or without a live
-update), flood waits, a lost connection, a send accepted and its answer
-dropped, a send lost before Telegram takes it, and a pause after a send
-is accepted. `send_after` lets that many sends through before a send fault
-applies.
+update), a lost connection, a send accepted and its answer dropped, and a
+pause after a send is accepted.
     python -m tests.telegram_emulator
 
 The server listens on a free port and prints it as its first line.
@@ -50,12 +48,8 @@ class State:
         self.blobs: dict[tuple[int, int], bytes] = {}
         self.randoms: dict[tuple[int, int], int] = {}
         self.dedup = True
-        self.flood_send = 0
-        self.send_after = 0
-        self.lose_send_next = False
         self.drop_reply_next = False
         self.pause_next = 0.0
-        self.down = False
         self.epoch = 0
         self.updates: list[dict] = []
         self.reads: dict[int, int] = {}
@@ -105,18 +99,12 @@ def make_app() -> web.Application:
     async def body(request) -> dict:
         return await request.json() if request.can_read_body else {}
 
-    def guard():
-        if s.down:
-            raise web.HTTPServiceUnavailable()
-
     async def ping(request):
-        guard()
         return ok({"epoch": s.epoch, "seq": len(s.updates)})
 
     async def control(request):
         b = await body(request)
-        knobs = ("dedup", "flood_send", "send_after", "lose_send_next", "drop_reply_next", "pause_next")
-        for k in (*knobs, "down"):
+        for k in ("dedup", "drop_reply_next", "pause_next"):
             if k in b:
                 setattr(s, k, b[k])
         for chat in b.get("chats", []):
@@ -153,7 +141,6 @@ def make_app() -> web.Application:
         return ok({"epoch": s.epoch, "seq": len(s.updates), "msgs": [_public(m) for m in s.updates[after:]]})
 
     async def history(request):
-        guard()
         b = await body(request)
         msgs = sorted(s.chat(b["chat"])["msgs"].values(), key=lambda m: -m["id"])
         if b.get("offset_id"):
@@ -161,31 +148,18 @@ def make_app() -> web.Application:
         return ok([_public(m) for m in msgs[: b.get("limit", 100)]])
 
     async def own(request):
-        guard()
         b = await body(request)
         msgs = sorted(s.chat(b["chat"])["msgs"].values(), key=lambda m: -m["id"])
         return ok([_public(m) for m in msgs if m.get("out") and m["id"] > b["after_id"]])
 
     async def get(request):
-        guard()
         b = await body(request)
         c = s.chat(b["chat"])["msgs"]
         return ok([_public(c[i]) if i in c else None for i in b["ids"]])
 
     async def send(request):
-        guard()
         b = await body(request)
         chat, rid = b["chat"], b["random_id"]
-        if s.send_after and (s.flood_send or s.lose_send_next):
-            s.send_after -= 1
-        elif s.flood_send:
-            secs, s.flood_send = s.flood_send, 0
-            return err("FLOOD_WAIT", seconds=secs)
-        elif s.lose_send_next:
-            s.lose_send_next = False
-            request.transport.close()
-            await asyncio.sleep(0.05)
-            raise web.HTTPServiceUnavailable()
         if s.dedup and (chat, rid) in s.randoms:
             return err("RANDOM_ID_DUPLICATE")
         text = (b.get("text") or "").strip()
@@ -222,13 +196,11 @@ def make_app() -> web.Application:
         return ok({"id": m["id"]})
 
     async def download(request):
-        guard()
         b = await body(request)
         data = s.blobs.get((b["chat"], b["id"]), b"")
         return ok({"data_b64": base64.b64encode(data).decode()})
 
     async def read(request):
-        guard()
         b = await body(request)
         s.reads[b["chat"]] = max(s.reads.get(b["chat"], 0), b["max_id"])
         return ok({})

@@ -24,11 +24,9 @@ import pytest
 import core.gateway
 from core import broker, db, ledger, machine, notices, rollout, router, runs, serve, session, signals, tasks
 from core.__main__ import _performers
-from core.gateway import Gateway
 from core.machine import State
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows, typed
-from tests.ports import listen
 from tests.scripted import commit
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -82,12 +80,6 @@ async def ticks(kernel: serve.Kernel, dsn: str, n: int) -> None:
     for _ in range(n):
         await tick(kernel, dsn)
         await settled(kernel)
-
-
-async def gateway_for(dsn) -> Gateway:
-    g = Gateway(dsn)
-    await g.start(port=listen())
-    return g
 
 
 def send(text: str) -> dict:
@@ -270,7 +262,7 @@ def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
 
     async def go():
         task = await scripted.start(fresh, ws)
-        gateway = await gateway_for(fresh)
+        gateway = await bridges.gateway(fresh)
         kernel = only(serve.Kernel(gateway, scripted.RUNNERS, None, fresh), task)
         try:
             await tick(kernel, fresh)

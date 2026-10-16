@@ -117,6 +117,14 @@ def dbname(dsn: str) -> str:
     return psycopg.conninfo.conninfo_to_dict(dsn)["dbname"]
 
 
+async def rolled(dsn, repo: Repo, sha: str) -> tuple:
+    """A task whose merge of `sha` landed, and the kernel's tick after it."""
+    task = await new_task(dsn)
+    effect = await landed(dsn, task, repo.url, sha)
+    k = kernel(dsn, repo, task)
+    return task, effect, k, await tick(k, dsn)
+
+
 async def recovered(dsn, repo: Repo, running: str) -> list[str]:
     async with await db.connect(dsn) as conn:
         return (await serve.recover(conn, checkout=repo.co, running=running))["rolled"]
@@ -129,14 +137,7 @@ def test_a_core_merge_restarts_and_recover_ends_it(fresh, tmp_path):
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
 
-    async def go():
-        task = await new_task(fresh)
-        effect = await landed(fresh, task, repo.url, sha)
-        k = kernel(fresh, repo, task)
-        restarted = await tick(k, fresh)
-        return task, effect, k, restarted
-
-    task, effect, k, restarted = run(go())
+    task, effect, k, restarted = run(rolled(fresh, repo, sha))
     assert restarted == sha
     (row,) = typed(run(rows(fresh, task)), "rollout.restarting")
     steps = ["fetch", "restart class", "fast-forward", "migrate"]
@@ -164,13 +165,7 @@ def test_a_dependency_or_schema_change_rolls_with_its_sync_or_backup(fresh, tmp_
     repo = Repo(tmp_path)
     sha = repo.land(path)
 
-    async def go():
-        task = await new_task(fresh)
-        effect = await landed(fresh, task, repo.url, sha)
-        k = kernel(fresh, repo, task)
-        return task, effect, k, await tick(k, fresh)
-
-    task, effect, k, restarted = run(go())
+    task, effect, k, restarted = run(rolled(fresh, repo, sha))
     assert restarted == sha and repo.head() == sha
     heads = {"backup": repo.base, "sync": sha, "migrate": sha}
     assert k.ran == [(step, heads[step]) for step in ran]

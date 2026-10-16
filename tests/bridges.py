@@ -13,12 +13,21 @@ from typing import Any
 
 from core import broker, db, ledger, tasks
 from core.bridge import Outbox, bound_performers, declared_performers
+from core.gateway import Gateway
 from core.settings import settings
+from tests.ports import listen
 
 OPERATOR = "42"
 OPERATOR_CHAT = "1000"
 OPERATOR_EMAIL = "tom@example.com"
 SNDBUF = 4 << 20  # within macOS's default kern.ipc.maxsockbuf, 8 MiB
+
+
+async def gateway(dsn: str, **kw) -> Gateway:
+    """A gateway on a test port."""
+    g = Gateway(dsn, **kw)
+    await g.start(port=listen())
+    return g
 
 
 async def connect(dsn: str):

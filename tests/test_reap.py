@@ -21,8 +21,7 @@ import aiohttp
 import pytest
 
 from core import db, ledger, runs, serve, tasks
-from core.gateway import Gateway
-from tests.ports import listen
+from tests import bridges
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -63,8 +62,7 @@ def _turn(dsn, build) -> tuple[dict, list[dict]]:
     async def go():
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="test"))
-        gateway = Gateway(dsn)
-        await gateway.start(port=listen())
+        gateway = await bridges.gateway(dsn)
         try:
             ended = await runs.run_turn(gateway, task, build, dsn=dsn)
         finally:
@@ -133,8 +131,7 @@ async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
     the cleanup is waiting on the reap). Returns what the test checks."""
     async with await db.connect(dsn) as conn:
         task = await tasks.start(conn, tasks.Brief(instruction="test"))
-    gateway = Gateway(dsn)
-    await gateway.start(port=listen())
+    gateway = await bridges.gateway(dsn)
     seen: dict = {}
 
     def build(url, brief, turn_id):

@@ -11,9 +11,8 @@ import json
 import pytest
 
 from core import broker, db, judgement, judgement_sites, ledger, machine, notices, router, session, tasks
-from core.gateway import Gateway
 from core.machine import State
-from tests import judgement_upstream, scripted
+from tests import bridges, judgement_upstream, scripted
 from tests.ports import listen
 from tests.scripted import git
 from tools.jev import Jev
@@ -26,8 +25,7 @@ run = asyncio.run
 
 
 async def drive(dsn, task, runners=None) -> dict:
-    gateway = Gateway(dsn)
-    await gateway.start(port=listen())
+    gateway = await bridges.gateway(dsn)
     try:
         return await scripted.route(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
     finally:
@@ -167,8 +165,7 @@ def test_an_idle_turn_ends_its_step_and_the_next_step_continues(dsn, tmp_path):
     async def go():
         task = await at(dsn, ws, "plan")
         scripted.steer(ws, plan="nothing", turns=1)
-        gateway = Gateway(dsn)
-        await gateway.start(port=listen())
+        gateway = await bridges.gateway(dsn)
         try:
             one = await router.step(gateway, task, scripted.RUNNERS, dsn, scripted.performers)
         finally:

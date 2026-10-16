@@ -26,12 +26,10 @@ from core import (
     tasks,
     workspace,
 )
-from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
 from tests import bridges, scripted
 from tests.performers import OutboxAppend, WorkspaceWrite
-from tests.ports import listen
 from tests.test_machine import Ledger
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -67,8 +65,7 @@ def test_kernel_role_cannot_edit_the_ledger(dsn):
 def test_a_stopped_tasks_call_is_refused_with_a_ledger_row_before_any_provider_call(dsn):
     async def go():
         task = await new_task(dsn)
-        gateway = Gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
-        await gateway.start(port=listen())
+        gateway = await bridges.gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
         base = gateway.issue(task, "turn-1")
         body = {"model": "claude-haiku-4-5", "max_tokens": 1000}
         body["messages"] = [{"role": "user", "content": "hi"}]
@@ -112,7 +109,7 @@ def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_p
     # Two identical requests are two effects; one request_id is one.
     assert held.kind == "done" and twin.kind == "done" and twin.effect_id != held.effect_id
     assert again.effect_id == once.effect_id and again.kind == "done"
-    assert _lines(tmp_path / "outbox.jsonl") == 3
+    assert len((tmp_path / "outbox.jsonl").read_text().splitlines()) == 3
     assert tasks.audit(state) == []
 
 
@@ -122,8 +119,7 @@ def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_p
 def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_ledger(dsn, tmp_path):
     async def go():
         task = await new_task(dsn)
-        gateway = Gateway(dsn)
-        await gateway.start(port=listen())
+        gateway = await bridges.gateway(dsn)
         # A real subprocess that would run for a minute, with a child of its own.
         script = "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)"
         build = lambda url, brief, turn_id: runs.TurnCommand(
@@ -148,10 +144,6 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     assert ended["outcome"] == "stopped" and ended["returncode"] == -9
     assert elapsed < 20  # far short of the turn's minute, with room for a loaded Mac (3.8 s seen)
     assert state["state"] == "stopped" and tasks.audit(state) == []
-
-
-def _lines(path) -> int:
-    return len(path.read_text().splitlines()) if path.exists() else 0
 
 
 # -- reconcile from the intent row ----------------------------------------------------------
@@ -500,76 +492,56 @@ def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn)
 # -- corrections and exemplars ----------------------------------------------------
 
 
-def row(number, text, source_class="direct") -> dict:
-    by = {"by": "tom", "at": "2026-10-16T00:00:00+00:00", "via": "the command line"}
-    return {"number": number, "scope": "global", "source_class": source_class, "text": text, "provenance": by}
-
-
 def test_direct_corrections_render_as_before_and_exemplars_follow_in_their_own_section():
-    assert corrections.render([]) == "# Corrections from Tom\n\nNone recorded."
-    direct = [row(1, "Fix the code."), row(3, "Ask first.")]
-    assert corrections.render(direct) == (
-        "# Corrections from Tom\n\nIn force for this turn, in the order Tom gave them.\n\n"
-        "1. (global, direct; tom, 2026-10-16, via the command line)\nFix the code.\n\n"
-        "3. (global, direct; tom, 2026-10-16, via the command line)\nAsk first."
-    )
-    exemplar = row(2, "That plan: one page, every claim cited.", "exemplar")
-    exemplars = (
-        "# Exemplars from Tom\n\nWork Tom loved, and why, in the order he gave them.\n\n"
-        "2. (global, exemplar; tom, 2026-10-16, via the command line)\nThat plan: one page, every claim cited."
-    )
-    assert (
-        corrections.render([direct[0], exemplar, direct[1]])
-        == corrections.render(direct) + "\n\n" + exemplars
-    )
-    assert corrections.render([exemplar]) == "# Corrections from Tom\n\nNone recorded.\n\n" + exemplars
+    by = {"by": "tom", "at": "2026-10-16T00:00:00+00:00", "via": "the command line"}
+    one, two, three = [
+        {"number": n, "scope": "global", "source_class": k, "text": t, "provenance": by}
+        for n, k, t in ((1, "direct", "Fix the code."), (2, "exemplar", "One page."), (3, "direct", "Ask."))
+    ]
+    none = "# Corrections from Tom\n\nNone recorded."
+    line = "{}. (global, {}; tom, 2026-10-16, via the command line)\n{}"
+    direct = "# Corrections from Tom\n\nIn force for this turn, in the order Tom gave them.\n\n"
+    direct += line.format(1, "direct", "Fix the code.") + "\n\n" + line.format(3, "direct", "Ask.")
+    exemplars = "\n\n# Exemplars from Tom\n\nWork Tom loved, and why, in the order he gave them.\n\n"
+    exemplars += line.format(2, "exemplar", "One page.")
+    assert corrections.render([]) == none
+    assert corrections.render([one, three]) == direct
+    assert corrections.render([one, two, three]) == direct + exemplars
+    assert corrections.render([two]) == none + exemplars
 
 
-def test_exemplars_share_the_corrections_numbering_and_reach_a_turn_once(dsn):
-    async def go():
-        async with await db.connect(dsn) as conn:
-            c = await corrections.record(conn, "Say less.", by="tom", via="test")
-            e = await corrections.record(
-                conn, "The c4 plan, for its brevity.", by="tom", via="t", source_class="exemplar"
-            )
-            d = await corrections.record(conn, "Say it plainly.", by="tom", via="test")
-            assert [e["number"], d["number"]] == [c["number"] + 1, c["number"] + 2]
-            assert (c["source_class"], e["source_class"], e["provenance"]["via"]) == (
-                "direct",
-                "exemplar",
-                "t",
-            )
-            with pytest.raises(ValueError, match="an exemplar has text"):
-                await corrections.record(conn, "  ", by="tom", via="t", source_class="exemplar")
-            task = await tasks.start(conn, tasks.Brief(instruction="test"))
-            turn = await tasks.dispatch(conn, task)
-            # The turn's `corrections` lists every number it carries, exemplars included.
-            assert {c["number"], e["number"], d["number"]} <= set(turn["corrections"])
-            assert turn["text"].count("The c4 plan, for its brevity.") == 1
-            assert turn["text"].index("# Corrections from Tom") < turn["text"].index("# Exemplars from Tom")
-            assert turn["text"].index("# Exemplars from Tom") < turn["text"].index("The c4 plan")
-
-    run(go())
-
-
-def test_the_exemplar_command_records_lists_and_refuses_blank_text(dsn):
+def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(dsn):
     env = {**os.environ, "VALOR_DB": settings.test_database}
 
     def core(*argv):
-        return subprocess.run(
-            [sys.executable, "-m", "core", *argv], env=env, capture_output=True, text=True, check=False
-        )
+        argv = [sys.executable, "-m", "core", *argv]
+        return subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
 
+    async def go():
+        async with await db.connect(dsn) as conn:
+            c = await corrections.record(conn, "Say less.", by="tom", via="test")
+            e = await corrections.record(conn, "The c4 plan.", by="tom", via="t", source_class="exemplar")
+            d = await corrections.record(conn, "Say it plainly.", by="tom", via="test")
+            assert [e["number"], d["number"]] == [c["number"] + 1, c["number"] + 2]
+            kinds = (c["source_class"], e["source_class"], e["provenance"]["via"])
+            assert kinds == ("direct", "exemplar", "t")
+            with pytest.raises(ValueError, match="an exemplar has text"):
+                await corrections.record(conn, "  ", by="tom", via="t", source_class="exemplar")
+            turn = await tasks.dispatch(conn, await tasks.start(conn, tasks.Brief(instruction="test")))
+            # The turn's `corrections` lists every number it carries, exemplars included.
+            assert {c["number"], e["number"], d["number"]} <= set(turn["corrections"])
+            text = turn["text"]
+            assert text.count("The c4 plan.") == 1
+            assert text.index("# Corrections from Tom") < text.index("# Exemplars from Tom")
+            assert text.index("# Exemplars from Tom") < text.index("The c4 plan.")
+
+    run(go())
     assert "exemplar TEXT" in core("--help").stdout
     made = core("exemplar", "The c4 plan: three fixes, one page.", "--via", "test")
-    assert (
-        made.returncode == 0
-        and made.stdout.startswith("exemplar ")
-        and " recorded, ledger row " in made.stdout
-    )
-    number = made.stdout.split()[1]
+    out = made.stdout
+    assert made.returncode == 0 and out.startswith("exemplar ") and " recorded, ledger row " in out
     listed = core("corrections").stdout
-    assert f"{number}. (global, exemplar; tom, " in listed and "The c4 plan: three fixes, one page." in listed
+    assert f"{out.split()[1]}. (global, exemplar; tom, " in listed and "three fixes, one page." in listed
     blank = core("exemplar", "   ")
     assert blank.returncode != 0 and "exemplar refused: an exemplar has text" in blank.stderr
     assert core("corrections").stdout == listed

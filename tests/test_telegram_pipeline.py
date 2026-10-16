@@ -10,7 +10,7 @@ import pytest
 
 from core import broker, db, intake, machine, notices, tasks
 from core.machine import State
-from tests import bridges
+from tests import bridges, scripted
 from tests.bridges import OPERATOR, new_task, of_type, rows
 from tests.telegram_port import chat, child_env, connected, due, emu_chat, ids, release, send, until
 from tests.telegram_port import machine as this_machine
@@ -107,8 +107,8 @@ def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn
 def test_stop_by_reply_and_a_released_send_of_that_task_is_refused_once(emu, dsn, tmp_path, op):
     async def go():
         effect = await release(dsn, send(op, "never sent"))
-        task = await _task_of(dsn, effect)
         async with await db.connect(dsn) as conn:
+            task = await scripted.task_of(conn, effect)
             await notices.request(conn, task, kind="test", about_key=f"t:{task}", text="about it", chat_id=op)
         async with connected(emu.url, dsn, tmp_path) as bridge:
             async with bridges.outbox(dsn, bridge) as box:
@@ -133,17 +133,6 @@ def test_stop_by_reply_and_a_released_send_of_that_task_is_refused_once(emu, dsn
             )
 
     run(go())
-
-
-async def _task_of(dsn, effect_id) -> str:
-    async with await db.connect(dsn) as conn:
-        (task,) = await (
-            await conn.execute(
-                "SELECT task_id FROM events WHERE type = 'effect.held' AND payload->>'effect_id' = %s",
-                (effect_id,),
-            )
-        ).fetchone()
-    return task
 
 
 HEAD = "Ship the quarterly invoices"
