@@ -806,9 +806,10 @@ def _mentions_only(spec: workspace.Spec, p: dict[str, Any]) -> bool:
 
 
 # How many of a team chat's messages a task started there carries, and how
-# much of each: the old system's reply chain (Valor's own longer).
+# much of each, as the old system's reply chain had it; the chain the
+# message replies to keeps Valor's own posts longer.
 HISTORY = 20
-CUT, CUT_OWN = 500, 2000
+CUT, CUT_CHAIN = 500, 2000
 
 
 async def _chat_context(conn, p: dict[str, Any], spec: workspace.Spec) -> str:
@@ -824,7 +825,7 @@ async def _chat_context(conn, p: dict[str, Any], spec: workspace.Spec) -> str:
     chain = [m for m in p.get("thread") or [] if isinstance(m, dict) and m.get("text")]
     if chain:
         lines.append("It replies to, oldest first:")
-        lines += tasks.quoted("\n".join(_cut(m["text"], CUT_OWN) for m in chain))
+        lines += tasks.quoted("\n".join(_cut(m["text"], CUT_CHAIN) for m in chain))
     rows = await (
         await conn.execute(
             "SELECT at, type, payload FROM events WHERE id < (SELECT id FROM events "
@@ -846,7 +847,7 @@ async def _chat_context(conn, p: dict[str, Any], spec: workspace.Spec) -> str:
         else:
             name = "Valor (you)"
             said = _cut((payload.get("payload") or {}).get("text") if type_ == "effect.intent" else payload.get("text"),
-                        CUT_OWN)  # fmt: skip
+                        CUT)  # fmt: skip
             when = _when(at.isoformat())
         lines.append(f"- {when} {name}: {said}")
     return "\n".join(lines)
