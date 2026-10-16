@@ -1,24 +1,13 @@
-"""The bridge in a child process, for tests that kill it by its pid.
+"""The bridge in a child process, for tests that kill it by its pid, over
+the test DSN with its state files in STATE (`telegram_port.child_env`).
 
-Each mode runs over the test database named by DSN, with the bridge's
-state files in STATE (a directory), under the settings the test passes in
-the environment (`telegram_port.child_env`).
+    perform URL DSN STATE EFFECT: one released send; killed in the
+        emulator's pause after it accepts it.
+    receive URL DSN STATE MARK before|after|none: writes MARK once
+        connected, MARK.paused on the first message, and pauses there.
+    run URL DSN STATE MARK TEXT: `serve`; MARK when TEXT's send starts.
 
-    python -m tests.telegram_child perform URL DSN STATE EFFECT
-        perform one released send through the outbox; the test sets the
-        emulator to pause after it accepts the send, and kills this
-        process during the pause.
-    python -m tests.telegram_child receive URL DSN STATE MARK before|after|none
-        run the bridge and write MARK once connected and the gap filled;
-        on the first message, write MARK.paused and pause before
-        `receive` or after it (before the read acknowledgement), so the
-        test kills it there.
-    python -m tests.telegram_child run URL DSN STATE MARK TEXT
-        `serve` the bridge; write MARK when the send of TEXT starts, for
-        SIGTERM during a perform.
-
-The pauses live here, in wrappers around the wire and the port; the
-bridge has no test hook.
+The pauses wrap the wire and the port; the bridge has no test hook.
 """
 
 from __future__ import annotations

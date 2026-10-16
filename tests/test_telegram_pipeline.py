@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core import broker, db, intake, machine, notices, tasks
+from core import broker, db, intake, ledger, machine, notices, tasks
 from core.machine import State
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, new_task, of_type, rows
@@ -213,3 +213,23 @@ def test_the_mailbox_connection_keeps_its_idle_path_alive():
             idle = getattr(socket, "TCP_KEEPIDLE", None) or socket.TCP_KEEPALIVE
             assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
             assert sock.getsockopt(socket.IPPROTO_TCP, idle) == smtp.KEEPALIVE["idle"]
+
+
+def test_a_task_tom_started_in_his_dm_is_answered_there(dsn, tmp_path):
+    async def go(chat):
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="Hi Valor"))
+            got = {"channel": "telegram", "chat_id": chat, "message_id": "9", "received_id": task}
+            await ledger.append(conn, "telegram", "message.received", got)
+            await ledger.append(
+                conn, "telegram", "message.bound", {"as": "start", "task_id": task, "received_id": task}
+            )
+            await notices.request(conn, task, kind="question", about_key="q", text="What next?")
+        return [
+            (r["channel"], r["chat_id"])
+            for r in await of_type(dsn, "notice.requested")
+            if r["task_id"] == task
+        ]
+
+    with bridges.configure(operator_telegram_id=OPERATOR, operator_channel="slack", operator_chat="T/U"):
+        assert run(go(OPERATOR)) == [("telegram", OPERATOR)] and run(go("-100")) == [("slack", "T/U")]

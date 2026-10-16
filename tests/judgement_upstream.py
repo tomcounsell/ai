@@ -1,17 +1,10 @@
-"""A real local HTTP upstream speaking Jev's and OpenRouter's wire formats, for
-the scripted judge and the scripted checks' judgements (`tests/scripted.py`).
+"""A real local HTTP upstream speaking Jev's and OpenRouter's wire formats
+for the scripted judge and checks, its bodies shaped like the live ones in
+`tests/fixtures/judgement_*.json`, on its own thread and loop.
 
-Its 200 bodies have the shape of the responses recorded live in
-`tests/fixtures/judgement_jev.json` and `judgement_open_weight.json`, with
-the answers and usage put in per request. It runs on its own thread and
-event loop, so synchronous tests and each `asyncio.run` share one server.
-
-One kind of path, `/fixed/<answer>/<leg>` (the leg `jev` or `open_weight`):
-every question answered with 0.95 on one label: `precise` or `thin` for the
-request judge (thin is `one_line_ask`), `true` or `false` for a boolean.
-`<answer>` may list labels with commas (`precise,covered,1,after`): each
-question takes the first it has, else its last label (`distinct` and
-`none` for the overlap site, so a plain `precise` reads as distinct).
+`/fixed/<answer>/<leg>` (leg `jev` or `open_weight`) answers every question
+0.95 on one label: `precise`/`thin` (`one_line_ask`), `true`/`false`, or a
+comma list where each question takes the first it has, else its last label.
 """
 
 import asyncio

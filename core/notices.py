@@ -11,8 +11,8 @@ a note to Tom (the text of `done.md` above its first `---` line, or
 `stop.md`), the note is the message.
 
 `owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
-and has not requested, to `settings.operator_channel` and
-`settings.operator_chat`:
+and has not requested, to the chat of Tom's message that started the task
+(`home`), else to `settings.operator_channel` and `settings.operator_chat`:
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
@@ -71,6 +71,8 @@ async def request(
     if found is not None:
         return None
     notice_id = ledger.new_id()
+    if channel is None and chat_id is None:
+        channel, chat_id = await home(conn, task_id)
     channel = channel or settings.operator_channel
     chat_id = chat_id if chat_id is not None else settings.operator_chat
     try:
@@ -103,6 +105,28 @@ async def request(
     except psycopg.errors.UniqueViolation:
         return None
     return notice_id
+
+
+async def home(conn, task_id: str) -> tuple[str | None, str | None]:
+    """The channel and chat of the message that started the task, when it
+    came from Tom's own chat (`intake._toms_own`): his notices about it are
+    answered where he asked, as a developer would. Else (None, None), the
+    operator's. Tom's "Hi Valor" on Telegram, 2026-10-16, was answered on
+    Slack."""
+    from core import intake
+
+    row = await (
+        await conn.execute(
+            "SELECT r.payload FROM events b JOIN events r ON r.type = 'message.received' "
+            "AND r.payload->>'received_id' = b.payload->>'received_id' "
+            "WHERE b.type = 'message.bound' AND b.payload->>'as' = 'start' "
+            "AND b.payload->>'task_id' = %s ORDER BY b.id LIMIT 1",
+            (task_id,),
+        )
+    ).fetchone()
+    if row is None or not intake._toms_own(row[0]):
+        return None, None
+    return row[0]["channel"], row[0]["chat_id"]
 
 
 async def owe(conn, task_id: str) -> list[str]:

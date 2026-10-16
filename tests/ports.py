@@ -1,10 +1,8 @@
 """Ports the tests' own services listen on.
 
 `VALOR_TEST_PORTS` (`LOW-HIGH`) moves every server the tests start into one
-span: test runs side by side on one machine never share a port, and in a
-task's workspace the span is the dev ports, the only ones the check and
-turn profiles let a process listen on. Unset, `span` gives each call site
-its own default span and `listen` gives 0, so the OS chooses.
+span, so test runs side by side never share a port. Unset, `span` gives
+each call site its own default span and `listen` gives 0 (the OS chooses).
 
 A port `service` gives a task's service is reserved, in the file
 `VALOR_TEST_RESERVED_PORTS` names (set for the session in

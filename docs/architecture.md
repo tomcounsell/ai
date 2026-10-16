@@ -193,7 +193,7 @@ token, and it is tried again on its own until the token works. Each try is one r
 `merge:<digest>:<grants>:<tries>`), so a second step asks nothing twice.
 
 What reaches Tom is a report of what left: when an `act` effect's outcome is `done`, the same
-transaction requests one `report` notice (`report:<effect_id>`) to the operator channel, saying what
+transaction requests one `report` notice (`report:<effect_id>`) to the chat Tom started the task from when it is his own, else the operator channel, saying what
 left. A merge's report names the request, says it is merged into its branch, carries the note to Tom
 the delivering turn wrote above the `---` line of `done.md`; a reply to it is feedback. No notice
 carries an id, commit, path, command or link (`core/notices.py`); the checks and findings are on the

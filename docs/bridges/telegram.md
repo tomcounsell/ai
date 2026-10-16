@@ -145,9 +145,10 @@ refused release writes `effect.refused` once and is not yielded again. The bridg
 Some messages are the kernel speaking to Tom about his own work: a question a
 turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
-A notice goes only to Tom's operator chat, which is fixed in settings. No
-turn, task, or payload names the recipient, so a notice cannot reach anyone
-else. The kernel writes `notice.requested` with the text and the record it
+A notice goes to the chat where Tom started the task, when that is his own
+chat (his DM on that channel, or the operator chat), and otherwise to his
+operator chat, which is fixed in settings (`notices.home`). No turn, task,
+or payload names the recipient, so a notice cannot reach anyone else. The kernel writes `notice.requested` with the text and the record it
 concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
