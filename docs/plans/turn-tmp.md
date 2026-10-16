@@ -1,103 +1,84 @@
 # Plan: a turn's TMPDIR is its own and goes when the turn ends
 
-Task 2b1cca5b0610 (backlog:turn-tmp-leak; first carried by 8426bdd16707,
-whose branch did not survive the strip).
+backlog:turn-tmp-leak. Built, tested, reviewed and documented by
+2b1cca5b0610, which the kernel ended at the two-rebase cap (removed on main
+in abb3f7d54). Carried by df8e5c6bb79b.
 
-## Carried by df8e5c6bb79b
+## The carry
 
-2b1cca5b0610 built, tested, reviewed and documented this; the kernel ended
-it at the two-rebase cap (removed on main in abb3f7d54). Its head is
-`valor/carry-2b1cca5b0610` (cc89d1303) on GitHub. Rebased onto main
-2d1864305 as local branch `carry-rebased`: this plan commit is on the task
-branch; the build takes `ff94aaaf3` (code and tests) and `80e658d38` (docs,
-with the "As built" section below) as they are. The one conflict was
-`test_stop_from_another_connection_kills_the_turn`: main loosened its bound
-to `elapsed < 20`, the carry added the tmp check; the resolution keeps both.
-The build re-runs the full suite and `tests/test_budget.py` on the rebased
-head; nothing else is redone.
+The finished head is `valor/carry-2b1cca5b0610` (cc89d1303) on GitHub
+(`tomcounsell/ai`), not in this task's origin mirror. It is rebased onto main
+2d1864305 as the local branch `carry-rebased` in this repo: the plan commit,
+then `ff94aaaf3` (code and tests), then `80e658d38` (docs). The one conflict
+was in `test_stop_from_another_connection_kills_the_turn`: main loosened the
+bound to `elapsed < 20` and the carry added `not (tmp_path / "tmp").exists()`.
+The resolution keeps both. If `carry-rebased` is missing, the build redoes
+this rebase from cc89d1303 with the same resolution.
 
-## The cause, as it stands on main 17bd5a728
+## The cause, on main 2d1864305
 
-The report names `state/work/tmp`, the per-task TMPDIR the old
-provisioning set. Strip B (c86f22c39) deleted that setting with the tmp
-redirects, so today no provisioning or check sets `harness["tmpdir"]`
-(`core/workspace.py:721`, `:1309`). Both harnesses still honor it
-(`harnesses/claude_code.py:116`, `harnesses/pi.py:307`), but it is never
-given. A turn therefore writes its scratch (test runs, builds, downloads,
-Claude Code's own `CLAUDE_CODE_TMPDIR` files) into the operator's shared
-`/var/folders/.../T`, mixed with every other turn, task and program on the
-Mac. The workspace no longer grows, but the disk does, and no step can give
-a turn's space back because nothing says which files are the turn's.
-macOS removes items in T only after three days unused; that is a sweep, not
-the turn's end.
+Strip B (c86f22c39) deleted the per-task `state/work/tmp` setting. No
+provisioning (`core/workspace.py:721-727`) or fresh session (`check_harness`,
+`:1314-1319`) sets `harness["tmpdir"]`, though both harnesses honor it
+(`harnesses/claude_code.py:116`, `harnesses/pi.py:307`). So every turn's
+scratch goes into the shared `/var/folders/.../T`, and nothing can tell
+which files are a turn's, so nothing gives them back.
 
 **What the next turn of the same session reads from its TMPDIR: nothing.**
-Claude Code's session state is in `CLAUDE_CONFIG_DIR` (`state/work/claude`),
-Pi's in `state/work/pi`, the uv and npm caches in `cache/`, and background
-tasks are off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), so nothing that
-outlives a turn is kept. Nothing is kept.
+Session state is in `state/work/claude` and `state/work/pi`, the caches are
+in `cache/`, and background tasks are off. Nothing is kept.
 
-## What will be built
+## What is built (as in ff94aaaf3)
 
-1. **A TMPDIR per turn.** `harness["tmpdir"]` now names a root, and each
-   turn's TMPDIR is `<root>/<turn_id>`. Both harnesses set `TMPDIR` (and
-   Claude Code's `CLAUDE_CODE_TMPDIR`) to that path and return it as a new
-   `TurnCommand.tmpdir`. Provisioning gives the working session
-   `<task>/tmp`, and `check_harness` gives a fresh session (critique,
-   review, docs, advice) `<check_dir>/tmp`, which `fresh_dir` already makes.
-2. **Made at the start, removed at the end.** `runs._run_turn` empties the
-   root after `build` and before the spawn, and then makes the turn's
-   directory. Only one turn of a session runs at a time, so anything in the
-   root at that point was left by an earlier turn: a kernel that died, or a
-   delete that failed. `runs.run_turn` removes `<root>/<turn_id>` in a
-   `finally` once the slot is released. That runs however the turn ended
-   (done, failed, stopped, interrupted, kernel failure), so a multi-GB
-   delete does not hold another task's turn back. Both steps use the
-   existing `workspace.rmtree`, which follows no link and clears locked and
-   read-only entries, imported in the function because `workspace`
-   imports `runs`. A failed delete is suppressed: the turn's result stands,
-   and the next turn's start-time emptying finishes the job.
-3. **Briefs from before the strip** carry `tmpdir = state/work/tmp`. Their
-   first turn on this code empties it, which reclaims the old leak too.
-4. **The turn is told.** `persona/turn.md` gets one line: `$TMPDIR` is
-   emptied when the turn ends, so anything a later turn needs goes in the
-   workspace. `docs/workspace.md` and the layout docstring
-   (`core/workspace.py:4`) name `tmp/`.
+1. **One TMPDIR per session.** A working session's TMPDIR is `<task>/tmp`.
+   `_turn_for` gives it to briefs that carry no `tmpdir`, so live tasks need
+   no migration. A fresh session's is `<check_dir>/tmp`. Both harnesses set
+   `TMPDIR` (and Claude Code's `CLAUDE_CODE_TMPDIR`) and return it as
+   `TurnCommand.tmpdir`. It is the root itself, not `<root>/<turn_id>`:
+   one turn of a session runs at a time, and the short path keeps sockets
+   under macOS's 104-byte limit.
+2. **Emptied at the start, removed at the end.** `runs._run_turn` removes
+   and remakes the root before the spawn, which clears anything a dead
+   kernel or a failed delete left. `runs.run_turn` removes it in a
+   `finally` once the slot is released, however the turn ended. Both steps
+   use `workspace.rmtree`, which follows no link and clears locked and
+   read-only entries. A failed delete is suppressed and the next turn's
+   start finishes the job. Pre-strip briefs (`state/work/tmp`) are emptied
+   on their first turn.
+3. **The review's pgpass leaves tmp/.** `check_services` wrote it to
+   `<check_dir>/tmp/pgpass` (`core/workspace.py:1612`), which the review
+   turn's start would delete. The carry writes it to `<check_dir>/pgpass`,
+   and the docstring at `:1596` says so.
+4. **The turn is told.** One line in `persona/turn.md` says `$TMPDIR` is
+   emptied when the turn ends. `docs/workspace.md`, `docs/harnesses.md` and
+   the layout docstring name `tmp/`.
 
-Governance: none added. Setting TMPDIR chooses a location and limits
-nothing: the turn can still write anywhere, `/tmp` included.
+Governance: none added. Setting TMPDIR picks a location and limits nothing.
+
+## Tests (tests/test_kernel.py, real Postgres)
+
+Carried:
+- done and failed turns: a nested tree, a read-only file, a `uchg` file and
+  a link out of the root. Afterwards the root is gone, the link's target
+  and a sibling directory are intact, and a leftover from before the turn
+  was gone at its start.
+- stop: the root is gone.
+- harness build, with and without `tmpdir`.
+
+Added by this build (the critique's missed case): a fresh session with
+services. The test runs the real `check_services` for a Postgres-only
+project, then `check_harness(..., services=True)` with a `tmpdir`, then a
+turn whose process checks that `$PGPASSFILE` exists after the start-time
+emptying. Afterwards the passfile still exists and the TMPDIR is gone. The
+full suite and `tests/test_budget.py` run on the rebased head.
 
 ## Out of scope
 
-- Files a turn writes to `/tmp` or another explicit path: no TMPDIR covers
-  them.
-- The check suite's pytest basetemp (backlog:check-tmp-leak, 4e22396368f4)
-  and a finished task's whole workspace (backlog:workspace-reclaim,
-  87fd35370d9c).
-- About 11,000 empty `valor-test-*` directories the suite's conftest
-  leaves in the shared T (seen this turn, about 0 bytes each). This is a
-  separate defect, named in the delivery.
-
-## Tests (tests/test_kernel.py, real Postgres, a direct `TurnCommand`)
-
-- A turn whose process writes into `$TMPDIR` a nested tree, a read-only
-  file, a locked (`uchg`) file and a link to a file outside the root. After
-  the turn ends **done**, and again after it ends **failed**, the turn's
-  directory is gone, the root still exists, the link's target outside is
-  intact, and a sibling of the root (standing in for `state/work/claude`)
-  is untouched.
-- The existing stop test gets a tmpdir: after a **stop**, the directory is
-  gone.
-- A leftover `<root>/<dead-turn>/` from before the turn is gone once the
-  turn has started; the turn's process asserts it.
-- `claude_code` build with `tmpdir`: `TMPDIR`, `CLAUDE_CODE_TMPDIR` and
-  `command.tmpdir` are all `<root>/<turn_id>`. Without `tmpdir`, none is
-  set and `command.tmpdir` is None, and the turn's start and end delete
-  nothing.
+Files written to `/tmp` directly; the check suite's pytest basetemp
+(4e22396368f4); a finished task's workspace (87fd35370d9c); the roughly
+11,000 empty `valor-test-*` directories the conftest leaves in T, named in
+the delivery.
 
 ## Loops
 
-This is a defect fix (CLAUDE.md hard rule 9), so it gets 0 critique rounds
-and 0 review rounds. The deletion is confined to a directory named by the
-kernel's own turn id under a root the kernel chose, and every case above is
-tested.
+Defect fix (CLAUDE.md rule 9): 0 critique and 0 review rounds.
