@@ -51,6 +51,9 @@ class Brief:
     `routine` names the routine a task belongs to (its objective, its runs,
     and what they start). It makes the task, and every task under it, background work
     (`background`): the kernel runs Tom's tasks first.
+
+    `chat` (`{"channel", "chat_id"}`) makes the task that chat's chat
+    session (`core/intake.py`, `core/session.py`).
     """
 
     instruction: str
@@ -319,9 +322,9 @@ def stage_text(state: machine.State | str) -> str | None:
     return path.read_text().strip() if path.is_file() else None
 
 
-def channel_text(offered: list[str]) -> str:
+def channel_text(offered: list[str], name: str = "channel.md") -> str:
     effects = "\n".join(f"  - {line}" for line in offered) or "  - none"
-    return (Path(settings.stages_dir) / "channel.md").read_text().strip().replace("{effects}", effects)
+    return (Path(settings.stages_dir) / name).read_text().strip().replace("{effects}", effects)
 
 
 def verdict_text() -> str:
@@ -344,7 +347,8 @@ async def dispatch(
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
     usage lines of the task's own performers) and the stage file for the state the task
-    is in (`skills/sdlc/<state>.md`; `converse.md` for a team chat's clarify). A `fresh` session (critique, review,
+    is in (`skills/sdlc/<state>.md`); a chat session gets `skills/sdlc/converse.md`
+    in place of both. A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file; the advisor (`advice`)
@@ -378,11 +382,13 @@ async def dispatch(
         stage = stage_text(fresh)
         if stage:
             sections.append(stage)
+    elif b.workspace and b.chat:
+        lines = list(offered)
+        sections.append(channel_text(lines, "converse.md"))
     elif b.workspace:
         lines = list(offered)
         sections.append(channel_text(lines))
-        chat = b.chat and state is machine.State.CLARIFY
-        stage = stage_text("converse" if chat else state)
+        stage = stage_text(state)
         if stage:
             sections.append(stage)
     if not fresh:

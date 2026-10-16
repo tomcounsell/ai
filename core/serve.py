@@ -42,8 +42,10 @@ A task is stepped again when it moved, when its turn finished `idle`
 (behind every ready task that did not go idle, and among idle tasks the
 oldest latest row first, so an idle task never holds the slot from other
 work, whatever its queue place), or when a row it did not write
-lands on its stream (an answer, a steer, a stop, an effect's outcome). A
-step that failed is stepped again by the kernel once `router.retry_due`
+lands on its stream (an answer, a steer, a stop, an effect's outcome); a
+chat session only when a message wakes it or one of its tasks reports
+(`session.chat_waiting`), and its provisioning runs no setup and starts
+no services. A step that failed is stepped again by the kernel once `router.retry_due`
 says the delay after it has passed, and the task ends with a report at
 `router.STEP_TRIES` failures in a row. A step that answers `parked` (a
 merge whose facts git could not read, whose push has no answer yet, or
@@ -76,6 +78,7 @@ notice saying what failed.
 """
 
 import asyncio
+import dataclasses
 import functools
 import json
 import os
@@ -855,6 +858,8 @@ class Kernel:
             return None
         if latest <= self.seen.get(task_id, 0) and not router.retry_due(rows):
             return None
+        if b.chat and not session.chat_waiting(rows) and not router.retry_due(rows):
+            return None  # a chat session waits for the chat or its tasks, not its own outcomes
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)
         elif f.state in HARNESS:
@@ -910,6 +915,9 @@ class Kernel:
                     if os.path.lexists(workspace.layout(task_id).root):
                         await git.threaded(workspace.remove, task_id)
                     spec = workspace.Spec.load(name or "")
+                    if b.chat:
+                        # A chat session reads; its tasks build. No setup or services.
+                        spec = dataclasses.replace(spec, setup=(), services=())
                     await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
                     try:
                         taken = await workspace.taken_ports(conn)

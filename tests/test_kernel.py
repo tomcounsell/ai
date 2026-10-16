@@ -727,7 +727,7 @@ def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(
     assert core("corrections").stdout == listed
 
 
-# -- a team chat: anyone there is heard, and the work happens in the open ---------
+# -- a team chat: one long-lived chat session, every message a steer ------------
 
 
 GROUP, QUIET_GROUP, OTHER = "-1001", "-1002", "-1003"
@@ -748,8 +748,7 @@ def team(tmp_path):
 
 
 async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None) -> dict:
-    """A Telegram group message, received and bound: its binding, with the
-    started task's Brief when it started one."""
+    """A Telegram group message, received and bound: its binding."""
     mid = str(uuid.uuid4().int % 10**9)
     inbound = intake.Inbound(
         channel="telegram", chat_id=chat, chat_kind="group", message_id=mid, sender_id=sender,
@@ -760,135 +759,156 @@ async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None
         await intake.bind(conn)
     (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
     bound["message_id"] = mid
-    if bound["as"] == "start":
-        async with await db.connect(dsn) as conn:
-            bound["brief"] = await tasks.brief(conn, bound["task_id"])
     return bound
 
 
-async def on(dsn, type_, task) -> list[dict]:
-    return [r for r in await bridges.of_type(dsn, type_) if r["task_id"] == task]
+async def rows_of(dsn, task) -> list[dict]:
+    async with await db.connect(dsn) as conn:
+        return await ledger.read(conn, task)
 
 
-def test_anyone_in_a_team_chat_starts_work_that_carries_the_chat_and_who_asked(dsn, team):
-    """Rain's message starts a task, as Tom's would: by Rain, the chat on
-    its Brief, the chat's earlier messages (Valor's own among them) in its
-    instruction. A group no spec lists stays unheard."""
+async def turn(dsn, task) -> None:
+    """A finished turn of the chat session: what came before it is spent."""
+    turn_id = ledger.new_id()
+    async with await db.connect(dsn) as conn:
+        await ledger.append(conn, task, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+        await ledger.append(conn, task, "turn.ended", {"turn_id": turn_id, "outcome": "done", "result": {}})
+
+
+def test_a_team_chat_has_one_chat_session_and_every_message_reaches_it(dsn, team):
+    """Anyone's message binds to the chat's one session, started by the
+    first with the chat's earlier messages; each is a steer naming its
+    sender. A group no spec lists stays unheard."""
 
     async def go():
-        first = await said(dsn, "the florist page 500s on mobile", name="Kim", sender="78")
+        before = (await said(dsn, "morning all", sender="78", name="Kim"))["task_id"]
         async with await db.connect(dsn) as conn:
-            await notices.request(conn, first["task_id"], kind="ended", about_key="x", text="Looking now.")
-        bound = await said(dsn, "can you check the deploy log?")
+            await tasks.stop(conn, before, reason="a new session")
+        first = await said(dsn, "the florist page 500s on mobile")
+        second = await said(dsn, "valor can you look?", sender="78", name="Kim")
         other = await said(dsn, "hello valor", chat=OTHER)
-        return first, bound, other, await on(dsn, "task.started", bound["task_id"])
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, first["task_id"])
+        return first, second, other, b, await rows_of(dsn, first["task_id"])
 
-    first, bound, other, (started,) = run(go())
-    b = bound["brief"]
-    assert bound["as"] == "start" and other["as"] == "none"
-    assert started["provenance"]["by"] == "Rain" and b.project == {"name": "flowers"}
-    assert b.chat == {"channel": "telegram", "chat_id": GROUP, "message_id": bound["message_id"],
-                      "sender_id": RAIN, "sender_name": "Rain"}  # fmt: skip
-    text = b.instruction
-    assert text.startswith(
-        "can you check the deploy log?\n\nRain wrote this in the flowers team chat on Telegram"
+    first, second, other, b, rows = run(go())
+    assert first["task_id"] == second["task_id"] and (first["as"], second["as"]) == ("steer", "steer")
+    assert other["as"] == "none"
+    assert b.chat == {"channel": "telegram", "chat_id": GROUP} and b.project == {"name": "flowers"}
+    assert "flowers team chat on Telegram" in b.instruction and "Kim (message " in b.instruction
+    assert "): morning all" in b.instruction
+    steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
+    assert [(p["provenance"]["by"], p["text"]) for p in steered] == [
+        ("Rain", "the florist page 500s on mobile"), ("Kim", "valor can you look?"),
+    ]  # fmt: skip
+
+
+def test_in_a_mentions_chat_only_a_message_naming_valor_wakes_the_session(dsn, team):
+    """The rest are heard, quiet, and ride along with the next wake."""
+
+    async def go():
+        bound = [(await said(dsn, t, chat=QUIET_GROUP))["as"] for t in ("lunch at noon?", "valorous effort")]
+        waiting = session.chat_waiting(
+            await rows_of(dsn, (await said(dsn, "x", chat=QUIET_GROUP))["task_id"])
+        )
+        woke = await said(dsn, "Valor, what broke?", chat=QUIET_GROUP)
+        rows = await rows_of(dsn, woke["task_id"])
+        return bound, waiting, woke, session.chat_waiting(rows), session.chat_prompt(rows)
+
+    bound, waiting, woke, now, prompt = run(go())
+    assert bound == ["heard", "heard"] and not waiting
+    assert woke["as"] == "steer" and now
+    assert (
+        prompt.index("lunch at noon?") < prompt.index("valorous effort") < prompt.index("Valor, what broke?")
     )
-    assert text.index("Kim: the florist page 500s") < text.index("Valor (you): Looking now.")
-    assert first["brief"].chat["sender_name"] == "Kim"
+    assert "Rain (message " in prompt
 
 
-def test_in_a_mentions_chat_only_a_message_naming_valor_starts_work(dsn, team):
+def test_a_chat_session_wakes_on_messages_and_reports_and_reads_only_whats_new(dsn, team):
     async def go():
-        return [
-            (await said(dsn, text, chat=QUIET_GROUP))["as"]
-            for text in ("lunch at noon?", "Valor, what broke?", "@valor ping", "valorous effort")
-        ]
-
-    assert run(go()) == ["none", "start", "start", "none"]
-
-
-def test_a_team_tasks_question_is_asked_in_the_chat_and_anyone_there_answers_it(dsn, team):
-    """The chat task skips the judge to its conversation turn; its question
-    goes to the chat in reply to the request, with no kernel framing, and
-    Kim's reply answers it. A credential request stays with Tom."""
-    from types import SimpleNamespace
-
-    from core import judgement_sites
-
-    async def go():
-        bound = await said(dsn, "valor can you bump the stripe sdk?")
-        task = bound["task_id"]
-        ctx = SimpleNamespace(dsn=dsn, task_id=task, alive=None)
-        assert await judgement_sites.judge_runner(None)(ctx) == {"status": "moved"}
+        task = (await said(dsn, "is staging up?"))["task_id"]
+        await turn(dsn, task)
+        idle = session.chat_waiting(await rows_of(dsn, task))
+        await said(dsn, "and prod?")
         async with await db.connect(dsn) as conn:
-            for row in Ledger(judge="thin").ask().rows[2:]:
-                await ledger.append(conn, task, row["type"], row["payload"])
-            assert machine.fold(await ledger.read(conn, task)).state is State.WAITING
-            (nid,) = await notices.owe(conn, task)
-            await notices.credential(conn, task, "abc", missing=True)
-            sent = [{"channel": "telegram", "chat_id": GROUP, "message_id": "9001"}]
-            await ledger.append(conn, task, "notice.sent", {"notice_id": nid, "sent": sent})
-        answer = await said(dsn, "yes, v12", sender="78", name="Kim", reply_to="9001")
-        return bound, answer, *[await on(dsn, t, task) for t in ("judge.decided", "notice.requested",
-                                                                 "question.answered")]  # fmt: skip
+            await ledger.append(conn, task, "child.reported", {"child_id": "c1", "kind": "question",
+                                                               "about_key": "q", "text": "Which region?"})  # fmt: skip
+        rows = await rows_of(dsn, task)
+        return idle, session.chat_waiting(rows), session.chat_prompt(rows)
 
-    bound, answer, (judged,), (asked, credential), (answered,) = run(go())
-    assert judged["verdict"] == "thin" and judged["leg"] == "chat"
-    assert (asked["channel"], asked["chat_id"], asked["reply_to"], asked["text"]) == (
-        "telegram", GROUP, bound["message_id"], "?",
-    )  # fmt: skip
-    assert (credential["chat_id"], credential["reply_to"]) == (bridges.OPERATOR_CHAT, None)
-    assert answer["as"] == "answer"
-    assert answered["provenance"]["by"] == "Kim" and answered["text"] == "yes, v12"
+    idle, waiting, prompt = run(go())
+    assert not idle and waiting
+    assert "is staging up?" not in prompt and "and prod?" in prompt
+    assert "Your task c1 reports (question):\n  Which region?" in prompt
 
 
-def test_a_conversation_turn_runs_the_converse_stage_and_its_reply_is_posted_as_written(dsn, team, tmp_path):
-    """A chat task in clarify gets the converse stage; `Done:` posts the
-    reply alone, in reply to the message; `Quiet.` posts nothing; and a
-    reply to a finished conversation starts the next one."""
-    from core import verdicts
-
-    async def ended(text) -> tuple[dict, list[dict]]:
-        bound = await said(dsn, "valor, is staging up?")
-        async with await db.connect(dsn) as conn:
-            await verdicts.record_chat(conn, bound["task_id"])
-            await ledger.append(conn, bound["task_id"], "task.ended", {"kind": "decided", "by": "valor",
-                                                                        "text": text})  # fmt: skip
-            await notices.owe(conn, bound["task_id"])
-        return bound, await on(dsn, "notice.requested", bound["task_id"])
+def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team, tmp_path):
+    from core import signals, verdicts
+    from tools import chat_tasks
 
     async def go():
         async with await db.connect(dsn) as conn:
-            chat = {
-                "channel": "telegram",
-                "chat_id": GROUP,
-                "message_id": "1",
-                "sender_id": RAIN,
-                "sender_name": "R",
-            }
-            task = await tasks.start(conn, tasks.Brief(instruction="hi", workspace=str(tmp_path), chat=chat))
-            await verdicts.record_chat(conn, task)
-            text = (await tasks.dispatch(conn, task))["text"]
-        asked, (reply,) = await ended("Done: Staging is up, deployed 09:12.")
-        _, quiet = await ended("Quiet.")
-        async with await db.connect(dsn) as conn:
-            sent = [{"channel": "telegram", "chat_id": GROUP, "message_id": "9100"}]
-            await ledger.append(
-                conn, asked["task_id"], "notice.sent", {"notice_id": reply["notice_id"], "sent": sent}
+            b = tasks.Brief(
+                instruction="chat", workspace=str(tmp_path), chat={"channel": "telegram", "chat_id": GROUP}
             )
-        return text, asked, reply, quiet, await said(dsn, "thanks! and prod?", reply_to="9100")
+            task = await tasks.start(conn, b)
+            await verdicts.record_chat(conn, task)
+            offered = [p.usage for p in chat_tasks.performers(b)]
+            return b, (await tasks.dispatch(conn, task, offered=offered))["text"]
 
-    text, asked, reply, quiet, follow = run(go())
-    assert "# Stage: converse" in text and "# Stage: clarify" not in text
-    assert (reply["text"], reply["chat_id"], reply["reply_to"]) == (
-        "Staging is up, deployed 09:12.", GROUP, asked["message_id"],
-    )  # fmt: skip
-    assert quiet == []
-    assert follow["as"] == "start" and follow["task_id"] != asked["task_id"]
-    assert "Valor (you): Staging is up" in follow["brief"].instruction
+    b, text = run(go())
+    assert "# A chat session" in text and "`task.start`" in text and "# Stage: clarify" not in text
+    assert "# How this task reaches Tom" not in text
+    asked = session._stage_verdict(State.CLARIFY, signals.Signals(question="?"), None, "t", True, b)
+    assert asked == ("idle", {}, ["question means nothing in a chat session; ignored"])
+    assert (
+        session._stage_verdict(State.CLARIFY, signals.Signals(stop="bye"), None, "t", True, b)[0] == "ended"
+    )
 
 
-def test_a_team_tasks_send_to_its_own_chat_owes_no_report_and_one_elsewhere_reaches_tom(dsn, team):
+def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_it(dsn, team):
+    """`task.start` makes a child on the project, named by who asked; its
+    question reaches the session, never a chat, and `task.answer` answers
+    it. The push credential request stays Tom's; a task not the session's
+    is refused."""
+    from tools import chat_tasks
+
+    async def go():
+        session_id = (await said(dsn, "valor, bump the stripe sdk"))["task_id"]
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, session_id)
+        start, answer, stop = chat_tasks.performers(b, dsn)
+        made = await start.perform(
+            broker.Action("task.start", "work", {"instruction": "Bump stripe", "by": "Rain"}), "k1"
+        )
+        child = made["task_id"]
+        async with await db.connect(dsn) as conn:
+            cb = await tasks.brief(conn, child)
+            for row in Ledger(judge="thin").ask().rows[1:]:
+                await ledger.append(conn, child, row["type"], row["payload"])
+            await notices.owe(conn, child)
+            await notices.credential(conn, child, "abc", missing=True)
+            refused = await answer.refuse(conn, broker.Action("task.answer", session_id, {"text": "x"}))
+        await answer.perform(broker.Action("task.answer", child, {"text": "v12", "by": "Kim"}), "k2")
+        found = await start.lookup(broker.Action("task.start", "work", {}), "k1")
+        await stop.perform(broker.Action("task.stop", child, {"why": "not now", "by": "Rain"}), "k3")
+        return session_id, child, cb, refused, found, *[await rows_of(dsn, t) for t in (session_id, child)]
+
+    session_id, child, cb, refused, found, parent_rows, child_rows = run(go())
+    assert cb.parent_id == session_id and cb.project == {"name": "flowers"} and found == {"task_id": child}
+    (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
+    assert started["provenance"]["by"] == "Rain"
+    (reported,) = [r["payload"] for r in parent_rows if r["type"] == "child.reported"]
+    assert (reported["child_id"], reported["kind"]) == (child, "question")
+    notes = [r["payload"] for r in child_rows if r["type"] == "notice.requested"]
+    assert [(n["kind"], n["chat_id"]) for n in notes] == [("credential", bridges.OPERATOR_CHAT)]
+    (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]
+    assert (answered["text"], answered["provenance"]["by"]) == ("v12", "Kim")
+    assert refused == f"task {session_id} is not one this chat started"
+    assert machine.fold(child_rows).state is State.STOPPED
+
+
+def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_reaches_tom(dsn, team):
     async def go():
         task = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
         async with await db.connect(dsn) as conn:
@@ -896,7 +916,7 @@ def test_a_team_tasks_send_to_its_own_chat_owes_no_report_and_one_elsewhere_reac
                 effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": kind,
                           "target": target, "payload": {"text": "We're live.", "to": [target]}}  # fmt: skip
                 await notices.report(conn, task, effect, {})
-        return await on(dsn, "notice.requested", task)
+        return [r["payload"] for r in await rows_of(dsn, task) if r["type"] == "notice.requested"]
 
     (reported,) = run(go())
     assert (reported["chat_id"], reported["reply_to"]) == (bridges.OPERATOR_CHAT, None)

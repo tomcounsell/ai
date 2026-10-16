@@ -1266,6 +1266,15 @@ def fetch_into_mirror(
     return sha
 
 
+def fetch_tip(spec: Spec, mirror: str | Path) -> str:
+    """Fetch the project's branch into the kernel's cache, then its tip
+    into `mirror` (`refs/valor/tip`); return the tip."""
+    cache = _cache(spec, None, work_dir())
+    tip = _commit_of(cache, f"refs/heads/{spec.branch or _remote_head(cache)}")
+    git.trusted(Path(mirror), "fetch", "-q", "--no-tags", f"file://{cache}", f"+{tip}:refs/valor/tip")
+    return tip
+
+
 def bring_merged(
     repo: str | Path,
     mirror: str | Path,

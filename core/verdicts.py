@@ -123,8 +123,8 @@ async def record_judge(conn, task_id: str, judgement_id: str) -> int:
 
 
 async def record_chat(conn, task_id: str) -> int:
-    """The judge's verdict for a task started in a team chat: `thin`, with
-    no judgement asked, so its clarify turn is the conversation."""
+    """The judge's verdict for a chat session: `thin`, with no judgement
+    asked, so it runs in clarify."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         await _fold(conn, task_id, State.JUDGE)

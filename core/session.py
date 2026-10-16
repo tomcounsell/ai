@@ -35,6 +35,18 @@ Every question is a `question.asked` row and its answer a
 `question.answered` row with Tom's provenance, and his feedback a
 `feedback.given` row, so the attention a task cost is a fold over its
 ledger (`tasks.status`).
+
+A chat session (`Brief.chat`, `core/intake.py`) is one long-lived
+working session in `clarify`, resumed once per wake. Its prompt is what
+reached it since its last finished turn, in order (`chat_prompt`): the
+chat's messages, woken or heard, each with when, who and its id, and its
+tasks' reports (`child.reported`, `core/notices.py`); its first opens
+with its instruction. It answers by requesting sends; `stop.md` ends it,
+and no other signal counts. A turn ends the run `listening`: it is
+stepped again only when a message wakes it or a task reports
+(`chat_waiting`), never on its own effects' outcomes. Before each turn
+its checkout is brought up to the project's branch (`refresh`). Its
+history is the harness's to compact.
 """
 
 import asyncio
@@ -103,6 +115,9 @@ async def run(
                 return {"status": "moved", "state": now}
             b = await tasks.brief(conn, task_id)
             asked = pending_advice(await ledger.read(conn, task_id)) if advise else None
+            stale = None
+            if b.chat and asked is None:
+                stale = await asyncio.to_thread(refresh, b)
             if asked is None:
                 prompt, resume = await next_prompt(conn, task_id)
             rows = await ledger.read(conn, task_id) if state is State.PATCH and asked is None else []
@@ -113,7 +128,7 @@ async def run(
             continue
         merged = await asyncio.to_thread(merged_into_work, b, rows) if rows else None
         moved = await asyncio.to_thread(target_into_origin, b, rows) if rows else None
-        merged = "\n\n".join(x for x in (merged, moved) if x)
+        merged = "\n\n".join(x for x in (merged, moved, stale) if x)
         if merged:
             prompt = f"{prompt}\n\n{merged}"
         try:
@@ -155,6 +170,8 @@ async def run(
             return {"status": "moved", "state": now, "turn": ended}
         if not ok:
             return {"status": "failed", "state": now, "turn": ended}
+        if b.chat:
+            return {"status": "listening", "state": now, "turn": ended}
         if not asking:
             return {"status": "idle", "state": now, "turn": ended}
 
@@ -219,6 +236,53 @@ def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | No
     if head is None:
         return None, "the workspace has no commit"
     return {"sha": head, "turn_id": turn_id}, None
+
+
+def refresh(brief: tasks.Brief) -> str | None:
+    """Bring a chat session's checkout up to its project's branch: fetch
+    the repository into the kernel's cache, then fast-forward the work
+    branch to its tip (`workspace.bring_merged`). When it cannot, a note
+    for the turn's prompt."""
+    if not brief.mirror or not brief.workspace or not brief.push_url or not brief.project:
+        return None
+    try:
+        tip = workspace.fetch_tip(workspace.Spec.load(brief.project["name"]), brief.mirror)
+        workspace.bring_merged(brief.workspace, brief.mirror, brief.push_url, tip, brief.target_branch,
+                               brief.harness["sandbox_profile"], f"refresh-{brief.id}")  # fmt: skip
+    except (workspace.Refused, git.GitError) as exc:
+        return f"# Your checkout\n\nThe kernel could not bring it up to the project's branch: {exc}"
+    return None
+
+
+CHAT_WAKES = ("message.steered", "child.reported")
+CHAT_ROWS = ("message.steered", "message.heard", "child.reported")
+
+
+def chat_waiting(rows: list[dict]) -> bool:
+    """Whether a chat session has something to answer: a message that
+    wakes it or a task's report, since its last finished turn began."""
+    since = machine.fold(rows).steer_since
+    return any(r["type"] in CHAT_WAKES and int(r.get("id") or 0) > since for r in rows)
+
+
+def chat_prompt(rows: list[dict]) -> str:
+    """What reached a chat session since its last finished turn began,
+    oldest first: each message as `intake.chat_line` renders it, and each
+    task's report under its task id."""
+    from core import intake
+
+    since = machine.fold(rows).steer_since
+    lines = []
+    for r in rows:
+        if r["type"] not in CHAT_ROWS or int(r.get("id") or 0) <= since:
+            continue
+        p = r["payload"]
+        if r["type"] == "child.reported":
+            lines.append(f"- Your task {p.get('child_id')} reports ({p.get('kind')}):")
+            lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]
+        else:
+            lines.append(f"- {intake.chat_line(p)}")
+    return "\n".join(["# In the chat since your last turn", "", *lines]) if lines else ""
 
 
 def merged_into_work(brief: tasks.Brief, rows: list[dict]) -> str | None:
@@ -325,6 +389,14 @@ def _stage_verdict(
     """The turn's verdict from the signals that end a stage."""
     errors: list[str] = list(found.unreadable)
     extra: dict[str, Any] = {}
+    if brief is not None and brief.chat:
+        # A chat session answers by sends; only stop.md ends it.
+        for name in ("question", "no_question", "plan", "done"):
+            if getattr(found, name) is not None:
+                errors.append(f"{name} means nothing in a chat session; ignored")
+        if found.stop is not None:
+            return "ended", extra, errors
+        return ("idle" if finished else "failed"), extra, errors
     meant = {
         State.CLARIFY: ("question", "no_question"),
         State.PLAN: ("question", "plan"),
@@ -953,8 +1025,15 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     """The next turn's prompt and the harness session it resumes."""
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
+    b = await tasks.brief(conn, task_id)
+    if b.chat:
+        first = b.instruction if f.session is None else None
+        report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
+        parts = (first, chat_prompt(rows), _failure_report(rows), _advice_report(rows),
+                 _errors_report(f.last_collected), report)  # fmt: skip
+        return "\n\n".join(x for x in parts if x) or "Continue.", f.session
     if f.session is None:
-        prompt = (await tasks.brief(conn, task_id)).instruction
+        prompt = b.instruction
     else:
         prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."
     advice = _advice_report(rows)

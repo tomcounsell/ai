@@ -54,8 +54,8 @@ project_name = tasks.project_name
 def judge_runner(port: JudgementPort):
     """The runner for `State.JUDGE`: ask once (or reuse an answer no verdict
     has consumed yet), then let the kernel record the verdict from the row.
-    A task started in a team chat (`Brief.chat`) asks nothing and goes to
-    clarify, its conversation turn."""
+    A chat session (`Brief.chat`) asks nothing and goes to clarify, where
+    its turns run."""
 
     async def run(ctx) -> dict[str, Any]:
         from core import verdicts
@@ -69,8 +69,7 @@ def judge_runner(port: JudgementPort):
                 return {"status": "moved"}
             b = await tasks.brief(conn, ctx.task_id)
             if b.chat:
-                # A team chat's message is a conversation first: its clarify
-                # turn decides whether to answer, ask, or start the work.
+                # A chat session is one long working session in clarify.
                 await verdicts.record_chat(conn, ctx.task_id)
                 return {"status": "moved"}
         if not any(r["type"] == "reconcile.decided" for r in rows):

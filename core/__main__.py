@@ -178,8 +178,10 @@ def _performers(b: tasks.Brief) -> broker.Performers:
     origin; the merge pushes to the Brief's origin URL, from the kernel mirror
     with the GitHub credential when the kernel provisioned the task, and from
     the workspace with none otherwise. A declared send sizes its files in the
-    task's workspace."""
+    task's workspace. A chat session also starts, answers and stops its
+    tasks (`tools/chat_tasks.py`)."""
     from core.bridge import declared_performers
+    from tools import chat_tasks
     from tools.push_branch import Merge, PushBranch
 
     kernel = []
@@ -193,7 +195,7 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
-    return broker.Performers(*kernel, *declared_performers(b.workspace))
+    return broker.Performers(*kernel, *chat_tasks.performers(b), *declared_performers(b.workspace))
 
 
 def _harnesses() -> dict:

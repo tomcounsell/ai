@@ -54,6 +54,9 @@ QUIET = (
     "reconcile.decided",
     "shape.confirmed",
     "task.placed",
+    # A team chat's message that does not wake its chat session: it reaches
+    # the session with the next one that does (`core/intake.py`).
+    "message.heard",
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:
