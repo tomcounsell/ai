@@ -357,5 +357,15 @@ Each has the default the plan proceeds on if Tom says nothing.
   IMAP socket now keeps TCP keepalive (ddd48c68d): every 29-minute IDLE had
   ended in a TimeoutError. Suite 125 passed, 1 skipped, under 9 s on the
   Cowboy and the Pirate.
-- **Waiting on Tom.** Step 3 (Tom sends on Telegram, Valor answers) and step
-  6 (a popoto issue Tom names, merged, used).
+- **Step 3, 2026-10-16.** Tom sent "Hi Valor" on Telegram; Valor reacted 👀
+  then 👌 and asked what to take on, but on Slack, the operator channel.
+  Fixed (70207329e): a task Tom starts in his own chat is answered there.
+- **Step 6, merged 2026-10-16.** Tom named popoto PR 842 (huggingface-hub
+  1.32.0 to 2.1.1). Task f67b25bd6ed5 ran popoto's suite on the PR's lock
+  (5,134 passed, the 117 model tests run for real), changed no code, and
+  merged it ($3.89). On the way the Cowboy's disk filled with 26 finished
+  workspaces (67 GB); the kernel now removes one a day after its task
+  finishes (186656705). It found popoto's LoCoMo dataset gone from Hugging
+  Face.
+- **Waiting on Tom.** Step 6 is done when Tom has used popoto on 2.1.1; the
+  date goes here.
