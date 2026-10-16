@@ -71,4 +71,10 @@ through Pi, each using a yudame skill, recorded with the date (rule 5).
   (dcf7a2466cf6, $0.35) did the same and counted 16 tabs through byob.
 - The Cowboy's `~/.claude.json` still names the old system's `memory` MCP
   server, which no longer starts; Tom sees it before it goes (rule 2).
+- **Done 2026-10-16.** Under Tom's grant ("you do the whole thing"), two
+  real tasks on `skills`, their working turns on the new harnesses and
+  their checks on Claude Code: effde9a89930 through Codex (house-style
+  says it covers visuals, $0.78) and c077ae6e3914 through Pi (the checker
+  holds manual-only skills to `agents/openai.yaml`, $1.02). Both merged and
+  are in the Cowboy's plugins, which every turn loads; uses recorded.
 
