@@ -7,9 +7,13 @@ client's projects ([machine.md](machine.md)). The Cowboy went first
 which the 2026-10-16 sweep retired with step 8 below.
 
 **Order.** The Pirate next, then the Captain and the Bald. Those two serve
-customers and teams and stay on the old system until Tom is sure the new
-one is a valid replacement (Tom, 2026-10-16); the Pirate is where that is
-shown. Until then their old updater is harmless: `main` was rewritten, so
+customers and teams and stay on the old system until the new one is shown
+a valid replacement. The bar, Tom's words (2026-10-16): "a successful
+teamwork session in a group telegram chat, where Valor acts properly
+according to his persona and accomplishes tasks with Tom and the team. The
+Eng: PsyOPTIMAL group is a great example of how well Valor has been working
+with the team for several months. The rebuild has to be as good if not
+better than that." Building to it is [plans/team-chat.md](plans/team-chat.md). Until then their old updater is harmless: `main` was rewritten, so
 its fast-forward fails and it keeps running its own code (the Pirate's
 `logs/update.log`, 395 aborted fast-forwards).
 
