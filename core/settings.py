@@ -309,6 +309,12 @@ class Settings:
             if d
         )
     )
+    # The operator's own Claude Code config, whose user MCP servers (the
+    # logged-in browser among them) a workspace turn loads (`--mcp-config`):
+    # the turn's own config directory holds none.
+    claude_json: str = field(
+        default_factory=lambda: _env("VALOR_CLAUDE_JSON", str(Path.home() / ".claude.json"))
+    )
     # Pi, and the node that runs it: both run inside the turn's sandbox, and
     # `node` is named by an absolute path inside Homebrew's prefix, which every
     # turn profile denies writing, and is never looked up on a PATH.

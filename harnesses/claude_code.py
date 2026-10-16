@@ -3,7 +3,8 @@
 `workspace_turn` builds one turn of a task that works in a directory over
 several turns. It runs as a developer's Claude Code would in that
 directory: the project's own CLAUDE.md, settings, hooks, skills and MCP
-servers, the yudame plugins (`settings.plugin_dirs`), and the operator's
+servers, the yudame plugins (`settings.plugin_dirs`), the operator's own
+user MCP servers (`settings.claude_json`), and the operator's
 environment, `gh` login, git credentials and SSH agent. Two things differ:
 every model call goes to the gateway (`ANTHROPIC_BASE_URL`), which meters
 it against the task and supplies the kernel's credential in place of the
@@ -65,6 +66,15 @@ def parse(stdout: bytes) -> dict:
         "harness_reported_usd": result.get("total_cost_usd"),
         "session_id": result.get("session_id"),
     }
+
+
+def user_mcp_servers() -> dict:
+    """The operator's user-scope MCP servers, as a developer's Claude Code
+    loads them; none when the config is missing or unreadable."""
+    try:
+        return json.loads(Path(settings.claude_json).read_text()).get("mcpServers") or {}
+    except OSError, ValueError, AttributeError:
+        return {}
 
 
 def workspace_turn(
@@ -138,6 +148,8 @@ def workspace_turn(
         for d in settings.plugin_dirs:
             if os.path.isdir(d):
                 argv += ["--plugin-dir", d]
+        if servers := user_mcp_servers():
+            argv += ["--mcp-config", json.dumps({"mcpServers": servers})]
         # The session id is the kernel's, so where its transcript lies is
         # known before the turn starts.
         if resume:

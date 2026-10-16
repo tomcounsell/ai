@@ -3,6 +3,7 @@ message on real Postgres, with no model call."""
 
 import asyncio
 import dataclasses
+import json
 import os
 import pathlib
 import subprocess
@@ -239,6 +240,20 @@ def test_a_harness_turns_tmpdir_is_the_one_its_settings_name(tmp_path):
     assert __main__._turn_for("p", None, old)("http://h:1", "b", "t").tmpdir == str(tmp_path / "tmp")
     assert "tmpdir" not in bare
     assert claude_code.workspace_turn("p", cwd=".", harness=bare)("http://h:1", "b", "t").tmpdir is None
+
+
+def test_a_claude_turn_loads_the_operators_own_mcp_servers(tmp_path, monkeypatch):
+    from core import workspace
+    from harnesses import claude_code
+
+    harness = workspace.check_harness(workspace.Layout(tmp_path), workspace.fresh_dir(tmp_path / "c"), [], {})
+    servers = {"byob": {"type": "stdio", "command": "byob-mcp"}}
+    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": servers}))
+    monkeypatch.setattr(
+        claude_code, "settings", dataclasses.replace(settings, claude_json=str(tmp_path / ".claude.json"))
+    )
+    argv = claude_code.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t").argv
+    assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": servers}
 
 
 # -- reconcile from the intent row ----------------------------------------------------------

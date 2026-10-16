@@ -91,7 +91,9 @@ It runs as a developer's Claude Code would there: the project's CLAUDE.md, setti
 MCP servers and web tools all load, and so do the plugin directories in `settings.plugin_dirs`
 (`VALOR_PLUGIN_DIRS`, colon-separated; by default the yudame and yudame-dev plugins of the yudame
 marketplace Claude Code keeps under `~/.claude/plugins/marketplaces/`), each passed as
-`--plugin-dir` when it exists.
+`--plugin-dir` when it exists. The operator's own user-scope MCP servers (`mcpServers` in
+`settings.claude_json`, `VALOR_CLAUDE_JSON`, default `~/.claude.json`; the logged-in browser
+among them) are passed as `--mcp-config`, since the turn's own config directory holds none.
 
 It defaults to the light seat's pinned model id
 (`claude-haiku-5-5`), and a Brief to the frontier seat's, never an alias: the installed CLI
