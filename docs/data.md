@@ -361,10 +361,12 @@ over from an earlier turn. `core/tasks.py`, `dispatch`, renders the
 persona from `persona/`, reads the task document and every correction in
 force from the `corrections` stream, and renders one text: the persona,
 the task's commitments, the
-corrections in the order Tom gave them with their provenance, what memory
+corrections in the order Tom gave them with their provenance, then the
+exemplars in their own section, what memory
 recalls, and the `.valor/` protocol a turn uses to reach Tom. `core/runs.py` records that
 text whole in `turn.started`, with its SHA-256, the persona's SHA-256 and
-size, and the correction numbers it carried, under the task's lock, before the harness starts.
+size, and the correction numbers it carried (exemplars' included: they
+share one numbering), under the task's lock, before the harness starts.
 
 Serves the constraint that corrections reach every session and agent. A
 correction recorded now reaches the next turn of every task, including

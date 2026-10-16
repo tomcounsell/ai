@@ -308,7 +308,9 @@ before it. Correction 1, the governing constraint, rendered into every Brief of 
 demonstration, and each `turn.started` row carries the same digest (rebuild-demonstration.md,
 Correction 1 rendering).
 
-Source classes are `direct` (a correction Tom gave) and `exemplar`. Both streams are the kernel's;
+Source classes are `direct` (a correction Tom gave, `python -m core correct`) and `exemplar`
+(`python -m core exemplar`), numbered in one sequence. A turn renders exemplars under "Exemplars
+from Tom", after the corrections; with none recorded the text is the corrections section alone. Both streams are the kernel's;
 `memory/` takes them as records and never writes or owns them. The **exemplar ledger** is the same
 store with a distinct source class: work Tom loved and why. Without it the system learns to avoid
 mistakes and never what excellent looks like. Serves: Evidence, "Tom's feedback, both directions";

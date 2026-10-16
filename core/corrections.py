@@ -12,9 +12,11 @@ force from the ledger when it starts, so a correction recorded now reaches
 the next turn of every task, including tasks started before it.
 
 `scope` is `global` for now; a narrower scope is a new value here and a
-filter in `in_force`. `source_class` is `direct` for a correction Tom gave;
-`exemplar` names the exemplar ledger, which shares this store. Withdrawing or
-superseding a correction is not built yet.
+filter in `in_force`. `source_class` is `direct` for a correction Tom gave
+(`python -m core correct`) and `exemplar` for work Tom loved and why
+(`python -m core exemplar`): the exemplar ledger shares this store and its
+numbering, and renders in its own section after the corrections. Withdrawing
+or superseding either is not built yet.
 
 `record` names a memory record (`<ledger>/<key>`, as its Remembered label
 shows) a correction is about: a fact about one client that turned up in
@@ -64,7 +66,7 @@ def payload(
     """A `correction.recorded` payload: the one place its shape is built."""
     text = text.strip()
     if not text:
-        raise ValueError("a correction has text")
+        raise ValueError(f"{'an exemplar' if source_class == 'exemplar' else 'a correction'} has text")
     if scope not in SCOPES:
         raise ValueError(f"unknown scope {scope!r}")
     if source_class not in SOURCE_CLASSES:
@@ -122,15 +124,26 @@ async def in_force(conn) -> list[dict[str, Any]]:
         return [{"event_id": row["id"], **row["payload"]} for row in await cur.fetchall()]
 
 
+def _line(c: dict[str, Any]) -> str:
+    p = c["provenance"]
+    return (
+        f"{c['number']}. ({c['scope']}, {c['source_class']}; {p['by']}, {p['at'][:10]}, via {p['via']})\n"
+        f"{c['text']}"
+    )
+
+
 def render(corrections: list[dict[str, Any]]) -> str:
-    """The corrections as the text a turn reads."""
-    if not corrections:
-        return "# Corrections from Tom\n\nNone recorded."
-    parts = ["# Corrections from Tom\n\nIn force for this turn, in the order Tom gave them."]
-    for c in corrections:
-        p = c["provenance"]
-        parts.append(
-            f"{c['number']}. ({c['scope']}, {c['source_class']}; {p['by']}, {p['at'][:10]}, via {p['via']})\n"
-            f"{c['text']}"
-        )
+    """The corrections as the text a turn reads: direct corrections, then
+    exemplars in their own section. With no exemplar the text is exactly the
+    corrections section."""
+    direct = [c for c in corrections if c["source_class"] != "exemplar"]
+    exemplars = [c for c in corrections if c["source_class"] == "exemplar"]
+    if direct:
+        parts = ["# Corrections from Tom\n\nIn force for this turn, in the order Tom gave them."]
+        parts += [_line(c) for c in direct]
+    else:
+        parts = ["# Corrections from Tom\n\nNone recorded."]
+    if exemplars:
+        parts.append("# Exemplars from Tom\n\nWork Tom loved, and why, in the order he gave them.")
+        parts += [_line(c) for c in exemplars]
     return "\n\n".join(parts)

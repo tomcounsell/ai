@@ -15,7 +15,7 @@ The kernel and the control loop. Authority lives here and nowhere else.
 - Ports that `bridges/`, `harnesses/`, and `memory/` conform to. `channels.py` is the table of what each channel's port differs in, which `bridge.py`, `intake.py`, `notices.py`, and `workspace.py` read. Email's kernel side is here: `mail.py` (reply-all, the message an `email.send` becomes, and its encoded size, which `core/bridge.py` uses to refuse an oversize send when it is requested).
 - One typed settings module. Kernel-held secrets (the kernel databases' passwords, the judgement keys, the mail credentials, the GitHub push token, the optional long-lived Claude token the gateway sends upstream, and the OpenAI key it sends on its OpenAI route) live in the kernel key directory, the password file's directory, which a turn's sandbox profile denies ([docs/machine.md](../docs/machine.md), Keychain).
 - State lives in Postgres as JSONB documents plus an append-only events table.
-- The corrections and exemplar streams in the ledger. `memory/` reads them; `core/` owns them.
+- The corrections and exemplar streams in the ledger, recorded by `python -m core correct` and `python -m core exemplar`. `memory/` reads them; `core/` owns them.
 
 Governed by [docs/architecture.md](../docs/architecture.md) (the kernel and control loop), [docs/sdlc-state-machine.md](../docs/sdlc-state-machine.md) (states and verdicts), [docs/judgement-layer.md](../docs/judgement-layer.md) (the judgement tier), and [docs/data.md](../docs/data.md) (storage), under [docs/mission.md](../docs/mission.md).
 

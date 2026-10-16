@@ -3,6 +3,8 @@ message on real Postgres, with no model call."""
 
 import asyncio
 import dataclasses
+import os
+import subprocess
 import sys
 import uuid
 
@@ -10,9 +12,23 @@ import aiohttp
 import psycopg
 import pytest
 
-from core import broker, db, intake, ledger, machine, notices, runs, session, slot, tasks, workspace
+from core import (
+    broker,
+    corrections,
+    db,
+    intake,
+    ledger,
+    machine,
+    notices,
+    runs,
+    session,
+    slot,
+    tasks,
+    workspace,
+)
 from core.gateway import Gateway
 from core.machine import State
+from core.settings import settings
 from tests import bridges, scripted
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.ports import listen
@@ -479,3 +495,81 @@ def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn)
     assert (label["confirmed"], label["decision"], label["provenance"]["by"]) == (True, "overlaps", "valor")
     steer = next(r["payload"] for r in ys if r["type"] == "message.steered")
     assert session._steering([steer]) == "Written to you while you worked:\n- valor: only the tests half"
+
+
+# -- corrections and exemplars ----------------------------------------------------
+
+
+def row(number, text, source_class="direct") -> dict:
+    by = {"by": "tom", "at": "2026-10-16T00:00:00+00:00", "via": "the command line"}
+    return {"number": number, "scope": "global", "source_class": source_class, "text": text, "provenance": by}
+
+
+def test_direct_corrections_render_as_before_and_exemplars_follow_in_their_own_section():
+    assert corrections.render([]) == "# Corrections from Tom\n\nNone recorded."
+    direct = [row(1, "Fix the code."), row(3, "Ask first.")]
+    assert corrections.render(direct) == (
+        "# Corrections from Tom\n\nIn force for this turn, in the order Tom gave them.\n\n"
+        "1. (global, direct; tom, 2026-10-16, via the command line)\nFix the code.\n\n"
+        "3. (global, direct; tom, 2026-10-16, via the command line)\nAsk first."
+    )
+    exemplar = row(2, "That plan: one page, every claim cited.", "exemplar")
+    exemplars = (
+        "# Exemplars from Tom\n\nWork Tom loved, and why, in the order he gave them.\n\n"
+        "2. (global, exemplar; tom, 2026-10-16, via the command line)\nThat plan: one page, every claim cited."
+    )
+    assert (
+        corrections.render([direct[0], exemplar, direct[1]])
+        == corrections.render(direct) + "\n\n" + exemplars
+    )
+    assert corrections.render([exemplar]) == "# Corrections from Tom\n\nNone recorded.\n\n" + exemplars
+
+
+def test_exemplars_share_the_corrections_numbering_and_reach_a_turn_once(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            c = await corrections.record(conn, "Say less.", by="tom", via="test")
+            e = await corrections.record(
+                conn, "The c4 plan, for its brevity.", by="tom", via="t", source_class="exemplar"
+            )
+            d = await corrections.record(conn, "Say it plainly.", by="tom", via="test")
+            assert [e["number"], d["number"]] == [c["number"] + 1, c["number"] + 2]
+            assert (c["source_class"], e["source_class"], e["provenance"]["via"]) == (
+                "direct",
+                "exemplar",
+                "t",
+            )
+            with pytest.raises(ValueError, match="an exemplar has text"):
+                await corrections.record(conn, "  ", by="tom", via="t", source_class="exemplar")
+            task = await tasks.start(conn, tasks.Brief(instruction="test"))
+            turn = await tasks.dispatch(conn, task)
+            # The turn's `corrections` lists every number it carries, exemplars included.
+            assert {c["number"], e["number"], d["number"]} <= set(turn["corrections"])
+            assert turn["text"].count("The c4 plan, for its brevity.") == 1
+            assert turn["text"].index("# Corrections from Tom") < turn["text"].index("# Exemplars from Tom")
+            assert turn["text"].index("# Exemplars from Tom") < turn["text"].index("The c4 plan")
+
+    run(go())
+
+
+def test_the_exemplar_command_records_lists_and_refuses_blank_text(dsn):
+    env = {**os.environ, "VALOR_DB": settings.test_database}
+
+    def core(*argv):
+        return subprocess.run(
+            [sys.executable, "-m", "core", *argv], env=env, capture_output=True, text=True, check=False
+        )
+
+    assert "exemplar TEXT" in core("--help").stdout
+    made = core("exemplar", "The c4 plan: three fixes, one page.", "--via", "test")
+    assert (
+        made.returncode == 0
+        and made.stdout.startswith("exemplar ")
+        and " recorded, ledger row " in made.stdout
+    )
+    number = made.stdout.split()[1]
+    listed = core("corrections").stdout
+    assert f"{number}. (global, exemplar; tom, " in listed and "The c4 plan: three fixes, one page." in listed
+    blank = core("exemplar", "   ")
+    assert blank.returncode != 0 and "exemplar refused: an exemplar has text" in blank.stderr
+    assert core("corrections").stdout == listed

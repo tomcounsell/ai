@@ -106,7 +106,11 @@ correct TEXT [--by] [--via] [--record RECORD]
                                `--record` names the memory record a client
                                fact in another client's Brief came from, which
                                memory then recalls for its own client only
-corrections                    every correction, in force for every turn
+exemplar TEXT [--by] [--via]   record work Tom loved, and why (global,
+                               exemplar), numbered with the corrections and
+                               rendered after them in every turn
+corrections                    every correction and exemplar, in force for
+                               every turn
 serve [--plist]                the resident kernel: binds Tom's messages, owes
                                notices, and runs every task's next step as
                                rows land, until killed; `--plist` prints its
@@ -772,6 +776,14 @@ async def _run(args) -> None:
             except ValueError as exc:
                 raise SystemExit(f"correct refused: {exc}") from None
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
+        elif args.command == "exemplar":
+            try:
+                c = await corrections.record(
+                    conn, args.text, by=args.by, via=args.via, source_class="exemplar"
+                )
+            except ValueError as exc:
+                raise SystemExit(f"exemplar refused: {exc}") from None
+            print(f"exemplar {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
 
@@ -949,6 +961,10 @@ def main() -> None:
     correct.add_argument("--by", default="tom")
     correct.add_argument("--via", default="the command line")
     correct.add_argument("--record", help="the memory record (<ledger>/<key>) the correction confines")
+    exemplar = sub.add_parser("exemplar")
+    exemplar.add_argument("text")
+    exemplar.add_argument("--by", default="tom")
+    exemplar.add_argument("--via", default="the command line")
     sub.add_parser("corrections")
     sub.add_parser("secure-login")
     memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)
