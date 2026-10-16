@@ -3,6 +3,19 @@
 Task 2b1cca5b0610 (backlog:turn-tmp-leak; first carried by 8426bdd16707,
 whose branch did not survive the strip).
 
+## Carried by df8e5c6bb79b
+
+2b1cca5b0610 built, tested, reviewed and documented this; the kernel ended
+it at the two-rebase cap (removed on main in abb3f7d54). Its head is
+`valor/carry-2b1cca5b0610` (cc89d1303) on GitHub. Rebased onto main
+2d1864305 as local branch `carry-rebased`: this plan commit is on the task
+branch; the build takes `ff94aaaf3` (code and tests) and `80e658d38` (docs,
+with the "As built" section below) as they are. The one conflict was
+`test_stop_from_another_connection_kills_the_turn`: main loosened its bound
+to `elapsed < 20`, the carry added the tmp check; the resolution keeps both.
+The build re-runs the full suite and `tests/test_budget.py` on the rebased
+head; nothing else is redone.
+
 ## The cause, as it stands on main 17bd5a728
 
 The report names `state/work/tmp`, the per-task TMPDIR the old
