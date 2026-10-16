@@ -9,49 +9,59 @@ review_rounds: 1
 
 # Notices read as a note from the deputy
 
-Fixes the cause: the text builders. No filter, and nothing here adds a
-check, gate, hook, approval step or guard.
+Fixes the cause: the text builders. No filter; nothing adds a check, gate,
+hook, approval step or guard. `head` below is `notices.headline`; `lead(head, s)`
+opens with `On "<head>": ` (capitalised `s` when there is none).
 
-**Premise, checked on the stripped main.** The delivered notice and the
-governance refusal notices, with their `python -m core grant` command, are
-gone. So the frozen branch's approve-by-reply path is not needed, and it is
-not carried. What is left that puts internal detail in front of Tom:
+**Premise, checked on the stripped main.** No delivered or governance-refusal
+notice exists, so no grant command reaches Tom; the frozen branch's
+approve-by-reply path is not carried. What is left:
 
-| Where | Today | After |
-|---|---|---|
-| `notices.request` | appends `[n:<id>]` to every text | text as written; the id stays in the row |
-| `notices.owe` question | `Task <id> asks:` | `lead(head, "I have a question for you.")`, the question, "Reply to this message to answer." |
-| `ended_text`, merge `report` | end with the `127.0.0.1` status-page link; `step` kind names the stage and a raw error | no link; `step`/`provision`/`merge`/other say what happened in plain words with no stage name or raw error; a turn's own note stays; the ended notice says a reply is taken as feedback |
-| `credential` | raw push error line | the error line dropped; the one ask stays |
-| send `report` | `Task <id> sent email.send to ...` | `lead(head, "I sent an email to a@b:")` (Telegram / Slack message by name); a reply-all reads "a reply to everyone on the email thread" |
-| `_unstorable` | task id, kind, about_key, jsonb wording | `lead(head, ...)`: I had a message for Tom about this work I could not store; the record of the work holds it |
-| `intake` reply to merged/stopped work | `Task <id> is merged; nothing was done.` | `lead(head, "this work is already merged/stopped, so your reply changed nothing.")` |
-| `intake` not-a-stop / bind-failed | message id, raw exception | plain: "Your message was not acted on." (exception stays in `message.bound`'s `error`) |
-| `serve` rollout (both) | task id, sha, step name, raw reason | `lead(head, "it is merged, but I could not put it live ...")`, tries, retried every N seconds; mixed-code case said plainly |
-| email `in_doubt` | `(effect <id>)` | id dropped, rest kept, opened with `lead(head, ...)` |
+| Where | After |
+|---|---|
+| `request` | no `[n:<id>]`; the id stays in the row. `tag`, `report_link` deleted |
+| question | `lead(head, "I have a question for you.")`, the question, "Reply to this message to answer." |
+| ended, any kind | no status link; a turn's own note stays; ends "Reply to this message if you want me to pick it up again or change course." (a reply is already feedback) |
+| ended `step` | check in plain words (test: "its tests", review: "its review", docs: "its documentation check", else "one of its steps") "failed N times in a row, the same way each time"; raw error stays in the ledger |
+| ended `provision` | "I could not set up a copy of the project for it to work in, after N tries" |
+| ended `merge` | `verdicts.end` adds `why` = `merge_failure(last)` to the payload. moved: "the branch it merges into kept moving and I could not bring the work up to date with it". refused: "the merge was refused, and trying again would get the same answer". transient: "the merge failed N times in a row on errors from GitHub or the network". No `why` (old rows): "I could not merge it". All add "The work stays on its branch." |
+| `credential(conn, task, sha, missing: bool)` | missing (`credential_missing` set): "no GitHub push token is set up on this machine". Refused (push error): "GitHub refused the push token on this machine; it may have expired or lost access to this repository." Then "Once a working token is in place I merge it on my own." No key-file path |
+| send `report` | `lead(head, "I sent <what> to <who>:")`, body, file names. Email: the addresses. Reply-all: "a reply to everyone on the email thread". Telegram/Slack: the project whose `Spec.chats` holds `"<channel>:<target>"`, as "the <project> chat on Telegram/Slack", else "a Telegram chat" / "a Slack channel"; never the id |
+| `_unstorable` | `lead(head, f"I had a {plain kind} message for you about this work that I could not store, so here is this note instead. The record of the work holds what it is about.")` |
+| intake, merged/stopped | `lead(head, "this work is already merged/stopped, so your reply changed nothing.")` |
+| intake, bind failed | `Your message "<short(text)>" was not acted on: something went wrong reading it. Send it again, or reply stop.`; with a task, led by head. Exception stays in `message.bound.error`; `headline` of a channel name returns None (KeyError) |
+| intake, not a stop | replying channel: `lead(head, "that was not a stop, so your message steers the work. To stop it, reply stop.")`; email: `lead(head, f"stops come by reply {_where()}; your email steers the work.")` |
+| serve rollout | `lead(head, f"it is merged, but I could not put it live on my own system: the step that failed is {plain step}, N times. I try again every S seconds.")`; mixed: `lead(head, "it is merged, but putting it live failed partway and I could not undo it, so my system runs a mix of old and new code. I try again every S seconds.")`. No task id, sha, raw reason |
+| email in doubt | `lead(head, f"the email to {target} may or may not have gone ...")`; no effect id |
 
-`report_link` and `tag` are deleted (no other caller). The module docstring
-loses "links the status page" and "each text carries the short id".
+Docstrings: `core/notices.py` (no status link, no short id in text) and
+`bridges/telegram/send.py:29-31`: the whole-chat lookup of a notice whose
+record was lost relies on every earlier send being claimed by its recorded
+`sent`; an unclaimed identical text is ambiguous and settles `Unknown`.
 
-**Out of scope.** Turn-written notes (`done.md`, `stop.md`): they are Valor's
-own words. Approve-by-reply. The status page itself.
+**Known edge, stated plainly.** Telegram recovery (`_scan`) matches a notice by
+text; the tag made texts unique. Two identical notices in the same chat both in
+flight across a crash, or one whose start record was lost beside an identical
+unclaimed message, give `Unknown`: logged once, retried every wake, never
+delivered, and nothing tells Tom. Texts that do not vary are where it can
+happen; so every notice with a task leads with its headline, and bind-failed
+quotes Tom's own message. Accepted.
 
-**Known edge.** Telegram's crash recovery (`_scan`) matches a notice's text in
-the chat; the tag made two identical texts distinct. Without it, two
-identical notices both in flight across a crash read as ambiguous (`Unknown`,
-nothing sent twice). Headlines make identical texts rare; accepted.
+**Out of scope.** Turn-written notes; approve-by-reply; the status page.
 
-**Tests** (no new file; budget is 15):
-- `tests/test_telegram_pipeline.py`: one test builds a task with a
-  headline and renders each builder (question, every `ended` kind, merge and
-  send reports for email/Telegram/reply-all, credential, unstorable, the
-  intake reply to merged and stopped work, rollout and mixed rollout, email in
-  doubt); each opens with `On "<headline>":`, and none contains the task id,
-  notice id, effect id, sha, `[n:`, `127.0.0.1`, `python -m`, or a `/` path.
-- A task with no Brief: the sentence is capitalised, no `On ""`.
-- `tests/test_telegram_outbox.py:64`: asserts the sent text equals the
-  requested text (the tag assertion moves).
+**Tests** (no new file; budget is 15), in `tests/test_telegram_pipeline.py`:
+- One test, task with a headline, renders: question; ended `step`, `provision`,
+  `merge` (each `why` and none), `rounds`, `decided`; credential missing and
+  refused (different sentences); merge report; send reports for email,
+  reply-all, Telegram to a project chat and an unknown chat, Slack; unstorable;
+  intake merged, stopped, not-a-stop (replying and email), bind-failed with a
+  task; rollout and mixed rollout; email in doubt. Each opens `On "<headline>":`;
+  none contains the task id, notice id, effect id, sha, Telegram/Slack target
+  id, `[n:`, `127.0.0.1`, `python -m`, a key-file path or a `/`-path.
+- Bind-failed with no task (task id is the channel name): no raise, no `On ""`,
+  quotes the message.
+- `tests/test_telegram_outbox.py:64`: sent text equals requested text.
 - Full suite under 5 minutes; test lines stay under production.
 
-**Stakes.** Text only, reversible by revert; a wrong word reaches Tom, no data
-or merge path changes.
+**Stakes.** Text, plus one additive `why` field on `task.ended`; reversible by
+revert. A wrong word reaches Tom; no merge or send path changes.
