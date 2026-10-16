@@ -13,11 +13,11 @@ governance_grant: none
 Task 4a54eb8bdf09 (backlog `rollout-restarts-bridges`). Mission item 1,
 "Tom never coordinates the gaps between those steps", and the architect,
 2026-10-15: "a merge to main should hot reload the running server
-essentially". Ports frozen task fad0dd74b313's reviewed build (its branch
-`valor/fad0dd74`, commits `662639fd2` and `ac9da7024`) onto the stripped
-main. The patch applies with conflicts only in `core/README.md` (the
-`serve` entry, rewritten by the strip), `core/binaries.py`
-(`LAUNCHCTL = "/bin/launchctl"`), and `tests/test_rollout.py`.
+essentially". This plan is the spec. Frozen task fad0dd74b313 built an earlier
+version on the Cowboy, in `/Users/valorengels/valor-tasks/fad0dd74b313/repo`
+(branch `valor/fad0dd74`, not in this checkout's remotes). The builder may
+read it, but must build to this plan, which differs from it on the points
+below.
 
 **Today.** `Kernel._apply` (`core/serve.py:559`) migrates, writes
 `rollout.restarting`, and raises `Restart`. launchd restarts only
@@ -53,21 +53,37 @@ holds its lock on a connection named `valor-<channel>`
    - `kick(label)`: `launchctl kickstart -k gui/<uid>/<label>`, with a
      10 s timeout. It returns an error string and never raises.
 3. **`core/serve.py`.** `recover` runs `restart_bridges` just before
-   `_rolled`:
-   - It reads the live `valor-<channel>[@stamp]` connections from
-     `pg_stat_activity`.
+   `_rolled`, and only when `_rolled` has a rollout to end at this start
+   (an open `rollout.restarting` that the running commit contains):
+   - **Which connection counts.** For each channel, the bridge is the
+     connection that holds its advisory lock. That is the
+     `pg_stat_activity` row in `datname = current_database()` whose pid
+     has a granted `pg_locks` advisory lock on
+     `hashtextextended('bridge:<channel>:<machine>', 0)`, with the bigint
+     split into classid and objid, and objsubid 1. Its name parses as
+     exactly `valor-<channel>` or `valor-<channel>@<stamp>`, with
+     `<channel>` a `BRIDGES` key. So a connection waiting on the lock,
+     another database's connection (the test database shares the
+     cluster), `valor-email-watch`/`-settle`/`-stop`/`-perform`/`-listen`
+     and `valor-kernel*`/`valor-slot` are never read.
    - It computes `stale` off the loop, then kicks each stale bridge one at
      a time, also off the loop.
-   - `_rolled` writes `restarted` (label to the old stamp) and
-     `restart_failed` (label to the error) on each `rollout.ended` row.
+   - `_rolled` writes `restarted` (label to the old stamp, or null for no
+     stamp) and `restart_failed` (label to the error) on each
+     `rollout.ended` row it writes. So no kick goes unrecorded.
    - Any error is logged, and the kernel still starts.
 
    Running the kicks at the new kernel's start, after migrate, puts
    kernel and bridges on the same code and schema. The outbox stays safe
-   because each bridge reconciles its sends on start. The same pass also
-   repairs a failed kick, or a bridge started by hand on old code, at the
-   next start. A merge of only `docs/`, `tests/`, `persona/`, `skills/` or
-   top-level `*.md` restarts neither the kernel nor any bridge.
+   because each bridge reconciles its sends on start. A start that ends
+   no rollout (a crash or a hand restart) kicks nothing. A merge of only
+   `docs/`, `tests/`, `persona/`, `skills/` or top-level `*.md` restarts
+   neither the kernel nor any bridge.
+
+   `kickstart -k` restarts launchd's instance of the label. If a bridge
+   started by hand holds the lock, the kick kills launchd's waiting
+   instance, and the stale holder keeps running. The next rollout tries
+   again. The docs say so, and the plan does not claim to fix it.
 4. **Docs:**
    - the `core/rollout.py` and `core/serve.py` docstrings;
    - `docs/machine.md`: the launchd section and the rollout paragraph;
@@ -79,7 +95,10 @@ holds its lock on a connection named `valor-<channel>`
 **Out of scope:**
 - skipping the kernel's restart for a merge that touches only bridges;
 - restarting routines, the backup job or the cluster;
-- any retry of a failed kick other than the next kernel start.
+- any retry of a failed kick other than the next rollout's start;
+- kicks at a start that ends no rollout, which would have no row to
+  record them;
+- replacing a bridge started by hand outside launchd.
 
 ## Tests
 
@@ -112,8 +131,11 @@ of its 5,000-line budget left. `test_budget.py` must still pass.
 - **`restart_bridges` and `recover`** (test database, fake bridge
   connections, injected kick):
   - only the stale bridge is kicked;
-  - `-perform` and `-listen` connections and unknown channels are
-    ignored;
+  - `valor-email-watch`, `valor-telegram-perform`, `valor-kernel` and
+    `valor-bogus@<sha>` connections are ignored;
+  - a stale connection that does not hold the lock, beside a current
+    holder on the same channel, is not kicked; a stale holder is;
+  - with no rollout to end, nothing is kicked;
   - a failing kick lands in `restart_failed`;
   - a raising query is logged and nothing is kicked;
   - with no checkout, nothing is read;
@@ -121,6 +143,10 @@ of its 5,000-line budget left. `test_budget.py` must still pass.
     `restarted`.
 - **Stamp:** the lock connection shows `valor-<channel>@<head>`, and
   `@none` when `git.head` raises.
+
+The fake bridges take the real advisory lock key with a test-only
+machine name, so they never collide with the Mac's live bridges, and the
+`current_database()` filter keeps the kernel from seeing them.
 
 Run `test_rollout`, `test_serve`, the telegram suites and the full suite.
 After the merge, check live on the Cowboy:
