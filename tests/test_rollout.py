@@ -450,14 +450,20 @@ def test_a_failed_bridge_pass_still_ends_the_rollout_and_the_stamp(fresh, tmp_pa
         async with await db.connect(fresh) as conn:
             await ledger.append(conn, task, "rollout.restarting", {"effect_id": "e1", "sha": running})
 
+            calls = []
+
             async def broken(*a, **kw):
+                calls.append(a)
                 raise psycopg.OperationalError("gone")
 
             monkeypatch.setattr(serve, "restart_bridges", broken)
+            unread = await serve.recover(conn, checkout=None, running=running, kick=lambda label: None)
+            assert calls == []  # no checkout: no bridge is read or kicked
             done = await serve.recover(conn, checkout=co, running=running, kick=lambda label: None)
-        return task, done
+        return task, unread, done
 
-    task, done = run(go())
+    task, unread, done = run(go())
+    assert unread["rolled"] == [] and unread["bridges"] == []
     assert done["rolled"] == ["e1"] and done["bridges"] == []
     (ended,) = typed(run(rows(fresh, task)), "rollout.ended")
     assert "restarted" not in ended
