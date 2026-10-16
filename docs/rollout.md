@@ -100,7 +100,11 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    reads Slack, `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
    and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
-   Every job's `PATH` includes `/opt/homebrew/bin`.
+   Every job's `PATH` includes `/opt/homebrew/bin`: the `core serve` and
+   `core routine` plists print it (`routines.launchd_path`: the system
+   directories, then those of `claude`, `git`, Postgres and `uv`); add it
+   by hand to the others. A plist edited on disk takes effect only after
+   `launchctl bootout $D/<label>` and a fresh `bootstrap`.
 10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
     passes; `$PY -m core settings` names the machine and the backup folder;
     `$PY -m core routines` lists the routines; a message in each chat the

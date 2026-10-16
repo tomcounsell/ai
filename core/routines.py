@@ -154,11 +154,24 @@ def names(directory: str | Path | None = None) -> list[str]:
     return sorted(p.parent.name for p in root.glob("*/routine.toml"))
 
 
+def launchd_path() -> str:
+    """The PATH of the kernel's and every routine's launchd job: the system
+    directories first, then those of the tools a turn or a check runs
+    (`claude`, `git`, Postgres, `uv`)."""
+    path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    for d in (os.path.dirname(settings.claude), os.path.dirname(settings.git_bin), settings.pg_bin,
+              os.path.dirname(settings.uv)):  # fmt: skip
+        if d and d not in path:
+            path.append(d)
+    return ":".join(path)
+
+
 def plist(routine: Routine, *, python: str | None = None, root: Path = ROOT) -> bytes:
     """The launchd job: the kernel's interpreter, `-m core routine NAME`, the
-    toml's schedule, the settings in `PLIST_ENV` that were set when it was
-    printed, and nothing else. It names no script and carries no secret."""
-    env = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    toml's schedule, `launchd_path()`, the settings in `PLIST_ENV` that were
+    set when it was printed, and nothing else. It names no script and
+    carries no secret."""
+    env = {"HOME": str(Path.home()), "PATH": launchd_path()}
     env.update({k: os.environ[k] for k in PLIST_ENV if k in os.environ})
     log = Path(settings.log_dir) / f"routine-{routine.name}.log"
     job: dict[str, Any] = {

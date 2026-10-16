@@ -107,6 +107,7 @@ from core import (
     reactions,
     rollout,
     router,
+    routines,
     runs,
     session,
     signals,
@@ -1195,11 +1196,7 @@ PLIST_ENV = (
 
 def plist(*, python: str | None = None, root: Path = ROOT) -> bytes:
     """The launchd job for the kernel: kept alive, started at load."""
-    path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    for d in (os.path.dirname(settings.claude), os.path.dirname(settings.git_bin), settings.pg_bin):
-        if d and d not in path:
-            path.append(d)
-    env = {"HOME": str(Path.home()), "PATH": ":".join(path)}
+    env = {"HOME": str(Path.home()), "PATH": routines.launchd_path()}
     env.update({k: os.environ[k] for k in PLIST_ENV if k in os.environ})
     log = Path(settings.log_dir) / "kernel.log"
     return plistlib.dumps(

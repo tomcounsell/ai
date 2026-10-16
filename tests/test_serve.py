@@ -376,3 +376,23 @@ def test_a_finished_tasks_workspace_is_removed_a_day_after_it_finished(dsn, tmp_
             )
 
     assert run(go()) == (False, False, True) and not (tmp_path / "w").exists()
+
+
+def test_the_kernel_and_routine_jobs_find_uv_after_the_system_directories(monkeypatch, tmp_path):
+    """A routine runs the project's setup (`uv sync --frozen`) as the kernel
+    does, so its launchd job gets the kernel's PATH, `uv`'s directory on it."""
+    import plistlib
+
+    from core import routines
+    from core.settings import settings
+
+    monkeypatch.setattr(
+        routines, "settings", dataclasses.replace(settings, uv=str(tmp_path / "uvbin" / "uv"))
+    )
+    r = routines.load("verify", Path(__file__).resolve().parent.parent / "routines")
+    paths = [plistlib.loads(p)["EnvironmentVariables"]["PATH"] for p in (routines.plist(r), serve.plist())]
+    assert paths[0] == paths[1]
+    path = paths[0].split(":")
+    assert path[:4] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    assert str(tmp_path / "uvbin") in path and settings.pg_bin in path
+    assert os.path.dirname(settings.git_bin) in path and os.path.dirname(settings.claude) in path
