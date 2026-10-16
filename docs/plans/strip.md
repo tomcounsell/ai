@@ -367,8 +367,13 @@ Each has the default the plan proceeds on if Tom says nothing.
   workspaces (67 GB); the kernel now removes one a day after its task
   finishes (186656705). It found popoto's LoCoMo dataset gone from Hugging
   Face.
-- **Step 6 not met.** PR 842 changed only popoto's dev `uv.lock`; Valor
-  pins the released popoto 1.10.0, so nothing Tom or Valor runs uses it, and
-  it started from the CLI, not Telegram. Step 6 still needs a popoto change
-  Tom names on Telegram, released, with Valor's pin moved to it; the date
-  Valor first runs on it goes here.
+- **Step 6 not met by PR 842.** It changed only popoto's dev `uv.lock`;
+  Valor pins the released popoto, so nothing Valor runs used it.
+- **Step 6 done 2026-10-16.** Tom granted his Claude his authority ("you do
+  the whole thing"; a trivial docs change is fine). Task eb49f1bbe848 noted
+  LoCoMo's removal from Hugging Face and bumped popoto to 1.10.1 ($2.51);
+  the lead tagged v1.10.1 (on PyPI), pinned Valor to it (d436e5637) and
+  rolled the Cowboy. Memory ingested 2,385 records through 1.10.1 and task
+  48b43a24a0bf's Brief recalled 6. Use recorded (ledger e497a43cab67).
+  Ingest had a 1,800-row backlog: the after-turn ingest is cut short by
+  each restart and runs inside the turn's task.
