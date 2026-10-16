@@ -3,6 +3,7 @@ emulator is Telegram and Tom; notices go out through the bridge and Tom's
 replies come back through it."""
 
 import asyncio
+import socket
 import sys
 from types import SimpleNamespace
 
@@ -199,3 +200,16 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
 
     with this_machine(tmp_path, ["9001", "-100777"]):
         run(go())
+
+
+def test_the_mailbox_connection_keeps_its_idle_path_alive():
+    from bridges.email import smtp  # an IDLE the network would drop stays open, or is found dead
+
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        c = object.__new__(smtp._IMAP)
+        c.host, c.port, c.ends = "127.0.0.1", server.getsockname()[1], None
+        c.ssl_context = SimpleNamespace(wrap_socket=lambda sock, server_hostname: sock)
+        with c._create_socket(5) as sock:
+            idle = getattr(socket, "TCP_KEEPIDLE", None) or socket.TCP_KEEPALIVE
+            assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+            assert sock.getsockopt(socket.IPPROTO_TCP, idle) == smtp.KEEPALIVE["idle"]

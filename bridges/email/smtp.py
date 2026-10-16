@@ -17,6 +17,7 @@ import hashlib
 import imaplib
 import re
 import smtplib
+import socket
 import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -197,6 +198,25 @@ def _close(smtp: smtplib.SMTP, ended: bool) -> None:
     smtp.close()
 
 
+# TCP keepalive on the mailbox connection: an idle path is probed after a
+# minute, every thirty seconds, four times. On the Cowboy (2026-10-16) the
+# network dropped an idle IDLE connection within its 29 minutes, so mail
+# waited for the re-issue and every re-issue ended in a TimeoutError.
+KEEPALIVE = {"idle": 60, "interval": 30, "count": 4}
+
+
+def keepalive(sock: socket.socket) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    idle = getattr(socket, "TCP_KEEPIDLE", None) or getattr(socket, "TCP_KEEPALIVE", None)
+    for opt, value in (
+        (idle, KEEPALIVE["idle"]),
+        (getattr(socket, "TCP_KEEPINTVL", None), KEEPALIVE["interval"]),
+        (getattr(socket, "TCP_KEEPCNT", None), KEEPALIVE["count"]),
+    ):
+        if opt is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, value)
+
+
 class _IMAP(imaplib.IMAP4_SSL):
     """`imaplib.IMAP4_SSL` whose socket is registered with `ends` as it
     opens, before the TLS handshake and the greeting."""
@@ -207,6 +227,7 @@ class _IMAP(imaplib.IMAP4_SSL):
 
     def _create_socket(self, timeout):
         sock = imaplib.IMAP4._create_socket(self, timeout)
+        keepalive(sock)
         if self.ends is not None:
             self.ends.register(sock)
         return self.ssl_context.wrap_socket(sock, server_hostname=self.host)

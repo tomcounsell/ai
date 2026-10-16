@@ -84,12 +84,9 @@ def test_a_red_test_goes_to_patch_and_the_patched_candidate_merges(dsn, tmp_path
 
 
 def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp_path):
-    """A push rejected because main moved never ends passing work: each
-    rejection means another merge landed, so it rebases again (the Cowboy,
-    2026-10-16: a cap of two ended three passing tasks)."""
+    """Each rejection means another merge landed, so passing work rebases again."""
     ws, origin = scripted.workspace(tmp_path)
-    other = tmp_path / "other"
-    git(tmp_path, "clone", "-q", str(origin), str(other))
+    git(tmp_path, "clone", "-q", str(origin), str(other := tmp_path / "other"))
 
     async def go():
         task = await to_checks(dsn, ws)
@@ -105,8 +102,7 @@ def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp
         return states, await fold(dsn, task)
 
     states, f = run(go())
-    assert states == [State.PATCH] * 3, states
-    assert f.counts["rebases"] == 3 and f.state is not State.ENDED
+    assert states == [State.PATCH] * 3 and f.counts["rebases"] == 3 and f.state is not State.ENDED
 
 
 # -- an idle turn ends its step; stop.md hands in from any working state -------------
