@@ -2,7 +2,7 @@
 tracking: none
 slug: orchestration
 type: build
-status: waves 0, 1 and 2 built (2026-10-17); the done bar is open
+status: waves 0, 1 and 2 built and live on the Cowboy (2026-10-17); done bar 3 met, bar 1 shown and waiting on Tom's use, bar 2 waiting on a team-chat session
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -213,6 +213,22 @@ with no project, the message starts a task.
    it, recorded with the date.
 3. The `web.agent_only` row is in the ledger with its expiry, and no other new
    governance is in the diff.
+
+**Where the bar stands (2026-10-17, on the Cowboy at 2e4527f15).**
+
+- **Bar 1: the mechanism is shown; Tom's use is open.** Tom's Claude, acting
+  under Tom's grant, recorded one message in Tom's Slack DM: "What is the
+  newest release of Claude Code on npm right now?" The message is
+  `eb6a8f78816b`.
+  - The message bound `steer` to a new DM session, `29513299e8d1`.
+  - In the session's turn, the main agent started `valor:web` and called no web
+    tool itself. `valor:web` made all ten WebFetch calls.
+  - The session's answer (2.1.301, published 2026-10-15) was sent to Tom's DM
+    (`effect.outcome` done).
+  - It stays open until Tom uses an answer.
+- **Bar 2: waits on Tom's teamwork session in a team chat** (team-chat.md, Done).
+- **Bar 3: met.** The ledger holds `web.agent_only`, expiring 2027-01-14. The
+  wave 1 and wave 2 reviews found no other governance.
 
 ## Known and left open
 
