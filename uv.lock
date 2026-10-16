@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.14"
 
 [[package]]
@@ -505,15 +505,15 @@ wheels = [
 
 [[package]]
 name = "popoto"
-version = "1.10.0"
+version = "1.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgpack" },
     { name = "redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/38/06/962cede7e3790cc5890ffedc4805c7c2cc7dd5abd0eeaf200021e436e722/popoto-1.10.0.tar.gz", hash = "sha256:021448a6e58be3cf1f220bb6ffe05ba588e4550c242e826514e12956d83bd384", size = 1086414, upload-time = "2026-10-09T03:25:44.571Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/28/8c5c30a2953823283f7190dd72af47926a07b39aab08f54ba0d7ceea662c/popoto-1.10.1.tar.gz", hash = "sha256:64b22cb73ecc578f6d5912fc16179338256f49bd316a43cd76d8eaf596b842b4", size = 1088367, upload-time = "2026-10-16T09:30:24.854Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/f8/f1a0f4de61c431ec4882f4dca1094e993174d9f9face01035fe26b157446/popoto-1.10.0-py3-none-any.whl", hash = "sha256:f94bc09d6c395b1233e2079c81e174521000171c71cae9ebb65da670fa4a94e2", size = 1161268, upload-time = "2026-10-09T03:25:42.593Z" },
+    { url = "https://files.pythonhosted.org/packages/da/9e/1ccd8eac64d5f6d68f73b3da8853e481f6fc945a138a55e44b38947c4fff/popoto-1.10.1-py3-none-any.whl", hash = "sha256:52108411b837235b0764711557e9fbdd086f55249eed73b590539240298c0a97", size = 1163323, upload-time = "2026-10-16T09:30:22.972Z" },
 ]
 
 [package.optional-dependencies]
@@ -834,7 +834,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.12" },
-    { name = "popoto", extras = ["postgres"], specifier = "==1.10.0" },
+    { name = "popoto", extras = ["postgres"], specifier = "==1.10.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "slack-sdk", specifier = ">=3.45.0" },
     { name = "telethon", specifier = ">=1.40" },
