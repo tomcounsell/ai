@@ -40,13 +40,15 @@ improves them with ordinary tasks.
    `agents/openai.yaml` for the five no-implicit skills; Claude-only skills
    labelled `compatibility`; the do-sdlc `tom:` bug; `install.sh` linking
    into `~/.agents/skills`.
-3. **Pi** loads skills (`--no-skills` goes) and MCP servers.
-4. **Codex** wrapper, ported from the old adapter
+3. **Pi** loads skills and context files (6ab8fb774). MCP needs Pi 1.3;
+   the pin (0.73.1) moves up so Pi turns reach byob.
+4. **Codex** wrapper (8c25acf06), ported from the old adapter
    (`agent/session_runner/harness/codex.py`, rule 10): `codex exec --json`
    on the gateway's Responses route, its own `CODEX_HOME`, `CLAUDE.md` as
    fallback instructions, its rollout transcript collected.
-5. **Machines:** `install.sh`, Codex and Pi logins-free configs on the
-   Cowboy, the Pirate and Tom's Mac.
+5. **Machines:** `install.sh` on Tom's Mac and other people's. Not on the
+   Valor Macs: their turns take the skills from `settings.plugin_dirs`, and
+   a second copy in `~/.agents/skills` would load each skill twice (rule 4).
 6. **Old tools Tom used** (counts, 2026-09-10 to 10-14): byob (step 1),
    the do-* skills (in `yudame-dev`); `officecli`, `tts`, `deck_video`,
    calendar as CLIs with skills. `roles:prime-pm-role` and
