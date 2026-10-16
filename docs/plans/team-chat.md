@@ -52,3 +52,10 @@ The proving ground is Eng: Monday Flowers with Rain, on the Pirate (Tom,
 2026-10-16), so the Pirate rolls out once steps 1 to 4 are in. Tom has a
 teamwork session there on the new kernel; he judges it as good as Eng: PsyOPTIMAL or better, recorded with
 the date (rule 5). Then the Captain and the Bald roll out.
+
+**Next: the Agent Builders Chat**, the real test (Tom, 2026-10-16): many
+people chatting freely with Valor about his own codebase, in the old
+mostly read-only teammate mode. There Valor spoke only when his name
+matched; that switch stays for now, and the goal is full human-like
+judgement of when to speak and when to stay quiet, made by the
+conversation turn alone.
