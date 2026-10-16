@@ -48,10 +48,12 @@ improves them with ordinary tasks.
 5. **Machines:** `install.sh`, Codex and Pi logins-free configs on the
    Cowboy, the Pirate and Tom's Mac.
 6. **Old tools Tom used** (counts, 2026-09-10 to 10-14): byob (step 1),
-   the do-* skills (in `yudame-dev`), `roles:prime-pm-role` and
-   `prime-teammate-role` (Tom's Telegram sessions on cyndra) into
-   `yudame/skills`; `officecli`, `tts`, `deck_video`, calendar as CLIs with
-   skills. The rest had no use in the window; Tom sees that list (rule 2).
+   the do-* skills (in `yudame-dev`); `officecli`, `tts`, `deck_video`,
+   calendar as CLIs with skills. `roles:prime-pm-role` and
+   `prime-teammate-role` were the old session runner's own prompts, loaded
+   for every Telegram session; the persona and the response shape do that
+   job, so they are not ported. The rest had no use in the window; Tom sees
+   that list (rule 2).
 
 ## Done
 
