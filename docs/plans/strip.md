@@ -349,5 +349,13 @@ Each has the default the plan proceeds on if Tom says nothing.
   as bug commits (abb3f7d54: a moved target always rebases; 2d1864305). The
   four were restarted from their finished heads (`valor/carry-<task>` on
   origin).
+- **The four, again.** All four merged on their own, on main moved
+  under them: b656459b8ffe (bridges restart on rollout, carried, $4.94),
+  7554a93be094 (plain notices, 1 rebase, $7.32), df8e5c6bb79b (turn TMPDIR,
+  2 rebases, $11.65), 66c140971bfa (exemplars, 1 rebase, $5.58). The Cowboy
+  rolled itself out and restarted its bridges each time. The email bridge's
+  IMAP socket now keeps TCP keepalive (ddd48c68d): every 29-minute IDLE had
+  ended in a TimeoutError. Suite 125 passed, 1 skipped, under 9 s on the
+  Cowboy and the Pirate.
 - **Waiting on Tom.** Step 3 (Tom sends on Telegram, Valor answers) and step
   6 (a popoto issue Tom names, merged, used).
