@@ -341,5 +341,13 @@ Each has the default the plan proceeds on if Tom says nothing.
   gaps, fixed in 78471ea5b: a PATH frozen at provisioning (no `gh`, no `uv`)
   and `gh` not knowing the repository behind the local origin (`GH_REPO`).
   Started by the lead with `--by tom`; it was the lead's, on Tom's word.
+- **The restarted seven.** Three merged and the Cowboy rolled itself out
+  each time: 32e9c97a0869 (Slack DM context, $3.21), 872196c785ab (idle turn
+  yields the slot, $4.66), 0b11dfcde385 (ask reconciliation, $12.18). Four
+  passed but ended: three at the two-rebase cap as main moved under them,
+  one on a two-second timing bound a loaded Mac missed (3.8 s). Both fixed
+  as bug commits (abb3f7d54: a moved target always rebases; 2d1864305). The
+  four were restarted from their finished heads (`valor/carry-<task>` on
+  origin).
 - **Waiting on Tom.** Step 3 (Tom sends on Telegram, Valor answers) and step
   6 (a popoto issue Tom names, merged, used).
