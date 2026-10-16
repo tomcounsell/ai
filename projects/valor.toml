@@ -20,6 +20,8 @@ chats = ["telegram:-1003890616618", "telegram:-1003449100931", "telegram:1791448
 machine = "Valor the Cowboy"
 
 [env]
+# Its Sentry project; the turn's sentry-cli is Valor's own login (org yudame).
+SENTRY_PROJECT = "valor"
 VALOR_PGHOST = "127.0.0.1"
 VALOR_PGPORT = "{port}"
 VALOR_PG_OWNER = "app"

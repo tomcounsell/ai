@@ -25,5 +25,7 @@ chats = ["telegram:-1003801797780"]
 machine = "Valor the Captain"
 
 [env]
+# Its Sentry project; the turn's sentry-cli is Valor's own login (org yudame).
+SENTRY_PROJECT = "cuttlefish"
 UV_PYTHON = "3.12"
 DJANGO_SETTINGS_MODULE = "settings"

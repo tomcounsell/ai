@@ -17,4 +17,6 @@ chats = ["telegram:-5189826365"]
 machine = "Valor the Cowboy"
 
 [env]
+# Its Sentry project; the turn's sentry-cli is Valor's own login (org yudame).
+SENTRY_PROJECT = "popoto"
 UV_PYTHON = "3.12"

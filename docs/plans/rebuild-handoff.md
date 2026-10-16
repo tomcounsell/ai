@@ -107,13 +107,25 @@ switch it off `main`; the rebuild is a separate checkout.
    run `.venv/bin/python -m core backup` once, then
    `.venv/bin/python -m core backup --plist`, load it with `launchctl`, and
    allow disk access when macOS asks.
-9. **Check.** `VALOR_TEST_DB=valor_rebuild_test_setup .venv/bin/python -m pytest -q tests`
-   passes with only the live tests skipped, plus two machine-dependent
-   skips on a fresh Mac (the ledger-copy test needs task history, and the
-   planted commit-graph test needs a git that trusts the planted file,
-   which Apple's does not), and `.venv/bin/python -m core settings`
-   shows the right owner role, Postgres paths, and backup folder. Drop the
-   scratch database afterwards.
+9. **Valor's own accounts, for turns (rule 1).** A turn uses what the
+   machine user has, as a developer would:
+   - `gh`: write `~/.config/gh/hosts.yml` (mode 600) with the
+     `valorengels` token from `github-keys` (`gh auth login --with-token`
+     refuses it for lacking `read:org`), then `gh auth setup-git`.
+   - `sentry-cli`: `brew install getsentry/tools/sentry-cli` (or Sentry's
+     installer into `~/.local/bin`), and `~/.sentryclirc` (mode 600) with
+     the vault's `SENTRY_PERSONAL_TOKEN` and `org=yudame`. A project spec's
+     `SENTRY_PROJECT` names its project.
+   - Plugins: `claude plugin marketplace add yudame/skills`, then
+     `claude plugin install yudame@yudame` and `yudame-dev@yudame`.
+   - Every `com.valor.*` LaunchAgent's `PATH` includes `/opt/homebrew/bin`.
+   - Never commit in the kernel's own checkout: a commit there diverges it
+     and every rollout fails its fast-forward (the Cowboy, 2026-10-15).
+10. **Check.** In a separate worktree with dev dependencies
+   (`uv sync --frozen`), `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
+   passes (89 tests, under a minute), and `.venv/bin/python -m core settings`
+   shows the right owner role, Postgres paths, and backup folder. The
+   kernel needs Postgres 16 or newer.
 
 ## Running Valor on a Mac with only the local bridge
 
