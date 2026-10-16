@@ -143,9 +143,9 @@ def test_stop_ends_the_work_from_clarify_plan_and_build_and_done_says_so(dsn, tm
     out, f = run(go())
     assert out["status"] == "ended" and f.state is State.ENDED
     assert f.entry["payload"] == {**f.entry["payload"], "kind": "decided", "by": "valor"}
-    assert notices.ended_text("t", f, None).startswith("This is done; nothing needed merging.\n")
+    assert notices.ended_text(f, None).startswith("This is done; nothing needed merging.\n")
     f.entry["payload"]["text"] = "Not worth it."
-    assert notices.ended_text("t", f, None).startswith("I stopped this work without merging it.")
+    assert notices.ended_text(f, None).startswith("I stopped this work without merging it.")
 
 
 def test_a_stop_beside_a_question_lets_the_question_count(dsn, tmp_path):
