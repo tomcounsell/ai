@@ -1,8 +1,9 @@
 """Guards: every checkpoint that holds or redirects work, ledgered with the
 incident it prevents, the mission item it serves, and a ninety-day expiry.
 
-The four granted with the pipeline on 2026-10-01 are seeded by `db.migrate`
-on the `guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
+The four granted with the pipeline on 2026-10-01, and the web guard granted on
+2026-10-16 (docs/plans/orchestration.md), are seeded by `db.migrate` on the
+`guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
 rows and proposes the deletion of what is due.
 """
 
@@ -67,20 +68,46 @@ SEEDED: tuple[dict[str, Any], ...] = (
         "mission_items": [1],
         "source": "docs/sdlc-state-machine.md, checks.review, Why; rebuild-baseline.md, Review rounds",
     },
+    {
+        "guard_id": "web.agent_only",
+        "name": (
+            "the web agent: in a Claude Code turn, WebFetch and WebSearch run only inside the valor:web "
+            "agent, a leaf any agent at any depth can start (skills/valor/hooks/web_only.py)"
+        ),
+        "incident": (
+            "injection through inbound and retrieved content: the old system's inbound injection "
+            "inspection (#3648); a page read by a working agent puts its text in that agent's context"
+        ),
+        "mission_items": [4],
+        "source": "docs/plans/orchestration.md, Tom's grants",
+        "granted_at": "2026-10-16",
+        "expires": "2027-01-14",
+        "note": (
+            'Tom, 2026-10-16: "for web fetch, I recommend a dedicated subagent that must be used." '
+            '"subagents can create subagents to unlimited degree. so web fetch is only ever another '
+            'subagent away."'
+        ),
+        "via": "the 2026-10-16 orchestration rulings, seeded by migrate",
+        # It fires inside a turn, which cannot reach the ledger.
+        "firing_record": False,
+    },
 )
 
 
 def seeded_payload(guard: dict[str, Any]) -> dict[str, Any]:
+    """A seeded guard's row: the pipeline's grant date, expiry, note and
+    provenance unless the entry carries its own."""
+    entry = {k: v for k, v in guard.items() if k != "via"}
+    granted = entry.setdefault("granted_at", GRANTED.isoformat())
+    entry.setdefault("expires", EXPIRES.isoformat())
+    entry.setdefault("note", NOTE)
     return {
-        **guard,
-        "granted_at": GRANTED.isoformat(),
-        "expires": EXPIRES.isoformat(),
-        "note": NOTE,
+        **entry,
         "provenance": {
             "by": "tom",
-            "via": "the 2026-10-01 pipeline decision, seeded by migrate",
+            "via": guard.get("via", "the 2026-10-01 pipeline decision, seeded by migrate"),
             "role_played": False,
-            "at": GRANTED.isoformat(),
+            "at": granted,
         },
     }
 

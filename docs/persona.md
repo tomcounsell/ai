@@ -59,7 +59,9 @@ the persona does (Tom's grant, 2026-10-16). Web access goes through the
 web agent, which any agent at any depth can start, since subagents nest
 without limit.
 
-**Planned** ([plans/orchestration.md](plans/orchestration.md)). Until it is
+The web agent and unlimited nesting are built
+([plans/orchestration.md](plans/orchestration.md), wave 1;
+[harnesses.md](harnesses.md), Skill rendering). The rest is planned: until it is
 built, a message of Tom's that is not a reply starts an SDLC task, and the
 persona is appended to the working session's system prompt, so the session
 that speaks also does the work (see "How the persona reaches a turn").

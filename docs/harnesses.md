@@ -407,10 +407,11 @@ Two points the harness relies on and has to keep true:
 - **Corrections reaching subagents.** The Brief, corrections included, is in
   the system prompt of the main session. A subagent Claude Code starts
   inside a turn (`cc_is_subagent=true` on its requests) gets Claude Code's
-  own subagent system prompt and only the prompt the parent wrote, so the
-  Brief and the corrections in it stop at the main session.
-  **Gap**: the plan says corrections reach every agent; for Claude Code
-  subagents they do not. Pi starts no subagents.
+  own subagent system prompt and the prompt the parent wrote, and, at every
+  depth, the Brief as its opening context: the wrapper puts the
+  SubagentStart hook output in `VALOR_SUBAGENT_START`
+  (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
+  prints it. Pi starts no subagents.
 
 ## The turn sandbox
 
@@ -530,27 +531,36 @@ spending). A harness on another format needs a route that meters it first.
 
 ## Skill rendering
 
-Skills come from three sources (`skills/README.md`): Valor's own skills in
-`skills/` (none written yet), the yudame plugins in `settings.plugin_dirs`,
-and the project's own skills. A workspace turn loads the plugins and the
+Skills come from three sources (`skills/README.md`): Valor's own plugin,
+`skills/valor` in the kernel's checkout, always first in
+`settings.plugin_dirs`; the yudame plugins after it; and the project's own
+skills. A workspace turn loads the plugins and the
 project's skills (The Claude Code wrapper; Pi and Codex under "Pi, Codex,
 and further harnesses"). The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
 text, so they need nothing harness-specific.
 
-**Planned** ([plans/orchestration.md](plans/orchestration.md)): workers
-carry the skills, not the persona. The persona's conversation turn reads
+**The web agent** ([plans/orchestration.md](plans/orchestration.md)).
+WebFetch and WebSearch run only inside `valor:web`, the leaf agent in Valor's
+plugin (`skills/valor/agents/web.md`) whose tools are those two alone. The
+plugin's PreToolUse hook (`skills/valor/hooks/web_only.py`) denies them to
+any other caller, naming the agent, so an agent that needs the web starts
+it and gets findings back as data, never a page. This is the guard
+`web.agent_only`, granted by Tom on 2026-10-16 against injection through
+retrieved content (#3648), ledgered by `core/guards.py` with its ninety-day
+expiry. A session-wide `--disallowedTools` would remove the tools from the
+web agent too, so the hook is the one mechanism. Subagents nest without
+limit: the wrapper sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` to
+`claude_code.SPAWN_DEPTH` (Claude Code's own cap is 3), and with background
+tasks off a chain returns in order, so the web is always one subagent away.
+A Codex turn keeps its built-in `web_search`, since Codex has no subagent
+to hand it to; Pi has no web tool.
+
+**Planned** ([plans/orchestration.md](plans/orchestration.md), wave 2):
+workers carry the skills, not the persona. The persona's conversation turn reads
 (the chat, memory, task status, the repository) and dispatches (starts,
 steers, answers, stops work); it never edits, runs a skill, or uses the
 web. A small thing goes to a Claude Code subagent inside its turn; anything
 with a deliverable or a merge is a kernel task, which reports to the
-persona and never to a comms channel. WebFetch and WebSearch belong to one
-web agent; every other agent starts it and gets findings back as data,
-never raw pages, and a replay gets no web. Subagents nest without limit:
-every agent at every depth can start subagents, the web agent among them,
-so the web is always one subagent away, and no depth limit is set. So the
-agent definitions, the web agent's included, reach every depth. Removing
-web tools from every other agent is governance, granted by Tom on
-2026-10-16, citing inbound and retrieved-content injection (issue #3648)
-with the usual ninety-day expiry. Until this is built, every workspace turn
-loads web tools directly and does its own work.
+persona and never to a comms channel. Until this is built, the working
+session that speaks also does the work.

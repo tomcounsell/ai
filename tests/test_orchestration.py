@@ -1,0 +1,60 @@
+"""Orchestration (docs/plans/orchestration.md): the web reached only through
+Valor's web agent, subagents to any depth, and the Brief in every subagent."""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import psycopg
+
+from core import guards
+from core.settings import VALOR_PLUGIN, settings
+from harnesses import claude_code
+
+HOOK = Path(VALOR_PLUGIN) / "hooks" / "web_only.py"
+
+
+def hook(call: dict) -> dict | None:
+    done = subprocess.run(
+        [sys.executable, HOOK], input=json.dumps(call), capture_output=True, text=True, check=True
+    )
+    return json.loads(done.stdout) if done.stdout.strip() else None
+
+
+def test_only_the_web_agent_reaches_the_web():
+    assert hook({"tool_name": "WebFetch", "agent_type": "valor:web"}) is None
+    for caller in ({}, {"agent_type": "general-purpose"}, {"agent_type": "web"}):
+        out = hook({"tool_name": "WebSearch", **caller})["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny" and "valor:web" in out["permissionDecisionReason"]
+    front = (Path(VALOR_PLUGIN) / "agents" / "web.md").read_text().split("---")[1]
+    tools = next(line for line in front.splitlines() if line.startswith("tools:"))
+    assert {t.strip() for t in tools.removeprefix("tools:").split(",")} == {"WebFetch", "WebSearch"}
+    registered = json.loads((Path(VALOR_PLUGIN) / "hooks" / "hooks.json").read_text())["hooks"]
+    assert registered["PreToolUse"][0]["matcher"] == "WebFetch|WebSearch"
+
+
+def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE type = 'guard.granted' ORDER BY payload->>'guard_id'"
+        ).fetchall()
+    by_id = {r[0]["guard_id"]: r[0] for r in rows}
+    assert set(by_id) == {g["guard_id"] for g in guards.SEEDED}
+    web = by_id["web.agent_only"]
+    assert (web["granted_at"], web["expires"], web["mission_items"]) == ("2026-10-16", "2027-01-14", [4])
+    assert "#3648" in web["incident"] and web["provenance"]["at"] == "2026-10-16"
+    assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g != "web.agent_only")
+
+
+def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_brief():
+    assert settings.plugin_dirs[0] == VALOR_PLUGIN
+    made = claude_code.workspace_turn("p", cwd=".", harness={"sandbox_profile": "turn"})
+    argv_env = made("http://h:1", "the brief\nwith lines", "t")
+    argv = argv_env.argv
+    assert argv[argv.index("--plugin-dir") + 1] == VALOR_PLUGIN
+    assert argv_env.env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == claude_code.SPAWN_DEPTH
+    start = json.loads(argv_env.env["VALOR_SUBAGENT_START"])["hookSpecificOutput"]
+    assert start["hookEventName"] == "SubagentStart"
+    assert start["additionalContext"].endswith("\n\nthe brief\nwith lines")
+    assert "--disallowedTools" not in argv

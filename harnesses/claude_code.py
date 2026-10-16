@@ -3,9 +3,9 @@
 `workspace_turn` builds one turn of a task that works in a directory over
 several turns. It runs as a developer's Claude Code would in that
 directory: the project's own CLAUDE.md, settings, hooks, skills and MCP
-servers, the yudame plugins (`settings.plugin_dirs`), the operator's own
-user MCP servers (`settings.claude_json`), and the operator's
-environment, `gh` login, git credentials and SSH agent. Two things differ:
+servers, Valor's own plugin and the yudame plugins (`settings.plugin_dirs`),
+the operator's own user MCP servers (`settings.claude_json`), and the
+operator's environment, `gh` login, git credentials and SSH agent. Two things differ:
 every model call goes to the gateway (`ANTHROPIC_BASE_URL`), which meters
 it against the task and supplies the kernel's credential in place of the
 placeholder the turn carries, and the turn runs under a sandbox-exec
@@ -44,6 +44,21 @@ def version(path: str) -> str | None:
     the binary. None for a layout this does not recognise."""
     real = Path(os.path.realpath(path))
     return real.name if real.parent.name == "versions" else None
+
+
+SPAWN_DEPTH = "1000"
+SUBAGENT_OPENING = (
+    "The Brief of the Valor session that started you follows. Its stage and channel are that "
+    "session's; your task is the prompt you were given, and what you find goes back to it."
+)
+
+
+def subagent_start(brief: str) -> str:
+    """The SubagentStart hook output that gives a subagent the dispatched text."""
+    context = f"{SUBAGENT_OPENING}\n\n{brief}"
+    return json.dumps(
+        {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}}
+    )
 
 
 class Unsandboxed(ValueError):
@@ -124,6 +139,12 @@ def workspace_turn(
         # running in the background; so a turn runs its commands in the
         # foreground or not at all.
         env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        # Subagents start subagents to any depth (Tom, 2026-10-16), so the web
+        # agent is always one more away; Claude Code's own cap is 3.
+        env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = SPAWN_DEPTH
+        # Every subagent, at every depth, opens with the dispatched text: the
+        # SubagentStart hook of Valor's plugin prints this.
+        env["VALOR_SUBAGENT_START"] = subagent_start(brief)
         if harness.get("tmpdir"):
             env["TMPDIR"] = env["CLAUDE_CODE_TMPDIR"] = harness["tmpdir"]
         if harness.get("claude_config_dir"):

@@ -20,6 +20,9 @@ from pathlib import Path
 
 from core import channels
 
+# Valor's own plugin, in the kernel's checkout (docs/plans/orchestration.md).
+VALOR_PLUGIN = str(Path(__file__).resolve().parent.parent / "skills" / "valor")
+
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
@@ -295,18 +298,23 @@ class Settings:
     )
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", str(Path.home() / ".local/bin/claude")))
     # The plugins a workspace turn loads (`--plugin-dir`, each that exists):
-    # by default the yudame marketplace Claude Code keeps current on the machine.
+    # Valor's own (`skills/valor` in the kernel's checkout: the web agent, its
+    # guard, Valor's skills) always first, then by default the yudame
+    # marketplace Claude Code keeps current on the machine.
     plugin_dirs: tuple[str, ...] = field(
-        default_factory=lambda: tuple(
-            d
-            for d in _env(
-                "VALOR_PLUGIN_DIRS",
-                ":".join(
-                    str(Path.home() / ".claude/plugins/marketplaces/yudame/plugins" / p)
-                    for p in ("yudame", "yudame-dev")
-                ),
-            ).split(":")
-            if d
+        default_factory=lambda: (
+            (VALOR_PLUGIN,)
+            + tuple(
+                d
+                for d in _env(
+                    "VALOR_PLUGIN_DIRS",
+                    ":".join(
+                        str(Path.home() / ".claude/plugins/marketplaces/yudame/plugins" / p)
+                        for p in ("yudame", "yudame-dev")
+                    ),
+                ).split(":")
+                if d and d != VALOR_PLUGIN
+            )
         )
     )
     # The operator's own Claude Code config, whose user MCP servers (the

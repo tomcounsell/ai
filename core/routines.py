@@ -601,7 +601,7 @@ async def due(conn, now: datetime) -> dict[str, list[dict[str, Any]]]:
                 "granted_at": p.get("granted_at"),
                 "expires": p["expires"],
                 "last_firing": fired.isoformat() if fired else None,
-                "firing_record": True,
+                "firing_record": p.get("firing_record", True),
             }
         )
 

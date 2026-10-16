@@ -14,6 +14,7 @@ The suite proves the kernel is solid and that Telegram carries messages both way
 8. End to end: a Telegram message starts a task, a scripted turn builds, check and review pass, the kernel merges, Tom's chat gets the report.
 9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed, and the start that ends the rollout restarts each bridge whose code the merge reaches.
 10. Metering: a turn's model call through the gateway writes its opened and charged rows with the turn's id.
+11. Orchestration: only `valor:web` reaches the web, its guard is ledgered with its grant and expiry, and a turn loads Valor's plugin first, nests subagents without Claude Code's cap, and gives every subagent the Brief.
 
 ## Running
 
