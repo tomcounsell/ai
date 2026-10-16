@@ -242,18 +242,29 @@ def test_a_harness_turns_tmpdir_is_the_one_its_settings_name(tmp_path):
     assert claude_code.workspace_turn("p", cwd=".", harness=bare)("http://h:1", "b", "t").tmpdir is None
 
 
-def test_a_claude_turn_loads_the_operators_own_mcp_servers(tmp_path, monkeypatch):
+def test_a_turn_loads_the_operators_own_mcp_servers_and_the_plugins_skills(tmp_path, monkeypatch):
     from core import workspace
-    from harnesses import claude_code
+    from harnesses import claude_code, pi
 
     harness = workspace.check_harness(workspace.Layout(tmp_path), workspace.fresh_dir(tmp_path / "c"), [], {})
     servers = {"byob": {"type": "stdio", "command": "byob-mcp"}}
     (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": servers}))
-    monkeypatch.setattr(
-        claude_code, "settings", dataclasses.replace(settings, claude_json=str(tmp_path / ".claude.json"))
+    (tmp_path / "plugin" / "skills").mkdir(parents=True)
+    replaced = dataclasses.replace(
+        settings,
+        claude_json=str(tmp_path / ".claude.json"),
+        plugin_dirs=(str(tmp_path / "plugin"), str(tmp_path / "skill-less")),
     )
+    monkeypatch.setattr(claude_code, "settings", replaced)
+    monkeypatch.setattr(pi, "settings", replaced)
     argv = claude_code.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t").argv
     assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": servers}
+    # Pi loads the project's context files and skills, and each plugin's skills; it has no MCP.
+    argv = pi.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t").argv
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--skill"] == [
+        str(tmp_path / "plugin" / "skills")
+    ]
+    assert not {"--no-skills", "--no-context-files"} & set(argv)
 
 
 # -- reconcile from the intent row ----------------------------------------------------------

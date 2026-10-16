@@ -22,14 +22,20 @@ and `VALOR_TURN` mark as Claude Code.
   own reported cost is an approximation (it cannot express tiers or
   long-context rates); the
   gateway's meter is the record.
-- **Configuration a clone carries.** `--system-prompt` is always passed, so
-  `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it, and
-  `--no-context-files --no-extensions --no-skills --no-prompt-templates
-  --no-themes` keep `AGENTS.md`, `CLAUDE.md`, and the clone's extensions,
-  skills, prompts, and themes out. The one file Pi still reads is
-  `.pi/settings.json` (compaction, retry, thinking, shell path and prefix,
-  package list); it cannot change the provider, model, tools, or system
+- **Context and skills, as a developer's Pi.** `--system-prompt` is always
+  passed, so `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it;
+  the project's `AGENTS.md` and `CLAUDE.md` are appended to it. Skills load
+  from the project's `.pi/skills` and `.agents/skills`, the operator's
+  `~/.agents/skills`, and `--skill <plugin>/skills` for each of
+  `settings.plugin_dirs`. The pinned release needs no trust step for project
+  skills. `--no-extensions --no-prompt-templates --no-themes` keep the
+  clone's extensions, prompts, and themes out. `.pi/settings.json` is still
+  read (compaction, retry, thinking, shell path and prefix, package and
+  skills lists); it cannot change the provider, model, tools, or system
   prompt, which are flags.
+- **No MCP.** The pinned release has none built in (its docs: "no built-in
+  MCP"; MCP is an extension), so the operator's MCP servers
+  (`claude_code.user_mcp_servers`) reach Claude Code turns only.
 - **The prompt is on stdin.** `-p` merges piped input into the prompt, so a
   prompt starting with `-` or `@` is neither an option nor a file. Only the
   Brief is appended to the system prompt.

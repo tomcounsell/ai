@@ -18,7 +18,7 @@ Governed by [docs/harnesses.md](../docs/harnesses.md).
 
 ## The Pi wrapper
 
-`pi.py` builds one turn of a task through Pi, pinned in `PINNED`. It matches `claude_code.workspace_turn`: the same `harness` settings, the same refusal without a sandbox profile, plus the turn's own Pi directory (`pi_agent_dir`). It writes Pi's `models.json` and `settings.json` each turn, passes the system prompt and every loader-off flag, gives the prompt on stdin, and reads Pi's JSON event stream in `parse`. How it is configured and why is `docs/pi.md`.
+`pi.py` builds one turn of a task through Pi, pinned in `PINNED`. It matches `claude_code.workspace_turn`: the same `harness` settings, the same refusal without a sandbox profile, plus the turn's own Pi directory (`pi_agent_dir`). It writes Pi's `models.json` and `settings.json` each turn, passes the system prompt, the project's context files and skills and the yudame plugins' skills (`--skill`), turns the other loaders off, gives the prompt on stdin, and reads Pi's JSON event stream in `parse`. How it is configured and why is `docs/pi.md`.
 
 ## Imports
 

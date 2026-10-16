@@ -14,19 +14,23 @@ against the task and carries no credential of the turn's.
   `settings.json` before every turn: one provider, `valor`, whose base URL is
   the gateway and whose key is the placeholder the gateway replaces.
 - The system prompt is always passed (`--system-prompt`), so a project's
-  `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it, and
-  `--no-context-files` keeps `AGENTS.md` and `CLAUDE.md` out of it, in the
-  clone and every directory above it. `--no-extensions --no-skills
-  --no-prompt-templates --no-themes` keep a clone's `.pi/extensions`,
-  `.pi/skills`, `.pi/prompts`, and `.pi/themes` from loading anything.
+  `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it. As for a
+  developer's Pi, the project's `AGENTS.md` and `CLAUDE.md` (in the clone
+  and every directory above it) are appended to it, and its skills load:
+  the project's `.pi/skills` and `.agents/skills`, the operator's
+  `~/.agents/skills`, and each yudame plugin's `skills` (`--skill`, from
+  `settings.plugin_dirs`). The pinned release has no MCP (its docs: "no
+  built-in MCP"), so the operator's MCP servers reach only Claude Code turns.
+  `--no-extensions --no-prompt-templates --no-themes` keep a clone's
+  `.pi/extensions`, `.pi/prompts`, and `.pi/themes` from loading anything.
 - A clone's `.pi/settings.json` is still read, and Pi has no flag against
   it. Read from the pinned release's source, it can change compaction,
   retry, thinking, the image settings, `shellPath`, `shellCommandPrefix`,
-  `npmCommand`, and the package list; it cannot change the provider or model
-  (flags), the tools (flags), the system prompt (flags), or the session
-  directory (flag), and `--no-extensions` and `--no-skills` keep a settings
-  `packages`, `extensions`, or `skills` list from loading anything. The
-  working session's builder owns its clone, so its own settings stand there.
+  `npmCommand`, the package list, and the skills list; it cannot change the
+  provider or model (flags), the tools (flags), the system prompt (flags), or
+  the session directory (flag), and `--no-extensions` keeps a settings
+  `packages` or `extensions` list from loading anything. The working
+  session's builder owns its clone, so its own settings stand there.
 
 **The prompt travels on standard input.** The pinned release reads `--` as
 an unknown flag, and a leading `@` on the command line is a file to read
@@ -309,10 +313,8 @@ def workspace_turn(
         argv = [
             *_entry(settings.pi),
             "--no-extensions",
-            "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
-            "--no-context-files",
             "--offline",
             "--provider",
             PROVIDER,
@@ -323,6 +325,9 @@ def workspace_turn(
             "--session-dir",
             str(Path(agent_dir) / "sessions"),
         ]
+        for d in settings.plugin_dirs:
+            if os.path.isdir(skills := os.path.join(d, "skills")):
+                argv += ["--skill", skills]
         if resume:
             argv += ["--session", resume]
         argv += ["--system-prompt", SYSTEM_PROMPT, "--append-system-prompt", brief, "-p"]

@@ -481,7 +481,9 @@ it collects the turn. [browser.md](browser.md) specifies it.
 ## Pi, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`
-mark (`docs/pi.md`). Codex has not been run here.
+mark (`docs/pi.md`). It loads the project's `AGENTS.md`, `CLAUDE.md` and
+skills and the yudame plugins' skills; the pinned Pi has no MCP. Codex has
+not been run here.
 
 The gateway meters two formats: Anthropic's Messages API, and OpenAI's
 Responses API at `<gateway>/t/<token>/openai/v1` (architecture.md, Metered
