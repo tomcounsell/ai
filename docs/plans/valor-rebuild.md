@@ -52,8 +52,15 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   from Tom's Telegram message to a merge Tom uses
   ([strip.md](strip.md)).
 - Valor's Sentry login in the turn ([c19-sentry-route.md](c19-sentry-route.md)).
-- Asks reconciled before they start, and an inbox with backpressure
+- Asks reconciled before they start, in shadow, and run in start order
   ([ask-reconciliation.md](ask-reconciliation.md)).
+- Calibrate `intake.overlap` and build the ask hold: `shape.proposed` waits
+  on the writer, `ask.folded` folds a covered ask into its task, and a
+  confirmed `supersedes` stops the narrower task (Valor confirms it as PM,
+  Tom 2026-10-15). It is a guard and needs Tom's grant in its plan file:
+  mission items 6 and 1; incidents `cfb11735ee36`/`5172ae8d8b4f` fixed one
+  cause (rows 32505, 33201-33498, 34466-34468) and
+  `d734763cd94e`/`85abb1026556` both build approve-by-reply (row 33265).
 - Three small fixes ([c4-small-fixes.md](c4-small-fixes.md)).
 - The GitHub token's reach (Tom's), the other three Macs, and the old
   system's features this one lacks, which Tom picks and orders, one task each.

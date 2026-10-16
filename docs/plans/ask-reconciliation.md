@@ -50,12 +50,20 @@ waiting path.
 2. **`judgement_sites.judge_runner`** asks the overlap site before
    `intake.underspecified` and writes one `reconcile.decided` row. If an
    answer that no `reconcile.decided` has consumed is already there, it uses
-   that answer, the same way the judge does. An abstain or a failure of both
+   that answer, the same way the judge does. If `reconcile.decided` is
+   already on the task (a retry after `record_judge` failed or the lock was
+   lost), it skips the overlap call, so a task never has two. An abstain or a failure of both
    legs is recorded as `distinct` with a note. The judge then runs exactly
    as today, whatever the decision: shadow holds nothing, writes no notice,
    and leaves the verdict alone. `machine.fold` applies the row and leaves
    the state as it is. Unknown kinds already do that (`core/machine.py`,
-   the end of `_apply`).
+   the end of `_apply`). `reconcile.decided`, `shape.confirmed`, and
+   `task.placed` join `ledger.QUIET` (`core/ledger.py:45`). Otherwise
+   `serve._ready` would step a working task again on a confirm or a
+   placement (`core/serve.py:720,735`), and a placement written after
+   `step.failed` would hide the failure from `router.retry_due` and skip its
+   backoff. The `message.steered` row from `--amend` stays loud, so it
+   wakes the task as a steer does today.
 3. **`python -m core shape TASK (--confirm | --amend TEXT) [--before T | --after T]`**
    with `--by` and `--role-played` provenance, as `answer` has.
    `--confirm` and `--amend` write `shape.confirmed`, the writer's label on
@@ -65,9 +73,12 @@ waiting path.
    `--before` and `--after` write `task.placed`.
 4. **Queue order** in `core/serve.py:schedule`. The sort key becomes
    (foreground first, queue position, task id). The old key's middle term
-   was the latest activity. `tasks.queue(conn, project)` computes positions
-   once per pass. It starts from start order (the id of each active task's
-   `task.started` row), then applies every `task.placed` row as a move, in
+   was the latest activity. Each ready entry still carries `latest`, which
+   `_start` and `_step` need (`core/serve.py:707-709`); it just no longer
+   sorts. One queue spans every project, because `schedule` ranks all
+   ready tasks against one `max_turns` pool. `tasks.queue(conn)` computes
+   positions once per pass. It starts from global start order (the id of
+   each active task's `task.started` row), then applies every `task.placed` row as a move, in
    row id order, so the latest placement wins. A chain therefore resolves
    in order, a cycle resolves to whichever placement came last, and a
    placement whose anchor is not active is skipped. The reconciler's
@@ -86,8 +97,10 @@ kinds), `core/README.md` (`shape` and queue order), and `docs/machine.md:155`
 
 - **The hold path**: `shape.proposed` waiting on the writer, `ask.folded`,
   folding into T, and stopping a superseded T. It is built in the task
-  that calibrates `intake.overlap`, which holds Tom's grant written in this
-  file. The grant would name the incidents below and mission items 6 and 1.
+  that calibrates `intake.overlap`. That task is its own open item in
+  `docs/plans/valor-rebuild.md`, which names the incidents below, mission
+  items 6 and 1, and Decided item 2 (Valor confirms `supersedes`). It
+  starts only with Tom's grant written in its plan file.
 - **A cap on asks in flight.** Tom ruled it out on 2026-10-15, and it has
   no incident.
 - **Message binding** (`623c4901e1d5`), and work that lives only on hand
@@ -129,12 +142,17 @@ Tests go into the existing files, about 250 lines in all.
   - a cycle resolves to the latest placement;
   - an anchor that is not active is skipped;
   - foreground work runs ahead of placed background work;
+  - ready tasks on two projects run in global start order;
+  - a confirm or a placement on a working task starts no new step, and
+    a placement after `step.failed` keeps the backoff;
   - a proposed placement applies only when the writer gave none.
 - `test_pipeline.py` (scripted upstream):
   - `reconcile.decided` comes before `judge.decided`;
   - a `covered` decision still reaches the judge, with no notice and no
     wait;
   - an abstain or a failure of both legs is recorded as `distinct`;
+  - a judge step retried after `reconcile.decided` was written asks no
+    second overlap call and writes no second row;
   - the open-task inputs leave out other projects and tasks that are
     terminal, calibration, or legacy, and cut a long list with a count.
 - `test_machine.py`:
@@ -183,6 +201,9 @@ Tests go into the existing files, about 250 lines in all.
 
 - 2026-10-15: drafted, and Tom answered (`22b030d9e`). Under b5233f922bb0,
   the first critique raised seven findings against the `reconcile` state.
+- 2026-10-16: critique round 1 (five findings): the new rows are quiet,
+  the queue is global, a retried judge step makes no second overlap call,
+  `latest` is still carried, and the hold has its own open item.
 - 2026-10-16: re-planned on the stripped main. The hold moves to the
   calibration task, and shadow runs inside the judge step (see "Why this is
   narrower").
