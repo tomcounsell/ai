@@ -131,3 +131,74 @@ What this changes:
   it, read-only, through the gateway with the kernel's token
   ([c19-sentry-route.md](c19-sentry-route.md)).
 - Unchanged: a turn holds no credential.
+
+## Tom's rulings (2026-10-16)
+
+On what Valor is for, Tom said: "full operator, all of the above." On whose
+accounts: "on his accounts. he has a full human level google workspace seat
+as well as human-level memberships in all platforms." And: "he already has
+a logged in browser on each machine." On authority, Tom chose "Fully free"
+over "free inside a task" and "reads free, acts tapped", and on money: "no
+ceiling. Valor uses claude -p on his claude subscription".
+
+On skills: "Like the previous system, Valor should have the combination of
+his own internal skills, yudame skills, and the skills in the project repo
+he is working in."
+
+On orchestration: "there was an intended distinction for the agent that
+acts with Valor's persona for communication is simply an orchestrator of
+subagents and it's those subagents that are the ones that use all the
+skills." Asked whether workers are subagents or kernel tasks: "Both, by
+size", "but other kernel tasks report to the parent Valor agent and are not
+allowed to interact with comms channels."
+
+On the web: "for web fetch, I recommend a dedicated subagent that must be
+used."
+
+On posting: "there is no gate or block or approval from Tom because Valor
+posts as himself on his own accounts."
+
+What this changes:
+
+- **Valor is a full operator.** He reads the world (the web, media, the
+  links, images and videos Tom sends, memory on demand), uses accounts
+  (Gmail, Calendar, Docs, Sheets, Drive, Linear, Sentry, Stripe, Notion,
+  Telegram history, SMS codes for 2FA), produces deliverables (decks,
+  Office documents, diagrams, images), posts on LinkedIn and X, and builds
+  managed agents for clients (imagine-agent, build-agent, cowork). Issues
+  #3636 to #3642 are all wanted, in no order.
+- **Valor acts as himself, on his own accounts**: his own Google Workspace
+  seat, his own memberships on every platform, his own logged-in browser on
+  each machine. He never acts as Tom.
+- **Fully free.** No post, send, portal submission or client agent's launch
+  waits on a tap from Tom. There is no spend ceiling: Valor's turns run
+  `claude -p` on his own Claude subscription, and spending stays metered.
+- **Skills come from three places**: Valor's own internal skills, the
+  yudame plugins from `yudame/skills`, and the project repository's own
+  skills. A workspace turn already loads the last two; Valor's own skill
+  set does not exist yet (`skills/` holds the SDLC stage files) and is an
+  open item.
+- **The persona orchestrates; workers do the work.** The persona's turn
+  reads the chat, memory, task status and the repository, and starts,
+  steers, answers and stops work. It never edits, runs a skill or uses the
+  web. The persona judges each request's size: a small thing is a Claude
+  Code subagent inside its turn; anything with a deliverable or a merge is
+  a kernel task. Workers send their questions, progress and deliveries to
+  the persona, the parent Valor agent, never to Telegram, email or Slack;
+  only the persona speaks. Tom granted the comms rule directly.
+- **One conversation turn, everywhere.** Every inbound message that does
+  not bind to running work, Tom's DM included, gets the persona's
+  conversation turn, which answers, chats, stays quiet, steers, or starts
+  work; a reply's steer, answer and stop bind as they do now. It replaces
+  starting an SDLC task on each message of Tom's that is not a reply, and
+  generalises step 2 of [team-chat.md](team-chat.md) to every channel. The
+  build is [orchestration.md](orchestration.md).
+- **The web goes through one web agent.** Only the web agent holds
+  WebFetch and WebSearch; the persona and every other agent ask it, and it
+  returns findings as data, so raw pages never enter the caller's context.
+  Replays get no web. Tom granted this as a capability removal; its
+  incident is inbound and retrieved-content injection (issue #3648), with
+  the ninety-day expiry every guard carries.
+- **Posting craft is skills, not a gate.** de-slop and authenticity-pass
+  are used when posting; nothing waits on Tom.
+- Unchanged: the governance paragraph in `CLAUDE.md`.

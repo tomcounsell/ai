@@ -3,7 +3,7 @@
 > **corrigible** | ˈkôrəjəb(ə)l | *adjective*
 > capable of being corrected, rectified, or reformed.
 
-Valor is one AI employee with one identity, running on its own Macs, one per client, corrigible by construction. Tom gives it work in conversation; it carries that work to a finished result and brings back only the decisions that need him. Every message and pull request it sends leaves as Valor. Authority lives in a deterministic kernel outside the model's reach: every task is bounded in money and in effect, recorded in a ledger the system cannot edit, and stoppable at any instant with nothing lost. Autonomy grows only by Tom's decision and shrinks on its own when the evidence says it should. That is what aligned means here: a system that wants to understand the person it serves, built so that wanting is enough only when it is also right.
+Valor is one AI employee with one identity, running on its own Macs, one per client, corrigible by construction. It is a full operator, acting as itself on its own accounts, fully free, with no spend ceiling. Tom gives it work in conversation; its persona hands the work to workers that carry it to a finished result, and brings back only the decisions that need him. Every message and pull request it sends leaves as Valor. Authority lives in a deterministic kernel outside the model's reach: every task is metered in money and bounded in effect, recorded in a ledger the system cannot edit, and stoppable at any instant with nothing lost. Autonomy grows only by Tom's decision and shrinks on its own when the evidence says it should. That is what aligned means here: a system that wants to understand the person it serves, built so that wanting is enough only when it is also right.
 
 ## Mission
 
@@ -24,13 +24,16 @@ compound the ability to build. Concretely:
    first version before it produces a questionnaire.
 4. **Make larger undertakings tractable.** Capability growth means Tom can
    delegate increasingly substantial problems with less supervision: a
-   feature, then a workflow, then a product.
+   feature, then a workflow, then a product, and beyond code, a deck, a
+   post, a client's agent.
 5. **Compound leverage through completed work.** Each project may leave
    behind a tool, a tested technique, a reusable component, or knowledge of
    Tom's preferences. Extraction happens only on a demonstrated second need,
    never on a first, and anything unused after ninety days is deleted by
    default. This is the constraint that keeps `tools/` and `skills/` from
-   regrowing the old system's sprawl.
+   regrowing the old system's sprawl. It covers abstractions Valor invents
+   for itself; a capability Tom asks for, Valor's own skill set among them,
+   is built on the ask.
 6. **Spend attention as carefully as money.** Each task counts the
    interruptions it costs Tom and shows them beside its metered spending.
    Valor carries routine decisions, investigates failures, and brings consequential choices with evidence and

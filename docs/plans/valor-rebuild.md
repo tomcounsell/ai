@@ -29,24 +29,39 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
 - **Turns.** `claude -p` with JSON output, session resume, the persona and
   Brief appended, and the gateway as the model endpoint, which meters every
   call (Anthropic and OpenAI routes). A turn has Valor's own `gh`, git, SSH
-  and `sentry-cli` access and the project's own CLAUDE.md and skills, in one
+  and `sentry-cli` access, the project's own CLAUDE.md and skills, the
+  `yudame` and `yudame-dev` plugins, the operator's user MCP servers (the
+  logged-in browser among them) and the web tools, in one
   sandbox profile that denies only the kernel key directory, the Postgres
   data directory, the backup disk and loopback 5432. Everything a turn
   started is reaped, and background tasks are off. Concurrency is a limit
   read from settings, default 3.
 - **Bridges.** Telegram, email, Slack and a local chat bridge. Telegram
   carries messages both ways and is the one tested bridge. Reactions mark
-  arrival and the shape of the reply.
+  arrival and the shape of the reply. In a team chat a message that binds
+  to no running work gets a conversation turn first; elsewhere each of
+  Tom's messages that is not a reply starts an SDLC task.
 - **Harnesses.** Claude Code, plus Pi and the OpenAI route in code.
 - **Persona and routines.** The persona is rendered into every turn;
   routines (status page, the 90-day expiry list, which reports to Tom and
   never deletes) run from `routines/`.
-- **Effects.** `act` for every task Tom starts.
+- **Effects.** `act` for every task Tom starts. Valor acts as itself on
+  its own accounts, fully free, with no spend ceiling (Tom, 2026-10-16).
 - **Suite.** No line count (Tom, 2026-10-16); `tests/test_bloat.py`
   fails on production code nothing in production uses; it covers the state machine, the merge predicate,
   the ledger, the resident kernel and Telegram.
 
 ## Open items
+
+- Orchestration ([orchestration.md](orchestration.md)): the persona's
+  conversation turn on every channel, Tom's DM included, which reads and
+  dispatches and never does the work; workers, Claude Code subagents for
+  small things and kernel tasks for anything with a deliverable or a merge,
+  that report to the persona and never touch a comms channel; and the one
+  web agent that alone holds WebFetch and WebSearch (Tom, 2026-10-16).
+- Valor's own skill set, beside the yudame plugins and the project's own
+  skills (Tom, 2026-10-16), and with it the full-operator capabilities of
+  issues #3636 to #3642, all wanted, in no order.
 
 - The strip's waves 3 and 4 and its done bar: a real task on popoto goes
   from Tom's Telegram message to a merge Tom uses
@@ -64,6 +79,3 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
 - Three small fixes ([c4-small-fixes.md](c4-small-fixes.md)).
 - The GitHub token's reach (Tom's), the other three Macs, and the old
   system's features this one lacks, which Tom picks and orders, one task each.
-- Skill system requirements, before `skills/` grows past `skills/sdlc/`.
-  Shared skills come from `yudame/skills` (Tom, 2026-10-15); what else the
-  system needs is open.
