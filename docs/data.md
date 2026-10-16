@@ -304,8 +304,8 @@ absent, or unknown (the target did not answer). A bridge's `lookup`
 returns nothing only when the platform can no longer record the send, and
 raises `Unknown` while it still might. Present is written `done`,
 absent `failed`. Unknown writes nothing, and the effect stays in flight. For `email.send` the target is Sent Mail: present is a message there with the effect's `Message-ID`; a miss, or a mailbox that cannot be read, is unknown, since Gmail files a sent message after a delay no document gives, so an `email.send` in doubt is never written `failed` by reconcile. Either outcome is marked `reconciled`. The router does this for a
-task's merge on its next run; other dangling intents stay listed by
-`tasks.audit` (`docs/architecture.md`, Stop).
+task's merge on its next run; other dangling intents stay in flight in
+`tasks.status` (`docs/architecture.md`, Stop).
 
 ## State is a fold over events
 
@@ -324,7 +324,7 @@ of generated ledgers to exactly one state (`tests/test_machine.py`).
 
 This is what makes stop lossless at the storage level. A stop at any
 instant leaves rows that each landed whole or not at all, and no stored
-status that could disagree with them. `tasks.audit` states what a stop
+status that could disagree with them. `audit` (`tests/test_kernel.py`) states what a stop
 must leave true, and it is a check over the fold: every opened
 call charged, every turn ended, no effect between intent and outcome.
 

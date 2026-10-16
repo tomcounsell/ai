@@ -1,4 +1,4 @@
-"""The task record, its Brief, stop, status, and the consistency audit.
+"""The task record, its Brief, stop, and status.
 
 A task is one JSONB document holding its Brief, written once, plus the
 events that name it. Its state is `machine.fold` over the events, never a
@@ -908,22 +908,6 @@ def _counts(attention: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
         elif played:
             c["role_played"] += 1
     return counts
-
-
-def audit(state: dict[str, Any]) -> list[str]:
-    """What a lossless stop must leave true. Empty means consistent: every
-    gateway call charged, every turn ended, and no effect caught between
-    intent and outcome."""
-    problems = []
-    for call_id in state["open_calls"]:
-        problems.append(f"gateway call {call_id} opened and never charged")
-    for turn_id, outcome in state["turns"].items():
-        if outcome is None:
-            problems.append(f"turn {turn_id} started and never ended")
-    for effect_id, effect_state in state["effects"].items():
-        if effect_state == "in_flight":
-            problems.append(f"effect {effect_id} has an intent and no outcome")
-    return problems
 
 
 async def index(conn) -> list[dict[str, Any]]:

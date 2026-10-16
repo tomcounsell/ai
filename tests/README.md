@@ -23,7 +23,7 @@ Each xdist worker gets its own database (`<VALOR_TEST_DB>_<worker>`) and an equa
 
 ## Budget
 
-At most 15 test files and 5,000 lines under `tests/`, and no more test lines than production lines. `test_budget.py` fails when either is passed (CLAUDE.md rule 8).
+No line count bounds the suite (CLAUDE.md rule 8). `test_bloat.py` runs vulture (configured in `pyproject.toml`) over production code alone and fails on anything nothing in production uses, so code kept alive only by a test fails too.
 
 ## Not here
 

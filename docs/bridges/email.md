@@ -217,8 +217,8 @@ may have stored the message. The intent stays in flight with no outcome, and
 a notice goes to Tom at once, once per send, saying it is in doubt. The send
 is settled on the next wake (every `serve_tick_s` or ledger row, not at once)
 by reading Sent Mail for its Message-ID once no process performs it: found is
-`done`; not found leaves it in flight for the next wake, and `tasks.audit`
-lists it. A send cut off by a restart before it was settled gets the same
+`done`; not found leaves it in flight for the next wake, and `python -m
+core status` shows it `in_flight`. A send cut off by a restart before it was settled gets the same
 notice on the first wake after. After the 250,
 `QUIT` is sent and its reply is not awaited, since the send is already
 done. When the server accepts

@@ -17,6 +17,7 @@ dev = [
     "pytest>=8",
     "pytest-xdist>=3.8",
     "ruff==0.16.10",
+    "vulture>=2.16",
 ]
 
 [tool.uv]
@@ -33,3 +34,15 @@ markers = [
 
 [tool.ruff]
 line-length = 110
+
+# tests/test_bloat.py: production code nothing in production uses fails the
+# suite. The names below are reached from outside the code vulture reads:
+# parser callbacks (HTMLParser, expat), popoto's Meta and fields, psycopg's
+# connection attribute, and record fields stored or listed, never read back.
+[tool.vulture]
+paths = ["core", "harnesses", "bridges", "routines", "tools", "ui", "api", "memory", "scripts"]
+min_confidence = 60
+ignore_names = [
+    "handle_*", "*DeclHandler", "Meta", "words", "isolation_level",
+    "created_at", "error_cost", "on_abstain", "consumer", "serves",
+]

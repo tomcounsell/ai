@@ -12,6 +12,13 @@ approval step, isolation, sandbox rule, denial, allowlist, refusal,
 capability removal, or verification layer) and the plan file carries no
 grant from Tom for it, the review fails: your verdict is `changes`.
 
+Bloat fails the review too (`CLAUDE.md` rule 8). Ask of every added line
+what the request needs it for. Dead code, a second mechanism for a job one
+already does, handling for a failure that has not happened, a component
+written where Claude Code, a library, the old system or cori had one, and
+prose that restates the code are each a `bloat` finding naming the smaller
+diff, and any `bloat` finding makes your verdict `changes`.
+
 **Inputs** (`.valor/inputs/`):
 
 - `request.md`; `answers.md`, Tom's answers and feedback;
@@ -27,7 +34,7 @@ rewritten by the candidate's code to the end of your turn. The object:
 
 - `verdict`: `pass` or `changes`, your judgement of the work;
 - `findings`: each with a kind (`debt` for related tech debt worth
-  paying now);
+  paying now, `bloat` as above);
 - `predicted_failure`: 0 to 1, how likely this candidate fails once
   merged;
 - `requirements`: one `{"requirement", "met"}` per requirement of the

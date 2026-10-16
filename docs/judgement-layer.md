@@ -140,9 +140,9 @@ refuses one over its limits with `400` and `error_type`
 `max_tokens_exceeded`, billing nothing: that is `input_too_large`, and the
 fallback is asked as for any failed leg.
 
-The fallback endpoint's context and largest answer are as OpenRouter
-lists them (`OPEN_WEIGHT_CONTEXT` 131,072 and `OPEN_WEIGHT_MAX_COMPLETION`
-117,964 in `core/settings.py`, with the day checked). Valor's estimate
+The fallback endpoint's context (131,072) and largest answer are as
+OpenRouter lists them (`OPEN_WEIGHT_MAX_COMPLETION` 117,964 in
+`core/settings.py`, with the day checked). Valor's estimate
 (bytes / 3) is a metering worst case, not the host's count, so every input
 is sent. OpenRouter refuses one over the context with `404`, no usage, and
 a message naming `parasail/fp8` in its "Filter by Context Length" step:

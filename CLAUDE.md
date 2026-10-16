@@ -29,9 +29,13 @@ Adopted 2026-10-15 from "Valor rebuild: missteps and hard rules"
    writing. No agent rewrites, replaces or marks one done on its own say-so.
 7. **Real work outnumbers self-work.** In any week, most merged tasks are
    on projects other than Valor.
-8. **Size budgets, enforced as tests.** The full suite runs in under 5
-   minutes on one Mac. Test lines stay at or under production lines. A plan
-   file fits on one page. `tests/test_budget.py` holds the first two.
+8. **Bloat is refused, not budgeted.** No line count is a bar (Tom,
+   2026-10-16). Production code that nothing in production uses fails the
+   suite (`tests/test_bloat.py`). The reviewer refuses a line that buys
+   nothing the request needs: dead code, a second mechanism for one job,
+   handling for a failure that has not happened, a component written where
+   one existed, prose that restates the code. The full suite runs in under
+   5 minutes on one Mac. A plan file fits on one page.
 9. **A bug fix is a commit.** A defect gets a fix and a test, with no plan
    file, no critique round and no separate review.
 10. **Reuse before writing.** Before writing a component, take it from

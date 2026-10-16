@@ -377,3 +377,13 @@ Each has the default the plan proceeds on if Tom says nothing.
   48b43a24a0bf's Brief recalled 6. Use recorded (ledger e497a43cab67).
   Ingest had a 1,800-row backlog: the after-turn ingest is cut short by
   each restart and runs inside the turn's task.
+- **Line bars dropped 2026-10-16.** Tom, in writing: "those 6k and 4k
+  limits were completely arbitrary. we need to remove them in favor of a
+  quality bar or forcing function against bloat". Dropped: the 6,000- and
+  43,000-line reduction bars above, and the 15-file, 5,000-line and
+  tests-under-production caps (`tests/test_budget.py`). In their place
+  (rule 8): `tests/test_bloat.py` runs vulture over production alone, and
+  the reviewer's `bloat` finding fails a review; that review criterion is
+  Tom's grant in the same message. It removed `demo_dir`/`VALOR_DEMO` and
+  `OPEN_WEIGHT_CONTEXT`, and moved `tasks.audit`, used only by tests, into
+  `tests/test_kernel.py`.

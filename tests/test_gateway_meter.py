@@ -16,6 +16,7 @@ from yarl import URL
 from core import db, ledger, tasks
 from core.gateway import Gateway
 from tests.ports import listen
+from tests.test_kernel import audit
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -77,7 +78,7 @@ def _check(result, *, body: bytes, usd: int):
     assert charged["usd_micros"] == usd and state["spent_usd_micros"] == usd
     assert charged["complete"] is True
     assert charged["price_checked"] == "2026-10-01"
-    assert not state["open_calls"] and tasks.audit(state) == []
+    assert not state["open_calls"] and audit(state) == []
     assert charged["unpriced"] is False and state["unpriced_calls"] == []
 
 

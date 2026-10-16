@@ -223,7 +223,7 @@ that does hear it:
 4. reaps what the turn left behind (see The turn sandbox and reaping);
 5. writes `turn.ended` with outcome `stopped`.
 
-`tasks.audit` states what a stop must leave true: every opened call charged, every started turn
+`audit` in `tests/test_kernel.py` states what a stop must leave true: every opened call charged, every started turn
 ended, no effect between intent and outcome. `tests/test_serve.py` stops a task mid-turn
 and asserts the audit is empty.
 

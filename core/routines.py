@@ -46,10 +46,9 @@ SCHEDULE_KEYS = {"minute": "Minute", "hour": "Hour", "day": "Day", "weekday": "W
 CALENDAR_RANGES = {"minute": (0, 59), "hour": (0, 23), "day": (1, 31), "weekday": (0, 7), "month": (1, 12)}
 
 # The names a launchd job carries: the settings that reach Postgres (the
-# names `backup.PLIST_ENV` lists for it) and the replay directory.
+# names `backup.PLIST_ENV` lists for it).
 PLIST_ENV = (
     *(n for n in backup.PLIST_ENV if n.startswith(("VALOR_PG", "VALOR_DB"))),
-    "VALOR_DEMO",
     # What shapes the turn slot, the projects and the workspaces must match
     # the kernel's, or a routine's turns run beside Tom's and resolve other paths.
     "VALOR_MACHINE",

@@ -209,12 +209,10 @@ OPEN_WEIGHT_MODEL = "qwen/qwen3-235b-a22b-2507"
 OPEN_WEIGHT_PROVIDER = "parasail/fp8"  # OpenRouter's endpoint tag
 OPEN_WEIGHT_PROVIDER_NAME = "Parasail"  # what OpenRouter names on the response
 OPEN_WEIGHT_PIN = f"{OPEN_WEIGHT_MODEL}@{OPEN_WEIGHT_PROVIDER}"
-# The pinned endpoint's context and the most it answers, in tokens, as
-# OpenRouter lists them (https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints,
-# checked 2026-10-03): OpenRouter refuses an input past the context itself
-# (`tools/open_weight.py`), and no call is billed more output than the
-# completion figure.
-OPEN_WEIGHT_CONTEXT = 131_072
+# The most the pinned endpoint answers, in tokens, as OpenRouter lists it
+# (https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints,
+# checked 2026-10-03): no call is billed more output than this. OpenRouter
+# refuses an input past the endpoint's context itself (`tools/open_weight.py`).
 OPEN_WEIGHT_MAX_COMPLETION = 117_964
 
 # Kept apart from `PRICES`, so the gateway never prices a model it would
@@ -365,9 +363,6 @@ class Settings:
     persona_dir: str = field(
         default_factory=lambda: _env("VALOR_PERSONA", str(Path(__file__).resolve().parent.parent / "persona"))
     )
-
-    # -- the replay and demonstration workspaces ------------------------------
-    demo_dir: str = field(default_factory=lambda: _env("VALOR_DEMO", str(Path.home() / "src" / "valor-demo")))
 
     # -- routines: the directories of toml files the kernel's own checkout
     # holds (routines/), the rolling period their spending is reported over,

@@ -24,6 +24,7 @@ from core.machine import State
 from tests import bridges, scripted
 from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows, typed
 from tests.scripted import commit
+from tests.test_kernel import audit
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -133,11 +134,11 @@ def test_kill_mid_turn(fresh, op, tmp_path):
     assert not runs.alive(sleeper)
     assert started[0]["brief_sha256"] == started[1]["brief_sha256"]
 
-    async def audit():
+    async def stopped():
         async with await db.connect(fresh) as conn:
-            return tasks.audit(await tasks.status(conn, task))
+            return audit(await tasks.status(conn, task))
 
-    assert run(audit()) == []
+    assert run(stopped()) == []
 
 
 def _plan_signals(ws: Path, turn: str, *effects: str) -> Path:

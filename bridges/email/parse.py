@@ -65,7 +65,7 @@ class _Text(HTMLParser):
         self.parts: list[str] = []
         self.skip = 0
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, _attrs):
         if tag in ("script", "style"):
             self.skip += 1
         elif tag in ("br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4"):

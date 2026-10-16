@@ -158,7 +158,6 @@ class TelethonWire:
         )
         if test_dc:
             self.client.session.set_dc(*TEST_DC)
-        self._handlers: list[Handler] = []
         self.premium: bool | None = None  # read once on connect
 
     # -- connection --------------------------------------------------------

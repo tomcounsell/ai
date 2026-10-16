@@ -31,7 +31,7 @@ from core.settings import (
 # The session lock the code opening a call holds while it waits on the
 # call (`run:<task>` inside a run), recorded on `gateway.opened` as
 # `holder`. After a kernel restart, a call whose holder lock is free is
-# charged at its estimate; a call with none is left for `tasks.audit`.
+# charged at its estimate; a call with none stays open in `tasks.status`.
 HOLDER: ContextVar[str | None] = ContextVar("holder", default=None)
 
 

@@ -42,8 +42,8 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   routines (status page, the 90-day expiry list, which reports to Tom and
   never deletes) run from `routines/`.
 - **Effects.** `act` for every task Tom starts.
-- **Suite.** At most 15 test files and 5,000 lines, enforced by
-  `tests/test_budget.py`; it covers the state machine, the merge predicate,
+- **Suite.** No line count (Tom, 2026-10-16); `tests/test_bloat.py`
+  fails on production code nothing in production uses; it covers the state machine, the merge predicate,
   the ledger, the resident kernel and Telegram.
 
 ## Open items

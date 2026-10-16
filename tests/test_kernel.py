@@ -33,6 +33,23 @@ from tests import bridges, scripted
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.test_machine import Ledger
 
+
+def audit(state) -> list[str]:
+    """What a lossless stop must leave true. Empty means consistent: every
+    gateway call charged, every turn ended, and no effect caught between
+    intent and outcome."""
+    problems = []
+    for call_id in state["open_calls"]:
+        problems.append(f"gateway call {call_id} opened and never charged")
+    for turn_id, outcome in state["turns"].items():
+        if outcome is None:
+            problems.append(f"turn {turn_id} started and never ended")
+    for effect_id, effect_state in state["effects"].items():
+        if effect_state == "in_flight":
+            problems.append(f"effect {effect_id} has an intent and no outcome")
+    return problems
+
+
 pytestmark = pytest.mark.spend(usd=0)
 
 
@@ -111,7 +128,7 @@ def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_p
     assert held.kind == "done" and twin.kind == "done" and twin.effect_id != held.effect_id
     assert again.effect_id == once.effect_id and again.kind == "done"
     assert len((tmp_path / "outbox.jsonl").read_text().splitlines()) == 3
-    assert tasks.audit(state) == []
+    assert audit(state) == []
 
 
 # -- stop is immediate and lossless ---------------------------------------------
@@ -146,7 +163,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     assert ended["outcome"] == "stopped" and ended["returncode"] == -9
     assert elapsed < 20  # far short of the turn's minute, with room for a loaded Mac (3.8 s seen)
     assert not (tmp_path / "tmp").exists()
-    assert state["state"] == "stopped" and tasks.audit(state) == []
+    assert state["state"] == "stopped" and audit(state) == []
 
 
 # A turn's scratch in a review session: its TMPDIR was emptied before it, its
