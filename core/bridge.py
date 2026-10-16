@@ -47,13 +47,18 @@ import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
 
-from core import broker, db, ledger, mail, tasks
+from core import broker, db, git, ledger, mail, tasks
 from core import workspace as ws
 from core.settings import settings
+
+ROOT = Path(__file__).resolve().parent.parent
+# The stamp of a bridge that could not read its head (`stamp`).
+NO_HEAD = "none"
 
 # The email bridge builds and measures its messages with the kernel's
 # builder, reached here (a bridge imports core.bridge, never core.mail).
@@ -600,11 +605,24 @@ def bound_performers(bridge: Bridge, conn) -> broker.Performers:
     )
 
 
+def stamp() -> str:
+    """The commit of the checkout this code runs from, or `NO_HEAD` when it
+    cannot be read for any reason: the stamp never stops a bridge."""
+    try:
+        return git.head(ROOT) or NO_HEAD
+    except Exception:  # noqa: BLE001  no trusted git, a refused config: unstamped, and it serves
+        return NO_HEAD
+
+
 async def serve(bridge: Bridge, dsn: str | None = None) -> None:
     """Run a bridge until it stops; then exit nonzero, for launchd to
-    restart it. Holds `bridge:<channel>:<machine>` for its life."""
+    restart it. Holds `bridge:<channel>:<machine>` for its life, on the
+    connection named `valor-<channel>@<stamp>`, the commit it started at,
+    which a kernel's start reads to restart a bridge a merge left on old
+    code (`core.serve.restart_bridges`)."""
     channel = bridge.channel
-    conn = await db.connect(dsn, application_name=f"valor-{channel}")
+    head = await asyncio.to_thread(stamp)
+    conn = await db.connect(dsn, application_name=f"valor-{channel}@{head}")
     perform_conn = await db.connect(dsn, application_name=f"valor-{channel}-perform")
     listener = await db.connect(dsn, application_name=f"valor-{channel}-listen")
     outbox = None

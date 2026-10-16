@@ -18,7 +18,10 @@ On start it recovers (`recover`) what a killed kernel left:
 - an intent of a kernel type with no outcome: reconciled;
 - services a killed kernel left up: swept;
 - a kernel merge with a rollout row and no `rollout.ended` that the
-  running commit contains: ended `done` (`core/rollout.py`).
+  running commit contains: ended `done` (`core/rollout.py`). When there is
+  one, first each bridge holding its lock on code the running commit
+  changed where it reaches the bridge is restarted (`restart_bridges`),
+  and the row names the bridges restarted and any that failed to.
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
@@ -64,7 +67,8 @@ backs up the database when the merge changes `core/schema.sql` (`python -m
 core backup`'s dump), fast-forwards the checkout, runs `uv sync --frozen`
 when it changes `uv.lock` or `pyproject.toml`, runs the merged code's
 migrate, writes `rollout.restarting`, and raises `rollout.Restart`, which
-leaves `serve`; launchd starts the kernel again. A failed step writes
+leaves `serve`; launchd starts the kernel again, and the new kernel's
+start restarts each bridge the merge reached. A failed step writes
 `rollout.failed`, steps the checkout (and its dependencies) back when it
 had moved, lifts the hold, and is tried again on the next `serve_tick_s`
 wake; after `rollout.NOTICE_AFTER` failures of one merge, Tom gets one
@@ -76,6 +80,7 @@ import functools
 import json
 import os
 import plistlib
+import re
 import sys
 import time
 import traceback
@@ -118,6 +123,18 @@ HARNESS = {State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 # never waits on the build of another task.
 AT_ONCE = {State.JUDGE, State.CLARIFY, State.MERGE}
 LABEL = "com.valor.kernel"
+# A bridge's lock connection (`core.bridge.serve`): its channel, and its stamp.
+BRIDGE_CONNECTION = re.compile(r"valor-([a-z]+)(?:@([0-9a-z]+))?")
+# The connection in this database holding a bridge's lock, `%s` its key
+# (a bigint lock is held as classid, its high half, objid, its low half).
+LOCK_HOLDER = (
+    "SELECT a.application_name FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+    "CROSS JOIN (SELECT hashtextextended(%s, 0) AS k) h "
+    "WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 "
+    "AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+    "AND a.datname = current_database() "
+    "AND l.classid = ((h.k >> 32) & 4294967295)::oid AND l.objid = (h.k & 4294967295)::oid"
+)
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -206,10 +223,13 @@ async def recover(
     *,
     checkout: Path | None = None,
     running: str | None = None,
+    kick: Callable[[str], str | None] | None = None,
 ) -> dict[str, list]:
     """Settle what a killed kernel left. Returns what was done, by kind.
     With the kernel's `checkout` and the `running` commit, also ends the
-    rollouts that commit contains (`rolled`)."""
+    rollouts that commit contains (`rolled`); with `kick` too, when there
+    is one to end, first restarts each bridge on code the running commit
+    changed (`restart_bridges`, `bridges`) and records it on those rows."""
     done: dict[str, list] = {
         "charged": [],
         "interrupted": [],
@@ -217,6 +237,7 @@ async def recover(
         "uncollected": [],
         "reconciled": [],
         "swept": [],
+        "bridges": [],
         "rolled": [],
     }
 
@@ -319,18 +340,65 @@ async def recover(
 
     if checkout is not None and running is not None:
         try:
-            done["rolled"] = await _rolled(conn, checkout, running)
+            ending = await _rolled(conn, checkout, running)
         except git.GitError as exc:
             _log(f"the kernel's checkout cannot be read; rollouts not ended: {exc}")
+            ending = []
+        kicked: dict[str, dict] = {}
+        if ending and kick is not None:
+            try:
+                kicked = await restart_bridges(conn, checkout, running, kick)
+            except Exception as exc:  # noqa: BLE001  the bridges' restart never stops the kernel's start
+                _log(f"the bridges were not restarted: {exc!r}")
+            done["bridges"] = sorted(kicked.get("restarted", {}))
+        for task_id, payload in ending:
+            async with conn.transaction():
+                await ledger.append(conn, task_id, "rollout.ended", payload | kicked)
+            done["rolled"].append(payload["effect_id"])
     return done
 
 
-async def _rolled(conn, checkout: Path, running: str) -> list[str]:
-    """End every kernel merge with a `rollout.restarting` or
-    `rollout.failed` row, or covered by a restarting row, that has no
-    `rollout.ended` and whose sha the running commit contains: `rolled_by`
-    the merge whose restart covered it, or `by: started` when no restart
-    names it (rolled by hand, or carried by a later restart)."""
+async def restart_bridges(
+    conn, checkout: Path, running: str, kick: Callable[[str], str | None]
+) -> dict[str, dict]:
+    """Restart each bridge holding its lock, `bridge:<channel>:<machine>`,
+    in this database, whose start commit differs from `running` in code it
+    runs (`rollout.stale`), one at a time, off the loop. Returns
+    `restarted`, each label with the stamp it replaced (None when
+    unstamped), and `restart_failed`, each label with why; empty ones left
+    out."""
+    live: list[tuple[str, str | None]] = []
+    for channel in rollout.BRIDGES:
+        row = await (await conn.execute(LOCK_HOLDER, (f"bridge:{channel}:{settings.machine}",))).fetchone()
+        found = BRIDGE_CONNECTION.fullmatch(row[0] or "") if row else None
+        if found and found[1] == channel:
+            live.append((channel, found[2]))
+            if found[2] == rollout.NO_HEAD:
+                _log(f"the {channel} bridge could not read its head; it is not restarted")
+    due = await git.threaded(rollout.stale, checkout, running, live) if live else set()
+    restarted: dict[str, str | None] = {}
+    failed: dict[str, str] = {}
+    for channel, stamp in live:
+        if channel not in due:
+            continue
+        label = rollout.BRIDGES[channel]
+        why = await git.threaded(kick, label)
+        if why is None:
+            restarted[label] = stamp
+            _log(f"restarted {label}, started at {stamp}, for {running}")
+        else:
+            failed[label] = why
+            _log(f"restarting {label} failed: {why}")
+    return {k: v for k, v in (("restarted", restarted), ("restart_failed", failed)) if v}
+
+
+async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[str, Any]]]:
+    """The `rollout.ended` rows owed, `(task, payload)`: one for every
+    kernel merge with a `rollout.restarting` or `rollout.failed` row, or
+    covered by a restarting row, that has no `rollout.ended` and whose sha
+    the running commit contains, `rolled_by` the merge whose restart
+    covered it, or `by: started` when no restart names it (rolled by hand,
+    or carried by a later restart). `recover` writes them."""
     ended = {
         r[0]
         for r in await (
@@ -368,9 +436,7 @@ async def _rolled(conn, checkout: Path, running: str) -> list[str]:
             payload["rolled_by"] = v["by"]
         elif not v.get("own"):
             payload["by"] = "started"
-        async with conn.transaction():
-            await ledger.append(conn, v["task"], "rollout.ended", payload)
-        rolled.append(effect_id)
+        rolled.append((v["task"], payload))
     return rolled
 
 
@@ -966,11 +1032,13 @@ async def serve(
     migrate: Callable[[str], None] | None = None,
     credential: str | Path | None = None,
     judgement_port: judgement.JudgementPort | None = None,
+    kick: Callable[[str], str | None] | None = rollout.kick,
 ) -> None:
     """Run the kernel until killed, or until a rollout of its own merge
     raises `rollout.Restart`. `checkout` is the checkout it runs from and
     rolls forward; `credential` the GitHub key file for the fetch
-    (default `settings.github_keyfile`)."""
+    (default `settings.github_keyfile`); `kick` restarts a bridge's
+    launchd job at start (`restart_bridges`)."""
     dsn = dsn or settings.dsn()
     conn = await db.connect(dsn, application_name="valor-kernel")
     listener = await db.connect(dsn, application_name="valor-kernel-listen")
@@ -984,7 +1052,7 @@ async def serve(
                 started = await git.threaded(git.head, checkout)
             except git.GitError as exc:
                 _log(f"the kernel's checkout cannot be read; nothing is rolled out by this process: {exc}")
-        done = await recover(conn, performers, checkout=checkout, running=started)
+        done = await recover(conn, performers, checkout=checkout, running=started, kick=kick)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
         if gateway is None:
             from core.gateway import ClaudeLogin, OpenAIKey

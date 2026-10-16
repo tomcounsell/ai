@@ -205,10 +205,30 @@ launchd starts everything that starts on its own. There is no other
 scheduler, supervisor, or watchdog on the machine.
 
 - **LaunchAgents with `KeepAlive`**: the machine cluster, the kernel
-  process, and each bridge. launchd restarts one that exits. Nothing else
-  restarts anything, and nothing kills a process on a heuristic such as
-  age or memory; stop and recovery are the kernel's (constraint "reliable
-  stop, recovery, and correction").
+  process, and each bridge. launchd restarts one that exits. The one
+  other restart is the kernel's, of a bridge a merge left on old code:
+  each bridge holds its lock on a connection named
+  `valor-<channel>@<commit>`, the commit it started at (`@none` when it
+  could not read it). When a kernel start ends one of its own rollouts
+  (after the migrate, before `rollout.ended`), it reads the connection
+  holding each bridge's lock in the kernel database, and restarts with
+  `launchctl kickstart -k gui/<uid>/<label>`, one at a time, waiting at
+  most 10 s each, every bridge whose diff from that commit to the running
+  one reaches its code: `bridges/<name>/`, any `core/` or `bridges/` file
+  it imports (`core/bridge.py`, `core/intake.py` and `core/channels.py`
+  for every bridge; not `core/serve.py`, `core/rollout.py` or
+  `core/router.py`), `uv.lock` or `pyproject.toml`. A bridge with no
+  commit in its name (started before the stamp) is restarted; one at
+  `@none` is not. The `rollout.ended` row names the bridges restarted and
+  any that failed, and a failed one is tried again only at the next start
+  that ends a rollout. A merge of only `docs/`, `tests/`, `persona/`,
+  `skills/` or top-level `*.md` restarts nothing. The kick restarts
+  launchd's instance of the label, so a bridge started by hand that holds
+  the lock keeps running its old code until it is stopped. A bridge
+  reconciles its outbox on start, so a send the kill cut off is looked up
+  before it is tried again. Nothing kills a process on a heuristic such
+  as age or memory; stop and recovery are the kernel's (constraint
+  "reliable stop, recovery, and correction").
 - **LaunchAgents with `StartCalendarInterval`**: routines. Each firing
   runs `python -m core routine NAME`, which starts or continues a run that
   is a child of the routine's objective, so a routine's turn takes the turn
@@ -286,7 +306,8 @@ to `kernel.log` until the key is installed.
 The kernel also exits with status 1 to run its own merged code
 (`rollout.restarting`, [architecture.md](architecture.md)); `KeepAlive`
 starts it again, so a rollout restart needs no `kickstart`, and it loads
-the judgement keys again too.
+the judgement keys again too. The new kernel's start then kicks each
+bridge the merge reached (the launchd section above).
 
 A turn's environment is the operator's, less the kernel's secrets (the `ANTHROPIC_`, `CLAUDE`, and
 `AI_AGENT` variables, the OpenAI, TypeSafe, OpenRouter, and GitHub push keys, and the `PG*` password

@@ -2,7 +2,7 @@
 tracking: none
 slug: 4a54eb8b-rollout-restarts-bridges
 type: plan
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 1
 governance_grant: none

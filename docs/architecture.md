@@ -444,7 +444,9 @@ turn, backs up the database when the diff from the running commit to the one the
 (the checkout's head when it is already past the merge) changes `core/schema.sql`, fast-forwards the
 checkout, runs `uv sync --frozen` there when that diff changes `uv.lock` or `pyproject.toml`, runs
 the merged code's `db.migrate`, writes `rollout.restarting`, and exits; launchd starts it again on
-the merged code. An uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql` in the checkout
+the merged code. That start, before it writes `rollout.ended`, restarts each bridge (`launchctl
+kickstart -k`) holding its lock on a commit whose diff to the running one reaches the bridge's code
+(`bridges/<name>/`, the `core/` it imports, the dependencies), and the row names them. An uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql` in the checkout
 stops the restart before the checkout moves, since the restart would run an edit nothing merged. A
 failed step steps the checkout and its dependencies back when they had moved, lifts the hold, writes
 `rollout.failed`, and is tried again on the next `serve_tick_s` wake. Once one merge's rollout has

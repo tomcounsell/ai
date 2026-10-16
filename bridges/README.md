@@ -9,6 +9,8 @@ Self-contained comms modules.
 - Each conforms to one port in `core/`, so a bridge can be replaced without touching anything else.
 - Test accounts are configured per bridge for `tests/`.
 
+Each bridge holds its lock on a connection named `valor-<channel>@<commit>`, the commit it started at; a kernel start that ends a rollout restarts each bridge whose code that rollout changed (`launchctl kickstart -k`, `core.serve.restart_bridges`, [docs/machine.md](../docs/machine.md)).
+
 Entry points: `python -m bridges.telegram run | login | keys | --plist`, `python -m bridges.email run | keys | --plist`, `python -m bridges.slack run | keys | manifest | --plist`, and `python -m bridges.local run | open | --plist`.
 
 Governed by [docs/bridges/telegram.md](../docs/bridges/telegram.md), which owns the bridge port, [docs/bridges/email.md](../docs/bridges/email.md), [docs/bridges/slack.md](../docs/bridges/slack.md), and [docs/bridges/local.md](../docs/bridges/local.md).

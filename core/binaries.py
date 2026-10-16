@@ -7,6 +7,7 @@ from pathlib import Path
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 SECURITY = "/usr/bin/security"
+LAUNCHCTL = "/bin/launchctl"
 
 
 class Untrusted(RuntimeError):

@@ -40,20 +40,57 @@ merge's notice, a report of what failed, goes out once it has failed
 `Restart` leaves `serve` once `rollout.restarting` is written; `python -m
 core serve` then exits with status 1 and launchd starts it again.
 
-Imports the standard library, `core.credentials`, `core.git`, and
-`core.targets`.
+The bridges are launchd jobs of their own (`BRIDGES`), and each names
+its lock connection with the commit it started at (`core.bridge.serve`).
+A kernel start that ends a rollout restarts every bridge holding its lock
+whose code the running commit changed (`core.serve.restart_bridges`),
+after migrate and before the `rollout.ended` rows, which name the bridges
+restarted and any that failed to:
+
+- `closure`: every file a bridge can import, by walking the imports of
+  `bridges/<name>/` through `core/` and `bridges/`, function-level and
+  relative ones too, with each package's `__init__.py`.
+- `reaches`: whether a diff changes a file of the closure, anything under
+  `bridges/<name>/`, or the dependencies. A diff of only `persona/`,
+  `skills/`, `docs/`, `tests/` and top-level `*.md` reaches none.
+- `stale`: which live bridges run code the running commit changed where
+  it reaches them, the bridge's commit behind or ahead of it. One with no
+  stamp (started before bridges stamped their head), or whose stamp git
+  cannot diff, is stale; one stamped `NO_HEAD` (it could not read its
+  head) is not, since a kick would bring it back the same.
+- `kick`: `launchctl kickstart -k gui/<uid>/<label>`, waiting at most
+  `KICK_TIMEOUT_S`, never for the bridge to come back. A bridge reconciles
+  its outbox on start, so a send cut off by the kill is looked up before
+  it is tried again. A failed kick is tried again only at the next start
+  that ends a rollout. The kick restarts launchd's instance of the label:
+  a bridge started by hand that holds the lock is not replaced.
+
+Imports the standard library, `core.binaries`, `core.credentials`,
+`core.git`, and `core.targets`.
 """
 
+import ast
 import contextlib
 import os
 import re
 import signal
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core import credentials, git, targets
+from core import binaries, credentials, git, targets
 
 REF = "refs/valor-kernel/rollout"
+# Each bridge's launchd job, by channel: `LABEL` in `bridges/<name>/__main__.py`.
+BRIDGES = {
+    "telegram": "com.valor.kernel.telegram",
+    "slack": "com.valor.kernel.slack",
+    "email": "com.valor.email",
+    "local": "com.valor.kernel.local",
+}
+# The stamp of a bridge that could not read its own head: `core.bridge.NO_HEAD`.
+NO_HEAD = "none"
+KICK_TIMEOUT_S = 10.0
 # Read per turn (`persona/`, `skills/`) or never read by the kernel.
 QUIET_DIRS = ("persona/", "skills/", "docs/", "tests/")
 DEPENDENCIES = ("uv.lock", "pyproject.toml")
@@ -114,6 +151,101 @@ def restarts(paths: list[str]) -> bool:
     """Whether a diff with these paths may change what the kernel imports
     or reads at start."""
     return any(not (p.startswith(QUIET_DIRS) or ("/" not in p and p.endswith(".md"))) for p in paths)
+
+
+def closure(checkout: Path, name: str) -> set[str]:
+    """Every file of the checkout the bridge `name` can import: each `.py`
+    under `bridges/<name>/` and `bridges/__init__.py`, then every `core/`
+    or `bridges/` module any of them imports, anywhere in the file, with
+    the `__init__.py` of each package on its path, transitively. Paths are
+    relative to the checkout."""
+    todo = [p.relative_to(checkout).as_posix() for p in sorted((checkout / "bridges" / name).rglob("*.py"))]
+    todo.append("bridges/__init__.py")
+    files: set[str] = set()
+    while todo:
+        path = todo.pop()
+        if path in files or not (checkout / path).is_file():
+            continue
+        files.add(path)
+        try:
+            tree = ast.parse((checkout / path).read_bytes(), path)
+        except SyntaxError, ValueError:
+            continue
+        package = path.split("/")[:-1]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                within = package[: len(package) - node.level + 1] if node.level else []
+                base = ".".join([*within, *([node.module] if node.module else [])])
+                modules = [base, *(f"{base}.{a.name}" for a in node.names)]
+            else:
+                continue
+            for module in modules:
+                todo.extend(_module_files(checkout, module))
+    return files
+
+
+def _module_files(checkout: Path, module: str) -> list[str]:
+    """The files importing `module` runs: each package's `__init__.py` on
+    its path and the module's own file, those in `core/` or `bridges/`."""
+    parts = [p for p in module.split(".") if p]
+    if not parts or parts[0] not in ("core", "bridges"):
+        return []
+    found = []
+    for i in range(1, len(parts) + 1):
+        stem = "/".join(parts[:i])
+        found += [f for f in (f"{stem}/__init__.py", f"{stem}.py") if (checkout / f).is_file()]
+    return found
+
+
+def reaches(paths: list[str], files: set[str], name: str) -> bool:
+    """Whether a diff with these paths changes code the bridge `name` runs:
+    a file of its `closure`, anything under `bridges/<name>/`, or the
+    dependencies."""
+    return any(p in files or p.startswith(f"bridges/{name}/") or p in DEPENDENCIES for p in paths)
+
+
+def stale(checkout: Path, running: str, live: list[tuple[str, str | None]]) -> set[str]:
+    """The channels among the live bridges, `(channel, stamp)`, whose code
+    differs from `running` where it reaches them."""
+    out: set[str] = set()
+    for channel, stamp in live:
+        if stamp in (NO_HEAD, running):
+            continue
+        if stamp is None or not _SHA.fullmatch(stamp):
+            out.add(channel)
+            continue
+        try:
+            paths = git.diff_paths(checkout, stamp, running)
+        except git.GitError:
+            out.add(channel)
+            continue
+        if reaches(paths, closure(checkout, channel), channel):
+            out.add(channel)
+    return out
+
+
+def kick_argv(label: str) -> list[str]:
+    return [binaries.require(binaries.LAUNCHCTL), "kickstart", "-k", f"gui/{os.getuid()}/{label}"]
+
+
+def kick(label: str) -> str | None:
+    """Restart the launchd job `label` (`launchctl kickstart -k`), without
+    waiting for it to come back; why it failed, or None."""
+    try:
+        done = subprocess.run(
+            kick_argv(label), capture_output=True, text=True, timeout=KICK_TIMEOUT_S,
+            env={"PATH": git.PATH}, check=False,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        return f"launchctl kickstart did not return in {KICK_TIMEOUT_S:g} s"
+    except (OSError, binaries.Untrusted) as exc:
+        return str(exc)
+    if done.returncode != 0:
+        tail = " / ".join(done.stderr.strip().splitlines()[-3:])
+        return f"launchctl kickstart exited with status {done.returncode}: {tail}"
+    return None
 
 
 def judge(checkout: Path, started: str, merges: list[Merge]) -> tuple[list[Merge], list[str]]:
