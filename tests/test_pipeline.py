@@ -100,6 +100,32 @@ def test_a_red_test_goes_to_patch_and_the_patched_candidate_merges(dsn, tmp_path
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
 
 
+def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp_path):
+    """A push rejected because main moved never ends passing work: each
+    rejection means another merge landed, so it rebases again (the Cowboy,
+    2026-10-16: a cap of two ended three passing tasks)."""
+    ws, origin = scripted.workspace(tmp_path)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(origin), str(other))
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        states = []
+        for n in range(3):
+            scripted.commit(other, "greeting.txt", f"landed first {n}\n")
+            git(other, "push", "-q", "origin", "HEAD:main")
+            await scripted.checks(dsn, task)  # the push is rejected: main moved
+            async with await db.connect(dsn) as conn:
+                await scripted.ensure_merge(conn, task)  # the next step acts on it
+            states.append((await fold(dsn, task)).state)
+            await drive(dsn, task)
+        return states, await fold(dsn, task)
+
+    states, f = run(go())
+    assert states == [State.PATCH] * 3, states
+    assert f.counts["rebases"] == 3 and f.state is not State.ENDED
+
+
 # -- an idle turn ends its step; stop.md hands in from any working state -------------
 
 

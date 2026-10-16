@@ -134,8 +134,9 @@ patch carrying every finding of the three branches together.
   then sits on a tip whose other commits were never tested with the candidate; the status page
   shows the carry, naming the sha it was tested at and the sha it merged at. A carry is not a rebase.
   Otherwise the work goes to `patch` to rebase onto the new tip (`rebase.requested`, naming why it
-  did not carry). A rebase is mechanical and spends no round; at most two happen per loop window,
-  and the next such rejection ends the task.
+  did not carry). A rebase is mechanical and spends no round, and has no cap: each rejection
+  means another merge landed, so the rebases end. A cap of two ended three passing tasks on
+  2026-10-16, when four tasks merged within half an hour.
 
 So a task patches on findings at most `review_rounds` plus one times before it merges or ends (the
 join table gives every case): work that does not converge stops instead of spending on itself.

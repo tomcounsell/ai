@@ -324,8 +324,8 @@ def merge_action(f: machine.Fold, b: tasks.Brief) -> broker.Action | None:
 # failures; then the task ends with a report. Two failures take their own
 # path: a push rejected because the target moved carries the verified
 # candidate onto the new tip when the target's new commits change none of
-# its paths (`_carry`), else sends the work back to be rebased
-# (`machine.REBASES` per loop window, spending no round), and one that
+# its paths (`_carry`), else sends the work back to be rebased (spending
+# no round; some merge always lands first, so this ends), and one that
 # needs the push credential asks Tom for it, the one thing only he holds,
 # and is tried again every `CREDENTIAL_RETRY_S` until it lands.
 MERGE_TRIES = 5
@@ -433,11 +433,11 @@ async def ensure_merge(
     A merge that did not land is acted on by why (`merge_failure`): a
     moved target first carries the verified candidate onto the new tip
     (`_carry`, `verdicts.carried`) and requests its merge at once, else
-    writes `rebase.requested` while rebases remain; a
+    writes `rebase.requested`; a
     credential asks Tom for it once per candidate (`notices.credential`)
     and is tried again every `CREDENTIAL_RETRY_S`; a transient failure is
-    tried again after `_backoff`; a refusal, a transient failure past
-    `MERGE_TRIES`, or a moved target past the rebases ends the task
+    tried again after `_backoff`; a refusal or a transient failure past
+    `MERGE_TRIES` ends the task
     (`task.ended`, kind `merge`). A merge whose credential is missing is
     not requested; Tom is asked for it. Before a try is due the answer is
     `unknown` with the time it is due, so the step parks."""
@@ -468,11 +468,10 @@ async def ensure_merge(
             not_carried = await _carry(conn, task_id, b, f, last)
             if not_carried is None:
                 return await ensure_merge(conn, performers, task_id, now=now)
-            if f.counts["rebases"] < machine.REBASES:
-                await _rebase(conn, task_id, b, f.candidate, last, not_carried)
-                return None
+            await _rebase(conn, task_id, b, f.candidate, last, not_carried)
+            return None
         transient = [t for t in tries if merge_failure(t) == "transient"]
-        if why in ("moved", "refused") or (why == "transient" and len(transient) >= MERGE_TRIES):
+        if why == "refused" or (why == "transient" and len(transient) >= MERGE_TRIES):
             await end(conn, task_id, "merge", _first_line(last.reason), effect_id=last.effect_id)
             return None
         if why == "credential":

@@ -103,10 +103,8 @@ CHECK_ROWS = {"test.decided": Check.TEST, "review.decided": Check.REVIEW, "docs.
 
 ROUNDS = (0, 1, 2)
 # After the plan's rounds are spent, the one round Valor may still give a
-# task that has not passed (join row 5), and the rebases a merge whose
-# target moved may ask for, per loop window.
+# task that has not passed (join row 5).
 LAST_ROUNDS = 1
-REBASES = 2
 # Review sends work back at most once: a plan or a critique raise of 2 is
 # read as 1, never refused (docs/sdlc-state-machine.md, Loops).
 REVIEW_MAX = 1
