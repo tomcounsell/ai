@@ -54,6 +54,16 @@ Status: **in use**.
 
 ## The accounts each business gives Valor
 
+Valor's accounts are its own: a full Google Workspace seat
+(valor@yuda.me), its own memberships on every platform it uses, and its own
+logged-in browser on each machine ([browser.md](browser.md)). Valor holds
+none of Tom's accounts and never acts as Tom. Its acts through its accounts
+are fully free: a post, a send, a portal submit, or a client-agent launch
+needs no tap from Tom, and each is reported. No spend ceiling applies;
+turns run `claude -p` on Valor's Claude subscription. Posting uses the
+craft skills de-slop and authenticity-pass, which shape the post and gate
+nothing (`skills/README.md`).
+
 Valor acts through its own accounts on the client's Mac, and those
 accounts are the boundary of what it can do there (docs/business.md,
 Business item 8). Every channel that can act records what it did; an

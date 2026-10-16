@@ -17,6 +17,12 @@ runs, and refuses to run outside a git clone. It prints the two paths, the
 status, and a `shasum -a 256` line for each file. `.valor/` is excluded from commits, so
 screens never enter one. Interaction (clicks, forms, logins) is not part of it.
 
+**Valor's logged-in browser.** `look` is headless and logged in to
+nothing. Valor's own browser, logged in to its own accounts, runs on each
+machine and is reached through the byob MCP server, which a workspace turn
+loads with the operator's user MCP servers ([harnesses.md](harnesses.md),
+The Claude Code wrapper). Clicks, forms, and logins go through it.
+
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
 newest in the cache. A turn that

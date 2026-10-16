@@ -530,9 +530,27 @@ spending). A harness on another format needs a route that meters it first.
 
 ## Skill rendering
 
-Each wrapper will turn a versioned skill into what its harness loads. The
-skill system is deferred until Tom's requirements are gathered
-(`skills/README.md`). A workspace turn loads the plugins in
-`settings.plugin_dirs` and the project's own skills. The stage instructions are plain files in
+Skills come from three sources (`skills/README.md`): Valor's own skills in
+`skills/` (none written yet), the yudame plugins in `settings.plugin_dirs`,
+and the project's own skills. A workspace turn loads the plugins and the
+project's skills (The Claude Code wrapper; Pi and Codex under "Pi, Codex,
+and further harnesses"). The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
 text, so they need nothing harness-specific.
+
+**Planned** ([plans/orchestration.md](plans/orchestration.md)): workers
+carry the skills, not the persona. The persona's conversation turn reads
+(the chat, memory, task status, the repository) and dispatches (starts,
+steers, answers, stops work); it never edits, runs a skill, or uses the
+web. A small thing goes to a Claude Code subagent inside its turn; anything
+with a deliverable or a merge is a kernel task, which reports to the
+persona and never to a comms channel. WebFetch and WebSearch belong to one
+web agent; every other agent starts it and gets findings back as data,
+never raw pages, and a replay gets no web. Subagents nest without limit:
+every agent at every depth can start subagents, the web agent among them,
+so the web is always one subagent away, and no depth limit is set. So the
+agent definitions, the web agent's included, reach every depth. Removing
+web tools from every other agent is governance, granted by Tom on
+2026-10-16, citing inbound and retrieved-content injection (issue #3648)
+with the usual ninety-day expiry. Until this is built, every workspace turn
+loads web tools directly and does its own work.
