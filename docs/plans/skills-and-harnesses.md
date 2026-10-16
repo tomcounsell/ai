@@ -40,8 +40,8 @@ improves them with ordinary tasks.
    `agents/openai.yaml` for the five no-implicit skills; Claude-only skills
    labelled `compatibility`; the do-sdlc `tom:` bug; `install.sh` linking
    into `~/.agents/skills`.
-3. **Pi** loads skills and context files (6ab8fb774). MCP needs Pi 1.3;
-   the pin (0.73.1) moves up so Pi turns reach byob.
+3. **Pi** loads skills and context files (6ab8fb774) and, on Pi 1.0.0,
+   the operator's MCP servers (3bb5327d6; installed on the Cowboy).
 4. **Codex** wrapper (8c25acf06), ported from the old adapter
    (`agent/session_runner/harness/codex.py`, rule 10): `codex exec --json`
    on the gateway's Responses route, its own `CODEX_HOME`, `CLAUDE.md` as
@@ -61,3 +61,14 @@ improves them with ordinary tasks.
 
 Tom has had one real task on a real project carried through Codex and one
 through Pi, each using a yudame skill, recorded with the date (rule 5).
+
+## Record
+
+- 2026-10-16: tasks 488fa856bef9 ($14.21, portability, `install.sh`) and
+  698091d21d7e ($3.28, officecli and calendar) merged on `skills`.
+- 2026-10-16, live on the Cowboy, read-only: a Codex turn (dc3557a93e02,
+  $0.18) listed the yudame skills, used one, ran `gh`; a Pi turn
+  (dcf7a2466cf6, $0.35) did the same and counted 16 tabs through byob.
+- The Cowboy's `~/.claude.json` still names the old system's `memory` MCP
+  server, which no longer starts; Tom sees it before it goes (rule 2).
+
