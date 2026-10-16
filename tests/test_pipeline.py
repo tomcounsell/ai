@@ -13,16 +13,21 @@ import pytest
 from core import (
     broker,
     db,
+    judgement,
+    judgement_sites,
     ledger,
     machine,
     router,
     session,
+    tasks,
 )
 from core.gateway import Gateway
 from core.machine import State
-from tests import scripted
+from tests import judgement_upstream, scripted
 from tests.ports import listen
 from tests.scripted import git
+from tools.jev import Jev
+from tools.open_weight import OpenWeight
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -186,3 +191,108 @@ def test_an_idle_turn_that_asked_the_advisor_goes_on_in_the_same_run(dsn, tmp_pa
 
     out = run(go())
     assert asked == ["Should I?"] and out["missing"] == ["critique"]
+
+
+# -- the reconciler, in shadow (docs/plans/ask-reconciliation.md) ------------------
+
+
+async def ask(conn, project: str, instruction: str = "fix it", **marker) -> str:
+    b = tasks.Brief(instruction=instruction, origin_url=f"/repos/{project}.git")
+    return await tasks.start(conn, b, marker={"sdlc": 1, **marker} if marker else None)
+
+
+def kinds(found: list[dict], *types: str) -> list[dict]:
+    return [r for r in found if r["type"] in types]
+
+
+def test_an_ask_is_read_against_its_projects_open_tasks_and_the_judge_runs_as_without_it(dsn, monkeypatch):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            older = await ask(conn, "alpha", "fix the valor spec's branch in the tests")
+            newer = await ask(conn, "alpha")
+            ended = await ask(conn, "alpha")
+            await ledger.append(conn, ended, "task.ended", {"outcome": "ended"})
+            stopped = await ask(conn, "alpha")
+            await tasks.stop(conn, stopped, reason="test")
+            other = await ask(conn, "beta")
+            legacy = await tasks.start(conn, tasks.Brief("x", origin_url="/repos/alpha.git"), marker={})
+            listed, left_out = await judgement_sites.open_tasks(conn, "alpha", besides="none")
+            monkeypatch.setattr(judgement_sites, "OPEN_LISTED", 1)
+            cut = await judgement_sites.open_tasks(conn, "alpha", besides="none")
+            monkeypatch.undo()
+            task = await ask(conn, "alpha", "the tests still assert valor-cori-rebuild")
+        await scripted.run_judge(dsn, task, "precise,covered,2,after")
+        await scripted.run_judge(dsn, task, "precise")  # moved on: asks nothing again
+        return (
+            older,
+            newer,
+            (ended, stopped, other, legacy),
+            listed,
+            left_out,
+            cut,
+            task,
+            await rows(dsn, task),
+        )
+
+    older, newer, closed, listed, left_out, cut, _, found = run(go())
+    assert [t["id"] for t in listed] == [newer, older] and left_out == 0
+    assert not {t["id"] for t in listed} & set(closed)
+    assert [t["id"] for t in cut[0]] == [newer] and cut[1] == 1
+    decided, judged = kinds(found, "reconcile.decided", "judge.decided")
+    assert decided["id"] < judged["id"]
+    p = decided["payload"]
+    assert (p["decision"], p["named"], p["placement"], p["shadow"]) == ("covered", older, "after", True)
+    # Shadow holds nothing: the judge decides as it would have, and no notice is owed.
+    assert judged["payload"]["verdict"] == "precise" and machine.fold(found).state is State.PLAN
+    assert not kinds(found, "notice.requested", "question.asked")
+    overlap = [r for r in kinds(found, "judgement.answered") if r["payload"]["site"] == "intake.overlap"]
+    assert len(overlap) == 1
+
+
+def test_a_retried_judge_step_asks_no_second_overlap_and_a_failure_or_a_stop_holds_nothing(dsn):
+    dead = judgement.JudgementPort(
+        {
+            "jev": Jev(f"http://127.0.0.1:{listen()}/jev", judgement.LOOPBACK_KEY, timeout_s=2),
+            "open_weight": OpenWeight(f"http://127.0.0.1:{listen()}/ow", judgement.LOOPBACK_KEY, timeout_s=2),
+        }
+    )
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            retried = await ask(conn, "alpha")
+            failed = await ask(conn, "alpha")
+            stopped = await ask(conn, "alpha")
+            await tasks.stop(conn, stopped, reason="test")
+        up = judgement_upstream.shared().port(fixed="precise,covered,1")
+        # The overlap recorded, then the step lost before the judge's verdict.
+        ctx = router.Context(None, retried, dsn, scripted._always)
+        async with await db.connect(dsn) as conn:
+            b, before = await tasks.brief(conn, retried), await ledger.read(conn, retried)
+        await judgement_sites._reconcile(up, ctx, before, b)
+        await scripted.run_judge(dsn, retried, "precise")
+        out = await judgement_sites.judge_runner(dead)(router.Context(None, failed, dsn, scripted._always))
+        gone = await judgement_sites.judge_runner(up)(router.Context(None, stopped, dsn, scripted._always))
+        return out, gone, *[await rows(dsn, t) for t in (retried, failed, stopped)]
+
+    out, gone, retried, failed, stopped = run(go())
+    assert len(kinds(retried, "reconcile.decided")) == 1 and machine.fold(retried).state is State.PLAN
+    sites = [r["payload"]["site"] for r in kinds(retried, "judgement.answered")]
+    assert sites.count("intake.overlap") == 1
+    p = kinds(failed, "reconcile.decided")[0]["payload"]
+    assert (p["decision"], p["note"], p["answered"]) == ("distinct", "both legs failed", False)
+    assert out["status"] == "moved" and machine.fold(failed).state is State.CLARIFY  # the judge's own caution
+    assert gone["status"] == "stopped" and not kinds(stopped, "reconcile.decided")
+
+
+def test_the_reconcilers_table_never_stands_on_a_guess():
+    def row(picked, kind="judgement.answered"):
+        return {"type": kind, "payload": {"picked": picked, "ref": {"listed": ["t1", "t2"]}}}
+
+    decide = judgement_sites.reconcile_decision
+    assert decide(row({"task": "1"}))["note"] == "the decision abstained"
+    assert decide(row({}, "judgement.failed"))["decision"] == "distinct"
+    assert decide(row({"decision": "covered", "task": "7", "placement": "after"})) == {
+        "decision": "covered", "named": None, "placement": None, "note": "no listed task named",
+    }  # fmt: skip
+    assert decide(row({"decision": "distinct", "task": "2", "placement": "before"}))["named"] is None
+    assert decide(row({"decision": "overlaps", "task": "2", "placement": "none"}))["named"] == "t2"

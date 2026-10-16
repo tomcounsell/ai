@@ -9,7 +9,7 @@ the two.
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -467,6 +467,89 @@ async def background(conn, task_id: str) -> bool:
     return row is not None
 
 
+# -- the queue (docs/plans/ask-reconciliation.md) ---------------------------------
+
+
+TERMINAL = (machine.State.MERGED, machine.State.ENDED, machine.State.STOPPED)
+
+
+def project_name(b: Brief) -> str:
+    """The repository a task works in, by its origin's or workspace's name."""
+    source = b.origin_url or b.workspace or ""
+    return PurePosixPath(source.rstrip("/")).name.removesuffix(".git") or "unknown"
+
+
+def queue(order: Sequence[str], moves: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """Each task's queue position: `order` (start order), then every move
+    (`{"task", "anchor", "where": "before" | "after"}`, in row order) puts
+    its task right before or after its anchor, so the latest placement of a
+    task wins. A move whose task or anchor is not in `order` is skipped."""
+    out = list(order)
+    for m in moves:
+        task, anchor = m.get("task"), m.get("anchor")
+        if task == anchor or task not in out or anchor not in out:
+            continue
+        out.remove(task)
+        out.insert(out.index(anchor) + (m.get("where") == "after"), task)
+    return {t: i for i, t in enumerate(out)}
+
+
+async def moves(conn, open_ids: Sequence[str]) -> list[dict[str, Any]]:
+    """The placements of open tasks, in row order: each `task.placed` the
+    writer wrote, and the reconciler's proposed placement for a task its
+    writer never placed."""
+    rows = await (
+        await conn.execute(
+            "SELECT task_id, type, payload FROM events WHERE type IN ('task.placed', 'reconcile.decided')"
+            " AND task_id = ANY(%s) ORDER BY id",
+            (list(open_ids),),
+        )
+    ).fetchall()
+    placed = {task_id for task_id, kind, _ in rows if kind == "task.placed"}
+    out = []
+    for task_id, kind, p in rows:
+        if kind == "task.placed":
+            out.append({"task": task_id, "anchor": p.get("anchor"), "where": p.get("where")})
+        elif task_id not in placed and p.get("placement") and p.get("named"):
+            out.append({"task": task_id, "anchor": p["named"], "where": p["placement"]})
+    return out
+
+
+async def open_ids(conn) -> list[tuple[str, list[dict[str, Any]], machine.Fold]]:
+    """Every open task in start order, with its rows and fold: started, and
+    not merged, ended, stopped, calibration, or legacy."""
+    found = await (
+        await conn.execute(
+            "SELECT t.task_id FROM events t WHERE t.type = 'task.started' AND NOT EXISTS ("
+            "SELECT 1 FROM events s WHERE s.task_id = t.task_id AND s.type = 'task.stopped') ORDER BY t.id"
+        )
+    ).fetchall()
+    out = []
+    for (task_id,) in found:
+        rows = await ledger.read(conn, task_id)
+        f = machine.fold(rows)
+        if not (f.legacy or f.calibration or f.state in TERMINAL):
+            out.append((task_id, rows, f))
+    return out
+
+
+async def queue_line(conn, task_id: str) -> str:
+    """What a writer sees after starting an ask: how many tasks are open on
+    its project, how many open tasks are ahead of it in the one queue the
+    kernel runs, and which on the project wait on an answer."""
+    found = await open_ids(conn)
+    ids = [t for t, _, _ in found]
+    positions = queue(ids, await moves(conn, ids))
+    if task_id not in positions:
+        return f"queue: task {task_id} is not open"
+    project = project_name(await brief(conn, task_id))
+    same = [(t, f) for t, _, f in found if project_name(await brief(conn, t)) == project]
+    waiting = [t for t, f in same if f.state is machine.State.WAITING]
+    ahead = sum(1 for p in positions.values() if p < positions[task_id])
+    line = f"queue: {len(same)} open on {project}, {ahead} ahead of {task_id} in the kernel's queue"
+    return line + (f"; waiting on an answer: {', '.join(waiting)}" if waiting else "")
+
+
 async def lock_tree(conn, task_id: str) -> str:
     """The tree's advisory lock, `tree:<root id>`, taken by the writers that
     change what a tree holds or whether a node may reopen (`start_child`,
@@ -708,8 +791,17 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         "parent_id": next(iter(await ancestors(conn, task_id)), None),
         "fenced_by": await fenced_by(conn, task_id),
         "children": await reports(conn, task_id),
+        **{key: _latest(rows, kind) for key, kind in SHAPE_ROWS.items()},
         **{k: v for k, v in (await tree_spending(conn, task_id)).items() if k != "charges"},
     }
+
+
+# What `status` shows of the reconciler and the writer: each kind's latest payload.
+SHAPE_ROWS = {"reconcile": "reconcile.decided", "shape": "shape.confirmed", "placed": "task.placed"}
+
+
+def _latest(rows: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    return next((r["payload"] for r in reversed(rows) if r["type"] == kind), None)
 
 
 def failed_step(rows: list[dict[str, Any]]) -> dict[str, Any] | None:

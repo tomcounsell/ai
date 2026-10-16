@@ -49,6 +49,11 @@ QUIET = (
     "gateway.opened",
     "gateway.refused",
     "gateway.charged",
+    # The reconciler's record and the writer's label and placement
+    # (docs/plans/ask-reconciliation.md): they order the queue, never step a task.
+    "reconcile.decided",
+    "shape.confirmed",
+    "task.placed",
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:

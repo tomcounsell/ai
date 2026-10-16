@@ -169,5 +169,75 @@ SHAPE = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, SHAPE)
+# The open tasks an overlap judgement lists, numbered: a leg answers labels
+# only, so the task a decision names is one of these numbers.
+OPEN_LISTED = 8
+OVERLAP = JudgementTask(
+    site="intake.overlap",
+    questions=(
+        Question(
+            id="decision",
+            text=(
+                "Read the new ask against the open tasks listed on its project. Does one of them already "
+                "do what the ask asks, or would the two touch the same work? Judge scope, not wording: "
+                "two asks that fix one cause overlap however they are worded."
+            ),
+            kind=Kind.PICK,
+            labels={
+                "covered": "One listed task already does what the ask asks; the ask adds nothing to it.",
+                "supersedes": "The ask covers a listed task's whole scope and more.",
+                "overlaps": "The ask and a listed task should both go ahead, but they touch the same code.",
+                "split": "The ask holds parts that belong to different tasks.",
+                "distinct": "No listed task shares the ask's scope.",
+            },
+            proceed=frozenset({"covered", "supersedes", "overlaps", "split", "distinct"}),
+        ),
+        Question(
+            id="task",
+            text="Which listed task does that decision name? `none` when it names none.",
+            kind=Kind.PICK,
+            labels={
+                **{str(n): f"listed task {n}" for n in range(1, OPEN_LISTED + 1)},
+                "none": "no listed task",
+            },
+            proceed=frozenset({*(str(n) for n in range(1, OPEN_LISTED + 1)), "none"}),
+        ),
+        Question(
+            id="placement",
+            text=(
+                "Should the ask run before or after the task named, because one lands work the other "
+                "needs? `none` when the order does not matter."
+            ),
+            kind=Kind.PICK,
+            labels={
+                "before": "The ask should run before the named task.",
+                "after": "The ask should run after the named task, which lands what it needs first.",
+                "none": "The order does not matter.",
+            },
+            proceed=frozenset({"before", "after", "none"}),
+        ),
+    ),
+    inputs={
+        "request": "task.started instruction, verbatim",
+        "project": "the name of the repository the task works in",
+        "open_tasks": (
+            f"the project's open tasks, the {OPEN_LISTED} most recently active, numbered: id, state, "
+            "instruction (cut), and a count of those left out"
+        ),
+    },
+    error_cost="medium",
+    # Floors set from the calibration record (docs/plans/ask-reconciliation.md, Rollout).
+    floor={"primary": 0.70, "fallback": 0.75},
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": "reconcile.decided records the decision; shadow: the judge runs as if distinct",
+        "caution": "reconcile.decided records distinct, with a note",
+    },
+    serves="Mission items 6 and 1",
+    guard="none in shadow: a record, no hold (the hold waits for calibration and Tom's grant)",
+    calibrated=None,
+)
+
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, SHAPE, OVERLAP)
 BY_SITE = {t.site: t for t in TASKS}

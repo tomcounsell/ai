@@ -2,6 +2,9 @@
 
 - The judge runner: the `judge` state's runner (`intake.underspecified`).
   The composition root registers `judge_runner(port)` for `State.JUDGE`.
+  Before the judge it asks `intake.overlap` once and records
+  `reconcile.decided`; in shadow (the site uncalibrated) that decision
+  holds nothing and the judge runs as it would without it.
 - `breadth`: the call `checks.test` makes (`checks.test.breadth`). 1.4's
   test runner calls it and passes the id to
   `verdicts.record_check(..., breadth=id)`, which reads the row itself.
@@ -25,9 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from core import db, git, judgement, ledger, machine, tasks
+from core import db, findings, git, judgement, ledger, machine, tasks
 from core.judgement import UNANSWERED_RUNS, JudgementPort, Kind
-from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, SHAPE
+from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, OPEN_LISTED, OVERLAP, SHAPE
 from core.machine import State
 
 DIFF = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color")
@@ -45,9 +48,7 @@ class Unanswered(LookupError):
 # -- the judge -------------------------------------------------------------------
 
 
-def project_name(b: tasks.Brief) -> str:
-    source = b.origin_url or b.workspace or ""
-    return PurePosixPath(source.rstrip("/")).name.removesuffix(".git") or "unknown"
+project_name = tasks.project_name
 
 
 def judge_runner(port: JudgementPort):
@@ -65,6 +66,10 @@ def judge_runner(port: JudgementPort):
             if f.state is not State.JUDGE:
                 return {"status": "moved"}
             b = await tasks.brief(conn, ctx.task_id)
+        if not any(r["type"] == "reconcile.decided" for r in rows):
+            stopped = await _reconcile(port, ctx, rows, b)
+            if stopped is not None:
+                return stopped
         consumed = {r["payload"].get("judgement_id") for r in rows if r["type"] == "judge.decided"}
         pending = [
             r
@@ -112,6 +117,120 @@ def judge_verdict(row: dict) -> str:
     if row["type"] == "judgement.answered" and row["payload"].get("action", {}).get("request") == "proceed":
         return "precise"
     return "thin"
+
+
+# -- the reconciler (shadow) ----------------------------------------------------
+
+SHADOW_NOTE = "shadow: intake.overlap is uncalibrated, so the judge runs as if distinct"
+
+
+async def open_tasks(conn, project: str, *, besides: str) -> tuple[list[dict[str, Any]], int]:
+    """The open tasks on `project` other than `besides`, most recently
+    active first, the first `OPEN_LISTED` of them, and how many more were
+    left out. Open is started and not merged, ended, stopped, calibration,
+    or legacy; activity is a task's latest row but for quiet ones."""
+    out = []
+    for task_id, rows, f in await tasks.open_ids(conn):
+        if task_id == besides or project_name(await tasks.brief(conn, task_id)) != project:
+            continue
+        start = next(r for r in rows if r["type"] == "task.started")
+        out.append(
+            {
+                "id": task_id,
+                "state": f.state.value,
+                "instruction": str(start["payload"].get("instruction") or "")[: findings.MESSAGE],
+                "active": max((r["id"] for r in rows if not ledger.quiet(r)), default=0),
+            }
+        )
+    out.sort(key=lambda t: t["active"], reverse=True)
+    return out[:OPEN_LISTED], max(len(out) - OPEN_LISTED, 0)
+
+
+def open_text(listed: list[dict[str, Any]], left_out: int) -> str:
+    lines = [f"{n}. {t['id']} ({t['state']}): {t['instruction']}" for n, t in enumerate(listed, 1)]
+    if left_out:
+        lines.append(f"({left_out} more open tasks, less recently active, are not listed)")
+    return "\n".join(lines) or "(no open tasks)"
+
+
+def reconcile_decision(row: dict[str, Any]) -> dict[str, Any]:
+    """The kernel's table for `intake.overlap`: the picked decision, the
+    listed task its number names, and a placement only beside a named
+    task. An abstain on the decision, or a failure of both legs, is
+    `distinct` with a note: the reconciler never stands on a guess."""
+    p = row["payload"]
+    listed = (p.get("ref") or {}).get("listed") or []
+    if row["type"] != "judgement.answered":
+        return {"decision": "distinct", "named": None, "placement": None, "note": "both legs failed"}
+    picked = p.get("picked") or {}
+    decision = picked.get("decision")
+    if decision is None:
+        return {"decision": "distinct", "named": None, "placement": None, "note": "the decision abstained"}
+    number = picked.get("task", "none")
+    named = listed[int(number) - 1] if number.isdigit() and 0 < int(number) <= len(listed) else None
+    if decision == "distinct":
+        named = None
+    placement = picked.get("placement") if named and picked.get("placement") in ("before", "after") else None
+    note = None if named or decision in ("distinct", "split") else "no listed task named"
+    return {"decision": decision, "named": named, "placement": placement, "note": note}
+
+
+async def _reconcile(port: JudgementPort, ctx, rows: list[dict], b: tasks.Brief) -> dict | None:
+    """Ask `intake.overlap` (or reuse an answer no `reconcile.decided` has
+    consumed) and record `reconcile.decided`. Returns the runner's result
+    when the task was stopped meanwhile, else None: the judge goes on."""
+    pending = [
+        r for r in rows if r["type"] in judgement.OUTCOMES and r["payload"].get("site") == OVERLAP.site
+    ]
+    if pending:
+        row = pending[-1]
+    else:
+        start = next(r for r in rows if r["type"] == "task.started")
+        request = str(start["payload"].get("instruction") or "")
+        project = project_name(b)
+        async with await db.connect(ctx.dsn) as conn:
+            listed, left_out = await open_tasks(conn, project, besides=ctx.task_id)
+        inputs = {"request": request, "project": project, "open_tasks": open_text(listed, left_out)}
+        ref = {
+            "request_sha256": ledger.digest(request),
+            "listed": [t["id"] for t in listed],
+            "left_out": left_out,
+        }
+        try:
+            j = await port.judge(OVERLAP, inputs, task_id=ctx.task_id, ref=ref, dsn=ctx.dsn)
+        except tasks.TaskStopped:
+            async with await db.connect(ctx.dsn) as conn:
+                return {"status": "stopped", "state": await tasks.status(conn, ctx.task_id)}
+        row = {"type": "judgement.answered" if j.answered else "judgement.failed", "payload": j.payload}
+    if not await ctx.alive():
+        return {"status": "lock lost"}
+    p = row["payload"]
+    async with await db.connect(ctx.dsn) as conn, conn.transaction():
+        await ledger.lock(conn, f"task:{ctx.task_id}")
+        now = await ledger.read(conn, ctx.task_id)
+        if machine.fold(now).state is State.STOPPED:
+            return {"status": "stopped", "state": await tasks.status(conn, ctx.task_id)}
+        if any(r["type"] == "reconcile.decided" for r in now):
+            return None
+        decided = reconcile_decision(row)
+        await ledger.append(
+            conn,
+            ctx.task_id,
+            "reconcile.decided",
+            {
+                **decided,
+                "judgement_id": p["judgement_id"],
+                "answered": row["type"] == "judgement.answered",
+                "abstained": list(p.get("abstained") or []),
+                "listed": len((p.get("ref") or {}).get("listed") or []),
+                "left_out": (p.get("ref") or {}).get("left_out", 0),
+                "model": p.get("model"),
+                "usd_micros": p.get("usd_micros"),
+                "shadow": OVERLAP.calibrated is None,
+                **({"shadow_note": SHADOW_NOTE} if OVERLAP.calibrated is None else {}),
+            },
+        )
+    return None
 
 
 # -- breadth ---------------------------------------------------------------------

@@ -152,7 +152,9 @@ docs checks hold one for their whole run, and the turn a review or docs check ru
 a no-op.
 
 **What runs beside the turns.** Bridges keep receiving and delivering released messages while turns
-run; an incoming request becomes a queued task. Judgement calls are hosted HTTP and run concurrently
+run; an incoming request becomes a task in one queue across projects: foreground work first, then
+start order, moved by the writers' placements (`python -m core shape TASK --before T`), which picks
+the next ready task for a free slot and never refuses one. Judgement calls are hosted HTTP and run concurrently
 with a turn at no memory cost, so a request can be classified (and sent to clarify or build, per
 [judgement-layer.md](judgement-layer.md)) while other tasks' turns hold the slots.
 

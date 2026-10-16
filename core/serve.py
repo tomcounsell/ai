@@ -30,13 +30,15 @@ rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`router.step`), a provisioning, or the collection recover could not
 make; one job per
 task at a time, and at most `settings.max_turns` harness jobs at once,
-foreground first; a clarify step (a question to Tom) is started whenever
+foreground first, then in queue order (`tasks.queue`: start order, moved
+by the writers' placements); a clarify step (a question to Tom) is started whenever
 it is ready, outside that count. A turn also holds one of the machine's turn slots
 (`core/slot.py`), which `python -m core run` shares.
 
 A task is stepped again when it moved, when its turn finished `idle`
-(behind every ready task whose latest row is older, so an idle task never
-holds the slot from other work), or when a row it did not write
+(behind every ready task that did not go idle, and among idle tasks the
+oldest latest row first, so an idle task never holds the slot from other
+work, whatever its queue place), or when a row it did not write
 lands on its stream (an answer, a steer, a stop, an effect's outcome). A
 step that failed is stepped again by the kernel once `router.retry_due`
 says the delay after it has passed, and the task ends with a report at
@@ -435,6 +437,10 @@ class Kernel:
         # Tasks whose job could not start its work, with the latest row then:
         # tried again on a newer row or the next `serve_tick_s` wake.
         self.parked: dict[str, int] = {}
+        # Tasks whose last step went idle: they queue behind every other
+        # ready task of their kind, and rotate among themselves by latest row,
+        # so an idle task never holds a slot by its queue place.
+        self.idle: set[str] = set()
         self.parked_at = time.monotonic()
         self.wake = asyncio.Event()
 
@@ -694,31 +700,47 @@ class Kernel:
                 _log(f"task {task_id}: settling failed: {exc!r}")
         if self.restart_due is not None:
             return  # a restart is due: no new job until the running ones end
+        open_ids: list[str] = []
         for task_id in active:
             if task_id in self.jobs:
+                open_ids.append(task_id)
                 continue
             try:
                 found = await self._ready(conn, task_id)
             except Exception as exc:  # noqa: BLE001  one task's scheduling fails alone
                 _log(f"task {task_id}: scheduling failed: {exc!r}")
                 continue
+            if found is False:
+                continue
+            open_ids.append(task_id)
             if found is not None:
                 ready.append(found)
-        # Foreground before background, then the oldest, up to the limit.
+        # Foreground before background, then queue order, up to the limit; a
+        # task whose last step went idle goes behind the rest, oldest latest
+        # row first (`self.idle`).
+        positions = tasks.queue(open_ids, await tasks.moves(conn, open_ids))
         free = settings.max_turns - len(self.harness) - len(self.background)
-        for background, latest, task_id in sorted(ready)[: max(free, 0)]:
+
+        def key(r: tuple[bool, int, str]) -> tuple:
+            idle = r[2] in self.idle
+            return (r[0], idle, r[1] if idle else positions.get(r[2], len(positions)), r[2])
+
+        ranked = sorted(ready, key=key)
+        for background, latest, task_id in ranked[: max(free, 0)]:
+            _log(f"task {task_id}: step started, queue position {positions.get(task_id)} of {len(positions)}")
             (self.background if background else self.harness).add(task_id)
             self._start(task_id, self._step(task_id, latest), latest)
 
-    async def _ready(self, conn, task_id: str) -> tuple[bool, int, str] | None:
+    async def _ready(self, conn, task_id: str) -> tuple[bool, int, str] | bool | None:
         """Start the task's job if it has one now; a harness step is
         returned instead, for `schedule` to choose: foreground before
-        background, then the oldest."""
+        background, then queue order. False: the task is closed (merged,
+        ended, stopped, calibration, or legacy) and has no queue place."""
         rows = await ledger.read(conn, task_id)
         f = machine.fold(rows)
-        if f.legacy or f.calibration or f.state in (State.MERGED, State.ENDED, State.STOPPED):
+        if f.legacy or f.calibration or f.state in tasks.TERMINAL:
             await self.settle(task_id)
-            return None
+            return False
         latest = max((r["id"] for r in rows if not ledger.quiet(r)), default=0)
         if task_id in self.parked:
             if latest <= self.parked[task_id]:
@@ -847,6 +869,7 @@ class Kernel:
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, task_id)
         self.seen[task_id] = latest
+        (self.idle.add if out.get("status") == "idle" else self.idle.discard)(task_id)
         if out.get("status") == "parked":
             # Asked again on the next row or the next `serve_tick_s` wake.
             self.seen.pop(task_id, None)

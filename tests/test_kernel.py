@@ -457,3 +457,58 @@ def test_threaded_posts_other_chats_later_posts_and_group_channels_are_not_carri
     assert (in_dm["as"], in_dm["instruction"]) == ("start", "hello")
     assert (in_group["as"], in_group["instruction"]) == ("start", "hello")
     assert stop["as"] == "start" and stop["task_id"] != task and task_state is not State.STOPPED
+
+
+# -- core shape and the queue (docs/plans/ask-reconciliation.md) --------------------
+
+
+def test_queue_order_is_start_order_moved_by_each_placement_in_turn():
+    def at(where, task, anchor):
+        return {"task": task, "anchor": anchor, "where": where}
+
+    def order(*moves):
+        q = tasks.queue("abcd", moves)
+        return "".join(sorted(q, key=q.get))
+
+    assert order() == "abcd"
+    assert order(at("after", "a", "c")) == "bcad"  # moved later
+    assert order(at("before", "d", "b"), at("before", "c", "d")) == "acdb"  # a chain, in order
+    assert order(at("before", "a", "b"), at("before", "b", "a")) == "bacd"  # a cycle: the latest wins
+    assert order(at("before", "d", "gone"), at("after", "a", "a")) == "abcd"  # not open, or itself
+
+
+def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            x, y, z, bare = [await new_task(dsn) for _ in range(4)]
+            await ledger.append(conn, x, "reconcile.decided", {"decision": "overlaps", "named": y})
+            await ledger.append(
+                conn, z, "reconcile.decided", {"decision": "overlaps", "named": x, "placement": "before"}
+            )
+            await ledger.append(
+                conn, y, "reconcile.decided", {"decision": "overlaps", "named": x, "placement": "before"}
+            )
+            refused = []
+            for t, kw in ((bare, {"confirm": True}), (x, {"before": x}), (x, {"after": "nope"}),
+                          (x, {"confirm": True, "amend": "y"}), (x, {})):  # fmt: skip
+                try:
+                    await session.shape(conn, t, by="valor", **kw)
+                except (LookupError, ValueError) as exc:
+                    refused.append(str(exc))
+            got = [
+                await session.shape(conn, x, confirm=True, by="valor"),
+                await session.shape(conn, y, amend="only the tests half", after=z, by="valor"),
+            ]
+            ids = [x, y, z, bare]
+            queued = tasks.queue(ids, await tasks.moves(conn, ids))
+            return got, refused, queued, ids, await ledger.read(conn, x), await ledger.read(conn, y)
+
+    got, refused, queued, (x, y, z, bare), xs, ys = run(go())
+    assert got == [["shape.confirmed"], ["shape.confirmed", "message.steered", "task.placed"]]
+    assert len(refused) == 5 and "no reconciler decision" in refused[0]
+    # z's proposal applies (z before x); y's writer placed it, so y's own proposal does not.
+    assert sorted(queued, key=queued.get) == [z, y, x, bare]
+    label = next(r["payload"] for r in xs if r["type"] == "shape.confirmed")
+    assert (label["confirmed"], label["decision"], label["provenance"]["by"]) == (True, "overlaps", "valor")
+    steer = next(r["payload"] for r in ys if r["type"] == "message.steered")
+    assert session._steering([steer]) == "Written to you while you worked:\n- valor: only the tests half"

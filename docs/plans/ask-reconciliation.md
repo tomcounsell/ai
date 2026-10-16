@@ -207,3 +207,13 @@ Tests go into the existing files, about 250 lines in all.
 - 2026-10-16: re-planned on the stripped main. The hold moves to the
   calibration task, and shadow runs inside the judge step (see "Why this is
   narrower").
+- 2026-10-16: critique round 2 sound; one finding built (a stop during the
+  overlap call returns `stopped`, as the judge's does). Built: the judgement
+  port answers labels only, so the site lists the 8 most recently active
+  open tasks numbered and the decision names one by number; there is no
+  free-text restated scope. Success criterion 2 (the live replay) is not
+  yet run: the build turn has no judgement keys and no live ledger.
+- 2026-10-16: rebased onto main `e64fe39fd`, which made an idle step yield
+  the slot (`f2227fe8c`). Queue order keeps that: a task whose last step went
+  idle sorts behind every ready task that did not, idle tasks rotating by
+  latest row, so start order never lets an idle old task hold a slot.

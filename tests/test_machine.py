@@ -122,6 +122,20 @@ def test_the_happy_path_from_judge_to_merged():
     assert led.state is State.MERGED
 
 
+def test_the_reconcilers_rows_move_no_state_so_a_task_from_before_them_folds_as_it_did():
+    """docs/plans/ask-reconciliation.md: shadow adds rows, never a state."""
+    old, new = Ledger(judge=None), Ledger(judge=None)
+    new.add("reconcile.decided", {"decision": "covered", "named": "t1", "placement": "after"})
+    for led in (old, new):
+        led.add("judge.decided", {"verdict": "precise", "leg": "manual"})
+    new.add("shape.confirmed", {"decision": "covered", "confirmed": True})
+    new.add("task.placed", {"anchor": "t1", "where": "before"})
+    for led in (old, new):
+        led.plan().critique("sound")
+    assert old.state is new.state is State.BUILD
+    assert old.fold().ignored == new.fold().ignored == []
+
+
 def test_a_thin_request_clarifies_and_an_answer_returns_to_the_state_that_asked():
     led = Ledger(judge="thin")
     assert led.state is State.CLARIFY

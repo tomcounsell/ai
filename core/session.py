@@ -775,6 +775,81 @@ async def answer(
     return f.open_question
 
 
+async def shape(
+    conn,
+    task_id: str,
+    *,
+    confirm: bool = False,
+    amend: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
+    by: str = "tom",
+    via: str = "the command line",
+    role_played: bool = False,
+) -> list[str]:
+    """The writer's word on the reconciler's decision and the ask's place in
+    the queue (docs/plans/ask-reconciliation.md): `confirm` or `amend`
+    writes `shape.confirmed`, the writer's label on `reconcile.decided`, and
+    an amend's text also steers the task (`message.steered`); `before` or
+    `after` writes `task.placed` beside another open task. Returns the kinds
+    written. Refused (LookupError, nothing written): a task that is not an
+    open SDLC task, a label with no decision to label, and an anchor that is
+    the task itself or not open."""
+    amend = amend.strip() if amend is not None else None
+    if (confirm and amend is not None) or (before and after):
+        raise ValueError("one of confirm and amend, and one of before and after")
+    if amend == "":
+        raise ValueError("an amend has text")
+    if not (confirm or amend or before or after):
+        raise ValueError("nothing to record: confirm, amend, before, or after")
+    anchor = before or after
+    written: list[str] = []
+    provenance = ledger.provenance(by, via, role_played)
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        rows = await ledger.read(conn, task_id)
+        if not rows:
+            raise LookupError(f"no task {task_id}")
+        f = machine.fold(rows)
+        if f.legacy or f.calibration or f.state in tasks.TERMINAL:
+            raise LookupError(f"task {task_id} is not open (it is {f.state})")
+        if anchor is not None and (
+            anchor == task_id or anchor not in {t for t, _, _ in await tasks.open_ids(conn)}
+        ):
+            raise LookupError(f"task {anchor} is not another open task")
+        if confirm or amend:
+            decided = next((r for r in reversed(rows) if r["type"] == "reconcile.decided"), None)
+            if decided is None:
+                raise LookupError(f"task {task_id} has no reconciler decision to confirm or amend")
+            d = decided["payload"]
+            await ledger.append(
+                conn,
+                task_id,
+                "shape.confirmed",
+                {
+                    "judgement_id": d.get("judgement_id"),
+                    "decision": d.get("decision"),
+                    "named": d.get("named"),
+                    "confirmed": bool(confirm),
+                    "amend": amend,
+                    "provenance": provenance,
+                },
+            )
+            written.append("shape.confirmed")
+            if amend:
+                await ledger.append(
+                    conn, task_id, "message.steered", {"text": amend, "provenance": provenance}
+                )
+                written.append("message.steered")
+        if anchor is not None:
+            where = "before" if before else "after"
+            await ledger.append(
+                conn, task_id, "task.placed", {"anchor": anchor, "where": where, "provenance": provenance}
+            )
+            written.append("task.placed")
+    return written
+
+
 async def feedback(
     conn,
     task_id: str,
@@ -961,10 +1036,13 @@ def _steering(steered: list[dict[str, Any]]) -> str:
     finished), for the next working turn."""
     if not steered:
         return ""
-    lines = ["Tom wrote while you worked:"]
+    by = {(p.get("provenance") or {}).get("by") or "tom" for p in steered}
+    lines = ["Tom wrote while you worked:" if by == {"tom"} else "Written to you while you worked:"]
     for p in steered:
         paths = [a["path"] for a in p.get("attachments") or [] if a.get("path")]
-        lines.append(f"- {p.get('text', '')}" + (f" (attachments: {', '.join(paths)})" if paths else ""))
+        writer = (p.get("provenance") or {}).get("by") or "tom"
+        text = p.get("text", "") if by == {"tom"} else f"{writer}: {p.get('text', '')}"
+        lines.append(f"- {text}" + (f" (attachments: {', '.join(paths)})" if paths else ""))
     return "\n".join(lines)
 
 

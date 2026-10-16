@@ -9,6 +9,9 @@ event loop, so synchronous tests and each `asyncio.run` share one server.
 One kind of path, `/fixed/<answer>/<leg>` (the leg `jev` or `open_weight`):
 every question answered with 0.95 on one label: `precise` or `thin` for the
 request judge (thin is `one_line_ask`), `true` or `false` for a boolean.
+`<answer>` may list labels with commas (`precise,covered,1,after`): each
+question takes the first it has, else its last label (`distinct` and
+`none` for the overlap site, so a plain `precise` reads as distinct).
 """
 
 import asyncio
@@ -63,9 +66,7 @@ def questions_of(leg: str, body: dict) -> dict[str, list[str]]:
 
 
 def fixed_probs(answer: str, labels: list[str]) -> dict[str, float]:
-    pick = FIXED.get(answer, answer)
-    if pick not in labels:
-        pick = labels[-1]
+    pick = next((p for p in (FIXED.get(a, a) for a in answer.split(",")) if p in labels), labels[-1])
     rest = [label for label in labels if label != pick]
     return {label: (0.95 if label == pick else round(0.05 / len(rest), 6)) for label in labels}
 

@@ -202,7 +202,13 @@ without saying what happens to it. A code summary as input is a gap until it is 
 
 **Exit evidence.** `judgement.answered` (or `judgement.failed`) at site `intake.underspecified`,
 read by the kernel into the one `judge.decided` (`leg: judgement`, the `judgement_id`, P(precise),
-model, cost, guard id when thin). `precise` goes to `plan`; anything short of the floor, including
+model, cost, guard id when thin). Before it, the same step asks `intake.overlap` once over the
+request, the project, and the project's open tasks, and records `reconcile.decided` (the decision,
+the open task it names, a proposed placement, the judgement id, `shadow: true`). The row moves no
+state, and while the site is uncalibrated the judge decides as it would without it; a retried step
+reuses that row and asks nothing again. The writer labels it with `python -m core shape`
+(`shape.confirmed`) and places the task in the queue (`task.placed`); all three rows are quiet, so
+none steps the task. `precise` goes to `plan`; anything short of the floor, including
 both legs failing, is `thin`, to `clarify`: a wrong `thin` costs one clarify turn, a wrong `precise`
 costs review rounds.
 

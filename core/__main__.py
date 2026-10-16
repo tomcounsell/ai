@@ -73,11 +73,19 @@ feedback TASK_ID TEXT [--by B] [--role-played]
                                next run patches in the same session. `--by`
                                names who wrote it (default tom); `--role-played`
                                marks a stand-in speaking for Tom
+shape TASK_ID (--confirm | --amend TEXT) [--before T | --after T] [--by B] [--role-played]
+                               the writer's word on the reconciler's decision
+                               (`shape.confirmed`; an amend's text also steers
+                               the task), and the task's place in the queue,
+                               right before or after open task T (`task.placed`);
+                               a placement alone is `shape TASK --before T`
 status TASK_ID                 the task as a fold over its ledger: its state,
                                loops, candidate, checks, metered spending, and
                                the attention log (questions, answers, feedback,
                                approvals) and its counts;
-                               its parent, its children's reports, and the
+                               its parent, its children's reports, the
+                               reconciler's decision, the writer's label and
+                               placement, the queue line, and the
                                metered spending of its whole subtree; and
                                what came after each merge (feedback after it,
                                its paths, later merges sharing them, whether
@@ -628,8 +636,9 @@ async def _run(args) -> None:
                 )
             except routines.Refused as exc:
                 raise SystemExit(f"routine refused: {exc}") from None
-        print(said)
-        print(task)
+            print(said)
+            print(task)
+            print(await tasks.queue_line(conn, task))
         return
     if args.command == "routine":
         async with await db.connect() as conn:
@@ -654,7 +663,9 @@ async def _run(args) -> None:
         elif args.command == "agenda":
             print(json.dumps(await agenda.open_items(conn), indent=2, default=str))
         elif args.command == "start" and args.project:
-            print(await _start_project(conn, args))
+            started = await _start_project(conn, args)
+            print(started)
+            print(await tasks.queue_line(conn, started))
         elif args.command == "start":
             harness = json.loads(Path(args.harness_config).read_text()) if args.harness_config else {}
             workspace = str(Path(args.workspace).resolve()) if args.workspace else None
@@ -676,6 +687,7 @@ async def _run(args) -> None:
             except START_REFUSED as exc:
                 raise SystemExit(f"start refused: {exc}") from None
             print(started)
+            print(await tasks.queue_line(conn, started))
         elif args.command == "workspace":
             print(await _workspace(conn, args))
         elif args.command == "answer":
@@ -686,6 +698,22 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"answered question {question_id}; continue with: python -m core run {args.task_id}")
+        elif args.command == "shape":
+            try:
+                written = await session.shape(
+                    conn,
+                    args.task_id,
+                    confirm=args.confirm,
+                    amend=args.amend,
+                    before=args.before,
+                    after=args.after,
+                    by=args.by,
+                    role_played=args.role_played,
+                )
+            except (LookupError, ValueError) as exc:
+                raise SystemExit(f"shape refused: {exc.args[0]}") from None
+            print(f"{', '.join(written)} recorded on task {args.task_id}")
+            print(await tasks.queue_line(conn, args.task_id))
         elif args.command == "feedback":
             try:
                 feedback_id = await session.feedback(
@@ -711,6 +739,7 @@ async def _run(args) -> None:
             except KeyError:
                 raise SystemExit(f"no task {args.task_id}") from None
             state.update(await outcomes.after_merge(conn, b, await ledger.read(conn, args.task_id)))
+            state["queue"] = await tasks.queue_line(conn, args.task_id)
             print(json.dumps(state, indent=2))
         elif args.command == "used":
             try:
@@ -887,6 +916,16 @@ def main() -> None:
         reply.add_argument("text")
         reply.add_argument("--by", default="tom")
         reply.add_argument("--role-played", action="store_true")
+    shape = sub.add_parser("shape")
+    shape.add_argument("task_id")
+    label = shape.add_mutually_exclusive_group()
+    label.add_argument("--confirm", action="store_true", help="the reconciler's decision stands")
+    label.add_argument("--amend", help="the decision is wrong or partial: this text says how")
+    place = shape.add_mutually_exclusive_group()
+    place.add_argument("--before", metavar="T", help="run right before open task T")
+    place.add_argument("--after", metavar="T", help="run right after open task T")
+    shape.add_argument("--by", default="tom")
+    shape.add_argument("--role-played", action="store_true")
     ws_cmd = sub.add_parser("workspace").add_subparsers(dest="workspace_command", required=True)
     ws_cmd.add_parser("show").add_argument("task_id")
     remove = ws_cmd.add_parser("remove")

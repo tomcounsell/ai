@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -26,8 +27,10 @@ from core import (
     ledger,
     machine,
     rollout,
+    router,
     runs,
     serve,
+    session,
     signals,
     tasks,
 )
@@ -295,8 +298,8 @@ def test_an_idle_task_gives_the_slot_to_other_ready_work(fresh, op, monkeypatch)
         return a, b
 
     a, b = run(go())
-    # b arrived after a's last turn; from then on they alternate.
-    assert calls == [a, a, a, b, a, b]
+    # b arrived after a's last turn: b goes ahead of the idle a, then they alternate.
+    assert calls == [a, a, b, a, b, a]
 
 
 def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
@@ -367,3 +370,51 @@ def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, c
         run(serve.serve({}, dsn=fresh, checkout=None))
     assert len(ticks) == 2 and closed == ["kernel", "gateway"]
     assert "kernel wake failed: RuntimeError('one wake failed')" in capsys.readouterr().err
+
+
+# -- queue order (docs/plans/ask-reconciliation.md) ---------------------------------
+
+
+def test_ready_work_runs_foreground_first_then_in_start_order_moved_by_placements(fresh, op, monkeypatch):
+    calls = []
+
+    async def counting(ctx):
+        calls.append(ctx.task_id)
+        return {"status": "waiting"}  # neither moved nor idle: stepped again only on a new row
+
+    async def go():
+        a = await new_task(fresh, routine="r", origin_url="/repos/alpha.git")
+        b = await new_task(fresh, routine="r", origin_url="/repos/beta.git")
+        c = await new_task(fresh, routine="r", origin_url="/repos/alpha.git")
+        tom = await new_task(fresh)
+        for t in (a, b, c, tom):
+            await scripted.run_judge(fresh, t, "precise")
+        async with await db.connect(fresh) as conn:
+            await session.shape(conn, a, after=c, by="valor")
+        monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, max_turns=1))
+        kernel = only(serve.Kernel(None, {State.PLAN: counting}, None, fresh), a, b, c, tom)
+        for _ in range(4):
+            await tick(kernel, fresh)
+            await settled(kernel)
+        ran = list(calls)
+        # A label or a placement moves no task: nothing steps again.
+        async with await db.connect(fresh) as conn:
+            await session.shape(conn, b, confirm=True, before=a, by="valor")
+        for _ in range(2):
+            await tick(kernel, fresh)
+            await settled(kernel)
+        return ran, len(calls), (a, b, c, tom)
+
+    ran, after, (a, b, c, tom) = run(go())
+    assert ran == [tom, b, c, a] and after == 4
+
+
+def test_a_placement_after_a_failed_step_keeps_the_failure_and_its_backoff():
+    at = datetime.now(UTC)
+    rows_ = [
+        {"id": 1, "type": "task.started", "payload": {"sdlc": 1}, "at": at},
+        {"id": 2, "type": "step.failed", "payload": {"reason": "x"}, "at": at},
+        {"id": 3, "type": "task.placed", "payload": {"anchor": "t", "where": "before"}, "at": at},
+    ]
+    assert not router.retry_due(rows_, now=at) and router.retry_due(rows_, now=at + timedelta(days=1))
+    assert tasks.failed_step(rows_) is not None
