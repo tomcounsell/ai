@@ -1,0 +1,38 @@
+# gato-os: served by the Pirate (one Mac per client). No kernel runs as
+# "Valor the Pirate" until that Mac's rollout, so this spec and its chat
+# are inert until then. `client` follows the old config's owner; Tom may
+# rename it.
+#
+# The old system also took email from the domain chainstarters.com. A chats
+# entry names one sender address (`email:<sender address>`, matched exactly),
+# not a domain, so that routing is left out until Tom names the addresses.
+name = "gato-os"
+client = "chainstarters"
+repo = "https://github.com/chainstarters/gato-os.git"
+# A Rust (cargo) workspace; KINDS has no rust, so plain.
+kind = "plain"
+branch = "main"
+merge_url = "https://github.com/chainstarters/gato-os.git"
+# No kernel services: its tests start their own throwaway Postgres (with
+# pgvector) from GATO_OS_PG_BIN_DIR, which the repo's Nix devshell sets and
+# [env] below points at Homebrew's postgresql@18.
+#
+# Absent on the Pirate on 2026-10-16: a Rust toolchain >= 1.88 (edition
+# 2024) and cargo-nextest. The repo's own gates run under `nix develop`, and
+# the Pirate has no Nix.
+#
+# cargo test writes no JUnit; cargo-nextest does, from a profile. The repo
+# has no .config/nextest.toml, so the suite writes one under target/ (no
+# tracked file changes) and copies the report to {junit}, keeping the exit.
+suite = "mkdir -p target && printf '[profile.valor.junit]\\npath = \"junit.xml\"\\n' > target/valor-nextest.toml && { cargo nextest run --workspace --no-fail-fast --config-file target/valor-nextest.toml --profile valor; rc=$?; cp target/nextest/valor/junit.xml {junit}; exit $rc; }"
+# CI's gates, as AGENTS.md lists them.
+lint = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && ./scripts/lint-all.sh"
+# "Eng: Gato".
+chats = ["telegram:-1003513124705"]
+machine = "Valor the Pirate"
+knowledge_base = "SOUL"
+
+[env]
+GATO_OS_PG_BIN_DIR = "/opt/homebrew/opt/postgresql@18/bin"
+# `pg_config --sharedir` on the Pirate; Homebrew's pgvector installs here.
+GATO_OS_PG_SHARE_DIR = "/opt/homebrew/share/postgresql@18"

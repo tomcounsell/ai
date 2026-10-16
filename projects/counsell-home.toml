@@ -1,0 +1,20 @@
+# counsell-home: served by the Pirate (one Mac per client). No kernel runs
+# as "Valor the Pirate" until that Mac's rollout, so this spec and its chat
+# are inert until then. `client` follows the old config's owner; Tom may
+# rename it.
+name = "counsell-home"
+client = "counsell"
+repo = "https://github.com/tomcounsell/counsell-home.git"
+# A monorepo. The Kotlin device controller and the Flutter chat app have no
+# toolchain on the Pirate, so the suite is server/llm-proxy's, the one
+# Python package with tests (no uv.lock; its .venv is gitignored).
+kind = "python-uv"
+branch = "main"
+merge_url = "https://github.com/tomcounsell/counsell-home.git"
+setup = ["cd server/llm-proxy && uv venv -q --python 3.12 && uv pip install -q -e '.[test]'"]
+# Its tests mock the upstream, so no credential or service is needed. 28
+# pass at main on 2026-10-16.
+suite = "cd server/llm-proxy && .venv/bin/python -m pytest -p no:cacheprovider -q --junitxml={junit} tests"
+# "Eng: Counsell Home".
+chats = ["telegram:-5174105183"]
+machine = "Valor the Pirate"

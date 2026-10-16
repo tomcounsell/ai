@@ -1,0 +1,18 @@
+# yudame: the yuda.me website, served by the Pirate. No kernel runs as
+# "Valor the Pirate" until that Mac's rollout, so this spec and its chat
+# are inert until then. `client` follows the old config's owner; Tom may
+# rename it.
+name = "yudame"
+client = "yudame"
+repo = "https://github.com/yudame/yuda.me.git"
+kind = "node"
+branch = "main"
+merge_url = "https://github.com/yudame/yuda.me.git"
+setup = ["npm ci"]
+# A static Tailwind site with no tests and no JUnit reporter: the suite is
+# the build its deploy workflow runs, judged by its exit alone.
+suite = "npm run build"
+# "Yudame".
+chats = ["telegram:-4719889199"]
+machine = "Valor the Pirate"
+knowledge_base = "Yudame"
