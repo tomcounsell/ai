@@ -3,30 +3,35 @@
 
 Claude Code runs it before each web call with the call as JSON on stdin; the
 `agent_type` it carries names the agent making the call, absent in the main
-session. Any other caller is denied with the way to the web: start the agent.
+session. Any other caller, or a call it cannot read, is denied with the way
+to the web: start the agent. `hooks.json` turns any failure of the hook into
+exit 2, which Claude Code treats as a block.
 """
 
 import json
 import sys
 
 WEB_AGENT = "valor:web"
+DENY = {
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": (
+            f"The web is reached through the {WEB_AGENT} agent: start it with the Agent tool "
+            "and ask it your question."
+        ),
+    }
+}
 
 
 def decision(call):
-    if call.get("agent_type") == WEB_AGENT:
-        return None
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"The web is reached through the {WEB_AGENT} agent: start it with the Agent tool "
-                "and ask it your question."
-            ),
-        }
-    }
+    return None if isinstance(call, dict) and call.get("agent_type") == WEB_AGENT else DENY
 
 
 if __name__ == "__main__":
-    if (out := decision(json.load(sys.stdin))) is not None:
+    try:
+        call = json.load(sys.stdin)
+    except ValueError:
+        call = None
+    if (out := decision(call)) is not None:
         print(json.dumps(out))

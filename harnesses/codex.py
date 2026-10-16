@@ -93,7 +93,8 @@ def config_toml(base_url: str, model: str, brief: str) -> str:
 
 
 def link_skills(codex_home: str) -> None:
-    """Make `<codex_home>/skills` hold one link per yudame plugin, named by
+    """Make `<codex_home>/skills` hold one link per plugin in `settings.plugin_dirs`
+    (Valor's own and yudame's), named by
     the plugin, to its `skills` directory. Every link there is the kernel's,
     so each is removed first; what Codex keeps there itself (`.system`) is
     no link. The home and `skills` are opened without following a link."""

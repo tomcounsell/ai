@@ -47,6 +47,7 @@ def version(path: str) -> str | None:
 
 
 SPAWN_DEPTH = "1000"
+HOOKS_ON = json.dumps({"disableAllHooks": False})
 SUBAGENT_OPENING = (
     "The Brief of the Valor session that started you follows. Its stage and channel are that "
     "session's; your task is the prompt you were given, and what you find goes back to it."
@@ -57,7 +58,8 @@ def subagent_start(brief: str) -> str:
     """The SubagentStart hook output that gives a subagent the dispatched text."""
     context = f"{SUBAGENT_OPENING}\n\n{brief}"
     return json.dumps(
-        {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}}
+        {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}},
+        ensure_ascii=False,
     )
 
 
@@ -165,6 +167,11 @@ def workspace_turn(
             "off",
             "--append-system-prompt",
             brief,
+            # Valor's plugin hooks (the web guard, the Brief to subagents) stay on
+            # whatever the project's or the turn's own settings say: command-line
+            # settings outrank both, and a settings file the turn writes reloads.
+            "--settings",
+            HOOKS_ON,
         ]
         for d in settings.plugin_dirs:
             if os.path.isdir(d):

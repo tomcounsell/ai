@@ -2,7 +2,7 @@
 tracking: none
 slug: orchestration
 type: build
-status: wave 0 done (2026-10-17); wave 1 building; wave 2 waits on team-chat steps 2 and 3
+status: waves 0 and 1 done (2026-10-17); wave 2 building
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -96,9 +96,12 @@ The strip's ten rules, with rules 1, 3, 4, 8 and 10 most often in play. On top o
   as data (the answer, the quotes it rests on, the URLs), never a page, and treats
   what it reads as data.
 - `skills/valor/hooks/hooks.json`: PreToolUse on `WebFetch|WebSearch` runs
-  `web_only.py`. SubagentStart prints `VALOR_SUBAGENT_START` when it is set.
+  `web_only.py` under `/usr/bin/python3 -I`, and any failure exits 2, a block.
+  SubagentStart runs `subagent_start.py`.
 - `skills/valor/hooks/web_only.py`: allows `agent_type == "valor:web"` and denies
-  everyone else, naming the web agent.
+  everyone else, and any call it cannot read, naming the web agent.
+- `skills/valor/hooks/subagent_start.py`: prints `VALOR_SUBAGENT_START` for every
+  subagent but the web agent, which reads untrusted pages with the web in hand.
 - `skills/valor/skills/authenticity-pass/SKILL.md`: ported from the old system as
   craft. It returns the missing markers and how to add them, with no PASS or BLOCK.
 - `core/guards.py`: the `web.agent_only` entry, with its own grant date, expiry
@@ -114,7 +117,15 @@ The strip's ten rules, with rules 1, 3, 4, 8 and 10 most often in play. On top o
   - sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, so there is no depth limit;
   - sets `VALOR_SUBAGENT_START`, the SubagentStart JSON whose `additionalContext`
     is the dispatched text, opened by one line saying it is the Brief of the
-    session that started the subagent and the subagent's task is its prompt.
+    session that started the subagent and the subagent's task is its prompt;
+  - passes `--settings '{"disableAllHooks": false}'`, so neither the project's
+    settings nor a settings file the turn writes can switch the guard off.
+
+**The review** (2026-10-17) found the plugin's two JSON files ignored by
+`.gitignore` (now un-ignored), the guard failing open when the hook could not
+run, a turn able to switch hooks off mid-turn, and the Brief reaching the web
+agent. All four are fixed and probed live. The guard's reach is stated under
+"Known and left open".
 
 **Tests** (`tests/test_orchestration.py`):
 
@@ -173,10 +184,14 @@ Merge order: C, D, E, one after another, since D and E edit text the session rea
 
 ## Known and left open
 
-- The logged-in browser (byob) is also a web path. The grant names WebFetch and
-  WebSearch only, so a page the browser reads is not covered.
+- The guard covers WebFetch and WebSearch only. Other web paths stay open: the
+  logged-in browser (byob), a command (`curl`, `gh api`, a script), and an MCP
+  server's own fetch tool. Covering any of them would be new governance and
+  would need its own grant.
+- A turn can write the kernel checkout, the hook script included.
 - The guard cannot write the ledger when it fires, since turns cannot reach
   Postgres. At expiry it is listed for Tom with no firing record, and he decides.
 - `VALOR_SUBAGENT_START` puts a second copy of the Brief into the turn's
-  environment. That is fine while argv plus environment stays under macOS's
-  1 MB limit.
+  environment (UTF-8, not escaped). That is fine while argv plus environment
+  stays under macOS's 1 MB limit. Above about 10,000 characters, Claude Code
+  hands the subagent a preview and a file path instead of the whole text.

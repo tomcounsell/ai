@@ -88,10 +88,11 @@ turns share the RAM. The RAM a turn takes is `docs/machine.md`'s to state.
 
 `harnesses/claude_code.py` builds `workspace_turn`, one turn of a task that works in a directory.
 It runs as a developer's Claude Code would there: the project's CLAUDE.md, settings, hooks, skills,
-MCP servers and web tools all load, and so do the plugin directories in `settings.plugin_dirs`
-(`VALOR_PLUGIN_DIRS`, colon-separated; by default the yudame and yudame-dev plugins of the yudame
-marketplace Claude Code keeps under `~/.claude/plugins/marketplaces/`), each passed as
-`--plugin-dir` when it exists. The operator's own user-scope MCP servers (`mcpServers` in
+MCP servers and web tools all load (WebFetch and WebSearch run inside the web agent alone; see
+Skill rendering), and so do the plugin directories in `settings.plugin_dirs`: Valor's own,
+`skills/valor` in the kernel's checkout, always first, then `VALOR_PLUGIN_DIRS` (colon-separated;
+by default the yudame and yudame-dev plugins of the yudame marketplace Claude Code keeps under
+`~/.claude/plugins/marketplaces/`), each passed as `--plugin-dir` when it exists. The operator's own user-scope MCP servers (`mcpServers` in
 `settings.claude_json`, `VALOR_CLAUDE_JSON`, default `~/.claude.json`; the logged-in browser
 among them) are passed as `--mcp-config`, since the turn's own config directory holds none.
 
@@ -106,7 +107,8 @@ Its arguments:
 |---|---|---|
 | `-p --output-format json` | one non-interactive turn; one JSON result on stdout | the port's `parse` |
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
-| `--plugin-dir DIR`, once per existing `settings.plugin_dirs` entry | loads the yudame plugins | developer parity (C18) |
+| `--plugin-dir DIR`, once per existing `settings.plugin_dirs` entry | loads Valor's plugin, then the yudame plugins | developer parity (C18); the web guard |
+| `--settings '{"disableAllHooks": false}'` | keeps Valor's plugin hooks on: command-line settings outrank the project's and any the turn writes, which Claude Code reloads mid-turn | the web guard (Skill rendering) |
 | `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
 | `--session-id ID` or `--resume SESSION` | a new session under an id the kernel chose, or the task's session continued | Mission item 1 (see below); the kernel knows which transcript is the turn's |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
@@ -133,6 +135,10 @@ The wrapper then sets:
   background tests before this (rebuild-baseline.md, Caveats). Mission
   item 1: tests that ran are tests that finished.
 - `GIT_TERMINAL_PROMPT=0`.
+- `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`: `claude_code.SPAWN_DEPTH`, so subagents start subagents
+  past Claude Code's own cap of 3 (Skill rendering).
+- `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the dispatched text, which Valor's
+  plugin gives every subagent but the web agent (Corrections reaching subagents, below).
 - `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
   `tmpdir` (the workspace's `tmp/` for the working session, a check's
   `checks/<name>/tmp/` for a fresh one; emptied at each turn's start and
@@ -411,7 +417,12 @@ Two points the harness relies on and has to keep true:
   depth, the Brief as its opening context: the wrapper puts the
   SubagentStart hook output in `VALOR_SUBAGENT_START`
   (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
-  prints it. Pi starts no subagents.
+  (`skills/valor/hooks/subagent_start.py`) prints it for every subagent but
+  the web agent, which reads untrusted pages and gets only its prompt.
+  Claude Code keeps a hook output of more than about 10,000 characters in a
+  file and gives the subagent a preview and the file's path, so a long
+  Brief arrives that way, read with the subagent's Read tool. Pi starts no
+  subagents.
 
 ## The turn sandbox
 
@@ -544,8 +555,12 @@ text, so they need nothing harness-specific.
 WebFetch and WebSearch run only inside `valor:web`, the leaf agent in Valor's
 plugin (`skills/valor/agents/web.md`) whose tools are those two alone. The
 plugin's PreToolUse hook (`skills/valor/hooks/web_only.py`) denies them to
-any other caller, naming the agent, so an agent that needs the web starts
-it and gets findings back as data, never a page. This is the guard
+any other caller, naming the agent, so an agent that needs a search or a
+page starts it and gets findings back as data, never a page. The hook fails
+closed: it runs `/usr/bin/python3 -I`, a call it cannot read is denied, and
+any failure exits 2, which Claude Code treats as a block; `--settings` keeps
+it on. The guard covers those two tools only: a command (`curl`, `gh api`)
+and an MCP server's own fetch tool still reach the network. This is the guard
 `web.agent_only`, granted by Tom on 2026-10-16 against injection through
 retrieved content (#3648), ledgered by `core/guards.py` with its ninety-day
 expiry. A session-wide `--disallowedTools` would remove the tools from the

@@ -351,9 +351,9 @@ workspace turn keeps Claude Code's own system prompt and tools, appends the
 dispatched text (persona, then Brief) re-rendered every turn
 (`--system-prompt-snapshot off`), resumes the task's session, and runs with:
 
-- the project's own `CLAUDE.md`, settings, hooks, skills, and MCP servers, and the yudame plugins
-  from `settings.plugin_dirs`, each passed as `--plugin-dir`: a turn runs as a developer's Claude
-  Code would;
+- the project's own `CLAUDE.md`, settings, hooks, skills, and MCP servers, and the plugins in
+  `settings.plugin_dirs` (Valor's own first, then yudame's), each passed as `--plugin-dir`: a turn
+  runs as a developer's Claude Code would, with WebFetch and WebSearch inside the web agent alone;
 - `--permission-mode bypassPermissions`: nobody is there to answer a permission prompt;
 - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, because a `-p` turn that stops
   kills what it left running in the background

@@ -24,6 +24,19 @@ def hook(call: dict) -> dict | None:
 
 def test_only_the_web_agent_reaches_the_web():
     assert hook({"tool_name": "WebFetch", "agent_type": "valor:web"}) is None
+    # A call the hook cannot read is denied, and a hook that fails at all blocks (exit 2).
+    unread = subprocess.run(
+        [sys.executable, HOOK], input="not json", capture_output=True, text=True, check=True
+    )
+    assert json.loads(unread.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    command = json.loads((Path(VALOR_PLUGIN) / "hooks" / "hooks.json").read_text())["hooks"]["PreToolUse"][0]
+    failed = command["hooks"][0]["command"].replace("${CLAUDE_PLUGIN_ROOT}", "/nonexistent")
+    assert (
+        subprocess.run(
+            ["sh", "-c", failed], input="{}", capture_output=True, text=True, check=False
+        ).returncode
+        == 2
+    )
     for caller in ({}, {"agent_type": "general-purpose"}, {"agent_type": "web"}):
         out = hook({"tool_name": "WebSearch", **caller})["hookSpecificOutput"]
         assert out["permissionDecision"] == "deny" and "valor:web" in out["permissionDecisionReason"]
@@ -57,4 +70,19 @@ def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_brief():
     start = json.loads(argv_env.env["VALOR_SUBAGENT_START"])["hookSpecificOutput"]
     assert start["hookEventName"] == "SubagentStart"
     assert start["additionalContext"].endswith("\n\nthe brief\nwith lines")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": False}
     assert "--disallowedTools" not in argv
+
+
+def test_every_subagent_but_the_web_agent_opens_with_the_brief():
+    start = Path(VALOR_PLUGIN) / "hooks" / "subagent_start.py"
+
+    def opens(agent_type: str) -> str:
+        env = {"VALOR_SUBAGENT_START": claude_code.subagent_start("Brief ü")}
+        call = json.dumps({"hook_event_name": "SubagentStart", "agent_type": agent_type})
+        return subprocess.run(
+            [sys.executable, start], input=call, env=env, capture_output=True, text=True, check=True
+        ).stdout
+
+    assert json.loads(opens("general-purpose"))["hookSpecificOutput"]["additionalContext"].endswith("Brief ü")
+    assert opens("valor:web") == ""
