@@ -53,14 +53,20 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
    system there: `git -C ~/src/ai branch retired/old-main`, then
    `cd ~/src/ai && git fetch origin && git checkout -B main origin/main && uv sync --frozen`.
+   While the old system still serves, the kernel can instead be readied in
+   a clone beside it, `~/src/ai-kernel-staging`, and steps 4 to 6 and 10's
+   suite run from there; after step 7 it is swapped in with
+   `mv ~/src/ai ~/src/ai-old && mv ~/src/ai-kernel-staging ~/src/ai && cd ~/src/ai && git pull --ff-only && uv sync --frozen`,
+   and step 8 is given `~/src/ai-old`.
    Never commit in it afterwards: a rollout fast-forwards it.
 4. **The kernel database.** `$PY -m core migrate` makes the roles, the
    database and the schema, and runs `secure-login` (`pgpass`, the
    `pg_hba.conf` rules). Add `export PGPASSFILE=~/.config/valor-kernel/pgpass`
    to the shell profile.
 5. **Keys**, copied from the Cowboy without printing them:
-   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys slack-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; done; chmod 600 ~/.config/valor-kernel/*`.
-   Calibrate the judge from the Cowboy's `~/src/valor-demo/items/`:
+   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys slack-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
+   Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
+   (the judgement file names case files beside it):
    `$PY -m core calibrate <items>/judgement/intake.underspecified.json`
    (its `task_sha256` equals `JUDGE.calibrated` in `core/judgement_tasks.py`).
 6. **Valor's accounts for turns** (rule 1): `~/.config/gh/hosts.yml` from
