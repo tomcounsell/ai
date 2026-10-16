@@ -13,6 +13,7 @@ import pytest
 from core import broker, db, judgement, judgement_sites, ledger, machine, notices, router, session, tasks
 from core.machine import State
 from tests import bridges, judgement_upstream, scripted
+from tests.bridges import rows
 from tests.ports import listen
 from tests.scripted import git
 from tools.jev import Jev
@@ -40,11 +41,6 @@ async def to_checks(dsn, ws, **kw) -> str:
     out = await drive(dsn, task)
     assert out["missing"] == ["test", "review", "docs"], out
     return task
-
-
-async def rows(dsn, task) -> list[dict]:
-    async with await db.connect(dsn) as conn:
-        return await ledger.read(conn, task)
 
 
 async def fold(dsn, task) -> machine.Fold:
@@ -251,12 +247,9 @@ def test_an_ask_is_read_against_its_projects_open_tasks_and_the_judge_runs_as_wi
 
 
 def test_a_retried_judge_step_asks_no_second_overlap_and_a_failure_or_a_stop_holds_nothing(dsn):
-    dead = judgement.JudgementPort(
-        {
-            "jev": Jev(f"http://127.0.0.1:{listen()}/jev", judgement.LOOPBACK_KEY, timeout_s=2),
-            "open_weight": OpenWeight(f"http://127.0.0.1:{listen()}/ow", judgement.LOOPBACK_KEY, timeout_s=2),
-        }
-    )
+    jev = Jev(f"http://127.0.0.1:{listen()}/jev", judgement.LOOPBACK_KEY, timeout_s=2)
+    ow = OpenWeight(f"http://127.0.0.1:{listen()}/ow", judgement.LOOPBACK_KEY, timeout_s=2)
+    dead = judgement.JudgementPort({"jev": jev, "open_weight": ow})
 
     async def go():
         async with await db.connect(dsn) as conn:

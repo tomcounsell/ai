@@ -39,9 +39,7 @@ async def tom(emu, dsn, chat_id, text, reply_to=None) -> dict:
     """Tom writes in the chat; the bridge records it; the kernel binds it."""
     mid = emu.inject(int(chat_id), text, sender_id=int(OPERATOR), sender_name="Tom", reply_to=reply_to)
     await until(lambda: _has(dsn, chat_id, mid))
-    (got,) = [
-        r for r in await of_type(dsn, "message.received", chat_id=chat_id) if r["message_id"] == str(mid)
-    ]
+    (got,) = await of_type(dsn, "message.received", chat_id=chat_id, message_id=str(mid))
     async with await db.connect(dsn) as conn:
         await intake.bind(conn)
     (bound,) = await of_type(dsn, "message.bound", received_id=got["received_id"])
@@ -159,12 +157,8 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
                 {"kind": "merge", "reason": "deadbeef"},
                 {"kind": "other", "reason": "deadbeef"},
             ]
-            texts = [
-                notices.ended_text(
-                    SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None), head
-                )
-                for p in ended
-            ]
+            fold = lambda p: SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None)
+            texts = [notices.ended_text(fold(p), head) for p in ended]
             assert texts[1] != texts[2] and len(set(texts[4 : 5 + len(why)])) == len(why) + 1
             assert texts[0].endswith(notices.AGAIN)
             for missing in (True, False):
@@ -192,9 +186,8 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
                 notices.lead(head, serve._rollout_text(s, 3)) for s in (*serve.ROLLOUT_STEPS, "?")
             ]
             for text in texts:
-                assert text.startswith(f'On "{HEAD}": ') and not [s for s in (*LEAKS, task) if s in text], (
-                    text
-                )
+                leaked = [s for s in (*LEAKS, task) if s in text]
+                assert text.startswith(f'On "{HEAD}": ') and not leaked, text
             assert requested[0] != requested[1]
             for (*_, said), text in zip(sends, requested[2:], strict=False):
                 assert said in text

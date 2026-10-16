@@ -53,16 +53,10 @@ OW_TEMPLATE = _template(
 def questions_of(leg: str, body: dict) -> dict[str, list[str]]:
     """Each question's labels, read from the request."""
     if leg == "jev":
-        out = {}
-        for qid, q in body["questions"].items():
-            out[qid] = list(q["criteria"]) if q["type"] == "choice" else ["true", "false"]
-        return out
+        qs = body["questions"]
+        return {k: list(q["criteria"]) if q["type"] == "choice" else ["true", "false"] for k, q in qs.items()}
     schema = body["response_format"]["json_schema"]["schema"]
-    return {
-        qid: list(spec["properties"])
-        for qid, spec in schema["properties"].items()
-        if spec["type"] == "object"
-    }
+    return {qid: list(s["properties"]) for qid, s in schema["properties"].items() if s["type"] == "object"}
 
 
 def fixed_probs(answer: str, labels: list[str]) -> dict[str, float]:
@@ -104,12 +98,9 @@ class Upstream:
         from tools.open_weight import OpenWeight
 
         base = f"{self.url}/fixed/{fixed}"
-        return JudgementPort(
-            {
-                "jev": Jev(f"{base}/jev", LOOPBACK_KEY, timeout_s=5),
-                "open_weight": OpenWeight(f"{base}/open_weight", LOOPBACK_KEY, timeout_s=5),
-            }
-        )
+        jev = Jev(f"{base}/jev", LOOPBACK_KEY, timeout_s=5)
+        ow = OpenWeight(f"{base}/open_weight", LOOPBACK_KEY, timeout_s=5)
+        return JudgementPort({"jev": jev, "open_weight": ow})
 
     async def handle(self, request: web.Request) -> web.Response:
         leg = request.match_info["leg"]
@@ -126,23 +117,16 @@ class Upstream:
                 if set(labels[qid]) == {"true", "false"}:
                     out["answers"][qid] = {"type": "noul", "noul": p.get("true")}
                 else:
-                    out["answers"][qid] = {
-                        "type": "choice",
-                        "choice": max(p, key=p.get),
-                        "probabilities": p,
-                        "confidence": 0.5,
-                    }
+                    choice = {"choice": max(p, key=p.get), "probabilities": p, "confidence": 0.5}
+                    out["answers"][qid] = {"type": "choice", **choice}
             out["usage"] = {"input_tokens": tokens, "output_tokens": 12}
         else:
             out = json.loads(json.dumps(OW_TEMPLATE))
             out["model"] = OPEN_WEIGHT_MODEL
             out["provider"] = OPEN_WEIGHT_PROVIDER_NAME
             out["choices"][0]["message"]["content"] = json.dumps({"notes": "compared", **answers})
-            out["usage"] = {
-                "prompt_tokens": tokens,
-                "completion_tokens": 30,
-                "cost": round(tokens * 0.14e-6 + 30 * 0.8e-6, 10),
-            }
+            cost = round(tokens * 0.14e-6 + 30 * 0.8e-6, 10)
+            out["usage"] = {"prompt_tokens": tokens, "completion_tokens": 30, "cost": cost}
         return web.json_response(out)
 
 

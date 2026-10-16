@@ -166,12 +166,8 @@ def make_app() -> web.Application:
         media = None
         if "data_b64" in b:
             data = base64.b64decode(b["data_b64"])
-            media = {
-                "kind": "document",
-                "name": b["name"],
-                "mime": "application/octet-stream",
-                "size": len(data),
-            }
+            media = {"kind": "document", "name": b["name"], "mime": "application/octet-stream"}
+            media["size"] = len(data)
         elif not text:
             return err("MESSAGE_EMPTY")
         m = {"sender_id": ME, "sender_name": "Valor", "text": text, "out": True, "media": media}
@@ -224,7 +220,8 @@ def make_app() -> web.Application:
 def to_msg(m: dict | None) -> Msg | None:
     if m is None:
         return None
-    media = m.get("media")
+    if media := m.get("media"):
+        media = Media(media["kind"], media.get("name", ""), media.get("mime", ""), media.get("size", 0))
     return Msg(
         chat_id=m["chat_id"],
         id=m["id"],
@@ -239,9 +236,7 @@ def to_msg(m: dict | None) -> Msg | None:
         top_id=m.get("top_id"),
         forum_topic=bool(m.get("forum_topic")),
         grouped_id=m.get("grouped_id"),
-        media=Media(media["kind"], media.get("name", ""), media.get("mime", ""), media.get("size", 0))
-        if media
-        else None,
+        media=media or None,
     )
 
 
@@ -268,9 +263,7 @@ class EmulatorWire:
                     raise InDoubt("service unavailable") if send else NotConnected("service unavailable")
                 out = await r.json()
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:  # a disconnect is one
-            if send:
-                raise InDoubt(type(e).__name__) from None
-            raise NotConnected(type(e).__name__) from None
+            raise (InDoubt if send else NotConnected)(type(e).__name__) from None
         if isinstance(out, dict) and "error" in out:
             if out["error"] == "FLOOD_WAIT":
                 raise FloodWait(out["seconds"])
@@ -332,10 +325,8 @@ class EmulatorWire:
                     return
 
     async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100) -> list[Msg]:
-        return [
-            to_msg(m)
-            for m in await self._post("history", {"chat": chat_id, "offset_id": offset_id, "limit": limit})
-        ]
+        out = await self._post("history", {"chat": chat_id, "offset_id": offset_id, "limit": limit})
+        return [to_msg(m) for m in out]
 
     async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
         return [to_msg(m) for m in await self._post("own", {"chat": chat_id, "after_id": after_id})]

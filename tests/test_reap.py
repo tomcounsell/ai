@@ -78,11 +78,9 @@ def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
     bystander = subprocess.Popen(["sleep", "30"])
     try:
         build = lambda url, brief, turn_id: runs.TurnCommand(
-            argv=[sys.executable, "-c", DAEMON, str(pidfile)],
-            env={"PATH": os.environ["PATH"]},
-            cwd=str(tmp_path),
-            harness="daemonizer",
-        )
+            argv=[sys.executable, "-c", DAEMON, str(pidfile)], env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path), harness="daemonizer",
+        )  # fmt: skip
         ended, rows = _turn(dsn, build)
         daemon = _wait_for(pidfile)
         assert ended["outcome"] == "done"
@@ -137,11 +135,9 @@ async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
     def build(url, brief, turn_id):
         seen.update(url=url, turn_id=turn_id)
         return runs.TurnCommand(
-            argv=[sys.executable, "-c", HARNESS, str(tmp_path), daemon],
-            env={"PATH": os.environ["PATH"]},
-            cwd=str(tmp_path),
-            harness="children",
-        )
+            argv=[sys.executable, "-c", HARNESS, str(tmp_path), daemon], env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path), harness="children",
+        )  # fmt: skip
 
     turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
     child = await asyncio.to_thread(_wait_for, tmp_path / "child.pid")

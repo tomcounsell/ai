@@ -91,18 +91,12 @@ def send(text: str) -> dict:
 
 def kernel_child(tmp_path, dsn, runners, log) -> subprocess.Popen:
     env = {
-        **os.environ,
-        "KERNEL_DSN": dsn,
-        "KERNEL_RUNNERS": runners,
-        "KERNEL_PIDFILE": str(tmp_path / "sleeper.pid"),
-        "VALOR_MACHINE": "m-test",
-        "VALOR_DEFAULT_MACHINE": "m-test",
-        "VALOR_SERVE_TICK_S": "0.2",
-        "VALOR_OPERATOR_TELEGRAM_ID": OPERATOR,
-        "VALOR_OPERATOR_CHAT": OPERATOR_CHAT,
-        "VALOR_PROJECTS": str(tmp_path / "projects"),
-        "VALOR_WORK": str(tmp_path / "work"),
-    }
+        **os.environ, "KERNEL_DSN": dsn, "KERNEL_RUNNERS": runners,
+        "KERNEL_PIDFILE": str(tmp_path / "sleeper.pid"), "VALOR_MACHINE": "m-test",
+        "VALOR_DEFAULT_MACHINE": "m-test", "VALOR_SERVE_TICK_S": "0.2",
+        "VALOR_OPERATOR_TELEGRAM_ID": OPERATOR, "VALOR_OPERATOR_CHAT": OPERATOR_CHAT,
+        "VALOR_PROJECTS": str(tmp_path / "projects"), "VALOR_WORK": str(tmp_path / "work"),
+    }  # fmt: skip
     return subprocess.Popen(
         [sys.executable, "-m", "tests.kernel_child"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT
     )
@@ -165,9 +159,8 @@ def _plan_signals(ws: Path, turn: str, *effects: str) -> Path:
 async def _ended(dsn, task, turn, state_) -> None:
     async with await db.connect(dsn) as conn:
         await ledger.append(conn, task, "turn.started", {"turn_id": turn, "state": state_})
-        await ledger.append(
-            conn, task, "turn.ended", {"turn_id": turn, "outcome": "done", "returncode": 0, "result": {}}
-        )
+        ended = {"turn_id": turn, "outcome": "done", "returncode": 0, "result": {}}
+        await ledger.append(conn, task, "turn.ended", ended)
 
 
 def test_kill_after_ended_before_collected(fresh, op, tmp_path):
@@ -182,9 +175,8 @@ def test_kill_after_ended_before_collected(fresh, op, tmp_path):
         async with await db.connect(fresh) as conn:
             b = await tasks.brief(conn, task)
             # The effect was requested before the kill.
-            await broker.request(
-                conn, _performers(b), task, broker.Action(**send("a.json")), request_id=f"{turn}/a.json"
-            )
+            action = broker.Action(**send("a.json"))
+            await broker.request(conn, _performers(b), task, action, request_id=f"{turn}/a.json")
             done = await serve.recover(conn, _performers)
             again = await serve.recover(conn, _performers)
         return task, turn, done, again
@@ -312,11 +304,10 @@ def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, c
         async def close(self):
             closed.append("gateway")
 
-    monkeypatch.setattr(serve.Kernel, "tick", tick)
-    monkeypatch.setattr(serve.Kernel, "close", close)
-    monkeypatch.setattr(serve, "Gateway", Stand)
-    monkeypatch.setattr(core.gateway, "ClaudeLogin", Stand)
-    monkeypatch.setattr(core.gateway, "OpenAIKey", Stand)
+    for where, name, stand_in in ((serve.Kernel, "tick", tick), (serve.Kernel, "close", close),
+                                  (serve, "Gateway", Stand), (core.gateway, "ClaudeLogin", Stand),
+                                  (core.gateway, "OpenAIKey", Stand)):  # fmt: skip
+        monkeypatch.setattr(where, name, stand_in)
     monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, serve_tick_s=0.05))
     with pytest.raises(rollout.Restart):
         run(serve.serve({}, dsn=fresh, checkout=None))

@@ -66,14 +66,10 @@ def child_env(tmp_path: Path, chats: list[str]) -> dict[str, str]:
     """The same machine, for a child process."""
     projects = _spec(tmp_path, chats[1:])
     return {
-        **os.environ,
-        "VALOR_MACHINE": "m-test",
-        "VALOR_DEFAULT_MACHINE": "m-test",
-        "VALOR_OPERATOR_CHAT": chats[0],
-        "VALOR_PROJECTS": str(projects),
+        **os.environ, "VALOR_MACHINE": "m-test", "VALOR_DEFAULT_MACHINE": "m-test",
+        "VALOR_OPERATOR_CHAT": chats[0], "VALOR_PROJECTS": str(projects), "VALOR_SERVE_TICK_S": "0.2",
         "VALOR_INBOUND": str(tmp_path / "inbound"),
-        "VALOR_SERVE_TICK_S": "0.2",
-    }
+    }  # fmt: skip
 
 
 def state(tmp_path: Path) -> dict[str, Path]:
@@ -167,15 +163,8 @@ async def notice(dsn: str, chat_id: str, text: str = "waiting on approval") -> t
     """One `notice.requested` row for a fresh task, to `chat_id`; (task, notice id)."""
     task = await bridges.new_task(dsn)
     async with await db.connect(dsn) as conn:
-        notice_id = await notices.request(
-            conn,
-            task,
-            kind="effect",
-            about_key=f"about:{task}",
-            text=text,
-            channel="telegram",
-            chat_id=chat_id,
-        )
+        notice_id = await notices.request(conn, task, kind="effect", about_key=f"about:{task}", text=text,
+                                          channel="telegram", chat_id=chat_id)  # fmt: skip
     return task, notice_id
 
 
@@ -202,10 +191,6 @@ class Only:
     async def __aiter__(self):
         while True:
             for item in await self.box.due():
-                if (
-                    getattr(item, "effect_id", None) in self.wanted
-                    or getattr(item, "notice_id", None) in self.wanted
-                    or getattr(item, "reaction_id", None) in self.wanted
-                ):
+                if {getattr(item, k, None) for k in ("effect_id", "notice_id", "reaction_id")} & self.wanted:
                     yield item
             await asyncio.sleep(0.05)

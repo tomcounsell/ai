@@ -175,12 +175,10 @@ def steer(ws: Path, **cfg) -> None:
 def turn_for(prompt, resume, b):
     def build(url, brief, turn_id):
         return claude_code.TurnCommand(
-            argv=[sys.executable, "-c", SCRIPT, prompt, resume or "", brief],
-            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
-            cwd=b.workspace,
-            harness="script",
+            argv=[sys.executable, "-c", SCRIPT, prompt, resume or "", brief], harness="script",
+            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]}, cwd=b.workspace,
             parse=claude_code.parse,
-        )
+        )  # fmt: skip
 
     return build
 
@@ -199,18 +197,11 @@ def judge(answer: str = "precise"):
 
 RUNNERS = {
     State.JUDGE: judge("precise"),
-    State.CLARIFY: working,
-    State.PLAN: working,
-    State.BUILD: working,
-    State.PATCH: working,
+    **dict.fromkeys((State.CLARIFY, State.PLAN, State.BUILD, State.PATCH), working),
 }
 SESSION_LEG = {"leg": "session", "turn_id": "scripted-turn", "model": "scripted"}
 SCRIPTED_FAILURE = "a scripted test failure"
-
-
-def performers(b: tasks.Brief) -> broker.Performers:
-    """The task's performers, as the composition root builds them."""
-    return _performers(b)
+performers = _performers  # the task's performers, as the composition root builds them
 
 
 async def route(gateway, task: str, runners=None, dsn: str | None = None) -> dict:
@@ -231,13 +222,8 @@ async def start(dsn: str, ws: Path, judge: str | None = "precise", **kw) -> str:
     """A task on the workspace, judged `precise` or `thin` by the real judge
     runner against the local upstream (None leaves it in `judge`)."""
     where = tasks.resolve_workspace(str(ws), kw.pop("target_branch", None))
-    b = tasks.Brief(
-        instruction=kw.pop("instruction", "Write Tom a greeting."),
-        max_effect_class=kw.pop("max_effect_class", "act"),
-        workspace=str(ws),
-        **where,
-        **kw,
-    )
+    kw = {"instruction": "Write Tom a greeting.", "max_effect_class": "act", **kw}
+    b = tasks.Brief(workspace=str(ws), **where, **kw)
     async with await db.connect(dsn) as conn:
         task = await tasks.start(conn, b)
     if judge is not None:
@@ -295,13 +281,8 @@ async def request(conn, task: str, action: broker.Action) -> broker.Outcome:
 
 async def task_of(conn, effect_id: str) -> str:
     """The task an effect is of, from its first ledger row."""
-    row = await (
-        await conn.execute(
-            "SELECT task_id FROM events WHERE type LIKE 'effect.%%' AND payload->>'effect_id' = %s ORDER BY id LIMIT 1",
-            (effect_id,),
-        )
-    ).fetchone()
-    return row[0]
+    sql = "SELECT task_id FROM events WHERE type LIKE 'effect.%%' AND payload->>'effect_id' = %s ORDER BY id"
+    return (await (await conn.execute(sql + " LIMIT 1", (effect_id,))).fetchone())[0]
 
 
 async def ensure_merge(conn, task: str) -> broker.Outcome | None:

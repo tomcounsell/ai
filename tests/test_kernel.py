@@ -4,6 +4,7 @@ message on real Postgres, with no model call."""
 import asyncio
 import dataclasses
 import os
+import pathlib
 import subprocess
 import sys
 import uuid
@@ -123,8 +124,9 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
         # A real subprocess that would run for a minute, with a child of its own.
         script = "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)"
         build = lambda url, brief, turn_id: runs.TurnCommand(
-            argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper"
-        )
+            argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper",
+            tmpdir=str(tmp_path / "tmp"),
+        )  # fmt: skip
         turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
         await asyncio.sleep(1.0)
         started = asyncio.get_running_loop().time()
@@ -143,7 +145,83 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     ended, elapsed, state = run(go())
     assert ended["outcome"] == "stopped" and ended["returncode"] == -9
     assert elapsed < 20  # far short of the turn's minute, with room for a loaded Mac (3.8 s seen)
+    assert not (tmp_path / "tmp").exists()
     assert state["state"] == "stopped" and tasks.audit(state) == []
+
+
+# A turn's scratch in a review session: its TMPDIR was emptied before it, its
+# passfile was not; a nested tree, a read-only file, a locked file, a link out.
+SCRATCH = r"""
+import os, pathlib, sys
+t = pathlib.Path(os.environ["TMPDIR"])
+assert list(t.iterdir()) == [] and pathlib.Path(os.environ["PGPASSFILE"]).exists()
+(t / "a" / "b").mkdir(parents=True)
+(t / "a" / "b" / "big").write_bytes(b"x" * 4096)
+(t / "ro").write_text("r"); (t / "ro").chmod(0o400); (t / "a").chmod(0o500)
+(t / "locked").write_text("l"); os.chflags(t / "locked", 2)  # UF_IMMUTABLE
+(t / "out").symlink_to(sys.argv[1])
+sys.exit(int(sys.argv[2]))
+"""
+
+
+@pytest.mark.parametrize("code,outcome", [(0, "done"), (3, "failed")])
+def test_a_turns_tmpdir_is_emptied_before_it_and_removed_after_it(dsn, tmp_path, monkeypatch, code, outcome):
+    from core import workspace
+
+    def init(lay, task_id, spec, port):  # a turn cannot nest sandbox-exec to start a real cluster
+        lay.home.mkdir(parents=True, exist_ok=True)
+        (lay.home / "pgpass").write_text(f"127.0.0.1:{port}:*:app:pw\n")
+        return {"app": "pw"}
+
+    for name, stand_in in (("_init_postgres", init), ("start_services", print), ("stop_services", print)):
+        monkeypatch.setattr(workspace, name, stand_in)
+    lay, outside = workspace.Layout(tmp_path / "t"), tmp_path / "keep.txt"
+    check_dir = workspace.fresh_dir(lay.checks / "review-x")
+    (check_dir / "tmp" / "dead-turn").mkdir()
+    outside.write_text("mine")
+
+    async def go(harness):
+        task = await new_task(dsn)
+        gateway = await bridges.gateway(dsn)
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", SCRATCH, str(outside), str(code)], cwd=str(tmp_path),
+            env={**harness["env"], "TMPDIR": harness["tmpdir"]}, harness="scratch", tmpdir=harness["tmpdir"],
+        )  # fmt: skip
+        try:
+            return await runs.run_turn(gateway, task, build, dsn=dsn)
+        finally:
+            await gateway.close()
+
+    with workspace.check_services(
+        lay, check_dir, {"services": ["postgres"], "ports": {"postgres": 1}}, "t"
+    ) as env:
+        ended = run(go(workspace.check_harness(lay, check_dir, [], env, services=True)))
+        assert ended["outcome"] == outcome and ended["returncode"] == code
+        assert not (check_dir / "tmp").exists() and pathlib.Path(env["PGPASSFILE"]).exists()
+    assert outside.read_text() == "mine" and (check_dir / "claude").is_dir()
+
+
+def test_a_harness_turns_tmpdir_is_the_one_its_settings_name(tmp_path):
+    from core import __main__, workspace
+    from harnesses import claude_code, pi
+
+    harness = workspace.check_harness(workspace.Layout(tmp_path), workspace.fresh_dir(tmp_path / "c"), [], {})
+    assert harness["tmpdir"] == str(tmp_path / "c" / "tmp")
+    made = [
+        m.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t") for m in (claude_code, pi)
+    ]
+    assert {c.tmpdir for c in made} | {c.env["TMPDIR"] for c in made} == {
+        harness["tmpdir"],
+        made[0].env["CLAUDE_CODE_TMPDIR"],
+    }
+    # A task provisioned before the harness named a TMPDIR gets its own; none named, none set.
+    bare = {"sandbox_profile": harness["sandbox_profile"]}
+    old = tasks.Brief(
+        instruction="x", mirror=str(tmp_path / "kernel.git"), harness=bare, harness_name="claude_code"
+    )
+    assert __main__._turn_for("p", None, old)("http://h:1", "b", "t").tmpdir == str(tmp_path / "tmp")
+    assert "tmpdir" not in bare
+    assert claude_code.workspace_turn("p", cwd=".", harness=bare)("http://h:1", "b", "t").tmpdir is None
 
 
 # -- reconcile from the intent row ----------------------------------------------------------
