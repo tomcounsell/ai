@@ -29,8 +29,8 @@ stops there.
 **Design** ([plans/orchestration.md](plans/orchestration.md)). Within the agents tier, Valor's
 persona orchestrates and workers do the work. Each chat's session, a team chat's or Tom's own
 chat's, reads and dispatches; the tasks it starts use the skills and report to it, and only it
-speaks in its chat. A task with no session (from the CLI, a routine, or Tom's email) reaches Tom
-directly (The task and its Brief, the signal channel).
+speaks in its chat. A root task that is no session (from the CLI, a routine, or Tom's email)
+reports to the operator chat's session (The task and its Brief, the signal channel).
 
 The off switch and the bounds live in the kernel because an agent's
 incentive to accept correction depends on its uncertainty and is fragile

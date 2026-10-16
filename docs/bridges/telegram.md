@@ -145,13 +145,16 @@ refused release writes `effect.refused` once and is not yielded again. The bridg
 Some messages are the kernel speaking to Tom about his own work: a question a
 turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
-A task a chat session started, in a team chat or in Tom's own chat,
-reports to that session (next section), all but its push credential
-request, which is the operator's. Any other task's notice goes to the chat
-where Tom started it, when that is his own chat, and otherwise to his
-operator chat, which is fixed in settings (`notices.home`): a task with
-no session (from the CLI, a routine, or his email) reaches Tom directly. No turn, task, or
-payload names the recipient. The kernel writes `notice.requested` with the text and the record it
+Every task reports to a Valor session (next section): a task a chat
+session started reports to that session, in a team chat or in Tom's own
+chat, and a root task that is no session (from the CLI, a routine, or his
+email) reports to the operator chat's session, started for it when none
+is open. The kinds that stay Tom's go to him directly: the push credential
+request, a binding notice, and a rollout's. Those, and any notice with no
+session to take it, go to the chat where Tom started the work, when that
+is his own chat (a session's own chat, or its child's session's), and
+otherwise to his operator chat, which is fixed in settings
+(`notices.home`). No turn, task, or payload names the recipient. The kernel writes `notice.requested` with the text and the record it
 concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
@@ -300,7 +303,11 @@ finding is why both fields exist: rows 177 and 207 both read `"by": "tom"`
 and 207 was role-played (rebuild-demonstration.md, Kernel findings, item 5).
 
 Stop binds by structure, a verified sender replying to a known message
-with a fixed token, because it decides what may happen. A classifier
+with a fixed token, because it decides what may happen. In Tom's own chat
+an exact `stop` from Tom, top level or in reply to the session's own post,
+stops at once every open task that reports to the session, and reaches
+the session as a steer so it knows; it never stops the session. A team
+chat's `stop` is a message to its session like any other. A classifier
 decides what a thing is; it never decides what a thing may do. A reply
 near `stop` that is not it is told "Not a stop; reply `stop`. Your message
 steers the task." and steers. A notice about how a message bound goes in
@@ -343,7 +350,9 @@ it is Tom's own chat, a 1:1 with him, not a team chat. Only Tom is heard
 there, and every message of his wakes it. A reply to an older task's
 notice or send binds to that task as above; every other message of his
 there, a reply to the session's own post included, is the session's next
-prompt. So the work he asks for in his DM is a task the session starts,
+prompt, and a reply to another chat's session's post binds to that session
+as a reply. Root tasks that are no session report to the operator chat's
+session. So the work he asks for in his DM is a task the session starts,
 which reports to the session, and the session tells him.
 
 ### Started tasks

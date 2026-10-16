@@ -39,12 +39,23 @@ post of Valor's does. The session decides whether to answer
 *Tom's own chat* (`_toms_own`: the operator chat, his Telegram DM, his
 Slack DMs, the local chat) has a chat session too, under the project
 listing the chat, else `valor` (`_project_for`). Only Tom is heard there,
-and every message of his wakes it. A reply that resolves to a task that
-is not this chat's session (an older task's notice or send, or a notice that
-stays Tom's: credential, binding, rollout, spend, grants) keeps the reply
-binding below; any other message of his there, a reply to the session's
-own post included, is a `message.steered` row on the session. With no
-project to put the session under, the message starts a task.
+and every message of his wakes it. A reply that resolves to a task
+other than one of this chat's sessions (an older task's notice or send,
+another chat's session's post, or a notice that stays Tom's: credential,
+binding, rollout) keeps the reply binding below; any other message of his
+there, a reply to the session's own post included, is a `message.steered`
+row on the chat's open session (one that ended goes to a new one). Stop is
+immediate there by structure: an exact `stop` also stops at once every
+open task that reports to the session (`tasks.reporting`: those it
+started, and those whose report is on it), by Tom, never the session
+itself. With no project to put the session under, the message starts a
+task.
+
+A chat's session is picked under the chat's lock (`open_session`) and
+read again once its tree and task locks are held; if it ended in between,
+a new session takes the message, in the same transaction. The operator
+chat's session also takes the reports of root tasks that are no session
+(`operator_session`, `core/notices.py`).
 
 The binding table, first match wins:
 
@@ -55,6 +66,7 @@ The binding table, first match wins:
 | In a team chat, otherwise | `heard`, to the chat session |
 | Not verified, or not from the operator | `none` |
 | In Tom's own chat, with no text or files | `none` |
+| In Tom's own chat, exactly `stop`, not a reply to a task other than its session | `stop`: each open task reporting to the session stopped, and a steer to the session |
 | In Tom's own chat, not a reply to a task other than its session | `steer`, to the chat's session |
 | A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
 | A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
@@ -554,7 +566,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     if not _from_operator(p):
         return await _bound(conn, p, None, "none")
     task_id, replied = await _replied(conn, p)
-    if _toms_own(p) and (task_id is None or replied is None or await _is_chat(conn, task_id)):
+    if _toms_own(p) and (task_id is None or replied is None or await _session_of(conn, task_id, p)):
         spec = _project_for(p)
         if spec is not None:
             return await _chat(conn, p, spec, own=True)
@@ -634,13 +646,15 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     return as_
 
 
-async def _is_chat(conn, task_id: str) -> bool:
-    """Whether `task_id` is a chat session (a stream, such as a channel's,
-    is not)."""
+async def _session_of(conn, task_id: str, p: dict[str, Any]) -> bool:
+    """Whether `task_id` is a session of the message's own chat. A stream
+    (a channel's id) is no task, and another chat's session keeps the
+    reply binding."""
     try:
-        return bool((await tasks.brief(conn, task_id)).chat)
+        chat = (await tasks.brief(conn, task_id)).chat
     except KeyError:
         return False
+    return chat == {"channel": p["channel"], "chat_id": p["chat_id"]}
 
 
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
@@ -682,31 +696,30 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
 async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False) -> str:
     """Bind a message to its chat's session, started here when the chat
     has none open: a team chat's, or with `own` Tom's own chat's, where
-    every message wakes it."""
+    every message wakes it and an exact `stop` also stops at once every
+    open task that reports to the session. A session picked here and
+    found ended once its locks are held gives way to a new one."""
     text = (p.get("text") or "").strip()
     if not text and not p.get("attachments"):
         return await _bound(conn, p, None, "none")
     replied, _ = await _replied(conn, p)
     wakes = own or not _mentions_only(spec, p) or bool(MENTION.search(text)) or replied is not None
-    await ledger.lock(conn, f"chat:{p['channel']}:{p['chat_id']}")
-    task_id = await chat_session(conn, p["channel"], p["chat_id"])
-    brief = None
-    if task_id is None:
-        harness_name, model = resolve_seat("frontier")
-        brief = tasks.Brief(
-            instruction=await _chat_start(conn, p, spec, own),
-            model=model,
-            harness_name=harness_name,
-            project={"name": spec.name},
-            max_effect_class="act",
-            chat={"channel": p["channel"], "chat_id": p["chat_id"]},
-        )
-        task_id = brief.id
-    as_ = await _bound(conn, p, task_id, "steer" if wakes else "heard")
+    channel, chat = p["channel"], p["chat_id"]
+    task_id, brief = await open_session(conn, channel, chat, spec, own=own, before=p["received_id"])
+    if brief is None:
+        # Tree, then task, the order every tree writer takes; a stop that
+        # landed after the pick shows in the fold read under them.
+        await tasks.lock_tree(conn, task_id)
+        await ledger.lock(conn, f"task:{task_id}")
+        if machine.fold(await ledger.read(conn, task_id)).state in tasks.TERMINAL:
+            brief = await _session_brief(conn, channel, chat, spec, own=own, before=p["received_id"])
+            task_id = brief.id
+    stop = own and text.casefold() == "stop"
+    as_ = await _bound(conn, p, task_id, "stop" if stop else "steer" if wakes else "heard")
     by = "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
     if brief is not None:
-        await tasks.start(conn, brief, by=by, via=p["channel"])
-    await ledger.lock(conn, f"task:{task_id}")
+        await tasks.start(conn, brief, by=by, via=channel)
+        await ledger.lock(conn, f"task:{task_id}")
     keep = (
         "received_id",
         "message_id",
@@ -721,8 +734,12 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         conn,
         task_id,
         "message.steered" if wakes else "message.heard",
-        {**{k: p.get(k) for k in keep}, "provenance": ledger.provenance(by, p["channel"], False)},
+        {**{k: p.get(k) for k in keep}, "provenance": ledger.provenance(by, channel, False)},
     )
+    if stop:
+        for t in await tasks.reporting(conn, task_id):
+            if machine.fold(await ledger.read(conn, t)).state not in tasks.TERMINAL:
+                await tasks.stop(conn, t, reason=f"Tom said stop ({p['message_id']})", by="tom", via=channel)
     return as_
 
 
@@ -749,26 +766,79 @@ async def chat_session(conn, channel: str, chat_id: str) -> str | None:
     return None
 
 
-async def _chat_start(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False) -> str:
+async def open_session(
+    conn, channel: str, chat_id: str, spec: workspace.Spec, *, own: bool, before: str | None = None
+) -> tuple[str, tasks.Brief | None]:
+    """Under the chat's lock: its open session and None, or a new
+    session's id and its Brief, for the caller to start in the same
+    transaction. `before` is the received id the new session's history
+    stops at."""
+    await ledger.lock(conn, f"chat:{channel}:{chat_id}")
+    task_id = await chat_session(conn, channel, chat_id)
+    if task_id is not None:
+        return task_id, None
+    brief = await _session_brief(conn, channel, chat_id, spec, own=own, before=before)
+    return brief.id, brief
+
+
+async def operator_session(conn) -> str | None:
+    """The session of the operator chat (`settings.operator_channel` and
+    `operator_chat`), started when it has none open; None when that chat
+    is not Tom's own chat or has no project to work under."""
+    channel = settings.operator_channel
+    chat = LOCAL_CHAT if channel == "local" else settings.operator_chat
+    p = {"channel": channel, "chat_id": chat, "sender_id": ""}
+    if not chat or not _toms_own(p):
+        return None
+    found = await chat_session(conn, channel, chat)
+    if found is not None:
+        return found
+    spec = _project_for(p)
+    if spec is None:
+        return None
+    task_id, brief = await open_session(conn, channel, chat, spec, own=True)
+    if brief is not None:
+        await tasks.start(conn, brief, by="valor", via="kernel")
+    return task_id
+
+
+async def _session_brief(
+    conn, channel: str, chat_id: str, spec: workspace.Spec, *, own: bool, before: str | None
+) -> tasks.Brief:
+    harness_name, model = resolve_seat("frontier")
+    return tasks.Brief(
+        instruction=await _chat_start(conn, channel, chat_id, spec, own, before),
+        model=model,
+        harness_name=harness_name,
+        project={"name": spec.name},
+        max_effect_class="act",
+        chat={"channel": channel, "chat_id": chat_id},
+    )
+
+
+async def _chat_start(
+    conn, channel: str, chat_id: str, spec: workspace.Spec, own: bool, before: str | None
+) -> str:
     """A new chat session's instruction: the chat it serves (a team chat,
     or with `own` Tom's own chat on its channel), and the chat's last
-    `HISTORY` recorded messages before this one, oldest first."""
+    `HISTORY` recorded messages (before the one received as `before`),
+    oldest first."""
     rows = await (
         await conn.execute(
             "SELECT payload FROM events WHERE type = 'message.received' AND task_id = %s "
-            "AND payload->>'chat_id' = %s AND id < (SELECT id FROM events WHERE type = 'message.received' "
-            "AND payload->>'received_id' = %s) ORDER BY id DESC LIMIT %s",
-            (p["channel"], p["chat_id"], p["received_id"], HISTORY),
+            "AND payload->>'chat_id' = %s AND (%s::text IS NULL OR id < (SELECT id FROM events "
+            "WHERE type = 'message.received' AND payload->>'received_id' = %s)) ORDER BY id DESC LIMIT %s",
+            (channel, chat_id, before, before, HISTORY),
         )
     ).fetchall()
-    where = "the local chat page" if p["channel"] == "local" else p["channel"].capitalize()
+    where = "the local chat page" if channel == "local" else channel.capitalize()
     lines = [
         (
-            f"You are in Tom's own chat on {where} (chat id {p['chat_id']}), a 1:1 with him, not a team "
+            f"You are in Tom's own chat on {where} (chat id {chat_id}), a 1:1 with him, not a team "
             f"chat; your work here is under the {spec.name} project. This session is the chat's: every "
             "message Tom sends in it comes to you here."
             if own
-            else f"You are in the {spec.name} team chat on {where} (chat id {p['chat_id']}). "
+            else f"You are in the {spec.name} team chat on {where} (chat id {chat_id}). "
             "This session is the chat's: every message said in it comes to you here."
         )
     ]

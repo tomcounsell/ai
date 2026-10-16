@@ -163,25 +163,27 @@ def test_toms_dm_session_starts_the_work_and_tells_him_of_its_merge(dsn, tmp_pat
         await scripted.checks(dsn, task)
         done = await merged(dsn, task)
         second = await drive(dsn, chat)
+        (held,) = [r for r in await bridges.of_type(dsn, "effect.held") if r["task_id"] == chat]
+        async with bridges.outbox(dsn, bridges.FakeBridge()) as box:
+            (item,) = [i for i in await box.due() if getattr(i, "effect_id", None) == held["effect_id"]]
+            sent = await box.perform(item)
         async with await db.connect(dsn) as conn:
             briefs = [await tasks.brief(conn, t) for t in (chat, task)]
-        return bound, first, second, done, briefs, await rows(dsn, chat), await rows(dsn, task)
+        return bound, first, second, done, sent, briefs, await rows(dsn, chat), await rows(dsn, task)
 
     with (
         bridges.operator(tmp_path),
         bridges.configure(operator_telegram_id=tom, database=settings.test_database),
     ):
-        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(
-            'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
-        )
-        bound, first, second, done, (cb, tb), chat_rows, task_rows = run(go())
+        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(bridges.VALOR_SPEC)
+        bound, first, second, done, sent, (cb, tb), chat_rows, task_rows = run(go())
     assert bound["as"] == "steer" and cb.chat == {"channel": "telegram", "chat_id": tom}
     assert (first["status"], second["status"]) == ("listening", "listening")
     assert tb.parent_id == cb.id and tb.project == {"name": "valor"}
     assert done.kind == "done" and git(origin, "rev-parse", "main") == machine.fold(task_rows).candidate.sha
     assert not bridges.typed(task_rows, "notice.requested")
-    (reported,) = bridges.typed(chat_rows, "child.reported")
-    assert (reported["child_id"], reported["kind"]) == (tb.id, "report")
+    reported = [p for p in bridges.typed(chat_rows, "child.reported") if p["child_id"] == tb.id]
+    assert len(reported) == 1 and reported[0]["kind"] == "report"
     turns = [json.loads(x) for x in (chat_ws / ".git" / "valor-turns.jsonl").read_text().splitlines()]
     assert len(turns) == 2 and f"Your task {tb.id} reports (report):" in turns[1]["prompt"]
     assert turns[0]["prompt"].startswith("You are in Tom's own chat on Telegram")
@@ -189,6 +191,8 @@ def test_toms_dm_session_starts_the_work_and_tells_him_of_its_merge(dsn, tmp_pat
     (held,) = bridges.typed(chat_rows, "effect.held")
     assert (held["action_type"], held["target"]) == ("telegram.send_message", tom)
     assert held["payload"]["text"] == "Your greeting is merged."
+    # The session's send to Tom's DM is itself the message: it owes no report.
+    assert sent.kind == "done" and not bridges.typed(chat_rows, "notice.requested")
 
 
 # -- an idle turn ends its step; stop.md hands in from any working state -------------

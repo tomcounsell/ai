@@ -428,16 +428,13 @@ def at(n: int) -> str:
     return f"1780000000.{n:06d}"
 
 
-VALOR_SPEC = 'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
-
-
 @pytest.fixture
 def dm(tmp_path):
     """Tom's own Slack DM, fresh per test, with the `valor` project its
-    chat session works under."""
+    chat session works under. The operator chat is Telegram's `1000`."""
     tom = f"T0ABC/U{uuid.uuid4().hex[:8].upper()}"
     with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
-        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(VALOR_SPEC)
+        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(bridges.VALOR_SPEC)
         yield tom
 
 
@@ -461,12 +458,14 @@ async def tom_says(dsn, dm, text, ts, *, sender=None, **kw) -> dict:
 
 async def posted(dsn, task, chat, ts, text, *, question=False) -> None:
     """Valor's post in a Slack chat: a send, or the notice of the task's
-    open question."""
+    open question sent there directly."""
     entries = [{"channel": "slack", "chat_id": chat, "message_id": ts, "thread_ts": None}]
     async with await db.connect(dsn) as conn:
         if question:
             about = f"question:{machine.fold(await ledger.read(conn, task)).open_question}"
-            nid = await notices.request(conn, task, kind="question", about_key=about, text=text)
+            nid = await notices.request(
+                conn, task, kind="question", about_key=about, text=text, channel="slack", chat_id=chat
+            )
             await ledger.append(conn, task, "notice.sent", {"notice_id": nid, "sent": entries})
             return
         effect, payload = ledger.new_id(), {"text": text}
@@ -495,9 +494,19 @@ async def state(dsn, task) -> State:
 
 async def task_count(dsn) -> int:
     async with await db.connect(dsn) as conn:
-        return (await (await conn.execute("SELECT count(*) FROM documents WHERE kind = 'task'")).fetchone())[
-            0
-        ]
+        (n,) = await (await conn.execute("SELECT count(*) FROM documents WHERE kind = 'task'")).fetchone()
+    return n
+
+
+async def child_of(dsn, session_id) -> str:
+    """A task the session starts with `task.start`."""
+    from tools import chat_tasks
+
+    async with await db.connect(dsn) as conn:
+        b = await tasks.brief(conn, session_id)
+    start = chat_tasks.performers(b, dsn)[0]
+    action = broker.Action("task.start", "work", {"instruction": "Bump stripe", "by": "tom"})
+    return (await start.perform(action, ledger.new_id()))["task_id"]
 
 
 def test_a_non_reply_dm_from_tom_binds_to_his_dm_session_and_starts_no_task(dsn, dm):
@@ -517,9 +526,8 @@ def test_a_non_reply_dm_from_tom_binds_to_his_dm_session_and_starts_no_task(dsn,
     assert (first["as"], second["as"]) == ("steer", "steer") and first["task_id"] == second["task_id"]
     assert after == before + 1 and b.parent_id is None
     assert b.chat == {"channel": "slack", "chat_id": dm} and b.project == {"name": "valor"}
-    assert (
-        b.instruction.startswith("You are in Tom's own chat on Slack") and "not a team chat" in b.instruction
-    )
+    assert b.instruction.startswith("You are in Tom's own chat on Slack")
+    assert "not a team chat" in b.instruction
     steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
     assert [(p["provenance"]["by"], p["text"]) for p in steered] == [
         ("tom", "fix the login page"), ("tom", "and the signup page"),
@@ -537,31 +545,158 @@ def test_a_stranger_in_toms_dm_binds_to_none(dsn, dm):
     assert (bound["as"], bound["task_id"]) == ("none", None) and after == before
 
 
-def test_a_reply_to_an_older_tasks_notice_binds_to_it_and_one_to_the_sessions_post_reaches_the_session(
-    dsn, dm
-):
-    """A reply to an older task's question answers it; a reply to the
-    session's own post, even `stop`, is the session's next prompt."""
+def test_replies_bind_to_an_older_task_another_chats_session_or_this_chats_session(dsn, dm):
+    """A threaded reply to a question sent before the DM had a session
+    answers it; a reply to a team session's post steers that session, as
+    any reply binds; a reply to this DM session's own post is its next
+    prompt."""
 
     async def go():
         waiting = await asking(dsn)
         await posted(dsn, waiting, dm, at(10), "Which colour?", question=True)
-        answer = await tom_says(dsn, dm, "blue", at(20), reply_to=at(10))
-        chat = (await tom_says(dsn, dm, "hello", at(30)))["task_id"]
-        await posted(dsn, chat, dm, at(40), "Hello Tom.")
-        thanks = await tom_says(dsn, dm, "thanks", at(50), reply_to=at(40))
-        stop = await tom_says(dsn, dm, "stop", at(60), reply_to=at(40))
-        return waiting, answer, chat, thanks, stop, await bridges.rows(dsn, waiting), await state(dsn, chat)
+        answer = await tom_says(dsn, dm, "blue", at(20), reply_to=at(10), topic_id=at(10))
+        team_chat = {"channel": "slack", "chat_id": f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"}
+        team = await new_task(dsn, chat=team_chat, max_effect_class="act")
+        await posted(dsn, team, dm, at(30), "From the team chat: can you confirm?")
+        to_team = await tom_says(dsn, dm, "confirmed", at(40), reply_to=at(30))
+        chat = (await tom_says(dsn, dm, "hello", at(50)))["task_id"]
+        await posted(dsn, chat, dm, at(60), "Hello Tom.")
+        thanks = await tom_says(dsn, dm, "thanks", at(70), reply_to=at(60))
+        return waiting, answer, team, to_team, chat, thanks, await bridges.rows(dsn, waiting)
 
-    waiting, answer, chat, thanks, stop, rows_, chat_state = run(go())
+    waiting, answer, team, to_team, chat, thanks, rows_ = run(go())
     assert (answer["task_id"], answer["as"]) == (waiting, "answer")
     assert [r["payload"]["text"] for r in rows_ if r["type"] == "question.answered"] == ["blue"]
-    assert chat != waiting
-    assert (thanks["task_id"], thanks["as"]) == (chat, "steer") and (stop["task_id"], stop["as"]) == (
+    assert (to_team["task_id"], to_team["as"]) == (team, "steer")
+    assert chat not in (waiting, team) and (thanks["task_id"], thanks["as"]) == (chat, "steer")
+
+
+def test_stop_in_toms_dm_stops_every_task_reporting_to_its_session_and_tells_the_session(dsn, dm):
+    """Exactly `stop`, top level or in reply to the session's own post,
+    stops at once each open task the session started or that reported to
+    it, never the session; the session gets the stop as a steer. A reply
+    `stop` to an older task's question still stops that task."""
+
+    async def go():
+        chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
+        child, other = await child_of(dsn, chat), await new_task(dsn, max_effect_class="act")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, chat, "child.reported",
+                                {"child_id": other, "kind": "question", "about_key": "q", "text": "?"})  # fmt: skip
+        top = await tom_says(dsn, dm, "stop", at(20))
+        later = await child_of(dsn, chat)
+        await posted(dsn, chat, dm, at(30), "Started the next one.")
+        replied = await tom_says(dsn, dm, " Stop ", at(40), reply_to=at(30))
+        waiting = await asking(dsn)
+        await posted(dsn, waiting, dm, at(50), "Should I go on?", question=True)
+        old = await tom_says(dsn, dm, "stop", at(60), reply_to=at(50))
+        states = [await state(dsn, t) for t in (child, other, later, waiting, chat)]
+        return chat, top, replied, old, waiting, states, await bridges.rows(dsn, chat)
+
+    chat, top, replied, old, waiting, states, rows = run(go())
+    assert (top["task_id"], top["as"]) == (chat, "stop") and (replied["task_id"], replied["as"]) == (
         chat,
-        "steer",
+        "stop",
     )
-    assert chat_state is not State.STOPPED
+    assert (old["task_id"], old["as"]) == (waiting, "stop")
+    assert states[:4] == [State.STOPPED] * 4 and states[4] is not State.STOPPED
+    steered = [p["text"] for p in bridges.typed(rows, "message.steered")]
+    assert steered[-2:] == ["stop", " Stop "]
+
+
+def test_a_root_task_with_no_session_reports_to_the_operator_chats_session(dsn, dm):
+    """Its question is `child.reported` on the operator chat's session,
+    started for it; the session can answer, steer and stop it. Its push
+    credential request still goes to Tom."""
+    from tools import chat_tasks
+
+    async def go():
+        root = await asking(dsn)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, root)
+            await notices.credential(conn, root, "abc", missing=True)
+            operator = await intake.chat_session(conn, "telegram", bridges.OPERATOR_CHAT)
+            b = await tasks.brief(conn, operator)
+        _, answer, steer, stop = chat_tasks.performers(b, dsn)
+        async with await db.connect(dsn) as conn:
+            refused = await steer.refuse(
+                conn, broker.Action("task.steer", await new_task(dsn), {"text": "x"})
+            )
+        await answer.perform(broker.Action("task.answer", root, {"text": "green", "by": "tom"}), "a1")
+        await steer.perform(
+            broker.Action("task.steer", root, {"text": "and make it bold", "by": "tom"}), "s1"
+        )
+        found = await steer.lookup(broker.Action("task.steer", root, {}), "s1")
+        await stop.perform(broker.Action("task.stop", root, {"why": "not now", "by": "tom"}), "t1")
+        return root, b, refused, found, await bridges.rows(dsn, operator), await bridges.rows(dsn, root)
+
+    root, b, refused, found, operator_rows, root_rows = run(go())
+    assert b.chat == {"channel": "telegram", "chat_id": bridges.OPERATOR_CHAT} and b.project == {
+        "name": "valor"
+    }
+    assert "Tom's own chat on Telegram" in b.instruction
+    reported = [p for p in bridges.typed(operator_rows, "child.reported") if p["child_id"] == root]
+    assert [p["kind"] for p in reported] == ["question"]
+    assert [n["kind"] for n in bridges.typed(root_rows, "notice.requested")] == ["credential"]
+    assert refused.endswith("does not report to this chat") and found == {"task_id": root}
+    assert [p["text"] for p in bridges.typed(root_rows, "question.answered")] == ["green"]
+    assert [p["text"] for p in bridges.typed(root_rows, "message.steered")] == ["and make it bold"]
+    assert machine.fold(root_rows).state is State.STOPPED
+
+
+def test_a_sessions_and_its_childs_notices_are_at_home_in_toms_own_chat_only(dsn, dm):
+    async def go():
+        chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
+        child = await child_of(dsn, chat)
+        team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
+        async with await db.connect(dsn) as conn:
+            await notices.credential(conn, child, "abc", missing=True)
+            homes = [await notices.home(conn, t) for t in (chat, child, team)]
+        return homes, bridges.typed(await bridges.rows(dsn, child), "notice.requested")
+
+    homes, (credential,) = run(go())
+    assert homes == [("slack", dm), ("slack", dm), (None, None)]
+    assert (credential["channel"], credential["chat_id"]) == ("slack", dm)
+
+
+def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):
+    """The binder picks the DM's session, then waits on its tree's lock
+    while another connection stops it; once the lock is free the binder
+    sees the stop and binds the message to a new session."""
+
+    async def go():
+        old = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
+        inbound = intake.Inbound(
+            channel="slack", chat_id=dm, chat_kind="dm", message_id=at(20), sender_id=dm,
+            sender_name="Tom", sent_at="2026-10-15T00:00:00Z", text="are you there?",
+        )  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            got = await intake.receive(conn, inbound)
+        async with await db.connect(dsn) as holder, await db.connect(dsn) as binder:
+            async with holder.transaction():
+                await tasks.lock_tree(holder, old)
+                binding = asyncio.create_task(intake.bind(binder))
+                pid = binder.info.backend_pid
+                for _ in range(500):
+                    (waits,) = await (
+                        await holder.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", (pid,)
+                        )
+                    ).fetchone()
+                    if waits == "Lock":
+                        break
+                    await asyncio.sleep(0.01)
+                await tasks.stop(holder, old, reason="ended meanwhile")
+            await binding
+        (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, bound["task_id"])
+        return old, waits, bound, b, await bridges.rows(dsn, bound["task_id"])
+
+    old, waits, bound, b, rows = run(go())
+    assert waits == "Lock" and bound["as"] == "steer" and bound["task_id"] != old
+    assert b.chat == {"channel": "slack", "chat_id": dm} and "): hello" in b.instruction
+    assert [p["text"] for p in bridges.typed(rows, "message.steered")] == ["are you there?"]
 
 
 def test_with_no_project_to_hold_it_toms_dm_message_starts_a_task(dsn, tmp_path):
@@ -839,7 +974,7 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
         session_id = (await said(dsn, "valor, bump the stripe sdk"))["task_id"]
         async with await db.connect(dsn) as conn:
             b = await tasks.brief(conn, session_id)
-        start, answer, stop = chat_tasks.performers(b, dsn)
+        start, answer, _, stop = chat_tasks.performers(b, dsn)
         made = await start.perform(
             broker.Action("task.start", "work", {"instruction": "Bump stripe", "by": "Rain"}), "k1"
         )
@@ -866,7 +1001,7 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert [(n["kind"], n["chat_id"]) for n in notes] == [("credential", bridges.OPERATOR_CHAT)]
     (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]
     assert (answered["text"], answered["provenance"]["by"]) == ("v12", "Kim")
-    assert refused == f"task {session_id} is not one this chat started"
+    assert refused == f"task {session_id} does not report to this chat"
     assert machine.fold(child_rows).state is State.STOPPED
 
 

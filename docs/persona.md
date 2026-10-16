@@ -57,13 +57,15 @@ question about a codebase, and it answers, stays quiet, or dispatches. For
 a small thing it starts a Claude Code subagent inside its turn; web
 searches and page reads go through the web agent (`valor:web`), which any
 agent at any depth can start, since subagents nest without limit; anything
-with a deliverable or a merge becomes a task it starts, answers, or stops
-(`tools/chat_tasks.py`). Those tasks send their questions, progress, and
+with a deliverable or a merge becomes a task it starts, answers, steers,
+or stops (`tools/chat_tasks.py`). Those tasks send their questions, progress, and
 deliveries to the session that started them, never to a chat; only the
 session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
 its own words (`core/notices.py`). This is the session's prompt and the
-persona, with no tool taken from it. A task with no session (one started
-from the CLI, a routine, or Tom's email) reports to Tom directly.
+persona, with no tool taken from it. A root task that is no session (one
+started from the CLI, a routine, or Tom's email) reports to the operator
+chat's session. In Tom's own chat his exact `stop` stops at once every
+task reporting to the session.
 
 ## Voice
 

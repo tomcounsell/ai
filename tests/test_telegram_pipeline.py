@@ -12,7 +12,7 @@ import pytest
 from core import broker, db, intake, ledger, machine, notices, tasks
 from core.machine import State
 from tests import bridges, scripted
-from tests.bridges import OPERATOR, new_task, of_type, rows
+from tests.bridges import OPERATOR, VALOR_SPEC, new_task, of_type, rows
 from tests.telegram_port import chat, child_env, connected, due, emu_chat, ids, release, send, until
 from tests.telegram_port import machine as this_machine
 
@@ -24,6 +24,8 @@ def op(emu, tmp_path):
     operator = chat()
     emu.control(chats=[emu_chat(operator)])
     with this_machine(tmp_path, [operator]):
+        # The project the operator chat's session works under.
+        (tmp_path / "projects" / "valor.toml").write_text(VALOR_SPEC)
         yield operator
 
 
@@ -234,5 +236,11 @@ def test_a_task_tom_started_in_his_dm_is_answered_there(dsn, tmp_path):
             if r["task_id"] == task
         ]
 
-    with bridges.configure(operator_telegram_id=OPERATOR, operator_channel="slack", operator_chat="T/U"):
+    # No project: the message started the task itself, and there is no session to report to.
+    with bridges.configure(
+        operator_telegram_id=OPERATOR,
+        operator_channel="slack",
+        operator_chat="T/U",
+        projects_dir=str(tmp_path),
+    ):
         assert run(go(OPERATOR)) == [("telegram", OPERATOR)] and run(go("-100")) == [("slack", "T/U")]

@@ -11,8 +11,9 @@ a note to Tom (the text of `done.md` above its first `---` line, or
 `stop.md`), the note is the message.
 
 `owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
-and has not requested, to the chat of Tom's message that started the task
-(`home`), else to `settings.operator_channel` and `settings.operator_chat`:
+and has not requested, to the session it reports to (below), else to the
+task's home chat (`home`), else to `settings.operator_channel` and
+`settings.operator_chat`:
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
@@ -30,14 +31,19 @@ an email only to Tom's addresses, any local send), nor does a chat
 session's send to its own chat (`intake.chat_session`), which the chat saw.
 A reply to a merge's report is feedback.
 
-A task whose parent is a chat session reports to it, never to a chat:
-each notice it owes but the push credential request is a
-`child.reported` row on the parent (`child_id`, `kind`, `about_key`,
-`text`), once per `about_key`, which wakes the session; the session
-tells the chat in its own words. Tom's own chat has a session too
-(`core/intake.py`), so the work he asks for there is its child and
-reports to it. A root task with no session (one started from the CLI, a
-routine, or Tom's email) gives its notices to Tom directly.
+Every task reports to a Valor session, never to a chat (Tom's rule of
+2026-10-16: kernel tasks report to the parent Valor agent). A task whose
+parent is a chat session reports to it; a root task that is not itself a
+session (one started from the CLI, a routine, or Tom's email) reports to
+the operator chat's session (`intake.operator_session`), started when
+none is open. Each notice it owes is then a `child.reported` row on that
+session (`child_id`, `kind`, `about_key`, `text`), once per `about_key`,
+which wakes the session; the session tells its chat in its own words and
+can answer, steer and stop the task (`tools/chat_tasks.py`). The kinds
+that stay Tom's (`TOMS`) go to Tom directly: the push credential request,
+a binding notice, and a rollout's. So does every notice when there is no
+session to take it: a session's own, a child of a task that is not a
+session, or no operator chat or project for the operator session.
 
 A notice with no channel or chat (the operator's unset) is written with a
 `notice.undeliverable` row beside it, so the ledger shows it was never
@@ -81,8 +87,8 @@ async def request(
     ).fetchone()
     if found is not None:
         return None
-    if channel is None and chat_id is None and kind != "credential":
-        parent = await _chat_parent(conn, task_id)
+    if channel is None and chat_id is None and kind not in TOMS:
+        parent = await reports_to(conn, task_id)
         if parent is not None:
             return await _to_parent(conn, parent, task_id, kind, about_key, text)
     notice_id = ledger.new_id()
@@ -122,14 +128,26 @@ async def request(
     return notice_id
 
 
-async def _chat_parent(conn, task_id: str) -> str | None:
-    """The task's parent when that parent is a chat session."""
-    from core import tasks
+# The notice kinds that go to Tom, never to a session.
+TOMS = ("credential", "binding", "rollout")
 
-    parent = (await tasks.brief(conn, task_id)).parent_id
-    if parent is None:
+
+async def reports_to(conn, task_id: str) -> str | None:
+    """The session the task reports to: its parent when that is a chat
+    session; for a root task that is no session, the operator chat's
+    session. None for a session, a child of a task that is not one, a
+    stream (a channel's id, no task), or no operator session to have."""
+    from core import intake, tasks
+
+    try:
+        b = await tasks.brief(conn, task_id)
+    except KeyError:
         return None
-    return parent if (await tasks.brief(conn, parent)).chat else None
+    if b.chat:
+        return None
+    if b.parent_id is not None:
+        return b.parent_id if (await tasks.brief(conn, b.parent_id)).chat else None
+    return await intake.operator_session(conn)
 
 
 async def _to_parent(conn, parent: str, task_id: str, kind: str, about_key: str, text: str) -> str | None:
@@ -148,12 +166,23 @@ async def _to_parent(conn, parent: str, task_id: str, kind: str, about_key: str,
 
 
 async def home(conn, task_id: str) -> tuple[str | None, str | None]:
-    """The channel and chat of the message that started the task, when it
-    came from Tom's own chat (`intake._toms_own`): his notices about it are
-    answered where he asked, as a developer would. Else (None, None), the
-    operator's. Tom's "Hi Valor" on Telegram, 2026-10-16, was answered on
-    Slack."""
-    from core import intake
+    """The chat Tom's notices about the task go to, when it is Tom's own
+    chat (`intake._toms_own`), so he is answered where he asked, as a
+    developer would: a chat session's own chat, a session's child's
+    session's chat, else the chat of the message that started the task.
+    Else (None, None), the operator's. Tom's "Hi Valor" on Telegram,
+    2026-10-16, was answered on Slack."""
+    from core import intake, tasks
+
+    try:
+        b = await tasks.brief(conn, task_id)
+    except KeyError:
+        b = None
+    chat = b.chat if b is not None else None
+    if b is not None and chat is None and b.parent_id is not None:
+        chat = (await tasks.brief(conn, b.parent_id)).chat
+    if chat:
+        return (chat["channel"], chat["chat_id"]) if intake._toms_own(chat) else (None, None)
 
     row = await (
         await conn.execute(

@@ -30,7 +30,9 @@ teammate would (in Tom's own chat, a good deputy):
    said it needs, and say in the chat that it is started.
 3. **A task's report**: a question it asks, its delivery, or why it
    stopped. Tell the chat in your own words; when the chat answers its
-   question, pass the answer on with `task.answer`. A task asks only you.
+   question, pass the answer on with `task.answer`, and pass on what the
+   chat adds with `task.steer`. A task asks only you. In the operator
+   chat, tasks that no session started report to you too.
 4. **Nothing for you** (talk between others, thanks, an acknowledgement of
    your post): send nothing. Silence is the default; a turn that requests
    nothing posts nothing.

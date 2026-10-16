@@ -154,7 +154,11 @@ session, as his Telegram DM does
 ([telegram.md](telegram.md#chat-sessions-one-per-chat-every-message-a-steer)),
 so a top-level message there is the session's next prompt, read against
 the whole DM, and the session takes it for what it is: an answer to a
-question it relayed, or new work.
+question it relayed, or new work; it answers, steers and stops the tasks
+that report to it. An exact `stop` there stops those tasks at once
+([telegram.md](telegram.md#bound-replies-decided-by-the-kernel)). A
+threaded reply to a question a task sent before the DM had a session
+still binds to that task.
 
 ## Sending
 

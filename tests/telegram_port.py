@@ -4,8 +4,7 @@
 lasts the session and intake records each (chat, message id) once.
 `machine` makes this machine own the chats a test names, the way the
 operator's settings and a project spec do: the first is the operator
-chat, the rest a project's, and the `valor` project is there for the
-operator chat's session. `connected` runs a bridge on the emulator
+chat, the rest a project's. `connected` runs a bridge on the emulator
 over `from_core(dsn)`, with its state files in the test's directory, so a
 second `connected` there is a restart. `release` puts one requested send
 in the ledger for the outbox to yield.
@@ -45,7 +44,6 @@ def emu_chat(id: str, **more: Any) -> dict:
 def _spec(tmp_path: Path, chats: list[str]) -> Path:
     projects = tmp_path / "projects"
     projects.mkdir(exist_ok=True)
-    (projects / "valor.toml").write_text('name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n')
     if chats:
         listed = ", ".join(f'"telegram:{c}"' for c in chats)
         (projects / "tg.toml").write_text(

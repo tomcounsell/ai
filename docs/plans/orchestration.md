@@ -146,46 +146,63 @@ now exists, and `docs/persona.md` and `skills/README.md` likewise.
   his Telegram DM, his Slack DMs, the local chat), a message of his goes to that
   chat's session through the same `_chat` path as a team chat's, under
   `_project_for` (the project listing the chat, else `valor`), and always wakes
-  it. A reply that `_replied` resolves to a task that is not this chat's session (an
-  older task's notice or send, or a notice that stays Tom's: credential,
-  binding, rollout, spend, grants) keeps the reply binding; a reply to the
-  session's own post goes to the session. With no project, the message starts a
-  task as before. `_chat_start` opens with "Tom's own chat on <channel>, a 1:1
-  with him, not a team chat".
+  it. A reply that `_replied` resolves to a task other than one of this chat's
+  sessions (an older task's notice or send, another chat's session's post, or a
+  notice that stays Tom's: credential, binding, rollout) keeps the reply
+  binding; a reply to the session's own post goes to the session. With no
+  project, the message starts a task. `_chat_start` opens with "Tom's own chat
+  on <channel>, a 1:1 with him, not a team chat".
+- The session is picked under the chat's lock (`open_session`) and read again
+  under its tree and task locks; one that ended in between gives way to a new
+  session in the same transaction.
+- Stop is immediate by structure: in Tom's own chat an exact `stop` from Tom,
+  top level or in reply to the session's own post, stops every open task that
+  reports to the session (`tasks.reporting`), by Tom, and reaches the session as
+  a steer. It never stops the session. Team chats are unchanged.
 - Anyone else in Tom's own chat binds to nothing.
-- Email is out: Tom's emails each start a task, as the binding table says.
-- The Slack DM preceding-posts machinery is gone (`_preceding`, `_waits`,
-  `_adjacent`, `_context`, `CARRIED`, and `plans/slack-dm-reply-context.md`):
-  the session reads the whole DM.
-- Tests (`tests/test_kernel.py`): a non-reply DM from Tom binds to his DM
-  session and starts no SDLC task; a stranger there binds to none; a reply to an
-  older task's notice still binds to it, and a reply to the session's post goes
-  to the session.
+- Email has no session: Tom's emails each start a task.
+- The session reads the whole DM, so a top-level Slack DM message carries no
+  quoted posts.
 
 **D. One voice for every task.**
 
-- Already true for a task whose parent is a chat session (`notices.request` →
-  `_chat_parent` → `_to_parent`, `child.reported`). After C every task started
-  from Tom's own chat is a child of its session, so it follows. A root task with
-  no session (the CLI, a routine, Tom's email) notifies Tom directly, as
-  `core/notices.py`'s docstring says. The credential request stays Tom's.
+- `core/notices.py`, `request` → `reports_to` → `_to_parent`: a task whose
+  parent is a chat session reports to it as `child.reported`; a root task that
+  is no session (the CLI, a routine, Tom's email) reports to the operator chat's
+  session (`intake.operator_session`), started for it when none is open. The
+  kinds in `TOMS` (credential, binding, rollout) go to Tom directly, as does a
+  notice with no session to take it.
+- `notices.home`: a chat session's own chat, or a session's child's session's
+  chat, when it is Tom's own; else the chat of the message that started the
+  task.
+- `tools/chat_tasks.py`: a session answers, steers (`task.steer`) and stops any
+  task that reports to it, its children and the tasks whose report is on it.
+  A task waiting on a question it sent Tom directly still takes his threaded
+  reply.
 - `skills/sdlc/channel.md` tells a worker that a session's task leaves its
   output for the session, which tells the chat.
 - Test, end to end (`tests/test_pipeline.py`): Tom's DM message, the DM
   session's turn requests `task.start`, the task builds, its checks and review
-  pass, the kernel merges, the report is `child.reported` on the session, and
-  the session's next turn sends the news to Tom's chat.
+  pass, the kernel merges, the report is one `child.reported` on the session,
+  and the session's next turn sends the news to Tom's DM, which owes no report.
 
 **E. The session orchestrates.**
 
 - `skills/sdlc/converse.md` is any chat's, Tom's own included, where it is a 1:1
   with the CEO. The session reads and dispatches: a Claude Code subagent for
   something small, `valor:web` for anything on the web, a task for anything with
-  a deliverable or a merge, and `task.answer` and `task.stop` for its tasks.
+  a deliverable or a merge, and `task.answer`, `task.steer` and `task.stop` for
+  the tasks that report to it.
 - `docs/persona.md`, "One voice that orchestrates", describes it as built.
-- Not built: an exact `stop` in reply to the session's relay of task X goes to
-  the session, which stops X with `task.stop`; the kernel does not map the
-  relay to X, since a relay is the session's own send and names no task.
+
+**Tests** (`tests/test_kernel.py`): a non-reply DM from Tom binds to his DM
+session and starts no task; a stranger there binds to none; a threaded reply to
+an older task's question answers it, a reply to a team session's post binds to
+that session, and a reply to the DM session's post reaches it; `stop` stops the
+tasks reporting to the session and not the session; a root task reports to the
+operator chat's session, which answers, steers and stops it; `home` for a
+session and its child; a session ended after its pick gives way to a new one;
+with no project, the message starts a task.
 
 ## Done
 
@@ -206,6 +223,14 @@ now exists, and `docs/persona.md` and `skills/README.md` likewise.
 - A turn can write the kernel checkout, the hook script included.
 - The guard cannot write the ledger when it fires, since turns cannot reach
   Postgres. At expiry it is listed for Tom with no firing record, and he decides.
+- Every root task that is no session reports to the operator chat's
+  session, so one session hears the CLI's, the routines' and Tom's emails'
+  work, whichever chat Tom is in.
+- A `stop` in Tom's own chat stops every task reporting to that session, not
+  one of them; the session stops one with `task.stop`.
+- A `stop` that takes the tree locks of root tasks reporting to the session
+  while the session's own are held can deadlock with a writer taking them the
+  other way; Postgres ends one, and that message is bound `none` with a notice.
 - `VALOR_SUBAGENT_START` puts a second copy of the Brief into the turn's
   environment (UTF-8, not escaped). That is fine while argv plus environment
   stays under macOS's 1 MB limit. Above about 10,000 characters, Claude Code

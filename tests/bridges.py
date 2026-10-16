@@ -20,6 +20,8 @@ from tests.ports import listen
 OPERATOR = "42"
 OPERATOR_CHAT = "1000"
 OPERATOR_EMAIL = "tom@example.com"
+# The `valor` project, which a session of Tom's own chat works under.
+VALOR_SPEC = 'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
 SNDBUF = 4 << 20  # within macOS's default kern.ipc.maxsockbuf, 8 MiB
 
 

@@ -445,6 +445,19 @@ async def children(conn, task_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+async def reporting(conn, session_id: str) -> list[str]:
+    """The tasks that report to a chat session: its children, then every
+    other task whose report is on it (`child.reported`), each once, in
+    the order they first did."""
+    rows = await (
+        await conn.execute(
+            "SELECT payload->>'child_id' FROM events WHERE task_id = %s AND type = 'child.reported' ORDER BY id",
+            (session_id,),
+        )
+    ).fetchall()
+    return list(dict.fromkeys([*await children(conn, session_id), *(r[0] for r in rows)]))
+
+
 async def subtree(conn, task_id: str) -> list[str]:
     """The task's descendants, breadth first, each node's children in start
     order."""
