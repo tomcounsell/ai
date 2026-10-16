@@ -483,7 +483,8 @@ it collects the turn. [browser.md](browser.md) specifies it.
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`
 mark (`docs/pi.md`). It loads the project's `AGENTS.md`, `CLAUDE.md` and
-skills and the yudame plugins' skills; the pinned Pi has no MCP.
+skills and the yudame plugins' skills, and the operator's MCP servers from
+the `mcp.json` it writes in the turn's Pi directory.
 
 Codex is the third (`harnesses/codex.py`, ported from the old system's
 adapter; `--harness codex`, with an OpenAI model such as `--model gpt-6.1-sol`).

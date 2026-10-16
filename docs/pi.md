@@ -1,9 +1,12 @@
 # Pi
 
-Pi (`@mariozechner/pi-coding-agent`, pinned in `harnesses/pi.py`, `PINNED`)
-is the second harness. It is a node script installed at `PINNED` with
-`npm install -g @mariozechner/pi-coding-agent@<PINNED>`, where `settings.pi`
-defaults (`/opt/homebrew/bin/pi`); `VALOR_PI` names another install. The
+Pi (`@earendil-works/pi-coding-agent`, pinned in `harnesses/pi.py`,
+`PINNED`, 1.0.0: the newest release two weeks old with MCP built in) is the
+second harness. It is a node script (node 22.19 or later) installed at
+`PINNED` with `npm install -g @earendil-works/pi-coding-agent@<PINNED>`, where
+`settings.pi` defaults (`/opt/homebrew/bin/pi`); `VALOR_PI` names another
+install. The package before 1.0 was `@mariozechner/pi-coding-agent`; both
+install a `pi`, so the old one is uninstalled first. The
 kernel runs it as `settings.node` and the resolved `cli.js` (`VALOR_NODE`
 names another node), and records the release (`harness_version`) on every
 `turn.started`. Its wrapper `workspace_turn` takes the same `harness`
@@ -27,21 +30,29 @@ and `VALOR_TURN` mark as Claude Code.
   the project's `AGENTS.md` and `CLAUDE.md` are appended to it. Skills load
   from the project's `.pi/skills` and `.agents/skills`, the operator's
   `~/.agents/skills`, and `--skill <plugin>/skills` for each of
-  `settings.plugin_dirs`. The pinned release needs no trust step for project
-  skills. `--no-extensions --no-prompt-templates --no-themes` keep the
-  clone's extensions, prompts, and themes out. `.pi/settings.json` is still
-  read (compaction, retry, thinking, shell path and prefix, package and
-  skills lists); it cannot change the provider, model, tools, or system
-  prompt, which are flags.
-- **No MCP.** The pinned release has none built in (its docs: "no built-in
-  MCP"; MCP is an extension), so the operator's MCP servers
-  (`claude_code.user_mcp_servers`) reach Claude Code turns only.
+  `settings.plugin_dirs`. Project skills, `.pi/settings.json` and
+  `.pi/mcp.json` are behind Pi's project trust, which JSON mode cannot ask
+  for, so the turn passes `--approve`. `--no-extensions --no-prompt-templates
+  --no-themes` keep the clone's extensions, prompts, and themes out;
+  `--no-extensions` also drops Pi's built-in extensions, so `-e builtin:mcp`,
+  `builtin:codemode` and `builtin:tool-search` name them back.
+  `.pi/settings.json` is read (compaction, retry, thinking, shell path and prefix, default tools,
+  package and skills lists); it cannot change the provider, model, or
+  system prompt, which are flags.
+- **MCP.** The kernel writes the operator's MCP servers
+  (`claude_code.user_mcp_servers`) into `mcp.json` in `pi_agent_dir` each
+  turn, entries as Claude Code reads them. Pi names their tools
+  `mcp__<server>__<tool>` and by default reaches them through `codemode`
+  scripts (its docs/mcp.md, exposure), listing each server in the system
+  prompt; a server's `exposure` in the operator's config changes that.
 - **The prompt is on stdin.** `-p` merges piped input into the prompt, so a
-  prompt starting with `-` or `@` is neither an option nor a file. Only the
+  prompt starting with `@` is not a file. Only the
   Brief is appended to the system prompt.
 - **Resume** is by session id from `--session-dir`; an unknown id prints
   `No session found matching '<id>'` and exits 1, which `parse` reports as
   `is_error` (no session line).
+- **Retry.** An `agent_end` with `willRetry` is not the end of the run;
+  `parse` waits for one without it.
 - **Compaction.** A compaction a turn triggers runs after `agent_end`; in
   print mode the stream can end on `compaction_start` and the session still
   holds the result. `parse` lists each with `finished`. The API refuses a
@@ -52,4 +63,5 @@ and `VALOR_TURN` mark as Claude Code.
   the session cost $8.87 at the gateway against $2.63 Pi reported, since Pi
   cannot express the cache-write and long-context rates.
 
-The suite holds no Pi tests.
+The suite builds a Pi turn and checks its MCP config, skills and flags
+(`tests/test_kernel.py`); it runs no Pi.

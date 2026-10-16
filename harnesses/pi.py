@@ -1,4 +1,4 @@
-"""Pi (`@mariozechner/pi-coding-agent`) turns, pointed at the kernel's gateway.
+"""Pi (`@earendil-works/pi-coding-agent`) turns, pointed at the kernel's gateway.
 
 `workspace_turn` builds one turn of a task that works in a directory over
 several turns, matching `claude_code.workspace_turn`: the same `harness`
@@ -10,31 +10,36 @@ against the task and carries no credential of the turn's.
 **What Pi reads, and what the turn is left with.**
 
 - Its agent directory is the turn's own (`PI_CODING_AGENT_DIR`, from
-  `harness["pi_agent_dir"]`), and the kernel writes its `models.json` and
-  `settings.json` before every turn: one provider, `valor`, whose base URL is
-  the gateway and whose key is the placeholder the gateway replaces.
+  `harness["pi_agent_dir"]`), and the kernel writes its `models.json`,
+  `settings.json` and `mcp.json` before every turn: one provider, `valor`,
+  whose base URL is the gateway and whose key is the placeholder the gateway
+  replaces, and the operator's user MCP servers
+  (`claude_code.user_mcp_servers`), whose entries Pi reads as Claude Code
+  writes them. Pi names their tools `mcp__<server>__<tool>`.
 - The system prompt is always passed (`--system-prompt`), so a project's
   `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` never replace it. As for a
   developer's Pi, the project's `AGENTS.md` and `CLAUDE.md` (in the clone
   and every directory above it) are appended to it, and its skills load:
   the project's `.pi/skills` and `.agents/skills`, the operator's
   `~/.agents/skills`, and each yudame plugin's `skills` (`--skill`, from
-  `settings.plugin_dirs`). The pinned release has no MCP (its docs: "no
-  built-in MCP"), so the operator's MCP servers reach only Claude Code turns.
+  `settings.plugin_dirs`). Project skills, settings and `.pi/mcp.json` are
+  behind Pi's project trust, which print and JSON modes cannot ask for, so
+  the turn trusts its own clone (`--approve`), as a developer has.
   `--no-extensions --no-prompt-templates --no-themes` keep a clone's
-  `.pi/extensions`, `.pi/prompts`, and `.pi/themes` from loading anything.
-- A clone's `.pi/settings.json` is still read, and Pi has no flag against
-  it. Read from the pinned release's source, it can change compaction,
-  retry, thinking, the image settings, `shellPath`, `shellCommandPrefix`,
-  `npmCommand`, the package list, and the skills list; it cannot change the
-  provider or model (flags), the tools (flags), the system prompt (flags), or
-  the session directory (flag), and `--no-extensions` keeps a settings
+  `.pi/extensions`, `.pi/prompts`, and `.pi/themes` from loading anything;
+  `--no-extensions` also drops Pi's built-in extensions, so the MCP,
+  codemode and tool-search ones are named back (`-e builtin:<name>`).
+- A trusted clone's `.pi/settings.json` is read. Per the pinned release's
+  docs, it can change compaction, retry, thinking, the image settings,
+  `shellPath`, `shellCommandPrefix`, `npmCommand`, the default tools
+  (`defaultTools`), the package list, and the skills list; it cannot change
+  the provider or model (flags), the system prompt (flags), or the session
+  directory (flag), and `--no-extensions` keeps a settings
   `packages` or `extensions` list from loading anything. The working
   session's builder owns its clone, so its own settings stand there.
 
-**The prompt travels on standard input.** The pinned release reads `--` as
-an unknown flag, and a leading `@` on the command line is a file to read
-into the prompt, so the prompt is given on stdin (`-p` merges piped stdin
+**The prompt travels on standard input.** A leading `@` on the command line
+is a file to read into the prompt, so the prompt is given on stdin (`-p` merges piped stdin
 into the prompt), where no character of it is an option or a file.
 
 **Binaries.** Pi is a node script; it runs as `<node> <cli.js>` with both
@@ -53,12 +58,16 @@ from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import settings
 from core.workspace import current_profile, environment
-from harnesses.claude_code import Unsandboxed
+from harnesses.claude_code import Unsandboxed, user_mcp_servers
 
 # The release the contract suite ran on. The turn row records what ran.
-PINNED = "0.73.1"
+PINNED = "1.0.0"
 
-PACKAGE = "@mariozechner/pi-coding-agent"
+PACKAGE = "@earendil-works/pi-coding-agent"
+
+# Pi's own extensions a developer's Pi loads, named back after `--no-extensions`
+# (all but the llama.cpp provider).
+BUILTIN_EXTENSIONS = ("mcp", "codemode", "tool-search")
 
 # The provider name in the turn's `models.json`.
 PROVIDER = "valor"
@@ -67,9 +76,10 @@ PROVIDER = "valor"
 # examples paths and is overridden by a project file, so the kernel states
 # the role itself. The dispatched Brief is appended after it.
 SYSTEM_PROMPT = (
-    "You are a coding agent working in the current directory. You have four tools: "
-    "read (read a file), bash (run a shell command), edit (replace text in a file), and "
-    "write (create or overwrite a file). Do the task you are given, and say plainly "
+    "You are a coding agent working in the current directory. Your tools are "
+    "read (read a file), bash (run a shell command), edit (replace text in a file), "
+    "write (create or overwrite a file), and those of the MCP servers declared or listed "
+    "to you. Do the task you are given, and say plainly "
     "what you did and what you could not do."
 )
 
@@ -178,15 +188,20 @@ def _entry(path: str) -> list[str]:
     return [settings.node, real] if real.endswith(".js") else [real]
 
 
+def mcp_json() -> str:
+    return json.dumps({"mcpServers": user_mcp_servers()}, indent=2)
+
+
 @functools.cache
 def version(path: str) -> str | None:
-    """The installed package's version, from the `package.json` that is the
-    parent of the resolved script's directory (`dist/cli.js`), never by
-    running the binary. None for a layout this does not recognise."""
+    """The installed package's version, from the `package.json` nearest above
+    the resolved script (`dist/bundle/cli.js`), never by running the binary.
+    None for a layout this does not recognise."""
     real = Path(os.path.realpath(path))
     try:
-        package = json.loads((real.parent.parent / "package.json").read_text())
-    except OSError, ValueError:
+        manifest = next(p / "package.json" for p in real.parents if (p / "package.json").is_file())
+        package = json.loads(manifest.read_text())
+    except OSError, ValueError, StopIteration:
         return None
     if not isinstance(package, dict) or package.get("name") != PACKAGE:
         return None
@@ -206,8 +221,8 @@ def parse(stdout: bytes) -> dict:
     Claude Code's `parse` returns. Pi's own cost figure is kept beside the
     gateway's, never in place of it, and is an approximation (`_cost`).
 
-    A stream with no session line, or none ending its run (`agent_end`),
-    or whose last assistant message ended in an error or an abort, is an
+    A stream with no session line, or none ending its run (an `agent_end`
+    that will not retry), or whose last assistant message ended in an error or an abort, is an
     error: so is the unknown-session path, where Pi exits 1 with no session
     line.
 
@@ -232,7 +247,7 @@ def parse(stdout: bytes) -> dict:
         if kind == "session" and session_id is None:
             session_id = event.get("id")
         elif kind == "agent_end":
-            ended = True
+            ended = not event.get("willRetry")
         elif kind == "turn_end":
             turns += 1
         elif kind == "message_end":
@@ -249,7 +264,7 @@ def parse(stdout: bytes) -> dict:
                 "reason": event.get("reason"),
                 "finished": True,
                 "tokens_before": result.get("tokensBefore"),
-                "tokens_after": result.get("tokensAfter"),
+                "tokens_after": result.get("estimatedTokensAfter"),
                 "aborted": event.get("aborted"),
                 "will_retry": event.get("willRetry"),
                 "error": event.get("errorMessage"),
@@ -303,7 +318,7 @@ def workspace_turn(
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         write_config(agent_dir, {"models.json": models_json(base_url, model, max_output_tokens),
-                                 "settings.json": settings_json(model)})  # fmt: skip
+                                 "settings.json": settings_json(model), "mcp.json": mcp_json()})  # fmt: skip
         env = environment(harness.get("env", {}))
         env["PI_CODING_AGENT_DIR"] = agent_dir
         env["PI_OFFLINE"] = "1"
@@ -315,6 +330,8 @@ def workspace_turn(
             "--no-extensions",
             "--no-prompt-templates",
             "--no-themes",
+            *(a for name in BUILTIN_EXTENSIONS for a in ("-e", f"builtin:{name}")),
+            "--approve",
             "--offline",
             "--provider",
             PROVIDER,

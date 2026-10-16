@@ -260,8 +260,11 @@ def test_a_turn_loads_the_operators_own_mcp_servers_and_the_plugins_skills(tmp_p
     monkeypatch.setattr(pi, "settings", replaced)
     argv = claude_code.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t").argv
     assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": servers}
-    # Pi loads the project's context files and skills, and each plugin's skills; it has no MCP.
+    # Pi loads the same servers from its agent directory, the project's context files and
+    # (trusted) skills, and each plugin's skills.
     argv = pi.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t").argv
+    mcp = json.loads((pathlib.Path(harness["pi_agent_dir"]) / "mcp.json").read_text())
+    assert mcp == {"mcpServers": servers} and "builtin:mcp" in argv and "--approve" in argv
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--skill"] == [
         str(tmp_path / "plugin" / "skills")
     ]
