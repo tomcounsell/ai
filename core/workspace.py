@@ -91,7 +91,11 @@ class Spec:
     `"slack:<team id>/<channel or user id>"`; each id normalised as
     `core/channels.py` says), and `machine` the
     machine whose bridges receive them; none means
-    `settings.default_machine`, so each chat has one owner.
+    `settings.default_machine`, so each chat has one owner. In a group
+    chat it lists, anyone's message binds, not only Tom's
+    (`core/intake.py`). `mentions` lists those of its chats where a message
+    starts work only when it names Valor; a reply to Valor's post binds
+    anywhere.
 
     `knowledge_base` names the business's folder in `~/work-vault`, which a
     working task's turns read and write.
@@ -114,6 +118,7 @@ class Spec:
     env: dict[str, str] = field(default_factory=dict)
     max_output_tokens: int | None = None
     chats: tuple[str, ...] = ()
+    mentions: tuple[str, ...] = ()
     machine: str | None = None
     knowledge_base: str | None = None
     client: str | None = None
@@ -159,6 +164,14 @@ class Spec:
             if row is None or not ident or not row.listable(ident):
                 raise Refused(f"chat {chat!r} is not {channels.hints()}")
             normal.append(f"{channel}:{row.normal(ident)}")
+        mentions = []
+        for chat in raw.get("mentions") or ():
+            channel, _, ident = chat.partition(":") if isinstance(chat, str) else ("", "", "")
+            row = channels.get(channel)
+            found = f"{channel}:{row.normal(ident)}" if row is not None and ident else None
+            if found not in normal:
+                raise Refused(f"mentions names {chat!r}, which is not one of the spec's chats")
+            mentions.append(found)
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
@@ -186,6 +199,7 @@ class Spec:
             env=dict(env),
             max_output_tokens=cap,
             chats=tuple(normal),
+            mentions=tuple(mentions),
             machine=machine,
             knowledge_base=kb,
             client=client,

@@ -22,11 +22,24 @@ machine belongs to `settings.default_machine`. The operator chat is the
 bridge's whose channel is `settings.operator_channel`: the Telegram
 operator chat, a Slack chat, or the one local chat, `local`.
 
+A *team chat* is a group chat a spec of this machine lists, other than
+Tom's own chat (`team_spec`). There anyone's message binds as Tom's
+would, with no rights by sender, as in the old system: its rows name the
+sender's display name as `by` (Tom's are `tom`), and the received row
+keeps the `sender_id`. A task it starts carries the chat (`Brief.chat`);
+its instruction is the message, then where and when it was said, the
+chain it replies to, and the chat's last `HISTORY` recorded messages,
+Valor's own posts among them. Every message in an owned chat is recorded,
+bound or not, so that history is whole. In a chat the spec lists under
+`mentions`, a top-level message starts nothing unless it names Valor
+(`MENTION`).
+
 The binding table, first match wins:
 
 | The record | Bound as |
 | --- | --- |
-| Not verified, or not from the operator | `none` |
+| Not verified, or neither from the operator nor in a team chat | `none` |
+| A reply to a chat task's notice, task `stopped`, or `ended` with no plan, not exactly `stop` | `start` (the next conversation) |
 | A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
 | A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
 | A reply to a merged or stopped task | `none`, with a notice |
@@ -34,7 +47,8 @@ The binding table, first match wins:
 | A reply to the open question's notice | `answer` |
 | Any other reply to a task's notice or send | `steer` |
 | Not a reply, in a DM on a threaded channel, with text, after exactly one live ask among Valor's preceding posts | `answer`, with a notice |
-| Not a reply, with text or files | `start`, carrying the preceding posts in a DM on a threaded channel |
+| Not a reply, in a team chat under `mentions`, not naming Valor | `none` |
+| Not a reply, with text or files | `start`, carrying the preceding posts in a DM on a threaded channel, or a team chat's recent messages |
 | Not a reply, empty | `none` |
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
@@ -339,6 +353,29 @@ def _from_operator(p: dict[str, Any]) -> bool:
     return p["channel"] == "local"
 
 
+def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
+    """The project whose team chat the message is in: a group chat a spec
+    of this machine lists, other than Tom's own chat. None for any other
+    message."""
+    if not p.get("verified") or p.get("chat_kind") != "group" or _toms_own(p):
+        return None
+    for chat, spec in _project_chats(p["channel"]):
+        if chat == p["chat_id"]:
+            return spec
+    return None
+
+
+def _by(p: dict[str, Any]) -> str:
+    """Who a bound message's rows name: `tom` for the operator, else the
+    sender's display name (`sender_id` is on the received row)."""
+    return "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
+
+
+# A message names Valor (the old system's mention triggers: "valor",
+# "@valor", "hey valor").
+MENTION = re.compile(r"(?i)(?<![\w])@?valor\b")
+
+
 def _bare(text: str) -> str:
     return re.sub(r"[^\w\s]", "", text).strip().casefold()
 
@@ -510,8 +547,9 @@ async def _notice(conn, task_id: str, p: dict[str, Any], text: str, suffix: str 
 
 
 async def _bind(conn, p: dict[str, Any]) -> str | None:
-    if not _from_operator(p):
+    if not _from_operator(p) and team_spec(p) is None:
         return await _bound(conn, p, None, "none")
+    by = _by(p)
     task_id, replied = await _replied(conn, p)
     if task_id is None or replied is None:
         posts = await _preceding(conn, p)
@@ -532,6 +570,13 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     notice = (replied.get("notice") or {}) if "notice" in replied else {}
     kind, about = notice.get("kind"), notice.get("about_key") or ""
     merge = f.merge_effect or {}
+    if (await tasks.brief(conn, task_id)).chat and (
+        f.state is State.STOPPED or (f.state is State.ENDED and not f.plan)
+    ):
+        # A reply to a conversation that is over is the next conversation.
+        if exact == "stop":
+            return await _bound(conn, p, task_id, "none")
+        return await _start(conn, p)
     if (
         kind == "report"
         and f.state is State.MERGED
@@ -540,11 +585,11 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         and not _near(text, "stop")
     ):
         as_ = await _bound(conn, p, task_id, "feedback")
-        await session.feedback(conn, task_id, text, by="tom", via=via)
+        await session.feedback(conn, task_id, text, by=by, via=via)
         return as_
     if f.state is State.ENDED and text and not _near(text, "stop"):
         as_ = await _bound(conn, p, task_id, "feedback")
-        await session.feedback(conn, task_id, text, by="tom", via=via)
+        await session.feedback(conn, task_id, text, by=by, via=via)
         return as_
     if f.state in (State.MERGED, State.STOPPED):
         as_ = await _bound(conn, p, task_id, "none")
@@ -561,11 +606,12 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
 
     if replies and exact == "stop":
         as_ = await _bound(conn, p, task_id, "stop")
-        await tasks.stop(conn, task_id, reason=f"Tom replied stop ({p['message_id']})", by="tom", via=via)
+        who = "Tom" if by == "tom" else by
+        await tasks.stop(conn, task_id, reason=f"{who} replied stop ({p['message_id']})", by=by, via=via)
         return as_
     if kind == "question" and f.state is State.WAITING and about == f"question:{f.open_question}":
         as_ = await _bound(conn, p, task_id, "answer")
-        await session.answer(conn, task_id, text, by="tom", via=via)
+        await session.answer(conn, task_id, text, by=by, via=via)
         return as_
 
     as_ = await _bound(conn, p, task_id, "steer")
@@ -580,7 +626,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             "message_id": p["message_id"],
             "text": text,
             "attachments": p.get("attachments") or [],
-            "provenance": ledger.provenance("tom", via, False),
+            "provenance": ledger.provenance(by, via, False),
         },
     )
     if _near(text, "stop"):
@@ -678,7 +724,7 @@ async def _adjacent(conn, p: dict[str, Any], post: dict[str, Any]) -> str | None
     if not _waits(machine.fold(await ledger.read(conn, task_id)), post):
         return None
     as_ = await _bound(conn, p, task_id, "answer")
-    await session.answer(conn, task_id, text, by="tom", via=p["channel"])
+    await session.answer(conn, task_id, text, by=_by(p), via=p["channel"])
     said = (
         "I took your message as your answer to my question. "
         "If it was new work, send it again and it will start on its own."
@@ -713,20 +759,32 @@ def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
 
 
 async def _start(conn, p: dict[str, Any], posts: list[dict[str, Any]] | None = None) -> str | None:
-    """A new task from Tom's message, under the project listing the chat
+    """A new task from the message, under the project listing the chat
     (by email: the sender), else `valor`. Its workspace is provisioned by a
     kernel job after it starts. A message of files alone starts a task
     whose instruction lists them; one that followed Valor's `posts` in a
-    DM carries them after Tom's words."""
+    DM carries them after Tom's words. In a team chat the task carries the
+    chat as `Brief.chat` and its instruction the chat's recent messages
+    (`_chat_context`); in a chat the spec lists under `mentions`, a message
+    that does not name Valor starts nothing."""
     text = (p.get("text") or "").strip()
+    team = team_spec(p)
+    if team is not None and _mentions_only(team, p) and not MENTION.search(text):
+        return await _bound(conn, p, None, "none")
+    by = _by(p)
     files = _files(p.get("attachments") or [])
     if files:
-        text = f"{text}\n\n{files}" if text else f"Tom sent files with no text:\n{files}"
+        who = "Tom" if by == "tom" else by
+        text = f"{text}\n\n{files}" if text else f"{who} sent files with no text:\n{files}"
     if not text:
         return await _bound(conn, p, None, "none")
     if posts:
         text = f"{text}\n\n{_context(posts)}"
-    spec = _project_for(p)
+    chat = None
+    if team is not None:
+        text = f"{text}\n\n{await _chat_context(conn, p, team)}"
+        chat = {k: p[k] for k in ("channel", "chat_id", "message_id", "sender_id", "sender_name")}
+    spec = team or _project_for(p)
     harness_name, model = resolve_seat("frontier")
     brief = tasks.Brief(
         instruction=text,
@@ -734,10 +792,76 @@ async def _start(conn, p: dict[str, Any], posts: list[dict[str, Any]] | None = N
         harness_name=harness_name,
         project={"name": spec.name} if spec else None,
         max_effect_class="act",
+        chat=chat,
     )
     as_ = await _bound(conn, p, brief.id, "start")
-    await tasks.start(conn, brief, by="tom", via=p["channel"])
+    await tasks.start(conn, brief, by=by, via=p["channel"])
     return as_
+
+
+def _mentions_only(spec: workspace.Spec, p: dict[str, Any]) -> bool:
+    row = channels.get(p["channel"])
+    chat = row.normal(p["chat_id"]) if row is not None else p["chat_id"]
+    return f"{p['channel']}:{chat}" in spec.mentions
+
+
+# How many of a team chat's messages a task started there carries, and how
+# much of each: the old system's reply chain (Valor's own longer).
+HISTORY = 20
+CUT, CUT_OWN = 500, 2000
+
+
+async def _chat_context(conn, p: dict[str, Any], spec: workspace.Spec) -> str:
+    """Where a team chat's message was said and what came before it: the
+    messages the chain it replies to holds, then the chat's last `HISTORY`
+    messages before it, Valor's own posts among them, oldest first, each
+    with its time and who wrote it."""
+    channel, chat = p["channel"], p["chat_id"]
+    who = p.get("sender_name") or p["sender_id"]
+    lines = [
+        f"{who} wrote this in the {spec.name} team chat on {channel.capitalize()}, at {_when(p.get('sent_at'))}."
+    ]
+    chain = [m for m in p.get("thread") or [] if isinstance(m, dict) and m.get("text")]
+    if chain:
+        lines.append("It replies to, oldest first:")
+        lines += tasks.quoted("\n".join(_cut(m["text"], CUT_OWN) for m in chain))
+    rows = await (
+        await conn.execute(
+            "SELECT at, type, payload FROM events WHERE id < (SELECT id FROM events "
+            "WHERE type = 'message.received' AND payload->>'received_id' = %s) AND ("
+            "(type = 'message.received' AND task_id = %s AND payload->>'chat_id' = %s) OR "
+            "(type = 'notice.requested' AND payload->>'channel' = %s AND payload->>'chat_id' = %s) OR "
+            "(type = 'effect.intent' AND payload->>'action_type' = %s AND payload->>'target' = %s)"
+            ") ORDER BY id DESC LIMIT %s",
+            (p["received_id"], channel, chat, channel, chat, f"{channel}.send_message", chat, HISTORY),
+        )
+    ).fetchall()
+    if rows:
+        lines.append(f"The chat before it, oldest first (the last {HISTORY} messages at most):")
+    for at, type_, payload in reversed(rows):
+        if type_ == "message.received":
+            name = payload.get("sender_name") or payload.get("sender_id")
+            said = _cut(payload.get("text") or "(no text)", CUT)
+            when = _when(payload.get("sent_at"))
+        else:
+            name = "Valor (you)"
+            said = _cut((payload.get("payload") or {}).get("text") if type_ == "effect.intent" else payload.get("text"),
+                        CUT_OWN)  # fmt: skip
+            when = _when(at.isoformat())
+        lines.append(f"- {when} {name}: {said}")
+    return "\n".join(lines)
+
+
+def _when(at: str | None) -> str:
+    try:
+        return datetime.fromisoformat(str(at)).astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return "an unknown time"
+
+
+def _cut(text: str | None, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _files(attachments: list[dict[str, Any]]) -> str:

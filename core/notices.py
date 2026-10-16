@@ -12,19 +12,25 @@ a note to Tom (the text of `done.md` above its first `---` line, or
 
 `owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
 and has not requested, to the chat of Tom's message that started the task
-(`home`), else to `settings.operator_channel` and `settings.operator_chat`:
+(`home`), or to the team chat a task was started in, in reply to the
+message, else to `settings.operator_channel` and `settings.operator_chat`.
+A team chat's task (`Brief.chat`) gets its question as the turn wrote it
+and, when it ends, the conversation turn's reply (`chat_reply`): no kernel
+framing, and nothing for `Quiet.`.
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
   and why it stopped, in plain words. A reply to it is feedback.
 
 `credential(conn, task_id, sha, why)` asks Tom for the push credential a
-merge needs (`credential:<sha>`), the one merge failure that reaches him.
+merge needs (`credential:<sha>`), the one merge failure that reaches him,
+in his operator chat wherever the task was asked for.
 
 `report(conn, task_id, effect, result)` writes the `report` notice
 (`report:<effect>`) an `act` effect owes once its outcome is `done`: what
 left. A merge's says what shipped; a send's carries its channel,
-recipients, and text. A push owes none (a step inside the task), nor does
+recipients, and text. A team chat's task reports a send to Tom's operator
+chat, and none for a send to that chat itself. A push owes none (a step inside the task), nor does
 a send that itself reached Tom (to the operator chat or Tom's Telegram id,
 an email only to Tom's addresses, any local send). A reply to a merge's report is feedback.
 
@@ -38,6 +44,7 @@ Postgres jsonb refuses is written with kernel text in its place, naming
 what it is about. The bridge sends notices as they come.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +79,8 @@ async def request(
         return None
     notice_id = ledger.new_id()
     if channel is None and chat_id is None:
-        channel, chat_id = await home(conn, task_id)
+        channel, chat_id, threaded = await home(conn, task_id)
+        reply_to = reply_to or threaded
     channel = channel or settings.operator_channel
     chat_id = chat_id if chat_id is not None else settings.operator_chat
     try:
@@ -107,12 +115,14 @@ async def request(
     return notice_id
 
 
-async def home(conn, task_id: str) -> tuple[str | None, str | None]:
-    """The channel and chat of the message that started the task, when it
-    came from Tom's own chat (`intake._toms_own`): his notices about it are
-    answered where he asked, as a developer would. Else (None, None), the
-    operator's. Tom's "Hi Valor" on Telegram, 2026-10-16, was answered on
-    Slack."""
+async def home(conn, task_id: str) -> tuple[str | None, str | None, str | None]:
+    """The channel, chat and message to reply to for the task's notices:
+    the chat of the message that started it, when that is Tom's own chat
+    (`intake._toms_own`), where his notices are answered as a developer
+    would (Tom's "Hi Valor" on Telegram, 2026-10-16, was answered on
+    Slack); a team chat (`intake.team_spec`), in reply to that message, so
+    the team sees the work where it was asked. Else (None, None, None), the
+    operator's."""
     from core import intake
 
     row = await (
@@ -124,9 +134,14 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
             (task_id,),
         )
     ).fetchone()
-    if row is None or not intake._toms_own(row[0]):
-        return None, None
-    return row[0]["channel"], row[0]["chat_id"]
+    if row is None:
+        return None, None, None
+    p = row[0]
+    if intake._toms_own(p):
+        return p["channel"], p["chat_id"], None
+    if intake.team_spec(p) is not None:
+        return p["channel"], p["chat_id"], p["message_id"]
+    return None, None, None
 
 
 async def owe(conn, task_id: str) -> list[str]:
@@ -135,6 +150,9 @@ async def owe(conn, task_id: str) -> list[str]:
     f = machine.fold(rows)
     if f.legacy or f.calibration or f.state in (State.STOPPED, State.MERGED):
         return []
+    from core import tasks
+
+    chat = (await tasks.brief(conn, task_id)).chat
     made: list[str | None] = []
     if f.state is State.WAITING and f.open_question:
         asked = next(
@@ -149,7 +167,9 @@ async def owe(conn, task_id: str) -> list[str]:
                     task_id,
                     kind="question",
                     about_key=f"question:{f.open_question}",
-                    text="\n\n".join(
+                    text=str(asked.get("text", ""))
+                    if chat
+                    else "\n\n".join(
                         [
                             lead(await headline(conn, task_id), "I have a question for you."),
                             str(asked.get("text", "")),
@@ -159,16 +179,26 @@ async def owe(conn, task_id: str) -> list[str]:
                 )
             )
     if f.state is State.ENDED and f.entry is not None:
-        made.append(
-            await request(
-                conn,
-                task_id,
-                kind="ended",
-                about_key=f"ended:{f.entry.get('id')}",
-                text=ended_text(f, await headline(conn, task_id)),
+        text = chat_reply(f) if chat else ended_text(f, await headline(conn, task_id))
+        if text:
+            made.append(
+                await request(conn, task_id, kind="ended", about_key=f"ended:{f.entry.get('id')}", text=text)
             )
-        )
     return [m for m in made if m]
+
+
+def chat_reply(f: machine.Fold) -> str | None:
+    """What a team chat sees when its task ends: the conversation turn's
+    words as written (`Done:` dropped), or nothing for `Quiet.`. A task
+    that ended for another reason says so as `ended_text` does."""
+    entry = f.entry or {}
+    p = entry.get("payload") or {}
+    if entry.get("type") != "task.ended" or p.get("kind") != "decided":
+        return ended_text(f, None)
+    text = str(p.get("text") or "").strip()
+    if re.match(r"(?i)quiet\b", text):
+        return None
+    return re.sub(r"(?i)^done:\s*", "", text).strip() or None
 
 
 def short(instruction: str | None, limit: int = 80) -> str | None:
@@ -297,7 +327,16 @@ async def credential(conn, task_id: str, sha: str, *, missing: bool) -> str | No
             "Once a working token is in place I merge it on my own.",
         ]
     )
-    return await request(conn, task_id, kind="credential", about_key=f"credential:{sha}", text=text)
+    return await request(
+        conn,
+        task_id,
+        kind="credential",
+        about_key=f"credential:{sha}",
+        text=text,
+        # Tom's alone, wherever the task was asked for.
+        channel=settings.operator_channel or "",
+        chat_id=settings.operator_chat or "",
+    )
 
 
 def _to_tom(effect: dict[str, Any]) -> bool:
@@ -347,6 +386,11 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
             if x
         )
     else:
+        from core import tasks
+
+        chat = (await tasks.brief(conn, task_id)).chat or {}
+        if kind == f"{chat.get('channel')}.send_message" and str(effect.get("target")) == chat.get("chat_id"):
+            return None  # posted in the team chat it was asked in, which saw it
         body = payload.get("text") or payload.get("subject") or payload.get("body") or ""
         files = [Path(f.get("path", "")).name for f in payload.get("files") or []]
         text = "\n\n".join(
@@ -358,6 +402,17 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
             )
             if x
         )
+        if chat:
+            # What left elsewhere under Valor's name is reported to Tom.
+            return await request(
+                conn,
+                task_id,
+                kind="report",
+                about_key=f"report:{effect['effect_id']}",
+                text=text,
+                channel=settings.operator_channel or "",
+                chat_id=settings.operator_chat or "",
+            )
     return await request(conn, task_id, kind="report", about_key=f"report:{effect['effect_id']}", text=text)
 
 

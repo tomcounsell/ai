@@ -122,6 +122,16 @@ async def record_judge(conn, task_id: str, judgement_id: str) -> int:
         )
 
 
+async def record_chat(conn, task_id: str) -> int:
+    """The judge's verdict for a task started in a team chat: `thin`, with
+    no judgement asked, so its clarify turn is the conversation."""
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        await _fold(conn, task_id, State.JUDGE)
+        payload = {"verdict": "thin", "leg": "chat", "guard_id": None}
+        return await ledger.append(conn, task_id, "judge.decided", payload)
+
+
 async def record_critique(
     conn, task_id: str, verdict: str, *, findings: Iterable = (), raised: Mapping[str, int] | None = None,
     leg: str, model: str | None = None, usd_micros: int = 0, turn_id: str | None = None,

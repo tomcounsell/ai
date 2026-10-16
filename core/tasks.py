@@ -67,6 +67,7 @@ class Brief:
     project: dict[str, Any] | None = None
     parent_id: str | None = None
     routine: str | None = None
+    chat: dict[str, str] | None = None
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -343,7 +344,7 @@ async def dispatch(
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
     usage lines of the task's own performers) and the stage file for the state the task
-    is in (`skills/sdlc/<state>.md`). A `fresh` session (critique, review,
+    is in (`skills/sdlc/<state>.md`; `converse.md` for a team chat's clarify). A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file; the advisor (`advice`)
@@ -380,7 +381,8 @@ async def dispatch(
     elif b.workspace:
         lines = list(offered)
         sections.append(channel_text(lines))
-        stage = stage_text(state)
+        chat = b.chat and state is machine.State.CLARIFY
+        stage = stage_text("converse" if chat else state)
         if stage:
             sections.append(stage)
     if not fresh:

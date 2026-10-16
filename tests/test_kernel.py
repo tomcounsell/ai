@@ -725,3 +725,179 @@ def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(
     blank = core("exemplar", "   ")
     assert blank.returncode != 0 and "exemplar refused: an exemplar has text" in blank.stderr
     assert core("corrections").stdout == listed
+
+
+# -- a team chat: anyone there is heard, and the work happens in the open ---------
+
+
+GROUP, QUIET_GROUP, OTHER = "-1001", "-1002", "-1003"
+RAIN = "77"
+
+
+@pytest.fixture
+def team(tmp_path):
+    """A project whose two team chats this machine reads, one of them
+    mentions only; `OTHER` is a group no spec lists."""
+    with bridges.operator(tmp_path):
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+            f'chats = ["telegram:{GROUP}", "telegram:{QUIET_GROUP}"]\n'
+            f'mentions = ["telegram:{QUIET_GROUP}"]\n'
+        )
+        yield
+
+
+async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None) -> dict:
+    """A Telegram group message, received and bound: its binding, with the
+    started task's Brief when it started one."""
+    mid = str(uuid.uuid4().int % 10**9)
+    inbound = intake.Inbound(
+        channel="telegram", chat_id=chat, chat_kind="group", message_id=mid, sender_id=sender,
+        sender_name=name, sent_at="2026-10-16T09:30:00+00:00", text=text, reply_to=reply_to,
+    )  # fmt: skip
+    async with await db.connect(dsn) as conn:
+        got = await intake.receive(conn, inbound)
+        await intake.bind(conn)
+    (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+    bound["message_id"] = mid
+    if bound["as"] == "start":
+        async with await db.connect(dsn) as conn:
+            bound["brief"] = await tasks.brief(conn, bound["task_id"])
+    return bound
+
+
+async def on(dsn, type_, task) -> list[dict]:
+    return [r for r in await bridges.of_type(dsn, type_) if r["task_id"] == task]
+
+
+def test_anyone_in_a_team_chat_starts_work_that_carries_the_chat_and_who_asked(dsn, team):
+    """Rain's message starts a task, as Tom's would: by Rain, the chat on
+    its Brief, the chat's earlier messages (Valor's own among them) in its
+    instruction. A group no spec lists stays unheard."""
+
+    async def go():
+        first = await said(dsn, "the florist page 500s on mobile", name="Kim", sender="78")
+        async with await db.connect(dsn) as conn:
+            await notices.request(conn, first["task_id"], kind="ended", about_key="x", text="Looking now.")
+        bound = await said(dsn, "can you check the deploy log?")
+        other = await said(dsn, "hello valor", chat=OTHER)
+        return first, bound, other, await on(dsn, "task.started", bound["task_id"])
+
+    first, bound, other, (started,) = run(go())
+    b = bound["brief"]
+    assert bound["as"] == "start" and other["as"] == "none"
+    assert started["provenance"]["by"] == "Rain" and b.project == {"name": "flowers"}
+    assert b.chat == {"channel": "telegram", "chat_id": GROUP, "message_id": bound["message_id"],
+                      "sender_id": RAIN, "sender_name": "Rain"}  # fmt: skip
+    text = b.instruction
+    assert text.startswith(
+        "can you check the deploy log?\n\nRain wrote this in the flowers team chat on Telegram"
+    )
+    assert text.index("Kim: the florist page 500s") < text.index("Valor (you): Looking now.")
+    assert first["brief"].chat["sender_name"] == "Kim"
+
+
+def test_in_a_mentions_chat_only_a_message_naming_valor_starts_work(dsn, team):
+    async def go():
+        return [
+            (await said(dsn, text, chat=QUIET_GROUP))["as"]
+            for text in ("lunch at noon?", "Valor, what broke?", "@valor ping", "valorous effort")
+        ]
+
+    assert run(go()) == ["none", "start", "start", "none"]
+
+
+def test_a_team_tasks_question_is_asked_in_the_chat_and_anyone_there_answers_it(dsn, team):
+    """The chat task skips the judge to its conversation turn; its question
+    goes to the chat in reply to the request, with no kernel framing, and
+    Kim's reply answers it. A credential request stays with Tom."""
+    from types import SimpleNamespace
+
+    from core import judgement_sites
+
+    async def go():
+        bound = await said(dsn, "valor can you bump the stripe sdk?")
+        task = bound["task_id"]
+        ctx = SimpleNamespace(dsn=dsn, task_id=task, alive=None)
+        assert await judgement_sites.judge_runner(None)(ctx) == {"status": "moved"}
+        async with await db.connect(dsn) as conn:
+            for row in Ledger(judge="thin").ask().rows[2:]:
+                await ledger.append(conn, task, row["type"], row["payload"])
+            assert machine.fold(await ledger.read(conn, task)).state is State.WAITING
+            (nid,) = await notices.owe(conn, task)
+            await notices.credential(conn, task, "abc", missing=True)
+            sent = [{"channel": "telegram", "chat_id": GROUP, "message_id": "9001"}]
+            await ledger.append(conn, task, "notice.sent", {"notice_id": nid, "sent": sent})
+        answer = await said(dsn, "yes, v12", sender="78", name="Kim", reply_to="9001")
+        return bound, answer, *[await on(dsn, t, task) for t in ("judge.decided", "notice.requested",
+                                                                 "question.answered")]  # fmt: skip
+
+    bound, answer, (judged,), (asked, credential), (answered,) = run(go())
+    assert judged["verdict"] == "thin" and judged["leg"] == "chat"
+    assert (asked["channel"], asked["chat_id"], asked["reply_to"], asked["text"]) == (
+        "telegram", GROUP, bound["message_id"], "?",
+    )  # fmt: skip
+    assert (credential["chat_id"], credential["reply_to"]) == (bridges.OPERATOR_CHAT, None)
+    assert answer["as"] == "answer"
+    assert answered["provenance"]["by"] == "Kim" and answered["text"] == "yes, v12"
+
+
+def test_a_conversation_turn_runs_the_converse_stage_and_its_reply_is_posted_as_written(dsn, team, tmp_path):
+    """A chat task in clarify gets the converse stage; `Done:` posts the
+    reply alone, in reply to the message; `Quiet.` posts nothing; and a
+    reply to a finished conversation starts the next one."""
+    from core import verdicts
+
+    async def ended(text) -> tuple[dict, list[dict]]:
+        bound = await said(dsn, "valor, is staging up?")
+        async with await db.connect(dsn) as conn:
+            await verdicts.record_chat(conn, bound["task_id"])
+            await ledger.append(conn, bound["task_id"], "task.ended", {"kind": "decided", "by": "valor",
+                                                                        "text": text})  # fmt: skip
+            await notices.owe(conn, bound["task_id"])
+        return bound, await on(dsn, "notice.requested", bound["task_id"])
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            chat = {
+                "channel": "telegram",
+                "chat_id": GROUP,
+                "message_id": "1",
+                "sender_id": RAIN,
+                "sender_name": "R",
+            }
+            task = await tasks.start(conn, tasks.Brief(instruction="hi", workspace=str(tmp_path), chat=chat))
+            await verdicts.record_chat(conn, task)
+            text = (await tasks.dispatch(conn, task))["text"]
+        asked, (reply,) = await ended("Done: Staging is up, deployed 09:12.")
+        _, quiet = await ended("Quiet.")
+        async with await db.connect(dsn) as conn:
+            sent = [{"channel": "telegram", "chat_id": GROUP, "message_id": "9100"}]
+            await ledger.append(
+                conn, asked["task_id"], "notice.sent", {"notice_id": reply["notice_id"], "sent": sent}
+            )
+        return text, asked, reply, quiet, await said(dsn, "thanks! and prod?", reply_to="9100")
+
+    text, asked, reply, quiet, follow = run(go())
+    assert "# Stage: converse" in text and "# Stage: clarify" not in text
+    assert (reply["text"], reply["chat_id"], reply["reply_to"]) == (
+        "Staging is up, deployed 09:12.", GROUP, asked["message_id"],
+    )  # fmt: skip
+    assert quiet == []
+    assert follow["as"] == "start" and follow["task_id"] != asked["task_id"]
+    assert "Valor (you): Staging is up" in follow["brief"].instruction
+
+
+def test_a_team_tasks_send_to_its_own_chat_owes_no_report_and_one_elsewhere_reaches_tom(dsn, team):
+    async def go():
+        task = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
+        async with await db.connect(dsn) as conn:
+            for kind, target in (("telegram.send_message", GROUP), ("email.send", "x@florist.test")):
+                effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": kind,
+                          "target": target, "payload": {"text": "We're live.", "to": [target]}}  # fmt: skip
+                await notices.report(conn, task, effect, {})
+        return await on(dsn, "notice.requested", task)
+
+    (reported,) = run(go())
+    assert (reported["chat_id"], reported["reply_to"]) == (bridges.OPERATOR_CHAT, None)
+    assert "an email to x@florist.test" in reported["text"]
