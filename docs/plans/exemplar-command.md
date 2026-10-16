@@ -9,6 +9,20 @@ review_rounds: 1
 
 # `python -m core exemplar`: record work Tom loved
 
+**Carried (2026-10-16).** Task 80f69f9e52da built, tested, reviewed and
+documented this; the kernel's since-removed two-rebase cap ended it. Its plan
+and build commits are rebased onto main here (one conflict: both sides
+appended tests to the end of `tests/test_kernel.py`; both kept). Code and docs
+stand as built. On main the rebased suite gives 115 passed, 1 skipped, and
+one failure: `test_budget` counts 5,076 test lines against its 5,000 (main
+alone is 4,995). The bar does not move, so the only work left is to fit it:
+1. Compact the three carried tests into two (render, and record-plus-turn-
+   plus-CLI) keeping every assertion listed under Tests below.
+2. Take the remaining overage from `tests/` without dropping any assertion:
+   duplicated setup, helpers inlined once used once, multi-line literals the
+   110-column formatter allows on one line. No test file is deleted.
+3. Full suite green, `test_budget` included, total test lines <= 5,000.
+
 Adds no check, gate, hook, guard or refusal. Empty text is already a
 `ValueError` in `corrections.payload`; the command reports it the way
 `correct` does.
