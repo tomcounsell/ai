@@ -15,7 +15,7 @@ bound to `elapsed < 20` and the carry added `not (tmp_path / "tmp").exists()`.
 The resolution keeps both. If `carry-rebased` is missing, the build redoes
 this rebase from cc89d1303 with the same resolution.
 
-## The cause, on main 2d1864305
+## The cause, on main 62fcd0c1d
 
 Strip B (c86f22c39) deleted the per-task `state/work/tmp` setting. No
 provisioning (`core/workspace.py:721-727`) or fresh session (`check_harness`,
@@ -65,25 +65,16 @@ Carried:
 - stop: the root is gone.
 - harness build, with and without `tmpdir`.
 
-Added by this build (the critique's missed case): a fresh session with
-services. The test runs the real `check_services` for a Postgres-only
-project, then `check_harness(..., services=True)` with a `tmpdir`, then a
-turn whose process checks that `$PGPASSFILE` exists after the start-time
-emptying. Afterwards the passfile still exists and the TMPDIR is gone. The
-full suite and `tests/test_budget.py` run on the rebased head.
-
-## As built
-
-- TMPDIR is the root itself, not `<root>/<turn_id>`: one turn of a session
-  runs at a time, and the shorter path keeps socket paths under macOS's
-  104-byte limit (a check's `tmp/` is about 76 characters, the length it had
-  before the strip). The turn's start removes and remakes the root; its end
-  removes it. `run_turn` collects the path through a list `_run_turn`
-  appends to, so the end-of-turn removal runs on the cut-short paths too.
-- Briefs provisioned since the strip carry no `tmpdir`; `_turn_for` gives a
-  workspace task `<task>/tmp`, so live tasks are covered with no migration.
-- A review session's `pgpass` moved from `<check_dir>/tmp/` to
-  `<check_dir>/`, since the turn's start would empty it.
+Added by this build (the critique's missed case): the done/failed test now
+runs its turn in a review session made by the real `check_services` (a
+Postgres-only project; the cluster's init, start and stop stood in for,
+since a turn cannot nest sandbox-exec) and `check_harness(...,
+services=True)`. The turn's process checks `$PGPASSFILE` exists after the
+start-time emptying; afterwards the passfile still exists and the TMPDIR is
+gone. With the passfile back under `tmp/` the test fails. To keep the suite
+within its 5,000 lines on main ce4f6cd1a (already at 4,998), test support
+code (`scripted.py`, `judgement_upstream.py`, `telegram_port.py`, the
+emulator) and a few tests were compacted; no assertion was dropped.
 
 ## Out of scope
 
