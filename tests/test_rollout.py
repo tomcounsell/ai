@@ -1,13 +1,8 @@
 """The kernel rolling itself forward to its own merges (`core/rollout.py`,
-`Kernel.roll`), on real Postgres and temporary checkouts cloned from a
-local bare remote: a merge of the kernel's own branch fast-forwards the
-checkout and restarts it on the new commit, `recover` ends the rollout
-after the restart, a dependency or schema change rolls with its sync or
-backup, and `python -m core serve` exits for the restart.
-
-The backup, the sync, the migrate, and the restart are stand-ins; nothing
-touches the build's own checkout, the machine's kernel, or the real
-ledger. No model call.
+`Kernel.roll`) on real Postgres and checkouts cloned from a local bare
+remote: fast-forward and restart, `recover` ending the rollout, a dependency
+or schema change rolling with its sync or backup, and `serve` exiting for
+the restart. Backup, sync, migrate and restart are stand-ins. No model call.
 """
 
 import asyncio

@@ -1,13 +1,8 @@
-"""The gateway meters a model call, its opened and charged rows carrying the
-turn's id, against a local upstream replaying a recorded provider response
-(`tests/fixtures/messages_stream_haiku.sse` and `messages_haiku.json`).
-
-Every expected charge is worked by hand from the fixture's usage and the
-Haiku 4.5 price checked on 2026-10-01 ($1 input and $5 output per million
-tokens, which is 1 and 5 micro-dollars per token), never computed by
-`spending.cost`.
-
-Live spend: none.
+"""The gateway meters a model call, its rows carrying the turn's id, against a
+local upstream replaying a recorded response (`tests/fixtures/messages_*`).
+Each charge is worked by hand from the fixture's usage at Haiku 4.5's price of
+2026-10-01 (1 and 5 micro-dollars per input and output token), never by
+`spending.cost`. Live spend: none.
 """
 
 import asyncio

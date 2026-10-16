@@ -1769,6 +1769,31 @@ def _empty_dir(root: int) -> None:
             os.rmdir(name, dir_fd=root)
 
 
+async def reclaim(conn, task_id: str, *, by: str, via: str, before=None) -> bool:
+    """Remove a stopped, merged, or ended task's workspace under the task's
+    lock and write `workspace.removed`; with `before`, only when the task
+    entered that state before then. False when it did not."""
+    from core import ledger, machine, tasks
+    from core.machine import State
+
+    b = await tasks.brief(conn, task_id)
+    if not b.mirror:
+        return False
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        rows = await ledger.read(conn, task_id)
+        f = machine.fold(rows)
+        if f.state not in (State.STOPPED, State.MERGED, State.ENDED):
+            return False
+        at = next((r["at"] for r in rows if f.entry and r["id"] == f.entry.get("id")), None)
+        if before is not None and not (at and at < before):
+            return False
+        await git.threaded(remove, task_id, Layout(Path(b.mirror).parent))
+        await ledger.append(conn, task_id, "workspace.removed", {"path": str(Path(b.mirror).parent),
+                            "provenance": ledger.provenance(by, via, False)})  # fmt: skip
+    return True
+
+
 def remove(task_id: str, lay: Layout | None = None) -> None:
     """Remove the task's directory: a stopped or merged task's workspace, an
     orphan's, or one a provisioning that died left. What could still write

@@ -515,19 +515,10 @@ async def _workspace(conn, args) -> str:
             "project",
         )
         return json.dumps({k: getattr(b, k) for k in keys}, indent=2)
-    async with conn.transaction():
-        await ledger.lock(conn, f"task:{args.task_id}")
+    if not await workspace.reclaim(conn, args.task_id, by=args.by, via=args.via):
         f = machine.fold(await ledger.read(conn, args.task_id))
-        if f.state not in (State.STOPPED, State.MERGED, State.ENDED):
-            raise SystemExit(
-                f"task {args.task_id} is in {f.state}; only a stopped, merged, or ended task's workspace is removed"
-            )
-        await git.threaded(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
-        await ledger.append(
-            conn,
-            args.task_id,
-            "workspace.removed",
-            {"path": str(Path(b.mirror).parent), "provenance": ledger.provenance(args.by, args.via, False)},
+        raise SystemExit(
+            f"task {args.task_id} is in {f.state}; only a stopped, merged, or ended task's workspace is removed"
         )
     return f"removed the workspace of task {args.task_id}"
 

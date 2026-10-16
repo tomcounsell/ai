@@ -59,11 +59,13 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core import db, git, ledger, machine, memory, slot, spending, tasks, transcripts
-from core.gateway import Gateway
 from core.settings import settings
+
+if TYPE_CHECKING:
+    from core.gateway import Gateway  # gateway -> tasks -> workspace -> runs: a cycle at import
 
 TURN_ENV = "VALOR_TURN"
 Transcript = transcripts.Transcript

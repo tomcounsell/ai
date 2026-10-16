@@ -74,8 +74,11 @@ side runs inside the turn's profile under the turn's mark, the receiving git wit
 A project declares the services its tests need (`postgres`, `redis`, or none).
 Each runs under `service.sb`, marked `valor.service.<task id>`. A port is the lowest free one that
 no unremoved task and no task directory's `ports.json` names, chosen under the
-`workspace:ports` lock. `python -m core workspace remove TASK` (stopped or
-merged only) stops the services, deletes the directory, and frees the ports.
+`workspace:ports` lock. `python -m core workspace remove TASK` (stopped,
+merged, or ended only) stops the services, deletes the directory, and frees the ports.
+The resident kernel does the same itself a day after a task stopped, merged,
+or ended (`serve.RECLAIM_AFTER_S`), once it runs no job for it: until then
+feedback on a merge and a restart of ended work can use it.
 It also takes the directory a provisioning that died left for a task with no
 workspace, once the task is stopped or merged and its provisioning is not
 live (otherwise "being provisioned now"), and records `workspace.removed`.

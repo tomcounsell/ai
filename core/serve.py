@@ -117,6 +117,12 @@ from core.machine import State
 from core.settings import settings
 
 PROVISION_TRIES = 3
+# A finished task's workspace is removed a day after it merged, stopped or
+# ended (`workspace.reclaim`): feedback on a merge and a restart of ended
+# work use it until then. On the Cowboy, 2026-10-16, 26 finished
+# workspaces (67 GB) had filled the disk and stopped a popoto turn.
+RECLAIM_AFTER_S = 24 * 3600.0
+RECLAIM_EVERY_S = 600.0
 PROVISION_BACKOFF_S = 60.0
 HARNESS = {State.PLAN, State.CRITIQUE, State.BUILD, State.CHECKS, State.PATCH}
 # Started whenever ready, outside `max_turns`: a question to Tom (clarify)
@@ -441,6 +447,11 @@ async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[st
 
 
 # The kernel's merge outcomes not yet ended, oldest first.
+# Tasks with a provisioned workspace not removed since.
+RECLAIMABLE = (
+    "SELECT DISTINCT p.task_id FROM events p WHERE p.type = 'workspace.provisioned' AND NOT EXISTS ("
+    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id)"
+)
 MERGE_OUTCOMES = (
     "SELECT o.id, o.task_id, o.payload->>'effect_id', o.payload->'result' FROM events o "
     "JOIN events i ON i.type = 'effect.intent' AND i.payload->>'effect_id' = o.payload->>'effect_id' "
@@ -508,6 +519,7 @@ class Kernel:
         # so an idle task never holds a slot by its queue place.
         self.idle: set[str] = set()
         self.parked_at = time.monotonic()
+        self.reclaimed_at = float("-inf")
         self.wake = asyncio.Event()
 
     async def tick(self, conn) -> None:
@@ -533,6 +545,23 @@ class Kernel:
             self.restart_due = None
             _log(f"rollout failed: {exc!r}")
         await self.schedule(conn)
+        try:
+            await self.reclaim(conn)
+        except Exception as exc:  # noqa: BLE001  a removal that fails is tried on the next pass
+            _log(f"workspace reclaim failed: {exc!r}")
+
+    async def reclaim(self, conn) -> None:
+        """Every `RECLAIM_EVERY_S`, remove the workspace of each task that
+        finished `RECLAIM_AFTER_S` ago and runs no job here."""
+        if time.monotonic() - self.reclaimed_at < RECLAIM_EVERY_S:
+            return
+        self.reclaimed_at = time.monotonic()
+        before = datetime.now(UTC) - timedelta(seconds=RECLAIM_AFTER_S)
+        for (task_id,) in await (await conn.execute(RECLAIMABLE)).fetchall():
+            if task_id in self.jobs or task_id in self.services:
+                continue
+            if await workspace.reclaim(conn, task_id, by="kernel", via="serve", before=before):
+                _log(f"task {task_id}: removed its finished workspace")
 
     async def shape(self, conn) -> None:
         """A job of its own for each pending shape judgement not already

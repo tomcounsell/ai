@@ -1,11 +1,7 @@
-"""A kernel in a process of its own, for the kill tests in
-`tests/test_serve.py`: `python -m tests.kernel_child`.
-
-`KERNEL_DSN` names the database. `KERNEL_RUNNERS` is `hang` (a plan turn
-that starts a marked child, opens a gateway call, and waits on it) or
-`scripted` (the scripted turns of `tests/scripted.py`, judge excluded).
-The gateway's upstream accepts the connection and never answers, so an
-opened call stays open until the process dies.
+"""A kernel in a process of its own for `tests/test_serve.py`'s kill tests.
+`KERNEL_DSN` names the database; `KERNEL_RUNNERS` is `hang` (a plan turn
+holding a marked child and a gateway call whose upstream never answers) or
+`scripted` (`tests/scripted.py`'s turns, judge excluded).
 """
 
 import asyncio

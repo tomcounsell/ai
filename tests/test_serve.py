@@ -1,11 +1,7 @@
-"""The resident kernel on real Postgres: it takes a task and runs its
-scripted turns, a kill mid-turn is recovered with the task resumed, a turn
-ended before its collect is collected once, one step per event, a stop
-kills the turn under the kernel, and a restart leaves serve.
-
-Each test runs on a database of its own, since the kernel acts on every
-task in it. The kill test runs the kernel as a process of its own
-(`tests/kernel_child.py`) and SIGKILL it by its pid. No model call.
+"""The resident kernel on real Postgres: it runs a task's scripted turns,
+recovers a kill mid-turn, collects a turn ended before its collect once, runs
+one step per event, stops a turn under it, and leaves serve on a restart. Each
+test has a database of its own; the kill test SIGKILLs `tests/kernel_child.py`.
 """
 
 import asyncio
@@ -357,3 +353,25 @@ def test_a_placement_after_a_failed_step_keeps_the_failure_and_its_backoff():
     ]
     assert not router.retry_due(rows_, now=at) and router.retry_due(rows_, now=at + timedelta(days=1))
     assert tasks.failed_step(rows_) is not None
+
+
+def test_a_finished_tasks_workspace_is_removed_a_day_after_it_finished(dsn, tmp_path):
+    from core import workspace
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            (tmp_path / "w" / "kernel.git").mkdir(parents=True)
+            task = await tasks.start(
+                conn, tasks.Brief(instruction="x", mirror=str(tmp_path / "w" / "kernel.git"))
+            )
+            running = await workspace.reclaim(conn, task, by="t", via="t")
+            await tasks.stop(conn, task, reason="done")
+            day = datetime.now(UTC) - timedelta(seconds=serve.RECLAIM_AFTER_S)
+            fresh = await workspace.reclaim(conn, task, by="t", via="t", before=day)
+            return (
+                running,
+                fresh,
+                await workspace.reclaim(conn, task, by="t", via="t", before=day + timedelta(days=2)),
+            )
+
+    assert run(go()) == (False, False, True) and not (tmp_path / "w").exists()

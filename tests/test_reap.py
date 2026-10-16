@@ -1,13 +1,8 @@
 """A turn's processes end with the turn, daemonized or not, and the ledger
-says which were stopped.
-
-The incident: a replay turn ran a test setup that daemonized two
-redis-servers (one on *:6379, one on a socket in /tmp); they re-parented to
-launchd and outlived the turn. Here a stand-in turn daemonizes a child the
-classic way (fork, setsid, fork), and a cancelled turn's harness, children
-and daemon are all killed. A process the turn did not start is left alone.
-
-Live spend: none.
+says which were stopped. The incident: a replay turn's test setup daemonized
+two redis-servers that outlived it. A stand-in turn daemonizes a child (fork,
+setsid, fork); a cancelled turn's harness, children and daemon are killed,
+and a process the turn did not start is left alone. Live spend: none.
 """
 
 import asyncio
