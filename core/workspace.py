@@ -14,7 +14,9 @@ starts, from a project spec the kernel reads (never the candidate).
         home/              pgpass, profiles/*.sb
         cache/             the builder's uv and npm caches
         state/work/        the working session's Claude Code config directory
-        checks/<name>/     a fresh session's repo/, tmp/, claude/
+        tmp/               the working session's TMPDIR, emptied when each
+                           turn ends (`core.runs`)
+        checks/<name>/     a fresh session's repo/, tmp/ (its TMPDIR), claude/
         pg/data            the task's Postgres cluster (TCP on loopback only)
         redis/             the task's redis-server, when the project asks
         ports.json         the task's service ports, written when they are
@@ -264,6 +266,10 @@ class Layout:
     @property
     def work_state(self) -> Path:
         return self.root / "state" / "work"
+
+    @property
+    def tmp(self) -> Path:
+        return self.root / "tmp"
 
     @property
     def checks(self) -> Path:
@@ -722,6 +728,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "sandbox_profile": str(lay.profiles / "turn.sb"),
         "claude_config_dir": str(lay.work_state / "claude"),
         "pi_agent_dir": str(lay.work_state / "pi"),
+        "tmpdir": str(lay.tmp),
         "env": env,
         **({"max_output_tokens": spec.max_output_tokens} if spec.max_output_tokens else {}),
     }
@@ -1293,7 +1300,7 @@ def check_harness(
     lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str], *, services: bool = False
 ) -> dict[str, Any]:
     """The harness settings of one fresh session: the turn profile, its own
-    Claude Code config directory. A session that runs nothing against the
+    Claude Code config directory and TMPDIR. A session that runs nothing against the
     task's services (critique) gets none of their ports and only the PATH
     of the task's environment, so no database credential. With `services`
     (test, review) the session gets the environment `check_services` made
@@ -1315,6 +1322,7 @@ def check_harness(
         "sandbox_profile": str(path),
         "claude_config_dir": str(check_dir / "claude"),
         "pi_agent_dir": str(check_dir / "pi"),
+        "tmpdir": str(check_dir / "tmp"),
         "env": fresh_env,
     }
 
@@ -1593,7 +1601,7 @@ def check_services(
     `valor.service.<task>`, whichever layout started it) and every stale
     `checks/*-svc/` removed; a layout at `checks/<name>-svc/` gets a new
     Postgres cluster with the project's roles and new passwords, and an
-    empty Redis. The password file is copied to `<check_dir>/tmp/pgpass`
+    empty Redis. The password file is copied to `<check_dir>/pgpass`
     (`O_NOFOLLOW | O_EXCL`). Yields the check's environment
     (`harness_env` over the fresh instances). On exit the check's instances
     are stopped, their directory removed, and the task's own started again,
@@ -1609,7 +1617,7 @@ def check_services(
     remove_check_services(lay)
     try:
         passwords: dict[str, str] = {}
-        passfile = check_dir / "tmp" / "pgpass"
+        passfile = check_dir / "pgpass"  # beside tmp/, which a turn empties
         if names:
             svc.profiles.mkdir(parents=True)
             (svc.profiles / "service.sb").write_text(service_profile(task_id))

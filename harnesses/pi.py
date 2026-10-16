@@ -346,6 +346,7 @@ def workspace_turn(
             parse=parse,
             harness_version=version(settings.pi),
             stdin=prompt.encode(),
+            tmpdir=harness.get("tmpdir"),
         )
 
     return build

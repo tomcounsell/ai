@@ -18,6 +18,7 @@ a bare cache per repository URL (keyed by the URL's digest).
 | `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. Only the broker's `push_branch` and `merge` write it, from the kernel's process, when the push is requested inside the task's ceiling. After a merge the kernel also puts the merged head on the target branch from its mirror, and the clone's work branch is fast-forwarded to it before each `patch` turn (`workspace.bring_merged`) |
 | `kernel.git/` | the kernel mirror: seeded with the base, and fed each plan commit, candidate, and docs head (a docs session's kept head under `refs/valor/docs/`); the merge predicate and the merge read it |
 | `home/` | `pgpass` and the profiles: `turn.sb` and `service.sb` |
+| `tmp/` | the working session's `TMPDIR`: emptied before each turn starts and removed once it ends (`core/runs.py`), so a turn's scratch never outlives it; a fresh session's is its `checks/<name>/tmp/` |
 | `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's Claude Code config; each fresh session's checkout and `claude/`; each suite run's checkout and its own copy of the caches, cloned from `checks/seed/` (the base's setup output) |
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
 | `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr |

@@ -203,8 +203,12 @@ def _harnesses() -> dict:
 
 
 def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
+    harness = b.harness
+    if b.mirror and "tmpdir" not in harness:
+        # A task provisioned before its harness named a TMPDIR gets its own.
+        harness = {**harness, "tmpdir": str(workspace.Layout(Path(b.mirror).parent).tmp)}
     return _harnesses()[b.harness_name].workspace_turn(
-        prompt, cwd=b.workspace, resume=resume, model=b.model, harness=b.harness
+        prompt, cwd=b.workspace, resume=resume, model=b.model, harness=harness
     )
 
 

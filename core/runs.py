@@ -87,6 +87,8 @@ class TurnCommand:
     # there; None closes stdin with nothing in it.
     stdin: bytes | None = None
     transcript: Transcript | None = None
+    # The turn's TMPDIR: emptied before it starts, removed once it ends.
+    tmpdir: str | None = None
 
 
 async def run_turn(
@@ -109,12 +111,35 @@ async def run_turn(
     The turn holds a turn slot (`core/slot.py`) from before its Brief is
     rendered until `turn.ended` is written, except a clarify turn (a
     question to Tom), which never waits on one. Memory ingests once the slot
-    is released, so no other turn waits on it."""
+    is released, so no other turn waits on it.
+
+    The turn's TMPDIR (`TurnCommand.tmpdir`) is emptied before the turn
+    starts, which also clears what a killed kernel or a failed removal
+    left, and removed once the slot is released, however the turn ended.
+    Nothing in it is kept: a later turn of the session resumes from its
+    harness's config directory, never from TMPDIR. A failed removal leaves
+    the turn's result as it is."""
     held = contextlib.nullcontext() if state == "clarify" else slot.held(task_id, dsn or gateway.dsn)
-    async with held:
-        ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered)
+    tmpdirs: list[str] = []
+    try:
+        async with held:
+            ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs)
+    finally:
+        for tmpdir in tmpdirs:
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(_clear, tmpdir)
     await memory.after_turn(dsn or gateway.dsn)
     return ended
+
+
+def _clear(tmpdir: str, make: bool = False) -> None:
+    """Remove the turn's TMPDIR, never following a link, and make it empty
+    again when `make`."""
+    from core.workspace import rmtree  # core.workspace imports this module
+
+    rmtree(Path(tmpdir))
+    if make:
+        Path(tmpdir).mkdir(parents=True)
 
 
 # The kernel's checkout: its persona and stage files are read from it.
@@ -133,7 +158,7 @@ def kernel_commit() -> str | None:
         return None
 
 
-async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict[str, Any]:
+async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs) -> dict[str, Any]:
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -180,6 +205,8 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
         except BaseException:
             gateway.retire(task_id)
             raise
+        if command.tmpdir:
+            tmpdirs.append(command.tmpdir)
         out_path, err_path = output_paths(task_id, turn_id)
         proc = pumped = None
         waiters: list[asyncio.Future] = []
@@ -187,6 +214,8 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered) -> dict
         # handler ends it however it is cut short. The files close after it.
         with contextlib.ExitStack() as files:
             try:
+                if command.tmpdir:
+                    await asyncio.to_thread(_clear, command.tmpdir, True)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out = files.enter_context(out_path.open("wb"))
                 err = files.enter_context(err_path.open("wb"))

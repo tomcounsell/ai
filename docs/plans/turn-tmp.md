@@ -72,6 +72,19 @@ turn whose process checks that `$PGPASSFILE` exists after the start-time
 emptying. Afterwards the passfile still exists and the TMPDIR is gone. The
 full suite and `tests/test_budget.py` run on the rebased head.
 
+## As built
+
+- TMPDIR is the root itself, not `<root>/<turn_id>`: one turn of a session
+  runs at a time, and the shorter path keeps socket paths under macOS's
+  104-byte limit (a check's `tmp/` is about 76 characters, the length it had
+  before the strip). The turn's start removes and remakes the root; its end
+  removes it. `run_turn` collects the path through a list `_run_turn`
+  appends to, so the end-of-turn removal runs on the cut-short paths too.
+- Briefs provisioned since the strip carry no `tmpdir`; `_turn_for` gives a
+  workspace task `<task>/tmp`, so live tasks are covered with no migration.
+- A review session's `pgpass` moved from `<check_dir>/tmp/` to
+  `<check_dir>/`, since the turn's start would empty it.
+
 ## Out of scope
 
 Files written to `/tmp` directly; the check suite's pytest basetemp

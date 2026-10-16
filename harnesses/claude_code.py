@@ -88,7 +88,8 @@ def workspace_turn(
     which the profile names its processes by so `core.runs` can reap them;
     `env`, variables added to the turn's environment; `max_output_tokens`,
     set as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when given; `tmpdir`, the turn's
-    own `TMPDIR`; `claude_config_dir`, its own Claude Code config directory,
+    own `TMPDIR`, which `core.runs` empties at the turn's start and removes
+    at its end; `claude_config_dir`, its own Claude Code config directory,
     which holds no login and where its transcript lies. A fresh session
     (critique, review, docs) is this with no `resume`.
 
@@ -164,6 +165,7 @@ def workspace_turn(
             parse=parse,
             harness_version=version(settings.claude),
             transcript=transcripts.anchored(harness.get("claude_config_dir"), session_id),
+            tmpdir=harness.get("tmpdir"),
         )
 
     return build
