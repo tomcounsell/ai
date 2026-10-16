@@ -443,7 +443,7 @@ it was verified, the test, review, and docs verdicts with any breadth gaps, the 
 and the decisions Valor made that Tom may want to change, the one that most changes the outcome
 first. It then requests the merge, and the broker performs it at request when the predicate below
 holds. A done merge owes Tom a `report` notice of what shipped: the note the delivering turn wrote
-above the `---` line of `done.md`, and the task's status page link for the checks; a reply to it is
+above the `---` line of `done.md`, led by the request's first line; a reply to it is
 `feedback.given`.
 
 **Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done` for the merge. `feedback`:

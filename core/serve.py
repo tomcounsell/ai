@@ -983,7 +983,7 @@ def _log(text: str) -> None:
 ROLLOUT_STEPS = {
     "fetch": "fetching the merged code",
     "restart class": "working out what the change needs",
-    "uncommitted": "uncommitted changes to my own code, which the restart would run",
+    "uncommitted": "checking that my own code has no uncommitted changes the restart would run",
     "fast-forward": "moving my running code onto it",
     "backup": "backing up my database first",
     "dependencies": "installing its dependencies",

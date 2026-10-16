@@ -192,9 +192,9 @@ def note(summary: str | None) -> str | None:
 
 # A check or state, as a notice names the step that kept failing.
 STEPS = {"test": "its tests", "review": "its review", "docs": "its documentation check"}
-# Why a merge did not land (`verdicts.merge_failure`), in Tom's words.
+# Why a merge that ended the task did not land (`verdicts.merge_failure`;
+# a moved target rebases, it never ends one), in Tom's words.
 MERGE_WHY = {
-    "moved": "the branch it merges into kept moving, and I could not bring the work up to date with it",
     "refused": "the merge was refused, and trying again would get the same answer",
     "transient": "the merge kept failing on errors from GitHub or the network",
 }

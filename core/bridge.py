@@ -376,7 +376,7 @@ class NoticeDue:
     notice_id: str
     task_id: str
     chat_id: str
-    text: str  # carries the notice's short id
+    text: str  # plain text for Tom; the notice id stays in the row
     reply_to: str | None
     at: str  # the notice.requested row's at
 
