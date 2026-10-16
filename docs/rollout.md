@@ -6,6 +6,13 @@ client's projects ([machine.md](machine.md)). The Cowboy went first
 (2026-10-14); its cutover left the old system's files and jobs in place,
 which the 2026-10-16 sweep retired with step 8 below.
 
+**Order.** The Pirate next, then the Captain and the Bald. Those two serve
+customers and teams and stay on the old system until Tom is sure the new
+one is a valid replacement (Tom, 2026-10-16); the Pirate is where that is
+shown. Until then their old updater is harmless: `main` was rewritten, so
+its fast-forward fails and it keeps running its own code (the Pirate's
+`logs/update.log`, 395 aborted fast-forwards).
+
 Run from the Mac (or over SSH as `valorengels`), in `bash`:
 
 ```
