@@ -301,12 +301,8 @@ def test_the_proc_reader_takes_group_owner_arguments_and_environment_and_reads_a
         (d / "environ").write_bytes(environ)
 
     turn = ledger.new_id()
-    plant(
-        41,
-        "41 (a) b) c) S 1 4100 4100 0 -1",
-        b"python3\0-c\0pass\0",
-        f"{runs.TURN_ENV}={turn}\0A=b\0".encode(),
-    )
+    environ = f"{runs.TURN_ENV}={turn}\0A=b\0".encode()
+    plant(41, "41 (a) b) c) S 1 4100 4100 0 -1", b"python3\0-c\0pass\0", environ)
     plant(42, "42 (z) Z 1 4200 4200 0 -1", b"", b"")
     (tmp_path / "self").mkdir()
     monkeypatch.setattr(runs, "_DARWIN", False)

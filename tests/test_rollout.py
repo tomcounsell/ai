@@ -59,69 +59,38 @@ class Repo:
         return scripted.git(self.co, "rev-parse", "HEAD")
 
 
-async def landed(dsn, task, remote, sha, branch="main", kind="done", **extra) -> str:
+async def landed(dsn, task, remote, sha) -> str:
     """A merge effect's rows as the broker writes them: held, intent, outcome."""
     effect = uuid.uuid4().hex
-    described = {
-        "action_type": "merge",
-        "target": branch,
-        "payload": {"head_sha": sha},
-        "idempotency_key": effect,
-    }
+    held = {"effect_id": effect, "action_type": "merge", "target": "main", "payload": {"head_sha": sha}}
+    held["idempotency_key"] = effect
+    result = {"remote": remote, "branch": "main", "sha": sha}
     async with await db.connect(dsn) as conn, conn.transaction():
+        await ledger.append(conn, task, "effect.held", {**held, "effect_class": "act"})
+        await ledger.append(conn, task, "effect.intent", {**held, "approval_id": None})
         await ledger.append(
-            conn, task, "effect.held", {"effect_id": effect, **described, "effect_class": "act"}
-        )
-        await ledger.append(
-            conn, task, "effect.intent", {"effect_id": effect, **described, "approval_id": None}
-        )
-        await ledger.append(
-            conn,
-            task,
-            "effect.outcome",
-            {
-                "effect_id": effect,
-                "kind": kind,
-                "result": {"remote": remote, "branch": branch, "sha": sha},
-                **extra,
-            },
+            conn, task, "effect.outcome", {"effect_id": effect, "kind": "done", "result": result}
         )
     return effect
 
 
-def kernel(
-    dsn, repo: Repo, task: str, *, started: str | None = None, migrate=None, sync=None, backup=None
-) -> serve.Kernel:
+def kernel(dsn, repo: Repo, task: str) -> serve.Kernel:
     """A kernel on the test database rolling `repo.co`, the stand-in
     backup, sync, and migrate recording each call, in one list `k.ran` of
     `(step, the checkout's head then)`. `ready` records each task `schedule`
     considers, so an empty list after a wake means no job could have
     started."""
-    migrated: list[str] = []
-    ran: list[tuple[str, str]] = []
 
-    def stand_in(database: str) -> None:
-        migrated.append(database)
-        ran.append(("migrate", repo.head()))
-        if migrate is not None:
-            migrate(database)
-
-    def synced() -> None:
-        ran.append(("sync", repo.head()))
-        if sync is not None:
-            sync()
-
-    def backed_up(database: str) -> None:
-        ran.append(("backup", repo.head()))
-        if backup is not None:
-            backup(database)
+    def step(name: str, *database: str) -> None:
+        k.ran.append((name, repo.head()))
+        if name == "migrate":
+            k.migrated.extend(database)
 
     k = serve.Kernel(
-        None, {}, None, dsn, checkout=repo.co, started=started or repo.base, migrate=stand_in,
-        sync=synced, backup=backed_up,
+        None, {}, None, dsn, checkout=repo.co, started=repo.base, sync=lambda: step("sync"),
+        migrate=lambda d: step("migrate", d), backup=lambda d: step("backup", d),
     )  # fmt: skip
-    k.migrated, k.ran = migrated, ran
-    k.ready = []
+    k.ran, k.migrated, k.ready = [], [], []
 
     async def active(conn):
         return [task]
@@ -133,11 +102,8 @@ def kernel(
     return k
 
 
-async def tick(k: serve.Kernel, dsn: str, *, timer: bool = False) -> str | None:
-    """One wake; with `timer`, the `serve_tick_s` wake. The sha of a
-    `Restart`, or None."""
-    if timer:
-        k.parked_at = float("-inf")
+async def tick(k: serve.Kernel, dsn: str) -> str | None:
+    """One wake: the sha of a `Restart`, or None."""
     k.ready.clear()
     async with await db.connect(dsn) as conn:
         try:
@@ -173,13 +139,8 @@ def test_a_core_merge_restarts_and_recover_ends_it(fresh, tmp_path):
     task, effect, k, restarted = run(go())
     assert restarted == sha
     (row,) = typed(run(rows(fresh, task)), "rollout.restarting")
-    assert row == {
-        "effect_id": effect,
-        "sha": sha,
-        "from": repo.base,
-        "steps": ["fetch", "restart class", "fast-forward", "migrate"],
-        "covers": [],
-    }
+    steps = ["fetch", "restart class", "fast-forward", "migrate"]
+    assert row == {"effect_id": effect, "sha": sha, "from": repo.base, "steps": steps, "covers": []}
     assert repo.head() == sha
     assert k.migrated == [dbname(fresh)]
     assert k.ready == []  # no job started on that wake
@@ -194,16 +155,12 @@ def test_a_core_merge_restarts_and_recover_ends_it(fresh, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("path", "ran"),
-    [
-        ("uv.lock", ["sync", "migrate"]),
-        ("pyproject.toml", ["sync", "migrate"]),
-        ("core/schema.sql", ["backup", "migrate"]),
-    ],
+    ("path", "first"), [("uv.lock", "sync"), ("pyproject.toml", "sync"), ("core/schema.sql", "backup")]
 )
-def test_a_dependency_or_schema_change_rolls_with_its_sync_or_backup(fresh, tmp_path, path, ran):
+def test_a_dependency_or_schema_change_rolls_with_its_sync_or_backup(fresh, tmp_path, path, first):
     """The backup runs before the checkout moves; the sync after the
     fast-forward, against the merged lock, before the migrate."""
+    ran = [first, "migrate"]
     repo = Repo(tmp_path)
     sha = repo.land(path)
 

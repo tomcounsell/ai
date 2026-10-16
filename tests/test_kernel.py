@@ -38,13 +38,11 @@ def test_kernel_role_cannot_edit_the_ledger(dsn):
         for statement in (
             "UPDATE events SET type = 'x' WHERE task_id = %s",
             "DELETE FROM events WHERE task_id = %s",
+            "TRUNCATE events",
+            "UPDATE documents SET body = '{}' WHERE id = %s",
         ):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                conn.execute(statement, (task,))
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            conn.execute("TRUNCATE events")
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            conn.execute("UPDATE documents SET body = '{}' WHERE id = %s", (task,))
+                conn.execute(statement, (task,) * statement.count("%s"))
 
 
 # -- spending is metered; only a stop refuses a call ------------------------------
@@ -56,11 +54,8 @@ def test_a_stopped_tasks_call_is_refused_with_a_ledger_row_before_any_provider_c
         gateway = Gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
         await gateway.start(port=listen())
         base = gateway.issue(task, "turn-1")
-        body = {
-            "model": "claude-haiku-4-5",
-            "max_tokens": 1000,
-            "messages": [{"role": "user", "content": "hi"}],
-        }
+        body = {"model": "claude-haiku-4-5", "max_tokens": 1000}
+        body["messages"] = [{"role": "user", "content": "hi"}]
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, task, reason="test")
         async with aiohttp.ClientSession() as http, http.post(base + "/v1/messages", json=body) as r:
@@ -86,9 +81,8 @@ def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_p
     async def go():
         task = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            wrote = await broker.request(
-                conn, perf, task, broker.Action("workspace_write", "a.txt", {"text": "a"})
-            )
+            write = broker.Action("workspace_write", "a.txt", {"text": "a"})
+            wrote = await broker.request(conn, perf, task, write)
             send = broker.Action("outbox_send", "tom", {"text": "hi"})
             held = await broker.request(conn, perf, task, send)
             twin = await broker.request(conn, perf, task, send)
@@ -115,15 +109,9 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
         gateway = Gateway(dsn)
         await gateway.start(port=listen())
         # A real subprocess that would run for a minute, with a child of its own.
+        script = "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)"
         build = lambda url, brief, turn_id: runs.TurnCommand(
-            argv=[
-                sys.executable,
-                "-c",
-                "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)",
-            ],
-            env={},
-            cwd=str(tmp_path),
-            harness="sleeper",
+            argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper"
         )
         turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=dsn))
         await asyncio.sleep(1.0)
@@ -260,12 +248,12 @@ def dm(tmp_path):
         yield tom
 
 
-async def tom_says(dsn, dm, text, ts, chat=None) -> dict:
+async def tom_says(dsn, dm, text, ts, chat=None, **kw) -> dict:
     """Tom's top-level Slack message, received and bound: its binding, with
     the started task's instruction when it started one."""
     inbound = intake.Inbound(
         channel="slack", chat_id=chat or dm, chat_kind="group" if chat else "dm", message_id=ts,
-        sender_id=dm, sender_name="Tom", sent_at="2026-10-15T00:00:00Z", text=text,
+        sender_id=dm, sender_name="Tom", sent_at="2026-10-15T00:00:00Z", text=text, **kw,
     )  # fmt: skip
     async with await db.connect(dsn) as conn:
         got = await intake.receive(conn, inbound)
@@ -274,11 +262,8 @@ async def tom_says(dsn, dm, text, ts, chat=None) -> dict:
     if bound["as"] == "start":
         async with await db.connect(dsn) as conn:
             bound["instruction"] = (await tasks.brief(conn, bound["task_id"])).instruction
-    bound["notices"] = [
-        r
-        for r in await bridges.of_type(dsn, "notice.requested")
-        if r["about_key"] == f"reply:{got.received_id}"
-    ]
+    key = f"reply:{got.received_id}"
+    bound["notices"] = [r for r in await bridges.of_type(dsn, "notice.requested") if r["about_key"] == key]
     return bound
 
 
@@ -386,16 +371,8 @@ def test_two_stale_or_superseded_or_textless_asks_start_a_task(dsn, dm):
         out.append(await tom_says(dsn, dm, "ok", at(80)))
         files = await asking(dsn)
         await posted(dsn, files, dm, at(90), "Send the logo?", question=True)
-        inbound = intake.Inbound(
-            channel="slack", chat_id=dm, chat_kind="dm", message_id=at(100), sender_id=dm, sender_name="Tom",
-            sent_at="2026-10-15T00:00:00Z", attachments=[{"name": "logo.png", "mime": "image/png", "bytes": 1,
-                                                          "path": "/tmp/logo.png"}],
-        )  # fmt: skip
-        async with await db.connect(dsn) as conn:
-            got = await intake.receive(conn, inbound)
-            await intake.bind(conn)
-        (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
-        out.append(bound)
+        logo = {"name": "logo.png", "mime": "image/png", "bytes": 1, "path": "/tmp/logo.png"}
+        out.append(await tom_says(dsn, dm, "", at(100), attachments=[logo]))
         return out, [await state(dsn, t) for t in (a, b, later, files)]
 
     (two, stale, later, files), states = run(go())
