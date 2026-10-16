@@ -300,8 +300,7 @@ def workspace_turn(
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         write_config(agent_dir, {"models.json": models_json(base_url, model, max_output_tokens),
                                  "settings.json": settings_json(model)})  # fmt: skip
-        env = environment()
-        env.update(harness.get("env", {}))
+        env = environment(harness.get("env", {}))
         env["PI_CODING_AGENT_DIR"] = agent_dir
         env["PI_OFFLINE"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"

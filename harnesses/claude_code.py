@@ -104,8 +104,7 @@ def workspace_turn(
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
-        env = environment()
-        env.update(harness.get("env", {}))
+        env = environment(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
         if max_output_tokens is not None:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)

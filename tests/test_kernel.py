@@ -232,3 +232,20 @@ def test_max_turns_holders_run_at_once_and_the_next_waits_for_one(dsn, monkeypat
         assert sorted(inside) == ["a", "b", "c"]
 
     run(asyncio.wait_for(go(), timeout=15))
+
+
+# -- the turn's environment ------------------------------------------------------
+
+
+def test_a_turn_keeps_the_operators_path_and_knows_its_github_repo(tmp_path, monkeypatch):
+    from core import workspace
+
+    monkeypatch.setenv("PATH", "/opt/homebrew/bin:/usr/bin")
+    env = workspace.environment({"PATH": "/task/bin:/usr/bin", "REDIS_PORT": "6400"})
+    assert env["PATH"] == "/task/bin:/usr/bin:/opt/homebrew/bin" and env["REDIS_PORT"] == "6400"
+    spec = workspace.Spec(
+        name="p", repo="https://github.com/tomcounsell/popoto.git", kind="python-uv", suite="true"
+    )
+    lay = workspace.Layout(tmp_path)
+    found = workspace.harness_env(lay, spec, {}, {}, bin_dir=tmp_path / "bin", passfile=tmp_path / "pass")
+    assert found["GH_REPO"] == "tomcounsell/popoto"

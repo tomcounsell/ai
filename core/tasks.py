@@ -361,12 +361,7 @@ async def dispatch(
     state = state or f.state
     standing = await corrections.in_force(conn)
     rendered = persona.render(settings.persona_dir)
-    head = (
-        "# Brief\n\n"
-        f"Task: {b.id}\n"
-        f"Instruction: {b.instruction}\n"
-        f"Effect ceiling: {b.max_effect_class}"
-    )
+    head = f"# Brief\n\nTask: {b.id}\nInstruction: {b.instruction}\nEffect ceiling: {b.max_effect_class}"
     if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"
     if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN) and not fresh:

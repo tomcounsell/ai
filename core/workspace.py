@@ -592,6 +592,11 @@ def harness_env(
         "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
         "npm_config_cache": str(lay.cache / "npm"),
     }
+    # The workspace's origin is the task's local bare copy, so `gh` is told
+    # which GitHub repository it is working in.
+    found = re.match(r"(?:https://github\.com/|git@github\.com:)([^/]+/[^/]+?)(?:\.git)?/?$", spec.repo or "")
+    if found:
+        env["GH_REPO"] = found.group(1)
     if "postgres" in spec.services:
         port = ports["postgres"]
         env.update(
@@ -815,18 +820,25 @@ DROP_NAMES = ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "GITHU
               "PGPASSWORD", "PGPASSFILE", "VALOR_PG_PASSFILE")  # fmt: skip
 
 
-def environment() -> dict[str, str]:
-    """The operator's environment less the kernel's secrets: what a turn,
-    and every sandboxed step of a task, starts from."""
-    return {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
+def environment(task: dict[str, str] | None = None) -> dict[str, str]:
+    """The operator's environment less the kernel's secrets, with the
+    task's own variables (`task`) over it: what a turn, and every sandboxed
+    step of a task, starts from. The task's PATH goes in front of the
+    kernel's own, never in place of it, so a PATH recorded by whatever
+    process provisioned the task still finds what the operator has."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
+    task = task or {}
+    env.update(task)
+    if "PATH" in task:
+        parts = [*task["PATH"].split(os.pathsep), *os.environ.get("PATH", "").split(os.pathsep)]
+        env["PATH"] = os.pathsep.join(dict.fromkeys(p for p in parts if p))
+    return env
 
 
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
     """The environment a sandboxed step of the task (setup, suite, lint)
-    gets: the turn's, the operator's less the kernel's secrets, and the
-    task's own."""
-    env = environment()
-    env.update(harness.get("env", {}))
+    gets: the operator's less the kernel's secrets, and the task's own."""
+    env = environment(harness.get("env", {}))
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
