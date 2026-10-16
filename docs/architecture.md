@@ -74,7 +74,8 @@ lookup.
 [sdlc-state-machine.md](sdlc-state-machine.md)). Stop is final. A run (`core/router.py`) ends when
 the task needs Tom (`waiting`, `merge`, `merged`, `stopped`), reaches a stage with no runner, or has
 a turn fail. A turn that ends without its stage's signal is followed by the next turn in the same
-state.
+state; under the resident kernel that turn's step ends first, so any other ready task takes the turn
+slot before it.
 
 **Design.** The Brief gains, once tasks nest, a `parent_id` and a deadline.
 
