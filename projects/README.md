@@ -26,7 +26,10 @@ workspaces for (`python -m core start ... --project NAME`).
   (`telegram:<chat id>`, `email:<sender address>`,
   `slack:<team id>/<channel or user id>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so
-  each chat has one owner.
+  each chat has one owner. In a group chat listed here anyone's message
+  is heard, not only Tom's (a team chat, [telegram.md](../docs/bridges/telegram.md)).
+- `mentions` lists those chats where a top-level message starts work only
+  when it names Valor, as the old teammate groups did.
 - `knowledge_base` names the business's folder in `~/work-vault`, where its
   description lives. A working task's turns read and write that folder
   (`VALOR_KNOWLEDGE_BASE` names it to them).

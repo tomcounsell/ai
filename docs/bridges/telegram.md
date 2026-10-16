@@ -146,9 +146,11 @@ Some messages are the kernel speaking to Tom about his own work: a question a
 turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
 A notice goes to the chat where Tom started the task, when that is his own
-chat (his DM on that channel, or the operator chat), and otherwise to his
-operator chat, which is fixed in settings (`notices.home`). No turn, task,
-or payload names the recipient, so a notice cannot reach anyone else. The kernel writes `notice.requested` with the text and the record it
+chat (his DM on that channel, or the operator chat); to the team chat a
+task was started in, in reply to that message (next section); and
+otherwise to his operator chat, which is fixed in settings
+(`notices.home`). A push credential request is always the operator's. No
+turn, task, or payload names the recipient. The kernel writes `notice.requested` with the text and the record it
 concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
@@ -306,6 +308,28 @@ chat); about a message anywhere else, such as a project group, it goes to
 the operator channel and chat, so kernel text never reaches the other
 people there. How an act leaves belongs to
 [architecture.md](../architecture.md).
+
+### Team chats: anyone is heard, the work is in the open
+
+A group chat a project spec lists (other than Tom's own) is a team chat
+(`intake.team_spec`), as the old system's listed groups were: anyone's
+message there binds as Tom's would, with no rights by sender, and its rows
+name the sender as `by`. A top-level message starts a task carrying the
+chat (`Brief.chat`) and, in its instruction, the chain it replies to and
+the chat's last 20 recorded messages with names and times, Valor's posts
+among them. Every message in the chat is recorded, bound or not. In a chat
+the spec lists under `mentions` (the old teammate groups), a top-level
+message starts nothing unless it names Valor ("valor", "@valor"); a reply
+to Valor's post binds there too.
+
+Such a task skips the judge: its clarify turn is the conversation turn
+(`skills/sdlc/converse.md`), which answers (`stop.md` opening `Done:`,
+posted as written), asks (`question.md`, posted as written, answered by
+anyone's reply), stays quiet (`stop.md` exactly `Quiet.`), or starts the
+work (`no_question.md`, on to the plan in the same session). Its questions
+and its reports go to the chat in reply to the message. A reply to a
+conversation that ended without a plan, or was stopped, starts the next
+one.
 
 ### Unbound messages: classified by the judgement layer
 
