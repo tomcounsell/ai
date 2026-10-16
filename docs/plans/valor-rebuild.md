@@ -38,10 +38,13 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   read from settings, default 3.
 - **Bridges.** Telegram, email, Slack and a local chat bridge. Telegram
   carries messages both ways and is the one tested bridge. Reactions mark
-  arrival and the shape of the reply. In a team chat every message goes
-  to the chat's one long-lived chat session, which replies, stays quiet,
-  or starts tasks that report to it; elsewhere each of Tom's messages
-  that is not a reply starts an SDLC task.
+  arrival and the shape of the reply. Each team chat and Tom's own chat
+  (his Telegram and Slack DMs, the operator chat, the local chat) has one
+  long-lived chat session, and every message there that does not bind to
+  running work goes to it. It reads and dispatches: it replies, stays
+  quiet, starts a subagent for something small (`valor:web` for the web),
+  or starts tasks that report to it, and only it speaks in its chat. Each
+  of Tom's emails starts an SDLC task.
 - **Harnesses.** Claude Code, plus Pi and the OpenAI route in code.
 - **Persona and routines.** The persona is rendered into every turn;
   routines (status page, the 90-day expiry list, which reports to Tom and
@@ -54,12 +57,10 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
 
 ## Open items
 
-- Orchestration ([orchestration.md](orchestration.md)): the persona's
-  conversation turn on every channel, Tom's DM included, which reads and
-  dispatches and never does the work; workers, Claude Code subagents for
-  small things and kernel tasks for anything with a deliverable or a merge,
-  that report to the persona and never touch a comms channel; and the one
-  web agent that alone holds WebFetch and WebSearch (Tom, 2026-10-16).
+- Orchestration's done bar ([orchestration.md](orchestration.md)): Tom
+  uses an answer from the web through his DM's session, and judges a team
+  chat where a task's question and merge reach the chat through the
+  session.
 - Valor's own skill set, beside the yudame plugins and the project's own
   skills (Tom, 2026-10-16), and with it the full-operator capabilities of
   issues #3636 to #3642, all wanted, in no order.

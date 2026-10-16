@@ -1,7 +1,8 @@
 """A scripted Valor for the database tests: each turn is a real Python
 subprocess that reads its Brief's stage section and plays that stage by
 writing `.valor/` files and committing to a real git workspace, the way a
-`claude -p` turn would. A test steers it through `.git/valor-script.json`
+`claude -p` turn would; a chat session's turn, which has no stage, writes
+the requests of the next entry of `chat`. A test steers it through `.git/valor-script.json`
 (outside the work tree, so it never dirties a candidate), and every turn is
 logged to `.git/valor-turns.jsonl`.
 
@@ -59,6 +60,10 @@ if "turns" in cfg:  # the steering lasts this many turns, then the defaults play
 v = pathlib.Path(".valor")
 (v / "effects").mkdir(parents=True, exist_ok=True)
 git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
+if stage is None and cfg.get("chat"):  # a chat session's turn: the next entry's requests
+    for name, effect in cfg["chat"].pop(0).items():
+        (v / "effects" / f"{name}.json").write_text(json.dumps(effect))
+    cfg_path.write_text(json.dumps(cfg))
 
 def commit(path, text, message):
     p = pathlib.Path(path)

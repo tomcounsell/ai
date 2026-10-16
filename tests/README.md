@@ -9,9 +9,9 @@ The suite proves the kernel is solid and that Telegram carries messages both way
 3. Ledger: rows are written once and read back; the ledger role cannot update or delete.
 4. Kernel resident: `python -m core serve` starts, takes a task, runs a scripted turn, collects it, and survives a restart with the task resumed.
 5. Stop: stopping a task kills its turn and everything the turn started.
-6. Telegram in: an operator message reaches the kernel once and starts a task; a reply to Valor's message binds to that task.
+6. Telegram in: Tom's message reaches the kernel once and binds to his chat's session, starting no task itself; a reply to a task's message binds to that task; a stranger in Tom's DM binds to nothing.
 7. Telegram out: a send leaves through the outbox exactly once, across a bridge crash and restart.
-8. End to end: a Telegram message starts a task, a scripted turn builds, check and review pass, the kernel merges, Tom's chat gets the report.
+8. End to end: Tom's DM message reaches his DM session, whose scripted turn starts a task (`task.start`); the task builds, check and review pass, the kernel merges, the report reaches the session (`child.reported`), and the session's next turn tells Tom's DM.
 9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed, and the start that ends the rollout restarts each bridge whose code the merge reaches.
 10. Metering: a turn's model call through the gateway writes its opened and charged rows with the turn's id.
 11. Orchestration: only `valor:web` reaches the web, its guard is ledgered with its grant and expiry, and a turn loads Valor's plugin first, nests subagents without Claude Code's cap, and gives every subagent the Brief.

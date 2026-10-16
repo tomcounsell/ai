@@ -2,7 +2,7 @@
 tracking: none
 slug: orchestration
 type: build
-status: waves 0 and 1 done (2026-10-17); wave 2 building
+status: waves 0, 1 and 2 built (2026-10-17); the done bar is open
 critique_rounds: 0
 review_rounds: 0
 ---
@@ -83,8 +83,8 @@ The strip's ten rules, with rules 1, 3, 4, 8 and 10 most often in play. On top o
 | --- | --- | --- |
 | 1, hear the team | built (935e46889) | nothing |
 | 4, the persona for groups | built (d7c7cb3bd) | nothing |
-| 2, one session per chat | being built by another session, groups only | wave 2 waits for its merge |
-| 3, one voice | being built by another session, groups only | wave 2 waits for its merge |
+| 2, one session per chat | built (a50097858), groups; wave 2 adds Tom's own chat | done |
+| 3, one voice | built (a50097858), groups; wave 2 adds Tom's own chat | done |
 | 5, media; 6, the reference | not built | nothing |
 
 ## Wave 1 (touches none of team-chat's in-flight files)
@@ -138,39 +138,54 @@ agent. All four are fixed and probed live. The guard's reach is stated under
 After the merge: `docs/harnesses.md`'s "Gap" and "Planned" paragraphs say what
 now exists, and `docs/persona.md` and `skills/README.md` likewise.
 
-## Wave 2 (after team-chat steps 2 and 3 merge; these are its files)
+## Wave 2 (built 2026-10-17)
 
-**C. Tom's DM is a chat session.**
+**C. Tom's own chat is a chat session.**
 
-- `core/intake.py`: in Tom's own chats (his Telegram, Slack and local DMs, and
-  each of his email threads), a message that does not bind to running work is
-  the next prompt of that chat's session, the same session team-chat lands for
-  groups. No task starts from the message itself.
-- Anyone else in Tom's DM binds to nothing.
-- Tests: a non-reply DM from Tom reaches his session and starts no SDLC task; a
-  stranger in the DM binds to nothing.
+- `core/intake.py`, `_bind`: in Tom's own chat (`_toms_own`: the operator chat,
+  his Telegram DM, his Slack DMs, the local chat), a message of his goes to that
+  chat's session through the same `_chat` path as a team chat's, under
+  `_project_for` (the project listing the chat, else `valor`), and always wakes
+  it. A reply that `_replied` resolves to a task that is not this chat's session (an
+  older task's notice or send, or a notice that stays Tom's: credential,
+  binding, rollout, spend, grants) keeps the reply binding; a reply to the
+  session's own post goes to the session. With no project, the message starts a
+  task as before. `_chat_start` opens with "Tom's own chat on <channel>, a 1:1
+  with him, not a team chat".
+- Anyone else in Tom's own chat binds to nothing.
+- Email is out: Tom's emails each start a task, as the binding table says.
+- The Slack DM preceding-posts machinery is gone (`_preceding`, `_waits`,
+  `_adjacent`, `_context`, `CARRIED`, and `plans/slack-dm-reply-context.md`):
+  the session reads the whole DM.
+- Tests (`tests/test_kernel.py`): a non-reply DM from Tom binds to his DM
+  session and starts no SDLC task; a stranger there binds to none; a reply to an
+  older task's notice still binds to it, and a reply to the session's post goes
+  to the session.
 
 **D. One voice for every task.**
 
-- `core/notices.py`: a task whose root is a chat session gives its question, its
-  end and its merge report to that session, as team-chat step 3's prompt row. A
-  task with no chat (the CLI, a routine) uses Tom's DM session.
-- Notices about credentials, bindings, rollouts, spend and grants stay Tom's.
-- `skills/sdlc/channel.md` tells a worker its output goes to the Valor session
-  that started it.
-- Test, end to end: a worker's question reaches the session, the session's answer
-  resumes the worker, and the session tells the chat about the merge.
+- Already true for a task whose parent is a chat session (`notices.request` →
+  `_chat_parent` → `_to_parent`, `child.reported`). After C every task started
+  from Tom's own chat is a child of its session, so it follows. A root task with
+  no session (the CLI, a routine, Tom's email) notifies Tom directly, as
+  `core/notices.py`'s docstring says. The credential request stays Tom's.
+- `skills/sdlc/channel.md` tells a worker that a session's task leaves its
+  output for the session, which tells the chat.
+- Test, end to end (`tests/test_pipeline.py`): Tom's DM message, the DM
+  session's turn requests `task.start`, the task builds, its checks and review
+  pass, the kernel merges, the report is `child.reported` on the session, and
+  the session's next turn sends the news to Tom's chat.
 
 **E. The session orchestrates.**
 
-- The session's stage text and `docs/persona.md`: the session reads; answers;
-  starts a subagent for small things (`valor:web` for anything on the web);
-  starts a task for anything with a deliverable or a merge; and answers, steers
-  or stops tasks, through the same dispatch team-chat lands for starting one.
-- An exact `stop` in reply to the session's relay of task X still stops X in the
-  kernel, since stop is immediate.
-
-Merge order: C, D, E, one after another, since D and E edit text the session reads.
+- `skills/sdlc/converse.md` is any chat's, Tom's own included, where it is a 1:1
+  with the CEO. The session reads and dispatches: a Claude Code subagent for
+  something small, `valor:web` for anything on the web, a task for anything with
+  a deliverable or a merge, and `task.answer` and `task.stop` for its tasks.
+- `docs/persona.md`, "One voice that orchestrates", describes it as built.
+- Not built: an exact `stop` in reply to the session's relay of task X goes to
+  the session, which stops X with `task.stop`; the kernel does not map the
+  relay to X, since a relay is the session's own send and names no task.
 
 ## Done
 

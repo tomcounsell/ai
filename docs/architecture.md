@@ -26,11 +26,11 @@ takes its task's abstain route. The task taxonomy, the router, `JudgementPort`, 
 in [judgement-layer.md](judgement-layer.md). This document places the judgement tier in the loop and
 stops there.
 
-**Design** (planned in [plans/orchestration.md](plans/orchestration.md)). Within the agents tier, Valor's
-persona orchestrates and workers do the work. The persona's conversation turn reads and dispatches;
-workers use the skills and report to the persona, and only the persona speaks on a comms channel.
-Today a task's own turns do the work and reach Tom directly (The task and its Brief, the signal
-channel).
+**Design** ([plans/orchestration.md](plans/orchestration.md)). Within the agents tier, Valor's
+persona orchestrates and workers do the work. Each chat's session, a team chat's or Tom's own
+chat's, reads and dispatches; the tasks it starts use the skills and report to it, and only it
+speaks in its chat. A task with no session (from the CLI, a routine, or Tom's email) reaches Tom
+directly (The task and its Brief, the signal channel).
 
 The off switch and the bounds live in the kernel because an agent's
 incentive to accept correction depends on its uncertainty and is fragile
@@ -480,8 +480,10 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
 
 ## How a task flows from request to merge
 
-1. **Intake.** Tom's message reaches the kernel through a bridge, which
-   starts a task: an effect ceiling (`act`) and a provisioned workspace.
+1. **Intake.** Tom's message reaches the kernel through a bridge and is
+   his chat's session's next prompt; the session starts a task for the
+   work (by email, the message starts it): an effect ceiling (`act`) and
+   a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
 3. **Plan.** The working session writes the plan: approach, stakes, the
    critique loop (0 to 2) and the review loop (0 or 1), and related tech

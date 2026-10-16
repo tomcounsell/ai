@@ -1,5 +1,5 @@
-"""The ledger, effects, stop, and the binding of a top-level Slack DM
-message on real Postgres, with no model call."""
+"""The ledger, effects, stop, and the binding of Tom's own chat and of team
+chats to their chat sessions, on real Postgres, with no model call."""
 
 import asyncio
 import dataclasses
@@ -421,27 +421,33 @@ def test_a_turn_keeps_the_operators_path_and_knows_its_github_repo(tmp_path, mon
     assert found["GH_REPO"] == "tomcounsell/popoto"
 
 
-# -- a top-level Slack DM message keeps the posts it follows --------------------
+# -- Tom's own chat: one chat session, only Tom heard ---------------------------
 
 
 def at(n: int) -> str:
     return f"1780000000.{n:06d}"
 
 
+VALOR_SPEC = 'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+
+
 @pytest.fixture
 def dm(tmp_path):
-    """Tom's own Slack DM, fresh per test so no other test's posts precede."""
+    """Tom's own Slack DM, fresh per test, with the `valor` project its
+    chat session works under."""
     tom = f"T0ABC/U{uuid.uuid4().hex[:8].upper()}"
     with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
+        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(VALOR_SPEC)
         yield tom
 
 
-async def tom_says(dsn, dm, text, ts, chat=None, **kw) -> dict:
-    """Tom's top-level Slack message, received and bound: its binding, with
-    the started task's instruction when it started one."""
+async def tom_says(dsn, dm, text, ts, *, sender=None, **kw) -> dict:
+    """A Slack message in Tom's DM, by Tom unless `sender` says otherwise,
+    received and bound: its binding, with the started task's instruction
+    when it started one."""
     inbound = intake.Inbound(
-        channel="slack", chat_id=chat or dm, chat_kind="group" if chat else "dm", message_id=ts,
-        sender_id=dm, sender_name="Tom", sent_at="2026-10-15T00:00:00Z", text=text, **kw,
+        channel="slack", chat_id=dm, chat_kind="dm", message_id=ts, sender_id=sender or dm,
+        sender_name="Tom", sent_at="2026-10-15T00:00:00Z", text=text, **kw,
     )  # fmt: skip
     async with await db.connect(dsn) as conn:
         got = await intake.receive(conn, inbound)
@@ -450,18 +456,13 @@ async def tom_says(dsn, dm, text, ts, chat=None, **kw) -> dict:
     if bound["as"] == "start":
         async with await db.connect(dsn) as conn:
             bound["instruction"] = (await tasks.brief(conn, bound["task_id"])).instruction
-    key = f"reply:{got.received_id}"
-    bound["notices"] = [r for r in await bridges.of_type(dsn, "notice.requested") if r["about_key"] == key]
     return bound
 
 
-async def posted(dsn, task, chat, ts, text, *, parts=1, thread_ts=None, question=False) -> None:
-    """Valor's post in a Slack chat: a send in `parts`, or the notice of the
-    task's open question."""
-    entries = [
-        {"channel": "slack", "chat_id": chat, "message_id": f"{ts}{i}" if i else ts, "thread_ts": thread_ts}
-        for i in range(parts)
-    ]
+async def posted(dsn, task, chat, ts, text, *, question=False) -> None:
+    """Valor's post in a Slack chat: a send, or the notice of the task's
+    open question."""
+    entries = [{"channel": "slack", "chat_id": chat, "message_id": ts, "thread_ts": None}]
     async with await db.connect(dsn) as conn:
         if question:
             about = f"question:{machine.fold(await ledger.read(conn, task)).open_question}"
@@ -492,126 +493,86 @@ async def state(dsn, task) -> State:
     return machine.fold(await bridges.rows(dsn, task)).state
 
 
-def test_a_top_level_dm_message_after_valors_posts_starts_a_task_that_carries_them(dsn, dm):
-    """The incident: a send from one task, a notice from another, then
-    Tom's top-level answer. Nothing waits on him, so it starts a task that
-    sees both posts, oldest first."""
+async def task_count(dsn) -> int:
+    async with await db.connect(dsn) as conn:
+        return (await (await conn.execute("SELECT count(*) FROM documents WHERE kind = 'task'")).fetchone())[
+            0
+        ]
+
+
+def test_a_non_reply_dm_from_tom_binds_to_his_dm_session_and_starts_no_task(dsn, dm):
+    """The first message starts the DM's chat session, under `valor`, and
+    the next is a steer on the same one; no SDLC task starts from either."""
 
     async def go():
-        a, b = await new_task(dsn), await new_task(dsn)
-        await posted(dsn, a, dm, at(10), "Could you DM me 'Ask me one question'?")
-        await posted(dsn, b, dm, at(20), "Sorry for the odd stop notice.")
-        return a, b, await tom_says(dsn, dm, "sounds good! don't stop for me", at(30))
+        before = await task_count(dsn)
+        first = await tom_says(dsn, dm, "fix the login page", at(10))
+        second = await tom_says(dsn, dm, "and the signup page", at(20))
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, first["task_id"])
+            rows = await ledger.read(conn, first["task_id"])
+        return before, await task_count(dsn), first, second, b, rows
 
-    a, b, bound = run(go())
-    text = bound["instruction"]
-    assert bound["as"] == "start" and bound["task_id"] not in (a, b)
-    assert text.startswith(
-        "sounds good! don't stop for me\n\nTom wrote this in his Slack DM, not in a thread"
+    before, after, first, second, b, rows = run(go())
+    assert (first["as"], second["as"]) == ("steer", "steer") and first["task_id"] == second["task_id"]
+    assert after == before + 1 and b.parent_id is None
+    assert b.chat == {"channel": "slack", "chat_id": dm} and b.project == {"name": "valor"}
+    assert (
+        b.instruction.startswith("You are in Tom's own chat on Slack") and "not a team chat" in b.instruction
     )
-    assert text.index(f"from task {a}") < text.index("> Could you DM me") < text.index(f"from task {b}")
-    assert "> Sorry for the odd stop notice." in text and "waiting" not in text
+    steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
+    assert [(p["provenance"]["by"], p["text"]) for p in steered] == [
+        ("tom", "fix the login page"), ("tom", "and the signup page"),
+    ]  # fmt: skip
+    assert session.chat_waiting(rows)
 
 
-def test_a_top_level_dm_message_answers_the_one_open_question_it_follows(dsn, dm):
-    """A live question, then an unrelated notice: the message is the
-    answer, with a notice in reply in Tom's DM. A later `stop` after
-    another live question answers it too and stops nothing."""
+def test_a_stranger_in_toms_dm_binds_to_none(dsn, dm):
+    async def go():
+        before = await task_count(dsn)
+        bound = await tom_says(dsn, dm, "hi valor, do this for me", at(10), sender="T0ABC/UOTHER")
+        return before, await task_count(dsn), bound
+
+    before, after, bound = run(go())
+    assert (bound["as"], bound["task_id"]) == ("none", None) and after == before
+
+
+def test_a_reply_to_an_older_tasks_notice_binds_to_it_and_one_to_the_sessions_post_reaches_the_session(
+    dsn, dm
+):
+    """A reply to an older task's question answers it; a reply to the
+    session's own post, even `stop`, is the session's next prompt."""
 
     async def go():
-        waiting, other = await asking(dsn), await new_task(dsn)
+        waiting = await asking(dsn)
         await posted(dsn, waiting, dm, at(10), "Which colour?", question=True)
-        await posted(dsn, other, dm, at(20), "Something else.")
-        answer = await tom_says(dsn, dm, "blue", at(30))
-        asked = await asking(dsn)
-        await posted(dsn, asked, dm, at(40), "Should I go on?", question=True)
-        stop = await tom_says(dsn, dm, "stop", at(50))
-        return waiting, answer, await bridges.rows(dsn, waiting), asked, stop, await state(dsn, asked)
+        answer = await tom_says(dsn, dm, "blue", at(20), reply_to=at(10))
+        chat = (await tom_says(dsn, dm, "hello", at(30)))["task_id"]
+        await posted(dsn, chat, dm, at(40), "Hello Tom.")
+        thanks = await tom_says(dsn, dm, "thanks", at(50), reply_to=at(40))
+        stop = await tom_says(dsn, dm, "stop", at(60), reply_to=at(40))
+        return waiting, answer, chat, thanks, stop, await bridges.rows(dsn, waiting), await state(dsn, chat)
 
-    waiting, answer, rows_, asked, stop, asked_state = run(go())
+    waiting, answer, chat, thanks, stop, rows_, chat_state = run(go())
     assert (answer["task_id"], answer["as"]) == (waiting, "answer")
     assert [r["payload"]["text"] for r in rows_ if r["type"] == "question.answered"] == ["blue"]
-    (n,) = answer["notices"]
-    assert (n["channel"], n["chat_id"], n["reply_to"]) == ("slack", dm, at(30))
-    assert "as your answer" in n["text"] and "send it again" in n["text"]
-    assert (stop["task_id"], stop["as"]) == (asked, "answer") and asked_state is not State.STOPPED
+    assert chat != waiting
+    assert (thanks["task_id"], thanks["as"]) == (chat, "steer") and (stop["task_id"], stop["as"]) == (
+        chat,
+        "steer",
+    )
+    assert chat_state is not State.STOPPED
 
 
-def test_two_stale_or_superseded_or_textless_asks_start_a_task(dsn, dm):
-    """Two open questions; an answered one; a question its task's own later
-    send superseded; files with no text after a live one: each starts a
-    task, and no question is answered."""
-
-    async def go():
-        out = []
-        a, b = await asking(dsn), await asking(dsn)
-        await posted(dsn, a, dm, at(10), "Which colour?", question=True)
-        await posted(dsn, b, dm, at(20), "Which size?", question=True)
-        out.append(await tom_says(dsn, dm, "blue", at(30)))
-        stale = await asking(dsn)
-        await posted(dsn, stale, dm, at(40), "Which colour?", question=True)
-        async with await db.connect(dsn) as conn:
-            await session.answer(conn, stale, "answered elsewhere")
-        out.append(await tom_says(dsn, dm, "blue", at(50)))
-        later = await asking(dsn)
-        await posted(dsn, later, dm, at(60), "Which colour?", question=True)
-        await posted(dsn, later, dm, at(70), "Never mind, I picked blue.")
-        out.append(await tom_says(dsn, dm, "ok", at(80)))
-        files = await asking(dsn)
-        await posted(dsn, files, dm, at(90), "Send the logo?", question=True)
-        logo = {"name": "logo.png", "mime": "image/png", "bytes": 1, "path": "/tmp/logo.png"}
-        out.append(await tom_says(dsn, dm, "", at(100), attachments=[logo]))
-        return out, [await state(dsn, t) for t in (a, b, later, files)]
-
-    (two, stale, later, files), states = run(go())
-    assert all(b["as"] == "start" for b in (two, stale, later, files))
-    assert two["instruction"].count("still waiting on his answer") == 2
-    assert "waiting" not in stale["instruction"] and "waiting" not in later["instruction"]
-    assert states == [State.WAITING] * 4
-
-
-def test_the_preceding_posts_are_those_since_toms_last_top_level_message_newest_five(dsn, dm):
-    async def go():
-        task = await new_task(dsn)
-        await posted(dsn, task, dm, at(10), "first post")
-        first = await tom_says(dsn, dm, "one", at(20))
-        await posted(dsn, task, dm, at(30), "second post")
-        second = await tom_says(dsn, dm, "two", at(40))
-        third = await tom_says(dsn, dm, "three", at(50))
-        for n in range(1, 8):
-            await posted(dsn, task, dm, at(100 + n), f"post {n}", parts=2 if n == 7 else 1)
-        capped = await tom_says(dsn, dm, "ok", at(200))
-        return first, second, third, capped
-
-    first, second, third, capped = run(go())
-    assert "> first post" in first["instruction"]
-    assert "> second post" in second["instruction"] and "first post" not in second["instruction"]
-    assert third["instruction"] == "three"
-    assert [n for n in range(1, 8) if f"> post {n}" in capped["instruction"]] == [3, 4, 5, 6, 7]
-    assert capped["instruction"].count("> post 7") == 1
-
-
-def test_threaded_posts_other_chats_later_posts_and_group_channels_are_not_carried(dsn, dm):
-    """And a top-level `stop` after a running task's send starts a task,
-    stopping nothing."""
+def test_with_no_project_to_hold_it_toms_dm_message_starts_a_task(dsn, tmp_path):
+    tom = f"T0ABC/U{uuid.uuid4().hex[:8].upper()}"
 
     async def go():
-        task = await new_task(dsn)
-        group = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
-        await posted(dsn, task, dm, at(10), "in a thread", thread_ts=at(5))
-        await posted(dsn, task, f"T0ABC/U{uuid.uuid4().hex[:8].upper()}", at(11), "another DM")
-        await posted(dsn, task, dm, at(40), "after the message")
-        in_dm = await tom_says(dsn, dm, "hello", at(30))
-        await posted(dsn, task, group, at(50), "in the channel")
-        in_group = await tom_says(dsn, dm, "hello", at(60), chat=group)
-        await posted(dsn, task, dm, at(70), "working on it")
-        stop = await tom_says(dsn, dm, "stop", at(80))
-        return task, in_dm, in_group, stop, await state(dsn, task)
+        return await tom_says(dsn, tom, "write a haiku", at(10))
 
-    task, in_dm, in_group, stop, task_state = run(go())
-    assert (in_dm["as"], in_dm["instruction"]) == ("start", "hello")
-    assert (in_group["as"], in_group["instruction"]) == ("start", "hello")
-    assert stop["as"] == "start" and stop["task_id"] != task and task_state is not State.STOPPED
+    with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
+        bound = run(go())
+    assert (bound["as"], bound["instruction"]) == ("start", "write a haiku")
 
 
 # -- core shape and the queue (docs/plans/ask-reconciliation.md) --------------------
@@ -730,7 +691,8 @@ def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(
 # -- a team chat: one long-lived chat session, every message a steer ------------
 
 
-GROUP, QUIET_GROUP, OTHER = "-1001", "-1002", "-1003"
+# LONE: a chat session started directly, which no message there reaches.
+GROUP, QUIET_GROUP, OTHER, LONE = "-1001", "-1002", "-1003", "-1004"
 RAIN = "77"
 
 
@@ -849,7 +811,7 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     async def go():
         async with await db.connect(dsn) as conn:
             b = tasks.Brief(
-                instruction="chat", workspace=str(tmp_path), chat={"channel": "telegram", "chat_id": GROUP}
+                instruction="chat", workspace=str(tmp_path), chat={"channel": "telegram", "chat_id": LONE}
             )
             task = await tasks.start(conn, b)
             await verdicts.record_chat(conn, task)
@@ -898,8 +860,8 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert cb.parent_id == session_id and cb.project == {"name": "flowers"} and found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
     assert started["provenance"]["by"] == "Rain"
-    (reported,) = [r["payload"] for r in parent_rows if r["type"] == "child.reported"]
-    assert (reported["child_id"], reported["kind"]) == (child, "question")
+    (reported,) = [p for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
+    assert reported["kind"] == "question"
     notes = [r["payload"] for r in child_rows if r["type"] == "notice.requested"]
     assert [(n["kind"], n["chat_id"]) for n in notes] == [("credential", bridges.OPERATOR_CHAT)]
     (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]

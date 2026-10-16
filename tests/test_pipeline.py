@@ -7,11 +7,26 @@ No model call. Live spend: none.
 
 import asyncio
 import json
+import pathlib
+import uuid
 
 import pytest
 
-from core import broker, db, judgement, judgement_sites, ledger, machine, notices, router, session, tasks
+from core import (
+    broker,
+    db,
+    intake,
+    judgement,
+    judgement_sites,
+    ledger,
+    machine,
+    notices,
+    router,
+    session,
+    tasks,
+)
 from core.machine import State
+from core.settings import settings
 from tests import bridges, judgement_upstream, scripted
 from tests.bridges import rows
 from tests.ports import listen
@@ -103,6 +118,77 @@ def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp
 
     states, f = run(go())
     assert states == [State.PATCH] * 3 and f.counts["rebases"] == 3 and f.state is not State.ENDED
+
+
+# -- end to end: Tom's DM, its session, a task, the merge, the news -------------------
+
+
+def test_toms_dm_session_starts_the_work_and_tells_him_of_its_merge(dsn, tmp_path):
+    """Tom's DM message reaches his DM's chat session, whose turn starts a
+    task (`task.start`); the task builds, passes its checks and review, and
+    merges; its report reaches the session, never a chat, and the
+    session's next turn tells Tom's DM."""
+    ws, origin = scripted.workspace(tmp_path)
+    chat_ws, _ = scripted.workspace(tmp_path / "chat")
+    tom = str(uuid.uuid4().int % 10**9)  # Tom's Telegram id: a DM no other test's session holds
+    start = {"action_type": "task.start", "target": "work",
+             "payload": {"instruction": "Write Tom a greeting.", "by": "tom"}}  # fmt: skip
+    tell = {"action_type": "telegram.send_message", "target": tom,
+            "payload": {"text": "Your greeting is merged.", "reply_to": None, "topic_id": None, "files": []}}  # fmt: skip
+    scripted.steer(chat_ws, chat=[{"start": start}, {"tell": tell}])
+
+    async def provisioned(task, fields):
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "workspace.provisioned", {"fields": fields})
+
+    async def go():
+        said = intake.Inbound(
+            channel="telegram", chat_id=tom, chat_kind="dm", message_id="1", sender_id=tom,
+            sender_name="Tom", sent_at="2026-10-17T09:00:00+00:00", text="Write me a greeting.",
+        )  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            got = await intake.receive(conn, said)
+            await intake.bind(conn)
+        (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+        chat = bound["task_id"]
+        await provisioned(chat, {"workspace": str(chat_ws)})
+        first = await drive(dsn, chat)
+        (made,) = [r["result"] for r in await bridges.of_type(dsn, "effect.outcome") if r["task_id"] == chat]
+        task = made["task_id"]
+        await provisioned(task, {"workspace": str(ws), **tasks.resolve_workspace(str(ws))})
+        await scripted.run_judge(dsn, task, "precise")
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        await drive(dsn, task)
+        await scripted.checks(dsn, task)
+        done = await merged(dsn, task)
+        second = await drive(dsn, chat)
+        async with await db.connect(dsn) as conn:
+            briefs = [await tasks.brief(conn, t) for t in (chat, task)]
+        return bound, first, second, done, briefs, await rows(dsn, chat), await rows(dsn, task)
+
+    with (
+        bridges.operator(tmp_path),
+        bridges.configure(operator_telegram_id=tom, database=settings.test_database),
+    ):
+        (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(
+            'name = "valor"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+        )
+        bound, first, second, done, (cb, tb), chat_rows, task_rows = run(go())
+    assert bound["as"] == "steer" and cb.chat == {"channel": "telegram", "chat_id": tom}
+    assert (first["status"], second["status"]) == ("listening", "listening")
+    assert tb.parent_id == cb.id and tb.project == {"name": "valor"}
+    assert done.kind == "done" and git(origin, "rev-parse", "main") == machine.fold(task_rows).candidate.sha
+    assert not bridges.typed(task_rows, "notice.requested")
+    (reported,) = bridges.typed(chat_rows, "child.reported")
+    assert (reported["child_id"], reported["kind"]) == (tb.id, "report")
+    turns = [json.loads(x) for x in (chat_ws / ".git" / "valor-turns.jsonl").read_text().splitlines()]
+    assert len(turns) == 2 and f"Your task {tb.id} reports (report):" in turns[1]["prompt"]
+    assert turns[0]["prompt"].startswith("You are in Tom's own chat on Telegram")
+    assert "Write me a greeting." in turns[0]["prompt"] and "# A chat session" in turns[0]["brief"]
+    (held,) = bridges.typed(chat_rows, "effect.held")
+    assert (held["action_type"], held["target"]) == ("telegram.send_message", tom)
+    assert held["payload"]["text"] == "Your greeting is merged."
 
 
 # -- an idle turn ends its step; stop.md hands in from any working state -------------

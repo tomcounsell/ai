@@ -43,28 +43,27 @@ in the third person, Valor still answers as itself.
 
 ## One voice that orchestrates
 
-The persona is the one voice on every comms channel (Telegram, email,
-Slack), Tom's DM included, and it orchestrates. Every inbound message that
-does not bind to running work gets the persona's conversation turn, which
-answers, chats, stays quiet, steers running work, or starts work; a steer,
-answer, or stop on a reply binds to running work as it does now. The
-persona turn reads and dispatches: it reads the chat, memory, task status,
-and the repository, so it can answer a question about a codebase, and it
-starts, steers, answers, and stops work. It never edits, runs a skill, or
-uses the web; the workers it starts do. A small thing is a subagent inside
-the persona's turn; anything with a deliverable or a merge is a kernel
-task. Workers send their questions, progress, and deliveries to the
-persona, the parent Valor agent, and never speak on a comms channel; only
-the persona does (Tom's grant, 2026-10-16). Web access goes through the
-web agent, which any agent at any depth can start, since subagents nest
-without limit.
+Each chat Valor is in has one long-lived session, and it is the one voice
+there: every team chat a project lists, and Tom's own chat (his Telegram
+DM, his Slack DMs, the operator chat, the local chat page), where it is a
+1:1 with the CEO. Every message in the chat that does not bind to running
+work is the session's next prompt; a steer, answer, or stop on a reply to
+an older task's post binds to that task (`core/intake.py`). Email has no
+session: Tom's emails start tasks.
 
-The web agent and unlimited nesting are built
-([plans/orchestration.md](plans/orchestration.md), wave 1;
-[harnesses.md](harnesses.md), Skill rendering). The rest is planned: until it is
-built, a message of Tom's that is not a reply starts an SDLC task, and the
-persona is appended to the working session's system prompt, so the session
-that speaks also does the work (see "How the persona reaches a turn").
+The session reads and dispatches (`skills/sdlc/converse.md`). It reads the
+chat, memory, task status, and the repository, so it can answer a
+question about a codebase, and it answers, stays quiet, or dispatches. For
+a small thing it starts a Claude Code subagent inside its turn; web
+searches and page reads go through the web agent (`valor:web`), which any
+agent at any depth can start, since subagents nest without limit; anything
+with a deliverable or a merge becomes a task it starts, answers, or stops
+(`tools/chat_tasks.py`). Those tasks send their questions, progress, and
+deliveries to the session that started them, never to a chat; only the
+session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
+its own words (`core/notices.py`). This is the session's prompt and the
+persona, with no tool taken from it. A task with no session (one started
+from the CLI, a routine, or Tom's email) reports to Tom directly.
 
 ## Voice
 
@@ -445,6 +444,8 @@ order:
 5. **How the task reaches Tom.** The `.valor/` channel for asking,
    delivering, and requesting effects (`skills/sdlc/channel.md`), and the
    stage file for the state the turn runs in (`skills/sdlc/<state>.md`).
+   A chat session gets its own channel and stage in one,
+   `skills/sdlc/converse.md`, in place of both.
 
 Persona first, because it is the standing identity every task shares; the
 Brief and corrections follow, because they are specific and later, and a

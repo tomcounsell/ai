@@ -145,11 +145,12 @@ refused release writes `effect.refused` once and is not yielded again. The bridg
 Some messages are the kernel speaking to Tom about his own work: a question a
 turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
-A notice goes to the chat where Tom started the task, when that is his own
-chat (his DM on that channel, or the operator chat), and otherwise to his
-operator chat, which is fixed in settings (`notices.home`). A task a chat
-session started reports to that session instead (next section), all but
-its push credential request, which is the operator's. No turn, task, or
+A task a chat session started, in a team chat or in Tom's own chat,
+reports to that session (next section), all but its push credential
+request, which is the operator's. Any other task's notice goes to the chat
+where Tom started it, when that is his own chat, and otherwise to his
+operator chat, which is fixed in settings (`notices.home`): a task with
+no session (from the CLI, a routine, or his email) reaches Tom directly. No turn, task, or
 payload names the recipient. The kernel writes `notice.requested` with the text and the record it
 concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
@@ -309,7 +310,7 @@ the operator channel and chat, so kernel text never reaches the other
 people there. How an act leaves belongs to
 [architecture.md](../architecture.md).
 
-### Team chats: one chat session, every message a steer
+### Chat sessions: one per chat, every message a steer
 
 A group chat a project spec lists (other than Tom's own) is a team chat
 (`intake.team_spec`), as the old system's listed groups were, and has one
@@ -336,40 +337,37 @@ is the harness's to compact (Claude Code's own; Pi's with compaction on;
 Codex's), and its stage says what a compaction keeps: who is who, open
 asks, tasks in flight. Its sends to its own chat owe Tom no report.
 
-### Unbound messages: classified by the judgement layer
+Tom's own chat (the operator chat, his DM) has a chat session the same
+way, under the project listing the chat, else `valor`; its opening says
+it is Tom's own chat, a 1:1 with him, not a team chat. Only Tom is heard
+there, and every message of his wakes it. A reply to an older task's
+notice or send binds to that task as above; every other message of his
+there, a reply to the session's own post included, is the session's next
+prompt. So the work he asks for in his DM is a task the session starts,
+which reports to the session, and the session tells him.
 
-A message from Tom that replies to nothing, or to a message that is not a
-notice, goes to the judgement layer ([judgement-layer.md](../judgement-layer.md)),
-which reads it with its thread and says what it is:
+### Started tasks
 
-- **A new request.** It becomes a task. Before the first turn, the
-  request-underspecification classifier (`intake.underspecified`) reads it: an underspecified request (a
-  one-line ask, an ask leaning on an example, an ask naming existing UI
-  without scope) goes to a clarify turn, and a precise one goes straight to
-  build. That classifier is a guard Tom granted, ledgered with its incidents
-  (psyoptimal #894 in rebuild-demonstration.md, Attention log; popoto #191
-  and #188 in rebuild-baseline.md, "What this says about the old SDLC
-  stages", Clarify), serving Mission items 3 and 6, with a ninety-day expiry.
-- **A steer for a running task.** It is queued as steering for that task
-  and drained at the next turn boundary. Steering belongs to
-  [architecture.md](../architecture.md).
-- **Feedback or an answer** that Tom sent without using reply. It binds to
-  the task the judgement layer names, and the binding is ledgered with its
-  confidence.
-- **A correction.** "From now on..." becomes a `correction.recorded` row with
-  `source_class: direct`, rendered into every later turn.
-- **An exemplar.** Work Tom loved, and why, becomes a `correction.recorded`
-  row with `source_class: exemplar`, the same store with a distinct source
-  class (Mission, Evidence: "Tom's feedback, both directions").
-- **Conversation.** Recorded, nothing more.
+A task starts when a chat session asks for one (`task.start`), or from a
+message of Tom's that is not a reply and has no chat session to go to: an
+email, or a chat no project lists when there is no `valor` spec. Before
+its first turn, the request-underspecification classifier
+(`intake.underspecified`) reads the request: an underspecified request (a
+one-line ask, an ask leaning on an example, an ask naming existing UI
+without scope) goes to a clarify turn, and a precise one goes straight to
+build. That classifier is a guard Tom granted, ledgered with its incidents
+(psyoptimal #894 in rebuild-demonstration.md, Attention log; popoto #191
+and #188 in rebuild-baseline.md, "What this says about the old SDLC
+stages", Clarify), serving Mission items 3 and 6, with a ninety-day expiry.
 
 A low-confidence call takes its judgement task's abstain route
 ([judgement-layer.md](../judgement-layer.md), Confidence gating) rather than
 being acted on. Where that route reaches Tom it costs attention, so the
 floor is set from the calibration record and the attention log, not once.
 
-A task started from a message takes the effect ceiling `act`, set in the
-kernel and never from the message text, which would let a classifier set
+A task started from a message takes the effect ceiling `act`, and a chat
+session's task takes its session's (`act`), set in the kernel and never
+from the message text, which would let a classifier set
 authority (Tom, 2026-10-01); its pushes, sends, and merge leave at request. It runs on the `frontier` seat, like any task that goes
 through the SDLC (`core/intake.py`, `_start`).
 
@@ -379,10 +377,9 @@ ceiling. That changes only through
 
 ### Other people
 
-Messages from anyone other than Tom are recorded as `message.received` and
-serve as thread context. They do not start tasks, answer questions, give
-feedback, or record corrections. A request someone else makes reaches work
-only when Tom asks for it.
+In Tom's own chat only Tom is heard: anyone else's message there is
+recorded as `message.received` and binds to nothing. In a team chat
+everyone is heard, through its chat session (above).
 
 ## Sending
 

@@ -34,7 +34,10 @@ A task whose parent is a chat session reports to it, never to a chat:
 each notice it owes but the push credential request is a
 `child.reported` row on the parent (`child_id`, `kind`, `about_key`,
 `text`), once per `about_key`, which wakes the session; the session
-tells the chat in its own words.
+tells the chat in its own words. Tom's own chat has a session too
+(`core/intake.py`), so the work he asks for there is its child and
+reports to it. A root task with no session (one started from the CLI, a
+routine, or Tom's email) gives its notices to Tom directly.
 
 A notice with no channel or chat (the operator's unset) is written with a
 `notice.undeliverable` row beside it, so the ledger shows it was never

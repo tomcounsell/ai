@@ -149,15 +149,12 @@ the reply (the root included), read from the `sent` entries in the ledger,
 with no cap. A notice posted inside a long thread binds however far down
 it sits. Bindings record `via: "slack"`.
 
-People also answer in a DM without threading. A top-level message in
-Tom's DM carries the posts it follows: Valor's top-level posts there
-since his previous top-level message, the newest five. When exactly one
-of them is a question its task still waits on, and the message has text,
-the message is that task's answer, and a notice in reply names the work
-that took it. Otherwise it starts a task whose instruction quotes those
-posts after his words, so the task can see what he was answering. A
-top-level message never stops or steers an older task. Channels other
-than DMs keep the plain rule: a top-level message starts a task.
+People also answer in a DM without threading. Tom's Slack DM has a chat
+session, as his Telegram DM does
+([telegram.md](telegram.md#chat-sessions-one-per-chat-every-message-a-steer)),
+so a top-level message there is the session's next prompt, read against
+the whole DM, and the session takes it for what it is: an answer to a
+question it relayed, or new work.
 
 ## Sending
 

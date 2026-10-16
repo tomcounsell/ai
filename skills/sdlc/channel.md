@@ -5,7 +5,10 @@ Tom is not watching this session. He reads only what you leave under
 `.valor/` is ignored by git. Write each file in place as a plain file: a
 link, a hard link, a FIFO, a sparse file, or a directory under a signal's
 name is not read,
-and your next turn says so.
+and your next turn says so. When a chat's Valor session started this
+task, what you leave here (your question, your delivery, the merge's
+report) goes to that session, which tells the chat in its own words, so
+leave it here rather than sending it to a chat yourself.
 
 - A question for Tom goes in `.valor/question.md`; then end your turn. Ask
   only for vision, priorities, the cost and benefit of a tradeoff in how

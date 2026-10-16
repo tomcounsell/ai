@@ -95,10 +95,13 @@ def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn
                 'On "test": that was not a stop, so your message steers the work. To stop it, reply stop.'
             )
 
-            started = await tom(emu, dsn, op, "write a haiku")
-            assert started["as"] == "start" and started["task_id"] not in (task, None)
+            # Not a reply: the operator chat's session hears it, and no task starts from it.
+            heard = await tom(emu, dsn, op, "write a haiku")
+            assert heard["as"] == "steer" and heard["task_id"] not in (task, None)
             async with await db.connect(dsn) as conn:
-                assert (await tasks.status(conn, started["task_id"]))["spent_usd_micros"] == 0
+                b = await tasks.brief(conn, heard["task_id"])
+                assert b.chat == {"channel": "telegram", "chat_id": op} and b.parent_id is None
+                assert (await tasks.status(conn, heard["task_id"]))["spent_usd_micros"] == 0
 
     run(go())
 
