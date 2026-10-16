@@ -34,7 +34,9 @@ foreground first; a clarify step (a question to Tom) is started whenever
 it is ready, outside that count. A turn also holds one of the machine's turn slots
 (`core/slot.py`), which `python -m core run` shares.
 
-A task is stepped again when it moved, or when a row it did not write
+A task is stepped again when it moved, when its turn finished `idle`
+(behind every ready task whose latest row is older, so an idle task never
+holds the slot from other work), or when a row it did not write
 lands on its stream (an answer, a steer, a stop, an effect's outcome). A
 step that failed is stepped again by the kernel once `router.retry_due`
 says the delay after it has passed, and the task ends with a report at
@@ -849,8 +851,9 @@ class Kernel:
             # Asked again on the next row or the next `serve_tick_s` wake.
             self.seen.pop(task_id, None)
             self.parked[task_id] = latest
-        elif out.get("status") != "moved":
-            # Seen: the rows the step read, and the rows it wrote up to the
+        elif out.get("status") not in ("moved", "idle"):
+            # An idle step is stepped again, after the ready tasks whose
+            # latest row is older. Otherwise seen: the rows the step read, and the rows it wrote up to the
             # first another writer added while it ran, which steps it again.
             for r in rows:
                 if r["id"] <= latest or ledger.quiet(r):

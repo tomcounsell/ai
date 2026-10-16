@@ -22,4 +22,10 @@ and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 
+**When the work is done with nothing to merge.** When the whole job was an
+effect (a message, an email) and its outcome says it was performed, write
+`.valor/stop.md` opening `Done:`, then one line on what was sent. The task
+ends there and Tom gets that note. A turn with no signal is resumed with
+`Continue.`, so end the work this way rather than waiting.
+
 **Seeing the result.** When the work changes what a page shows, start the dev server on a port from 8000 to 8009, run `look URL` (it writes a screenshot and the page's HTML under `.valor/screens/`), open the screenshot, and name it in `done.md` with what you saw. The kernel files recorded screens away after the turn.

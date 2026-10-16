@@ -40,11 +40,11 @@ item, and a ninety-day expiry.
 |---|---|---|---|---|
 | intake | the request recorded once, verbatim, with its source | kernel | (writes `task.started`) | `judge` |
 | `judge` | decide whether the request is thin before anyone builds | judgement tier | `precise`, `thin` | `plan`, `clarify` |
-| `clarify` | ask only what inspection cannot settle | working session | `asked`, `no_material_question` | `waiting`, `plan` |
+| `clarify` | ask only what inspection cannot settle | working session | `asked`, `no_material_question`, `ended` | `waiting`, `plan`, `ended` |
 | `waiting` | Tom answers | nothing | `answered` | the state that asked |
-| `plan` | an approach, its stakes, its loop counts, its scope | working session | `planned`, `asked` | `critique`, `waiting` |
+| `plan` | an approach, its stakes, its loop counts, its scope | working session | `planned`, `asked`, `ended` | `critique`, `waiting`, `ended` |
 | `critique` | find what the plan gets wrong before code exists | fresh session | `sound`, `revise` | `build`, `plan` or `build` |
-| `build` | a candidate that does what the plan says | working session | `candidate`, `asked`, `idle`, `failed` | `checks`, `waiting` |
+| `build` | a candidate that does what the plan says | working session | `candidate`, `asked`, `ended`, `idle`, `failed` | `checks`, `waiting`, `ended` |
 | `checks` | test, review, and docs agree on one candidate | three branches at once (see `checks` below) | the join | `merge`, `patch`, or `ended` |
 | `checks.test` | the suite passes at head where it passed at base, and the tests exercise what the diff changes | deterministic suite, then judgement tier | `pass`, `red`, `gaps` | the join |
 | `checks.review` | an independent verdict on the candidate | verifier, fresh session | `pass`, `changes` | the join |
@@ -52,7 +52,7 @@ item, and a ninety-day expiry.
 | `patch` | every finding from the join resolved, or the work stopped | working session, resumed | `candidate`, `asked`, `ended`, `idle`, `failed` | `checks`, `waiting`, `ended` |
 | `merge` | the delivery merged | kernel and broker | `merged`, `feedback`, `rebase` | `merged`, `patch`, `checks`, `ended` |
 | `merged` | the change is on the target branch | nothing | `feedback` | `patch` |
-| `ended` | Valor stopped the work without merging; Tom has a report | nothing | `feedback` | `patch` |
+| `ended` | Valor stopped the work, or finished it with nothing to merge; Tom has a report | nothing | `feedback` | `patch` |
 | `stopped` | nothing more happens | nothing, ever again | | none |
 
 "`plan` or `build`" means the critique count decides (see Loops). The working session is the task's
@@ -288,11 +288,15 @@ starts, corrections included. Effects beyond the workspace are requests to the b
   which decisions Tom might want to change, recorded on `turn.collected` with the head commit. Goes
   to `checks`.
 - `asked`: the turn wrote `.valor/question.md`. Goes to `waiting`.
-- `idle`: the turn finished with neither. The task stays in `build`, and the run goes on to the next
-  turn, resumed with the prompt `Continue.` and what made any signal not count. The run ends only
-  when a turn leaves the state, fails, the task is stopped, or the run loses its lock. An `idle`
-  turn that left `.valor/advice.md` first gets the advisor's answer (`advice.given`), quoted in the
-  next turn.
+- `ended`: the turn wrote `.valor/stop.md` and no other signal, in any working state: recorded as
+  `task.ended` (`kind: decided`, its text the note to Tom). A note opening `Done:` is work finished
+  with nothing to merge (an effect performed), and Tom's report says so; any other is work stopped.
+- `idle`: the turn finished with none of these. The task stays in `build` and the step ends, so the
+  kernel can give the turn slot to any other ready task (oldest latest row first) before the task's
+  next turn, resumed with the prompt `Continue.` and what made any signal not count. There is no
+  bound on idle turns (Tom, 2026-10-03, `idle_turns` removed). An `idle` turn that left
+  `.valor/advice.md` goes on in the same step: it first gets the advisor's answer (`advice.given`),
+  quoted in the next turn.
 - `failed`: the harness reported an error or the turn did not finish. The step writes `step.failed`
   (the state, the check, the reason, the turn) and the run returns. The resident kernel steps the
   task again after a delay that doubles from a minute (`router.retry_due`), the next turn opening
@@ -416,8 +420,7 @@ kept in its mirror), through the bare origin, under the turn's profile (`session
 so the round's merge lands on top of the first; when it cannot, the prompt names the head and why.
 
 **Exit evidence.** Same as `build`: `candidate` goes to `checks`, all three branches again on the
-new candidate; `asked`, `idle`, and `failed` as in `build`. `ended`: the turn wrote
-`.valor/stop.md`, recorded as `task.ended` (`kind: decided`, its text the note to Tom).
+new candidate; `asked`, `ended`, `idle`, and `failed` as in `build`.
 
 **Why.** Tom's decision of 2026-10-01; the demonstration's two send-backs were one resumed turn
 each, $0.89 and $0.85 (rebuild-demonstration.md, Money).

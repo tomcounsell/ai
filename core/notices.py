@@ -210,7 +210,10 @@ def ended_text(task_id: str, f: machine.Fold, head: str | None) -> str:
     kind = p.get("kind") if entry.get("type") == "task.ended" else "rounds"
     parts: list[str | None]
     if kind == "decided":
-        parts = [lead(head, "I stopped this work without merging it."), str(p.get("text") or "")]
+        text = str(p.get("text") or "")
+        done = text.lstrip().lower().startswith("done:")
+        why = "This is done; nothing needed merging." if done else "I stopped this work without merging it."
+        parts = [lead(head, why), text]
     elif kind == "rounds":
         parts = [
             lead(

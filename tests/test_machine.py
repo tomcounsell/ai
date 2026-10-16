@@ -237,6 +237,19 @@ def test_valor_stopping_in_a_patch_ends_the_task_and_task_ended_never_ends_a_mer
     assert merged.state is State.MERGED and "task ended in merged" in merged.fold().ignored[-1]["why"]
 
 
+@pytest.mark.parametrize("judge, built", [("thin", 0), ("precise", 0), ("precise", 1)])
+def test_valor_ends_the_work_from_clarify_plan_and_build(judge, built):
+    led = Ledger(judge=judge)
+    if built:
+        led.plan().critique("sound")
+    where = led.state
+    led.turn("ended")
+    assert led.state is where and not led.fold().ignored
+    led.add("task.ended", {"kind": "decided", "by": "valor", "text": "Done: sent."})
+    assert led.state is State.ENDED
+    assert machine.TRANSITIONS[(where, "ended")] is State.ENDED
+
+
 # -- candidates and staleness -------------------------------------------------------------
 
 

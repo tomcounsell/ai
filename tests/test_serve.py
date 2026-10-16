@@ -267,6 +267,38 @@ def test_one_step_per_event(fresh, op):
     assert run(go()) == (2, 2, 3)
 
 
+def test_an_idle_task_gives_the_slot_to_other_ready_work(fresh, op, monkeypatch):
+    """The incident's shape: one turn slot, a task whose turns go idle, and
+    another task ready meanwhile."""
+    monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, max_turns=1))
+    calls = []
+
+    async def idling(ctx):
+        calls.append(ctx.task_id)
+        async with await db.connect(ctx.dsn) as conn:
+            await ledger.append(conn, ctx.task_id, "test.turn", {})  # the turn's own rows
+        return {"status": "idle"}
+
+    async def go():
+        a = await new_task(fresh)
+        await scripted.run_judge(fresh, a, "precise")
+        kernel = only(serve.Kernel(None, {State.PLAN: idling}, None, fresh), a)
+        for _ in range(2):  # alone, it is stepped again on every wake: no bound
+            await tick(kernel, fresh)
+            await settled(kernel)
+        b = await new_task(fresh)
+        await scripted.run_judge(fresh, b, "precise")
+        only(kernel, a, b)
+        for _ in range(4):
+            await tick(kernel, fresh)
+            await settled(kernel)
+        return a, b
+
+    a, b = run(go())
+    # b arrived after a's last turn; from then on they alternate.
+    assert calls == [a, a, a, b, a, b]
+
+
 def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
     ws, _ = scripted.workspace(tmp_path)
     scripted.steer(ws, sleep_once=30)

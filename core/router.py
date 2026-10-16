@@ -99,7 +99,9 @@ async def run(
         while True:
             out = await step(gateway, task_id, runners, dsn, performers, services, sweep=first)
             first = False
-            if out.get("status") != "moved":
+            # One task, no other work to give the slot to: an idle turn's
+            # step is followed by the next.
+            if out.get("status") not in ("moved", "idle"):
                 return out
     finally:
         await asyncio.to_thread(services.down)

@@ -83,6 +83,12 @@ if cfg.get("request_merge"):
         "payload": {"head_sha": head()}}))
 if act == "ask":
     (v / "question.md").write_text(f"A question from {stage}?")
+elif act == "stop":
+    (v / "stop.md").write_text(cfg.get("note", "The greeting still fails its check; I stopped rather than patch again."))
+    if cfg.get("beside"):
+        (v / cfg["beside"]).write_text("beside the stop")
+elif act == "nothing":
+    pass
 elif stage == "clarify":
     if "# Tom's answer" in prompt or act == "proceed":
         (v / "no_question.md").write_text("Nothing material is open; I will write the greeting.")
@@ -117,23 +123,18 @@ elif stage == "plan":
             commit("docs/plan.md", f"plan {n}\n", "Plan")
         (v / "plan.json").write_text(json.dumps({"path": "docs/plan.md", "stakes": "a toy change",
             **counts, "scope": []}))
-elif stage in ("build", "patch") and act == "stop":
-    (v / "stop.md").write_text("The greeting still fails its check; I stopped rather than patch again.")
 elif stage in ("build", "patch"):
     if act == "dirty":
         pathlib.Path("greeting.txt").write_text(f"uncommitted {n}\n")
-    elif act == "nothing":
-        pass
     elif act != "reasons":
         answer = re.search(r"# Tom's answer\n\n(.*)", prompt)
         commit("greeting.txt", (answer.group(1) if answer else f"greeting {n}") + "\n", stage)
     for command in cfg.get("run", []):
         subprocess.run(command, shell=True, check=False)
-    if cfg.get("push") and act != "nothing":
+    if cfg.get("push"):
         (v / "effects" / "push.json").write_text(json.dumps({"action_type": "push_branch",
             "target": cfg["push"], "payload": {"head_sha": head()}}))
-    if act != "nothing":
-        (v / "done.md").write_text(f"{stage} turn {n}: greeting.txt, checked by reading it.")
+    (v / "done.md").write_text(f"{stage} turn {n}: greeting.txt, checked by reading it.")
 print(json.dumps({"result": "ok", "session_id": resume or "00000000-0000-4000-8000-000000000001", "is_error": False}))
 """
 

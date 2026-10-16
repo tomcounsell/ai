@@ -5,9 +5,10 @@ Serves Mission item 1 (one working context from inspection to delivery) and
 Mission item 6 (Tom's answer lands in the context that asked). `run` runs
 one state's turns until the task leaves that state, or until there is
 something for Tom: a failed turn, a stop. A turn that finishes without its
-stage's signal is followed by the next, prompted `Continue.`; when it
-left only `.valor/advice.md`, the advisor (`fresh.advise`) answers first
-and the next turn opens with that answer, quoted.
+stage's signal ends the run (`idle`); the next step resumes it, prompted
+`Continue.`. When it left only `.valor/advice.md`, the run goes on: the
+advisor (`fresh.advise`) answers first and the next turn opens with that
+answer, quoted. `.valor/stop.md` ends the work from any working state.
 The router (`core/router.py`) decides what runs next.
 
 A turn's prompt is data from the row that moved the task into its state
@@ -57,7 +58,7 @@ Advise = Callable[[Gateway, str, str, Alive, dict[str, Any]], Awaitable[dict[str
 ADVICE_GIVEN = "advice.given"
 ADVICE_BESIDE = "advice.md beside a signal that ends the stage; not asked"
 ADVICE_UNFINISHED = "advice.md from a turn that did not finish; not asked"
-STOP_BESIDE = "stop.md beside question.md or done.md; the other signal counts"
+STOP_BESIDE = "stop.md beside another signal that ends the stage; the other signal counts"
 
 
 async def _always() -> bool:
@@ -74,9 +75,12 @@ async def run(
     advise: Advise | None = None,
 ) -> dict[str, Any]:
     """Run turns in the task's current working state until it leaves it.
-    Returns `status`: `moved` (the fold left the state), `failed`,
-    `stopped`, or `lock lost` (the router's run lock died), with the task's
-    `state` from `tasks.status`. Before each turn, a question for the
+    Returns `status`: `moved` (the fold left the state), `idle` (a turn
+    finished with no signal that ends the stage), `failed`, `stopped`, or
+    `lock lost` (the router's run lock died), with the task's `state` from
+    `tasks.status`. An `idle` turn ends the run, so the kernel can give the
+    turn slot to other ready work before the task's next `Continue.` turn;
+    one that asked the advisor goes on to its answer. Before each turn, a question for the
     advisor that is still pending (`pending_advice`) is put to `advise`
     (`fresh.advise`); its `lock lost` or `stopped` ends the
     run as a turn's does, so the question is asked on the next run. Before
@@ -144,12 +148,15 @@ async def run(
                 performers=performers,
             )
             now = await tasks.status(conn, task_id)
+            asking = advise is not None and pending_advice(await ledger.read(conn, task_id)) is not None
         if now["state"] == State.STOPPED.value:
             return {"status": "stopped", "state": now, "turn": ended}
         if now["state"] != state.value:
             return {"status": "moved", "state": now, "turn": ended}
         if not ok:
             return {"status": "failed", "state": now, "turn": ended}
+        if not asking:
+            return {"status": "idle", "state": now, "turn": ended}
 
 
 def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -322,16 +329,15 @@ def _stage_verdict(
         State.CLARIFY: ("question", "no_question"),
         State.PLAN: ("question", "plan"),
         State.BUILD: ("question", "done"),
-        State.PATCH: ("question", "done", "stop"),
+        State.PATCH: ("question", "done"),
     }[state]
-    for name in ("no_question", "plan", "done", "stop"):
+    for name in ("no_question", "plan", "done"):
         if name not in meant and getattr(found, name) is not None:
             errors.append(f"{name} means nothing in {state}; ignored")
-    if (
-        state is State.PATCH
-        and found.stop is not None
-        and (found.question is not None or found.done is not None)
-    ):
+    # `stop.md` ends the work from any working state, unless another of the
+    # state's signals is beside it.
+    beside = any(getattr(found, name) is not None for name in meant)
+    if found.stop is not None and beside:
         errors.append(STOP_BESIDE)
     if found.plan_error:
         errors.append(found.plan_error)
@@ -349,7 +355,7 @@ def _stage_verdict(
         else:
             extra["plan"] = plan
             return "planned", extra, errors
-    if state is State.PATCH and found.stop is not None and found.done is None:
+    if found.stop is not None and not beside:
         return "ended", extra, errors
     if state in (State.BUILD, State.PATCH) and found.done is not None:
         candidate, why = _candidate(workspace, turn_id)

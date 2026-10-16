@@ -18,3 +18,9 @@ Tom's answers to what you asked before.
 - `.valor/no_question.md`: why no question would materially change the
   result, then the approach you intend in a few lines. The task goes on to
   the plan without Tom.
+
+**When the work is done with nothing to merge.** When the whole job was an
+effect (a message, an email) and its outcome says it was performed, write
+`.valor/stop.md` opening `Done:`, then one line on what was sent. The task
+ends there and Tom gets that note. A turn with no signal is resumed with
+`Continue.`, so end the work this way rather than waiting.

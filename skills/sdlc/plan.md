@@ -25,3 +25,9 @@ your last plan.
 The kernel records it from the committed file. A question only Tom can
 answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
+
+**When the work is done with nothing to merge.** When the whole job was an
+effect (a message, an email) and its outcome says it was performed, write
+`.valor/stop.md` opening `Done:`, then one line on what was sent. The task
+ends there and Tom gets that note. A turn with no signal is resumed with
+`Continue.`, so end the work this way rather than waiting.

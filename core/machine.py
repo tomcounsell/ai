@@ -50,11 +50,11 @@ FRESH = "fresh"
 
 VERDICTS: dict[State | Check, frozenset[str]] = {
     State.JUDGE: frozenset({"precise", "thin"}),
-    State.CLARIFY: frozenset({"asked", "no_material_question", "idle", "failed"}),
+    State.CLARIFY: frozenset({"asked", "no_material_question", "idle", "failed", "ended"}),
     State.WAITING: frozenset({"answered"}),
-    State.PLAN: frozenset({"planned", "asked", "idle", "failed"}),
+    State.PLAN: frozenset({"planned", "asked", "idle", "failed", "ended"}),
     State.CRITIQUE: frozenset({"sound", "revise"}),
-    State.BUILD: frozenset({"candidate", "asked", "idle", "failed"}),
+    State.BUILD: frozenset({"candidate", "asked", "idle", "failed", "ended"}),
     State.PATCH: frozenset({"candidate", "asked", "ended", "idle", "failed"}),
     State.MERGE: frozenset({"released", "feedback", "rebase"}),
     State.MERGED: frozenset({"feedback"}),
@@ -77,7 +77,10 @@ TRANSITIONS: dict[tuple[State, str], State] = {
     (State.BUILD, "asked"): State.WAITING,
     (State.PATCH, "candidate"): State.CHECKS,
     (State.PATCH, "asked"): State.WAITING,
-    (State.PATCH, "ended"): State.ENDED,  # Valor stopped the work
+    (State.CLARIFY, "ended"): State.ENDED,  # Valor stopped the work, or it is done
+    (State.PLAN, "ended"): State.ENDED,
+    (State.BUILD, "ended"): State.ENDED,
+    (State.PATCH, "ended"): State.ENDED,
     (State.MERGE, "released"): State.MERGED,
     (State.MERGE, "feedback"): State.PATCH,
     (State.MERGE, "rebase"): State.PATCH,  # the target moved; spends no round
