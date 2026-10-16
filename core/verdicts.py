@@ -472,17 +472,19 @@ async def ensure_merge(
             return None
         transient = [t for t in tries if merge_failure(t) == "transient"]
         if why == "refused" or (why == "transient" and len(transient) >= MERGE_TRIES):
-            await end(conn, task_id, "merge", _first_line(last.reason), effect_id=last.effect_id)
+            await end(conn, task_id, "merge", _first_line(last.reason), effect_id=last.effect_id, why=why)
             return None
         if why == "credential":
-            await notices.credential(conn, task_id, f.candidate.sha, _first_line(last.reason))
+            await notices.credential(
+                conn, task_id, f.candidate.sha, missing=credentials.GITHUB_KEY in last.reason
+            )
         delay = CREDENTIAL_RETRY_S if why == "credential" else _backoff(len(transient))
         due = (last.at or now) + timedelta(seconds=delay)
         if now < due:
             return broker.Outcome(last.effect_id, "unknown", error=f"tried again at {due.isoformat()}")
     missing = credential_missing(performers)
     if missing is not None:
-        await notices.credential(conn, task_id, f.candidate.sha, missing)
+        await notices.credential(conn, task_id, f.candidate.sha, missing=True)
         return broker.Outcome("", "unknown", error=missing)
     request_id = f"merge:{ledger.digest(action.payload)}:{len(tries)}"
     return await broker.request(conn, performers, task_id, action, request_id=request_id)

@@ -52,7 +52,7 @@ def test_a_notice_goes_to_the_rows_chat_and_is_marked(emu, dsn, tmp_path, c):
         async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
             await bridge.sender.notice(await due(box, nid), box)
         [m] = emu.own(int(project))
-        assert m["text"].endswith(f"[n:{nid}]")
+        assert m["text"] == "waiting on approval"
         assert emu.own(int(operator)) == []
         [row] = await marked(dsn, nid)
         assert row["sent"] == [{"channel": "telegram", "chat_id": project, "message_id": str(m["id"])}]

@@ -27,8 +27,11 @@ each under its own `random_id`, so a message Telegram already holds is
 refused as a duplicate rather than shown twice; the send then settles as
 done. A send whose start record was lost with the file is
 `Unknown`, never `done`: the chat's history cannot tell it from an earlier
-identical message. A notice's text carries its own id, so a notice whose
-record was lost is looked up over the whole chat. When finishing is refused, or a file of the send is gone, the send
+identical message. A notice whose record was lost is looked up over the
+whole chat: every earlier send is claimed by its recorded `sent`, so an
+unclaimed message with the notice's text is taken as it, and two such are
+`Unknown`, logged and left unsent. Notices open with their task's request,
+so identical texts are rare. When finishing is refused, or a file of the send is gone, the send
 settles as done with the messages that are on screen. A notice is finished
 the same way.
 """

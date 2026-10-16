@@ -195,8 +195,9 @@ token, and it is tried again on its own until the token works. Each try is one r
 What reaches Tom is a report of what left: when an `act` effect's outcome is `done`, the same
 transaction requests one `report` notice (`report:<effect_id>`) to the operator channel, saying what
 left. A merge's report names the request, says it is merged into its branch, carries the note to Tom
-the delivering turn wrote above the `---` line of `done.md`, and links the task's status page, where
-the checks and findings are; a reply to it is feedback. No report is written for a push (a step
+the delivering turn wrote above the `---` line of `done.md`; a reply to it is feedback. No notice
+carries an id, commit, path, command or link (`core/notices.py`); the checks and findings are on the
+task's status page. No report is written for a push (a step
 inside the task), for a send that itself reached Tom (a Telegram or Slack send to the operator, an
 email only to Tom's addresses, any local chat send).
 
@@ -488,7 +489,7 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
    the three run again on the new candidate, within the loop counts.
 7. **Merge.** A passing delivery merges itself when the merge predicate
    holds, and the merge's report reaches Tom: what shipped, in the
-   delivering turn's note, and a link to the status page. Work that has
+   delivering turn's note. Work that has
    not passed when the plan's rounds are spent gets one last round, in
    which Valor patches once more or stops; when it stops, or that round
    does not pass either, the task ends and Tom gets a report of what was

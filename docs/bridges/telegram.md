@@ -473,8 +473,10 @@ An implementation conforms to the port when:
   is what `tests/test_live_telegram_dc.py` checks on the test servers. The
   broker never performs one effect twice, so for effects it is defence in
   depth; for notices, which the outbox yields until marked sent, the scan
-  backs it: it matches each message of the notice on its full text, which
-  carries the notice's short id. A notice cut off part way is finished the
+  backs it: it matches each message of the notice on its full text, among
+  messages no recorded send claims; a notice opens with its task's request,
+  so identical texts are rare, and two matches are `Unknown`, left unsent.
+  A notice cut off part way is finished the
   same way a split send is: the messages not on screen are sent.
 
 ## As built

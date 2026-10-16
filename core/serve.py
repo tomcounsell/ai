@@ -731,7 +731,7 @@ class Kernel:
                     m.task_id,
                     kind="rollout",
                     about_key=f"rollout:{m.effect_id}",
-                    text=_rollout_text(m, step, reason, tries),
+                    text=notices.lead(await notices.headline(conn, m.task_id), _rollout_text(step, tries)),
                 )
             if mixed:
                 await notices.request(
@@ -739,10 +739,12 @@ class Kernel:
                     m.task_id,
                     kind="rollout",
                     about_key=f"rollout:{m.effect_id}:mixed",
-                    text=f"The kernel's checkout could not be moved back after task {m.task_id}'s merge {m.sha} "
-                    f"failed at {step}: the running kernel's checkout holds code or dependencies it did not "
-                    "start from (mixed code). The rollout is tried again every "
-                    f"{settings.serve_tick_s:g} seconds.",
+                    text=notices.lead(
+                        await notices.headline(conn, m.task_id),
+                        "it is merged, but putting it live failed partway and I could not undo it, so my "
+                        f"system now runs a mix of old and new code. I try again every {settings.serve_tick_s:g} "
+                        "seconds.",
+                    ),
                 )
 
     async def active(self, conn) -> list[str]:
@@ -977,10 +979,25 @@ def _log(text: str) -> None:
     print(text, file=sys.stderr, flush=True)
 
 
-def _rollout_text(m: rollout.Merge, step: str, reason: str, tries: int) -> str:
+# A rollout step (`rollout.prepare`, `Kernel._restart`), in Tom's words.
+ROLLOUT_STEPS = {
+    "fetch": "fetching the merged code",
+    "restart class": "working out what the change needs",
+    "uncommitted": "uncommitted changes to my own code, which the restart would run",
+    "fast-forward": "moving my running code onto it",
+    "backup": "backing up my database first",
+    "dependencies": "installing its dependencies",
+    "migrate": "updating my database",
+}
+
+
+def _rollout_text(step: str, tries: int) -> str:
+    """The rollout notice's sentence: what failed, in plain words; the step
+    and reason stay on `rollout.failed`."""
     return (
-        f"Task {m.task_id}'s merge {m.sha} has not rolled out to the running kernel: {step} failed "
-        f"{tries} times, last with: {reason}. It is tried again every {settings.serve_tick_s:g} seconds."
+        "it is merged, but I could not put it live on my own system: "
+        f"{ROLLOUT_STEPS.get(step, 'one step of putting it live')} failed {tries} times. "
+        f"I try again every {settings.serve_tick_s:g} seconds."
     )
 
 

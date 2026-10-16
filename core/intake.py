@@ -417,12 +417,20 @@ async def _bind_failed(conn, p: dict[str, Any], exc: Exception) -> str | None:
     try:
         async with conn.transaction():
             as_ = await _bound(conn, p, task_id, "none", error=repr(exc))
-            await _notice(
-                conn, task_id or p["channel"], p, f"Your message ({p['message_id']}) was not acted on: {exc}"
-            )
+            await _notice(conn, task_id or p["channel"], p, await _unread(conn, task_id, p))
     except AlreadyBound:
         return None
     return as_
+
+
+async def _unread(conn, task_id: str | None, p: dict[str, Any]) -> str:
+    """What Tom is told when his message could not be bound: his own words
+    quoted, so he knows which; the error stays on `message.bound`."""
+    said = notices.short(p.get("text"), 60)
+    sentence = (f'your message "{said}"' if said else "your message") + (
+        " was not acted on: something went wrong reading it. Send it again, or reply stop."
+    )
+    return notices.lead(await notices.headline(conn, task_id) if task_id else None, sentence)
 
 
 async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
@@ -540,7 +548,15 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         return as_
     if f.state in (State.MERGED, State.STOPPED):
         as_ = await _bound(conn, p, task_id, "none")
-        await _notice(conn, task_id, p, f"Task {task_id} is {f.state.value}; nothing was done.")
+        await _notice(
+            conn,
+            task_id,
+            p,
+            notices.lead(
+                await notices.headline(conn, task_id),
+                f"this work is already {f.state.value}, so your reply changed nothing.",
+            ),
+        )
         return as_
 
     if replies and exact == "stop":
@@ -569,11 +585,11 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     )
     if _near(text, "stop"):
         said = (
-            "Not a stop; reply `stop`. Your message steers the task."
+            "that was not a stop, so your message steers the work. To stop it, reply stop."
             if replies
-            else f"Stops come by reply {_where()}; your email steers the task."
+            else f"stops come by reply {_where()}; your email steers the work."
         )
-        await _notice(conn, task_id, p, said)
+        await _notice(conn, task_id, p, notices.lead(await notices.headline(conn, task_id), said))
     return as_
 
 

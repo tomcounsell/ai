@@ -234,9 +234,12 @@ class EmailBridge:
             task_id,
             kind="send_in_doubt",
             about_key=f"send-in-doubt:{effect_id}",
-            text=f"The email to {held['target']} (effect {effect_id}) may or may not have gone: it was "
-            "cut off or not confirmed after the server could have taken it, and Sent Mail does not "
-            "show it yet. It stays in flight and Sent Mail is asked again on each wake.",
+            text=notices.lead(
+                await notices.headline(conn, task_id),
+                f"the email to {held['target']} may or may not have gone: the mail server was cut off "
+                "before it confirmed it, and Sent Mail does not show it yet. I keep checking Sent Mail "
+                "and will not send it twice.",
+            ),
         )
 
     async def tick(self) -> None:

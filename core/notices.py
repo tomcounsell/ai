@@ -4,8 +4,9 @@ Tom hears reports of what was done and questions only he can answer
 (Tom's rulings of 2026-10-03 and 2026-10-09). Each kernel-written text
 speaks to Tom as Valor, the way a deputy and general manager writes to
 the CEO: it names the task by the first line of its request (`headline`,
-`lead`), says what was done in outcome terms, and links the task's status page
-(`report_link`) for the checks and findings behind it. Where a turn wrote
+`lead`), says what was done and why in outcome terms, and asks at most one
+plain thing. No task, notice, or effect id, commit, path, command, link, stage
+name, or raw error is in the text; those stay in the ledger. Where a turn wrote
 a note to Tom (the text of `done.md` above its first `---` line, or
 `stop.md`), the note is the message.
 
@@ -15,8 +16,7 @@ and has not requested, to `settings.operator_channel` and
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
-  what did not pass, and why it stopped. It asks for nothing; a reply to
-  it is feedback.
+  and why it stopped, in plain words. A reply to it is feedback.
 
 `credential(conn, task_id, sha, why)` asks Tom for the push credential a
 merge needs (`credential:<sha>`), the one merge failure that reaches him.
@@ -35,9 +35,7 @@ its own. A notice is requested once
 per task and `about_key` (`events_one_notice`): a second request, from
 another kernel or a retry, is skipped in a savepoint. A notice whose text
 Postgres jsonb refuses is written with kernel text in its place, naming
-what it is about and Postgres's reason. Each text carries the
-notice's short id, so a bridge's lookup matches the sent message exactly.
-The bridge sends notices as they come.
+what it is about. The bridge sends notices as they come.
 """
 
 from pathlib import Path
@@ -48,11 +46,6 @@ import psycopg
 from core import ledger, machine
 from core.machine import State
 from core.settings import settings
-
-
-def tag(notice_id: str) -> str:
-    """The short id a rendered notice carries."""
-    return f"[n:{notice_id}]"
 
 
 async def request(
@@ -88,13 +81,13 @@ async def request(
                 "chat_id": chat_id,
                 "kind": kind,
                 "about_key": about_key,
-                "text": f"{text}\n\n{tag(notice_id)}",
+                "text": text,
                 "reply_to": reply_to,
             }
             written, why = await ledger.try_append(conn, task_id, "notice.requested", notice)
             if written is None:
                 await ledger.append(conn, task_id, "notice.requested", {**notice, "text": _unstorable(
-                    task_id, kind, about_key, why, notice_id)})  # fmt: skip
+                    await headline(conn, task_id), kind), "unstorable": why})  # fmt: skip
             if not channel or not chat_id:
                 # No bridge sends a notice with no chat: the ledger says so.
                 await ledger.append(
@@ -132,7 +125,13 @@ async def owe(conn, task_id: str) -> list[str]:
                     task_id,
                     kind="question",
                     about_key=f"question:{f.open_question}",
-                    text=f"Task {task_id} asks:\n\n{asked.get('text', '')}\n\nReply to this message to answer.",
+                    text="\n\n".join(
+                        [
+                            lead(await headline(conn, task_id), "I have a question for you."),
+                            str(asked.get("text", "")),
+                            "Reply to this message to answer.",
+                        ]
+                    ),
                 )
             )
     if f.state is State.ENDED and f.entry is not None:
@@ -142,16 +141,10 @@ async def owe(conn, task_id: str) -> list[str]:
                 task_id,
                 kind="ended",
                 about_key=f"ended:{f.entry.get('id')}",
-                text=ended_text(task_id, f, await headline(conn, task_id)),
+                text=ended_text(f, await headline(conn, task_id)),
             )
         )
     return [m for m in made if m]
-
-
-def report_link(task_id: str) -> str:
-    """The task's page on the status page (`ui/`), where its checks,
-    findings, and ledger are."""
-    return f"http://127.0.0.1:{settings.ui_port}/task/{task_id}"
 
 
 def short(instruction: str | None, limit: int = 80) -> str | None:
@@ -167,7 +160,9 @@ def short(instruction: str | None, limit: int = 80) -> str | None:
 
 
 async def headline(conn, task_id: str) -> str | None:
-    """The task's request, shortened; None for a task with no Brief."""
+    """The task's request, shortened; None for a task with no Brief (or an
+    id that names no task, such as the channel a failed binding falls back
+    to)."""
     from core import tasks
 
     try:
@@ -195,15 +190,22 @@ def note(summary: str | None) -> str | None:
     return "\n".join(lines[:at]).strip() or None
 
 
-def _reason(text: Any, limit: int = 300) -> str:
-    line = next((s.strip() for s in str(text or "").splitlines() if s.strip()), "")
-    return line if len(line) <= limit else line[: limit - 3] + "..."
+# A check or state, as a notice names the step that kept failing.
+STEPS = {"test": "its tests", "review": "its review", "docs": "its documentation check"}
+# Why a merge did not land (`verdicts.merge_failure`), in Tom's words.
+MERGE_WHY = {
+    "moved": "the branch it merges into kept moving, and I could not bring the work up to date with it",
+    "refused": "the merge was refused, and trying again would get the same answer",
+    "transient": "the merge kept failing on errors from GitHub or the network",
+}
+AGAIN = "Reply to this message if you want me to pick it up again or change course."
 
 
-def ended_text(task_id: str, f: machine.Fold, head: str | None) -> str:
+def ended_text(f: machine.Fold, head: str | None) -> str:
     """The report owed when a task ends without merging: why it stopped,
-    in Valor's words when the working session decided it, and what was
-    built, with the status page for the rest. It asks for nothing."""
+    in Valor's words when the working session decided it, in plain words
+    for the kernel's own reasons (the raw error stays on `task.ended`), and
+    what was built. A reply to it is feedback."""
     entry = f.entry or {}
     p = entry.get("payload") or {}
     built = note((f.delivery or {}).get("summary"))
@@ -224,48 +226,51 @@ def ended_text(task_id: str, f: machine.Fold, head: str | None) -> str:
             built and f"What was built: {built}",
         ]
     elif kind == "step":
-        what = p.get("check") or p.get("state") or "a step"
+        what = STEPS.get(p.get("check") or "", "one of its steps")
         parts = [
-            lead(
-                head,
-                f"I stopped this work: its {what} step failed {p.get('tries')} times in a row. "
-                f"The last failure: {_reason(p.get('reason'))}",
-            ),
+            lead(head, f"I stopped this work: {what} failed {p.get('tries') or 'several'} times in a row."),
             built and f"What was built before it: {built}",
         ]
     elif kind == "provision":
         parts = [
             lead(
                 head,
-                f"I stopped this work before it began: I could not set up its workspace after "
-                f"{p.get('tries')} tries. The last failure: {_reason(p.get('reason'))}",
+                "I stopped this work before it began: I could not set up a copy of the project for it "
+                f"to work in, after {p.get('tries') or 'several'} tries.",
             ),
         ]
     elif kind == "merge":
+        why = MERGE_WHY.get(p.get("why") or "")
         parts = [
             lead(
                 head,
-                f"I stopped this work: it passed its checks, but I could not merge it: "
-                f"{_reason(p.get('reason'))}. The work stays on its branch.",
+                "I stopped this work: it passed its checks, but I could not merge it"
+                + (f": {why}." if why else ".")
+                + " The work stays on its branch.",
             ),
             built and f"What was built: {built}",
         ]
     else:
-        parts = [lead(head, f"I stopped this work: {_reason(p.get('reason'))}")]
-    parts.append(f"The details are on its status page: {report_link(task_id)}")
+        parts = [lead(head, "I stopped this work without merging it."), built and f"What was built: {built}"]
+    parts.append(AGAIN)
     return "\n\n".join(x for x in parts if x)
 
 
-async def credential(conn, task_id: str, sha: str, why: str) -> str | None:
+async def credential(conn, task_id: str, sha: str, *, missing: bool) -> str | None:
     """Ask Tom for the push credential a merge needs, once per candidate:
-    the one merge failure only he can resolve. The merge is tried again on
-    its own once the credential is in place."""
-    head = await headline(conn, task_id)
+    the one merge failure only he can resolve. `missing` tells a token not
+    set up from one GitHub refused, since the fix differs. The merge is
+    tried again on its own once the credential is in place."""
+    why = (
+        "no GitHub push token is set up on this machine."
+        if missing
+        else "GitHub refused the push token on this machine; it may have expired or lost access to "
+        "this repository."
+    )
     text = "\n\n".join(
         [
-            lead(head, "it is ready to merge, and I need a working GitHub push token to merge it."),
-            _reason(why),
-            "Once the token is in place I merge it on my own.",
+            lead(await headline(conn, task_id), f"it is ready to merge, but I cannot push it: {why}"),
+            "Once a working token is in place I merge it on my own.",
         ]
     )
     return await request(conn, task_id, kind="credential", about_key=f"credential:{sha}", text=text)
@@ -314,26 +319,56 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
             for x in (
                 lead(await headline(conn, task_id), f"it is done and merged into {branch}."),
                 built,
-                f"The details are on its status page: {report_link(task_id)}",
             )
             if x
         )
     else:
         body = payload.get("text") or payload.get("subject") or payload.get("body") or ""
-        to = ", ".join([*(payload.get("to") or []), *(payload.get("cc") or [])]) or effect.get("target")
-        if kind == "email.send" and payload.get("reply_to"):
-            to = f"all of {payload['reply_to']}"
         files = [Path(f.get("path", "")).name for f in payload.get("files") or []]
-        text = f"Task {task_id} sent {kind} to {to}:\n\n{body}" + (
-            f"\n\nFiles: {', '.join(files)}" if files else ""
+        text = "\n\n".join(
+            x
+            for x in (
+                lead(await headline(conn, task_id), f"I sent {_sent_to(effect)}:"),
+                body,
+                files and f"Files: {', '.join(files)}",
+            )
+            if x
         )
     return await request(conn, task_id, kind="report", about_key=f"report:{effect['effect_id']}", text=text)
 
 
-def _unstorable(task_id: str, kind: str, about_key: str, why: str, notice_id: str) -> str:
+def _sent_to(effect: dict[str, Any]) -> str:
+    """What a send was and who it went to, as Tom knows them: email
+    addresses, else the project whose chat it is (`Spec.chats`), never a
+    chat id."""
+    kind, target, payload = (
+        effect.get("action_type"),
+        str(effect.get("target") or ""),
+        effect.get("payload") or {},
+    )
+    if kind == "email.send":
+        if payload.get("reply_to"):
+            return "a reply to everyone on an email thread"
+        return "an email to " + ", ".join([*(payload.get("to") or []), *(payload.get("cc") or [])])
+    if kind not in ("telegram.send_message", "slack.send_message"):
+        return "a message"
+    channel = kind.split(".")[0]
+    place = "Telegram" if channel == "telegram" else "Slack"
+    from core import workspace
+
+    for spec in workspace.Spec.all():
+        if f"{channel}:{target}".casefold() in {c.casefold() for c in spec.chats}:
+            return f"a message to the {spec.name} chat on {place}"
+    return f"a message to a {place} chat" if channel == "telegram" else "a message to a Slack channel"
+
+
+def _unstorable(head: str | None, kind: str) -> str:
     """A notice's text when Postgres jsonb refuses the one rendered: kernel
-    words only, naming what it is about, so Tom still hears of it."""
-    return (
-        f"Task {task_id} has a notice ({kind}, {about_key}) whose text the ledger's JSON (Postgres jsonb) "
-        f"cannot store: {why}. The task's ledger holds what it is about.\n\n{tag(notice_id)}"
+    words only, so Tom still hears of it; the row's `unstorable` holds
+    Postgres's reason."""
+    what = kind.replace("_", " ")
+    return lead(
+        head,
+        f"I had a {what} message for you about this work that I could not store, so this note "
+        "stands in for it. The record of the work holds what it is about.",
     )

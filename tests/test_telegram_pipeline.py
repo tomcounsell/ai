@@ -83,6 +83,11 @@ def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn
 
             near = await tom(emu, dsn, op, "approve", reply_to=int(target))
             assert near["as"] == "steer" and near["task_id"] == task
+            stopish = await tom(emu, dsn, op, "stop it now", reply_to=int(target))
+            (said,) = await replies_to(dsn, stopish["received_id"])
+            assert stopish["as"] == "steer" and said["text"] == (
+                'On "test": that was not a stop, so your message steers the work. To stop it, reply stop.'
+            )
 
             started = await tom(emu, dsn, op, "write a haiku")
             assert started["as"] == "start" and started["task_id"] not in (task, None)
@@ -114,6 +119,11 @@ def test_stop_by_reply_and_a_released_send_of_that_task_is_refused_once(emu, dsn
                 assert effect not in [getattr(i, "effect_id", None) for i in await box.due()]
             assert len(await of_type(dsn, "effect.refused", effect_id=effect)) == 1
             assert "never sent" not in [m["text"] for m in emu.own(int(op))]
+            after = await tom(emu, dsn, op, "go on", reply_to=int(sent["sent"][0]["message_id"]))
+            (said,) = await replies_to(dsn, after["received_id"])
+            assert after["as"] == "none" and said["text"] == (
+                'On "test": this work is already stopped, so your reply changed nothing.'
+            )
 
     run(go())
 
@@ -127,3 +137,78 @@ async def _task_of(dsn, effect_id) -> str:
             )
         ).fetchone()
     return task
+
+
+HEAD = "Ship the quarterly invoices"
+# What a notice to Tom never carries: ids, commits, chat ids, links, commands.
+LEAKS = ("[n:", "127.0.0.1", "http", "python -m", "/", "deadbeef", "-100777", "E1", "keys")
+
+
+def _plain(text: str, *also: str) -> None:
+    assert text.startswith(f'On "{HEAD}": '), text
+    assert not [s for s in (*LEAKS, *also) if s in text], text
+
+
+def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn, tmp_path):
+    from types import SimpleNamespace
+
+    from bridges.email import EmailBridge
+    from core import ledger, serve
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(
+                conn, tasks.Brief(instruction=f"{HEAD}\nand the rest", max_effect_class="act")
+            )
+            head = await notices.headline(conn, task)
+            texts = []
+            for p in (
+                {"kind": "decided", "text": "Not worth it."},
+                {"kind": "step", "check": "test", "tries": 4, "reason": "/tmp/x: boom"},
+                {"kind": "step", "state": "build", "tries": 4, "reason": "boom"},
+                {"kind": "provision", "tries": 3, "reason": "git clone /x failed"},
+                *({"kind": "merge", "why": w, "reason": "! [rejected] deadbeef"} for w in notices.MERGE_WHY),
+                {"kind": "merge", "reason": "deadbeef"},
+                {"kind": "other", "reason": "deadbeef"},
+            ):
+                f = SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None)
+                texts.append(notices.ended_text(f, head))
+            assert texts[1] != texts[2] and len(set(texts[4:7])) == 3
+            assert texts[0].endswith(notices.AGAIN)
+            for missing in (True, False):
+                await notices.credential(conn, task, f"deadbeef{missing}", missing=missing)
+            sends = [
+                (
+                    "email.send",
+                    "a@b.com",
+                    {"to": ["a@b.com"], "files": [{"path": "/w/q.pdf"}]},
+                    "an email to a@b.com",
+                ),
+                ("email.send", "x", {"reply_to": "<m@x>"}, "everyone on an email thread"),
+                ("telegram.send_message", "-100777", {"text": "hi"}, "the tg chat on Telegram"),
+                ("telegram.send_message", "555", {"text": "hi"}, "a Telegram chat"),
+                ("slack.send_message", "T1/C1", {"text": "hi"}, "a Slack channel"),
+            ]
+            for n, (kind, target, payload, _) in enumerate(sends):
+                effect = {"effect_class": "act", "action_type": kind, "target": target, "payload": payload}
+                await notices.report(conn, task, {**effect, "effect_id": f"E1{n}"}, {})
+            await ledger.append(conn, task, "effect.held", {"effect_id": "E1x", "target": "a@b.com"})
+            await EmailBridge.in_doubt(object(), conn, "E1x")
+            await notices.request(conn, task, kind="send_in_doubt", about_key="bad", text="\x00")
+            requested = [r["text"] for r in await of_type(dsn, "notice.requested") if r["task_id"] == task]
+            texts += requested + [
+                notices.lead(head, serve._rollout_text(s, 3)) for s in (*serve.ROLLOUT_STEPS, "?")
+            ]
+            for text in texts:
+                _plain(text, task)
+            assert requested[0] != requested[1]
+            for (*_, said), text in zip(sends, requested[2:], strict=False):
+                assert said in text
+            assert "q.pdf" in requested[2] and "I could not store" in requested[-1]
+            # No Brief (a failed binding names the channel): no empty quote.
+            assert await notices.headline(conn, "telegram") is None
+            unread = await intake._unread(conn, None, {"text": "do the thing"})
+            assert unread.startswith('Your message "do the thing" was not acted on')
+
+    with this_machine(tmp_path, ["9001", "-100777"]):
+        run(go())
