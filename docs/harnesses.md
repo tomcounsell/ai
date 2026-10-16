@@ -28,6 +28,7 @@ The port is one value, `TurnCommand`, built fresh for each turn:
 | `harness` | the harness's name, recorded in `turn.started` |
 | `harness_version` | the installed release, read from its files and recorded in `turn.started` |
 | `stdin` | the prompt, for a harness that takes it on standard input; none otherwise |
+| `tmpdir` | the turn's `TMPDIR`, when its harness settings name one: the kernel empties it before the turn starts and removes it once the turn ends, however it ended (`core/runs.py`) |
 | `parse` | reads the harness's stdout into the fields the ledger keeps |
 
 A wrapper supplies a builder. The kernel calls it with three values only it
@@ -72,6 +73,12 @@ code, the parsed result, the paths of the turn's whole stdout and stderr
 (`<work dir>/<task>/turns/<turn>.stdout` and `.stderr`, which no turn can
 write), and the metered total for the turn, the numeric sum of the charges
 on its calls. A failed turn's status line names its stderr file.
+
+The turn's `TMPDIR` (`TurnCommand.tmpdir`) is emptied before the process
+starts and removed once the turn slot is released, whatever the outcome. A
+later turn of the session resumes from its harness's config directory, never
+from `TMPDIR`, so nothing in it is kept. A failed removal leaves the turn's
+result as it is; the next turn's start clears what is left.
 
 At most `settings.max_turns` harness turns run at once on the machine (default 2), each holding one
 turn slot. The target is a 16 GB MacBook Air, where Postgres, the bridges, and two `claude -p`
@@ -125,7 +132,9 @@ The wrapper then sets:
   item 1: tests that ran are tests that finished.
 - `GIT_TERMINAL_PROMPT=0`.
 - `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
-  `tmpdir`; from its `claude_config_dir`, `CLAUDE_CONFIG_DIR` (its own Claude
+  `tmpdir` (the workspace's `tmp/` for the working session, a check's
+  `checks/<name>/tmp/` for a fresh one; emptied at each turn's start and
+  removed at its end, so nothing in it outlives the turn); from its `claude_config_dir`, `CLAUDE_CONFIG_DIR` (its own Claude
   Code state, no login) and a placeholder `CLAUDE_CODE_OAUTH_TOKEN`, which wins over a Keychain
   login (checked 2026-10-15 on Claude Code 2.1.300: every call reached a logging base URL carrying
   the placeholder).
