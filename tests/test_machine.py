@@ -61,18 +61,11 @@ class Ledger:
     def plan(self, critique_rounds: int | None = None, review_rounds: int | None = None, **extra) -> Ledger:
         self.turn("planned")
         self.plan_digest = f"plan{self.turns}"
-        return self.add(
-            "plan.written",
-            {
-                "turn_id": f"t{self.turns}",
-                "path": "p.md",
-                "commit": "c",
-                "sha256": self.plan_digest,
-                "critique_rounds": self.critique_rounds if critique_rounds is None else critique_rounds,
-                "review_rounds": self.review_rounds if review_rounds is None else review_rounds,
-                **extra,
-            },
-        )
+        return self.add("plan.written", {
+            "turn_id": f"t{self.turns}", "path": "p.md", "commit": "c", "sha256": self.plan_digest,
+            "critique_rounds": self.critique_rounds if critique_rounds is None else critique_rounds,
+            "review_rounds": self.review_rounds if review_rounds is None else review_rounds, **extra,
+        })  # fmt: skip
 
     def critique(self, verdict: str, digest: str | None = None, **raised) -> Ledger:
         return self.add(
@@ -82,11 +75,14 @@ class Ledger:
         )  # fmt: skip
 
     def build(self, sha: str | None = None) -> Ledger:
-        self.turn(
-            "candidate", candidate={"sha": sha or f"sha{self.turns + 1}", "turn_id": f"t{self.turns + 1}"}
-        )
+        nxt = self.turns + 1
+        self.turn("candidate", candidate={"sha": sha or f"sha{nxt}", "turn_id": f"t{nxt}"})
         self.candidate = self.rows[-1]["payload"]["candidate"]
         return self
+
+    def held(self, effect: str) -> Ledger:
+        payload = {"candidate": self.candidate}
+        return self.add("effect.held", {"effect_id": effect, "action_type": "merge", "payload": payload})
 
     def check(self, check: str, verdict: str, candidate: dict | None = None, **extra) -> Ledger:
         payload = {"candidate": candidate or self.candidate, "verdict": verdict,
@@ -113,9 +109,7 @@ def test_the_happy_path_from_judge_to_merged():
     led.checks("pass", "pass", "no_change")
     f = led.fold()
     assert f.state is State.MERGE and f.join.row == 1 and f.join.outcome == "passed"
-    led.add(
-        "effect.held", {"effect_id": "e1", "action_type": "merge", "payload": {"candidate": led.candidate}}
-    )
+    led.held("e1")
     led.add("effect.intent", {"effect_id": "e1"})
     assert led.fold().merge_effect["state"] == "in_flight"
     led.add("effect.outcome", {"effect_id": "e1", "kind": "done"})
@@ -298,9 +292,7 @@ def _reach(state: State) -> Ledger:
         return led.checks("pass", "changes", "no_change")
     led.checks("pass", "pass", "no_change")
     if state is State.MERGED:
-        led.add(
-            "effect.held", {"effect_id": "e", "action_type": "merge", "payload": {"candidate": led.candidate}}
-        )
+        led.held("e")
         led.add("effect.outcome", {"effect_id": "e", "kind": "done"})
     if state is State.ENDED:
         led.add("task.ended", {"kind": "merge", "by": "kernel", "reason": "x"})
@@ -356,35 +348,19 @@ TYPES = [
     "task.ended", "rebase.requested", "verdicts.carried", "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
 ]  # fmt: skip
 MISSING = object()  # a row with no payload key at all
-RAISED = st.sampled_from(
-    [
-        {},
-        None,
-        "x",
-        {"critique_rounds": 2},
-        {"review_rounds": "x"},
-        {"critique_rounds": 2, "review_rounds": "x"},
-        {"critique_rounds": 1, "review_rounds": 3},
-        {"review_rounds": True},
-    ]
-)
+RAISED = st.sampled_from([
+    {}, None, "x", {"critique_rounds": 2}, {"review_rounds": "x"}, {"critique_rounds": 2, "review_rounds": "x"},
+    {"critique_rounds": 1, "review_rounds": 3}, {"review_rounds": True},
+])  # fmt: skip
 payloads = payloads.flatmap(lambda p: st.builds(lambda r: {**p, "raised": r} if "raised" in p else p, RAISED))
 rows_strategy = st.lists(
     st.tuples(st.sampled_from(TYPES), st.one_of(payloads, st.sampled_from([None, "text", 3, MISSING]))),
     max_size=40,
 )
-STARTS = st.sampled_from(
-    [
-        {"sdlc": 1, "instruction": "x"},
-        {"instruction": "x"},
-        None,
-        MISSING,
-        "text",
-        {"sdlc": "1"},
-        {"calibration": "intake.underspecified"},
-        {"calibration": "intake.underspecified", "sdlc": 1},
-    ]
-)
+STARTS = st.sampled_from([
+    {"sdlc": 1, "instruction": "x"}, {"instruction": "x"}, None, MISSING, "text", {"sdlc": "1"},
+    {"calibration": "intake.underspecified"}, {"calibration": "intake.underspecified", "sdlc": 1},
+])  # fmt: skip
 
 
 def _row(i: int, kind: str, payload) -> dict:
@@ -436,9 +412,7 @@ def test_every_prefix_folds_to_exactly_one_state(start, generated):
 
 def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate_is_ignored():
     led = Ledger().to_checks().checks("pass", "pass", "no_change")
-    led.add(
-        "effect.held", {"effect_id": "e1", "action_type": "merge", "payload": {"candidate": led.candidate}}
-    )
+    led.held("e1")
     led.add("effect.intent", {"effect_id": "e1"})
     led.add("effect.outcome", {"effect_id": "e1", "kind": "failed"})
     f = led.fold()

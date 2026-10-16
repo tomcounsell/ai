@@ -12,7 +12,7 @@ The suite proves the kernel is solid and that Telegram carries messages both way
 6. Telegram in: an operator message reaches the kernel once and starts a task; a reply to Valor's message binds to that task.
 7. Telegram out: a send leaves through the outbox exactly once, across a bridge crash and restart.
 8. End to end: a Telegram message starts a task, a scripted turn builds, check and review pass, the kernel merges, Tom's chat gets the report.
-9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed.
+9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed, and the start that ends the rollout restarts each bridge whose code the merge reaches.
 10. Metering: a turn's model call through the gateway writes its opened and charged rows with the turn's id.
 
 ## Running

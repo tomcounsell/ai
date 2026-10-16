@@ -146,3 +146,11 @@ async def of_type(dsn: str, type_: str, **match: str) -> list[dict[str, Any]]:
             await conn.execute("SELECT task_id, payload FROM events WHERE type = %s ORDER BY id", (type_,))
         ).fetchall()
     return [{"task_id": t, **p} for t, p in found if all(str(p.get(k)) == v for k, v in match.items())]
+
+
+def typed(written, type_, **match) -> list[dict]:
+    return [
+        r["payload"]
+        for r in written
+        if r["type"] == type_ and all(r["payload"].get(k) == v for k, v in match.items())
+    ]

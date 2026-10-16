@@ -20,8 +20,7 @@ from tests.test_machine import Ledger
 pytestmark = pytest.mark.spend(usd=0)
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 async def new_task(dsn, **kw) -> str:

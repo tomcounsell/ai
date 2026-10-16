@@ -30,8 +30,7 @@ def c(emu, tmp_path):
         yield ns
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 def test_text_arrives_verbatim_and_tom_is_a_number(emu, dsn, tmp_path, c):

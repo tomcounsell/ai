@@ -10,17 +10,7 @@ import json
 
 import pytest
 
-from core import (
-    broker,
-    db,
-    judgement,
-    judgement_sites,
-    ledger,
-    machine,
-    router,
-    session,
-    tasks,
-)
+from core import broker, db, judgement, judgement_sites, ledger, machine, router, session, tasks
 from core.gateway import Gateway
 from core.machine import State
 from tests import judgement_upstream, scripted
@@ -32,8 +22,7 @@ from tools.open_weight import OpenWeight
 pytestmark = pytest.mark.spend(usd=0)
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 async def drive(dsn, task, runners=None) -> dict:

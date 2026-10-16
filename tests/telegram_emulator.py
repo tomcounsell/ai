@@ -35,15 +35,7 @@ from datetime import UTC, datetime
 import aiohttp
 from aiohttp import web
 
-from bridges.telegram.wire import (
-    DuplicateRandomId,
-    FloodWait,
-    InDoubt,
-    Media,
-    Msg,
-    NotConnected,
-    Refused,
-)
+from bridges.telegram.wire import DuplicateRandomId, FloodWait, InDoubt, Media, Msg, NotConnected, Refused
 from tests.ports import listen
 
 ME = 1000
@@ -123,15 +115,8 @@ def make_app() -> web.Application:
 
     async def control(request):
         b = await body(request)
-        for k in (
-            "dedup",
-            "flood_send",
-            "send_after",
-            "lose_send_next",
-            "drop_reply_next",
-            "pause_next",
-            "down",
-        ):
+        knobs = ("dedup", "flood_send", "send_after", "lose_send_next", "drop_reply_next", "pause_next")
+        for k in (*knobs, "down"):
             if k in b:
                 setattr(s, k, b[k])
         for chat in b.get("chats", []):
@@ -255,19 +240,8 @@ def make_app() -> web.Application:
         }
         return ok({"chats": out, "reads": {str(k): v for k, v in s.reads.items()}})
 
-    for name, fn in [
-        ("ping", ping),
-        ("control", control),
-        ("inject", inject),
-        ("history", history),
-        ("own", own),
-        ("get", get),
-        ("send", send),
-        ("download", download),
-        ("read", read),
-        ("state", state),
-    ]:
-        app.router.add_post(f"/{name}", fn)
+    for fn in (ping, control, inject, history, own, get, send, download, read, state):
+        app.router.add_post(f"/{fn.__name__}", fn)
     app.router.add_get("/updates", updates)
     return app
 
@@ -321,11 +295,7 @@ class EmulatorWire:
                 if r.status == 503:
                     raise InDoubt("service unavailable") if send else NotConnected("service unavailable")
                 out = await r.json()
-        except (
-            aiohttp.ServerDisconnectedError,
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-        ) as e:
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:  # a disconnect is one
             if send:
                 raise InDoubt(type(e).__name__) from None
             raise NotConnected(type(e).__name__) from None
@@ -402,25 +372,15 @@ class EmulatorWire:
         return [to_msg(m) for m in await self._post("get", {"chat": chat_id, "ids": ids})]
 
     async def send_text(self, chat_id, text, *, random_id, reply_to, topic_id) -> int:
-        body = {
-            "chat": chat_id,
-            "text": text,
-            "random_id": random_id,
-            "reply_to": reply_to,
-            "topic_id": topic_id,
-        }
-        return (await self._post("send", body, send=True))["id"]
+        body = {"chat": chat_id, "text": text}
+        return await self._send(body, random_id=random_id, reply_to=reply_to, topic_id=topic_id)
 
     async def send_file(self, chat_id, data, name, *, random_id, reply_to, topic_id) -> int:
-        body = {
-            "chat": chat_id,
-            "data_b64": base64.b64encode(data).decode(),
-            "name": name,
-            "random_id": random_id,
-            "reply_to": reply_to,
-            "topic_id": topic_id,
-        }
-        return (await self._post("send", body, send=True))["id"]
+        body = {"chat": chat_id, "data_b64": base64.b64encode(data).decode(), "name": name}
+        return await self._send(body, random_id=random_id, reply_to=reply_to, topic_id=topic_id)
+
+    async def _send(self, body: dict, **ids) -> int:
+        return (await self._post("send", {**body, **ids}, send=True))["id"]
 
     async def download(self, msg: Msg, progress=None) -> bytes:
         out = await self._post("download", {"chat": msg.chat_id, "id": msg.id})

@@ -56,8 +56,7 @@ def _wait_for(path: Path) -> int:
     raise AssertionError(f"{path} never written")
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 def _turn(dsn, build) -> tuple[dict, list[dict]]:

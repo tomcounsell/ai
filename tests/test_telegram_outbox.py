@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from tests.bridges import of_type, outbox
-from tests.telegram_emulator import Emulator
 from tests.telegram_port import (
     Only,
     chat,
@@ -24,13 +23,6 @@ pytestmark = pytest.mark.spend(usd=0)
 
 
 @pytest.fixture
-def emu():
-    e = Emulator().start()
-    yield e
-    e.stop()
-
-
-@pytest.fixture
 def c(emu, tmp_path):
     operator, project = chat(), chat()
     emu.control(chats=[emu_chat(operator), emu_chat(project)])
@@ -38,8 +30,7 @@ def c(emu, tmp_path):
         yield operator, project
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 async def marked(dsn, notice_id):

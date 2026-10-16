@@ -15,6 +15,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import psycopg
 import pytest
@@ -22,21 +23,14 @@ import pytest
 from core import db, git, ledger, rollout, serve
 from core.settings import settings
 from tests import scripted
-from tests.bridges import new_task, rows
+from tests.bridges import FakeBridge, new_task, rows, typed
 from tests.conftest import TEST_DB
 from tests.scripted import commit
 
 pytestmark = pytest.mark.spend(usd=0)
 
 
-def run(coro):
-    return asyncio.run(coro)
-
-
-@pytest.fixture
-def fresh() -> str:
-    """A database of this test's own."""
-    return db.migrate(f"{TEST_DB}_rollout", fresh=True)
+run = asyncio.run
 
 
 class Repo:
@@ -153,14 +147,6 @@ async def tick(k: serve.Kernel, dsn: str, *, timer: bool = False) -> str | None:
     return None
 
 
-def typed(written, type_, **match) -> list[dict]:
-    return [
-        r["payload"]
-        for r in written
-        if r["type"] == type_ and all(r["payload"].get(k) == v for k, v in match.items())
-    ]
-
-
 def dbname(dsn: str) -> str:
     return psycopg.conninfo.conninfo_to_dict(dsn)["dbname"]
 
@@ -263,21 +249,15 @@ def test_python_m_core_serve_exits_with_status_1_on_a_restart(monkeypatch):
 # inside a function and its own wire relatively; core.intake imports
 # core.channels; nothing imports core/serve.py.
 LAYOUT = {
-    "bridges/__init__.py": "",
-    "bridges/telegram/__init__.py": "",
+    "bridges/__init__.py": "", "bridges/telegram/__init__.py": "",
     "bridges/telegram/bridge.py": "from . import wire\n\ndef go():\n    from core import intake\n",
-    "bridges/telegram/wire.py": "import json\n",
+    "bridges/telegram/wire.py": "import json\n", "bridges/slack/sub/x.py": "",
     "bridges/slack/__init__.py": "from bridges.slack.sub import x\n",
     "bridges/slack/sub/__init__.py": "from core.bridge import Outbox\n",
-    "bridges/slack/sub/x.py": "",
-    "bridges/local/chat.js": "",
-    "bridges/local/__init__.py": "import core.bridge\n",
-    "core/__init__.py": "",
-    "core/intake.py": "from core.channels import C\n",
-    "core/channels.py": "C = 1\n",
-    "core/bridge.py": "",
+    "bridges/local/chat.js": "", "bridges/local/__init__.py": "import core.bridge\n", "core/__init__.py": "",
+    "core/intake.py": "from core.channels import C\n", "core/channels.py": "C = 1\n", "core/bridge.py": "",
     "core/serve.py": "from core import intake\n",
-}
+}  # fmt: skip
 
 
 def layout(tmp_path: Path) -> tuple[Path, str]:
@@ -288,96 +268,75 @@ def layout(tmp_path: Path) -> tuple[Path, str]:
     return co, sha
 
 
-def test_a_bridges_closure_follows_every_import_it_can_run(tmp_path):
+def test_a_bridges_closure_and_what_a_diff_reaches(tmp_path):
     co, _ = layout(tmp_path)
-    assert rollout.closure(co, "telegram") == {
+    files = {n: rollout.closure(co, n) for n in ("telegram", "slack", "local")}
+    assert files["telegram"] == {
         "bridges/__init__.py", "bridges/telegram/__init__.py", "bridges/telegram/bridge.py",
         "bridges/telegram/wire.py", "core/__init__.py", "core/intake.py", "core/channels.py",
     }  # fmt: skip
-    slack = rollout.closure(co, "slack")
-    assert {"bridges/slack/sub/__init__.py", "core/bridge.py", "core/__init__.py"} <= slack
-    assert "core/intake.py" not in slack and "core/serve.py" not in slack
+    assert {"bridges/slack/sub/__init__.py", "core/bridge.py", "core/__init__.py"} <= files["slack"]
+    assert not {"core/intake.py", "core/serve.py"} & files["slack"]
     # This checkout: the shared code is in every bridge's, the kernel's own in none.
-    root = Path(__file__).resolve().parent.parent
     for name in rollout.BRIDGES:
-        files = rollout.closure(root, name)
-        assert {"core/bridge.py", "core/intake.py", "core/channels.py"} <= files, name
-        assert not {"core/serve.py", "core/rollout.py", "core/router.py"} & files, name
-
-
-def test_what_a_diff_reaches(tmp_path):
-    co, _ = layout(tmp_path)
-    files = {n: rollout.closure(co, n) for n in ("telegram", "slack", "local")}
+        mine = rollout.closure(Path(__file__).resolve().parent.parent, name)
+        assert {"core/bridge.py", "core/intake.py", "core/channels.py"} <= mine, name
+        assert not {"core/serve.py", "core/rollout.py", "core/router.py"} & mine, name
     assert rollout.reaches(["core/channels.py"], files["telegram"], "telegram")
     assert not rollout.reaches(["core/channels.py"], files["slack"], "slack")
     assert not rollout.reaches(["bridges/slack/sub/x.py"], files["telegram"], "telegram")
     assert rollout.reaches(["bridges/local/chat.js"], files["local"], "local")
+    quiet = ["docs/a.md", "tests/t.py", "persona/p.md", "skills/s.md", "README.md"]
     for name, f in files.items():
         assert rollout.reaches(["uv.lock"], f, name) and rollout.reaches(["pyproject.toml"], f, name)
-        quiet = ["docs/a.md", "tests/t.py", "persona/p.md", "skills/s.md", "README.md"]
         assert not rollout.reaches(quiet, f, name)
 
 
 def test_which_live_bridges_are_stale(tmp_path):
     co, base = layout(tmp_path)
     shared = commit(co, "core/channels.py", "C = 2\n", "shared")
-    quiet = commit(co, "core/serve.py", "x = 1\n", "kernel only")
+    running = commit(co, "core/serve.py", "x = 1\n", "kernel only")
     ahead = commit(co, "bridges/telegram/wire.py", "import os\n", "telegram ahead")
-    running = quiet
-    # Current; behind with a diff that misses them.
     assert rollout.stale(co, running, [("telegram", running), ("slack", base), ("local", base)]) == set()
-    assert rollout.stale(co, running, [("telegram", base)]) == {"telegram"}  # behind, reached
-    assert rollout.stale(co, running, [("telegram", shared)]) == set()  # behind, quiet diff
-    assert rollout.stale(co, running, [("telegram", ahead)]) == {"telegram"}  # ahead, reached
-    assert rollout.stale(co, running, [("telegram", None)]) == {"telegram"}  # unstamped
-    assert rollout.stale(co, running, [("telegram", "f" * 40)]) == {"telegram"}  # unknown sha
-    assert rollout.stale(co, running, [("telegram", rollout.NO_HEAD)]) == set()
+    # Behind and reached, behind on a quiet diff, ahead, unstamped, an unknown sha, no head.
+    for sha, stale in [(base, 1), (shared, 0), (ahead, 1), (None, 1), ("f" * 40, 1), (rollout.NO_HEAD, 0)]:
+        assert rollout.stale(co, running, [("telegram", sha)]) == ({"telegram"} if stale else set()), sha
 
 
 def test_a_kick_is_launchctl_kickstart_and_its_failure_a_reason(monkeypatch):
     import core.bridge
-    import core.serve
 
     for name, label in rollout.BRIDGES.items():
-        main = __import__(f"bridges.{name}.__main__", fromlist=["LABEL"])
-        assert main.LABEL == label
+        assert __import__(f"bridges.{name}.__main__", fromlist=["LABEL"]).LABEL == label
     assert core.bridge.NO_HEAD == rollout.NO_HEAD
     monkeypatch.setattr(rollout.binaries, "require", lambda p: str(p))
     assert rollout.kick_argv("com.x") == ["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.x"]
-    ran = []
+    outcomes = iter([0, 113, None])  # one per kick below; None: it never returns
 
-    def done(code):
-        def fake(argv, **kw):
-            ran.append(argv)
-            return subprocess.CompletedProcess(argv, code, "", "Could not find service\n")
+    def fake(argv, timeout, **kw):
+        assert argv == rollout.kick_argv("com.x")
+        if (code := next(outcomes)) is None:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return subprocess.CompletedProcess(argv, code, "", "Could not find service\n")
 
-        return fake
-
-    monkeypatch.setattr(rollout.subprocess, "run", done(0))
-    assert rollout.kick("com.x") is None and ran[-1][-1].endswith("/com.x")
-    monkeypatch.setattr(rollout.subprocess, "run", done(113))
+    monkeypatch.setattr(rollout.subprocess, "run", fake)
+    assert rollout.kick("com.x") is None
     assert rollout.kick("com.x") == "launchctl kickstart exited with status 113: Could not find service"
-
-    def slow(argv, **kw):
-        raise subprocess.TimeoutExpired(argv, kw["timeout"])
-
-    monkeypatch.setattr(rollout.subprocess, "run", slow)
     assert "did not return" in rollout.kick("com.x")
 
 
-async def holding(dsn, name: str, channel: str | None = None):
-    """A connection named `name`, holding `channel`'s bridge lock when given
-    (an advisory lock is the database's own: the machine's bridges hold
-    theirs in the kernel's)."""
+async def holding(dsn, name: str, channel: str | None = None, wait: bool = True):
+    """A connection named `name`, holding (or with `wait=False` waiting on)
+    `channel`'s bridge lock: an advisory lock is the database's own, and the
+    machine's bridges hold theirs in the kernel's."""
     conn = await db.connect(dsn, application_name=name)
+    lock = ("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"bridge:{channel}:{settings.machine}",))
     if channel:
-        await conn.execute(
-            "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"bridge:{channel}:{settings.machine}",)
-        )
+        conn.waiting = asyncio.create_task(conn.execute(*lock)) if not wait else await conn.execute(*lock)
     return conn
 
 
-def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tmp_path, monkeypatch):
+def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tmp_path):
     """A stale holder is kicked before `rollout.ended`, which names it; a
     current holder, a stale waiter, other connections, and another
     database's bridge are not. (`NO_HEAD`: `test_which_live_bridges_are_stale`.)"""
@@ -387,48 +346,36 @@ def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tm
     kicked: list[str] = []
     other = db.migrate(f"{TEST_DB}_rollout_other", fresh=True)
 
+    def kick(label):
+        with psycopg.connect(fresh) as c:  # nothing is ended before the kick
+            assert c.execute("SELECT count(*) FROM events WHERE type = 'rollout.ended'").fetchone()[0] == 0
+        kicked.append(label)
+        return "no such service" if label == "com.valor.email" else None
+
     async def go():
-        task = await new_task(fresh)
-        effect = uuid.uuid4().hex
+        task, effect = await new_task(fresh), uuid.uuid4().hex
         async with await db.connect(fresh) as conn:
             await ledger.append(conn, task, "rollout.restarting", {"effect_id": effect, "sha": running})
-        conns = [
-            await holding(fresh, f"valor-telegram@{base}", "telegram"),
-            await holding(fresh, f"valor-slack@{running}", "slack"),
-            await holding(fresh, "valor-email", "email"),  # unstamped: started before stamps
-            await holding(fresh, "valor-email-watch"), await holding(fresh, "valor-kernel"),
-            await holding(fresh, f"valor-bogus@{base}"), await holding(fresh, "valor-telegram-perform"),
-            await holding(other, f"valor-local@{base}", "local"),  # another database's
-        ]  # fmt: skip
-        # A second slack, stale, waiting on the lock the current one holds.
-        waiter = await holding(fresh, f"valor-slack@{base}")
-        conns.insert(0, waiter)  # closed after the holder, so its wait ends
-        waiting = asyncio.create_task(
-            waiter.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"bridge:slack:{settings.machine}",)
-            )
-        )
+        named = [(f"valor-telegram@{base}", "telegram"), (f"valor-slack@{running}", "slack"),
+                 ("valor-email", "email"),  # unstamped: started before stamps
+                 ("valor-email-watch", None), ("valor-kernel", None), (f"valor-bogus@{base}", None),
+                 ("valor-telegram-perform", None)]  # fmt: skip
+        conns = [await holding(fresh, n, ch) for n, ch in named]
+        conns.append(await holding(other, f"valor-local@{base}", "local"))
+        # A second slack, stale, waiting on the lock the current one holds; closed last, so its wait ends.
+        waiter = await holding(fresh, f"valor-slack@{base}", "slack", wait=False)
         async with await db.connect(fresh) as conn:
             q = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
             while (await (await conn.execute(q)).fetchone())[0] == 0:
                 await asyncio.sleep(0.05)
-
-        def kick(label):
-            with psycopg.connect(fresh) as c:  # nothing is ended before the kick
-                assert (
-                    c.execute("SELECT count(*) FROM events WHERE type = 'rollout.ended'").fetchone()[0] == 0
-                )
-            kicked.append(label)
-            return "no such service" if label == "com.valor.email" else None
-
         try:
             async with await db.connect(fresh) as conn:
                 done = await serve.recover(conn, checkout=co, running=running, kick=kick)
                 again = await serve.recover(conn, checkout=co, running=running, kick=kick)
         finally:
-            for c in reversed(conns):
+            for c in [*reversed(conns), waiter]:
                 await c.close()
-            waiting.cancel()
+            waiter.waiting.cancel()
         return task, effect, done, again
 
     task, effect, done, again = run(go())
@@ -444,18 +391,16 @@ def test_a_failed_bridge_pass_still_ends_the_rollout_and_the_stamp(fresh, tmp_pa
     import core.bridge
 
     co, running = layout(tmp_path)
+    calls = []
+
+    async def broken(*a, **kw):
+        calls.append(a)
+        raise psycopg.OperationalError("gone")
 
     async def go():
         task = await new_task(fresh)
         async with await db.connect(fresh) as conn:
             await ledger.append(conn, task, "rollout.restarting", {"effect_id": "e1", "sha": running})
-
-            calls = []
-
-            async def broken(*a, **kw):
-                calls.append(a)
-                raise psycopg.OperationalError("gone")
-
             monkeypatch.setattr(serve, "restart_bridges", broken)
             unread = await serve.recover(conn, checkout=None, running=running, kick=lambda label: None)
             assert calls == []  # no checkout: no bridge is read or kicked
@@ -467,34 +412,17 @@ def test_a_failed_bridge_pass_still_ends_the_rollout_and_the_stamp(fresh, tmp_pa
     assert done["rolled"] == ["e1"] and done["bridges"] == []
     (ended,) = typed(run(rows(fresh, task)), "rollout.ended")
     assert "restarted" not in ended
-
     # The stamp: the lock connection names the head, or `none` when git fails.
-    seen = []
+    seen, bridge = [], FakeBridge("local")
 
-    class Quiet:
-        channel = "local"
+    async def named(outbox):
+        q = "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()"
+        seen.append((await (await outbox.conn.execute(q)).fetchone())[0])
 
-        def performers(self):
-            return {}
-
-        async def reconcile(self, outbox):
-            pass
-
-        async def run(self, outbox):
-            row = await (
-                await outbox.conn.execute(
-                    "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()"
-                )
-            ).fetchone()
-            seen.append(row[0])
-
+    bridge.run = named
     monkeypatch.setattr(core.bridge, "ROOT", co)
-
-    def untrusted(root):
-        raise rollout.binaries.Untrusted("no git")
-
-    for head in (lambda root: running, untrusted):
+    for head in (lambda root: running, mock.Mock(side_effect=rollout.binaries.Untrusted("no git"))):
         monkeypatch.setattr(core.bridge.git, "head", head)
         with pytest.raises(SystemExit):
-            run(core.bridge.serve(Quiet(), fresh))
+            run(core.bridge.serve(bridge, fresh))
     assert seen == [f"valor-local@{running}", "valor-local@none"]

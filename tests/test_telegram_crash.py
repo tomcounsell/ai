@@ -10,7 +10,6 @@ import time
 import pytest
 
 from tests.bridges import of_type
-from tests.telegram_emulator import Emulator
 from tests.telegram_port import (
     chat,
     child_env,
@@ -24,13 +23,6 @@ from tests.telegram_port import (
 )
 
 pytestmark = pytest.mark.spend(usd=0)
-
-
-@pytest.fixture
-def emu():
-    e = Emulator().start()
-    yield e
-    e.stop()
 
 
 @pytest.fixture

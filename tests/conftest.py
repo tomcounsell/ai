@@ -122,9 +122,10 @@ def dsn() -> str:
     memory.reset()
 
 
-@pytest.fixture(scope="session")
-def owner_dsn(dsn) -> str:
-    return settings.dsn(owner=True, database=TEST_DB)
+@pytest.fixture
+def fresh(request) -> str:
+    """A database of this test module's own (`test_serve` -> `<test db>_serve`)."""
+    return db.migrate(f"{TEST_DB}_{request.module.__name__.rsplit('test_', 1)[-1]}", fresh=True)
 
 
 @pytest.fixture(autouse=True)
@@ -158,3 +159,13 @@ def release_ports(request):
                 (task_id, Jsonb({"path": mirror, "by": "tests"})),
             )
     ports.release()
+
+
+@pytest.fixture
+def emu():
+    """A Telegram emulator of this test's own (`tests/telegram_emulator.py`)."""
+    from tests.telegram_emulator import Emulator
+
+    e = Emulator().start()
+    yield e
+    e.stop()

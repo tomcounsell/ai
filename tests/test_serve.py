@@ -21,25 +21,12 @@ from pathlib import Path
 
 import pytest
 
-from core import (
-    broker,
-    db,
-    ledger,
-    machine,
-    rollout,
-    router,
-    runs,
-    serve,
-    session,
-    signals,
-    tasks,
-)
+from core import broker, db, ledger, machine, rollout, router, runs, serve, session, signals, tasks
 from core.__main__ import _performers
 from core.gateway import Gateway
 from core.machine import State
 from tests import bridges, scripted
-from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows
-from tests.conftest import TEST_DB
+from tests.bridges import OPERATOR, OPERATOR_CHAT, new_task, rows, typed
 from tests.ports import listen
 from tests.scripted import commit
 
@@ -48,14 +35,7 @@ pytestmark = pytest.mark.spend(usd=0)
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(coro):
-    return asyncio.run(coro)
-
-
-@pytest.fixture
-def fresh() -> str:
-    """A database of this test's own."""
-    return db.migrate(f"{TEST_DB}_serve", fresh=True)
+run = asyncio.run
 
 
 @pytest.fixture
@@ -77,14 +57,6 @@ async def until(check, timeout: float = 60, every: float = 0.1):
 
 async def state(dsn, task) -> State:
     return machine.fold(await rows(dsn, task)).state
-
-
-def typed(written, type_, **match) -> list[dict]:
-    return [
-        r["payload"]
-        for r in written
-        if r["type"] == type_ and all(r["payload"].get(k) == v for k, v in match.items())
-    ]
 
 
 def only(kernel: serve.Kernel, *tasks_: str) -> serve.Kernel:

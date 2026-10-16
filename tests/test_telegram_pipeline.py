@@ -11,30 +11,10 @@ from core import broker, db, intake, machine, notices, tasks
 from core.machine import State
 from tests import bridges
 from tests.bridges import OPERATOR, new_task, of_type, rows
-from tests.telegram_emulator import Emulator
-from tests.telegram_port import (
-    chat,
-    child_env,
-    connected,
-    due,
-    emu_chat,
-    ids,
-    release,
-    send,
-    until,
-)
-from tests.telegram_port import (
-    machine as this_machine,
-)
+from tests.telegram_port import chat, child_env, connected, due, emu_chat, ids, release, send, until
+from tests.telegram_port import machine as this_machine
 
 pytestmark = pytest.mark.spend(usd=0)
-
-
-@pytest.fixture
-def emu():
-    e = Emulator().start()
-    yield e
-    e.stop()
 
 
 @pytest.fixture
@@ -45,29 +25,13 @@ def op(emu, tmp_path):
         yield operator
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 async def child(tmp_path, op, *args: str):
     return await asyncio.create_subprocess_exec(
         sys.executable, "-m", "tests.telegram_child", *args, env=child_env(tmp_path, [op])
     )
-
-
-async def deliver(dsn, bridge, task) -> dict[str, str]:
-    """Owe the task's notices and send them through the bridge: notice
-    text's first line -> its message id."""
-    async with await db.connect(dsn) as conn:
-        made = await notices.owe(conn, task)
-    out = {}
-    async with bridges.outbox(dsn, bridge) as box:
-        for nid in made:
-            await bridge.sender.notice(await due(box, nid), box)
-            (sent,) = await of_type(dsn, "notice.sent", notice_id=nid)
-            (req,) = await of_type(dsn, "notice.requested", notice_id=nid)
-            out[req["kind"]] = sent["sent"][0]["message_id"]
-    return out
 
 
 async def tom(emu, dsn, chat_id, text, reply_to=None) -> dict:
@@ -85,12 +49,6 @@ async def tom(emu, dsn, chat_id, text, reply_to=None) -> dict:
 
 async def _has(dsn, chat_id, mid) -> bool:
     return str(mid) in await ids(dsn, chat_id)
-
-
-async def replies_to(dsn, received_id) -> list[dict]:
-    return [
-        r for r in await of_type(dsn, "notice.requested") if r["about_key"].startswith(f"reply:{received_id}")
-    ]
 
 
 def test_a_message_is_recorded_once_through_intake(emu, dsn, tmp_path, op):

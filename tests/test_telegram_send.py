@@ -5,9 +5,7 @@ import asyncio
 import pytest
 
 from bridges.telegram.send import random_id
-from core.bridge import LIMITS
 from tests.bridges import of_type
-from tests.telegram_emulator import Emulator
 from tests.telegram_port import (
     SEND,
     chat,
@@ -23,14 +21,6 @@ from tests.telegram_port import (
 )
 
 pytestmark = pytest.mark.spend(usd=0)
-MAX_TEXT = LIMITS["telegram"].max_text
-
-
-@pytest.fixture
-def emu():
-    e = Emulator().start()
-    yield e
-    e.stop()
 
 
 @pytest.fixture
@@ -41,8 +31,7 @@ def c(emu, tmp_path):
         yield group, forum
 
 
-def run(coro):
-    return asyncio.run(coro)
+run = asyncio.run
 
 
 def test_random_id_repeats_for_one_effect_and_differs_between_two():
@@ -107,13 +96,3 @@ def test_a_duplicate_random_id_on_an_effect_is_settled_by_reconcile(emu, dsn, tm
             }
 
     run(go())
-
-
-class Box:
-    """What `tidy` reads of the outbox: its action types and its due items."""
-
-    def types(self):
-        return [SEND]
-
-    async def due(self):
-        return []
