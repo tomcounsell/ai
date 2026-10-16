@@ -1,0 +1,94 @@
+# Rolling Valor out to a Mac
+
+How a Mac gets the kernel: a fresh one, or one still running the old
+system, whose retirement is part of the same rollout. Each Mac serves one
+client's projects ([machine.md](machine.md)). The Cowboy went first
+(2026-10-14); its cutover left the old system's files and jobs in place,
+which the 2026-10-16 sweep retired with step 8 below.
+
+Run from the Mac (or over SSH as `valorengels`), in `bash`:
+
+```
+export PATH=/opt/homebrew/bin:/opt/homebrew/opt/postgresql@18/bin:$HOME/.local/bin:$PATH
+export PGPASSFILE=~/.config/valor-kernel/pgpass VALOR_MACHINE="Valor the Pirate"   # this Mac's name
+D=gui/$(id -u); LA=~/Library/LaunchAgents; PY=.venv/bin/python
+OLDPY=~/src/ai/.venv/bin/python   # the old system's interpreter, before step 3
+CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
+```
+
+## Before the day
+
+- **The Mac's projects have specs** in `projects/`, each with `machine` set
+  to this Mac's name and `chats` taken from the old system's routing
+  (`~/Desktop/Valor/projects.json`; over SSH its copy
+  `~/src/ai/data/projects.last_known_good.json`), merged to `main`. A chat
+  the old system read and no spec names is a chat nobody reads after step 7.
+- **Valor can push** to each repo: `gh api repos/OWNER/REPO --jq .permissions.push`.
+
+## Steps
+
+1. **Stop the old updater** first: it pulls `main` every 30 minutes, and
+   `main` is now the kernel.
+   `launchctl disable $D/com.valor.update; launchctl bootout $D/com.valor.update`
+2. **Prerequisites.** Apple's Command Line Tools (the kernel runs the
+   root-owned `/Library/Developer/CommandLineTools/usr/bin/git`); Homebrew
+   `postgresql@18` as a service (on 5432, or on another port named by
+   `VALOR_PGPORT` in every job and the shell profile when 5432 is taken);
+   `uv`, `node`, `gh`, `redis` (tasks start their own servers), `dovecot`
+   and `openssl` (the email tests only); `claude`, `codex`, and
+   `npm install -g @earendil-works/pi-coding-agent@1.0.0` (the pin in
+   `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
+   browser.
+3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
+   system there: `git -C ~/src/ai branch retired/old-main`, then
+   `cd ~/src/ai && git fetch origin && git checkout -B main origin/main && uv sync --frozen`.
+   Never commit in it afterwards: a rollout fast-forwards it.
+4. **The kernel database.** `$PY -m core migrate` makes the roles, the
+   database and the schema, and runs `secure-login` (`pgpass`, the
+   `pg_hba.conf` rules). Add `export PGPASSFILE=~/.config/valor-kernel/pgpass`
+   to the shell profile.
+5. **Keys**, copied from the Cowboy without printing them:
+   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys slack-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; done; chmod 600 ~/.config/valor-kernel/*`.
+   Calibrate the judge from the Cowboy's `~/src/valor-demo/items/`:
+   `$PY -m core calibrate <items>/judgement/intake.underspecified.json`
+   (its `task_sha256` equals `JUDGE.calibrated` in `core/judgement_tasks.py`).
+6. **Valor's accounts for turns** (rule 1): `~/.config/gh/hosts.yml` from
+   `github-keys` and `gh auth setup-git`; `~/.sentryclirc` with `org=yudame`;
+   `claude plugin marketplace add yudame/skills`, then
+   `claude plugin install yudame@yudame` and `yudame-dev@yudame`. Not
+   `install.sh`: turns take the skills from the plugins, and a second copy
+   would load each one twice.
+7. **The handover**, when the old system is there:
+   - The old memory, exported while its Redis is up:
+     `$OLDPY -I scripts/cutover_export_memory.py $CUT/memory.jsonl` (`PYTHONDONTWRITEBYTECODE=1`).
+   - Its bridges and worker stopped:
+     `for L in com.valor.bridge-watchdog com.valor.worker-watchdog com.valor.bridge com.valor.email-bridge com.valor.worker com.valor.reflection-worker; do launchctl disable $D/$L; launchctl bootout $D/$L; done`.
+   - The newest message it handled per chat, as the new bridge's start
+     (`~/.config/valor-kernel/telegram-seen.json`, mode 600, keeping the
+     larger mark): `$OLDPY -I scripts/cutover_seed_seen.py CHAT_ID...`.
+   - Valor's Telegram account signed into the new bridge's own session
+     (a copied session breaks the account's key): **Tom** runs
+     `$PY -m bridges.telegram login` and types the code and password.
+8. **Retire the old system:** `scripts/retire_old.sh [OLD_CLONE...]`. It
+   stops and removes the old jobs, the old Redis, the old Claude Code
+   hooks, skills, agents, commands and memory MCP server, the old
+   command-line tools and caches, the old data in the checkout and in any
+   old clone kept aside, and the container runtime's images. Data goes to
+   `~/valor-retired/<date>`, never deleted. It leaves the caffeinate,
+   brew-nightly and vault-sync jobs, `~/.zshenv`'s loader for
+   `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
+   machine's, not the old system's.
+9. **The jobs.** For each of `core serve`, `bridges.telegram`, `bridges.email`
+   (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
+   reads Slack, `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
+   and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
+   with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
+   Every job's `PATH` includes `/opt/homebrew/bin`.
+10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
+    passes; `$PY -m core settings` names the machine and the backup folder;
+    `$PY -m core routines` lists the routines; a message in each chat the
+    specs name gets 👀; `launchctl list | grep com.valor` lists only the
+    jobs of step 9 and caffeinate and brew-nightly.
+
+A Mac with no Telegram session or mailbox can run with only the local
+chat bridge ([bridges/local.md](bridges/local.md)).

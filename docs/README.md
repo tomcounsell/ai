@@ -8,7 +8,7 @@ Documentation that describes the system as it is.
 - `docs/plans/`: the strip plan, the rebuild plan and its records.
 - `docs/conventions/`: conventions that hold across the repository.
 - `docs/sdlc/`: repo-specific addenda for SDLC stages.
-- Top-level docs that each directory README points at: `architecture.md`, `objective-tree.md`, `metered-spending.md`, `mission.md`, `business.md`, `tech-stack.md`, `judgement-layer.md`, `judgement-baseline.md`, `sdlc-state-machine.md`, `data.md`, `persona.md`, `harnesses.md`, `pi.md`, `workspace.md`, `spending-and-attention.md`, `browser.md`, `routines.md`, `memory.md`, `machine.md`, `performers.md`, and `bridges/`.
+- Top-level docs that each directory README points at: `architecture.md`, `objective-tree.md`, `metered-spending.md`, `mission.md`, `business.md`, `tech-stack.md`, `judgement-layer.md`, `judgement-baseline.md`, `sdlc-state-machine.md`, `data.md`, `persona.md`, `harnesses.md`, `pi.md`, `workspace.md`, `spending-and-attention.md`, `browser.md`, `routines.md`, `memory.md`, `machine.md`, `rollout.md`, `performers.md`, and `bridges/`.
 
 Governed by [mission.md](mission.md) (the constraint "Docs describe reality").
 

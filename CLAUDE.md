@@ -49,4 +49,4 @@ at `backup/pre-sync-main-2026-10-15`; read it with `git show <ref>:<path>`,
 never import from it. The cori copy is `tomcounsell/cori` at commit
 0336d10642534f344e002d9a7b7abb22eb40a8a1. What the rebuild left to do is
 `docs/plans/strip.md`, then `docs/plans/valor-rebuild.md`'s open items.
-Setting up a machine is `docs/plans/rebuild-handoff.md`.
+Setting up a machine, and retiring the old system on it, is `docs/rollout.md`.
