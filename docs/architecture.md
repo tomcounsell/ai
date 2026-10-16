@@ -187,7 +187,7 @@ target rejected because its branch moved, cleanly and on paths the candidate doe
 lockfile, no schema), carries the verdicts to the candidate replayed onto the new tip
 (`verdicts.carried`) and merges at once, its other new commits never tested with the candidate,
 which the status page shows (tested at one sha, merged at another); any other move sends the work
-to `patch` to rebase onto the new tip, twice at most, spending no review round; a refusal ends the
+to `patch` to rebase onto the new tip, as often as it moves, spending no review round; a refusal ends the
 task. A merge that needs the push credential is the one case that reaches Tom, as a request for the
 token, and it is tried again on its own until the token works. Each try is one request (`request_id`
 `merge:<digest>:<grants>:<tries>`), so a second step asks nothing twice.
