@@ -48,6 +48,7 @@ behaviour, not the classifiers.
 
 ## Done
 
-Tom has a teamwork session in a group Telegram chat, with the team, on the
-new kernel; he judges it as good as Eng: PsyOPTIMAL or better, recorded with
+The proving ground is Eng: Monday Flowers with Rain, on the Pirate (Tom,
+2026-10-16), so the Pirate rolls out once steps 1 to 4 are in. Tom has a
+teamwork session there on the new kernel; he judges it as good as Eng: PsyOPTIMAL or better, recorded with
 the date (rule 5). Then the Captain and the Bald roll out.
