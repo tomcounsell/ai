@@ -31,7 +31,7 @@ class Brief:
 
     `workspace` is the directory a turn works in, `model` the model it runs
     (by default the light seat's pinned id, never an alias),
-    `harness_name` the harness that runs it (`claude_code` or `pi`), and
+    `harness_name` the harness that runs it (`claude_code`, `pi` or `codex`), and
     `harness` the harness's own settings for the task (its isolation).
     `target_branch` is the branch a merge
     lands on, `origin_url` the absolute push URL of the workspace's origin

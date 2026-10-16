@@ -13,6 +13,13 @@ the kernel named (`--session-id`), and opens each file with
 sparse, or nothing and a reason. A file is named by its path under
 `projects/<dir>`.
 
+A Codex turn (`layout="codex"`) writes its session under its own home
+(`<anchor>/codex/sessions/<y>/<m>/<d>/rollout-<time>-<session_id>.jsonl`,
+a resumed session appending to the same file) and names the session
+itself, so the kernel reads the id from the turn's output and takes the
+one rollout file naming it, walked the same way, named by its path under
+`sessions`.
+
 Copied after the turn's processes are reaped, stopped turns included,
 before `turn.ended`. Stored as documents of kind `transcript`, id
 `<turn_id>/<name>/<n>`, body `{turn_id, name, offset, chunk, base64}`:
@@ -48,11 +55,14 @@ KIND = "transcript"
 class Transcript:
     """Where a turn's session file is: `anchor`, the kernel's directory
     holding the config root; `root`, the config root's name in it;
-    `session_id`, the id the kernel gave the session."""
+    `session_id`, the id the kernel gave the session, or None when the
+    harness names it, until the turn's output says which; `layout`, the
+    harness whose layout it is."""
 
     anchor: str
     root: str
-    session_id: str
+    session_id: str | None
+    layout: str = "claude_code"
 
 
 def collect(t: Transcript) -> tuple[list[tuple[str, int]], list[dict[str, str]]]:
@@ -63,6 +73,8 @@ def collect(t: Transcript) -> tuple[list[tuple[str, int]], list[dict[str, str]]]
 
     anchor = os.open(t.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
+        if t.layout == "codex":
+            return _collect_codex(anchor, t)
         projects, why = workspace.open_turn_dir(anchor, f"{t.root}/projects")
         if projects is None:
             raise LookupError(f"no projects directory: {why or f'{t.root}/projects does not exist'}")
@@ -128,6 +140,39 @@ def _collect(projects: int, session_id: str):
     finally:
         os.close(fd)
     return files, skipped
+
+
+def _collect_codex(anchor: int, t: Transcript):
+    from core import workspace
+
+    sessions, why = workspace.open_turn_dir(anchor, f"{t.root}/sessions")
+    if sessions is None:
+        raise LookupError(f"no sessions directory: {why or f'{t.root}/sessions does not exist'}")
+    try:
+        found = _rollouts(sessions, f"-{t.session_id}.jsonl", 3)
+        if len(found) != 1:
+            raise LookupError(f"{len(found)} rollout files name session {t.session_id}")
+        fd, why = workspace.open_turn_file(sessions, found[0])
+        return ([(found[0], fd)], []) if fd is not None else ([], [{"name": found[0], "why": why}])
+    finally:
+        os.close(sessions)
+
+
+def _rollouts(dir_fd: int, suffix: str, depth: int) -> list[str]:
+    """The rollout files ending `suffix`, `depth` directories below `dir_fd`."""
+    from core import workspace
+
+    if depth == 0:
+        return [e for e in os.listdir(dir_fd) if e.startswith("rollout-") and e.endswith(suffix)]
+    found = []
+    for entry in sorted(os.listdir(dir_fd)):
+        fd, _ = workspace.open_turn_dir(dir_fd, entry)
+        if fd is not None:
+            try:
+                found += [f"{entry}/{f}" for f in _rollouts(fd, suffix, depth - 1)]
+            finally:
+                os.close(fd)
+    return found
 
 
 def _close(files: list[tuple[str, int]]) -> None:
@@ -270,10 +315,12 @@ async def joined(conn, turn_id: str, name: str) -> bytes:
     return b"".join(base64.b64decode(r[0]["base64"]) for r in rows)
 
 
-def anchored(config_dir: str | None, session_id: str) -> Transcript | None:
+def anchored(
+    config_dir: str | None, session_id: str | None, layout: str = "claude_code"
+) -> Transcript | None:
     """The transcript source of a turn whose config directory is
     `config_dir`, or None when it has none."""
     if not config_dir:
         return None
     path = Path(config_dir)
-    return Transcript(str(path.parent), path.name, session_id)
+    return Transcript(str(path.parent), path.name, session_id, layout)

@@ -680,7 +680,8 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
     for d in (lay.repo.parent, lay.home, lay.profiles, lay.cache, lay.work_state / "claude",
-              lay.work_state / "pi", lay.checks, lay.root.parent / "bin"):  # fmt: skip
+              lay.work_state / "pi", lay.work_state / "codex", lay.checks,
+              lay.root.parent / "bin"):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
     _install_tools(lay.root.parent / "bin")
     # The clone: history up to the base only, no tags, one work branch.
@@ -728,6 +729,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         "sandbox_profile": str(lay.profiles / "turn.sb"),
         "claude_config_dir": str(lay.work_state / "claude"),
         "pi_agent_dir": str(lay.work_state / "pi"),
+        "codex_home": str(lay.work_state / "codex"),
         "tmpdir": str(lay.tmp),
         "env": env,
         **({"max_output_tokens": spec.max_output_tokens} if spec.max_output_tokens else {}),
@@ -1291,7 +1293,7 @@ def fresh_dir(check_dir: Path) -> Path:
     """Remove and make a fresh session's directory with `rmtree`, so a
     read-only entry a sandboxed run left goes too, never following a link."""
     rmtree(check_dir)
-    for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi"):
+    for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi", check_dir / "codex"):
         d.mkdir(parents=True)
     return check_dir
 
@@ -1322,6 +1324,7 @@ def check_harness(
         "sandbox_profile": str(path),
         "claude_config_dir": str(check_dir / "claude"),
         "pi_agent_dir": str(check_dir / "pi"),
+        "codex_home": str(check_dir / "codex"),
         "tmpdir": str(check_dir / "tmp"),
         "env": fresh_env,
     }

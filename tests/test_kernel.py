@@ -221,12 +221,13 @@ def test_a_turns_tmpdir_is_emptied_before_it_and_removed_after_it(dsn, tmp_path,
 
 def test_a_harness_turns_tmpdir_is_the_one_its_settings_name(tmp_path):
     from core import __main__, workspace
-    from harnesses import claude_code, pi
+    from harnesses import claude_code, codex, pi
 
     harness = workspace.check_harness(workspace.Layout(tmp_path), workspace.fresh_dir(tmp_path / "c"), [], {})
     assert harness["tmpdir"] == str(tmp_path / "c" / "tmp")
     made = [
-        m.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t") for m in (claude_code, pi)
+        m.workspace_turn("p", cwd=".", harness=harness)("http://h:1", "b", "t")
+        for m in (claude_code, pi, codex)
     ]
     assert {c.tmpdir for c in made} | {c.env["TMPDIR"] for c in made} == {
         harness["tmpdir"],
@@ -265,6 +266,61 @@ def test_a_turn_loads_the_operators_own_mcp_servers_and_the_plugins_skills(tmp_p
         str(tmp_path / "plugin" / "skills")
     ]
     assert not {"--no-skills", "--no-context-files"} & set(argv)
+
+
+# What `codex exec --json` printed for one turn against a stub upstream (codex-cli 0.153.4).
+CODEX_TURN = b"""\
+{"type":"thread.started","thread_id":"01a14501-8d3f-7e43-ac99-8359ba467614"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-6.1-sol` not found."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"stub reply 1"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":5}}
+"""
+
+
+def test_a_codex_turn_runs_on_the_gateway_with_the_brief_skills_and_mcp_servers(tmp_path, monkeypatch):
+    import tomllib
+
+    from core import transcripts, workspace
+    from core.gateway import TURN_TOKEN
+    from harnesses import claude_code, codex
+
+    harness = workspace.check_harness(workspace.Layout(tmp_path), workspace.fresh_dir(tmp_path / "c"), [], {})
+    servers = {"byob": {"type": "stdio", "command": "byob-mcp", "args": ["--x"]}, "web": {"url": "https://m"}}
+    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": servers}))
+    (tmp_path / "yudame" / "skills").mkdir(parents=True)
+    replaced = dataclasses.replace(settings, claude_json=str(tmp_path / ".claude.json"),
+                                   plugin_dirs=(str(tmp_path / "yudame"), str(tmp_path / "skill-less")))  # fmt: skip
+    monkeypatch.setattr(codex, "settings", replaced)
+    monkeypatch.setattr(claude_code, "settings", replaced)
+    brief = 'Brief "one"\n\U0001f600 \x7f'
+    made = codex.workspace_turn("-p", cwd=".", harness=harness)("http://h:1/t/k", brief, "t")
+    home = pathlib.Path(harness["codex_home"])
+    config = tomllib.loads((home / "config.toml").read_text())
+    assert config["model_providers"]["valor"]["base_url"] == "http://h:1/t/k/openai/v1"
+    assert made.env[config["model_providers"]["valor"]["env_key"]] == TURN_TOKEN
+    assert config["developer_instructions"] == brief and made.stdin == b"-p"
+    assert config["mcp_servers"] == {
+        "byob": {"command": "byob-mcp", "args": ["--x"]},
+        "web": {"url": "https://m"},
+    }
+    assert os.readlink(home / "skills" / "yudame") == str(tmp_path / "yudame" / "skills")
+    assert made.env["CODEX_HOME"] == str(home) and made.argv[-1] == "-"
+    # A resumed session keeps the developer message it began with: the Brief opens the prompt.
+    resumed = codex.workspace_turn("next", cwd=".", resume="th", harness=harness)("http://h:1", brief, "t")
+    assert resumed.argv[-3:] == ["resume", "th", "-"] and resumed.stdin == f"{brief}\n\nnext".encode()
+    assert codex.parse(CODEX_TURN) == {
+        "text": "stub reply 1", "is_error": False, "session_id": "01a14501-8d3f-7e43-ac99-8359ba467614",
+    }  # fmt: skip
+    assert codex.parse(CODEX_TURN.replace(b"turn.completed", b"turn.failed"))["is_error"]
+    # The rollout is found by the session id the turn printed.
+    day = home / "sessions" / "2026" / "10" / "16"
+    day.mkdir(parents=True)
+    (day / "rollout-2026-10-16T20-58-12-th.jsonl").write_text("{}\n")
+    files, skipped = transcripts.collect(transcripts.anchored(str(home), "th", layout="codex"))
+    assert [name for name, _ in files] == ["2026/10/16/rollout-2026-10-16T20-58-12-th.jsonl"] and not skipped
+    for _, fd in files:
+        os.close(fd)
 
 
 # -- reconcile from the intent row ----------------------------------------------------------

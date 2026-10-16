@@ -8,7 +8,7 @@ kernel runs it as `settings.node` and the resolved `cli.js` (`VALOR_NODE`
 names another node), and records the release (`harness_version`) on every
 `turn.started`. Its wrapper `workspace_turn` takes the same `harness`
 settings as Claude Code's, plus `pi_agent_dir`, the turn's own Pi directory,
-and a task's Brief names the wrapper in `harness_name` (`claude_code` or
+and a task's Brief names the wrapper in `harness_name` (`claude_code`, `codex` or
 `pi`; `--harness` on `start`). Pi runs under the same turn sandbox profile
 and `VALOR_TURN` mark as Claude Code.
 

@@ -1,6 +1,6 @@
 # Harnesses
 
-A harness is the agent program that does a turn's work: Claude Code and Pi. It sits in the
+A harness is the agent program that does a turn's work: Claude Code, Pi and Codex. It sits in the
 agents tier of the three (README, "Three tiers"): the kernel decides what a turn may do and pays for
 it, and the harness does the work inside those bounds. This doc covers the port every harness
 conforms to, the Claude Code wrapper, how a task's turns share one session, how a turn talks back to
@@ -363,6 +363,7 @@ kernel copies the session file and its subagents' files into the store as
 file's SHA-256 on `turn.ended`, so an edit is detectable and the copy
 outlives Claude Code's housekeeping. It follows no link, skips a file not
 regular, sparse, or with more links than one; a failed copy says `no_transcript`.
+A Codex turn's session file is its rollout (below), copied the same way.
 
 ## Metering through the gateway
 
@@ -478,12 +479,49 @@ The workspace has `look`, a script that screenshots a page served on a dev port
 and dumps its DOM into `.valor/screens/`. The kernel records those screens when
 it collects the turn. [browser.md](browser.md) specifies it.
 
-## Pi, and further harnesses
+## Pi, Codex, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`
 mark (`docs/pi.md`). It loads the project's `AGENTS.md`, `CLAUDE.md` and
-skills and the yudame plugins' skills; the pinned Pi has no MCP. Codex has
-not been run here.
+skills and the yudame plugins' skills; the pinned Pi has no MCP.
+
+Codex is the third (`harnesses/codex.py`, ported from the old system's
+adapter; `--harness codex`, with an OpenAI model such as `--model gpt-6.1-sol`).
+It runs `settings.codex` (`VALOR_CODEX`, default `~/.local/bin/codex`, the
+standalone installer's link; `harness_version` is read from the release
+directory it resolves to) as `codex exec --json
+--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -m <model>
+[resume <thread>] -`, under the same profile and mark, the prompt on stdin.
+Its home is the turn's own (`codex_home`: `state/work/codex`, or
+`checks/<name>/codex`), holding no login, where the kernel writes
+`config.toml` each turn:
+
+- **Provider.** One, `valor`, on the gateway's Responses route, keyed by
+  the placeholder (`env_key`), with `supports_websockets = false` and
+  `model_context_window` from the OpenAI price table less the maximum
+  output, as Pi's. Codex has no output cap to set. Measured against a
+  recording stub (codex-cli 0.153.4, 2026-10-16): every call, compaction
+  included, is `POST <gateway>/openai/v1/responses` carrying the
+  placeholder, so the gateway meters all of it unchanged. Its hosted tool is
+  `web_search`, which the price table prices.
+- **Context and skills.** `project_doc_fallback_filenames = ["CLAUDE.md"]`,
+  so a project with no `AGENTS.md` gives its `CLAUDE.md`. Each yudame
+  plugin's `skills` directory is linked into `<codex_home>/skills`, which
+  Codex searches beside the project's `.agents/skills` and
+  `~/.agents/skills`; the stub run listed all 31 yudame skills.
+- **MCP.** The operator's user MCP servers (`claude_code.user_mcp_servers`)
+  as `mcp_servers`: a command, its arguments, environment and directory, or
+  a URL and its headers.
+- **The Brief.** A new session gets it as `developer_instructions`, after
+  Codex's own instructions. A resumed session keeps the developer message
+  it started with and reads no new one, so a resumed turn's re-rendered
+  Brief opens the prompt on stdin.
+- **Session and transcript.** Codex names the thread; `parse` reads it from
+  `thread.started`, and a resumed turn names it to `resume`. The rollout,
+  `<codex_home>/sessions/<y>/<m>/<d>/rollout-<time>-<thread>.jsonl`, takes
+  every turn of the thread, and is copied as the turn's transcript. `parse`
+  reads the last `agent_message` as the text; no `turn.completed`, or a
+  `turn.failed` or `error` event, is an error. Codex reports no cost.
 
 The gateway meters two formats: Anthropic's Messages API, and OpenAI's
 Responses API at `<gateway>/t/<token>/openai/v1` (architecture.md, Metered

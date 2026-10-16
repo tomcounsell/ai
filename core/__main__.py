@@ -197,9 +197,9 @@ def _performers(b: tasks.Brief) -> broker.Performers:
 
 
 def _harnesses() -> dict:
-    from harnesses import claude_code, pi
+    from harnesses import claude_code, codex, pi
 
-    return {"claude_code": claude_code, "pi": pi}
+    return {"claude_code": claude_code, "pi": pi, "codex": codex}
 
 
 def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
@@ -906,7 +906,7 @@ def main() -> None:
     start.add_argument("--parent", help="start a child of this task, at or below its ceiling")
     start.add_argument("--workspace")
     start.add_argument("--model", default="frontier")
-    start.add_argument("--harness", choices=("claude_code", "pi"))
+    start.add_argument("--harness", choices=("claude_code", "pi", "codex"))
     start.add_argument("--harness-config")
     start.add_argument("--target-branch")
     start.add_argument(

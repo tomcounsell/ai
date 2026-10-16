@@ -57,7 +57,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -266,11 +266,15 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs
         "stdout": str(out_path),
         "stderr": str(err_path),
     }
-    if command.transcript is not None and ended["result"].get("session_id"):
-        ended["result"]["session_id"] = command.transcript.session_id
+    transcript = command.transcript
+    if transcript is not None and transcript.session_id is None:
+        # The harness named the session (Codex): its output says which.
+        transcript = replace(transcript, session_id=ended["result"].get("session_id"))
+    elif transcript is not None and ended["result"].get("session_id"):
+        ended["result"]["session_id"] = transcript.session_id
     async with await db.connect(dsn) as conn:
-        if command.transcript is not None:
-            ended.update(await transcripts.copy(conn, task_id, turn_id, command.transcript))
+        if transcript is not None:
+            ended.update(await transcripts.copy(conn, task_id, turn_id, transcript))
         ended["metered_usd_micros"] = await spending.turn_spent(conn, task_id, turn_id)
         async with conn.transaction():
             if reaped:

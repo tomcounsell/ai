@@ -4,7 +4,7 @@ Wrappers for running work through an agent harness.
 
 ## Scope
 
-- One wrapper per harness: Claude Code and Pi, and any future one (Codex).
+- One wrapper per harness: Claude Code, Pi and Codex.
 - Turn execution: one `claude -p` (or equivalent) at a time on this machine.
 - Session resume and transcript capture.
 - Per-harness skill rendering: turning a versioned skill into what the harness loads.
@@ -19,6 +19,10 @@ Governed by [docs/harnesses.md](../docs/harnesses.md).
 ## The Pi wrapper
 
 `pi.py` builds one turn of a task through Pi, pinned in `PINNED`. It matches `claude_code.workspace_turn`: the same `harness` settings, the same refusal without a sandbox profile, plus the turn's own Pi directory (`pi_agent_dir`). It writes Pi's `models.json` and `settings.json` each turn, passes the system prompt, the project's context files and skills and the yudame plugins' skills (`--skill`), turns the other loaders off, gives the prompt on stdin, and reads Pi's JSON event stream in `parse`. How it is configured and why is `docs/pi.md`.
+
+## The Codex wrapper
+
+`codex.py` builds one turn of a task through `codex exec --json`, ported from the old system's adapter. It matches `claude_code.workspace_turn`: the same `harness` settings, the same refusal without a sandbox profile, plus the turn's own Codex home (`codex_home`). It writes Codex's `config.toml` each turn (the gateway's Responses route, `CLAUDE.md` as fallback instructions, the Brief, the operator's MCP servers), links the yudame plugins' skills into the home, gives the prompt on stdin, and reads Codex's JSONL events in `parse`. How and why is the Codex part of `docs/harnesses.md`.
 
 ## Imports
 

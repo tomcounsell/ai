@@ -320,6 +320,8 @@ class Settings:
     # turn profile denies writing, and is never looked up on a PATH.
     pi: str = field(default_factory=lambda: _env("VALOR_PI", _pi()))
     node: str = field(default_factory=lambda: _env("VALOR_NODE", "/opt/homebrew/bin/node"))
+    # The Codex CLI, as its standalone installer links it.
+    codex: str = field(default_factory=lambda: _env("VALOR_CODEX", str(Path.home() / ".local/bin/codex")))
     # The uv a rollout runs outside the sandbox to sync the kernel's own
     # checkout (`core/rollout.py`), named the same way: inside Homebrew's
     # prefix, never looked up on a PATH.
