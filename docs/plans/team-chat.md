@@ -28,16 +28,21 @@ behaviour, not the classifiers.
 1. **Hear the team.** In a chat a spec lists, every sender binds as Tom
    does: starts, steers, answers, stops. The task records who
    (`by` is the sender's name, `sender_id` beside it). Tom's DM stays his.
-2. **One conversation turn.** A message that does not bind to running
-   work gets one short turn: the persona, the reply chain and the chat's
-   last 20 messages with names and times, the project's `CLAUDE.md`. It
-   answers in the chat (threaded), reacts, stays silent, or starts a task
-   with the request as written. It replaces the four classifiers (rule 4).
-   Non-`Eng:` groups: only messages naming Valor get the turn.
-3. **Work in the open.** A task started in a group asks its questions,
-   reports progress and delivers there, threaded to the request; anyone in
-   the thread answers or gives feedback. Notices about spend and grants
-   stay Tom's.
+2. **One chat session per chat**, like Hermes Agent (Tom, 2026-10-16):
+   each listed chat has one long-lived session with the main agent, and
+   every message in it, anyone's, is the next prompt (messages that arrive
+   during a turn go in together at the next one). The session replies
+   (threaded), reacts, stays quiet, or starts a task with the request as
+   written. Its workspace is the project checkout, kept and fetched before
+   each turn, with no setup or services, so a reply waits only for the
+   model. Compaction is the harness's own (Claude Code's, Pi's, Codex's),
+   told by the persona what to keep: who is who, open asks, tasks in
+   flight. In a `mentions` chat only a message naming Valor wakes it; the
+   rest reach it with the next one.
+3. **One voice.** A task the session started reports its questions,
+   progress and delivery to the session as a prompt, and the session tells
+   the chat; a reply to it reaches the task through the session. Notices
+   about spend and grants stay Tom's.
 4. **The persona for groups.** `engineer.md`'s buckets and `teammate.md`'s
    tone (short, warm, match the chat, read before replying) go into
    `persona/conduct.md` and `voice.md`.
