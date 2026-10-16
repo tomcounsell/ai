@@ -239,11 +239,11 @@ each, and the intended approach in a few lines (verdict `asked`, to `waiting`); 
 Tom (rebuild-baseline.md). The turn shows `no_material_question` by
 writing `.valor/no_question.md` (`skills/sdlc/clarify.md`).
 
-**In a team chat.** A task started there (`Brief.chat`) asks no judgement: the judge writes
-`judge.decided` `thin` with `leg: chat`, and the clarify turn is the conversation turn
-(`skills/sdlc/converse.md`). It answers or stays quiet with `stop.md` (`ended`), asks the chat
-(`asked`; anyone there answers), or starts the work (`no_material_question`). Its notices go to
-that chat ([bridges/telegram.md](bridges/telegram.md), Team chats).
+**A chat session.** A team chat's session (`Brief.chat`) asks no judgement: the judge writes
+`judge.decided` `thin` with `leg: chat`, and it stays in clarify for its life, one turn per wake,
+resumed in the same harness session. Only `stop.md` counts there (`ended`); it answers by sends
+and starts work as tasks of its own, which report to it
+([bridges/telegram.md](bridges/telegram.md), Team chats).
 
 ### `waiting`: Tom has a question
 

@@ -38,9 +38,10 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   read from settings, default 3.
 - **Bridges.** Telegram, email, Slack and a local chat bridge. Telegram
   carries messages both ways and is the one tested bridge. Reactions mark
-  arrival and the shape of the reply. In a team chat a message that binds
-  to no running work gets a conversation turn first; elsewhere each of
-  Tom's messages that is not a reply starts an SDLC task.
+  arrival and the shape of the reply. In a team chat every message goes
+  to the chat's one long-lived chat session, which replies, stays quiet,
+  or starts tasks that report to it; elsewhere each of Tom's messages
+  that is not a reply starts an SDLC task.
 - **Harnesses.** Claude Code, plus Pi and the OpenAI route in code.
 - **Persona and routines.** The persona is rendered into every turn;
   routines (status page, the 90-day expiry list, which reports to Tom and

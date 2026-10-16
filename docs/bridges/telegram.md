@@ -146,11 +146,11 @@ Some messages are the kernel speaking to Tom about his own work: a question a
 turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
 
 A notice goes to the chat where Tom started the task, when that is his own
-chat (his DM on that channel, or the operator chat); to the team chat a
-task was started in, in reply to that message (next section); and
-otherwise to his operator chat, which is fixed in settings
-(`notices.home`). A push credential request is always the operator's. No
-turn, task, or payload names the recipient. The kernel writes `notice.requested` with the text and the record it
+chat (his DM on that channel, or the operator chat), and otherwise to his
+operator chat, which is fixed in settings (`notices.home`). A task a chat
+session started reports to that session instead (next section), all but
+its push credential request, which is the operator's. No turn, task, or
+payload names the recipient. The kernel writes `notice.requested` with the text and the record it
 concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
 outbox sends it and writes `notice.sent` with the platform's `message_id`.
 That `message_id` is what lets Tom's reply bind to the record (next section).
@@ -309,27 +309,32 @@ the operator channel and chat, so kernel text never reaches the other
 people there. How an act leaves belongs to
 [architecture.md](../architecture.md).
 
-### Team chats: anyone is heard, the work is in the open
+### Team chats: one chat session, every message a steer
 
 A group chat a project spec lists (other than Tom's own) is a team chat
-(`intake.team_spec`), as the old system's listed groups were: anyone's
-message there binds as Tom's would, with no rights by sender, and its rows
-name the sender as `by`. A top-level message starts a task carrying the
-chat (`Brief.chat`) and, in its instruction, the chain it replies to and
-the chat's last 20 recorded messages with names and times, Valor's posts
-among them. Every message in the chat is recorded, bound or not. In a chat
-the spec lists under `mentions` (the old teammate groups), a top-level
-message starts nothing unless it names Valor ("valor", "@valor"); a reply
-to Valor's post binds there too.
+(`intake.team_spec`), as the old system's listed groups were, and has one
+long-lived chat session (Tom, 2026-10-16: "more like Hermes agent
+system"): a task naming the chat (`Brief.chat`), started by its first
+message with the chat's last 20 recorded messages, and resumed for every
+message after, anyone's, with no rights by sender. A message that wakes it
+is a steer; in a chat the spec lists under `mentions` (the old teammate
+groups) only one naming Valor ("valor", "@valor") or replying to his post
+wakes it, and the rest are heard (`message.heard`, quiet) and reach it
+with the next. Each turn's prompt is what came in since the last, with
+when, who and message ids; messages that arrive during a turn go in
+together at the next.
 
-Such a task skips the judge: its clarify turn is the conversation turn
-(`skills/sdlc/converse.md`), which answers (`stop.md` opening `Done:`,
-posted as written), asks (`question.md`, posted as written, answered by
-anyone's reply), stays quiet (`stop.md` exactly `Quiet.`), or starts the
-work (`no_question.md`, on to the plan in the same session). Its questions
-and its reports go to the chat in reply to the message. A reply to a
-conversation that ended without a plan, or was stopped, starts the next
-one.
+The session reads and dispatches (`skills/sdlc/converse.md`): it replies
+with a send to the chat, threaded; stays quiet by sending nothing; and
+starts, answers and stops tasks (`task.start`, `task.answer`,
+`task.stop`, `tools/chat_tasks.py`). A task it started reports its
+questions, deliveries and ends to the session (`child.reported`), never
+to a chat, and the session tells the chat. Its workspace is the project's
+checkout with no setup and no services, brought up to the project's
+branch before each turn, so a reply waits only for the model. Its history
+is the harness's to compact (Claude Code's own; Pi's with compaction on;
+Codex's), and its stage says what a compaction keeps: who is who, open
+asks, tasks in flight. Its sends to its own chat owe Tom no report.
 
 ### Unbound messages: classified by the judgement layer
 
