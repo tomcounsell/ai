@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, db, ledger, machine, rollout, router, runs, serve, session, signals, tasks
+import core.gateway
+from core import broker, db, ledger, machine, notices, rollout, router, runs, serve, session, signals, tasks
 from core.__main__ import _performers
 from core.gateway import Gateway
 from core.machine import State
@@ -75,6 +76,12 @@ async def tick(kernel: serve.Kernel, dsn: str) -> None:
 async def settled(kernel: serve.Kernel) -> None:
     while kernel.jobs:
         await asyncio.gather(*list(kernel.jobs.values()), return_exceptions=True)
+
+
+async def ticks(kernel: serve.Kernel, dsn: str, n: int) -> None:
+    for _ in range(n):
+        await tick(kernel, dsn)
+        await settled(kernel)
 
 
 async def gateway_for(dsn) -> Gateway:
@@ -155,13 +162,8 @@ def _plan_signals(ws: Path, turn: str, *effects: str) -> Path:
     commit(ws, "docs/plan.md", "plan\n", "Plan")
     v = ws / ".valor"
     (v / "effects").mkdir(parents=True, exist_ok=True)
-    plan = {
-        "path": "docs/plan.md",
-        "stakes": "a toy change",
-        "critique_rounds": 0,
-        "review_rounds": 1,
-        "scope": [],
-    }
+    plan = {"path": "docs/plan.md", "stakes": "a toy change", "scope": []}
+    plan.update(critique_rounds=0, review_rounds=1)
     (v / "plan.json").write_text(json.dumps(plan))
     for name in effects:
         (v / "effects" / name).write_text(json.dumps(send(name)))
@@ -220,23 +222,15 @@ def test_one_step_per_event(fresh, op):
     async def go():
         task = await new_task(fresh)
         kernel = only(serve.Kernel(None, {State.JUDGE: counting}, None, fresh), task)
-
-        async def ticks(n):
-            for _ in range(n):
-                await tick(kernel, fresh)
-                await settled(kernel)
-
-        await ticks(5)
+        await ticks(kernel, fresh, 5)
         after_moved = len(calls)
-        from core import notices
-
         async with await db.connect(fresh) as conn:
             await notices.request(conn, task, kind="test", about_key="test:quiet", text="quiet")
-        await ticks(3)
+        await ticks(kernel, fresh, 3)
         after_quiet = len(calls)
         async with await db.connect(fresh) as conn:
             await ledger.append(conn, task, "test.poke", {})
-        await ticks(3)
+        await ticks(kernel, fresh, 3)
         return after_moved, after_quiet, len(calls)
 
     assert run(go()) == (2, 2, 3)
@@ -258,15 +252,11 @@ def test_an_idle_task_gives_the_slot_to_other_ready_work(fresh, op, monkeypatch)
         a = await new_task(fresh)
         await scripted.run_judge(fresh, a, "precise")
         kernel = only(serve.Kernel(None, {State.PLAN: idling}, None, fresh), a)
-        for _ in range(2):  # alone, it is stepped again on every wake: no bound
-            await tick(kernel, fresh)
-            await settled(kernel)
+        await ticks(kernel, fresh, 2)  # alone, it is stepped again on every wake: no bound
         b = await new_task(fresh)
         await scripted.run_judge(fresh, b, "precise")
         only(kernel, a, b)
-        for _ in range(4):
-            await tick(kernel, fresh)
-            await settled(kernel)
+        await ticks(kernel, fresh, 4)
         return a, b
 
     a, b = run(go())
@@ -309,8 +299,6 @@ def test_stop_mid_turn_under_serve(fresh, op, tmp_path):
 
 
 def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, capsys):
-    import core.gateway
-
     ticks, closed = [], []
 
     async def tick(self, conn):
@@ -365,16 +353,12 @@ def test_ready_work_runs_foreground_first_then_in_start_order_moved_by_placement
             await session.shape(conn, a, after=c, by="valor")
         monkeypatch.setattr(serve, "settings", dataclasses.replace(serve.settings, max_turns=1))
         kernel = only(serve.Kernel(None, {State.PLAN: counting}, None, fresh), a, b, c, tom)
-        for _ in range(4):
-            await tick(kernel, fresh)
-            await settled(kernel)
+        await ticks(kernel, fresh, 4)
         ran = list(calls)
         # A label or a placement moves no task: nothing steps again.
         async with await db.connect(fresh) as conn:
             await session.shape(conn, b, confirm=True, before=a, by="valor")
-        for _ in range(2):
-            await tick(kernel, fresh)
-            await settled(kernel)
+        await ticks(kernel, fresh, 2)
         return ran, len(calls), (a, b, c, tom)
 
     ran, after, (a, b, c, tom) = run(go())

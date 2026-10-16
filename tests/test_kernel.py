@@ -2,6 +2,7 @@
 message on real Postgres, with no model call."""
 
 import asyncio
+import dataclasses
 import sys
 import uuid
 
@@ -9,7 +10,7 @@ import aiohttp
 import psycopg
 import pytest
 
-from core import broker, db, intake, ledger, machine, notices, runs, session, tasks
+from core import broker, db, intake, ledger, machine, notices, runs, session, slot, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
 from tests import bridges, scripted
@@ -88,14 +89,11 @@ def test_act_is_performed_at_request_and_one_request_id_is_one_effect(dsn, tmp_p
             wrote = await broker.request(
                 conn, perf, task, broker.Action("workspace_write", "a.txt", {"text": "a"})
             )
-            held = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
-            twin = await broker.request(conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}))
-            once = await broker.request(
-                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
-            )
-            again = await broker.request(
-                conn, perf, task, broker.Action("outbox_send", "tom", {"text": "hi"}), request_id="t1/a.json"
-            )
+            send = broker.Action("outbox_send", "tom", {"text": "hi"})
+            held = await broker.request(conn, perf, task, send)
+            twin = await broker.request(conn, perf, task, send)
+            once = await broker.request(conn, perf, task, send, request_id="t1/a.json")
+            again = await broker.request(conn, perf, task, send, request_id="t1/a.json")
             state = await tasks.status(conn, task)
         return wrote, held, twin, once, again, state
 
@@ -206,11 +204,6 @@ def test_the_intent_row_carries_the_action_and_reconcile_rebuilds_it_from_that_a
 
 
 def test_max_turns_holders_run_at_once_and_the_next_waits_for_one(dsn, monkeypatch):
-    import dataclasses
-    import uuid
-
-    from core import slot
-
     monkeypatch.setattr(
         slot, "settings", dataclasses.replace(slot.settings, max_turns=2, machine=uuid.uuid4().hex)
     )
@@ -241,8 +234,6 @@ def test_max_turns_holders_run_at_once_and_the_next_waits_for_one(dsn, monkeypat
 
 
 def test_a_turn_keeps_the_operators_path_and_knows_its_github_repo(tmp_path, monkeypatch):
-    from core import workspace
-
     monkeypatch.setenv("PATH", "/opt/homebrew/bin:/usr/bin")
     env = workspace.environment({"PATH": "/task/bin:/usr/bin", "REDIS_PORT": "6400"})
     assert env["PATH"] == "/task/bin:/usr/bin:/opt/homebrew/bin" and env["REDIS_PORT"] == "6400"

@@ -117,8 +117,6 @@ os.rename(os.path.join(d, 'child.pid.tmp'), os.path.join(d, 'child.pid'))
 time.sleep(60)
 """
 
-# The same daemon, deaf to SIGTERM, so the reap waits out its grace.
-
 
 async def _gone(*pids: int, within: float) -> bool:
     deadline = time.monotonic() + within

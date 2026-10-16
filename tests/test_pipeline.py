@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from core import broker, db, judgement, judgement_sites, ledger, machine, router, session, tasks
+from core import broker, db, judgement, judgement_sites, ledger, machine, notices, router, session, tasks
 from core.gateway import Gateway
 from core.machine import State
 from tests import judgement_upstream, scripted
@@ -130,8 +130,6 @@ async def at(dsn, ws, stage: str) -> str:
 
 @pytest.mark.parametrize("stage", ["clarify", "plan", "build"])
 def test_stop_ends_the_work_from_clarify_plan_and_build_and_done_says_so(dsn, tmp_path, stage):
-    from core import notices
-
     ws, _ = scripted.workspace(tmp_path)
 
     async def go():
@@ -238,18 +236,9 @@ def test_an_ask_is_read_against_its_projects_open_tasks_and_the_judge_runs_as_wi
             task = await ask(conn, "alpha", "the tests still assert valor-cori-rebuild")
         await scripted.run_judge(dsn, task, "precise,covered,2,after")
         await scripted.run_judge(dsn, task, "precise")  # moved on: asks nothing again
-        return (
-            older,
-            newer,
-            (ended, stopped, other, legacy),
-            listed,
-            left_out,
-            cut,
-            task,
-            await rows(dsn, task),
-        )
+        return older, newer, (ended, stopped, other, legacy), listed, left_out, cut, await rows(dsn, task)
 
-    older, newer, closed, listed, left_out, cut, _, found = run(go())
+    older, newer, closed, listed, left_out, cut, found = run(go())
     assert [t["id"] for t in listed] == [newer, older] and left_out == 0
     assert not {t["id"] for t in listed} & set(closed)
     assert [t["id"] for t in cut[0]] == [newer] and cut[1] == 1

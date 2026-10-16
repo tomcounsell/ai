@@ -4,6 +4,7 @@ replies come back through it."""
 
 import asyncio
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +50,12 @@ async def tom(emu, dsn, chat_id, text, reply_to=None) -> dict:
 
 async def _has(dsn, chat_id, mid) -> bool:
     return str(mid) in await ids(dsn, chat_id)
+
+
+async def replies_to(dsn, received_id) -> list[dict]:
+    return [
+        r for r in await of_type(dsn, "notice.requested") if r["about_key"].startswith(f"reply:{received_id}")
+    ]
 
 
 def test_a_message_is_recorded_once_through_intake(emu, dsn, tmp_path, op):
@@ -144,36 +151,32 @@ HEAD = "Ship the quarterly invoices"
 LEAKS = ("[n:", "127.0.0.1", "http", "python -m", "/", "deadbeef", "-100777", "E1", "keys")
 
 
-def _plain(text: str, *also: str) -> None:
-    assert text.startswith(f'On "{HEAD}": '), text
-    assert not [s for s in (*LEAKS, *also) if s in text], text
-
-
 def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn, tmp_path):
-    from types import SimpleNamespace
-
     from bridges.email import EmailBridge
     from core import ledger, serve
 
     async def go():
         async with await db.connect(dsn) as conn:
-            task = await tasks.start(
-                conn, tasks.Brief(instruction=f"{HEAD}\nand the rest", max_effect_class="act")
-            )
+            brief = tasks.Brief(instruction=f"{HEAD}\nand the rest", max_effect_class="act")
+            task = await tasks.start(conn, brief)
             head = await notices.headline(conn, task)
-            texts = []
-            for p in (
+            why = [{"kind": "merge", "why": w, "reason": "! [rejected] deadbeef"} for w in notices.MERGE_WHY]
+            ended = [
                 {"kind": "decided", "text": "Not worth it."},
                 {"kind": "step", "check": "test", "tries": 4, "reason": "/tmp/x: boom"},
                 {"kind": "step", "state": "build", "tries": 4, "reason": "boom"},
                 {"kind": "provision", "tries": 3, "reason": "git clone /x failed"},
-                *({"kind": "merge", "why": w, "reason": "! [rejected] deadbeef"} for w in notices.MERGE_WHY),
+                *why,
                 {"kind": "merge", "reason": "deadbeef"},
                 {"kind": "other", "reason": "deadbeef"},
-            ):
-                f = SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None)
-                texts.append(notices.ended_text(f, head))
-            assert texts[1] != texts[2] and len(set(texts[4:7])) == 3
+            ]
+            texts = [
+                notices.ended_text(
+                    SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None), head
+                )
+                for p in ended
+            ]
+            assert texts[1] != texts[2] and len(set(texts[4 : 5 + len(why)])) == len(why) + 1
             assert texts[0].endswith(notices.AGAIN)
             for missing in (True, False):
                 await notices.credential(conn, task, f"deadbeef{missing}", missing=missing)
@@ -200,7 +203,9 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
                 notices.lead(head, serve._rollout_text(s, 3)) for s in (*serve.ROLLOUT_STEPS, "?")
             ]
             for text in texts:
-                _plain(text, task)
+                assert text.startswith(f'On "{HEAD}": ') and not [s for s in (*LEAKS, task) if s in text], (
+                    text
+                )
             assert requested[0] != requested[1]
             for (*_, said), text in zip(sends, requested[2:], strict=False):
                 assert said in text
