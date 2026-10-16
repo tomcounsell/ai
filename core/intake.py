@@ -32,9 +32,9 @@ The binding table, first match wins:
 | A reply to a merged or stopped task | `none`, with a notice |
 | A reply on a channel where Tom replies (not email), exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
-| A reply to the delivered notice, task in `merge` | `feedback` |
 | Any other reply to a task's notice or send | `steer` |
-| Not a reply, with text or files | `start` |
+| Not a reply, in a DM on a threaded channel, with text, after exactly one live ask among Valor's preceding posts | `answer`, with a notice |
+| Not a reply, with text or files | `start`, carrying the preceding posts in a DM on a threaded channel |
 | Not a reply, empty | `none` |
 
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
@@ -45,6 +45,18 @@ On a threaded channel (Slack) a reply names its thread's root, not the
 message it answers, so a reply binds to the newest of Valor's posts in
 that thread that is older than it (the root included), read from the
 ledger's `sent` entries.
+
+On a threaded channel people also answer in a DM without threading, so a
+top-level DM message keeps the posts it follows. Its *preceding posts* are
+Valor's top-level posts in the DM older than it and newer than the DM's
+previous top-level message, the newest `CARRIED`, one per send or notice.
+A post is a *live ask* when it is its task's newest there and is the open
+question's notice of a task in `waiting`. Exactly one live ask, still live
+once its task is locked, takes the message as its answer (even `stop`,
+which then does not stop the task), and a notice in reply says which work
+took it. Otherwise (no live ask, two, or files with no text) the message
+starts a task whose instruction carries the preceding posts after Tom's
+words. A top-level message never stops or steers an older task.
 
 A binding notice goes back in reply only in Tom's own chat: the operator
 chat, or his DM on a channel where he replies. About any other message
@@ -59,6 +71,7 @@ gets its reaction row (`reactions.on_bound`).
 
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -493,7 +506,11 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         return await _bound(conn, p, None, "none")
     task_id, replied = await _replied(conn, p)
     if task_id is None or replied is None:
-        return await _start(conn, p)
+        posts = await _preceding(conn, p)
+        asks = [post for post in posts if post["waits"]]
+        if len(asks) == 1 and (bound := await _adjacent(conn, p, asks[0])) is not None:
+            return bound
+        return await _start(conn, p, posts)
     # Tree, then task: the order every tree writer takes (a stop or
     # feedback below takes the tree's lock again).
     await tasks.lock_tree(conn, task_id)
@@ -560,6 +577,114 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     return as_
 
 
+# How many of Valor's posts a top-level DM message carries, newest kept.
+CARRIED = 5
+
+
+async def _preceding(conn, p: dict[str, Any]) -> list[dict[str, Any]]:
+    """Valor's top-level posts in a DM on a threaded channel that a
+    top-level message follows: older than it, newer than the chat's
+    previous top-level message, oldest first, the newest `CARRIED`. One
+    per send or notice, at its first part. Each is `{task_id, ts, kind,
+    about_key, text, waits}`; `waits` is true when the post is its task's
+    newest here and the task still waits on it for an answer. Empty for a
+    reply or any other chat."""
+    row = channels.get(p["channel"])
+    if p.get("reply_to") or p.get("chat_kind") != "dm" or row is None or not row.threaded:
+        return []
+    channel, chat, ts = p["channel"], p["chat_id"], p["message_id"]
+    (since,) = await (
+        await conn.execute(
+            "SELECT max(payload->>'message_id' COLLATE \"C\") FROM events WHERE type = 'message.received' "
+            "AND task_id = %s AND payload->>'chat_id' = %s AND payload->>'topic_id' IS NULL "
+            "AND (payload->>'message_id') COLLATE \"C\" < %s",
+            (channel, chat, ts),
+        )
+    ).fetchone()
+    found = await (
+        await conn.execute(
+            f"SELECT id, task_id, type, payload, e->>'message_id' {_SENT}"
+            "AND e->>'channel' = %s AND e->>'chat_id' = %s "
+            "AND (e->>'thread_ts' IS NULL OR e->>'thread_ts' = e->>'message_id') "
+            "AND (e->>'message_id') COLLATE \"C\" < %s AND (e->>'message_id') COLLATE \"C\" > %s "
+            "ORDER BY (e->>'message_id') COLLATE \"C\", id",
+            (channel, chat, ts, since or ""),
+        )
+    ).fetchall()
+    first: dict[int, tuple] = {}
+    for r in found:
+        first.setdefault(r[0], r)
+    posts = []
+    for _, task_id, type_, payload, at in sorted(first.values(), key=lambda r: (r[4], r[0]))[-CARRIED:]:
+        if type_ == "effect.outcome":
+            said = await (
+                await conn.execute(
+                    "SELECT payload->'payload'->>'text' FROM events WHERE type IN ('effect.intent', 'effect.held') "
+                    "AND payload->>'effect_id' = %s ORDER BY id LIMIT 1",
+                    (payload.get("effect_id"),),
+                )
+            ).fetchone()
+            post = {"kind": "send", "about_key": None, "text": said[0] if said else None}
+        else:
+            said = await (
+                await conn.execute(
+                    "SELECT payload FROM events WHERE type = 'notice.requested' AND payload->>'notice_id' = %s",
+                    (payload.get("notice_id"),),
+                )
+            ).fetchone()
+            n = said[0] if said else {}
+            post = {"kind": n.get("kind"), "about_key": n.get("about_key"), "text": n.get("text")}
+        posts.append({"task_id": task_id, "ts": at, **post, "waits": False})
+    newest = {post["task_id"]: post for post in posts}
+    for task_id, post in newest.items():
+        post["waits"] = _waits(machine.fold(await ledger.read(conn, task_id)), post)
+    return posts
+
+
+def _waits(f: machine.Fold, post: dict[str, Any]) -> bool:
+    """Whether the task still waits on Tom's answer to `post`, its open
+    question's notice."""
+    about = post.get("about_key") or ""
+    return post["kind"] == "question" and f.state is State.WAITING and about == f"question:{f.open_question}"
+
+
+async def _adjacent(conn, p: dict[str, Any], post: dict[str, Any]) -> str | None:
+    """Bind a top-level DM message as the answer to the one open question
+    it follows, with a notice in reply saying so. None, and nothing
+    written, when the message has no text or the question is no longer
+    open once the task is locked."""
+    text = (p.get("text") or "").strip()
+    if not text:
+        return None
+    task_id = post["task_id"]
+    await tasks.lock_tree(conn, task_id)
+    await ledger.lock(conn, f"task:{task_id}")
+    if not _waits(machine.fold(await ledger.read(conn, task_id)), post):
+        return None
+    as_ = await _bound(conn, p, task_id, "answer")
+    await session.answer(conn, task_id, text, by="tom", via=p["channel"])
+    said = (
+        "I took your message as your answer to my question. "
+        "If it was new work, send it again and it will start on its own."
+    )
+    await _notice(conn, task_id, p, notices.lead(await notices.headline(conn, task_id), said))
+    return as_
+
+
+def _context(posts: list[dict[str, Any]]) -> str:
+    """The posts a top-level DM message followed, as a started task's
+    instruction carries them."""
+    lines = [
+        "Tom wrote this in his Slack DM, not in a thread, right after these posts of mine there, oldest first:"
+    ]
+    for post in posts:
+        at = datetime.fromtimestamp(float(post["ts"]), UTC).strftime("%Y-%m-%d %H:%M UTC")
+        waits = ", still waiting on his answer" if post["waits"] else ""
+        lines.append(f"- {at}, from task {post['task_id']}{waits}:")
+        lines += tasks.quoted(post["text"] or "(its text is not in the ledger)")
+    return "\n".join(lines)
+
+
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
     ident = p["sender_id"] if p["channel"] == "email" else p["chat_id"]
     for chat, spec in _project_chats(p["channel"]):
@@ -571,17 +696,20 @@ def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
         return None
 
 
-async def _start(conn, p: dict[str, Any]) -> str | None:
+async def _start(conn, p: dict[str, Any], posts: list[dict[str, Any]] | None = None) -> str | None:
     """A new task from Tom's message, under the project listing the chat
     (by email: the sender), else `valor`. Its workspace is provisioned by a
     kernel job after it starts. A message of files alone starts a task
-    whose instruction lists them."""
+    whose instruction lists them; one that followed Valor's `posts` in a
+    DM carries them after Tom's words."""
     text = (p.get("text") or "").strip()
     files = _files(p.get("attachments") or [])
     if files:
         text = f"{text}\n\n{files}" if text else f"Tom sent files with no text:\n{files}"
     if not text:
         return await _bound(conn, p, None, "none")
+    if posts:
+        text = f"{text}\n\n{_context(posts)}"
     spec = _project_for(p)
     harness_name, model = resolve_seat("frontier")
     brief = tasks.Brief(

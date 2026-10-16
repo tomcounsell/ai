@@ -149,6 +149,16 @@ the reply (the root included), read from the `sent` entries in the ledger,
 with no cap. A notice posted inside a long thread binds however far down
 it sits. Bindings record `via: "slack"`.
 
+People also answer in a DM without threading. A top-level message in
+Tom's DM carries the posts it follows: Valor's top-level posts there
+since his previous top-level message, the newest five. When exactly one
+of them is a question its task still waits on, and the message has text,
+the message is that task's answer, and a notice in reply names the work
+that took it. Otherwise it starts a task whose instruction quotes those
+posts after his words, so the task can see what he was answering. A
+top-level message never stops or steers an older task. Channels other
+than DMs keep the plain rule: a top-level message starts a task.
+
 ## Sending
 
 **The performer.** `slack.send_message` is `act`. Its target is
