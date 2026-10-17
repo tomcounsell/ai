@@ -7,9 +7,14 @@ Valor usually waits to be mentioned and mostly stays quiet"; "go ahead and
 enact it all". Source of the rooms: the old system's
 `~/Desktop/Valor/projects.json`, read as data.
 
-**Base.** Builds on f3824ece2f03's `rooms` (`Spec.rooms`, `intake.room`,
-the `Room:` line in the Brief). The build turn rebases on `main` once that
-commit is there; no second mechanism.
+**Base.** Builds on f3824ece2f03's `rooms`, which is not on `main` yet
+(its unmerged commit b34cf0857 has `Spec.rooms` keyed
+`"telegram:<id>"`, `intake.room`, a `Room:` line in the Brief). The build
+does items 1-4 and their tests first; item 5 and the room tests start only
+after that commit has merged and this branch is rebased on it, and match
+its actual key format and `room` signature then, whatever they turn out to
+be. If it has not merged when items 1-4 are done, the build waits on it
+(a question to Tom names the dependency). No second mechanism.
 
 ## What is built
 
@@ -23,19 +28,27 @@ commit is there; no second mechanism.
    - satsol: Eng -5136818964; team -5095889193
    - psyoptimal: team -1002600253717
    - valor: Agent Builders Chat -1003879986445, Perplexity Build Comp -1003936769817
-2. **Mentions only** for every team chat: Yudame, PsyOPTIMAL, both Cyndra
+2. **The handle wakes.** `MENTION` is `(?<![\w])@?valor\b`, so a Telegram
+   tap-mention `@valorengels` does not match. It becomes
+   `(?<![\w])@?valor(?:engels)?\b`, matching "valor", "@valor", "hey
+   valor" (the old triggers) and Valor's handle.
+3. **Mentions only** for every team chat: Yudame, PsyOPTIMAL, both Cyndra
    groups, SATSOL, Agent Builders, Perplexity (`mentions`, which exists).
    Eng groups, the operator group and Tom's own chats are not listed.
-3. **DMs from others.** `team_spec` accepts a Telegram DM a spec lists, as
+4. **DMs from others.** `team_spec` accepts a Telegram DM a spec lists, as
    well as a group (Tom's DM stays his via `_toms_own`). A DM is never
    mentions-only. The chat session's opening says "a direct message with
-   <name>" for a DM instead of "team chat". DMs from the old whitelist:
-   valor: Kevin 577036901, Matt Rideout 2106858278, Nick Frith 7954357506,
-   Andy Malkin 2019570687; cyndra: Charlie 7312372670, Colin Behring
-   8209004019, Thabiso Epema 8762685703, Johann 6084902164, Jess Mason
-   7388810030, Hazem 7178632018; psyoptimal: Lewis Parrott 7820562338;
-   gato-os: Mike Berson 469027377; cuttlefish: Graham D 437868058.
-4. **Email lanes.** Exact senders already work (`email:<address>`):
+   <name>" for a DM instead of "team chat". As the old `dms` block did
+   ("All DMs use teammate persona against the ai repo"), every DM is listed
+   in `valor.toml`, so the Cowboy, which runs a kernel, answers all of them
+   now; each DM's room names the person and the project they work on. From
+   the old whitelist: Kevin 577036901, Matt Rideout 2106858278, Nick Frith
+   7954357506, Andy Malkin 2019570687 (valor); Charlie 7312372670, Colin
+   Behring 8209004019, Thabiso Epema 8762685703, Johann 6084902164, Jess
+   Mason 7388810030, Hazem 7178632018 (cyndra); Lewis Parrott 7820562338
+   (psyoptimal); Mike Berson 469027377 (gato-os); Graham D 437868058
+   (cuttlefish, customer service).
+5. **Email lanes.** Exact senders already work (`email:<address>`):
    cuttlefish nav@krystallabs.io, gcason2@gmail.com,
    grahamhderry@gmail.com (tom@yuda.me is Tom's own already); cyndra
    charlie@yuda.me. Domains need code: an `email:@<domain>` entry matches a
@@ -44,7 +57,7 @@ commit is there; no second mechanism.
    sender beats domain. Added: psyoptimal `@psyoptimal.com`,
    `@psyoptimalsports.com`; cyndra `@cyndra.ai`; gato-os
    `@chainstarters.com` (its comment about the left-out domain goes).
-5. **Room descriptions** (`rooms`), one per chat added, plus:
+6. **Room descriptions** (`rooms`), one per chat added, plus:
    - Each team chat: its purpose; "No engineering or SDLC work starts here.
      Web search and filing GitHub issues are fine. Point engineering
      requests to <its Eng group>." Agent Builders adds "a public group".
@@ -52,12 +65,13 @@ commit is there; no second mechanism.
    - yudame and psyoptimal's Eng-side texts revised to this rule (yudame
      has no Eng group: requests go to the Eng group of the project asked
      about, else Tom).
-   - DMs: "A direct message with <name>, a teammate on <project>"; same no-
-     engineering rule. Graham's (cuttlefish): customer service.
+   - DMs: "A direct message with <name>, who works on <project>"; same no-
+     engineering rule, pointing to that project's Eng group. Graham's:
+     customer service for Cuttlefish.
    - Email: `intake.room` for an email thread takes the session's project
      and returns that spec's `rooms."email"` if set, else today's
      `EMAIL_ROOM`. cuttlefish's says customer service; the others teammate.
-6. Docs: `projects/README.md` (domain entries, DMs), `docs/bridges/telegram.md`
+7. Docs: `projects/README.md` (domain entries, DMs), `docs/bridges/telegram.md`
    (DMs bind like team chats), the intake docstring's table.
 
 **No hard lock.** Tom asked for one "if possible". A lock is a restriction;
@@ -66,12 +80,21 @@ happened (the group was not even connected). The description governs; if a
 message there ever starts engineering, that is the incident, and the lock
 goes to Tom then. The delivery says this. This diff adds no governance.
 
+**Named risk, not fixed.** Email is unverified (`core/channels.py`), so a
+From can be forged. An exact sender admitted one person; a domain lane
+lets anyone forging an address at that domain open a session under that
+project. The session carries no Tom's rights (no email does), so the cost
+is a reply and the project's context in it. The delivery states this next
+to the no-lock note.
+
 ## Out of scope
 
 Slack DMs (not in the old list); `trusted_domains` (no email carries
 rights); old personas' read-only permissions (the descriptions carry the
-rule); rolling out the Pirate, Captain or Bald, so rooms on those machines
-stay inert until their rollout.
+rule); rolling out the Pirate, Captain or Bald. Rooms on those machines
+stay inert until their rollout, and the delivery lists them: Yudame, the
+email lanes and team groups of psyoptimal, cuttlefish, gato-os (Captain,
+Pirate), and all cyndra groups and lanes (Bald); satsol has no machine.
 
 ## Stakes
 
@@ -85,7 +108,9 @@ by a commit.
   group, operator group or Tom's DM is; every listed chat has a room;
   cyndra and satsol load.
 - A mentions team chat: unaddressed is `heard`, "Valor ..." and a reply to
-  Valor are `steer` (existing test, kept).
+  Valor are `steer` (existing test, kept); "@valorengels can you look" is
+  `steer`; "valorous" stays `heard`.
+- Real specs: every old-whitelist DM is in `valor.toml`'s chats.
 - A listed DM from another person: every message `steer`s that DM's
   session, no mention needed; an unlisted DM binds `none`; Tom's DM still
   binds as his own chat.
@@ -99,5 +124,5 @@ by a commit.
 **Live (done).** After the merge and a Cowboy bridge restart, in a team
 chat the Cowboy hears (Agent Builders Chat or Perplexity Build Comp;
 Yudame is the Pirate's, which has no kernel until its rollout) a message
-naming Valor gets a reply and an unaddressed one gets none, and Tom has
-seen it. Yudame itself is checked at the Pirate's rollout.
+naming Valor (and one tap-mentioning @valorengels) gets a reply and an
+unaddressed one gets none, and Tom has seen it. Yudame itself is checked at the Pirate's rollout.
