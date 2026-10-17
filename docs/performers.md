@@ -85,6 +85,7 @@ known yet.
 | TypeSafe (Jev) and OpenRouter, by `judgement-keys` | this install | judgement calls from the kernel | no; the gateway | `gateway.opened` and `gateway.charged` with `route: judgement`; `judgement.answered` or `judgement.failed` |
 | Claude Code's login in the login keychain, read by a turn through `security` | this install | a model call around the gateway | no | none beyond the turn's own transcript. **Gap**, accepted by Tom on 2026-10-01 ([architecture.md](architecture.md), Limits) |
 | Valor's own `gh` login, git credential helper, SSH agent, and `sentry-cli` auth | this install | whatever the account allows, from a turn: pushes to the task's origin, pull requests, issue and Sentry reads | no | none beyond the turn's own transcript. **Gap** |
+| Google Workspace, valor@yuda.me, by `gws`'s refresh token in `~/.config/gws/credentials.json` ([machine.md](machine.md)) | this install | whatever the account allows, from a turn: Gmail reads, drafts and sends, Calendar, Drive, Docs, Sheets, Slides, Tasks | no | none beyond the turn's own transcript. **Gap** |
 | Any other account logged in on the Mac, in the login keychain or a browser session | this install | whatever the account allows, from a turn | no | none beyond the turn's own transcript. **Gap** |
 | Stripe | per business, not yet granted | | | |
 | Google Analytics | per business, not yet granted | | | |
