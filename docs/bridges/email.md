@@ -118,8 +118,9 @@ the thread's earlier recorded emails; every later one is a steer on that
 session, naming its sender. The session reads, answers by replying to all
 (`email.send` with `reply_to`), and starts the tasks the work needs
 (`skills/sdlc/converse.md`). Its Brief's `Room:` line, on every turn, is
-`intake.EMAIL_ROOM`, Valor's own correspondence for the business (one
-mailbox today; [telegram.md](telegram.md#chat-sessions-one-per-chat-every-message-a-steer)).
+its project's `rooms.email` (cuttlefish's says customer service), else
+`intake.EMAIL_ROOM`, Valor's own correspondence for the business
+([telegram.md](telegram.md#chat-sessions-one-per-chat-every-message-a-steer)).
 
 **No rights by sender.** A `From` header is a claim anyone can write, so
 `intake.receive` sets every email record's `verified` false and the bridge
