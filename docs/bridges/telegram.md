@@ -355,12 +355,12 @@ Each chat (a "room") may carry a description of what it is for, beside
 where it is listed: a spec's `rooms` entry for its chat (every group and
 DM a spec lists), an email thread's its project's `rooms.email`, and for
 Tom's own chat (his Telegram and Slack DMs, the local chat) and any other
-email thread, the text in `core/intake.py` (`TOMS_OWN_ROOM`, `EMAIL_ROOM`).
-Every team chat's says no engineering or SDLC work starts there, that web
-search and filing GitHub issues are fine, and which Eng group engineering
-requests go to (Tom, 2026-10-17; a description, not a lock: no incident
-yet calls for one). Tom, 2026-10-17: "each
-'room' should have a description that anchors the purpose"). It is the
+email thread, the text in `core/intake.py` (`TOMS_OWN_ROOM`, `EMAIL_ROOM`;
+Tom, 2026-10-17: "each 'room' should have a description that anchors the
+purpose"). Every team chat's says no engineering or SDLC work starts
+there, that web search and filing GitHub issues are fine, and which Eng
+group engineering requests go to (Tom, 2026-10-17; a description, not a
+lock: no incident yet calls for one). It is the
 Brief's `Room:` line, read on every dispatch (`intake.room`), so it rides
 in the appended system prompt beside the persona and the corrections and
 no compaction removes it; editing it reaches an open session at its next
