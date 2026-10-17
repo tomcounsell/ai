@@ -30,8 +30,10 @@ place in DMs and in groups that allow custom reactions.
    👀 stays), `task` (hand work to a task), `code`, `web_search`, `lookup`
    (code, chat history, ledger, email), `document`, `present` (deck, video,
    explainer), `issue`, `schedule`, `send` (email, a file, a message to
-   someone else). `stop` stays unjudged 👌. The question text and
-   `consumer` say the label is the activity Valor's response will take.
+   someone else). `stop` stays unjudged 👌. The question text, the
+   `bound_as` input description and `consumer.proceed` change with them:
+   the label is the classifier's read of the activity the response will
+   take, a prediction, not a record of it.
 2. **One mapping, `core/reactions.py` `REACTIONS`.** Per channel, per label
    (`seen` included): Telegram an emoji glyph plus an optional custom-emoji
    document id; Slack a standard emoji name (`eyes`, `saluting_face`,
@@ -42,7 +44,10 @@ place in DMs and in groups that allow custom reactions.
    glyph is not on the standard list, recorded in the mapping. `EMOJI` and
    `REACTION_NAMES` go. `reaction.requested` gains `label` and, on
    Telegram, `custom_emoji_id`; `ReactionDue` carries both. Slack sends the
-   name it is given.
+   name it is given. A row written before the deploy (no `label`, no
+   `custom_emoji_id`) takes its label from its stage (`seen` → `seen`,
+   a `shape` row by its emoji's old meaning, else `seen`), so an in-flight
+   👀 is placed, not dropped.
 3. **Telegram sends custom emoji.** `Wire.react` takes the optional id and
    sends `ReactionCustomEmoji`, else `ReactionEmoji`. At connect the wire
    logs the available reactions (`GetAvailableReactionsRequest`, premium
@@ -50,22 +55,29 @@ place in DMs and in groups that allow custom reactions.
    group's `available_reactions` with the account; only if one refuses
    custom reactions does the Telegram entry get a standard fallback used on
    `REACTION_INVALID`, and the delivery names the chat that needed it.
-4. **Coverage gap closed.** `on_bound` also reacts (👀, judged) for a
-   message bound `none` with a task id, so Tom's reply to a finished task
-   in his DM is marked read.
-5. **Known to the session.** `chat_line` takes the message's current
-   reaction: the newest placed `reaction.requested` for its `received_id`,
-   with its label, e.g. `(message 123, you reacted 🔍 web_search)`, or
-   `you reacted 👀 read` (`reply` when the judgement answered so).
-   `chat_prompt` reads it from the session's own rows; the history block
-   and `_steering` read it by `received_id`. A shape reaction placed after
-   the turn that read its message reaches the next turn as a line, `- You
-   changed your reaction on message 123 to 🔍 (web_search)`, the way a
-   `heard` row does (quiet, it wakes nothing).
+4. **Coverage gap closed.** `on_bound` also writes 👀 for a message bound
+   `none` with a task id (Tom's DM reply to a merged or stopped task), as a
+   `seen` row with `judged: false`, which `pending()` excludes: its only
+   response is the kernel's notice, so no activity emoji follows.
+5. **Known to the session, truthfully.** The session never chose the
+   reaction; the classifier did, in its own serve job. `chat_line` shows
+   the message's current reaction as that: the newest placed
+   `reaction.requested` for its `received_id`, e.g. `(message 123; reacted
+   🔍: the reaction classifier read it as web_search)`; with only 👀,
+   `reacted 👀 (read)`, plus `; the classifier read it as a plain reply`
+   when the `judgement.answered` row for that `received_id` picked `reply`
+   (which writes no reaction row, so it is read from the judgement).
+   `chat_prompt` reads both from the session's own rows; the history block
+   and `_steering` read them by `received_id`. A shape reaction placed after
+   the turn that read its message reaches the next turn as `- The reaction
+   classifier set 🔍 (web_search) on message 123`, the way a `heard` row
+   does (quiet, it wakes nothing).
 6. **Docs.** `core/reactions.py` docstring, `docs/bridges/telegram.md` and
    `slack.md` Reactions sections, `docs/judgement-layer.md` labels,
-   `skills/sdlc/converse.md` (your reaction is on the message line; asked
-   about it, say which and why).
+   `skills/sdlc/converse.md` (the reaction on a message is on its line;
+   asked about it, say which emoji, that the classifier set it from its
+   read of the message, and correct that read if the work went otherwise;
+   never claim an activity you did not do).
 
 ## Out of scope
 
@@ -78,21 +90,28 @@ the classifier); Slack workspace custom emoji; reactions in
 - Coverage: Tom's DM message, an Eng-group message, a `mentions` group
   message naming Valor, and one replying to his post each get 👀; an
   unaddressed `mentions` group message gets none; a DM reply to a merged
-  task gets 👀; email and local get none.
+  task gets 👀 with `judged: false`, is not in `pending()`, and keeps 👀
+  after a serve shape pass; email and local get none.
 - Shape: a scripted port picking `web_search` writes the shape reaction with
   the Telegram glyph and custom id, and the Slack name on Slack; `reply`
   writes none and is not asked again; abstain leaves 👀; stop gives 👌.
 - Every label of `SHAPE` has an entry for `telegram` and `slack`, and no
   entry names a label `SHAPE` lacks.
+- Legacy row: a `reaction.requested` 👀 row with no `label` or
+  `custom_emoji_id` is placed as `eyes` on Slack and 👀 on Telegram.
 - Outbox: a `seen` superseded by a shape is closed, not sent; the
   Telegram sender passes the custom id to the wire (fake wire); Slack adds
   the name and removes `eyes`.
-- Session: `chat_line` shows the placed reaction and label; a shape placed
-  after the turn's `steer_since` appears as the changed-reaction line in
-  the next `chat_prompt`; a message with none shows no reaction text.
+- Session: `chat_line` shows `reacted 🔍: the reaction classifier read it
+  as web_search`; a `reply` judgement shows `reacted 👀 (read); the
+  classifier read it as a plain reply`; a shape placed after the turn's
+  `steer_since` appears as `The reaction classifier set 🔍 (web_search) on
+  message N` in the next `chat_prompt`; a message with none shows no
+  reaction text.
 - Live: in Tom's DM, a request that leads to work shows 👀 then its
   activity emoji; a plain question keeps 👀; asked "why that emoji?",
-  Valor names it and the activity.
+  Valor names the emoji and says the classifier read the message as that
+  activity, correcting it if the work went otherwise.
 
 **Governance.** None added: no check, gate or refusal; the fallback in 3 is
 built only on evidence of a chat that refuses custom reactions.
