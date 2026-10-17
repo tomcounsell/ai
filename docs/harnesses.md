@@ -139,6 +139,10 @@ The wrapper then sets:
   past Claude Code's own cap of 3 (Skill rendering).
 - `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the dispatched text, which Valor's
   plugin gives every subagent but the web agent (Corrections reaching subagents, below).
+- `VALOR_COMPACT`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`: for a
+  chat session's turn only (`chat_channel` in the harness), its compaction instructions, which the
+  PreCompact hook of Valor's plugin prints, and the window that makes Claude Code compact at
+  `compact_at`; the two window variables only for a model `WINDOWS` lists (Compaction, below).
 - `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
   `tmpdir` (the workspace's `tmp/` for the working session, a check's
   `checks/<name>/tmp/` for a fresh one; emptied at each turn's start and
@@ -247,8 +251,8 @@ tokens against 35,113 output tokens. Delivery 2 resumed over an hour after deliv
 (rebuild-demonstration.md, Money).
 
 **Compaction, never replacement.** The working session is always resumed.
-When it nears the model's context limit it is compacted in place, by
-Claude Code's own compaction, and resumed; it is never swapped for a fresh
+When it nears the model's context limit (a chat session, earlier: below)
+it is compacted in place, by Claude Code's own compaction, and resumed; it is never swapped for a fresh
 session seeded with a summary. The demonstration and the baseline ran on
 resume throughout (rebuild-baseline.md, Aggregate). Measured live:
 Claude Code's calls fell from 947,155
