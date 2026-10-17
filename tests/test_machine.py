@@ -116,6 +116,20 @@ def test_the_happy_path_from_judge_to_merged():
     assert led.state is State.MERGED
 
 
+def test_steering_sent_during_the_build_patches_before_a_passing_join_merges():
+    """Tom's steer reaches the builder: the join goes to patch, spending
+    no round, and the next passing join merges."""
+    led = Ledger().to_checks()
+    led.add("message.steered", {"text": "the session controls its own compaction"})
+    led.checks("pass", "pass", "no_change")
+    f = led.fold()
+    assert (f.state, f.join.row, f.counts["review_rounds"]) == (State.PATCH, 2, 0)
+    assert [s["text"] for s in f.steering] == ["the session controls its own compaction"]
+    led.build().checks("pass", "pass", "no_change")
+    f = led.fold()
+    assert (f.state, f.join.row, f.steering) == (State.MERGE, 1, [])
+
+
 def test_the_reconcilers_rows_move_no_state_so_a_task_from_before_them_folds_as_it_did():
     """docs/plans/ask-reconciliation.md: shadow adds rows, never a state."""
     old, new = Ledger(judge=None), Ledger(judge=None)

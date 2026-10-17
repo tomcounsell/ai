@@ -449,6 +449,14 @@ def ancestry(repo: str | Path, older: str, newer: str) -> tuple[bool | None, str
     return None, _text(done.stderr).strip()
 
 
+def fork_point(repo: str | Path, base: str, tip: str | None, sha: str) -> str:
+    """Where `sha` leaves its target, in a repository only the kernel
+    writes: the task's `base`, or once a rebase onto `tip` was asked, the
+    merge base of the two, so a diff from it holds the task's own commits
+    and none another merge landed."""
+    return trusted(repo, "merge-base", tip, sha) if tip else base
+
+
 def merges_between(workspace: str | Path, older: str, newer: str) -> list[str]:
     return out(workspace, "rev-list", "--merges", f"{older}..{newer}").split()
 

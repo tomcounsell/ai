@@ -228,6 +228,9 @@ class Fold:
     # `verdicts.carried` rows applied, oldest first: each moved the verified
     # candidate onto a moved target's new tip.
     carried: list[dict[str, Any]] = field(default_factory=list)
+    # The target's tip the latest `rebase.requested` names: what the
+    # candidate's own diff starts from after it (`git.fork_point`).
+    rebase_tip: str | None = None
     session: str | None = None
     last_collected: dict[str, Any] | None = None
     turn_states: dict[str, str] = field(default_factory=dict)
@@ -296,9 +299,13 @@ def _findings(source: str, payload: dict[str, Any]) -> tuple[Finding, ...]:
     return tuple(out)
 
 
-def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]) -> JoinResult:
-    """The join table, read in its order, first match wins (rows 1 and 3
-    to 6). The docs verdict holds no row: docs run, and their
+def join(
+    checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int], steered: bool = False
+) -> JoinResult:
+    """The join table, read in its order, first match wins. A join that
+    would merge while Tom's steering waits unread (`steered`) goes to
+    `patch` instead, spending nothing (row 2), so what he wrote during
+    the build reaches the builder before anything merges. The docs verdict holds no row: docs run, and their
     findings go on the delivery. One round count: a review `changes`, a
     red test, and test gaps each send the work back inside the plan's
     `review_rounds` (row 3). Once those are spent, gaps alone merge with
@@ -308,11 +315,19 @@ def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]
     r, t = (checks[c].verdict for c in (Check.REVIEW, Check.TEST))
     found = tuple(f for c in (Check.TEST, Check.REVIEW, Check.DOCS) for f in checks[c].findings)
     if r == "pass" and t == "pass":
-        return JoinResult(1, State.MERGE, "passed", None, found)
+        return (
+            JoinResult(2, State.PATCH, None, None, found)
+            if steered
+            else JoinResult(1, State.MERGE, "passed", None, found)
+        )
     if counts["review_rounds"] < loops.review_rounds:
         return JoinResult(3, State.PATCH, None, "round", found)
     if r == "pass" and t == "gaps":
-        return JoinResult(4, State.MERGE, "gaps", None, found)
+        return (
+            JoinResult(2, State.PATCH, None, None, found)
+            if steered
+            else JoinResult(4, State.MERGE, "gaps", None, found)
+        )
     if counts["last_rounds"] < LAST_ROUNDS:
         return JoinResult(5, State.PATCH, None, "last", found)
     return JoinResult(6, State.ENDED, "did_not_pass", None, found)
@@ -491,7 +506,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             check, candidate, p["verdict"], _findings(check.value, p), row.get("id") or 0, p
         )
         if len(f.checks) == 3:
-            result = join(f.checks, f.loops, f.counts)
+            result = join(f.checks, f.loops, f.counts, steered=bool(f.steering))
             f.join = result
             if result.spends == "round":
                 f.counts["review_rounds"] += 1
@@ -530,6 +545,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if s is not State.MERGE:
             return f"rebase requested in {s}"
         f.counts["rebases"] += 1
+        f.rebase_tip = p.get("tip") or f.rebase_tip
         _enter(f, State.PATCH, entry)
         return None
     if kind == "verdicts.carried":

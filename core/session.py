@@ -1002,7 +1002,12 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
         found = machine.fold(rows).join
         lines = [f"- [{x.source}, {x.kind}] {x.text}" for x in (found.findings if found else ())]
         head = "# Findings from the checks\n\n"
-        if found is not None and found.spends == "last":
+        if found is not None and found.row == 2:
+            head = (
+                "# The checks passed; Tom wrote while you built\n\n"
+                "What he wrote is below and came after your last turn began. Act on it, then write `done.md`.\n\n"
+            )
+        elif found is not None and found.spends == "last":
             head = (
                 "# Findings from the checks, with the plan's rounds spent\n\n"
                 "This is the last round: patch once more (`done.md`), or stop (`stop.md`).\n\n"

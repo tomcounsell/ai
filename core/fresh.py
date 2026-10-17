@@ -341,7 +341,8 @@ def advise(fresh_for: FreshFor):
         try:
             await asyncio.to_thread(checks.worktree, b.mirror, head, checkout)
             diff = await asyncio.to_thread(
-                git.trusted, b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, head,
+                git.trusted, b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                git.fork_point(b.mirror, b.base_sha, f.rebase_tip, head), head,
             )  # fmt: skip
             files = _advice_files(rows, f, b, asked, diff, left)
             await asyncio.to_thread(workspace.write_inputs, checkout, files)
@@ -496,7 +497,13 @@ def docs_inputs(checkout: Path, rows: list[dict], f: machine.Fold, b: tasks.Brie
         "request.md": b.instruction,
         "plan.md": plan_text or "No plan file.",
         "diff.patch": git.trusted(
-            mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, c.sha
+            mirror,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            git.fork_point(mirror, b.base_sha, f.rebase_tip, c.sha),
+            c.sha,
         ),
     }
     earlier = [r["payload"] for r in rows if r["type"] == "docs.decided"]
@@ -741,7 +748,13 @@ def review_inputs(rows: list[dict], f: machine.Fold, b: tasks.Brief, setup: dict
         "answers.md": _answers(rows),
         "plan.md": header + "\n" + (body or "No plan file."),
         "diff.patch": git.trusted(
-            b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", b.base_sha, f.candidate.sha
+            b.mirror,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            git.fork_point(b.mirror, b.base_sha, f.rebase_tip, f.candidate.sha),
+            f.candidate.sha,
         ),
         "setup.json": json.dumps(setup, indent=2),
         "effects.md": _effects(rows),

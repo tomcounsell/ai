@@ -279,12 +279,13 @@ async def breadth(port: JudgementPort, dsn: str, task_id: str) -> str:
     if len(mine) >= UNANSWERED_RUNS:
         return mine[-1]["payload"]["judgement_id"]
     repo = b.mirror or b.workspace
-    paths = git.diff_paths(repo, b.base_sha, f.candidate.sha)
+    base = git.fork_point(repo, b.base_sha, f.rebase_tip, f.candidate.sha)
+    paths = git.diff_paths(repo, base, f.candidate.sha)
     tests_ = [p for p in paths if is_test_path(p)]
     code = [p for p in paths if not is_test_path(p)]
     inputs = {
-        "diff": _diff(repo, b.base_sha, f.candidate.sha, code),
-        "tests": _diff(repo, b.base_sha, f.candidate.sha, tests_),
+        "diff": _diff(repo, base, f.candidate.sha, code),
+        "tests": _diff(repo, base, f.candidate.sha, tests_),
     }
     j = await port.judge(BREADTH, inputs, task_id=task_id, ref=ref, dsn=dsn)
     return j.judgement_id

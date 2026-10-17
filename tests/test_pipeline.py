@@ -25,6 +25,7 @@ from core import (
     session,
     tasks,
 )
+from core import git as gitlib
 from core.machine import State
 from core.settings import settings
 from tests import bridges, judgement_upstream, scripted
@@ -118,6 +119,24 @@ def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp
 
     states, f = run(go())
     assert states == [State.PATCH] * 3 and f.counts["rebases"] == 3 and f.state is not State.ENDED
+    assert f.rebase_tip == git(other, "rev-parse", "HEAD")
+
+
+def test_after_a_rebase_a_candidates_diff_holds_its_own_commits_only(tmp_path):
+    """The checks diff a rebased candidate from where it leaves the moved
+    target, so another task's merged change is not read as this one's."""
+    ws, origin = scripted.workspace(tmp_path)
+    base = git(ws, "rev-parse", "HEAD")
+    git(tmp_path, "clone", "-q", str(origin), str(other := tmp_path / "other"))
+    scripted.commit(other, "theirs.txt", "landed first\n")
+    git(other, "push", "-q", "origin", "HEAD:main")
+    git(ws, "pull", "-q", "--rebase", "origin", "main")
+    tip = git(ws, "rev-parse", "HEAD")
+    scripted.commit(ws, "mine.txt", "this task's work\n")
+    head = git(ws, "rev-parse", "HEAD")
+    fork = gitlib.fork_point(ws, base, tip, head)
+    assert fork == tip and gitlib.fork_point(ws, base, None, head) == base
+    assert gitlib.diff_paths(ws, fork, head) == ["mine.txt"]
 
 
 # -- end to end: Tom's DM, its session, a task, the merge, the news -------------------

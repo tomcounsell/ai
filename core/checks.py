@@ -796,9 +796,9 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
 # -- base and head runs -------------------------------------------------------------------
 
 
-async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asyncio.Task, head: str,
+async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asyncio.Task, base: str, head: str,
                         head_role: str, *, lint: bool = False) -> dict[str, Any]:  # fmt: skip
-    """The base run and the head run at `head` under `head_role`, each a
+    """The base run at `base` and the head run at `head` under `head_role`, each a
     usable `suite.ran` reused or run and appended. The seed cache is made
     from the base's setup when it is missing. Returns {"ran": {"base":
     row, "head": row}} or a runner result (`stopped`, `lock lost`, or
@@ -806,7 +806,7 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
     bin_dir = lay.root.parent / "bin"
     command = (b.project or {}).get("suite") or "true"
     ran: dict[str, dict[str, Any]] = {}
-    for key, role, sha in (("base", "base", b.base_sha), ("head", head_role, head)):
+    for key, role, sha in (("base", "base", base), ("head", head_role, head)):
         digest = await asyncio.to_thread(environment_digest, b.mirror, sha, b.project or {}, bin_dir)
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
@@ -818,7 +818,7 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
             continue
         if key == "head" and not (lay.checks / SEED).is_dir() and (b.project or {}).get("setup"):
             base_digest = ran["base"]["payload"]["digest"]
-            await suite(ctx, lay, b, b.base_sha, "base", stop, digest=base_digest, run_suite=False)
+            await suite(ctx, lay, b, base, "base", stop, digest=base_digest, run_suite=False)
         if not await ctx.alive():
             return {"status": "lock lost"}
         payload = await suite(ctx, lay, b, sha, role, stop, digest=digest, lint=lint and key == "head")
@@ -899,8 +899,14 @@ def test_runner(port):
         lay = workspace.Layout(Path(b.mirror).parent)
         command = (b.project or {}).get("suite") or "true"
         try:
+            base_sha = await asyncio.to_thread(
+                git.fork_point, b.mirror, b.base_sha, f.rebase_tip, candidate.sha
+            )
+        except git.GitError as exc:
+            return failed(f"the fork point: {exc}")
+        try:
             async with stop_heard(ctx) as stop:
-                got = await base_and_head(ctx, lay, b, stop, candidate.sha, "head")
+                got = await base_and_head(ctx, lay, b, stop, base_sha, candidate.sha, "head")
         except _Stopped:
             return {"status": "stopped"}
         if "ran" not in got:
@@ -909,7 +915,7 @@ def test_runner(port):
 
         base, head = ran["base"], ran["head"]
         try:
-            deleted = await asyncio.to_thread(removed_definitions, b.mirror, b.base_sha, candidate.sha)
+            deleted = await asyncio.to_thread(removed_definitions, b.mirror, base_sha, candidate.sha)
         except git.GitError as exc:
             return failed(f"the diff: {exc}")
         lists = compare(base["payload"], head["payload"], deleted)

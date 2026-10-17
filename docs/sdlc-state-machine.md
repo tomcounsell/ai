@@ -404,6 +404,7 @@ loop counts (see Loops), and moves the task once:
 
 | Review | Test and docs | Rounds | Goes to |
 |---|---|---|---|
+| `pass` | test `pass` or `gaps` (as below), with Tom's steering since the last working turn began unread | | `patch`, spending nothing, with his steering |
 | `pass` | test `pass`; docs `updated` or `no_change` | | `merge`, as a delivery that passed |
 | anything else | anything | a plan's round left | `patch`, with every finding |
 | `pass` | test `gaps`, docs passing | none left | `merge`, with the gaps listed |
