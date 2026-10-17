@@ -61,7 +61,10 @@ agent at any depth can start, since subagents nest without limit; anything
 with a deliverable or a merge becomes a task it starts, answers, steers,
 or stops (`tools/chat_tasks.py`); a steer of a task that has delivered
 (`merged` or `ended`) reopens it to revise, so a deliverable's task is the
-worker for its revision rounds. Those tasks send their questions, progress, and
+worker for its revision rounds. An idea still being talked through is
+shaped first and starts nothing; what only the asker could settle is
+asked one question per message, as the `yudame-dev:ask-me` skill says,
+ending with a readback the asker's next message accepts. The tasks it starts send their questions, progress, and
 deliveries to the session that started them, never to a chat; only the
 session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
 its own words (`core/notices.py`). This is the session's prompt and the
