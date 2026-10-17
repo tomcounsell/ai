@@ -1,0 +1,19 @@
+# satsol: the SATSOL platform. The old system had it paused on no machine;
+# "unassigned" is no Mac's name, so this spec and its chats are listed but
+# heard nowhere until Tom names one. From the old system's projects.json.
+name = "satsol"
+client = "satsol"
+repo = "https://github.com/yudame/satsol.git"
+# A Flutter app (src/mobile) and a Django server (src/server) under one
+# Makefile; the suite is the server's. Not yet run under the kernel.
+kind = "plain"
+branch = "main"
+merge_url = "https://github.com/yudame/satsol.git"
+setup = ["cd src/server && uv sync --frozen"]
+suite = "cd src/server && uv run pytest -p no:cacheprovider -q --junitxml={junit}"
+# "Eng: SATSOL" and the team group "SATSOL".
+chats = ["telegram:-5136818964", "telegram:-5095889193"]
+# Team chats wait to be mentioned (Tom, 2026-10-17).
+mentions = ["telegram:-5095889193"]
+machine = "unassigned"
+knowledge_base = "SATSOL"

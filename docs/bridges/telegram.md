@@ -337,13 +337,15 @@ people there. How an act leaves belongs to
 ### Chat sessions: one per chat, every message a steer
 
 A group chat a project spec lists (other than Tom's own) is a team chat
-(`intake.team_spec`), as the old system's listed groups were, and has one
+(`intake.team_spec`), as the old system's listed groups were; so is
+someone else's DM a spec lists (`valor.toml` lists the old system's DM
+whitelist), never mentions only. Each has one
 long-lived chat session (Tom, 2026-10-16: "more like Hermes agent
 system"): a task naming the chat (`Brief.chat`), started by its first
 message with the chat's last 20 recorded messages, and resumed for every
 message after, anyone's, with no rights by sender. A message that wakes it
 is a steer; in a chat the spec lists under `mentions` (the old teammate
-groups) only one naming Valor ("valor", "@valor") or replying to his post
+groups) only one naming Valor ("valor", "@valor", "@valorengels") or replying to his post
 wakes it, and the rest are heard (`message.heard`, quiet) and reach it
 with the next. Each turn's prompt is what came in since the last, with
 when, who and message ids; messages that arrive during a turn go in
@@ -424,8 +426,8 @@ ceiling. That changes only through
 ### Other people
 
 In Tom's own chat only Tom is heard: anyone else's message there is
-recorded as `message.received` and binds to nothing. In a team chat
-everyone is heard, through its chat session (above).
+recorded as `message.received` and binds to nothing, as does a DM no spec
+lists. In a team chat everyone is heard, through its chat session (above).
 
 ## Sending
 

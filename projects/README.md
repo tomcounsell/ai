@@ -23,11 +23,13 @@ workspaces for (`python -m core start ... --project NAME`).
   start tasks names it (`valor` names `main`); `start
   --branch` overrides it for one task.
 - `chats` lists the chats whose messages start tasks under the project
-  (`telegram:<chat id>`, `email:<sender address>`,
+  (`telegram:<chat id>`, `email:<sender address>`, `email:@<domain>` for
+  every sender at that domain unless an address is listed,
   `slack:<team id>/<channel or user id>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so
-  each chat has one owner. In a group chat listed here anyone's message
-  is heard, not only Tom's (a team chat, [telegram.md](../docs/bridges/telegram.md)).
+  each chat has one owner. In a group chat or someone else's DM listed
+  here, anyone's message is heard, not only Tom's (a team chat,
+  [telegram.md](../docs/bridges/telegram.md)).
 - `rooms` maps some of those chats to a description of what the chat is
   for (`rooms."telegram:<chat id>" = "..."`), rendered on every turn of
   its chat session; Tom's own chat's is in `core/intake.py`

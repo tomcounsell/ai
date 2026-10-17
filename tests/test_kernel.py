@@ -830,6 +830,8 @@ def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(
 # LONE: a chat session started directly, which no message there reaches.
 GROUP, QUIET_GROUP, OTHER, LONE = "-1001", "-1002", "-1003", "-1004"
 RAIN = "77"
+# KIM_DM: someone else's DM the spec lists.
+KIM_DM = "78"
 
 
 @pytest.fixture
@@ -839,17 +841,18 @@ def team(tmp_path):
     with bridges.operator(tmp_path):
         (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
             'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
-            f'chats = ["telegram:{GROUP}", "telegram:{QUIET_GROUP}"]\n'
+            f'chats = ["telegram:{GROUP}", "telegram:{QUIET_GROUP}", "telegram:{KIM_DM}"]\n'
             f'mentions = ["telegram:{QUIET_GROUP}"]\n'
         )
         yield
 
 
-async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None) -> dict:
-    """A Telegram group message, received and bound: its binding."""
+async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None, kind="group") -> dict:
+    """A Telegram message, in a group unless `kind` says, received and
+    bound: its binding."""
     mid = str(uuid.uuid4().int % 10**9)
     inbound = intake.Inbound(
-        channel="telegram", chat_id=chat, chat_kind="group", message_id=mid, sender_id=sender,
+        channel="telegram", chat_id=chat, chat_kind=kind, message_id=mid, sender_id=sender,
         sender_name=name, sent_at="2026-10-16T09:30:00+00:00", text=text, reply_to=reply_to,
     )  # fmt: skip
     async with await db.connect(dsn) as conn:
@@ -910,16 +913,33 @@ def test_in_a_mentions_chat_only_a_message_naming_valor_wakes_the_session(dsn, t
             await rows_of(dsn, (await said(dsn, "x", chat=QUIET_GROUP))["task_id"])
         )
         woke = await said(dsn, "Valor, what broke?", chat=QUIET_GROUP)
+        handle = (await said(dsn, "@valorengels can you look?", chat=QUIET_GROUP))["as"]
         rows = await rows_of(dsn, woke["task_id"])
-        return bound, waiting, woke, session.chat_waiting(rows), session.chat_prompt(rows)
+        return bound, waiting, woke, session.chat_waiting(rows), session.chat_prompt(rows), handle
 
-    bound, waiting, woke, now, prompt = run(go())
-    assert bound == ["heard", "heard"] and not waiting
+    bound, waiting, woke, now, prompt, handle = run(go())
+    assert bound == ["heard", "heard"] and not waiting and handle == "steer"
     assert woke["as"] == "steer" and now
     assert (
         prompt.index("lunch at noon?") < prompt.index("valorous effort") < prompt.index("Valor, what broke?")
     )
     assert "Rain (message " in prompt
+
+
+def test_someone_elses_dm_a_spec_lists_is_a_chat_every_message_of_theirs_wakes(dsn, team):
+    """Not Tom's chat and not mentions only; a DM no spec lists stays unheard."""
+
+    async def go():
+        first = await said(dsn, "hi, quick question", chat=KIM_DM, sender=KIM_DM, name="Kim", kind="dm")
+        second = await said(dsn, "is the shop open?", chat=KIM_DM, sender=KIM_DM, name="Kim", kind="dm")
+        other = await said(dsn, "valor?", chat="79", sender="79", name="Lee", kind="dm")
+        async with await db.connect(dsn) as conn:
+            return first, second, other, await tasks.brief(conn, first["task_id"])
+
+    first, second, other, b = run(go())
+    assert (first["as"], second["as"], other["as"]) == ("steer", "steer", "none")
+    assert first["task_id"] == second["task_id"] and b.chat == {"channel": "telegram", "chat_id": KIM_DM}
+    assert b.instruction.startswith("You are in a direct message with Kim on Telegram")
 
 
 def test_a_chat_session_wakes_on_messages_and_reports_and_reads_only_whats_new(dsn, team):
@@ -1138,6 +1158,10 @@ def mail(tmp_path):
         (projects / "flowers.toml").write_text(
             'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["email:kim@florist.test"]\n'
         )
+        (projects / "garden.toml").write_text(
+            'name = "garden"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+            'chats = ["email:@florist.test", "email:@garden.test"]\n'
+        )
         yield
 
 
@@ -1156,6 +1180,38 @@ async def emailed(dsn, text, *, sender=bridges.OPERATOR_EMAIL, name="Tom", threa
     (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
     bound["message_id"] = mid
     return bound
+
+
+def test_an_email_domain_entry_takes_every_sender_at_exactly_that_domain(dsn, mail):
+    """An exact address listed elsewhere wins over the domain."""
+    assert intake.owns("email", "Ann@Garden.test") and intake.owns("email", "kim@florist.test")
+    assert not intake.owns("email", "x@evilgarden.test") and not intake.owns("email", "x@garden.test.evil")
+
+    async def go():
+        ann = await emailed(dsn, "Beds\n\nmulch?", sender="ann@garden.test", name="Ann")
+        kim = await emailed(dsn, "Hours\n\nopen?", sender="kim@florist.test", name="Kim")
+        async with await db.connect(dsn) as conn:
+            return [(await tasks.brief(conn, x["task_id"])).project for x in (ann, kim)]
+
+    assert run(go()) == [{"name": "garden"}, {"name": "flowers"}]
+
+
+def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
+    """Every team chat waits to be mentioned (Tom, 2026-10-17); Eng
+    groups, the operator group and Tom's DM hear every message."""
+    team = {"yudame": ["-4719889199"], "psyoptimal": ["-1002600253717"],
+            "cyndra": ["-1003794218389", "-1004385743413"], "satsol": ["-5095889193"],
+            "valor": ["-1003879986445", "-1003936769817"]}  # fmt: skip
+    answering = {"valor": ["-1003890616618", "-1003449100931", "179144806"], "psyoptimal": ["-1003743854645"],
+                 "cyndra": ["-1003900483201"], "satsol": ["-5136818964"]}  # fmt: skip
+    root = pathlib.Path(__file__).parent.parent / "projects"
+    with bridges.configure(projects_dir=str(root)):
+        specs = {s.name: s for s in workspace.Spec.all()}
+    assert len(specs) == len(list(root.glob("*.toml")))
+    for name, ids in team.items():
+        assert {f"telegram:{i}" for i in ids} <= set(specs[name].mentions), name
+    for name, ids in answering.items():
+        assert {f"telegram:{i}" for i in ids} <= set(specs[name].chats) - set(specs[name].mentions), name
 
 
 def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, mail):

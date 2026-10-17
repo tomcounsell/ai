@@ -12,8 +12,11 @@ merge_url = "https://github.com/yudame/psyoptimal.git"
 services = ["postgres"]
 setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen"]
 suite = "uv run pytest -p no:cacheprovider -q --junitxml={junit} apps/team apps/public apps/api"
-# "Eng: PsyOPTIMAL".
-chats = ["telegram:-1003743854645"]
+# "Eng: PsyOPTIMAL", the team group "PsyOPTIMAL", and the domains
+# psyoptimal.com and psyoptimalsports.com. Team chats wait to be mentioned
+# (Tom, 2026-10-17).
+chats = ["telegram:-1003743854645", "telegram:-1002600253717", "email:@psyoptimal.com", "email:@psyoptimalsports.com"]
+mentions = ["telegram:-1002600253717"]
 # What each chat is for, rendered into every turn of its chat session;
 rooms = { "telegram:-1003743854645" = "Engineering on Psyoptimal, and assessment questions with Lewis." }
 machine = "Valor the Captain"

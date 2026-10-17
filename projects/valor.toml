@@ -15,8 +15,21 @@ suite = "uv run pytest -q -n auto -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
 merge_url = "https://github.com/tomcounsell/ai.git"
 # The operator group, the Eng group, and Tom's own DM, received on the
-# Cowboy.
-chats = ["telegram:-1003890616618", "telegram:-1003449100931", "telegram:179144806"]
+# Cowboy; the outside groups "Agent Builders Chat" and "Perplexity Build
+# Comp"; and, as the old system answered every DM against this repo, the
+# DMs of Kevin, Matt Rideout, Nick Frith, Andy Malkin, Charlie, Colin
+# Behring, Thabiso Epema, Johann, Jess Mason, Hazem, Lewis Parrott, Mike
+# Berson and Graham D.
+chats = [
+    "telegram:-1003890616618", "telegram:-1003449100931", "telegram:179144806",
+    "telegram:-1003879986445", "telegram:-1003936769817",
+    "telegram:577036901", "telegram:2106858278", "telegram:7954357506", "telegram:2019570687",
+    "telegram:7312372670", "telegram:8209004019", "telegram:8762685703", "telegram:6084902164",
+    "telegram:7388810030", "telegram:7178632018", "telegram:7820562338", "telegram:469027377",
+    "telegram:437868058",
+]
+# Team chats wait to be mentioned (Tom, 2026-10-17).
+mentions = ["telegram:-1003879986445", "telegram:-1003936769817"]
 # What each chat is for, rendered into every turn of its chat session;
 # Tom's DM's is his own chat's (core/intake.py).
 rooms."telegram:-1003890616618" = "Status and approvals across all projects; work no chat started reports here."

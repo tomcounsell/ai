@@ -23,7 +23,8 @@ bridge's whose channel is `settings.operator_channel`: the Telegram
 operator chat, a Slack chat, or the one local chat, `local`.
 
 A *team chat* is a group chat a spec of this machine lists, other than
-Tom's own chat (`team_spec`). It has one long-lived chat session: a task
+Tom's own chat (`team_spec`); someone else's DM a spec lists is one too
+(the old system answered them), with them as its one other member. It has one long-lived chat session: a task
 whose Brief names the chat (`Brief.chat`), started by the chat's first
 message and kept until stopped (`chat_session`). Every message there,
 anyone's, binds to it, with no rights by sender, as in the old system:
@@ -39,7 +40,8 @@ post of Valor's does. The session decides whether to answer
 An *email thread* is a chat too (Tom, 2026-10-17: "email threads are chat
 threads too"). Its id is the thread's root (`chat_id`, the first id in
 `References`), and it has one chat session, under the project listing
-the sender (`email:<address>`), else `valor`. Every email the bridge
+the sender (`email:<address>`), else its domain (`email:@<domain>`),
+else `valor`. Every email the bridge
 records in it, Tom's or a project sender's, is a `message.steered` row
 on that session naming its sender, as in a team chat. No email is
 verified, so none carries Tom's rights: `stop` there is a steer.
@@ -373,7 +375,15 @@ def owned(channel: str) -> list[str]:
 
 def owns(channel: str, id: str) -> bool:
     row = channels.get(channel)
-    return (row.normal(id) if row is not None else id) in owned(channel)
+    ident = row.normal(id) if row is not None else id
+    ids = owned(channel)
+    return ident in ids or (channel == "email" and _domain(ident) in ids)
+
+
+def _domain(address: str) -> str:
+    """An email chats entry naming every sender at the address's domain:
+    `@cyndra.ai` for `x@cyndra.ai`."""
+    return "@" + address.rpartition("@")[2]
 
 
 def _from_operator(p: dict[str, Any]) -> bool:
@@ -387,10 +397,10 @@ def _from_operator(p: dict[str, Any]) -> bool:
 
 
 def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
-    """The project whose team chat the message is in: a group chat a spec
-    of this machine lists, other than Tom's own chat. None for any other
-    message."""
-    if not p.get("verified") or p.get("chat_kind") != "group" or _toms_own(p):
+    """The project whose team chat the message is in: a group chat or
+    someone else's DM a spec of this machine lists, other than Tom's own
+    chat. None for any other message."""
+    if not p.get("verified") or p.get("chat_kind") not in ("group", "dm") or _toms_own(p):
         return None
     for chat, spec in _project_chats(p["channel"]):
         if chat == p["chat_id"]:
@@ -399,8 +409,8 @@ def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
 
 
 # A message names Valor (the old system's mention triggers: "valor",
-# "@valor", "hey valor").
-MENTION = re.compile(r"(?i)(?<![\w])@?valor\b")
+# "@valor", "hey valor", and his Telegram handle, @valorengels).
+MENTION = re.compile(r"(?i)(?<![\w])@?valor(?:engels)?\b")
 # How many of the chat's recorded messages a new chat session starts with.
 HISTORY = 20
 
@@ -671,10 +681,14 @@ async def _session_of(conn, task_id: str, p: dict[str, Any]) -> bool:
 
 
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
+    """The spec listing the chat; for an email, the sender's address, else
+    its domain (`email:@<domain>`); else `valor`."""
     ident = p["sender_id"] if p["channel"] == "email" else p["chat_id"]
-    for chat, spec in _project_chats(p["channel"]):
-        if chat == ident:
-            return spec
+    found = dict(reversed(_project_chats(p["channel"])))
+    if p["channel"] == "email" and ident not in found:
+        ident = _domain(ident)
+    if ident in found:
+        return found[ident]
     try:
         return workspace.Spec.load("valor")
     except workspace.Refused, FileNotFoundError:
@@ -833,7 +847,7 @@ async def _chat_start(
     conn, channel: str, chat_id: str, spec: workspace.Spec, own: bool, before: str | None
 ) -> str:
     """A new chat session's instruction: the chat it serves (a team chat,
-    an email thread, or with `own` Tom's own chat on its channel), and the chat's last
+    someone else's DM, an email thread, or with `own` Tom's own chat on its channel), and the chat's last
     `HISTORY` recorded messages (before the one received as `before`),
     oldest first."""
     rows = await (
@@ -845,6 +859,13 @@ async def _chat_start(
         )
     ).fetchall()
     where = "the local chat page" if channel == "local" else channel.capitalize()
+    dm = await (
+        await conn.execute(
+            "SELECT payload->>'sender_name' FROM events WHERE type = 'message.received' AND task_id = %s "
+            "AND payload->>'chat_id' = %s AND payload->>'chat_kind' = 'dm' ORDER BY id DESC LIMIT 1",
+            (channel, chat_id),
+        )
+    ).fetchone()
     lines = [
         (
             f"You are in an email thread (its first message {chat_id}); your work here is under the "
@@ -855,6 +876,10 @@ async def _chat_start(
             f"chat; your work here is under the {spec.name} project. This session is the chat's: every "
             "message Tom sends in it comes to you here."
             if own
+            else f"You are in a direct message with {dm[0] or 'someone'} on {where} (chat id {chat_id}), "
+            f"not Tom; your work here is under the {spec.name} project. This session is the chat's: every "
+            "message they send in it comes to you here."
+            if dm and channel != "email"
             else f"You are in the {spec.name} team chat on {where} (chat id {chat_id}). "
             "This session is the chat's: every message said in it comes to you here."
         )

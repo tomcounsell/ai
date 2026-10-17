@@ -1,0 +1,28 @@
+# cyndra: Cyndra's consulting monorepo, served by the Bald (the old fleet's
+# owner; one Mac per client). No kernel runs as "Valor the Bald" until that
+# Mac's rollout, so this spec and its chats are inert until then. From the
+# old system's projects.json.
+name = "cyndra"
+client = "cyndra"
+repo = "https://github.com/Cyndra-AI/cyndra-consulting.git"
+# Bun workspaces with one directory per client engagement, each with its
+# own dependencies and tests (CLAUDE.md). The suite is the worked example's,
+# behring/'s Python half; not yet run under the kernel.
+kind = "plain"
+branch = "main"
+merge_url = "https://github.com/Cyndra-AI/cyndra-consulting.git"
+setup = ["cd behring && python3 -m venv .venv && ./.venv/bin/pip install -q -e '.[dev]'"]
+suite = "cd behring && ./.venv/bin/python -m pytest -p no:cacheprovider -q --junitxml={junit}"
+# "Eng: Cyndra Consulting", the team groups "Cyndra Dev Team" and "Cyndra
+# Devs", Charlie's address and the domain cyndra.ai.
+chats = [
+    "telegram:-1003900483201",
+    "telegram:-1003794218389",
+    "telegram:-1004385743413",
+    "email:charlie@yuda.me",
+    "email:@cyndra.ai",
+]
+# Team chats wait to be mentioned (Tom, 2026-10-17).
+mentions = ["telegram:-1003794218389", "telegram:-1004385743413"]
+machine = "Valor the Bald"
+knowledge_base = "Cyndra"

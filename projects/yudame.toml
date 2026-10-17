@@ -12,8 +12,10 @@ setup = ["npm ci"]
 # A static Tailwind site with no tests and no JUnit reporter: the suite is
 # the build its deploy workflow runs, judged by its exit alone.
 suite = "npm run build"
-# "Yudame".
+# "Yudame", the company's team chat, which waits to be mentioned (Tom,
+# 2026-10-17).
 chats = ["telegram:-4719889199"]
+mentions = ["telegram:-4719889199"]
 # What each chat is for, rendered into every turn of its chat session;
 rooms = { "telegram:-4719889199" = "The company's team chat, with Lewis and Rain; answer whoever asks; mostly not engineering." }
 machine = "Valor the Pirate"

@@ -20,8 +20,9 @@ setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/De
 # over its testpaths, less apps/podcast/tests/e2e, whose conftest imports
 # playwright, which the `test` extra does not install.
 suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --junitxml={junit} apps"
-# "Eng: Cuttlefish".
-chats = ["telegram:-1003801797780"]
+# "Eng: Cuttlefish", and the old system's customer-service contacts by
+# address (Tom's own, tom@yuda.me, is his already).
+chats = ["telegram:-1003801797780", "email:nav@krystallabs.io", "email:gcason2@gmail.com", "email:grahamhderry@gmail.com"]
 # What each chat is for, rendered into every turn of its chat session;
 rooms = { "telegram:-1003801797780" = "Engineering on the Cuttlefish product." }
 machine = "Valor the Captain"

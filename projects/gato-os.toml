@@ -2,10 +2,6 @@
 # "Valor the Pirate" until that Mac's rollout, so this spec and its chat
 # are inert until then. `client` follows the old config's owner; Tom may
 # rename it.
-#
-# The old system also took email from the domain chainstarters.com. A chats
-# entry names one sender address (`email:<sender address>`, matched exactly),
-# not a domain, so that routing is left out until Tom names the addresses.
 name = "gato-os"
 client = "chainstarters"
 repo = "https://github.com/chainstarters/gato-os.git"
@@ -27,8 +23,8 @@ merge_url = "https://github.com/chainstarters/gato-os.git"
 suite = "mkdir -p target && printf '[profile.valor.junit]\\npath = \"junit.xml\"\\n' > target/valor-nextest.toml && { cargo nextest run --workspace --no-fail-fast --config-file target/valor-nextest.toml --profile valor; rc=$?; cp target/nextest/valor/junit.xml {junit}; exit $rc; }"
 # CI's gates, as AGENTS.md lists them.
 lint = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && ./scripts/lint-all.sh"
-# "Eng: Gato".
-chats = ["telegram:-1003513124705"]
+# "Eng: Gato", and the domain chainstarters.com.
+chats = ["telegram:-1003513124705", "email:@chainstarters.com"]
 # What each chat is for, rendered into every turn of its chat session;
 rooms = { "telegram:-1003513124705" = "Assessment and engineering for Chainstarters' Gato OS." }
 machine = "Valor the Pirate"

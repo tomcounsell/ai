@@ -97,7 +97,9 @@ received until it is marked unread.
 
 The bridge receives mail from owned senders only: Tom's addresses
 (`operator_email`) and the `email:<address>` chats a project spec on this
-machine lists. Replies to Valor's mail from anyone else are not recorded
+machine lists, and every sender at an `email:@<domain>` it lists (exactly
+that domain; a listed address wins over it). The sender's `From` is not
+verified, so a domain entry admits anyone who forges an address there. Replies to Valor's mail from anyone else are not recorded
 as thread context. A message with an empty body, or with no `From` (whose
 sender is empty, so never owned), is not dropped by the parser. There is no
 inbound size or part cap.
