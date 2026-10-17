@@ -73,7 +73,7 @@ outside the model is AI Control [4].
 **Python 3.14**, pinned in `.python-version`; `requires-python = ">=3.14"` in
 `pyproject.toml`. **uv** builds the environment from `uv.lock`, which holds
 twenty-five packages in all besides the project itself. The kernel's runtime dependencies are two:
-`psycopg[binary]` for Postgres and `aiohttp` for the gateway and the local chat page. Everything else
+`psycopg[binary]` for Postgres and `aiohttp` for the gateway, the local chat page, and the bridges' history reads for turns. Everything else
 is the standard library. Status: **in use**. Serves the selection rule: a
 two-dependency kernel is one a person can read.
 
