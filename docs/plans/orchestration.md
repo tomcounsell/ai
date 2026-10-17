@@ -160,7 +160,8 @@ now exists, and `docs/persona.md` and `skills/README.md` likewise.
   reports to the session (`tasks.reporting`), by Tom, and reaches the session as
   a steer. It never stops the session. Team chats are unchanged.
 - Anyone else in Tom's own chat binds to nothing.
-- Email has no session: Tom's emails each start a task.
+- An email thread is a chat with its own session (Tom, 2026-10-17: "email
+  threads are chat threads too"); before that, every email bound `none`.
 - The session reads the whole DM, so a top-level Slack DM message carries no
   quoted posts.
 
@@ -168,7 +169,7 @@ now exists, and `docs/persona.md` and `skills/README.md` likewise.
 
 - `core/notices.py`, `request` → `reports_to` → `_to_parent`: a task whose
   parent is a chat session reports to it as `child.reported`; a root task that
-  is no session (the CLI, a routine, Tom's email) reports to the operator chat's
+  is no session (the CLI, a routine) reports to the operator chat's
   session (`intake.operator_session`), started for it when none is open. The
   kinds in `TOMS` (credential, binding, rollout) go to Tom directly, as does a
   notice with no session to take it.
@@ -240,8 +241,7 @@ with no project, the message starts a task.
 - The guard cannot write the ledger when it fires, since turns cannot reach
   Postgres. At expiry it is listed for Tom with no firing record, and he decides.
 - Every root task that is no session reports to the operator chat's
-  session, so one session hears the CLI's, the routines' and Tom's emails'
-  work, whichever chat Tom is in.
+  session, so one session hears the CLI's and the routines' work, whichever chat Tom is in.
 - A `stop` in Tom's own chat stops every task reporting to that session, not
   one of them; the session stops one with `task.stop`.
 - A `stop` that takes the tree locks of root tasks reporting to the session

@@ -36,6 +36,14 @@ Every message wakes it, except in a chat the spec lists under
 post of Valor's does. The session decides whether to answer
 (`skills/sdlc/converse.md`).
 
+An *email thread* is a chat too (Tom, 2026-10-17: "email threads are chat
+threads too"). Its id is the thread's root (`chat_id`, the first id in
+`References`), and it has one chat session, under the project listing
+the sender (`email:<address>`), else `valor`. Every email the bridge
+records in it, Tom's or a project sender's, is a `message.steered` row
+on that session naming its sender, as in a team chat. No email is
+verified, so none carries Tom's rights: `stop` there is a steer.
+
 *Tom's own chat* (`_toms_own`: the operator chat, his Telegram DM, his
 Slack DMs, the local chat) has a chat session too, under the project
 listing the chat, else `valor` (`_project_for`). Only Tom is heard there,
@@ -64,6 +72,8 @@ The binding table, first match wins:
 | In a team chat, with no text or files | `none` |
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
+| An email, with no text or files | `none` |
+| An email | `steer`, to the thread's session |
 | Not verified, or not from the operator | `none` |
 | In Tom's own chat, with no text or files | `none` |
 | In Tom's own chat, exactly `stop`, not a reply to a task other than its session | `stop`: each open task reporting to the session stopped, and a steer to the session |
@@ -71,18 +81,14 @@ The binding table, first match wins:
 | A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
 | A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
 | A reply to a merged or stopped task | `none`, with a notice |
-| A reply on a channel where Tom replies (not email), exactly `stop` | `stop` |
+| A reply, exactly `stop` | `stop` |
 | A reply to the open question's notice | `answer` |
 | Any other reply to a task's notice or send | `steer` |
-| Not a reply, with text or files (email, or a chat with no project) | `start` |
+| Not a reply, with text or files (a chat with no project) | `start` |
 | Not a reply, empty | `none` |
 
-Email is not a chat with a session: Tom's emails start tasks, and a reply
-to a task's email binds as a reply.
-
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
-and owes a notice; by email, `stop` always steers, and the notice says it
-comes by reply on the operator channel.
+and owes a notice.
 
 On a threaded channel (Slack) a reply names its thread's root, not the
 message it answers, so a reply binds to the newest of Valor's posts in
@@ -159,12 +165,6 @@ def _replies(channel: str) -> bool:
     """Whether Tom replies on `channel`, so `stop` binds there."""
     row = channels.get(channel)
     return row is not None and row.replies
-
-
-def _where() -> str:
-    channel = settings.operator_channel
-    row = channels.get(channel)
-    return row.where if row is not None else f"on {channel}"
 
 
 async def receive(conn, inbound: Inbound) -> Received:
@@ -363,8 +363,6 @@ def _from_operator(p: dict[str, Any]) -> bool:
         return False
     if p["channel"] == "telegram":
         return settings.operator_telegram_id is not None and p["sender_id"] == settings.operator_telegram_id
-    if p["channel"] == "email":
-        return p["sender_id"].lower() in settings.operator_email
     if p["channel"] == "slack":
         return p["sender_id"] in settings.operator_slack_ids
     return p["channel"] == "local"
@@ -561,6 +559,8 @@ async def _notice(conn, task_id: str, p: dict[str, Any], text: str, suffix: str 
 
 async def _bind(conn, p: dict[str, Any]) -> str | None:
     team = team_spec(p)
+    if team is None and p["channel"] == "email":
+        team = _project_for(p)
     if team is not None:
         return await _chat(conn, p, team)
     if not _from_operator(p):
@@ -580,7 +580,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     f = machine.fold(rows)
     text = (p.get("text") or "").strip()
     exact = text.casefold()
-    replies = _replies(p["channel"])
     via = p["channel"]
     notice = (replied.get("notice") or {}) if "notice" in replied else {}
     kind, about = notice.get("kind"), notice.get("about_key") or ""
@@ -612,7 +611,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         )
         return as_
 
-    if replies and exact == "stop":
+    if exact == "stop":
         as_ = await _bound(conn, p, task_id, "stop")
         await tasks.stop(conn, task_id, reason=f"Tom replied stop ({p['message_id']})", by="tom", via=via)
         return as_
@@ -637,11 +636,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         },
     )
     if _near(text, "stop"):
-        said = (
-            "that was not a stop, so your message steers the work. To stop it, reply stop."
-            if replies
-            else f"stops come by reply {_where()}; your email steers the work."
-        )
+        said = "that was not a stop, so your message steers the work. To stop it, reply stop."
         await _notice(conn, task_id, p, notices.lead(await notices.headline(conn, task_id), said))
     return as_
 
@@ -669,8 +664,8 @@ def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
 
 
 async def _start(conn, p: dict[str, Any]) -> str | None:
-    """A new task from Tom's message, under the project listing the chat
-    (by email: the sender), else `valor`. Its workspace is provisioned by a
+    """A new task from Tom's message, under the project listing the chat,
+    else `valor`. Its workspace is provisioned by a
     kernel job after it starts. A message of files alone starts a task
     whose instruction lists them."""
     text = (p.get("text") or "").strip()
@@ -820,7 +815,7 @@ async def _chat_start(
     conn, channel: str, chat_id: str, spec: workspace.Spec, own: bool, before: str | None
 ) -> str:
     """A new chat session's instruction: the chat it serves (a team chat,
-    or with `own` Tom's own chat on its channel), and the chat's last
+    an email thread, or with `own` Tom's own chat on its channel), and the chat's last
     `HISTORY` recorded messages (before the one received as `before`),
     oldest first."""
     rows = await (
@@ -834,7 +829,11 @@ async def _chat_start(
     where = "the local chat page" if channel == "local" else channel.capitalize()
     lines = [
         (
-            f"You are in Tom's own chat on {where} (chat id {chat_id}), a 1:1 with him, not a team "
+            f"You are in an email thread (its first message {chat_id}); your work here is under the "
+            f"{spec.name} project. This session is the thread's: every email in it comes to you here, "
+            "its sender as its From header names them."
+            if channel == "email"
+            else f"You are in Tom's own chat on {where} (chat id {chat_id}), a 1:1 with him, not a team "
             f"chat; your work here is under the {spec.name} project. This session is the chat's: every "
             "message Tom sends in it comes to you here."
             if own

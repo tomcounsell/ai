@@ -28,13 +28,14 @@ left. A merge's says what shipped; a send's carries its channel,
 recipients, and text. A push owes none (a step inside the task), nor does
 a send that itself reached Tom (to the operator chat or Tom's Telegram id,
 an email only to Tom's addresses, any local send), nor does a chat
-session's send to its own chat (`intake.chat_session`), which the chat saw.
+session's send to its own chat (`intake.chat_session`; an email thread's
+session's reply in its thread), which the chat saw.
 A reply to a merge's report is feedback.
 
 Every task reports to a Valor session, never to a chat (Tom's rule of
 2026-10-16: kernel tasks report to the parent Valor agent). A task whose
 parent is a chat session reports to it; a root task that is not itself a
-session (one started from the CLI, a routine, or Tom's email) reports to
+session (one started from the CLI or a routine) reports to
 the operator chat's session (`intake.operator_session`), started when
 none is open. Each notice it owes is then a `child.reported` row on that
 session (`child_id`, `kind`, `about_key`, `text`), once per `about_key`,
@@ -395,6 +396,15 @@ def _to_tom(effect: dict[str, Any]) -> bool:
     return False
 
 
+def _own_chat(chat: dict[str, str], kind: str, effect: dict[str, Any]) -> bool:
+    """Whether a chat session's send went to its own chat: by email, a
+    reply in its thread, whose `References` start at the thread's root."""
+    if kind == "email.send":
+        refs = (effect.get("payload") or {}).get("references") or []
+        return chat["channel"] == "email" and refs[:1] == [chat["chat_id"]]
+    return kind == f"{chat['channel']}.send_message" and str(effect.get("target")) == chat["chat_id"]
+
+
 async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, Any]) -> str | None:
     """The `report` notice a `done` act owes Tom, inside the caller's
     transaction; None when it owes none (see the module docstring)."""
@@ -406,7 +416,7 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
     from core import tasks
 
     chat = (await tasks.brief(conn, task_id)).chat
-    if chat and kind == f"{chat['channel']}.send_message" and str(effect.get("target")) == chat["chat_id"]:
+    if chat and _own_chat(chat, kind, effect):
         return None
     if kind == "merge":
         f = machine.fold(await ledger.read(conn, task_id))

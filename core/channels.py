@@ -23,7 +23,6 @@ A row says:
 - `case`: how a `chats` id is normalised before it is stored and
   compared: kept as written, lowercased, or uppercased.
 - `hint`: the entry's shape, for a refusal.
-- `where`: where Tom replies, as the email near miss notice names it.
 """
 
 import re
@@ -40,7 +39,6 @@ class Channel:
     chat: str | None
     case: str  # "keep", "lower", or "upper"
     hint: str
-    where: str
 
     def normal(self, ident: str) -> str:
         """`ident` as this channel stores and compares a chat id."""
@@ -65,7 +63,6 @@ CHANNELS: dict[str, Channel] = {
         chat=r".+",
         case="keep",
         hint="telegram:<chat id>",
-        where="in Telegram",
     ),
     "email": Channel(
         name="email",
@@ -76,7 +73,6 @@ CHANNELS: dict[str, Channel] = {
         chat=r".+",
         case="lower",
         hint="email:<sender address>",
-        where="by email",
     ),
     "local": Channel(
         name="local",
@@ -87,7 +83,6 @@ CHANNELS: dict[str, Channel] = {
         chat=None,
         case="keep",
         hint="",
-        where="on the local chat page",
     ),
     # A Slack id is `<team>/<channel>` for a channel and `<team>/<user>`
     # for a DM, both as Slack writes them: capitals and digits.
@@ -100,7 +95,6 @@ CHANNELS: dict[str, Channel] = {
         chat=r"[A-Z0-9]+/[A-Z0-9]+",
         case="upper",
         hint="slack:<team id>/<channel or user id>",
-        where="in Slack",
     ),
 }
 

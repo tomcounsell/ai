@@ -105,20 +105,24 @@ inbound size or part cap.
 ## How a message becomes work
 
 The path is the one in [telegram.md](telegram.md#how-a-message-becomes-work):
-the bridge hands each message to intake, which records it. Two things
-differ for email, and together they mean no email reaches the judgement
-layer.
+the bridge hands each message to intake, which records it. An email thread
+is a chat (Tom, 2026-10-17: "email threads are chat threads too"), so
+email binds as a team chat's messages do (`core/intake.py`).
 
-**Who counts as Tom.** A `From` header is a claim anyone can write.
-`intake.receive` sets every email record's `verified` false, so a record
-from Tom's address is recorded and starts nothing. The bridge never sets
-`verified`.
+**One session per thread.** The thread's root (`chat_id`) names its chat.
+Its first recorded email starts the thread's chat session, under the
+project listing the sender (`email:<address>`), else `valor`, opening with
+the thread's earlier recorded emails; every later one is a steer on that
+session, naming its sender. The session reads, answers by replying to all
+(`email.send` with `reply_to`), and starts the tasks the work needs
+(`skills/sdlc/converse.md`).
 
-**Nothing binds.** Every email record is unverified, so intake binds it as
-`none`: mail from Tom is recorded in the ledger and does not start, answer,
-steer, or stop anything. Stops come through the
-operator channel (Telegram, or the local chat page) or the command line, which an email reply could not carry reliably anyway
-(quoted history and signatures surround what the person typed).
+**No rights by sender.** A `From` header is a claim anyone can write, so
+`intake.receive` sets every email record's `verified` false and the bridge
+never sets it. An email from Tom's address is named as its sender, never
+as Tom: it does not answer, give feedback, or stop anything by itself, and
+`stop` in it is a steer. Stops come through the operator channel or the
+command line.
 
 ## Sending
 
@@ -190,8 +194,7 @@ Help), and no document gives how long that takes, so a miss does not show
 the send failed. The bridge reads Sent Mail only for a send in doubt
 (below).
 The result's `sent` entry carries the `Message-ID` and the thread root.
-No email reply binds to a task; every one is recorded with binding
-`none`.
+A thread's session's reply in its own thread owes Tom no report.
 
 **One attempt.** `perform` submits once over SMTP with STARTTLS. No command
 has a timer: the greeting, EHLO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`,
@@ -312,5 +315,5 @@ The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
   server that accepts a connection and then never answers holds only that
   effect until the connection drops or a stop (Tom's task stop or SIGTERM) ends it; the outbox,
   the watch, and every other send go on.
-- **Email starts, answers, and steers nothing.** No email record is
-  verified, so mail from Tom is recorded and binds as `none`.
+- **Email carries no one's rights.** No email record is verified, so
+  mail from Tom steers its thread's session as its sender, never as Tom.

@@ -27,9 +27,9 @@ in [judgement-layer.md](judgement-layer.md). This document places the judgement 
 stops there.
 
 **Design** ([plans/orchestration.md](plans/orchestration.md)). Within the agents tier, Valor's
-persona orchestrates and workers do the work. Each chat's session, a team chat's or Tom's own
-chat's, reads and dispatches; the tasks it starts use the skills and report to it, and only it
-speaks in its chat. A root task that is no session (from the CLI, a routine, or Tom's email)
+persona orchestrates and workers do the work. Each chat's session, a team chat's, an email
+thread's, or Tom's own chat's, reads and dispatches; the tasks it starts use the skills and report
+to it, and only it speaks in its chat. A root task that is no session (from the CLI or a routine)
 reports to the operator chat's session (The task and its Brief, the signal channel).
 
 The off switch and the bounds live in the kernel because an agent's
@@ -469,7 +469,7 @@ feedback work this way. Serves: corrections reach every session.
 
 A bridge is I/O: it turns an inbound message into a request or a reply on a task, and renders the
 kernel's outbound records (questions, deliveries, reports) on its medium. The kernel's loop is the
-one execution engine; delivery is keyed by transport, so a task started by email answers by email.
+one execution engine; delivery is keyed by transport, so an email thread is answered by email.
 The kernel side of the port is built (`core/intake.py`, `core/notices.py`, `core/bridge.py`): one
 `message.received` row per inbound message, bound by the kernel to start, steer, answer, feedback,
 stop, or none; notices owed by the fold; and an outbox that hands each bridge the sends the broker
@@ -481,8 +481,8 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
 ## How a task flows from request to merge
 
 1. **Intake.** Tom's message reaches the kernel through a bridge and is
-   his chat's session's next prompt; the session starts a task for the
-   work (by email, the message starts it): an effect ceiling (`act`) and
+   his chat's session's next prompt (an email thread is a chat); the
+   session starts a task for the work: an effect ceiling (`act`) and
    a provisioned workspace.
 2. **Judge, then clarify if thin.** One inspecting turn, one message.
 3. **Plan.** The working session writes the plan: approach, stakes, the

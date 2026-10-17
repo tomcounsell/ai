@@ -158,6 +158,8 @@ used."
 On posting: "there is no gate or block or approval from Tom because Valor
 posts as himself on his own accounts."
 
+On email (2026-10-17): "email threads are chat threads too."
+
 What this changes:
 
 - **Valor is a full operator.** He reads the world (the web, media, the

@@ -1018,3 +1018,68 @@ def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_r
     (reported,) = run(go())
     assert (reported["chat_id"], reported["reply_to"]) == (bridges.OPERATOR_CHAT, None)
     assert "an email to x@florist.test" in reported["text"]
+
+
+# -- an email thread: a chat with its own session ------------------------------
+
+
+@pytest.fixture
+def mail(tmp_path):
+    """Tom's address, and a project that lists a client's."""
+    with bridges.operator(tmp_path):
+        projects = pathlib.Path(settings.projects_dir)
+        (projects / "valor.toml").write_text(bridges.VALOR_SPEC)
+        (projects / "flowers.toml").write_text(
+            'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["email:kim@florist.test"]\n'
+        )
+        yield
+
+
+async def emailed(dsn, text, *, sender=bridges.OPERATOR_EMAIL, name="Tom", thread=()) -> dict:
+    """An email received and bound, in reply to the last of `thread`: its
+    binding, with the email's id."""
+    mid = f"<{uuid.uuid4().hex}@mail.test>"
+    inbound = intake.Inbound(
+        channel="email", chat_id=thread[0] if thread else mid, chat_kind="email", message_id=mid,
+        sender_id=sender, sender_name=name, sent_at="2026-10-17T09:30:00+00:00", text=text,
+        reply_to=thread[-1] if thread else None, thread=[{"id": i} for i in thread],
+    )  # fmt: skip
+    async with await db.connect(dsn) as conn:
+        got = await intake.receive(conn, inbound)
+        await intake.bind(conn)
+    (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+    bound["message_id"] = mid
+    return bound
+
+
+def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, mail):
+    """Each thread has one session, under the sender's project, else
+    `valor`; an email names its sender, never Tom, so `stop` steers. The
+    session's reply in its thread owes Tom no report; a send elsewhere does."""
+
+    async def go():
+        first = await emailed(dsn, "The florist page\n\nit 500s on mobile")
+        root = first["message_id"]
+        second = await emailed(dsn, "Re: The florist page\n\nstop", thread=(root,))
+        empty = await emailed(dsn, "", thread=(root, second["message_id"]))
+        client = await emailed(dsn, "Hours\n\nopen Sunday?", sender="kim@florist.test", name="Kim")
+        task = first["task_id"]
+        async with await db.connect(dsn) as conn:
+            b, c = await tasks.brief(conn, task), await tasks.brief(conn, client["task_id"])
+            for refs in ([root, second["message_id"]], ["<elsewhere@mail.test>"]):
+                effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": "email.send",
+                          "target": "kim@florist.test",
+                          "payload": {"to": ["kim@florist.test"], "body": "On it.", "references": refs}}  # fmt: skip
+                await notices.report(conn, task, effect, {})
+        return first, second, empty, client, b, c, await rows_of(dsn, task)
+
+    first, second, empty, client, b, c, rows = run(go())
+    assert (first["as"], second["as"], empty["as"]) == ("steer", "steer", "none")
+    assert first["task_id"] == second["task_id"] != client["task_id"]
+    assert b.chat == {"channel": "email", "chat_id": first["message_id"]} and b.project == {"name": "valor"}
+    assert b.instruction.startswith("You are in an email thread") and c.project == {"name": "flowers"}
+    steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
+    assert [p["provenance"]["by"] for p in steered] == ["Tom", "Tom"]
+    assert machine.fold(rows).state is not State.STOPPED
+    (reported,) = [r["payload"] for r in rows if r["type"] == "notice.requested"]
+    assert reported["chat_id"] == bridges.OPERATOR_CHAT

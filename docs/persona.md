@@ -48,8 +48,9 @@ there: every team chat a project lists, and Tom's own chat (his Telegram
 DM, his Slack DMs, the operator chat, the local chat page), where it is a
 1:1 with the CEO. Every message in the chat that does not bind to running
 work is the session's next prompt; a steer, answer, or stop on a reply to
-an older task's post binds to that task (`core/intake.py`). Email has no
-session: Tom's emails start tasks.
+an older task's post binds to that task (`core/intake.py`). An email
+thread is a chat too, with a session of its own; no email carries Tom's
+rights, since a From header is a claim.
 
 The session reads and dispatches (`skills/sdlc/converse.md`). It reads the
 chat, memory, task status, and the repository, so it can answer a
@@ -63,7 +64,7 @@ deliveries to the session that started them, never to a chat; only the
 session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
 its own words (`core/notices.py`). This is the session's prompt and the
 persona, with no tool taken from it. A root task that is no session (one
-started from the CLI, a routine, or Tom's email) reports to the operator
+started from the CLI or a routine) reports to the operator
 chat's session. In Tom's own chat his exact `stop` stops at once every
 task reporting to the session.
 

@@ -38,13 +38,13 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   read from settings, default 3.
 - **Bridges.** Telegram, email, Slack and a local chat bridge. Telegram
   carries messages both ways and is the one tested bridge. Reactions mark
-  arrival and the shape of the reply. Each team chat and Tom's own chat
-  (his Telegram and Slack DMs, the operator chat, the local chat) has one
+  arrival and the shape of the reply. Each team chat, each email thread,
+  and Tom's own chat (his Telegram and Slack DMs, the operator chat, the
+  local chat) has one
   long-lived chat session, and every message there that does not bind to
   running work goes to it. It reads and dispatches: it replies, stays
   quiet, starts a subagent for something small (`valor:web` for the web),
-  or starts tasks that report to it, and only it speaks in its chat. Each
-  of Tom's emails starts an SDLC task.
+  or starts tasks that report to it, and only it speaks in its chat.
 - **Harnesses.** Claude Code, plus Pi and the OpenAI route in code.
 - **Persona and routines.** The persona is rendered into every turn;
   routines (status page, the 90-day expiry list, which reports to Tom and
