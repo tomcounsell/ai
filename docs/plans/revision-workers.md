@@ -50,7 +50,18 @@ and implement it that way."
    "# Tom's feedback on the delivery" for every `feedback.given`; it becomes
    "# Feedback on the delivery from <by>, via <via>" from the row's
    provenance, so a teammate's word in a team chat is not read as Tom's.
-4. **Text.** `TaskSteer.usage`: "gives that task what the chat added; to a
+4. **The revision ends the way the delivery did.** A reopened task runs in
+   `patch`, and `skills/sdlc/patch.md` today knows only `done.md` (or
+   `stop.md` as giving up when rounds are spent); build.md's "A document for
+   someone" (name the PDF's absolute path outside `.valor/`) and "done with
+   nothing to merge" (`stop.md` opening `Done:`) rules are missing there, so
+   a revised deck or video could come back with no path. patch.md gains one
+   paragraph: on feedback on a delivery, end as that delivery did; a revised
+   document or file is named by its absolute path outside `.valor/` in the
+   note; with nothing to merge, `stop.md` opening `Done:` and that path.
+   `stop.md` already ends the work from any working state
+   (`core/session.py`), so no kernel change.
+5. **Text.** `TaskSteer.usage`: "gives that task what the chat added; to a
    task that has delivered (merged or ended) it is feedback, and the task
    reopens in its own workspace and conversation to revise and report again."
    `skills/sdlc/converse.md` item 3: when the chat comments on or asks to
@@ -68,6 +79,7 @@ and implement it that way."
   live check in Done shows bde12e594236 does not report to the current team
   chat session, the done run uses a task the current session started, and
   the gap is named in the delivery.
+- No change to build.md's rules; patch.md points at them for feedback.
 - No new state, effect, check or refusal. No governance is added.
 
 ## Stakes
@@ -90,6 +102,9 @@ in one commit.
 - `lookup` finds the feedback by key; a second round with identical text and
   a new key is a second `feedback.given`, not found by the first key.
 - A task that does not report to the session is refused, as now.
+- `tasks.stage_text(State.PATCH)` carries the feedback paragraph (the
+  absolute path and `Done:` rule), so the reopened worker is told how to
+  hand back a file.
 - Second round end to end with the scripted harness: ended → steer → patch →
   `stop.md` → `ended` again, and the session gets a second `child.reported`.
 
