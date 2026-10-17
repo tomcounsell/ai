@@ -59,7 +59,9 @@ a small thing it starts a Claude Code subagent inside its turn; web
 searches and page reads go through the web agent (`valor:web`), which any
 agent at any depth can start, since subagents nest without limit; anything
 with a deliverable or a merge becomes a task it starts, answers, steers,
-or stops (`tools/chat_tasks.py`). Those tasks send their questions, progress, and
+or stops (`tools/chat_tasks.py`); a steer of a task that has delivered
+(`merged` or `ended`) reopens it to revise, so a deliverable's task is the
+worker for its revision rounds. Those tasks send their questions, progress, and
 deliveries to the session that started them, never to a chat; only the
 session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
 its own words (`core/notices.py`). This is the session's prompt and the

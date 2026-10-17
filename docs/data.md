@@ -134,7 +134,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/fresh.py` | `review.compared` | a review at a seat other than the registered one: seat, model, the candidate, the computed verdict, `reviewer_verdict`, findings, `predicted_failure`, `turn_id`, `usd_micros`. Information only: the fold never reads it | Evidence "Independent checks" |
 | `core/fresh.py` | `advice.given` | the advisor's answer to a working turn's `.valor/advice.md`: `asked_turn_id`, seat, model, the head it read, `usd_micros`, `advisor_turn_id` when its turn ran, and `answer`, or `error` naming why there is none (a failed or empty turn, a checkout it could not make, an answer Postgres jsonb refuses, with the reason). The working session's next turn opens with it, quoted; the fold never reads it | Tom's ruling of 2026-10-09: second opinions go to the advisor |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
-| `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
+| `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance (`by` and `via`: Tom by reply or the command line, or whoever a chat session named, via `chat`); `effect_key` when a chat session's `task.steer` of a `merged` or `ended` task gave it (`tools/chat_tasks.py`) | Mission item 1; Evidence "Tom's feedback, both directions" |
 | `core/outcomes.py` | `delivery.used` | `used_id`, `delivery_event_id` (the `task.delivered` row it names: the one the task's latest done merge carried, else the latest, or the one `--delivery` names), the candidate, `effect_id` and `head_sha` of the done merge that carried that delivery (null with none), note, provenance (`by` names who used the work). Written only by `python -m core used`; the fold ignores it. A role-played mark is listed and not counted as use | Evidence "Working results in real use" |
 | `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
 | `core/guards.py` | `guard.granted` | `guard_id`, name, incident, mission items, `granted_at`, `expires` (ninety days on), Tom's note, provenance; the seeded guards sit on the `guards` stream | The governing constraint |
@@ -396,8 +396,9 @@ are folds over rows the kernel already writes:
 
 - `question.asked` and `question.answered`: what Valor asked and Tom's
   answer.
-- `feedback.given`: Tom's feedback on a delivery, bound to the delivery it
-  answers (`on_delivery`).
+- `feedback.given`: feedback on a delivery, from Tom or passed on by a
+  chat session with its sender's name, bound to the delivery it answers
+  (`on_delivery`).
 - `approval.granted`: a tap on a held effect, with the literal message.
   No code writes one; the fold reads the rows a ledger holds.
 
