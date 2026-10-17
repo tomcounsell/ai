@@ -27,52 +27,32 @@ models live in one process.
 ## What is built
 
 1. **One voice process, `tools/voice.py`**, launchd agent `com.valor.voice`
-   (plist written like the bridges', with the ffmpeg path found at write
-   time), aiohttp on `127.0.0.1:settings.voice_port` (8714).
-   `POST /transcribe {path}` → `{text}`: ffmpeg decodes to 16 kHz mono PCM,
-   Parakeet with onnx-asr's Silero VAD so any length is cut into segments.
-   `POST /speech {text, format: ogg|mp3}` → audio bytes: Kokoro, then
-   ffmpeg to Opus or MP3. Each model loads on first use and stays loaded.
-   Engines sit behind two functions, `listen(path)` and `speak(text)`; the
-   models and voice are settings (`asr_model`, `tts_model_dir`
-   default `~/.cache/kokoro-onnx` as before, `tts_voice` `am_michael`), so a
-   new voice is a setting and a new engine is one function. `python -m
-   tools.voice fetch` downloads both models (the rollout step).
-   `onnx-asr[cpu,hub]` and `kokoro-onnx` join `pyproject.toml`.
-2. **Transcribed where the attachment is recorded.** `core/voice.py`
-   `transcribe(path)`: a stdlib POST to the voice process (bridges import
-   only `core/`). Telegram and Slack `inbound.attachment`, and email's
-   attachment write, add `transcript` to an `audio/*` attachment, through
-   `asyncio.to_thread` (email is already off the loop). Any failure,
-   including the process being down, records `transcript_failed: <reason>`
-   and the message is recorded as before. Telegram: the stall check
-   (`_cancel_stalled`) covers the download only; the message's entry leaves
-   `_received` once the file is in, so a long transcription is not
-   cancelled. Telegram files are already received off the stream and Slack
-   messages each run as their own task, so a slow transcription holds up
-   no other message; Slack redelivery while it runs is the existing wait.
-   `_files` prints `  transcript: <words>` or `  not transcribed: <reason>`
-   under the attachment line. No Telegram Premium path.
-3. **`valor-tts TEXT -o FILE`**, workspace tool (`tools/valor_tts.py`,
-   stdlib, Python 3.9, in `WORKSPACE_TOOLS`): POSTs to `/speech`, writes
-   the bytes; `.ogg` or `.mp3` picks the format. No key. Exits non-zero
-   with a sentence when the process is unreachable or answers an error.
-4. **Sent as a voice note.** `TelethonWire.send_file`: a `*.ogg` goes with
-   mime `audio/ogg` and `DocumentAttributeAudio(duration, voice=True)`
-   beside its filename attribute, without `force_file`; duration from the
-   Ogg's last granule position (48 kHz). Other files unchanged; sent-message
-   matching by name still holds. Slack: the `.mp3` uploads as today and
-   plays inline. No payload field: the extension decides.
-5. **Docs.** `skills/sdlc/converse.md`: an attachment with a transcript is
-   a voice note; answer with `valor-tts` (`.ogg` Telegram, `.mp3` Slack) in
-   the same send's `files`, the same words as `text`, kept short; typed
-   messages get text only. `docs/bridges/telegram.md`, `slack.md`,
-   `email.md`, `tools/README.md`, `docs/rollout.md` (on each Mac: `uv
-   sync`, `python -m tools.voice fetch`, install `com.valor.voice`, rewrite
-   bridge plists, restart; ~2.3 GB resident once both models are used).
+   (plist with ffmpeg's directory on PATH), aiohttp on
+   `127.0.0.1:settings.voice_port` (8714). `POST /transcribe {path}` →
+   `{text}`: ffmpeg decodes to 16 kHz mono, Parakeet with onnx-asr's Silero
+   VAD. The model loads on first use and stays loaded; the engine is
+   `listen`, the model `settings.asr_model`. `python -m tools.voice fetch`
+   downloads Parakeet and Kokoro's files (the rollout step).
+2. **Transcribed before the message is recorded.** `core/bridge.py`
+   `transcribe(attachment)`, a stdlib POST with a 600 s timeout, called off
+   the loop from Telegram's and Slack's `_receive` and email's `poll`: an
+   `audio/*` attachment gains `transcript`, or `transcript_failed` with the
+   reason, and the message is recorded either way. Telegram's stall check
+   stops watching once the file is in. `_files` prints the transcript line.
+3. **Speech out reuses the present skill's `tts.py`** (yudame plugin:
+   Kokoro v1.0, `am_michael`, the old system's engine, model files and
+   voice). The kernel puts `KOKORO_MODELS_DIR` and `VALOR_TTS_VOICE`
+   (`settings.tts_model_dir`, `settings.tts_voice`) in every turn's env, so
+   the voice is one setting; `converse.md` gives the command.
+4. **Sent as a voice note.** `TelethonWire.send_file`: an `*.ogg` goes as
+   `audio/ogg` with `DocumentAttributeAudio(duration, voice=True)` and its
+   filename; lookup matches a voice note by kind and size. Slack uploads
+   the `.mp3` as today.
+5. **Docs**: `converse.md`, the three bridge docs, `tools/README.md`,
+   `docs/harnesses.md`, `core/README.md`, `docs/rollout.md`.
 
-**Out of scope.** OpenAI or any second speech backend (the old cloud
-fallback is not carried: one mechanism); voice cloning or per-person
+**Out of scope.** A speech engine of our own, OpenAI or any second speech
+backend (one mechanism); voice cloning or per-person
 voices; Telegram's transcription; video notes; unloading models; a length
 cap.
 
@@ -81,23 +61,14 @@ message; it refuses nothing.
 
 ## Tests
 
-- Voice process, engines faked: `/transcribe` and `/speech` (ogg and mp3
-  through real ffmpeg), the configured voice passed to `speak`. One test
-  with real models (`say` → Parakeet; Kokoro → Opus → Parakeet round trip)
-  runs when the models are cached, skipped otherwise.
-- `valor-tts` run with the env `workspace.environment()` builds (no
-  `OPENAI_API_KEY`) against the faked process writes playable `.ogg`/`.mp3`;
-  process down and a 500 each exit non-zero with a sentence.
-- Telegram on the emulator: voice and audio transcribed, photo and PDF not;
-  transcriber down → `transcript_failed`, message recorded; a slow
-  transcriber across two ticks is not cancelled, a text sent after it is
-  recorded first, the voice note once it finishes, and gap fill does not
-  pass it. Slack: `audio/*` transcribed, image not, slow transcriber acked
-  once committed. Email: audio attachment transcribed.
-- `_files`/`chat_line`: transcript and not-transcribed lines.
-- Telegram send: `reply.ogg` → voice attribute with its duration, no
-  `force_file`; `report.pdf` as today; a sent voice note matched by name.
-- Full suite, lint, bloat test.
+`tests/test_voice.py`: decode; `listen` joins segments; the route; the
+plist; real Parakeet on `say` speech when cached; only downloaded audio
+transcribed; process down, and hung past the timeout, each recorded with
+the reason; chat-line rendering; Telegram on the emulator (voice and audio
+transcribed, photo and PDF not, a slow transcription not cancelled, run
+once, holding nothing up); Telegram sends (voice attribute and length, a
+nameless voice note found, a lost reply reconciled not resent); Slack and
+email transcription; the turn env names the voice. Full suite, lint, bloat.
 
 **Done** when Tom sends a voice note in a real chat, Valor answers what he
 said, and he plays the voice reply (recorded with the date).

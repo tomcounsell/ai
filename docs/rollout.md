@@ -96,13 +96,13 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
-   Parakeet into `~/.cache/huggingface`, Kokoro into `~/.cache/kokoro-onnx`;
-   Handy's own models folder is not used): `$PY -m tools.voice fetch`.
+   Parakeet into `~/.cache/huggingface`, Kokoro, which the present
+   skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`; Handy's own
+   models folder is not used): `$PY -m tools.voice fetch`.
    Then for each of `core serve`, `bridges.telegram`, `bridges.email`
    (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
    reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every
-   bridge's audio and speaks `valor-tts`; about 2.3 GB resident once both
-   models are used), `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
+   bridge's audio; about 1.7 GB resident once used), `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
    and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    Every job's `PATH` includes `/opt/homebrew/bin`: the `core serve` and
@@ -120,8 +120,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
     passes; `$PY -m core settings` names the machine and the backup folder;
     `$PY -m core routines` lists the routines; a message in each chat the
     specs name gets 👀; a voice note sent to Valor reaches its session with
-    a `transcript:` line, and `valor-tts hi -o /tmp/hi.ogg` writes a file
-    that plays; `launchctl list | grep com.valor` lists only the
+    a `transcript:` line and is answered with one that plays; `launchctl list | grep com.valor` lists only the
     jobs of step 9 and caffeinate and brew-nightly.
 
 A Mac with no Telegram session or mailbox can run with only the local

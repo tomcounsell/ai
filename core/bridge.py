@@ -619,12 +619,18 @@ def stamp() -> str:
         return NO_HEAD
 
 
+# Parakeet hears an hour of speech in a few minutes on this Mac's CPU; a
+# voice process that holds a request longer than this is hung, not working.
+TRANSCRIBE_TIMEOUT_S = 600.0
+
+
 def transcribe(attachment: dict[str, Any]) -> dict[str, Any]:
     """An inbound attachment as recorded: an `audio/*` file that was
     downloaded gains `transcript`, the words the voice process
     (`tools/voice.py`) heard, or `transcript_failed` with why not; any
     other attachment is returned as it was. It blocks until the voice
-    process answers, so a bridge runs it off its loop."""
+    process answers or `TRANSCRIBE_TIMEOUT_S` passes, so a bridge runs it
+    off its loop."""
     if not attachment.get("path") or not str(attachment.get("mime") or "").startswith("audio/"):
         return attachment
     request = urllib.request.Request(
@@ -633,7 +639,7 @@ def transcribe(attachment: dict[str, Any]) -> dict[str, Any]:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request) as answer:
+        with urllib.request.urlopen(request, timeout=TRANSCRIBE_TIMEOUT_S) as answer:
             return {**attachment, "transcript": json.load(answer)["text"]}
     except Exception as e:  # noqa: BLE001  the message is recorded either way, saying why
         return {**attachment, "transcript_failed": str(e) or type(e).__name__}

@@ -666,7 +666,6 @@ WORKSPACE_TOOLS = {
     "look": "look",
     "valor-telegram": "valor_read.py",
     "valor-slack": "valor_read.py",
-    "valor-tts": "valor_tts.py",
 }
 
 

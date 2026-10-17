@@ -1,6 +1,7 @@
 """Voice messages both ways: every audio attachment is transcribed by the
 voice process before it is recorded, and an `.ogg` a turn sends goes to
-Telegram as a voice note, spoken by `valor-tts` with no key."""
+Telegram as a voice note (spoken by the present skill's `tts.py`, from the
+voice every turn's env names)."""
 
 import asyncio
 import base64
@@ -11,7 +12,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 from email.message import EmailMessage
 from pathlib import Path
@@ -25,8 +25,7 @@ from bridges.email import imap
 from bridges.slack.bridge import SlackBridge
 from bridges.telegram.send import Expected, _matches
 from bridges.telegram.wire import Media, Msg, document, ogg_seconds
-from core import bridge, intake, workspace
-from core.settings import settings
+from core import bridge, intake
 from tests import bridges
 from tests.telegram_port import (
     chat,
@@ -47,13 +46,21 @@ pytestmark = [
     pytest.mark.spend(usd=0),
     pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg"),
 ]
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
 run = asyncio.run
 
 
 def tone(seconds: float = 2.0, rate: int = 24_000) -> np.ndarray:
     t = np.arange(int(seconds * rate)) / rate
     return (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+
+def opus(samples: np.ndarray, rate: int = 24_000, fmt: str = "ogg") -> bytes:
+    """Samples as an Ogg/Opus file, as the present skill's `tts.py` writes one (or MP3)."""
+    codec_args = ["-c:a", "libopus", "-f", "ogg"] if fmt == "ogg" else ["-c:a", "libmp3lame", "-f", "mp3"]
+    return subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1", "-i", "-", *codec_args, "-"],
+        input=samples.tobytes(), capture_output=True, check=True,
+    ).stdout  # fmt: skip
 
 
 def codec(data: bytes, tmp_path: Path) -> tuple[str, float]:
@@ -71,7 +78,7 @@ class Voice:
     """The voice process's app with its engines faked, on a free port in a
     thread of its own, with `settings.voice_port` pointed at it."""
 
-    def __init__(self, listen=None, speak=None):
+    def __init__(self, listen=None):
         self.heard: list[str] = []
         self.loop = asyncio.new_event_loop()
         ready = threading.Event()
@@ -80,11 +87,8 @@ class Voice:
             self.heard.append(path)
             return f"words of {Path(path).name[:8]}"
 
-        def spoken(text, fmt):
-            return voice.encode(tone(), 24_000, fmt)
-
         async def start():
-            self.runner = web.AppRunner(voice.app(listen=listen or heard, speak=speak or spoken))
+            self.runner = web.AppRunner(voice.app(listen=listen or heard))
             await self.runner.setup()
             site = web.TCPSite(self.runner, "127.0.0.1", 0)
             await site.start()
@@ -113,25 +117,17 @@ def heard():
 # -- the voice process ----------------------------------------------------------
 
 
-def test_decode_any_audio_to_16k_mono_and_encode_ogg_and_mp3(tmp_path):
-    ogg = tmp_path / "v.ogg"
-    ogg.write_bytes(voice.encode(tone(2.0), 24_000, "ogg"))
-    samples = voice.decode(ogg)
-    assert samples.dtype == np.float32 and abs(len(samples) - 32_000) < 1_600
-    assert codec(ogg.read_bytes(), tmp_path)[0] == "opus"
-    assert codec(voice.encode(tone(), 24_000, "mp3"), tmp_path)[0] == "mp3"
+def test_decode_any_audio_to_16k_mono(tmp_path):
+    for name, fmt in (("v.ogg", "ogg"), ("v.mp3", "mp3")):
+        f = tmp_path / name
+        f.write_bytes(opus(tone(2.0), fmt=fmt))
+        samples = voice.decode(f)
+        assert samples.dtype == np.float32 and abs(len(samples) - 32_000) < 1_600
     with pytest.raises(subprocess.CalledProcessError):
         voice.decode(tmp_path / "missing.ogg")
 
 
-def test_speak_uses_the_configured_voice_and_listen_joins_segments(tmp_path, monkeypatch):
-    used = []
-
-    class Kokoro:
-        def create(self, text, voice):
-            used.append((text, voice))
-            return tone(1.0), 24_000
-
+def test_listen_joins_the_segments_heard(tmp_path, monkeypatch):
     class Asr:
         def recognize(self, samples):
             assert samples.dtype == np.float32
@@ -141,35 +137,20 @@ def test_speak_uses_the_configured_voice_and_listen_joins_segments(tmp_path, mon
                 SimpleNamespace(text="Ship it."),
             ]
 
-    monkeypatch.setattr(voice, "_tts", lambda: Kokoro())
     monkeypatch.setattr(voice, "_asr", lambda: Asr())
-    with bridges.configure(tts_voice="bf_alice"):
-        data = voice.speak("hello", "ogg")
-    assert used == [("hello", "bf_alice")] and codec(data, tmp_path)[0] == "opus"
-    (tmp_path / "a.ogg").write_bytes(data)
+    (tmp_path / "a.ogg").write_bytes(opus(tone(1.0)))
     assert voice.listen(str(tmp_path / "a.ogg")) == "Valor. Ship it."
 
 
-def test_the_process_answers_transcribe_and_speech(heard, tmp_path):
-    import urllib.error
+def test_the_process_answers_transcribe(heard):
     import urllib.request
 
-    def post(path, body):
-        r = urllib.request.Request(
-            f"http://127.0.0.1:{heard.port}{path}",
-            json.dumps(body).encode(),
-            {"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(r) as answer:
-            return answer.headers["Content-Type"], answer.read()
-
-    assert post("/transcribe", {"path": "/x/abcdefgh123"}) == ("application/json; charset=utf-8",
-                                                              b'{"text": "words of abcdefgh"}')  # fmt: skip
-    kind, data = post("/speech", {"text": "hi", "format": "mp3"})
-    assert kind == "audio/mpeg" and codec(data, tmp_path)[0] == "mp3"
-    with pytest.raises(urllib.error.HTTPError) as e:
-        post("/speech", {"text": "hi", "format": "wav"})
-    assert e.value.code == 400
+    r = urllib.request.Request(
+        f"http://127.0.0.1:{heard.port}/transcribe", json.dumps({"path": "/x/abcdefgh123"}).encode(),
+        {"Content-Type": "application/json"},
+    )  # fmt: skip
+    with urllib.request.urlopen(r) as answer:
+        assert json.load(answer) == {"text": "words of abcdefgh"}
 
 
 def test_plist_runs_the_process_with_ffmpeg_on_its_path():
@@ -193,12 +174,12 @@ HF = Path.home() / ".cache" / "huggingface" / "hub" / "models--istupakov--parake
 
 
 @pytest.mark.skipif(
-    not _cached(HF, Path(settings.tts_model_dir).expanduser() / voice.KOKORO_FILES[0]),
-    reason="the models are not fetched (python -m tools.voice fetch)",
+    not (HF.exists() and shutil.which("say")), reason="Parakeet is not fetched (python -m tools.voice fetch)"
 )
-def test_real_models_round_trip(tmp_path):
-    ogg = tmp_path / "said.ogg"
-    ogg.write_bytes(voice.speak("Please check the deploy and send me a voice note.", "ogg"))
+def test_real_parakeet_hears_speech(tmp_path):
+    aiff, ogg = tmp_path / "said.aiff", tmp_path / "said.ogg"
+    subprocess.run(["say", "-o", str(aiff), "Please check the deploy and send me a voice note."], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(aiff), "-c:a", "libopus", str(ogg)], check=True)
     heard_text = voice.listen(str(ogg)).lower()
     assert "deploy" in heard_text and "voice note" in heard_text
 
@@ -215,6 +196,21 @@ def test_only_downloaded_audio_is_transcribed(heard):
     ):
         assert bridge.transcribe(other) == other
     assert heard.heard == ["/in/abcdefgh9"]
+
+
+def test_a_hung_voice_process_times_out_and_says_so(monkeypatch):
+    import socket
+
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    held.listen()  # accepts the connection and never answers
+    monkeypatch.setattr(bridge, "TRANSCRIBE_TIMEOUT_S", 0.5)
+    try:
+        with bridges.configure(voice_port=held.getsockname()[1]):
+            got = bridge.transcribe({"name": "voice", "mime": "audio/ogg", "path": "/in/1"})
+    finally:
+        held.close()
+    assert "timed out" in got["transcript_failed"]
 
 
 def test_voice_process_down_says_why():
@@ -341,7 +337,7 @@ async def _count(dsn, chat_id, n):
 
 
 def test_an_ogg_is_sent_as_a_voice_note_with_its_length_and_anything_else_as_a_document():
-    data = voice.encode(tone(3.2), 24_000, "ogg")
+    data = opus(tone(3.2))
     assert ogg_seconds(data) == 3
     note = document("up", data, "reply.ogg")
     audio, name = note.attributes
@@ -369,7 +365,7 @@ def test_a_voice_reply_lost_in_flight_is_found_by_reconcile_not_sent_twice(emu, 
         ws = tmp_path / "ws"
         ws.mkdir()
         ogg = ws / "reply.ogg"
-        ogg.write_bytes(voice.encode(tone(), 24_000, "ogg"))
+        ogg.write_bytes(opus(tone()))
         files = [{"path": str(ogg), "sha256": hashlib.sha256(ogg.read_bytes()).hexdigest()}]
         async with connected(emu.url, dsn, tmp_path) as b:
             effect = await release(dsn, send(group, "the same words", files=files), str(ws))
@@ -526,44 +522,3 @@ def test_an_email_audio_attachment_is_transcribed(tmp_path, monkeypatch, heard):
     memo, pdf = got[0].attachments
     assert memo["transcript"].startswith("words of ") and Path(memo["path"]).read_bytes() == b"memo"
     assert "transcript" not in pdf
-
-
-# -- valor-tts ---------------------------------------------------------------------
-
-
-def tts(tmp_path, *args, port):
-    """`valor-tts` as a turn runs it: the macOS python, in the environment
-    every turn starts from (no OpenAI key), with the turn's voice port."""
-    env = {**workspace.environment(), "VALOR_VOICE_PORT": str(port)}
-    assert "OPENAI_API_KEY" not in env
-    python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
-    return subprocess.run(
-        [python, "-I", str(TOOLS / "valor_tts.py"), *args], env=env, capture_output=True, text=True,
-        cwd=tmp_path, check=False,
-    )  # fmt: skip
-
-
-def test_valor_tts_writes_ogg_and_mp3_with_no_key(tmp_path, heard, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-not-for-turns")
-    for name, kind in (("reply.ogg", "opus"), ("reply.mp3", "mp3")):
-        out = tts(tmp_path, "Deploy is done.", "-o", str(tmp_path / name), port=heard.port)
-        assert out.returncode == 0, out.stderr
-        assert codec((tmp_path / name).read_bytes(), tmp_path)[0] == kind
-    bad = tts(tmp_path, "x", "-o", str(tmp_path / "reply.wav"), port=heard.port)
-    assert bad.returncode == 2 and ".ogg or .mp3" in bad.stderr
-
-
-def test_valor_tts_says_why_when_the_process_is_down_or_fails(tmp_path):
-    down = tts(tmp_path, "x", "-o", str(tmp_path / "r.ogg"), port=1)
-    assert down.returncode == 1 and "not answering on 127.0.0.1:1" in down.stderr
-
-    def broken(text, fmt):
-        raise RuntimeError("no model")
-
-    v = Voice(speak=broken)
-    try:
-        failed = tts(tmp_path, "x", "-o", str(tmp_path / "r.ogg"), port=v.port)
-    finally:
-        v.stop()
-    assert failed.returncode == 1 and "answered 500" in failed.stderr
-    assert not (tmp_path / "r.ogg").exists()

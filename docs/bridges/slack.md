@@ -172,7 +172,7 @@ is a target, owned or not. Its payload:
 |---|---|
 | `text` | Sent as written |
 | `reply_to` | A message `ts`; the post goes in that message's thread |
-| `files` | Each a path in the task's workspace and its sha256; a voice reply is an `.mp3` from `valor-tts`, uploaded like any file, which Slack plays in the message |
+| `files` | Each a path in the task's workspace and its sha256; a voice reply is an `.mp3` from the present skill's `tts.py`, uploaded like any file, which Slack plays in the message |
 
 A target in a workspace other than the connected one is `broker.Failed`
 ("`<team>` is not a connected workspace"), and nothing is posted.

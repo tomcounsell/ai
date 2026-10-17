@@ -457,7 +457,7 @@ after entity parsing. A longer text is sent as consecutive messages
 the bytes are unchanged, so the digest still holds. A file over 2000 MiB
 is refused when it is requested.
 
-**Voice notes.** A file named `*.ogg` (Opus, as `valor-tts` writes it) is
+**Voice notes.** A file named `*.ogg` (Opus, as the present skill's `tts.py` writes it) is
 sent as a voice note: mime `audio/ogg`, an audio attribute with `voice`
 set and its length in seconds (from the last Ogg page's granule
 position), and its file name. Every other file goes as a document.

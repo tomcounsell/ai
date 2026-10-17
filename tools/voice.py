@@ -1,23 +1,22 @@
-"""The voice process: speech to text and text to speech, on this Mac.
+"""The voice process: speech to text, on this Mac.
 
 `python -m tools.voice run | fetch | --plist`.
 
-One process holds both models, so the three bridges share one copy
-(Parakeet alone peaks near 1.7 GB resident). It answers on
+One process holds the model, so the three bridges share one copy
+(Parakeet peaks near 1.7 GB resident). It answers on
 `127.0.0.1:settings.voice_port`:
 
 - `POST /transcribe {"path": ...}` -> `{"text": ...}`: ffmpeg decodes any
   audio to 16 kHz mono; Parakeet (`settings.asr_model`, through onnx-asr,
   int8, on the CPU) with onnx-asr's Silero VAD, so any length is cut into
   segments.
-- `POST /speech {"text": ..., "format": "ogg" | "mp3"}` -> the audio:
-  Kokoro (`settings.tts_model_dir`, voice `settings.tts_voice`), then
-  ffmpeg to Opus in Ogg (a Telegram voice note) or MP3.
 
-The engines are `listen` and `speak`: a new voice or model is a setting, a
-new engine is one function. Each model loads on first use and stays
-loaded; inference runs on one thread, one request at a time.
-`fetch` downloads both models, the step each Mac runs once.
+The engine is `listen`: a new model is a setting, a new engine is one
+function. The model loads on first use and stays loaded; inference runs on
+one thread, one request at a time. Speech out is not here: a turn speaks
+with the yudame present skill's `tts.py` (Kokoro, the old system's engine),
+from Kokoro's files in `settings.tts_model_dir` in `settings.tts_voice`.
+`fetch` downloads Parakeet and those files, the step each Mac runs once.
 """
 
 from __future__ import annotations
@@ -43,14 +42,11 @@ from core.settings import settings
 
 LABEL = "com.valor.voice"
 ROOT = Path(__file__).resolve().parents[1]
-PLIST_ENV = ("VALOR_VOICE_PORT", "VALOR_ASR_MODEL", "VALOR_TTS_MODEL_DIR", "VALOR_TTS_VOICE")
-# The old system's Kokoro files: the kokoro-onnx maintainer's release.
+PLIST_ENV = ("VALOR_VOICE_PORT", "VALOR_ASR_MODEL")
+# The old system's Kokoro files, which the present skill's `tts.py` reads:
+# the kokoro-onnx maintainer's release.
 KOKORO = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 KOKORO_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
-ENCODERS = {
-    "ogg": ["-c:a", "libopus", "-b:a", "32k", "-f", "ogg"],
-    "mp3": ["-c:a", "libmp3lame", "-f", "mp3"],
-}
 RATE = 16_000
 QUIET = ("-nostdin", "-loglevel", "error")
 
@@ -72,17 +68,6 @@ def decode(path: str | Path) -> np.ndarray:
     return np.frombuffer(out.stdout, dtype=np.float32)
 
 
-def encode(samples: np.ndarray, rate: int, fmt: str) -> bytes:
-    """Mono float32 samples as an Ogg/Opus or MP3 file's bytes."""
-    out = subprocess.run(
-        [ffmpeg(), *QUIET, *f"-f f32le -ar {rate} -ac 1 -i -".split(), *ENCODERS[fmt], "-"],
-        input=np.asarray(samples, dtype=np.float32).tobytes(),
-        capture_output=True,
-        check=True,
-    )
-    return out.stdout
-
-
 @functools.cache
 def _asr():
     import onnx_asr
@@ -91,26 +76,12 @@ def _asr():
     return model.with_vad(onnx_asr.load_vad("silero"))
 
 
-@functools.cache
-def _tts():
-    from kokoro_onnx import Kokoro
-
-    folder = Path(settings.tts_model_dir).expanduser()
-    return Kokoro(str(folder / KOKORO_FILES[0]), str(folder / KOKORO_FILES[1]))
-
-
 def listen(path: str) -> str:
     """The words spoken in the audio file at `path`."""
     return " ".join(t for s in _asr().recognize(decode(path)) if (t := s.text.strip()))
 
 
-def speak(text: str, fmt: str) -> bytes:
-    """`text` spoken in the configured voice, as a `fmt` file's bytes."""
-    samples, rate = _tts().create(text, voice=settings.tts_voice)
-    return encode(samples, rate, fmt)
-
-
-def app(*, listen=listen, speak=speak) -> web.Application:
+def app(*, listen=listen) -> web.Application:
     pool = ThreadPoolExecutor(max_workers=1)
 
     async def transcribe(request: web.Request) -> web.Response:
@@ -118,16 +89,8 @@ def app(*, listen=listen, speak=speak) -> web.Application:
         text = await asyncio.get_running_loop().run_in_executor(pool, listen, body["path"])
         return web.json_response({"text": text})
 
-    async def speech(request: web.Request) -> web.Response:
-        body = await request.json()
-        fmt = body.get("format", "ogg")
-        if fmt not in ENCODERS:
-            return web.json_response({"error": f"format is ogg or mp3, not {fmt!r}"}, status=400)
-        data = await asyncio.get_running_loop().run_in_executor(pool, speak, body["text"], fmt)
-        return web.Response(body=data, content_type="audio/ogg" if fmt == "ogg" else "audio/mpeg")
-
     application = web.Application()
-    application.add_routes([web.post("/transcribe", transcribe), web.post("/speech", speech)])
+    application.router.add_post("/transcribe", transcribe)
     application.on_cleanup.append(lambda _: asyncio.to_thread(pool.shutdown))
     return application
 
@@ -174,8 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.voice")
     parser.add_argument("--plist", action="store_true", help="print the launchd job")
     sub = parser.add_subparsers(dest="verb")
-    sub.add_parser("run", help="answer transcription and speech on 127.0.0.1")
-    sub.add_parser("fetch", help="download both models")
+    sub.add_parser("run", help="answer transcription on 127.0.0.1")
+    sub.add_parser("fetch", help="download Parakeet and Kokoro's files")
     args = parser.parse_args(argv)
     if args.plist:
         sys.stdout.buffer.write(plist())
