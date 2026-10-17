@@ -645,6 +645,145 @@ def test_a_root_task_with_no_session_reports_to_the_operator_chats_session(dsn, 
     assert machine.fold(root_rows).state is State.STOPPED
 
 
+SESSION = "00000000-0000-4000-8000-0000000000aa"
+
+
+async def delivered(dsn, session_id, where: State) -> str:
+    """A child of the session, its rows played to `where` (`_reach`), each
+    turn on harness session `SESSION`."""
+    from tests.test_machine import _reach
+
+    child = await child_of(dsn, session_id)
+    async with await db.connect(dsn) as conn:
+        for row in _reach(where).rows[1:]:
+            p = {k: f"{child}-{v}" if k in ("turn_id", "effect_id") else v for k, v in row["payload"].items()}
+            if row["type"] == "turn.ended":
+                p["result"] = {**p["result"], "session_id": SESSION}
+            await ledger.append(conn, child, row["type"], p)
+    assert await state(dsn, child) is where
+    return child
+
+
+async def team_session(dsn) -> str:
+    return await new_task(dsn, chat={"channel": "telegram", "chat_id": f"-{uuid.uuid4().int % 10**9}"},
+                          project={"name": "valor"}, max_effect_class="act")  # fmt: skip
+
+
+def _steer(b, dsn):
+    from tools import chat_tasks
+
+    return chat_tasks.performers(b, dsn)[2]
+
+
+@pytest.mark.parametrize("where", [State.ENDED, State.MERGED])
+def test_a_chat_sessions_steer_of_a_delivered_task_is_feedback_that_reopens_it(dsn, where):
+    """The task goes to `patch` on a `feedback.given` naming who said it,
+    via the chat, and the steer's key; its next turn resumes its own
+    harness session, opening with the feedback under the sender's name."""
+
+    async def go():
+        chat = await team_session(dsn)
+        child = await delivered(dsn, chat, where)
+        async with await db.connect(dsn) as conn:
+            steer = _steer(await tasks.brief(conn, chat), dsn)
+        action = broker.Action("task.steer", child, {"text": "make the video shorter", "by": "Ann"})
+        done = await steer.perform(action, "k1")
+        found = await steer.lookup(action, "k1")
+        async with await db.connect(dsn) as conn:
+            prompt, resume = await session.next_prompt(conn, child)
+        return done, found, prompt, resume, await bridges.rows(dsn, child)
+
+    done, found, prompt, resume, rows = run(go())
+    (given,) = bridges.typed(rows, "feedback.given")
+    assert given["text"] == "make the video shorter" and given["effect_key"] == "k1"
+    assert (given["provenance"]["by"], given["provenance"]["via"]) == ("Ann", "chat")
+    assert done == found == {"task_id": done["task_id"], "feedback_id": given["feedback_id"]}
+    assert not bridges.typed(rows, "message.steered") and machine.fold(rows).state is State.PATCH
+    assert prompt.startswith("# Feedback on the delivery from Ann, via chat\n\nmake the video shorter")
+    assert resume == SESSION
+
+
+@pytest.mark.parametrize("where", [State.BUILD, State.MERGE, State.WAITING, State.STOPPED])
+def test_a_chat_sessions_steer_of_a_task_not_delivered_or_stopped_stays_a_steer(dsn, where):
+    async def go():
+        chat = await team_session(dsn)
+        child = await delivered(dsn, chat, where)
+        async with await db.connect(dsn) as conn:
+            steer = _steer(await tasks.brief(conn, chat), dsn)
+        done = await steer.perform(broker.Action("task.steer", child, {"text": "bolder", "by": "tom"}), "k1")
+        return done, await bridges.rows(dsn, child)
+
+    done, rows = run(go())
+    assert [p["text"] for p in bridges.typed(rows, "message.steered")] == ["bolder"]
+    assert "feedback_id" not in done and not bridges.typed(rows, "feedback.given")
+    assert machine.fold(rows).state is where
+
+
+def test_a_second_revision_round_with_the_same_words_is_a_second_feedback(dsn):
+    """Each round is found by its own key, so a repeat is never taken for
+    the round before it."""
+
+    async def go():
+        chat = await team_session(dsn)
+        child = await delivered(dsn, chat, State.ENDED)
+        async with await db.connect(dsn) as conn:
+            steer = _steer(await tasks.brief(conn, chat), dsn)
+        action = broker.Action("task.steer", child, {"text": "again", "by": "tom"})
+        first = await steer.perform(action, "k1")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(
+                conn, child, "task.ended", {"kind": "decided", "by": "valor", "text": "Done: v2"}
+            )
+        second = await steer.perform(action, "k2")
+        return (
+            first,
+            second,
+            [await steer.lookup(action, k) for k in ("k1", "k2")],
+            await bridges.rows(dsn, child),
+        )
+
+    first, second, found, rows = run(go())
+    assert [p["effect_key"] for p in bridges.typed(rows, "feedback.given")] == ["k1", "k2"]
+    assert found == [first, second] and first["feedback_id"] != second["feedback_id"]
+    assert machine.fold(rows).state is State.PATCH
+
+
+def test_an_empty_steer_or_one_under_a_stop_on_a_delivered_task_fails_and_writes_nothing(dsn):
+    """Feedback has text, and a merged task under a stopped session takes
+    none: the effect fails with feedback's own error, the task unmoved (the
+    stop itself stopped the ended one)."""
+
+    async def go():
+        chat = await team_session(dsn)
+        ended, merged = await delivered(dsn, chat, State.ENDED), await delivered(dsn, chat, State.MERGED)
+        async with await db.connect(dsn) as conn:
+            steer = _steer(await tasks.brief(conn, chat), dsn)
+        errors = []
+        try:
+            await steer.perform(broker.Action("task.steer", ended, {"text": "  ", "by": "tom"}), "k1")
+        except ValueError as exc:
+            errors.append(str(exc))
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, chat, reason="the chat closed")
+        try:
+            await steer.perform(broker.Action("task.steer", merged, {"text": "redo", "by": "tom"}), "k2")
+        except LookupError as exc:
+            errors.append(str(exc))
+        return errors, [await bridges.rows(dsn, t) for t in (ended, merged)]
+
+    errors, both = run(go())
+    assert errors[0] == "feedback has text" and "under stopped task" in errors[1]
+    for rows, where in zip(both, (State.STOPPED, State.MERGED)):
+        assert not bridges.typed(rows, "feedback.given") and not bridges.typed(rows, "message.steered")
+        assert machine.fold(rows).state is where
+
+
+def test_the_patch_stage_tells_a_revised_deliverable_how_to_come_back():
+    text = tasks.stage_text(State.PATCH)
+    assert "**Feedback on a delivery.**" in text
+    assert "absolute path" in text and "opening `Done:`" in text
+
+
 def test_a_sessions_and_its_childs_notices_are_at_home_in_toms_own_chat_only(dsn, dm):
     async def go():
         chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]

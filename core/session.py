@@ -1027,9 +1027,11 @@ async def feedback(
     by: str = "tom",
     via: str = "the command line",
     role_played: bool = False,
+    effect_key: str | None = None,
 ) -> str:
-    """Record Tom's feedback on the task's delivery, in `merge`, `merged`,
-    or `ended`, which sends the work to `patch` and opens a new loop window. Refused
+    """Record feedback on the task's delivery, in `merge`, `merged`, or
+    `ended`, which sends the work to `patch` and opens a new loop window;
+    `effect_key` names the chat session's `task.steer` that gave it. Refused
     while the merge's intent has no outcome, and on a task stopped or under
     a stopped ancestor, under the tree's lock so a stop's walk sees the
     reopened task or the feedback sees the stop. Returns the feedback's
@@ -1071,6 +1073,7 @@ async def feedback(
                 else None,
                 "text": text,
                 "provenance": ledger.provenance(by, via, role_played),
+                **({"effect_key": effect_key} if effect_key else {}),
             },
         )
     return feedback_id
@@ -1089,7 +1092,9 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
     if kind == "question.answered":
         return f"# Tom's answer\n\n{p['text']}"
     if kind == "feedback.given":
-        return f"# Tom's feedback on the delivery\n\n{p['text']}"
+        who = p.get("provenance") or {}
+        said = f"from {who.get('by', 'tom')}, via {who.get('via', 'the command line')}"
+        return f"# Feedback on the delivery {said}\n\n{p['text']}"
     if kind == "critique.decided":
         lines = [f"- [{x.get('kind', 'finding')}] {x.get('text', '')}" for x in p.get("findings") or []]
         return f"# Critique: {p['verdict']}\n\n" + ("\n".join(lines) or "No findings.")

@@ -60,7 +60,13 @@ teammate would (in Tom's own chat, a good deputy):
    question, pass the answer on with `task.answer`, and pass on what the
    chat adds with `task.steer`. A task asks only you. In the operator
    chat, tasks that no session started report to you too.
-4. **Nothing for you** (talk between others, thanks, an acknowledgement of
+4. **A comment on something a task delivered** (change the deck, redo the
+   video, fix what merged): `task.steer` that task with the request as
+   written and who asked, rather than starting a new one. It reopens in
+   its own workspace with its own history, revises, and reports to you
+   again; send the revised file as before. Start a new task only for new
+   work, or when the task that made it was stopped.
+5. **Nothing for you** (talk between others, thanks, an acknowledgement of
    your post): send nothing. Silence is the default; a turn that requests
    nothing posts nothing.
 

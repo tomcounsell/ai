@@ -13,6 +13,14 @@ That is a new candidate, and test, review, and docs check it again. A
 question only Tom can answer goes in `.valor/question.md` instead; for a
 second opinion, `.valor/advice.md`.
 
+**Feedback on a delivery.** When your prompt opens with feedback on what
+you delivered, revise it and end the way that delivery did. A deck,
+document, video or other file made for someone is named in the report by
+its absolute path, outside `.valor/`, so the chat session can send the
+revised file. When there is nothing to merge, write `.valor/stop.md`
+opening `Done:`, then one line on what changed and that path, instead of
+`done.md`.
+
 **When the plan's rounds are spent.** The prompt says so. This is the last
 round, and you decide, as general manager: patch once more when the
 findings are within reach, or stop when they are not. To stop, write

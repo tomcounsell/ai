@@ -214,6 +214,52 @@ def test_toms_dm_session_starts_the_work_and_tells_him_of_its_merge(dsn, tmp_pat
     assert sent.kind == "done" and not bridges.typed(chat_rows, "notice.requested")
 
 
+def test_a_chat_sessions_word_on_a_delivered_task_runs_a_second_round_in_the_same_task(dsn, tmp_path):
+    """A child of a chat session ends with `Done:`; the session's steer
+    reopens it in `patch`, whose turn resumes the same harness session in
+    the same workspace, opens with the feedback under its sender's name,
+    and ends with `Done:` again; each round reports to the session."""
+    from tools import chat_tasks
+
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            chat = await tasks.start(conn, tasks.Brief(
+                instruction="chat", chat={"channel": "telegram", "chat_id": "-42"},
+                project={"name": "valor"}, max_effect_class="act",
+            ))  # fmt: skip
+            task = await tasks.start_child(
+                conn, chat, instruction="Make Tom a greeting video.", workspace=str(ws),
+                **tasks.resolve_workspace(str(ws)),
+            )  # fmt: skip
+            steer = chat_tasks.performers(await tasks.brief(conn, chat), dsn)[2]
+        await scripted.run_judge(dsn, task, "precise")
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        scripted.steer(ws, build="stop", note="Done: the video is at /tmp/v1.mp4.")
+        first = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+        await steer.perform(broker.Action("task.steer", task, {"text": "shorter, please", "by": "Ann"}), "k1")
+        scripted.steer(ws, patch="stop", note="Done: the shorter video is at /tmp/v2.mp4.")
+        second = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, task)
+        return task, first, second, await rows(dsn, chat), await rows(dsn, task)
+
+    task, first, second, chat_rows, task_rows = run(go())
+    assert (first["status"], second["status"]) == ("ended", "ended")
+    assert machine.fold(task_rows).state is State.ENDED
+    reported = [p for p in bridges.typed(chat_rows, "child.reported") if p["child_id"] == task]
+    assert [p["kind"] for p in reported] == ["ended", "ended"] and "v2.mp4" in reported[1]["text"]
+    turns = [json.loads(x) for x in (ws / ".git" / "valor-turns.jsonl").read_text().splitlines()]
+    build, patch = turns[-2], turns[-1]
+    assert (build["stage"], patch["stage"]) == ("build", "patch") and patch["resume"] == build["resume"] != ""
+    assert patch["prompt"].startswith("# Feedback on the delivery from Ann, via chat\n\nshorter, please")
+    assert "**Feedback on a delivery.**" in patch["brief"]
+
+
 # -- an idle turn ends its step; stop.md hands in from any working state -------------
 
 

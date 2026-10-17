@@ -504,7 +504,11 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
    which Valor patches once more or stops; when it stops, or that round
    does not pass either, the task ends and Tom gets a report of what was
    built, what did not pass, and why it stopped. Feedback by reply to a report or that
-   notice goes to `patch` on the same task; nothing waits for it.
+   notice goes to `patch` on the same task; nothing waits for it. So does a
+   chat session's `task.steer` of a task it started that is `merged` or
+   `ended` (`tools/chat_tasks.py`): the task reopens in its own workspace,
+   resuming its working session, and reports to the session again, so a
+   deliverable's task is the worker for its revision rounds.
 
 The attention log, the money spent, and every verdict are read from the ledger at every step. The
 states, verdicts, loops, and the merge predicate are owned by

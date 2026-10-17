@@ -92,6 +92,11 @@ The binding table, first match wins:
 "Exactly" is the whole text, trimmed and casefolded. A near miss steers
 and owes a notice.
 
+A chat session passes what its chat says about a task it started with
+`task.steer` (`tools/chat_tasks.py`), which follows the same rows: on a
+task in `merged` or `ended` it is `feedback` (with the sender's name, via
+`chat`), on a stopped task it stays a steer, otherwise it is a steer.
+
 On a threaded channel (Slack) a reply names its thread's root, not the
 message it answers, so a reply binds to the newest of Valor's posts in
 that thread that is older than it (the root included), read from the

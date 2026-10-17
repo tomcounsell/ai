@@ -4,7 +4,12 @@
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
 asked; answers a task's open question with what the chat said; steers a
-task with what the chat added; and stops a task. Its tasks report to it
+task with what the chat added; and stops a task. A steer of a task that has
+delivered (`merged` or `ended`) is feedback (`session.feedback`), as a
+direct reply to its report is (`core/intake.py`): the task reopens in
+`patch`, in its own workspace, resuming its own harness session, and
+reports again, so each deliverable's task is the worker for its revision
+rounds. Its tasks report to it
 (`core/notices.py`), never to a chat, and so does every root task that is
 no session when the session is the operator chat's. Each is `propose`:
 the work a task does is bounded by its own ceiling, its parent's, and a
@@ -16,7 +21,7 @@ own; each refuses a task that does not report to its session
 `lookup` reads the ledger, which is how a dangling intent is reconciled:
 a start by its idempotency key on the child's `task.started`, an answer
 by the question it answered, a steer by its key on the `message.steered`
-row, a stop by the task's stop.
+or `feedback.given` row, a stop by the task's stop.
 """
 
 from core import db, ledger, machine, session, tasks
@@ -118,7 +123,9 @@ class TaskSteer(_ChatTask):
     action_type = "task.steer"
     usage = (
         '`task.steer`: target the task id, payload `{"text": "...", "by": "<who said it>"}`; '
-        "gives that task what the chat added, read at its next turn."
+        "gives that task what the chat added, read at its next turn. To a task that has delivered "
+        "(merged or ended) it is feedback: the task reopens in its own workspace and conversation, "
+        "revises, and reports to you again. A stopped task stays stopped."
     )
 
     async def perform(self, action, key: str) -> dict:
@@ -126,18 +133,25 @@ class TaskSteer(_ChatTask):
             await self._child(conn, action.target)
             await tasks.lock_tree(conn, action.target)
             await ledger.lock(conn, f"task:{action.target}")
-            by = str(action.payload.get("by") or "valor")
+            by, text = str(action.payload.get("by") or "valor"), str(action.payload.get("text") or "")
+            if machine.fold(await ledger.read(conn, action.target)).state in (State.MERGED, State.ENDED):
+                feedback = await session.feedback(
+                    conn, action.target, text, by=by, via="chat", effect_key=key
+                )
+                return {"task_id": action.target, "feedback_id": feedback}
             await ledger.append(conn, action.target, "message.steered", {
-                "text": str(action.payload.get("text") or ""), "effect_key": key,
-                "provenance": ledger.provenance(by, "chat", False),
+                "text": text, "effect_key": key, "provenance": ledger.provenance(by, "chat", False),
             })  # fmt: skip
         return {"task_id": action.target}
 
     async def lookup(self, action, key: str) -> dict | None:
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, action.target)
-        found = any(r["type"] == "message.steered" and r["payload"].get("effect_key") == key for r in rows)
-        return {"task_id": action.target} if found else None
+        for r in rows:
+            if r["type"] in ("message.steered", "feedback.given") and r["payload"].get("effect_key") == key:
+                found = r["payload"].get("feedback_id")
+                return {"task_id": action.target, **({"feedback_id": found} if found else {})}
+        return None
 
 
 class TaskStop(_ChatTask):

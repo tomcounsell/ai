@@ -190,7 +190,7 @@ file its Brief carries (`skills/sdlc/<state>.md`), never sentences in the kernel
 | clarify found nothing to ask | its statement, as the plan stage opens |
 | a critique's verdict | the verdict and its findings (a revision, or the build when no rounds are left) |
 | findings from the checks (test failures, breadth gaps, review findings, docs findings, joined) | every finding together (a patch) |
-| Tom's feedback on a delivery | the feedback (a patch) |
+| feedback on a delivery (Tom's reply, or a chat session's `task.steer`) | the feedback under its sender's name and channel (a patch) |
 | a turn in the same state that finished | "Continue." |
 
 **Patch is a resume.** A patch never starts a new agent: it is the session

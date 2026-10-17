@@ -120,7 +120,8 @@ patch carrying every finding of the three branches together.
   manager, whether to patch once more (`done.md`) or stop (`stop.md`, a note to Tom), optionally
   after asking the advisor. When it stops, or that round's candidate does not pass either, the task
   ends (`ended`, which runs nothing) and Tom gets one report of what was built, what did not pass,
-  and why it stopped; it asks for nothing, and feedback by reply opens a new loop window in `patch`.
+  and why it stopped; it asks for nothing, and feedback (by reply, or a chat session's `task.steer`)
+  opens a new loop window in `patch`.
   The decision is Valor's, not Tom's, under Tom's rulings of 2026-10-03 ("Valor decides who stops
   and who gets more budget") and 2026-10-09.
 - **Rebases.** A merge whose push the target rejects because its branch moved is carried when the
@@ -497,7 +498,8 @@ any branch may be the target. The docs cut and the merge's push read the kernel 
 turn writes. A turn cannot request a merge, and its `push_branch` cannot target the target branch.
 
 After the merge the task is `merged`; a defect found in use comes back as
-`feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects").
+`feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects"),
+by Tom's reply to its report or by a `task.steer` from the chat session it reports to.
 After a merge, `python -m core status` reads what came after it
 (`core/outcomes.py`): the feedback given after it and before the next
 delivery, the `delivery.used` marks, the later merges of other tasks to the
