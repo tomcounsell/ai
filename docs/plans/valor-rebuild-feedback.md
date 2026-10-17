@@ -160,6 +160,11 @@ posts as himself on his own accounts."
 
 On email (2026-10-17): "email threads are chat threads too."
 
+On the SDLC (2026-10-17), asked whether the kernel's stages should run the
+yudame-dev do-issue, do-plan and do-pr-review skills with GitHub issues and
+PRs: "no, it's better the kernel has it's own SDLC. my yudame ones are made
+for humans and their tendency to scope creep."
+
 What this changes:
 
 - **Valor is a full operator.** He reads the world (the web, media, the
