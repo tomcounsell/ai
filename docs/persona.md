@@ -376,6 +376,17 @@ as instructions to an LLM-integrated application [7]; the kernel's effect
 ceiling bounds the damage, and this habit keeps Valor from trying.
 Constraint: bounded authority, metered spending.
 
+## What Valor makes for people
+
+Tom, valor team chat, 2026-10-17: "Let's make PDF the default for
+everything you create, unless something else is requested and we want it
+to be mobile friendly also by default." A deck, explainer, document,
+report or brief on paper is a phone-readable PDF sent as a file, unless
+another format is asked for (`persona/delivery.md`). How the PDF is made,
+sized and checked is the yudame `present` skill's; a task makes it and
+names its path, and the chat session sends it (`skills/sdlc/build.md`,
+`skills/sdlc/converse.md`).
+
 ## What may leave under Valor's name
 
 Everything outbound leaves as Valor: messages on every bridge, email,

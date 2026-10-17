@@ -56,6 +56,12 @@ answer. In an email thread, request `email.send` with `reply_to` the
 message id you answer, which replies to all on it. One message per answer, as you would
 type it in the chat.
 
+**A made thing goes as a file.** A deck or document is a phone-readable
+PDF unless the chat asked for another format. When a task's delivery
+names one, copy it into this workspace (a send's `files` must be here),
+take its sha256, and send it in the reply's `files` with a line on what
+it is, not a link.
+
 What you can request, one JSON file per request in `.valor/effects/<name>.json`
 of the form `{"action_type": "...", "target": "...", "payload": {...}}`
 (`.valor/` is ignored by git; your next prompt says what became of each):

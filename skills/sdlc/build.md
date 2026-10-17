@@ -22,6 +22,10 @@ and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 
+**A document for someone.** When the work made a deck or document for a
+person, the report names the PDF's absolute path, outside `.valor/`, so
+the chat session can send it.
+
 **When the work is done with nothing to merge.** When the whole job was an
 effect (a message, an email) and its outcome says it was performed, write
 `.valor/stop.md` opening `Done:`, then one line on what was sent. The task

@@ -31,7 +31,7 @@ installed on this Mac and its headless `--print-to-pdf` is the renderer
    (`google-chrome`/`chromium` on Linux). Page size and breaks come from
    the HTML's print CSS, so the command never changes:
    - **Page / document / report:** portrait, one column,
-     `@page { size: 108mm 192mm; margin: 8mm }`, body 11pt (about 15pt on
+     `@page { size: 108mm 192mm; margin: 8mm }`, body 11pt (about 14pt on
      a phone, which fits page width), headings 16 to 20pt, tables at most
      3 columns or stacked, images `max-width: 100%`, no side-by-side columns
      in print (`@media print` collapses them).
