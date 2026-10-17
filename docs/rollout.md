@@ -77,14 +77,17 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    would load each one twice.
    Valor's Google sign-in for `gws` ([machine.md](machine.md)), copied
    from the Cowboy over any old sign-in on this Mac, since an old
-   encrypted credential is loaded first and is dead: `gws auth logout`
+   encrypted credential is loaded ahead of the copy (checked 2026-10-17)
+   and is dead: `gws auth logout`
    (it keeps `client_secret.json`), then
    `for F in credentials.json client_secret.json; do ssh valorengels@valor-the-cowboy cat .config/gws/$F > ~/.config/gws/$F; chmod 600 ~/.config/gws/$F; done`;
    `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
-   To sign in afresh (on the Cowboy, or after a revocation), at the Mac's
-   screen: `gws auth logout`, then
+   To sign in afresh (on the Cowboy, or after a revocation), Valor needs
+   no one at the screen: `gws auth logout`, then
    `gws auth login --scopes https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,openid,https://www.googleapis.com/auth/userinfo.email`,
-   approve as valor@yuda.me in Chrome, then
+   run in the background, and its printed URL opened and approved as
+   valor@yuda.me in byob Chrome (choose the account, Continue, Allow; byob's
+   auth-domain flag must be set, [browser.md](browser.md)), then
    `gws auth export --unmasked > ~/.config/gws/credentials.json && chmod 600 ~/.config/gws/credentials.json && rm ~/.config/gws/credentials.enc`.
    Never `--full` or the default scopes: they carry Cloud scopes, and
    Yudame's Cloud session control then asks for the sign-in again.

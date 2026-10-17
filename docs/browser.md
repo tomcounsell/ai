@@ -22,6 +22,14 @@ nothing. Valor's own browser, logged in to its own accounts, runs on each
 machine and is reached through the byob MCP server, which a workspace turn
 loads with the operator's user MCP servers ([harnesses.md](harnesses.md),
 The Claude Code wrapper). Clicks, forms, and logins go through it.
+byob refuses Google's, Microsoft's, and Apple's sign-in hosts unless
+its `BYOB_ALLOW_AUTH_DOMAINS` flag is set. Tom lifted that block on
+2026-10-17 so Valor can approve its own sign-ins, `gws`'s among them
+(rollout step 6). The flag lives in the extension's `chrome.storage.local`
+and survives a Chrome restart. Set it once per Mac with `browser_eval` on
+any byob extension page, e.g.
+`chrome-extension://pkpfojimekanmnjnpengjjdmbjmphnbe/manifest.json`:
+`chrome.storage.local.set({BYOB_ALLOW_AUTH_DOMAINS: true})`.
 
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
