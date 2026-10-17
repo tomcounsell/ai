@@ -241,7 +241,8 @@ writing `.valor/no_question.md` (`skills/sdlc/clarify.md`).
 
 **A chat session.** A chat's session (`Brief.chat`, a team chat's or Tom's own chat's) asks no judgement: the judge writes
 `judge.decided` `thin` with `leg: chat`, and it stays in clarify for its life, one turn per wake,
-resumed in the same harness session. Only `stop.md` counts there (`ended`); it answers by sends
+resumed in the same harness session. Only `stop.md` (`ended`) and `compact.md` (a `/compact` turn in
+the same session before its next, [harnesses.md](harnesses.md), Compaction) count there; it answers by sends
 and starts work as tasks of its own, which report to it
 ([bridges/telegram.md](bridges/telegram.md), Chat sessions).
 
