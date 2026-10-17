@@ -24,7 +24,9 @@ suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --
 # address (Tom's own, tom@yuda.me, is his already).
 chats = ["telegram:-1003801797780", "email:nav@krystallabs.io", "email:gcason2@gmail.com", "email:grahamhderry@gmail.com"]
 # What each chat is for, rendered into every turn of its chat session;
-rooms = { "telegram:-1003801797780" = "Engineering on the Cuttlefish product." }
+# `email` is any email thread under the project.
+rooms."telegram:-1003801797780" = "Engineering on the Cuttlefish product."
+rooms.email = "Customer service for Cuttlefish by email: answer the client's questions and check status. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cuttlefish."
 machine = "Valor the Captain"
 
 [env]

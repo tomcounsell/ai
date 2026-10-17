@@ -26,7 +26,9 @@ lint = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- 
 # "Eng: Gato", and the domain chainstarters.com.
 chats = ["telegram:-1003513124705", "email:@chainstarters.com"]
 # What each chat is for, rendered into every turn of its chat session;
-rooms = { "telegram:-1003513124705" = "Assessment and engineering for Chainstarters' Gato OS." }
+# `email` is any email thread under the project.
+rooms."telegram:-1003513124705" = "Assessment and engineering for Chainstarters' Gato OS."
+rooms.email = "Email with the Chainstarters team, as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Gato."
 machine = "Valor the Pirate"
 knowledge_base = "SOUL"
 

@@ -15,5 +15,8 @@ suite = "cd src/server && uv run pytest -p no:cacheprovider -q --junitxml={junit
 chats = ["telegram:-5136818964", "telegram:-5095889193"]
 # Team chats wait to be mentioned (Tom, 2026-10-17).
 mentions = ["telegram:-5095889193"]
+# What each chat is for, rendered into every turn of its chat session.
+rooms."telegram:-5136818964" = "Engineering on the SATSOL platform: a Flutter app and a Django server."
+rooms."telegram:-5095889193" = "The SATSOL team chat. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: SATSOL."
 machine = "unassigned"
 knowledge_base = "SATSOL"

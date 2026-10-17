@@ -24,5 +24,11 @@ chats = [
 ]
 # Team chats wait to be mentioned (Tom, 2026-10-17).
 mentions = ["telegram:-1003794218389", "telegram:-1004385743413"]
+# What each chat is for, rendered into every turn of its chat session;
+# `email` is any email thread under the project.
+rooms."telegram:-1003900483201" = "Engineering on Cyndra's consulting monorepo: one directory per client engagement, Behring's in production."
+rooms."telegram:-1003794218389" = "Cyndra Dev Team, the Cyndra developers' team chat. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
+rooms."telegram:-1004385743413" = "Cyndra Devs, a Cyndra developers' group. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
+rooms.email = "Email with the Cyndra team, as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
 machine = "Valor the Bald"
 knowledge_base = "Cyndra"

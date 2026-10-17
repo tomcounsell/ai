@@ -370,7 +370,7 @@ async def dispatch(
     if b.chat:
         from core.intake import room  # intake imports tasks
 
-        found = room(b.chat["channel"], b.chat["chat_id"])
+        found = room(b.chat["channel"], b.chat["chat_id"], (b.project or {}).get("name"))
         if found:
             head += f"\nRoom: {found}"
     head += f"\nEffect ceiling: {b.max_effect_class}"

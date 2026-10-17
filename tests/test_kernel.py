@@ -1047,9 +1047,16 @@ def test_every_listed_chat_resolves_to_its_description_on_its_machine():
             "telegram:-4719889199",
         }
         for chat, spec in listed.items():
+            channel, _, ident = chat.partition(":")
             with bridges.configure(machine=spec.machine or settings.default_machine):
-                found = intake.room("telegram", chat.partition(":")[2])
-            assert found == (intake.TOMS_OWN_ROOM if chat == "telegram:179144806" else spec.rooms[chat]), chat
+                found = intake.room(channel, "<root@mail.test>" if channel == "email" else ident, spec.name)
+            if channel == "email":
+                assert found == spec.rooms["email"] != intake.EMAIL_ROOM, chat
+            else:
+                assert found == (
+                    intake.TOMS_OWN_ROOM if chat == "telegram:179144806" else spec.rooms[chat]
+                ), chat
+        assert intake.room("email", "<root@mail.test>", "valor") == intake.EMAIL_ROOM
 
 
 def test_a_chat_sessions_every_turn_says_what_its_room_is_for(dsn, tmp_path):
@@ -1197,8 +1204,9 @@ def test_an_email_domain_entry_takes_every_sender_at_exactly_that_domain(dsn, ma
 
 
 def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
-    """Every team chat waits to be mentioned (Tom, 2026-10-17); Eng
-    groups, the operator group and Tom's DM hear every message."""
+    """Every team chat waits to be mentioned and starts no engineering
+    (Tom, 2026-10-17); Eng groups, the operator group and Tom's DM hear
+    every message."""
     team = {"yudame": ["-4719889199"], "psyoptimal": ["-1002600253717"],
             "cyndra": ["-1003794218389", "-1004385743413"], "satsol": ["-5095889193"],
             "valor": ["-1003879986445", "-1003936769817"]}  # fmt: skip
@@ -1210,6 +1218,9 @@ def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
     assert len(specs) == len(list(root.glob("*.toml")))
     for name, ids in team.items():
         assert {f"telegram:{i}" for i in ids} <= set(specs[name].mentions), name
+        for i in ids:
+            assert "No engineering or SDLC work starts here" in specs[name].rooms[f"telegram:{i}"], i
+    assert "a public group" in specs["valor"].rooms["telegram:-1003879986445"]
     for name, ids in answering.items():
         assert {f"telegram:{i}" for i in ids} <= set(specs[name].chats) - set(specs[name].mentions), name
 

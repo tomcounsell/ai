@@ -339,16 +339,19 @@ TOMS_OWN_ROOM = "Running the business with Tom, Yudame first; engineering only w
 EMAIL_ROOM = "Valor's own correspondence for the business."
 
 
-def room(channel: str, chat_id: str) -> str | None:
+def room(channel: str, chat_id: str, project: str | None = None) -> str | None:
     """What the chat is for: its `rooms` entry in a spec this machine
-    owns, else Tom's own chat's or an email thread's, else None (its
-    session's opening names only its project and kind)."""
+    owns, else Tom's own chat's, else for an email thread its `project`'s
+    `rooms.email` or `EMAIL_ROOM`, else None (its session's opening names
+    only its project and kind)."""
     for chat, spec in _project_chats(channel):
         if chat == chat_id and f"{channel}:{chat}" in spec.rooms:
             return spec.rooms[f"{channel}:{chat}"]
     if _toms_own({"channel": channel, "chat_id": chat_id}):
         return TOMS_OWN_ROOM
-    return EMAIL_ROOM if channel == "email" else None
+    if channel != "email":
+        return None
+    return workspace.Spec.load(project).rooms.get("email", EMAIL_ROOM) if project else EMAIL_ROOM
 
 
 def owned(channel: str) -> list[str]:
