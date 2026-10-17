@@ -13,7 +13,9 @@ merged. Done when Tom has read the report and picked or declined.
    commit into its own empty directory under `$TMPDIR` (read as data, no
    install, no build), read `packages/durable` source, tests and docs.
    Record the commit sha in the report. Fallback if the clone fails: the
-   valor:web agent reads the files on GitHub.
+   valor:web agent reads the files on GitHub. If `packages/durable` is
+   missing or moved at that commit, the report says so, naming the path
+   and sha it read; it does not substitute another package.
 2. **Read Valor's side**: `core/serve.py`, `core/router.py`, `core/slot.py`,
    `core/ledger.py`, `core/runs.py`, `core/schema.sql`, `core/rollout.py`,
    `core/judgement.py`, `harnesses/pi.py`, and `docs/architecture.md`,
@@ -30,14 +32,19 @@ merged. Done when Tom has read the report and picked or declined.
    per the governance rule and hard rule 4 (no second mechanism for a job
    the ledger already does). Zero recommendations is an acceptable result
    if that is what the evidence says.
-5. **Report**: `docs/research/pi-durable.md` (committed, one to two pages),
-   and a phone-readable PDF of the same content, made with the present
-   skill's document form, at `deliverables/pi-durable.pdf` outside the
-   repo, with its sha256 in `.valor/done.md` for the chat session to send.
+5. **Report**, outside the repo and outside `.valor/` (docs/ holds the
+   system as it is, not generated reports, and the brief says merge
+   nothing): the markdown at
+   `/Users/valorengels/valor-tasks/d388346d95da/deliverables/pi-durable.md`
+   (one to two pages) and a phone-readable PDF of the same content, made
+   with the present skill's document form, at
+   `/Users/valorengels/valor-tasks/d388346d95da/deliverables/pi-durable.pdf`.
+   `.valor/done.md` names both absolute paths with their sha256 so the
+   chat session sends both as files. The candidate holds only this plan.
 
 ## Out of scope
 
-Any change to Valor's code, schema, or docs other than the new report;
+Any change to Valor's code, schema, or docs (the report is not committed);
 filing tasks for the recommendations (that follows Tom's pick); changing
 the Pi harness pin.
 
@@ -51,7 +58,7 @@ the Pi harness pin.
 - The PDF is viewed page by page at phone width: no zooming needed,
   nothing cut off; the de-slop pass runs on the text.
 - No test suite run: no code changes. `git diff main --stat` shows only
-  the plan and the report.
+  this plan.
 
 ## Stakes and loops
 
