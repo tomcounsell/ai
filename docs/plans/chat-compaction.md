@@ -37,20 +37,29 @@ and a re-compaction that carries the previous summary forward.
      summary. The caps are Hermes's (`_LEAN_USER_MESSAGES_BUDGET_CHARS`
      24,000, `_LEAN_USER_MESSAGE_MAX_CHARS` 4,000): about 24,000 characters
      of quotes in all, each message cut at 4,000 characters, and the oldest
-     dropped past the cap. Dropped messages remain readable with
-     `valor-telegram read`, `valor-slack read` and the record.
-   - End with the last 20 messages of the chat verbatim, both the humans'
-     and Valor's sends, as the recent tail.
+     dropped past the cap. Messages in the tail below are not repeated
+     here. Dropped messages remain readable with `valor-telegram read`,
+     `valor-slack read` and the record.
+   - End with the recent tail: the last 20 messages of the chat verbatim,
+     both the humans' and Valor's sends, within about 3,000 tokens, each
+     cut at 4,000 characters, fewer than 20 when the budget runs out
+     (Hermes's `protect_last_n` 20, token-budgeted).
    - Keep converse.md's list: who is in the chat and what each cares about,
      unanswered asks and who made them, each task started (id, purpose,
      asker, state), and promises made.
    - When updating an earlier summary, keep what is still true and drop
      what has been settled.
-   - The whole summary stays within about 10,000 tokens (Hermes's
-     `_SUMMARY_TOKENS_CEILING`), so repeated compactions never outgrow the
-     compaction's output.
-   - In an email thread only, quote the opening message verbatim. Telegram,
-     Slack and the local chat do not keep it.
+   - The written part (the keep-list and what else is still true) stays
+     within about 2,000 tokens. With the quotes (about 6,000 tokens), the
+     tail (about 3,000) and an email opening (at most about 1,000), the
+     whole summary stays within about 12,000 tokens. In Hermes the verbatim
+     quotes sit beside its 10,000-token `_SUMMARY_TOKENS_CEILING` rather
+     than inside it; here every part is budgeted in one figure, so repeated
+     compactions never outgrow the compaction's output.
+   - In an email thread only, quote the opening message verbatim, cut at
+     4,000 characters, and carry it forward unchanged on every
+     re-compaction, outside the quotes cap. Telegram, Slack and the local
+     chat do not keep it.
 
    The kernel renders this text per channel into `VALOR_COMPACT` for a chat
    session's turn. Valor's plugin `hooks.json` gains a `PreCompact` hook,
@@ -95,7 +104,9 @@ limit is added.
 - The rendered instructions: Telegram, Slack and local carry no opening
   clause, email does, and every channel carries the verbatim-quotes, tail
   and keep-list clauses, and the caps (24,000 characters of quotes, 4,000
-  per message, about 10,000 tokens of summary).
+  per message, a tail of about 3,000 tokens not repeated in the quotes,
+  about 12,000 tokens of summary). The email rendering carries the clause
+  that carries the opening forward outside the quotes cap.
 - The hook, run as Claude Code runs it (as `test_orchestration.py` runs
   `subagent_start.py`), prints `VALOR_COMPACT` exactly, and prints nothing
   when it is unset.
@@ -103,7 +114,7 @@ limit is added.
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`, the plugin and a Telegram
   `VALOR_COMPACT` is driven through two compactions (each near 87k). The
   second summary still holds quotes and an open ask from before the first,
-  stays within about 10,000 tokens, carries the tail, and has no opening
+  stays within about 12,000 tokens, carries the tail, and has no opening
   message.
 
 **Done when** (Tom's bar, after merge): the valor team chat's session
