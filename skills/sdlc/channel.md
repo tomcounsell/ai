@@ -21,6 +21,10 @@ leave it here rather than sending it to a chat yourself.
   model reads it with a checkout of your committed work, and your next
   turn opens with its answer. The advisor informs; you decide. Commit what
   it should see.
+- A chat's history, when the request points at something said earlier:
+  `valor-telegram read [CHAT] --search "<words>"` (or `valor-slack read`)
+  reads and searches it with Valor's own account; with no chat, the
+  project's. It is a read, not an effect.
 - What ends each stage is named in the stage section below.
 - An effect beyond the workspace is a request, one JSON file per request
   in `.valor/effects/<name>.json`, of the form

@@ -35,7 +35,8 @@ and an internal app keeps Tier 3, which gap fill assumes.
 The manifest asks for these user scopes: `channels:history`,
 `groups:history`, `im:history`, `mpim:history`, `channels:read`,
 `groups:read`, `im:read`, `mpim:read`, `im:write`, `chat:write`,
-`files:read`, `files:write`, `users:read`, `reactions:write`; and these
+`files:read`, `files:write`, `users:read`, `reactions:write`,
+`search:read`; and these
 user events:
 `message.channels`, `message.groups`, `message.im`, `message.mpim`.
 
@@ -265,6 +266,22 @@ database, machine, and operator settings, `VALOR_OPERATOR_SLACK_IDS`
 among them. The kernel's job and the Telegram and email bridges' jobs
 carry `VALOR_OPERATOR_SLACK_IDS` too, since a send to Tom's Slack DM is a
 message to Tom in whichever process records it.
+
+**Reading history for a turn.** As on Telegram (its port's "Reading
+history for a turn"): `core.bridge.reads` on
+`127.0.0.1:slack_read_port` (`VALOR_SLACK_READ_PORT`, 8713) answers a
+turn's `valor-slack read`. The chat is the port's id (`T…/C…`, or `T…/U…`
+for a DM, opened with `conversations.open`). With no `q` it reads
+`conversations.history`, `before` passed as `latest` (strictly older).
+With `q` it reads `search.messages` for `<q> in:<#C…>` (`in:<@U…>` for a
+DM), sorted newest first, and keeps the matches in that channel; a search
+pages by number, so `before` does not apply and answers 400.
+`search.messages` needs the user scope `search:read`: until the app is
+reinstalled with it, a search answers 503 with `missing_scope`, and
+history still reads. Each message has `id` (its `ts`), `sent_at`,
+`sender_id`, `sender_name` (`users.info`), `out`, `reply_to` (its
+`thread_ts`, from the permalink for a search match), `text`, and its first
+file's name.
 
 ## What the bridge never does
 

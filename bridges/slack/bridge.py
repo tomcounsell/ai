@@ -45,6 +45,7 @@ import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from bridges.slack import gap, inbound
 from bridges.slack.send import Sender
@@ -82,6 +83,45 @@ class SlackBridge:
 
     def performers(self):
         return {"slack.send_message": (self.sender.perform, self.sender.lookup)}
+
+    async def read(self, chat: str, q: str | None, limit: int, before: str | None) -> list[dict]:
+        """A chat's messages for a turn (`core.bridge.reads`), newest first.
+        A search pages by number on Slack, so `before` applies only without
+        one."""
+        ident = chat.partition("/")[2]
+        if not ident:
+            raise ValueError("a Slack chat is <team>/<channel>, or <team>/<user> for a DM")
+        dm = inbound.is_dm(chat)
+        channel = await self.wire.open_im(ident) if dm else ident
+        if q is None:
+            found, _ = await self.wire.history(channel, latest=before, limit=limit)
+        elif before is not None:
+            raise ValueError("before does not apply to a Slack search")
+        else:
+            where = f"<@{ident}>" if dm else f"<#{channel}>"
+            matches = await self.wire.search(f"{q} in:{where}", count=limit)
+            found = [m for m in matches if (m.get("channel") or {}).get("id") == channel]
+        return [await self._shown(m) for m in found]
+
+    async def _shown(self, m: dict[str, Any]) -> dict:
+        """One message as `valor-slack read` prints it; a search match
+        carries its thread only in its permalink."""
+        thread = (
+            m.get("thread_ts")
+            or (parse_qs(urlsplit(m.get("permalink") or "").query).get("thread_ts") or [None])[0]
+        )
+        user = m.get("user") or ""
+        files = m.get("files") or []
+        return {
+            "id": m["ts"],
+            "sent_at": datetime.fromtimestamp(float(m["ts"]), UTC).isoformat(),
+            "sender_id": user,
+            "sender_name": (await self.wire.user_name(user) if user else "") or m.get("username", ""),
+            "out": bool(user) and user == self.wire.user_id,
+            "reply_to": thread if thread != m["ts"] else None,
+            "text": m.get("text") or "",
+            "media": {"kind": "document", "name": files[0].get("name", "")} if files else None,
+        }
 
     # -- the loop ----------------------------------------------------------
 

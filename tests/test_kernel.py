@@ -235,10 +235,11 @@ def test_a_harness_turns_tmpdir_is_the_one_its_settings_name(tmp_path):
     }
     # A task provisioned before the harness named a TMPDIR gets its own; none named, none set.
     bare = {"sandbox_profile": harness["sandbox_profile"]}
+    (tmp_path / "bin").mkdir()
     old = tasks.Brief(
-        instruction="x", mirror=str(tmp_path / "kernel.git"), harness=bare, harness_name="claude_code"
+        instruction="x", mirror=str(tmp_path / "t" / "kernel.git"), harness=bare, harness_name="claude_code"
     )
-    assert __main__._turn_for("p", None, old)("http://h:1", "b", "t").tmpdir == str(tmp_path / "tmp")
+    assert __main__._turn_for("p", None, old)("http://h:1", "b", "t").tmpdir == str(tmp_path / "t" / "tmp")
     assert "tmpdir" not in bare
     assert claude_code.workspace_turn("p", cwd=".", harness=bare)("http://h:1", "b", "t").tmpdir is None
 

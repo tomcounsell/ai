@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
+from aiohttp import web
 
 from core import broker, db, git, ledger, mail, tasks
 from core import workspace as ws
@@ -403,6 +404,9 @@ class Bridge(Protocol):
     # A bridge may define `async def reconcile(self, outbox)`, which then
     # replaces the outbox's own serial reconcile at start and on each wake,
     # for a bridge that settles each effect as its own task.
+    # A bridge may define `async def read(self, chat, q, limit, before)`,
+    # a chat's messages newest first (`q` a text search, `before` a message
+    # id to page back from); `serve` then answers it for turns (`reads`).
 
     async def tick(self) -> None: ...
 
@@ -614,6 +618,34 @@ def stamp() -> str:
         return NO_HEAD
 
 
+async def reads(read: Callable[..., Awaitable[list[dict[str, Any]]]], port: int) -> web.AppRunner:
+    """Answer `GET /history?chat=&q=&limit=&before=` on 127.0.0.1:`port`
+    with `read`'s messages as JSON, newest first, for a turn's
+    `valor-<channel> read`. `limit` is 50 unless given, at most 100. A
+    `ValueError` (a malformed chat or id) answers 400 and any other failure
+    503, each with its sentence."""
+
+    async def history(request: web.Request) -> web.Response:
+        q = request.query
+        try:
+            if not q.get("chat"):
+                raise ValueError("name the chat: ?chat=<id>")
+            limit = min(max(int(q.get("limit") or 50), 1), 100)
+            found = await read(q["chat"], q.get("q") or None, limit, q.get("before") or None)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:  # noqa: BLE001  the reader gets the sentence, the bridge runs on
+            return web.json_response({"error": str(e) or type(e).__name__}, status=503)
+        return web.json_response({"messages": found})
+
+    app = web.Application()
+    app.router.add_get("/history", history)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return runner
+
+
 async def serve(bridge: Bridge, dsn: str | None = None) -> None:
     """Run a bridge until it stops; then exit nonzero, for launchd to
     restart it. Holds `bridge:<channel>:<machine>` for its life, on the
@@ -625,17 +657,21 @@ async def serve(bridge: Bridge, dsn: str | None = None) -> None:
     conn = await db.connect(dsn, application_name=f"valor-{channel}@{head}")
     perform_conn = await db.connect(dsn, application_name=f"valor-{channel}-perform")
     listener = await db.connect(dsn, application_name=f"valor-{channel}-listen")
-    outbox = None
+    outbox = runner = None
     try:
         await conn.execute(
             "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"bridge:{channel}:{settings.machine}",)
         )
         await listener.execute("LISTEN valor_events")
+        if hasattr(bridge, "read"):
+            runner = await reads(bridge.read, getattr(settings, f"{channel}_read_port"))
         outbox = Outbox(bridge, bound_performers(bridge, conn), conn, perform_conn, listener, dsn)
         if not hasattr(bridge, "reconcile"):
             await outbox.reconcile()
         await bridge.run(outbox)
     finally:
+        if runner is not None:
+            await runner.cleanup()
         for c in (outbox.listener if outbox else listener, perform_conn, conn):
             await c.close()
     raise SystemExit(1)

@@ -459,6 +459,10 @@ class Settings:
     # core/workspace.py) and the Postgres and Redis spans above, so no turn
     # can connect to it.
     local_port: int = field(default_factory=lambda: int(_env("VALOR_LOCAL_PORT", "8711")))
+    # Where the Telegram and Slack bridges answer a turn's history reads
+    # (`core.bridge.reads`), on 127.0.0.1.
+    telegram_read_port: int = field(default_factory=lambda: int(_env("VALOR_TELEGRAM_READ_PORT", "8712")))
+    slack_read_port: int = field(default_factory=lambda: int(_env("VALOR_SLACK_READ_PORT", "8713")))
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

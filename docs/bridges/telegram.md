@@ -198,6 +198,7 @@ class Bridge(Protocol):
     async def tick(self) -> None: ...
 
     # Optional: async def reconcile(self, outbox: Outbox) -> None
+    # Optional: async def read(self, chat, q, limit, before) -> list[dict]
 ```
 
 `performers` maps each send type the kernel declares for the channel to how
@@ -207,7 +208,8 @@ acknowledges, and sends what the outbox yields until the process stops. The
 outbox calls `tick` on every wake. A bridge may also define `reconcile`,
 which then replaces the outbox's own serial reconcile at start and on each
 wake: the email bridge uses it to settle each dangling send as a task of its
-own, through `Outbox.dangling` and `Outbox.settle`. A performer raises
+own, through `Outbox.dangling` and `Outbox.settle`. A bridge that defines
+`read` has it served to turns (Reading history for a turn, below). A performer raises
 `broker.Failed` for an outcome it knows (nothing happened: `failed`, no
 lookup) and `broker.Unknown` for one it cannot know (no outcome, the intent
 stays in flight). The limits (`LIMITS` in `core/bridge.py`)
@@ -277,6 +279,21 @@ Each is written whole to a temporary file, flushed to disk, renamed into
 place, and the directory flushed. An entry in `telegram-sends.json` is
 dropped once the ledger settles its send: an `effect.outcome` for an
 effect, `notice.sent` for a notice.
+
+## Reading history for a turn
+
+A turn cannot open the session (its sandbox denies the key directory), and
+a second client on one session would be a second connection. So the
+running bridge answers reads: `bridge.serve` starts `core.bridge.reads` on
+`127.0.0.1:telegram_read_port` (`VALOR_TELEGRAM_READ_PORT`, 8712) once it
+holds the bridge lock, and a turn's `valor-telegram read` asks it.
+`GET /history?chat=<id>&q=<text>&limit=<n>&before=<id>` answers the chat's
+messages newest first (`Wire.history`, with `q` passed as Telegram's own
+server-side search), at most 100, each with `id`, `sent_at`, `sender_id`,
+`sender_name`, `out`, `reply_to`, `text`, and `media` kind and name;
+service messages are left out. A malformed id answers 400, a wire error
+503, each with its sentence. It is a `read`: nothing is sent or marked
+read, and nothing is recorded.
 
 ## How a message becomes work
 

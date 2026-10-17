@@ -491,6 +491,17 @@ The workspace has `look`, a script that screenshots a page served on a dev port
 and dumps its DOM into `.valor/screens/`. The kernel records those screens when
 it collects the turn. [browser.md](browser.md) specifies it.
 
+## Reading a chat's history
+
+The workspace also has `valor-telegram read` and `valor-slack read`
+(`tools/valor_read.py`), which read or search a chat through its running
+bridge ([bridges/telegram.md](bridges/telegram.md), Reading history for a
+turn). The kernel installs every workspace tool into the shared `bin/`
+before each turn (`workspace.install_tools`), so a session provisioned
+before a tool changed has the current one, and sets the turn's
+`VALOR_CHAT` (the session's chat, else the project's first) and the read
+ports.
+
 ## Pi, Codex, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`

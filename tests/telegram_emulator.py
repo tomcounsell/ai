@@ -145,6 +145,8 @@ def make_app() -> web.Application:
         msgs = sorted(s.chat(b["chat"])["msgs"].values(), key=lambda m: -m["id"])
         if b.get("offset_id"):
             msgs = [m for m in msgs if m["id"] < b["offset_id"]]
+        if b.get("search"):
+            msgs = [m for m in msgs if b["search"].lower() in (m.get("text") or "").lower()]
         return ok([_public(m) for m in msgs[: b.get("limit", 100)]])
 
     async def own(request):
@@ -324,8 +326,9 @@ class EmulatorWire:
                 if not self._connected:
                     return
 
-    async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100) -> list[Msg]:
-        out = await self._post("history", {"chat": chat_id, "offset_id": offset_id, "limit": limit})
+    async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100, search=None) -> list[Msg]:
+        body = {"chat": chat_id, "offset_id": offset_id, "limit": limit}
+        out = await self._post("history", body if search is None else {**body, "search": search})
         return [to_msg(m) for m in out]
 
     async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:

@@ -43,6 +43,7 @@ SCOPES = [
     "files:write",
     "users:read",
     "reactions:write",
+    "search:read",
 ]
 EVENTS = ["message.channels", "message.groups", "message.im", "message.mpim"]
 

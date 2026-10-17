@@ -14,6 +14,13 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 
 - `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, when requested; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, performed only when the merge predicate holds; no turn is offered it. `push_branch` pushes to the task's `push_url` (else the origin URL recorded at start) and never carries a credential. `merge` is built from the task's Brief, pushes to the origin URL and target branch recorded there at start, from the kernel mirror with the GitHub token, whose own reach bounds which repositories it can write ([docs/machine.md](../docs/machine.md), Keychain). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
 
+## Workspace tools
+
+Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, before each turn).
+
+- `look` (`read`): a page's screenshot and DOM ([docs/browser.md](../docs/browser.md)).
+- `valor_read.py`, as `valor-telegram` and `valor-slack` (`read`): `read [CHAT] [--search TEXT]` reads or searches a chat's history through its running bridge, with Valor's own account. Standard library and Python 3.9, the turn's `python3`. No send: sends stay broker effects.
+
 ## Judgement legs
 
 Adapters behind `core/judgement.py`'s `JudgementPort` ([docs/judgement-layer.md](../docs/judgement-layer.md)). Each is built by the composition root with its endpoint, pinned model, timeout, and key; makes one POST per call with no retry; and decodes any response into probabilities per label or a failure with a fixed sentence, so no provider text or key reaches a row or an exception.

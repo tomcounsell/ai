@@ -4,7 +4,7 @@ Serves Mission item 1 ("testing actual use"). A capability for the turn,
 never a gate.
 
 **`look`.** The workspace's `bin/` holds `look`, a shell script written there
-at each provisioning (to a temporary name, then renamed). `look URL [NAME]
+at provisioning and before each turn (to a temporary file of its own, then renamed). `look URL [NAME]
 [--size WxH] [--wait MS]` takes `--size` only as two positive integers joined by
 `x` (anything else, a zero included, is refused) and asks `/usr/bin/curl` for the page's status first and
 exits non-zero when nothing answers; on a 5xx it still renders and keeps the

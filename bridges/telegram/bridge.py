@@ -74,6 +74,15 @@ class TelegramBridge:
     def performers(self):
         return {"telegram.send_message": (self.sender.perform, self.sender.lookup)}
 
+    async def read(self, chat: str, q: str | None, limit: int, before: str | None) -> list[dict]:
+        """A chat's messages for a turn (`core.bridge.reads`), newest first."""
+        try:
+            chat_id, offset = int(chat), int(before or 0)
+        except ValueError:
+            raise ValueError("a Telegram chat and message are named by number") from None
+        found = await self.wire.history(chat_id, offset_id=offset, limit=limit, search=q)
+        return [shown(m) for m in found if not m.service]
+
     # -- the loop ----------------------------------------------------------
 
     async def run(self, outbox) -> None:
@@ -295,3 +304,17 @@ class TelegramBridge:
         if held:
             top = min(top, min(held) - 1)
         self._seen.set(str(chat), max(top, stop_id))
+
+
+def shown(m: Msg) -> dict:
+    """One message as `valor-telegram read` prints it."""
+    return {
+        "id": m.id,
+        "sent_at": m.date.isoformat(),
+        "sender_id": m.sender_id,
+        "sender_name": m.sender_name,
+        "out": m.out,
+        "reply_to": m.reply_to,
+        "text": m.text,
+        "media": {"kind": m.media.kind, "name": m.media.name} if m.media else None,
+    }

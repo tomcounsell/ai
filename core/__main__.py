@@ -206,12 +206,33 @@ def _harnesses() -> dict:
 
 def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
     harness = b.harness
-    if b.mirror and "tmpdir" not in harness:
-        # A task provisioned before its harness named a TMPDIR gets its own.
-        harness = {**harness, "tmpdir": str(workspace.Layout(Path(b.mirror).parent).tmp)}
+    if b.mirror:
+        lay = workspace.Layout(Path(b.mirror).parent)
+        if "tmpdir" not in harness:
+            # A task provisioned before its harness named a TMPDIR gets its own.
+            harness = {**harness, "tmpdir": str(lay.tmp)}
+        # Each turn gets the current workspace tools and its chat, so a
+        # session provisioned before either changed has them too.
+        workspace.install_tools(lay.root.parent / "bin")
+        harness = {**harness, "env": {**harness.get("env", {}), **_reading_env(b)}}
     return _harnesses()[b.harness_name].workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=harness
     )
+
+
+def _reading_env(b: tasks.Brief) -> dict[str, str]:
+    """What `valor-telegram read` and `valor-slack read` need: the bridges'
+    read ports, and `VALOR_CHAT`, the session's own chat, else the
+    project's first."""
+    env = {"VALOR_TELEGRAM_READ_PORT": str(settings.telegram_read_port),
+           "VALOR_SLACK_READ_PORT": str(settings.slack_read_port)}  # fmt: skip
+    if b.chat:
+        return {**env, "VALOR_CHAT": f"{b.chat['channel']}:{b.chat['chat_id']}"}
+    try:
+        chats = workspace.Spec.load(b.project["name"]).chats if b.project else ()
+    except workspace.Refused:
+        chats = ()
+    return {**env, "VALOR_CHAT": chats[0]} if chats else env
 
 
 def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_name: str = "claude_code"):

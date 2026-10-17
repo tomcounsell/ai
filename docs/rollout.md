@@ -104,7 +104,11 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `core routine` plists print it (`routines.launchd_path`: the system
    directories, then those of `claude`, `git`, Postgres and `uv`); add it
    by hand to the others. A plist edited on disk takes effect only after
-   `launchctl bootout $D/<label>` and a fresh `bootstrap`.
+   `launchctl bootout $D/<label>` and a fresh `bootstrap`. On a Mac that
+   reads Slack, the app at api.slack.com carries the manifest's user scopes
+   (`python -m bridges.slack manifest`); when it gained one (`search:read`
+   for `valor-slack read --search`), reinstall the app to Valor's account
+   and run `python -m bridges.slack keys` if the user token changed.
 10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
     passes; `$PY -m core settings` names the machine and the backup folder;
     `$PY -m core routines` lists the routines; a message in each chat the

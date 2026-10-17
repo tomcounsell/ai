@@ -217,6 +217,7 @@ class SlackWire:
         channel: str,
         *,
         oldest: str | None = None,
+        latest: str | None = None,
         inclusive: bool = False,
         cursor: str | None = None,
         limit: int = PAGE,
@@ -227,6 +228,7 @@ class SlackWire:
             **_drop_none(
                 channel=channel,
                 oldest=oldest,
+                latest=latest,
                 inclusive=inclusive,
                 cursor=cursor,
                 limit=limit,
@@ -260,6 +262,12 @@ class SlackWire:
             ),
         )
         return out.get("messages") or [], _next(out)
+
+    async def search(self, query: str, *, count: int) -> list[dict]:
+        """`search.messages`'s first page of matches, newest first; the
+        user token needs `search:read`."""
+        out = await self._read("search_messages", query=query, count=count, sort="timestamp", sort_dir="desc")
+        return (out.get("messages") or {}).get("matches") or []
 
     async def open_im(self, user: str) -> str:
         """The IM channel with `user`, cached for the process."""

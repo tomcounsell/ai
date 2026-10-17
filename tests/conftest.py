@@ -81,6 +81,9 @@ os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
+# A bridge the tests run under `serve` answers history reads on a port the
+# OS chooses, never the live bridges' (`core.bridge.reads`).
+os.environ["VALOR_TELEGRAM_READ_PORT"] = os.environ["VALOR_SLACK_READ_PORT"] = "0"
 # The ports reserved for the task services a test provisions (`tests/ports.py`).
 _fd, os.environ["VALOR_TEST_RESERVED_PORTS"] = tempfile.mkstemp(prefix="valor-test-reserved-ports-")
 os.close(_fd)

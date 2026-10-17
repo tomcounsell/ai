@@ -54,6 +54,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -651,17 +652,20 @@ def harness_env(
 
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-WORKSPACE_TOOLS = ("look",)
+# Each workspace tool's name in `bin/`, and its source in `tools/`.
+WORKSPACE_TOOLS = {"look": "look", "valor-telegram": "valor_read.py", "valor-slack": "valor_read.py"}
 
 
-def _install_tools(bin_dir: Path) -> None:
-    """Write each workspace tool into the shared `bin/`, to a temporary name
-    and renamed over, so a running turn never runs a half-written script."""
-    for name in WORKSPACE_TOOLS:
-        tmp = bin_dir / f".{name}.{os.getpid()}.tmp"
-        shutil.copyfile(TOOLS_DIR / name, tmp)
-        tmp.chmod(0o755)
-        tmp.replace(bin_dir / name)
+def install_tools(bin_dir: Path) -> None:
+    """Write each workspace tool into the shared `bin/`, to a temporary file
+    of its own and renamed over, so a running turn never runs a half-written
+    script and two turns installing at once never share a file."""
+    for name, source in WORKSPACE_TOOLS.items():
+        fd, tmp = tempfile.mkstemp(dir=bin_dir, prefix=f".{name}.")
+        os.close(fd)
+        shutil.copyfile(TOOLS_DIR / source, tmp)
+        Path(tmp).chmod(0o755)
+        Path(tmp).replace(bin_dir / name)
 
 
 def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | None = None,
@@ -697,7 +701,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
               lay.work_state / "pi", lay.work_state / "codex", lay.checks,
               lay.root.parent / "bin"):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
-    _install_tools(lay.root.parent / "bin")
+    install_tools(lay.root.parent / "bin")
     # The clone: history up to the base only, no tags, one work branch.
     ref = f"refs/heads/valor-base/{task_id}"
     git.trusted(cache, "update-ref", ref, base_sha)

@@ -102,8 +102,11 @@ class Wire(Protocol):
         """Returns when the connection is lost."""
 
     def on_message(self, handler: Handler) -> None: ...
-    async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100) -> list[Msg]:
-        """Newest first; with `offset_id`, only ids below it."""
+    async def history(
+        self, chat_id: int, *, offset_id: int = 0, limit: int = 100, search: str | None = None
+    ) -> list[Msg]:
+        """Newest first; with `offset_id`, only ids below it; with `search`,
+        only messages Telegram's own search matches."""
 
     async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
         """The account's own messages in the chat with ids above
@@ -204,8 +207,12 @@ class TelethonWire:
 
     # -- reading -----------------------------------------------------------
 
-    async def history(self, chat_id: int, *, offset_id: int = 0, limit: int = 100) -> list[Msg]:
-        found = await self._call(self.client.get_messages(chat_id, limit=limit, offset_id=offset_id))
+    async def history(
+        self, chat_id: int, *, offset_id: int = 0, limit: int = 100, search: str | None = None
+    ) -> list[Msg]:
+        found = await self._call(
+            self.client.get_messages(chat_id, limit=limit, offset_id=offset_id, search=search)
+        )
         return [await self._msg(m) for m in found if m is not None]
 
     async def own(self, chat_id: int, *, after_id: int) -> list[Msg]:
