@@ -63,7 +63,9 @@ of the form `{"action_type": "...", "target": "...", "payload": {...}}`
 `.valor/stop.md` ends this session for good; nothing else under `.valor/`
 counts here.
 
-**What to keep when the conversation is compacted:** who is in the chat
-and what each cares about, every ask not yet answered and who made it,
-each task you started (its id, what it is for, who asked, where it is),
-and what you promised the chat.
+**When the conversation is compacted** (at about 500,000 tokens), it
+becomes one summary: who is in the chat and what each cares about, every
+ask not yet answered, each task you started, what you promised, the
+humans' messages quoted, and the recent tail; in an email thread, its
+opening too. Anything older is still in the chat (`valor-telegram read`,
+`valor-slack read`) and in the record.

@@ -357,9 +357,14 @@ questions, deliveries and ends to the session (`child.reported`), never
 to a chat, and the session tells the chat. Its workspace is the project's
 checkout with no setup and no services, brought up to the project's
 branch before each turn, so a reply waits only for the model. Its history
-is the harness's to compact (Claude Code's own; Pi's with compaction on;
-Codex's), and its stage says what a compaction keeps: who is who, open
-asks, tasks in flight. Its sends to its own chat owe Tom no report.
+compacts the way Hermes Agent's does (Tom, 2026-10-17): by size, at half
+the model's window within 150k to 600k tokens (about 500k on the frontier
+seat), into one summary that keeps who is who, open asks, tasks in flight
+and promises, quotes the chat's human messages verbatim, newest first,
+and ends with the recent tail; an email thread's also carries its opening
+forward, a Telegram or Slack chat's does not (`skills/sdlc/compact.md`,
+docs/harnesses.md). A compacted message is still in the chat
+(`valor-telegram read`, `valor-slack read`) and in the ledger. Its sends to its own chat owe Tom no report.
 
 Tom's own chat (the operator chat, his DM) has a chat session the same
 way, under the project listing the chat, else `valor`; its opening says

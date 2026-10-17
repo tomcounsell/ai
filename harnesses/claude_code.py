@@ -54,6 +54,36 @@ SUBAGENT_OPENING = (
 )
 
 
+# The model windows a chat session compacts against, by pinned id.
+# Claude Code's calls on the frontier seat reached 947,155 input tokens
+# before a compaction (docs/harnesses.md), so it has the 1M window.
+WINDOWS = {"claude-opus-5-5": 1_000_000}
+# Claude Code 2.1.302 compacts at 80% of its auto-compact window less the
+# 20,000 tokens it keeps for output (the 80% is a fraction its server can
+# move; `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` keeps it from rising past 80).
+COMPACT_PCT = 80
+OUTPUT_RESERVE = 20_000
+EMAIL_OPENING = (
+    "4. **The thread's opening message, verbatim**: the email that opened this thread, with "
+    "when, who and its message id, quoted exactly, cut at 4,000 characters. Carry it forward "
+    "unchanged from an earlier summary on every update; it is outside part 2's cap and never dropped."
+)
+CHAT_OPENING = "The chat's opening message is kept only as parts 2 and 3 keep any message."
+
+
+def compact_at(window: int) -> int:
+    """Where a chat session compacts: half its model's window, as Hermes
+    Agent does, within Tom's 150k to 600k (2026-10-17)."""
+    return min(max(window // 2, 150_000), 600_000)
+
+
+def compact_text(channel: str) -> str:
+    """A chat session's compaction instructions (`skills/sdlc/compact.md`):
+    only an email thread keeps its opening."""
+    opening = EMAIL_OPENING if channel == "email" else CHAT_OPENING
+    return (Path(settings.stages_dir) / "compact.md").read_text().strip().replace("{opening}", opening)
+
+
 def subagent_start(brief: str) -> str:
     """The SubagentStart hook output that gives a subagent the dispatched text."""
     context = f"{SUBAGENT_OPENING}\n\n{brief}"
@@ -117,7 +147,12 @@ def workspace_turn(
     set as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when given; `tmpdir`, the turn's
     own `TMPDIR`, which `core.runs` empties at the turn's start and removes
     at its end; `claude_config_dir`, its own Claude Code config directory,
-    which holds no login and where its transcript lies. A fresh session
+    which holds no login and where its transcript lies; `chat_channel`,
+    set for a chat session, which compacts at `compact_at` its model's
+    window (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` and
+    `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, neither for a model `WINDOWS`
+    does not list) with `compact_text` for instructions (`VALOR_COMPACT`,
+    which the PreCompact hook of Valor's plugin prints). A fresh session
     (critique, review, docs) is this with no `resume`.
 
     A new session gets `--session-id` with an id the kernel chose; a
@@ -147,6 +182,12 @@ def workspace_turn(
         # Every subagent, at every depth, opens with the dispatched text: the
         # SubagentStart hook of Valor's plugin prints this.
         env["VALOR_SUBAGENT_START"] = subagent_start(brief)
+        if channel := harness.get("chat_channel"):
+            env["VALOR_COMPACT"] = compact_text(channel)
+            if model in WINDOWS:
+                compact_window = compact_at(WINDOWS[model]) * 100 // COMPACT_PCT + OUTPUT_RESERVE
+                env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_window)
+                env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(COMPACT_PCT)
         if harness.get("tmpdir"):
             env["TMPDIR"] = env["CLAUDE_CODE_TMPDIR"] = harness["tmpdir"]
         if harness.get("claude_config_dir"):

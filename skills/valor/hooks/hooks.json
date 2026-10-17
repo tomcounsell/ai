@@ -6,6 +6,11 @@
         "hooks": [{"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/web_only.py\" || exit 2"}]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [{"type": "command", "command": "printf %s \"$VALOR_COMPACT\""}]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [{"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent_start.py\""}]

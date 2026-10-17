@@ -45,8 +45,10 @@ with its instruction. It answers by requesting sends; `stop.md` ends it,
 and no other signal counts. A turn ends the run `listening`: it is
 stepped again only when a message wakes it or a task reports
 (`chat_waiting`), never on its own effects' outcomes. Before each turn
-its checkout is brought up to the project's branch (`refresh`). Its
-history is the harness's to compact.
+its checkout is brought up to the project's branch (`refresh`). It
+compacts at half its model's window within 150k to 600k tokens, by
+Claude Code's own compaction with `skills/sdlc/compact.md` for
+instructions (`harnesses/claude_code.py`, `compact_at`).
 """
 
 import asyncio

@@ -215,6 +215,8 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
         # session provisioned before either changed has them too.
         workspace.install_tools(lay.root.parent / "bin")
         harness = {**harness, "env": {**harness.get("env", {}), **_reading_env(b)}}
+    if b.chat:
+        harness = {**harness, "chat_channel": b.chat["channel"]}
     return _harnesses()[b.harness_name].workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=harness
     )

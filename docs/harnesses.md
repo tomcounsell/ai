@@ -254,6 +254,44 @@ resume throughout (rebuild-baseline.md, Aggregate). Measured live:
 Claude Code's calls fell from 947,155
 input tokens to 75,066 at its compaction; Pi's, in `docs/pi.md`.
 
+**A chat session compacts the way Hermes Agent does** (Tom, 2026-10-17:
+"let's go with Hermes' simpler solution"): by size, positionally, not by
+topic. Hermes (`agent/context_compressor.py`) compacts at half the
+model's window, keeps the first 3 and at least the last 20 messages, and
+writes the middle into one summary that quotes the user's messages,
+newest first, within 24,000 characters. A chat session's turn
+(`harnesses/claude_code.py`, `chat_channel` in the harness) drives Claude
+Code's own compaction to the same shape; no summarizer of Valor's runs.
+
+- *When.* `compact_at`: half the model's window (`WINDOWS`), within Tom's
+  150k to 600k, so 500,000 on the frontier seat's 1M. Claude Code 2.1.302
+  compacts at 80% of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` less the 20,000
+  tokens it keeps for output; the 80% is a fraction its server can lower
+  (`tengu_amber_rokovoko`), and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` keeps
+  it from rising. So the turn sets the window to 645,000. A model
+  `WINDOWS` does not list keeps Claude Code's default. Measured
+  (2026-10-17, a scratch session at a 60,000 target): every one of five
+  compactions fired with 62,724 to 67,691 tokens in context, the target
+  plus the prompt that crossed it.
+- *What is kept.* `skills/sdlc/compact.md`, rendered per channel into
+  `VALOR_COMPACT`, which the PreCompact hook of Valor's plugin prints and
+  Claude Code takes as the compaction's custom instructions. The summary
+  keeps who is who, open asks, tasks in flight and promises
+  (`skills/sdlc/converse.md`), quotes the human messages verbatim within
+  24,000 characters, and ends with the recent tail, all within about
+  12,000 tokens; an email thread's also carries its opening forward, while
+  Telegram, Slack and the local chat keep theirs only as any message.
+  Claude Code itself also keeps its last few messages verbatim after the
+  summary. Old tool output needs no clearing: the whole middle is replaced.
+  Measured on the same scratch session: two open asks and a task id from
+  before the first compaction survived nine compactions, the summary
+  stayed under 17,000 characters, and an email thread's opening was quoted
+  after five.
+- *Older than the summary.* A compacted message is still in the chat
+  (`valor-telegram read`, `valor-slack read`) and in the ledger, so no
+  store of compacted turns is kept. Task sessions keep Claude Code's
+  default, and Pi and Codex run no chat session.
+
 ## The signal channel: `.valor/`
 
 Serves Mission item 6 (every question and delivery is a ledger row, so the
