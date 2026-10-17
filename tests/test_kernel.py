@@ -964,6 +964,111 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     )
 
 
+def test_a_rooms_entry_matches_its_chat_as_chats_normalises_it():
+    spec = workspace.Spec.from_dict(
+        {
+            "name": "p",
+            "repo": "r",
+            "kind": "plain",
+            "suite": "true",
+            "chats": ["slack:t0abc/c0123", "telegram:-1001"],
+            "rooms": {"slack:t0abc/c0123": " Support. ", "telegram:-1001": "Engineering."},
+        }
+    )
+    assert spec.chats == ("slack:T0ABC/C0123", "telegram:-1001")
+    assert spec.rooms == {"slack:T0ABC/C0123": "Support.", "telegram:-1001": "Engineering."}
+    assert workspace.Spec.from_dict({"name": "p", "repo": "r", "kind": "plain", "suite": "true"}).rooms == {}
+
+
+def test_each_chat_gets_its_rooms_entry_else_tom_owns_or_emails_else_none(tmp_path):
+    tom_slack = "T0ABC/U0TOM"
+    with bridges.operator(tmp_path, operator_slack_ids=(tom_slack,)):
+        projects = pathlib.Path(settings.projects_dir)
+        (projects / "valor.toml").write_text(
+            bridges.VALOR_SPEC
+            + f'chats = ["telegram:{bridges.OPERATOR_CHAT}", "telegram:{bridges.OPERATOR}", "telegram:{GROUP}", '
+            f'"telegram:{QUIET_GROUP}"]\n'
+            f'rooms."telegram:{bridges.OPERATOR_CHAT}" = "Status."\nrooms."telegram:{GROUP}" = "Engineering."\n'
+        )
+        (projects / "far.toml").write_text(
+            'name = "far"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nmachine = "elsewhere"\n'
+            f'chats = ["telegram:{OTHER}"]\nrooms = {{ "telegram:{OTHER}" = "Far away." }}\n'
+        )
+        assert intake.room("telegram", GROUP) == "Engineering."
+        # The operator group is Tom's own too; its own entry wins.
+        assert intake.room("telegram", bridges.OPERATOR_CHAT) == "Status."
+        for channel, chat in (
+            ("telegram", bridges.OPERATOR),
+            ("slack", tom_slack),
+            ("local", intake.LOCAL_CHAT),
+        ):
+            assert intake.room(channel, chat) == intake.TOMS_OWN_ROOM
+        assert intake.room("email", "<root@example.com>") == intake.EMAIL_ROOM
+        assert intake.room("telegram", QUIET_GROUP) is None  # listed, no entry
+        assert intake.room("telegram", LONE) is None  # listed nowhere
+        assert intake.room("telegram", OTHER) is None  # another machine's
+
+
+def test_every_listed_chat_resolves_to_its_description_on_its_machine():
+    real = pathlib.Path(__file__).parent.parent / "projects"
+    with bridges.configure(projects_dir=str(real), operator_telegram_id="179144806"):
+        specs = workspace.Spec.all()
+        listed = {chat: spec for spec in specs for chat in spec.chats}
+        assert set(listed) >= {
+            "telegram:179144806",
+            "telegram:-1003890616618",
+            "telegram:-1003449100931",
+            "telegram:-5189826365",
+            "telegram:-1003801797780",
+            "telegram:-1003743854645",
+            "telegram:-5302491300",
+            "telegram:-1003513124705",
+            "telegram:-5174105183",
+            "telegram:-4719889199",
+        }
+        for chat, spec in listed.items():
+            with bridges.configure(machine=spec.machine or settings.default_machine):
+                found = intake.room("telegram", chat.partition(":")[2])
+            assert found == (intake.TOMS_OWN_ROOM if chat == "telegram:179144806" else spec.rooms[chat]), chat
+
+
+def test_a_chat_sessions_every_turn_says_what_its_room_is_for(dsn, tmp_path):
+    group = f"-{uuid.uuid4().int % 10**12}"  # its own chat: the ledger is shared across tests
+
+    async def text(task, **kw):
+        async with await db.connect(dsn) as conn:
+            return (await tasks.dispatch(conn, task, **kw))["text"]
+
+    async def start(brief):
+        async with await db.connect(dsn) as conn:
+            return await tasks.start(conn, brief)
+
+    with bridges.operator(tmp_path):
+        spec = pathlib.Path(settings.projects_dir) / "flowers.toml"
+        spec.write_text(
+            f'name = "flowers"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nchats = ["telegram:{group}"]\n'
+        )
+        chat = run(
+            start(
+                tasks.Brief(
+                    instruction="chat",
+                    workspace=str(tmp_path),
+                    chat={"channel": "telegram", "chat_id": group},
+                )
+            )
+        )
+        plain = run(start(tasks.Brief(instruction="work", workspace=str(tmp_path))))
+        # No description yet: the opening's project and kind stay the fallback.
+        assert "\nRoom: " not in run(text(chat))
+        spec.write_text(spec.read_text() + f'rooms = {{ "telegram:{group}" = "The florist\'s site." }}\n')
+        # The open session gets it at its next turn, and every turn after.
+        for _ in range(2):
+            assert "Instruction: chat\nRoom: The florist's site.\nEffect ceiling:" in run(text(chat))
+        # A fresh session of the chat task carries it too: it is the chat's.
+        assert "Room: The florist's site." in run(text(chat, fresh="advice"))
+        assert "\nRoom: " not in run(text(plain))
+
+
 def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_it(dsn, team):
     """`task.start` makes a child on the project, named by who asked; its
     question reaches the session, never a chat, and `task.answer` answers

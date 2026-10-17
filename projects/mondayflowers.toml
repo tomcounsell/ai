@@ -28,6 +28,8 @@ suite = ".venv/bin/python -m pytest -p no:cacheprovider -q --ds=settings --conti
 lint = ".venv/bin/flake8 apps settings"
 # "Eng: Monday Flowers".
 chats = ["telegram:-5302491300"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-5302491300" = "The Monday Flowers site, a client's flower subscription." }
 machine = "Valor the Pirate"
 knowledge_base = "Monday Flowers"
 

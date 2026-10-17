@@ -14,6 +14,8 @@ setup = ["uv sync --frozen --extra dev"]
 suite = "uv run pytest -p no:cacheprovider -q -m 'not slow and not benchmark' --ignore=tests/test_connection.py --ignore=tests/postgres --junitxml={junit} tests"
 # "Eng: Popoto".
 chats = ["telegram:-5189826365"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-5189826365" = "Engineering on popoto, the Redis ORM, including its memory work." }
 machine = "Valor the Cowboy"
 
 [env]

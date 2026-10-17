@@ -96,7 +96,9 @@ class Spec:
     chat it lists, anyone's message binds, not only Tom's
     (`core/intake.py`). `mentions` lists those of its chats where a message
     starts work only when it names Valor; a reply to Valor's post binds
-    anywhere.
+    anywhere. `rooms` maps some of its chats to a description of what the
+    chat is for, rendered into every turn of its chat session
+    (`intake.room`).
 
     `knowledge_base` names the business's folder in `~/work-vault`, which a
     working task's turns read and write.
@@ -120,6 +122,7 @@ class Spec:
     max_output_tokens: int | None = None
     chats: tuple[str, ...] = ()
     mentions: tuple[str, ...] = ()
+    rooms: dict[str, str] = field(default_factory=dict)
     machine: str | None = None
     knowledge_base: str | None = None
     client: str | None = None
@@ -173,6 +176,11 @@ class Spec:
             if found not in normal:
                 raise Refused(f"mentions names {chat!r}, which is not one of the spec's chats")
             mentions.append(found)
+        rooms = {}
+        for chat, text in (raw.get("rooms") or {}).items():
+            channel, _, ident = chat.partition(":")
+            row = channels.get(channel)
+            rooms[f"{channel}:{row.normal(ident)}" if row is not None and ident else chat] = str(text).strip()
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
@@ -201,6 +209,7 @@ class Spec:
             max_output_tokens=cap,
             chats=tuple(normal),
             mentions=tuple(mentions),
+            rooms=rooms,
             machine=machine,
             knowledge_base=kb,
             client=client,

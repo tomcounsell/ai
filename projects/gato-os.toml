@@ -29,6 +29,8 @@ suite = "mkdir -p target && printf '[profile.valor.junit]\\npath = \"junit.xml\"
 lint = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && ./scripts/lint-all.sh"
 # "Eng: Gato".
 chats = ["telegram:-1003513124705"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-1003513124705" = "Assessment and engineering for Chainstarters' Gato OS." }
 machine = "Valor the Pirate"
 knowledge_base = "SOUL"
 

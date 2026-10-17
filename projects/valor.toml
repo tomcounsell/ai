@@ -17,6 +17,10 @@ merge_url = "https://github.com/tomcounsell/ai.git"
 # The operator group, the Eng group, and Tom's own DM, received on the
 # Cowboy.
 chats = ["telegram:-1003890616618", "telegram:-1003449100931", "telegram:179144806"]
+# What each chat is for, rendered into every turn of its chat session;
+# Tom's DM's is his own chat's (core/intake.py).
+rooms."telegram:-1003890616618" = "Status and approvals across all projects; work no chat started reports here."
+rooms."telegram:-1003449100931" = "Engineering on Valor itself."
 machine = "Valor the Cowboy"
 
 [env]

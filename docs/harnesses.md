@@ -109,7 +109,7 @@ Its arguments:
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--plugin-dir DIR`, once per existing `settings.plugin_dirs` entry | loads Valor's plugin, then the yudame plugins | developer parity (C18); the web guard |
 | `--settings '{"disableAllHooks": false}'` | keeps Valor's plugin hooks on: command-line settings outrank the project's and any the turn writes, which Claude Code reloads mid-turn | the web guard (Skill rendering) |
-| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
+| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first; a chat session's Brief with its `Room:` line), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
 | `--session-id ID` or `--resume SESSION` | a new session under an id the kernel chose, or the task's session continued | Mission item 1 (see below); the kernel knows which transcript is the turn's |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
 

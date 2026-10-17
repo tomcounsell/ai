@@ -22,6 +22,8 @@ setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/De
 suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --junitxml={junit} apps"
 # "Eng: Cuttlefish".
 chats = ["telegram:-1003801797780"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-1003801797780" = "Engineering on the Cuttlefish product." }
 machine = "Valor the Captain"
 
 [env]

@@ -462,6 +462,9 @@ Code's own system prompt with `--append-system-prompt` and re-rendered on
 every resumed turn (`--system-prompt-snapshot off`), so a correction or a
 persona change reaches a running session at its next turn
 (`harnesses/claude_code.py`, `workspace_turn`; see `docs/harnesses.md`).
+A chat session's Brief also carries its chat's `Room:` description there
+(`intake.room`, docs/bridges/telegram.md), so it survives compaction as
+the persona does.
 
 **What the kernel renders.** `core/persona.py` renders `persona/` on every
 dispatch, from the kernel's own checkout (`settings.persona_dir`, never the

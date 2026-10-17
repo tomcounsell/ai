@@ -17,4 +17,6 @@ setup = ["cd server/llm-proxy && uv venv -q --python 3.12 && uv pip install -q -
 suite = "cd server/llm-proxy && .venv/bin/python -m pytest -p no:cacheprovider -q --junitxml={junit} tests"
 # "Eng: Counsell Home".
 chats = ["telegram:-5174105183"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-5174105183" = "Tom's home network and servers." }
 machine = "Valor the Pirate"

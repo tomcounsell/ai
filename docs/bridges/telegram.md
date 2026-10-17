@@ -349,6 +349,17 @@ with the next. Each turn's prompt is what came in since the last, with
 when, who and message ids; messages that arrive during a turn go in
 together at the next.
 
+Each chat (a "room") may carry a description of what it is for, beside
+where it is listed: a spec's `rooms` entry for its chat (the Eng groups,
+the operator group, the yudame team chat), and for Tom's own chat (his
+Telegram and Slack DMs, the local chat) and email threads, the text in
+`core/intake.py` (`TOMS_OWN_ROOM`, `EMAIL_ROOM`; Tom, 2026-10-17: "each
+'room' should have a description that anchors the purpose"). It is the
+Brief's `Room:` line, read on every dispatch (`intake.room`), so it rides
+in the appended system prompt beside the persona and the corrections and
+no compaction removes it; editing it reaches an open session at its next
+turn. A chat with none has only its opening's project and kind.
+
 The session reads and dispatches (`skills/sdlc/converse.md`): it replies
 with a send to the chat, threaded; stays quiet by sending nothing; and
 starts, answers and stops tasks (`task.start`, `task.answer`,
@@ -370,7 +381,9 @@ docs/harnesses.md). A compacted message is still in the chat
 
 Tom's own chat (the operator chat, his DM) has a chat session the same
 way, under the project listing the chat, else `valor`; its opening says
-it is Tom's own chat, a 1:1 with him, not a team chat. Only Tom is heard
+it is Tom's own chat, a 1:1 with him, not a team chat, and its room is
+running the business, Yudame first, engineering only when he starts it
+(the operator group's own `rooms` entry wins there). Only Tom is heard
 there, and every message of his wakes it. A reply to an older task's
 notice or send binds to that task as above; every other message of his
 there, a reply to the session's own post included, is the session's next

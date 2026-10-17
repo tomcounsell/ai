@@ -14,6 +14,8 @@ setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/De
 suite = "uv run pytest -p no:cacheprovider -q --junitxml={junit} apps/team apps/public apps/api"
 # "Eng: PsyOPTIMAL".
 chats = ["telegram:-1003743854645"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-1003743854645" = "Engineering on Psyoptimal, and assessment questions with Lewis." }
 machine = "Valor the Captain"
 
 [env]

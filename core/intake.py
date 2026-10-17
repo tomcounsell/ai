@@ -331,6 +331,24 @@ def _project_chats(channel: str) -> list[tuple[str, workspace.Spec]]:
     return found
 
 
+# What Tom's own chat is for (his Telegram and Slack DMs, the local chat;
+# the operator group's own spec entry wins), and an email thread.
+TOMS_OWN_ROOM = "Running the business with Tom, Yudame first; engineering only when he starts it."
+EMAIL_ROOM = "Valor's own correspondence for the business."
+
+
+def room(channel: str, chat_id: str) -> str | None:
+    """What the chat is for: its `rooms` entry in a spec this machine
+    owns, else Tom's own chat's or an email thread's, else None (its
+    session's opening names only its project and kind)."""
+    for chat, spec in _project_chats(channel):
+        if chat == chat_id and f"{channel}:{chat}" in spec.rooms:
+            return spec.rooms[f"{channel}:{chat}"]
+    if _toms_own({"channel": channel, "chat_id": chat_id}):
+        return TOMS_OWN_ROOM
+    return EMAIL_ROOM if channel == "email" else None
+
+
 def owned(channel: str) -> list[str]:
     """Every id this machine's bridge on `channel` receives."""
     ids: list[str] = []

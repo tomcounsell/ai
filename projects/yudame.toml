@@ -14,5 +14,7 @@ setup = ["npm ci"]
 suite = "npm run build"
 # "Yudame".
 chats = ["telegram:-4719889199"]
+# What each chat is for, rendered into every turn of its chat session;
+rooms = { "telegram:-4719889199" = "The company's team chat, with Lewis and Rain; answer whoever asks; mostly not engineering." }
 machine = "Valor the Pirate"
 knowledge_base = "Yudame"

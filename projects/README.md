@@ -28,6 +28,10 @@ workspaces for (`python -m core start ... --project NAME`).
   machine whose bridges receive them; none means the default machine, so
   each chat has one owner. In a group chat listed here anyone's message
   is heard, not only Tom's (a team chat, [telegram.md](../docs/bridges/telegram.md)).
+- `rooms` maps some of those chats to a description of what the chat is
+  for (`rooms."telegram:<chat id>" = "..."`), rendered on every turn of
+  its chat session; Tom's own chat's is in `core/intake.py`
+  ([telegram.md](../docs/bridges/telegram.md)).
 - `mentions` lists those chats where only a message naming Valor, or a
   reply to his post, wakes the chat session, as the old teammate groups
   did; the rest reach it with the next.
