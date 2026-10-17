@@ -30,7 +30,7 @@ from typing import Any
 
 from core import db, findings, git, judgement, ledger, machine, tasks
 from core.judgement import UNANSWERED_RUNS, JudgementPort, Kind
-from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, OPEN_LISTED, OVERLAP, SHAPE
+from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, OPEN_LISTED, OVERLAP
 from core.machine import State
 
 DIFF = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color")
@@ -375,22 +375,12 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
     case shape:
 
     - judge: `{"id", "request" or "item", "label": precise|thin, "sub_label", "source"}`;
-    - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`;
-    - shape: `{"id", "inputs": {"message", "thread", "bound_as"}, "label": <a shape>, "source"}`.
+    - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`.
 
     A label `false` expects proceed and `true` caution (each question's own
     `proceed` set); a `pick` question expects its label itself. Raises
     `ValueError` naming what is wrong."""
     task = BY_SITE[site]
-    if site == SHAPE.site:
-        q = task.questions[0]
-        inputs = c.get("inputs")
-        if not isinstance(inputs, dict) or set(inputs) != set(task.inputs):
-            raise ValueError(f"case {c.get('id')}: inputs are {sorted(task.inputs)}")
-        if c.get("label") not in q.labels or not c.get("source"):
-            raise ValueError(f"case {c.get('id')}: a shape label is one of {sorted(q.labels)}, with a source")
-        expected = {q.id: Expected(c["label"], c["label"], str(c["source"]))}
-        return {k: str(v) for k, v in inputs.items()}, expected
     if site == JUDGE.site:
         if c.get("label") not in JUDGE_LABELS:
             raise ValueError(f"case {c.get('id')}: a judge label is precise or thin")

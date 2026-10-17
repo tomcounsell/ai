@@ -251,8 +251,9 @@ the message carries one.
 `already_reacted` and `no_reaction` count as done. Slack's refusal
 (`missing_scope` until the app is reinstalled with `reactions:write`) is
 written as `reaction.failed`; a 429 or a lost connection leaves the
-reaction for the next wake, as a notice. A 👀 whose message already has its
-shape reaction is closed `superseded` by the outbox and never added.
+reaction for the next wake, as a notice. A 👀 whose message's activity
+reaction is already placed is closed `superseded` by the outbox and never
+added.
 
 ## Stop and recovery
 

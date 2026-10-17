@@ -290,9 +290,9 @@ def chat_waiting(rows: list[dict]) -> bool:
 def chat_prompt(rows: list[dict]) -> str:
     """What reached a chat session since its last finished turn began,
     oldest first: each message as `intake.chat_line` renders it, with the
-    reaction on it; each activity reaction set since on a message an
-    earlier turn read (quiet, it wakes nothing); and each task's report
-    under its task id."""
+    reaction on it; each reaction set since on a message an earlier turn
+    read, such as the activity of the last turn's work (quiet, it wakes
+    nothing); and each task's report under its task id."""
     from core import intake
 
     since = machine.fold(rows).steer_since
@@ -307,10 +307,10 @@ def chat_prompt(rows: list[dict]) -> str:
         if int(r.get("id") or 0) <= since:
             continue
         p = r["payload"]
-        if r["type"] == "reaction.requested" and p.get("judged") and p.get("received_id") in read:
+        if r["type"] == "reaction.requested" and p.get("stage") == "shape" and p.get("received_id") in read:
             lines.append(
-                f"- The reaction classifier set {reactions.emoji_of(p)} ({p.get('label')}) "
-                f"on message {read[p['received_id']]}"
+                f"- Your reaction on message {read[p['received_id']]} is now {reactions.emoji_of(p)}: "
+                f"{reactions.why(p)}"
             )
         elif r["type"] not in CHAT_ROWS:
             continue
@@ -740,7 +740,8 @@ async def record(
     written again; when it still refuses, the largest part left is
     answered and the row written again, alone, until it is stored
     (`_reduce`), and failing that, one `turn.collected` holding nothing the
-    turn wrote is (`_bare`). Returns the verdict recorded. For a task with a kernel
+    turn wrote is (`_bare`). Last, the reaction for what the turn did
+    (`reactions.on_turn`). Returns the verdict recorded. For a task with a kernel
     mirror, a plan commit or a candidate counts only once it is fetched
     into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
@@ -801,6 +802,7 @@ async def record(
                 await ledger.append(conn, task_id, "turn.collected", collected)
             else:
                 collected = reduced
+    await reactions.on_turn(conn, task_id, turn_id, effects)
     return collected["verdict"]
 
 

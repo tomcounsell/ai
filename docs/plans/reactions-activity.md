@@ -115,3 +115,14 @@ the classifier); Slack workspace custom emoji; reactions in
 
 **Governance.** None added: no check, gate or refusal; the fallback in 3 is
 built only on evidence of a chat that refuses custom reactions.
+
+## Revised after use (Tom, 2026-10-17 14:59-15:01 UTC)
+
+"The instant 👀 no longer come", and the classifier gave plain questions 👨‍💻;
+"it only needs to change if some work is done". So: the `response.shape`
+judgement and its serve jobs are removed; nothing is guessed on arrival.
+`reactions.on_turn`, called from `session.record`, sets the activity from
+what the collected turn did (its effects, its transcript's tool calls) on
+the message it answered; a plain reply keeps 👀. The outbox never skips a
+👀 (only one whose activity is already placed), and on a row's wake yields
+before the gap fill runs. Items 1 and 5's classifier wording is superseded.

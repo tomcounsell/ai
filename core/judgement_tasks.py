@@ -125,57 +125,6 @@ BREADTH = JudgementTask(
     calibrated=None,
 )
 
-_SHAPES = {
-    "reply": "a reply and nothing more: an answer from what Valor already knows, an acknowledgement, "
-    "a question back, or a refusal",
-    "task": "starting a task that does the work, where no more specific label below fits",
-    "code": "a change to code, a configuration, or a running system",
-    "web_search": "searching or reading the web",
-    "lookup": "looking something up in Valor's own records: the code, chat history, the ledger, email",
-    "document": "writing a document, a report, research, or an analysis",
-    "present": "making a deck, a one-page explainer, or a video",
-    "issue": "filing or updating a GitHub issue",
-    "schedule": "scheduling: a meeting, a reminder, a calendar event, a routine",
-    "send": "sending something to someone: an email, a file, or a message to another person or chat",
-}
-SHAPE = JudgementTask(
-    site="response.shape",
-    questions=(
-        Question(
-            id="shape",
-            text=(
-                "What activity will Valor's response to this message mainly take? Judge the response "
-                "Valor should give, not the message: a long message can want only a reply, and a "
-                "one-line request can want a change to code. When it takes several, pick the most "
-                "specific one the sender would see (a code change over starting a task, a web search "
-                "over a reply). `bound_as` says what the message is to its task: a new request "
-                "(`start`), an answer to Valor's question, feedback on a delivery, or a steer of "
-                "running work or of a chat's session."
-            ),
-            kind=Kind.PICK,
-            labels=dict(_SHAPES),
-            proceed=frozenset(_SHAPES),
-        ),
-    ),
-    inputs={
-        "message": "the message's text, from its message.received row",
-        "thread": "the earlier messages of its reply chain, oldest first, one per line",
-        "bound_as": "what message.bound bound it as: start, answer, feedback, or steer",
-    },
-    error_cost="low",
-    # Floors set from human labels once real messages have produced thirty or more rows.
-    floor={"primary": 0.55, "fallback": 0.60},
-    on_abstain="caution",
-    on_failure="caution",
-    consumer={
-        "proceed": "the picked activity's reaction replaces 👀, and reply leaves 👀 (core/reactions.py)",
-        "caution": "no activity reaction; 👀 stays",
-    },
-    serves="Mission item 6",
-    guard="none: a label, no gate",
-    calibrated=None,
-)
-
 # The open tasks an overlap judgement lists, numbered: a leg answers labels
 # only, so the task a decision names is one of these numbers.
 OPEN_LISTED = 8
@@ -246,5 +195,5 @@ OVERLAP = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, SHAPE, OVERLAP)
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP)
 BY_SITE = {t.site: t for t in TASKS}

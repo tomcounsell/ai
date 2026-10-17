@@ -25,9 +25,7 @@ On start it recovers (`recover`) what a killed kernel left:
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
-(`intake.bind`), starts a job for each message's shape judgement
-(`reactions.pending`; kept in `shaping`, apart from the task jobs, so a
-task's step never waits on one), requests the notices each task owes (`notices.owe`),
+(`intake.bind`), requests the notices each task owes (`notices.owe`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
 (`router.step`), a provisioning, or the collection recover could not
@@ -100,11 +98,9 @@ from core import (
     db,
     git,
     intake,
-    judgement,
     ledger,
     machine,
     notices,
-    reactions,
     rollout,
     router,
     routines,
@@ -485,7 +481,6 @@ class Kernel:
         credential: str | Path | None = None,
         sync: Callable[[], None] | None = None,
         backup: Callable[[str], None] | None = None,
-        judgement_port: judgement.JudgementPort | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
         # The checkout this process runs from and its commit then; with no
@@ -503,14 +498,6 @@ class Kernel:
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
         self.jobs: dict[str, asyncio.Task] = {}
-        # Shape judgements by `received_id` (`core/reactions.py`), apart
-        # from `jobs`: a task's step is scheduled while its message is judged.
-        self.judgement_port = judgement_port
-        self.shaping: dict[str, asyncio.Task] = {}
-        # Shape jobs that raised (an error with no `judgement.failed` row),
-        # by `received_id`: asked again up to `judgement.UNANSWERED_RUNS`
-        # times in this process, as a failed judgement is, then left with 👀.
-        self.shape_errors: dict[str, int] = {}
         self.harness: set[str] = set()  # the foreground tasks whose harness jobs run
         self.background: set[str] = set()  # the background tasks whose harness jobs run
         self.services: dict[str, router._Services] = {}
@@ -536,7 +523,6 @@ class Kernel:
             self.waiting.clear()
             self.parked_at = now
         await intake.bind(conn)
-        await self.shape(conn)
         for task_id in await self.active(conn):
             try:
                 await notices.owe(conn, task_id)
@@ -567,30 +553,6 @@ class Kernel:
                 continue
             if await workspace.reclaim(conn, task_id, by="kernel", via="serve", before=before):
                 _log(f"task {task_id}: removed its finished workspace")
-
-    async def shape(self, conn) -> None:
-        """A job of its own for each pending shape judgement not already
-        running (`reactions.pending`); none without a judgement port."""
-        if self.judgement_port is None:
-            return
-        for seen in await reactions.pending(conn):
-            rid = seen["received_id"]
-            if rid in self.shaping or self.shape_errors.get(rid, 0) >= judgement.UNANSWERED_RUNS:
-                continue
-            job = asyncio.create_task(self._shape(seen))
-            self.shaping[rid] = job
-
-            def finished(job, rid=rid):
-                self.shaping.pop(rid, None)
-                if not job.cancelled() and job.exception() is not None:
-                    self.shape_errors[rid] = self.shape_errors.get(rid, 0) + 1
-                    _log(f"reaction for message {rid}: shape failed: {job.exception()!r}")
-
-            job.add_done_callback(finished)
-
-    async def _shape(self, seen: dict[str, Any]) -> None:
-        async with await db.connect(self.dsn) as conn:
-            await reactions.shape(self.judgement_port, conn, seen, self.dsn)
 
     def _holding(self) -> bool:
         """A job other than a background turn's is running."""
@@ -1006,7 +968,7 @@ class Kernel:
                 await services.close()
 
     async def close(self) -> None:
-        jobs = [*self.jobs.values(), *self.shaping.values()]
+        jobs = list(self.jobs.values())
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
@@ -1087,7 +1049,6 @@ async def serve(
     checkout: Path | None = ROOT,
     migrate: Callable[[str], None] | None = None,
     credential: str | Path | None = None,
-    judgement_port: judgement.JudgementPort | None = None,
     kick: Callable[[str], str | None] | None = rollout.kick,
 ) -> None:
     """Run the kernel until killed, or until a rollout of its own merge
@@ -1125,7 +1086,6 @@ async def serve(
             started=started,
             migrate=migrate,
             credential=credential if credential is not None else settings.github_keyfile,
-            judgement_port=judgement_port,
         )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))

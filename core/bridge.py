@@ -418,9 +418,10 @@ class Outbox:
     first, every release requested for this channel with no intent,
     outcome, or refusal, then every notice on this channel not yet sent,
     then every reaction on this channel not yet placed or failed; then
-    waits for a row of any of these kinds, or `settings.serve_tick_s`, and on
-    that wake reconciles this channel's dangling sends, calls the bridge's
-    `tick`, and yields again."""
+    waits for a row of any of these kinds, or `settings.serve_tick_s`. On a
+    row's wake it yields again first, so a 👀 is placed before the bridge's
+    gap fill runs; then on either wake it reconciles this channel's
+    dangling sends, calls the bridge's `tick`, and yields again."""
 
     def __init__(
         self,
@@ -446,7 +447,9 @@ class Outbox:
         while True:
             for item in await self.due():
                 yield item
-            await self.wait()
+            if await self.wait():
+                for item in await self.due():
+                    yield item
             if hasattr(self.bridge, "reconcile"):
                 await self.bridge.reconcile(self)
             else:
@@ -503,15 +506,17 @@ class Outbox:
         )
 
     async def _reactions(self) -> list[ReactionDue]:
-        """This channel's reactions with no result, oldest first. A `seen`
-        reaction whose message already has a `shape` reaction is never
-        yielded: it is closed here, `reaction.placed` with `superseded`
-        and nothing sent, so a 👀 retried after a flood wait never lands
-        over its shape. The shape's own placement replaces whatever 👀 is
-        on screen."""
+        """This channel's reactions with no result, oldest first, so a
+        message's 👀 is placed before the reaction that replaces it. A `seen`
+        reaction whose message's `shape` reaction is already placed is
+        closed here instead, `reaction.placed` with `superseded` and nothing
+        sent, so a 👀 retried after a flood wait never lands over its
+        shape."""
         rows = await (
             await self.conn.execute(
                 "SELECT r.task_id, r.payload, r.at, EXISTS (SELECT 1 FROM events h "
+                "JOIN events d ON d.type = 'reaction.placed' "
+                "AND d.payload->>'reaction_id' = h.payload->>'reaction_id' "
                 "WHERE h.type = 'reaction.requested' AND h.payload->>'stage' = 'shape' "
                 "AND h.payload->>'received_id' = r.payload->>'received_id') "
                 "FROM events r WHERE r.type = 'reaction.requested' AND r.payload->>'channel' = %s "
@@ -539,8 +544,9 @@ class Outbox:
                 due.append(item)
         return due
 
-    async def wait(self) -> None:
-        """Until a release, notice, or reaction row is written, or the tick."""
+    async def wait(self) -> bool:
+        """Until a release, notice, or reaction row is written (true), or the
+        tick (false)."""
         try:
             async for note in self.listener.notifies(timeout=settings.serve_tick_s):
                 if json.loads(note.payload).get("type") in (
@@ -548,7 +554,7 @@ class Outbox:
                     "notice.requested",
                     "reaction.requested",
                 ):
-                    return
+                    return True
         except psycopg.OperationalError:
             # The listening connection died: wait the tick, then listen on a
             # new one; `due` catches up what was missed.
@@ -557,9 +563,10 @@ class Outbox:
                 listener = await db.connect(self.dsn, application_name=f"valor-{self.channel}-listen")
                 await listener.execute("LISTEN valor_events")
             except psycopg.OperationalError:
-                return
+                return False
             await self.listener.close()
             self.listener = listener
+        return False
 
     async def perform(self, item: Release, conn=None) -> broker.Outcome:
         """Release the effect through the broker: the checks, the intent,

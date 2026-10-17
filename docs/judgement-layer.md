@@ -238,7 +238,7 @@ never a bare build. Serves: constraint "Three tiers" ("confidence-gated to a hum
 item 6.
 
 A `pick` question is the one exception, for a site whose answer is a label and not an action
-(`response.shape`): the gate is on the top label's normalized probability against the leg's floor.
+(`intake.overlap`): the gate is on the top label's normalized probability against the leg's floor.
 At or above it the question proceeds with that label; under it the leg abstains; a leg never answers
 a pick with caution. The label of the answer that proceeded is recorded as `picked` on the
 `judgement.answered` row: the fallback's wherever the primary abstained, never an abstaining leg's
@@ -353,7 +353,7 @@ holds or redirects work. Status says where each stands.
 | 7 | Doc against reality | Does this doc state something this code contradicts? | `consistent`, `contradicted`, `unverifiable` | yes | Constraint: docs describe reality | Required by the plan |
 | 8 | Test breadth | Three booleans in one call: does the change leave unexercised a record in a non-obvious state (`gap_state`), a member of an enumeration the code branches on (`gap_enum`), or an existing test whose bounds encode the old behavior (`gap_bound`)? | `boolean` each | yes | Mission 1 | Built (`checks.test.breadth`), an SDLC stage by Tom's decision of 2026-10-01; its floors are provisional until 1.4's calibration record |
 | 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
-| 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Built (`response.shape`); floors provisional, uncalibrated |
+| 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Retired 2026-10-17: it guessed on arrival and got plain questions wrong; the reaction now comes from what a turn did (`core/reactions.py`) |
 | 12 | Ask overlap | Does an open task on the ask's project already do what it asks, or touch the same work? Which listed task, and should the ask run before or after it? | `decision`: `covered`, `supersedes`, `overlaps`, `split`, `distinct`; `task`: `1` to `8` (the numbered open tasks, the 8 most recently active) or `none`; `placement`: `before`, `after`, `none` (each a `pick`) | no, in shadow | Mission 6, 1 | Built (`intake.overlap`), uncalibrated: asked in the `judge` step before the judge, recorded as `reconcile.decided` (an abstain or both legs failing is `distinct` with a note), and holds nothing; its placement proposes a queue place when the writer gives none. Holding an ask for the writer waits for its calibration record and Tom's grant ([docs/plans/ask-reconciliation.md](plans/ask-reconciliation.md)) |
 
 Notes per shape:
@@ -392,15 +392,12 @@ Notes per shape:
     "Kernel findings", 3: `EPERM` at row 179) is the kind a deterministic
     signal names. This shape stays a candidate until a failure arrives that
     the deterministic signals could not classify.
-11. Asked once for each Telegram or Slack message bound to a task as a start,
-    an answer, feedback, or a steer (`core/reactions.py`), with the message,
-    its reply chain, and what it was bound as. It judges the response, not
-    the message. The picked label is a prediction of the activity, not a
-    record of it: `reply` leaves 👀, and any other names the reaction that
-    replaces 👀 on the message, which the session reads beside the message as
-    the classifier's. Nothing reads it for anything else: it holds,
-    redirects, and refuses nothing. Its rows sit on the bound task and are quiet there
-    (`ledger.quiet`), so they never step the task or hide a failed step.
+11. Retired 2026-10-17 (Tom: "it only needs to change if some work is
+    done"). It was asked on arrival for each Telegram or Slack message bound
+    to a task and picked the reaction that replaced 👀, and it read Tom's
+    plain questions as code changes. The reaction is now set from what a
+    collected turn did, with no judgement (`core/reactions.py`). Its rows
+    stay in the ledger and stay quiet (`ledger.QUIET_SITES`).
 
 Shapes 2 to 5, 10, and 11 label and route; they add no governance. Shapes 7 and 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.

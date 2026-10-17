@@ -1,13 +1,14 @@
 """Reactions (docs/plans/reactions-activity.md): which messages get one,
-the activity that replaces 👀, each platform's emoji, and what a session
-reads of the reaction on a message."""
+👀 placed at once, the activity a turn's actual work sets, each platform's
+emoji, and what a session reads of the reaction on a message."""
 
 import asyncio
+import base64
+import json
 import uuid
 from types import SimpleNamespace
 
-from core import bridge, db, intake, judgement, ledger, reactions, session, tasks
-from core.judgement_tasks import SHAPE
+from core import bridge, db, intake, ledger, reactions, session, tasks, transcripts
 from tests import bridges, test_kernel
 from tests.test_kernel import QUIET_GROUP, at, posted, said, tom_says, turn
 
@@ -16,36 +17,48 @@ team, dm = test_kernel.team, test_kernel.dm
 
 run = asyncio.run
 EYES = "\U0001f440"
+LONG_AGO, LATER = "2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"
 
 
 async def requested(dsn, received_id) -> list[dict]:
     return await bridges.of_type(dsn, "reaction.requested", received_id=received_id)
 
 
-class Port:
-    """A judgement port whose one leg picks `label` (None: abstain)."""
-
-    def __init__(self, label):
-        self.label = label
-        self.asked = []
-
-    async def judge(self, task, inputs, *, task_id, ref, dsn=None):
-        self.asked.append(ref["received_id"])
-        jid = ledger.new_id()
-        payload = {"judgement_id": jid, "site": task.site, "ref": ref}
-        if self.label is not None:
-            payload["picked"] = {SHAPE.questions[0].id: self.label}
-        async with await db.connect(dsn) as conn:
-            await ledger.append(conn, task_id, "judgement.answered", payload)
-        return judgement.Judgement(jid, task.site, True, {}, {}, (), "primary", "m", 0, (), 0, payload)
+def send(target, text="ok", reply_to=None, files=()):
+    """An effect entry as `session.record` makes it: a chat send."""
+    payload = {"text": text, "reply_to": reply_to, "files": [{"path": f, "sha256": "x"} for f in files]}
+    return {
+        "request": {"action_type": "telegram.send_message", "target": target, "payload": payload},
+        "kind": "held",
+    }
 
 
-async def shape_all(dsn, port, *bound) -> list:
-    """The serve job's part for these bindings' messages: each pending one judged."""
-    rids = {b["received_id"] for b in bound}
+def effect(action_type, target="t", **payload):
+    return {"request": {"action_type": action_type, "target": target, "payload": payload}, "kind": "held"}
+
+
+async def worked(dsn, task, effects=(), tools=(), before=()) -> str | None:
+    """A collected turn of `task`: its transcript holds `tools` (name,
+    input) called during it, and `before`, calls of an earlier turn the same
+    file still holds. The label `on_turn` writes."""
+    turn_id = ledger.new_id()
+    lines = [
+        json.dumps({"timestamp": when, "message": {"content": [{"type": "tool_use", "name": n, "input": i}]}})
+        for when, calls in ((LONG_AGO, before), (LATER, tools))
+        for n, i in calls
+    ]
+    body = {"turn_id": turn_id, "name": "s.jsonl", "offset": 0, "chunk": 0,
+            "base64": base64.b64encode("\n".join(lines).encode()).decode()}  # fmt: skip
     async with await db.connect(dsn) as conn:
-        pending = [seen for seen in await reactions.pending(conn) if seen["received_id"] in rids]
-        return [await reactions.shape(port, conn, seen, dsn) for seen in pending]
+        await ledger.append(conn, task, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+        await conn.execute(
+            "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s::jsonb)",
+            (transcripts.KIND, f"{turn_id}/s.jsonl/0", json.dumps(body)),
+        )
+        transcript = {"files": [{"name": "s.jsonl"}]}
+        await ledger.append(conn, task, "turn.ended", {"turn_id": turn_id, "outcome": "done", "result": {},
+                                                       "transcript": transcript})  # fmt: skip
+        return await reactions.on_turn(conn, task, turn_id, list(effects))
 
 
 async def place_all(dsn, channel) -> None:
@@ -57,7 +70,7 @@ async def place_all(dsn, channel) -> None:
 
 def test_every_label_has_an_emoji_on_each_platform_and_nothing_else():
     """Each activity, plus `seen` and `stop`, on Telegram and Slack."""
-    labels = set(SHAPE.questions[0].labels) - {reactions.REPLY} | {"seen", "stop"}
+    labels = set(reactions.ORDER) | {"seen", "stop"}
     assert set(reactions.REACTIONS) == {"telegram", "slack"}
     for channel, table in reactions.REACTIONS.items():
         assert set(table) == labels, channel
@@ -93,7 +106,7 @@ def test_in_team_chats_only_a_message_that_wakes_the_session_is_marked(dsn, team
 
 def test_toms_dm_is_marked_and_a_reply_to_finished_work_keeps_its_eyes(dsn, dm):
     """Every message of Tom's in his DM gets `eyes`; his reply to a stopped
-    task's post is marked read and never judged, so no activity follows."""
+    task's post is marked read for good, so no turn's work changes it."""
 
     async def go():
         top = await tom_says(dsn, dm, "what's on today?", at(10))
@@ -103,25 +116,19 @@ def test_toms_dm_is_marked_and_a_reply_to_finished_work_keeps_its_eyes(dsn, dm):
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, done, reason="test")
         late = await tom_says(dsn, dm, "one more thing", at(30), reply_to=at(20))
-        port = Port("web_search")
-        shaped = await shape_all(dsn, port, top, late)
+        later = await worked(dsn, done, tools=[("WebSearch", {"query": "x"})])
         return (
             top,
             late,
             await requested(dsn, top["received_id"]),
             await requested(dsn, late["received_id"]),
-            port,
-            shaped,
+            later,
         )
 
-    top, late, top_rows, late_rows, port, shaped = run(go())
-    assert top["as"] == "steer" and [(r["emoji"], r["label"]) for r in top_rows] == [
-        ("eyes", "seen"),
-        ("mag", "web_search"),
-    ]
-    assert late["as"] == "none" and [(r["emoji"], r["judged"]) for r in late_rows] == [("eyes", False)]
-    assert late["received_id"] not in port.asked and top["received_id"] in port.asked
-    assert shaped == ["mag"]
+    top, late, top_rows, late_rows, later = run(go())
+    assert top["as"] == "steer" and [(r["emoji"], r["label"]) for r in top_rows] == [("eyes", "seen")]
+    assert late["as"] == "none" and [(r["emoji"], r["final"]) for r in late_rows] == [("eyes", True)]
+    assert later is None
 
 
 def test_a_local_message_is_not_marked(dsn, dm):
@@ -138,34 +145,81 @@ def test_a_local_message_is_not_marked(dsn, dm):
     assert run(go()) == []
 
 
-def test_the_activity_replaces_eyes_reply_keeps_them_and_stop_is_ok_hand(dsn, team):
-    """A pick writes the shape with Telegram's glyph; `reply` writes none
-    and is not asked again; an abstain writes none; a stop gets 👌 unjudged."""
+def test_nothing_is_guessed_on_arrival_and_a_plain_reply_keeps_eyes(dsn, team):
+    """A message gets 👀 alone; a turn that only replies in the chat, even
+    reading a file and writing its own `.valor/` files, keeps it."""
 
     async def go():
-        work = await said(dsn, "search for florists open sunday")
-        searched = await shape_all(dsn, Port("web_search"), work)
-        plain = await said(dsn, "thanks!")
-        replied = await shape_all(dsn, Port("reply"), plain)
-        again = Port("code")
-        await shape_all(dsn, again, plain)
-        unsure = await said(dsn, "hmm")
-        abstained = await shape_all(dsn, Port(None), unsure)
-        return work, searched, plain, replied, again, unsure, abstained
+        q = await said(dsn, "what time is it in Bangkok?")
+        before = await requested(dsn, q["received_id"])
+        tools = [("Read", {"file_path": "/w/notes.md"}), ("Write", {"file_path": "/w/repo/.valor/done.md"}),
+                 ("Bash", {"command": "date"})]  # fmt: skip
+        label = await worked(dsn, q["task_id"], [send(test_kernel.GROUP, reply_to=q["message_id"])], tools,
+                             before=[("Edit", {"file_path": "/w/app.py"})])  # fmt: skip
+        return before, label, await requested(dsn, q["received_id"])
 
-    work, searched, plain, replied, again, unsure, abstained = run(go())
-    assert searched == ["\U0001f50d"]
-    shapes = [
-        r
-        for b in (work, plain, unsure)
-        for r in run(requested(dsn, b["received_id"]))
-        if r["stage"] == "shape"
-    ]
-    assert [(r["received_id"], r["label"], r["judged"]) for r in shapes] == [
-        (work["received_id"], "web_search", True)
-    ]
-    assert replied == [None] and plain["received_id"] not in again.asked
-    assert abstained == [None]
+    before, label, after = run(go())
+    assert [r["label"] for r in before] == ["seen"] and label is None and after == before
+
+
+def test_what_a_turn_did_sets_the_activity_on_the_message_it_answered(dsn, team):
+    """The most specific activity wins; it goes on the message the turn's
+    send replies to, else the newest still showing 👀, once."""
+
+    async def go():
+        a = await said(dsn, "how's the shop?")
+        b = await said(dsn, "and look up the florist's hours")
+        task = a["task_id"]
+        searched = await worked(dsn, task, [send(test_kernel.GROUP, reply_to=a["message_id"])],
+                                [("Agent", {"subagent_type": "valor:web", "prompt": "hours"}),
+                                 ("Grep", {"pattern": "x"})])  # fmt: skip
+        c = await said(dsn, "now fix the menu page")
+        fixed = await worked(dsn, task, [effect("task.start", instruction="fix it")],
+                             [("Bash", {"command": "git log -3"})])  # fmt: skip
+        again = await worked(dsn, task, [effect("task.start")])
+        return a, b, c, searched, fixed, again
+
+    a, b, c, searched, fixed, again = run(go())
+    assert (searched, fixed, again) == ("web_search", "task", None)
+    shapes = {
+        x["message_id"]: [(r["emoji"], r["label"], r["did"]) for r in run(requested(dsn, x["received_id"]))
+                          if r["stage"] == "shape"]
+        for x in (a, b, c)
+    }  # fmt: skip
+    assert shapes == {
+        a["message_id"]: [("\U0001f50d", "web_search", ["web_search", "lookup"])],
+        b["message_id"]: [],
+        c["message_id"]: [("\U0001fae1", "task", ["task", "lookup"])],
+    }
+
+
+def test_each_activity_from_effects_and_tools():
+    here = {"-1001"}
+    by_effect = {
+        "task": effect("task.start"), "code": effect("push_branch"), "send": effect("email.send"),
+        "present": send("-1001", files=["/w/deck.pptx", "/w/reply.ogg"]),
+        "document": send("-1001", files=["/w/brief.pdf"]),
+    }  # fmt: skip
+    for label, e in by_effect.items():
+        assert reactions.effect_did(e["request"], here) == label, label
+    assert reactions.effect_did(send("-1001", files=["/w/reply.ogg"])["request"], here) is None
+    assert reactions.effect_did(send("-1009")["request"], here) == "send"
+    assert reactions.effect_did(send("-1001", files=["/w/photo.png"])["request"], here) == "send"
+    by_tool = {
+        ("WebFetch", "{}"): "web_search", ("mcp__byob__browser_read", "{}"): "web_search",
+        ("Agent", '{"subagent_type": "Explore"}'): "lookup", ("Glob", "{}"): "lookup",
+        ("Skill", '{"skill": "yudame:present"}'): "present", ("Skill", '{"skill": "yudame:calendar"}'): "schedule",
+        ("Skill", '{"skill": "yudame-dev:do-issue"}'): "issue", ("CronCreate", "{}"): "schedule",
+        ("Edit", '{"file_path": "/w/app.py"}'): "code", ("Write", '{"file_path": "/w/plan.md"}'): "document",
+        ("Bash", '{"command": "gh issue create -t x"}'): "issue", ("Bash", '{"command": "git commit -m x"}'): "code",
+        ("Bash", '{"command": "valor-telegram read --search x"}'): "lookup",
+        ("Bash", '{"command": "gws calendar events insert --json {}"}'): "schedule",
+        ("Bash", '{"command": "cat x | grep y"}'): "lookup",
+        ("Bash", '{"command": "ls"}'): None, ("Read", '{"file_path": "/w/a.py"}'): None,
+        ("Write", '{"file_path": "/w/repo/.valor/effects/a.json"}'): None,
+    }  # fmt: skip
+    for (name, given), label in by_tool.items():
+        assert reactions.tool_did(name, json.loads(given)) == label, (name, given)
 
 
 def test_stop_in_toms_dm_gets_ok_hand_at_once(dsn, dm):
@@ -176,22 +230,63 @@ def test_stop_in_toms_dm_gets_ok_hand_at_once(dsn, dm):
 
     stop, rows = run(go())
     assert stop["as"] == "stop"
-    assert [(r["emoji"], r["label"], r["stage"], r["judged"]) for r in rows] == [
-        ("ok_hand", "stop", "shape", False)
+    assert [(r["emoji"], r["label"], r["stage"], r["reason"]) for r in rows] == [
+        ("ok_hand", "stop", "shape", "stop")
     ]
 
 
-def test_the_outbox_closes_a_superseded_eyes_and_carries_the_label(dsn, team):
+def test_eyes_go_out_first_even_when_the_activity_is_already_requested(dsn, team):
+    """Both due: 👀 is yielded before its activity, never skipped; only a 👀
+    whose activity is already placed is closed `superseded` (a flood wait's
+    retry), so it never lands over it."""
+
     async def go():
         work = await said(dsn, "file an issue for the 500")
-        await shape_all(dsn, Port("issue"), work)
+        await worked(dsn, work["task_id"], tools=[("Bash", {"command": "gh issue create -t 500"})])
         async with bridges.outbox(dsn, bridges.FakeBridge("telegram")) as box:
             due = [d for d in await box._reactions() if d.received_id == work["received_id"]]
-        return work, due, await bridges.of_type(dsn, "reaction.placed", received_id=work["received_id"])
+            await box.reacted(due[1])
+            again = [d for d in await box._reactions() if d.received_id == work["received_id"]]
+        return (
+            work,
+            due,
+            again,
+            await bridges.of_type(dsn, "reaction.placed", received_id=work["received_id"]),
+        )
 
-    _, due, placed = run(go())
-    assert [(d.emoji, d.label, d.stage) for d in due] == [("\U0001f3ab", "issue", "shape")]
-    assert [p.get("superseded") for p in placed] == [True]
+    _, due, again, placed = run(go())
+    assert [(d.emoji, d.label, d.stage) for d in due] == [
+        (EYES, "seen", "seen"),
+        ("\U0001f3ab", "issue", "shape"),
+    ]
+    assert again == [] and [p.get("superseded") for p in placed] == [None, True]
+
+
+def test_a_rows_wake_yields_again_before_the_bridges_tick(dsn):
+    """On a row's wake the outbox yields what is due before it reconciles
+    and runs the bridge's tick (the gap fill), so a 👀 never waits on them;
+    on the tick's wake it does not."""
+
+    async def go(woke):
+        fake = bridges.FakeBridge("telegram")
+        async with bridges.outbox(dsn, fake) as box:
+            calls = []
+
+            async def due():
+                calls.append(fake.ticks)
+                return [] if len(calls) == 1 else [f"due after {fake.ticks} ticks"]
+
+            async def wait():
+                return woke
+
+            async def reconcile():
+                return []
+
+            box.due, box.wait, box.reconcile = due, wait, reconcile
+            return await anext(box.__aiter__())
+
+    assert run(go(True)) == "due after 0 ticks"
+    assert run(go(False)) == "due after 1 ticks"
 
 
 # -- the senders ----------------------------------------------------------------
@@ -302,31 +397,29 @@ def test_telegram_sends_a_listed_emoji_as_itself_and_another_as_premium_custom_e
 # -- what the session reads --------------------------------------------------------
 
 
-def test_a_session_reads_the_classifiers_reaction_on_each_message_and_one_set_later(dsn, team):
-    """The line names the reaction and that the classifier set it; a reply
-    keeps 👀 and says so; an activity set after a turn read its message
-    reaches the next turn; a message with no reaction says nothing."""
+def test_a_session_reads_the_reaction_on_each_message_and_one_its_work_set(dsn, team):
+    """The line names the reaction; the activity a turn's work set reaches
+    the next turn on the message an earlier turn read, saying what set it;
+    a message with no reaction says nothing."""
 
     async def go():
         first = await said(dsn, "what time is it in Bangkok?")
         task = first["task_id"]
         await place_all(dsn, "telegram")
-        await shape_all(dsn, Port("reply"), first)
         read = session.chat_prompt(await bridges.rows(dsn, task))
         await turn(dsn, task)
         second = await said(dsn, "find me the florist's opening hours")
-        await place_all(dsn, "telegram")
-        await turn(dsn, task)
-        await shape_all(dsn, Port("web_search"), second)
+        await worked(dsn, task, [send(test_kernel.GROUP, reply_to=second["message_id"])],
+                     [("WebSearch", {"query": "florist"})])  # fmt: skip
         third = await said(dsn, "and book a table")
         return first, second, third, read, session.chat_prompt(await bridges.rows(dsn, task))
 
     first, second, third, read, later = run(go())
+    assert f"(message {first['message_id']}; reacted {EYES} (read))" in read
     assert (
-        f"(message {first['message_id']}; reacted {EYES} (read); the reaction classifier read it as a plain reply)"
-        in read
+        f"- Your reaction on message {second['message_id']} is now \U0001f50d: your turn did web_search"
+        in later
     )
-    assert f"- The reaction classifier set \U0001f50d (web_search) on message {second['message_id']}" in later
     assert f"(message {third['message_id']}; reacted {EYES} (read))" in later
     assert "what time" not in later
 
@@ -338,16 +431,16 @@ def test_chat_line_names_an_activity_and_says_nothing_without_a_reaction():
                                                    "emoji": "eyes", "label": "seen", "stage": "seen"}},
         {"type": "reaction.requested", "payload": {"reaction_id": "b", "received_id": "r", "channel": "slack",
                                                    "emoji": "ticket", "label": "issue", "stage": "shape",
-                                                   "judged": True}},
+                                                   "turn_id": "t1"}},
         {"type": "reaction.requested", "payload": {"reaction_id": "c", "received_id": "f", "channel": "slack",
                                                    "emoji": "eyes", "label": "seen", "stage": "seen"}},
         {"type": "reaction.requested", "payload": {"reaction_id": "d", "received_id": "f", "channel": "slack",
                                                    "emoji": "mag", "label": "web_search", "stage": "shape",
-                                                   "judged": True}},
+                                                   "turn_id": "t2"}},
         {"type": "reaction.failed", "payload": {"reaction_id": "d", "received_id": "f", "error": "x"}},
     ])  # fmt: skip
     assert intake.chat_line(m, shown["r"]) == (
-        "[2026-10-17 13:30 UTC] Tom (message 9; reacted :ticket:: the reaction classifier read it as issue): go"
+        "[2026-10-17 13:30 UTC] Tom (message 9; reacted :ticket:: your turn did issue): go"
     )
     assert shown["f"] == "reacted :eyes: (read)"
     assert intake.chat_line(m) == "[2026-10-17 13:30 UTC] Tom (message 9): go"
@@ -356,7 +449,7 @@ def test_chat_line_names_an_activity_and_says_nothing_without_a_reaction():
 def test_a_new_sessions_history_shows_the_reactions_on_earlier_messages(dsn, team):
     async def go():
         first = await said(dsn, "deploy the menu page")
-        await shape_all(dsn, Port("code"), first)
+        await worked(dsn, first["task_id"], tools=[("Edit", {"file_path": "/w/menu.py"})])
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, first["task_id"], reason="a new session")
         second = await said(dsn, "valor?")
@@ -364,10 +457,7 @@ def test_a_new_sessions_history_shows_the_reactions_on_earlier_messages(dsn, tea
             return first, (await tasks.brief(conn, second["task_id"])).instruction
 
     first, instruction = run(go())
-    assert (
-        f"(message {first['message_id']}; reacted \U0001f468‍\U0001f4bb: the reaction classifier read it as code)"
-        in instruction
-    )
+    assert f"(message {first['message_id']}; reacted \U0001f468‍\U0001f4bb: your turn did code)" in instruction
 
 
 def test_a_working_turn_reads_the_reaction_on_toms_steer():
@@ -377,3 +467,56 @@ def test_a_working_turn_reads_the_reaction_on_toms_steer():
         session._steering([steer], shown)
         == "Tom wrote while you worked:\n- use the blue one (reacted 👀 (read))"
     )
+
+
+def test_a_message_that_starts_a_task_gets_eyes_then_the_salute(dsn, tmp_path):
+    """With no project to hold a chat session, Tom's message starts a task:
+    work is done at once, so 🫡 follows 👀 in the same binding."""
+
+    async def go():
+        with bridges.operator(tmp_path):
+            inbound = intake.Inbound(
+                channel="telegram", chat_id=bridges.OPERATOR, chat_kind="dm", message_id="77",
+                sender_id=bridges.OPERATOR, sender_name="Tom", sent_at="2026-10-17T15:00:00Z", text="ship it",
+            )  # fmt: skip
+            async with await db.connect(dsn) as conn:
+                got = await intake.receive(conn, inbound)
+                await intake.bind(conn)
+            (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+            return bound, await requested(dsn, got.received_id)
+
+    bound, rows = run(go())
+    assert bound["as"] == "start"
+    assert [(r["emoji"], r["stage"], r.get("reason")) for r in rows] == [
+        (EYES, "seen", None),
+        ("\U0001fae1", "shape", "a task started"),
+    ]
+
+
+def test_collecting_a_turn_sets_the_activity_its_transcript_shows(dsn, team):
+    from core import signals
+    from core.machine import State
+
+    async def go():
+        m = await said(dsn, "valor, search for a vase supplier")
+        task = m["task_id"]
+        turn_id = ledger.new_id()
+        line = json.dumps({"timestamp": LATER, "message": {"content": [
+            {"type": "tool_use", "name": "WebSearch", "input": {"query": "vase"}}]}})  # fmt: skip
+        body = {"turn_id": turn_id, "name": "s.jsonl", "offset": 0, "chunk": 0,
+                "base64": base64.b64encode(line.encode()).decode()}  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+            await conn.execute(
+                "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s::jsonb)",
+                (transcripts.KIND, f"{turn_id}/s.jsonl/0", json.dumps(body)),
+            )
+            await ledger.append(conn, task, "turn.ended", {"turn_id": turn_id, "outcome": "done", "result": {},
+                                                           "transcript": {"files": [{"name": "s.jsonl"}]}})  # fmt: skip
+            b = await tasks.brief(conn, task)
+            await session.record(
+                conn, task, turn_id, signals.Signals(), state=State.CLARIFY, workspace=None, brief=b
+            )
+        return await requested(dsn, m["received_id"])
+
+    assert [r["label"] for r in run(go())] == ["seen", "web_search"]
