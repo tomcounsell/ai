@@ -176,9 +176,12 @@ the outbox places it at once: on a row's wake it yields before it
 reconciles and runs the gap fill. Nothing is guessed on arrival. When a
 turn of the task is collected, what the turn actually did (the effects it
 requested, the tool calls in its transcript) sets the reaction that
-replaces 👀 on the message it answered: `task` 🫡, `code` 👨‍💻,
-`web_search` 🔍, `lookup` 🧐, `document` ✍, `present` 📊, `issue` 🎫,
-`schedule` 📅, `send` 📤. A turn that only replied leaves 👀. A message that
+replaces 👀 on one message its prompt read (those that arrived since the
+last turn that took the steering; the one a send of the turn replies to,
+else the newest; a fresh, compaction, or errored turn sets none): `task` 🫡,
+`code` 👨‍💻, `web_search` 🔍, `lookup` 🧐, `document` ✍, `present` 📊,
+`issue` 🎫, `schedule` 📅, `send` 📤. A turn that only replied leaves 👀;
+writing its own `.valor/` files or Claude Code's memory is not work. A message that
 starts a task gets 🫡 at once after 👀; a `stop` gets 👌; Tom's reply to
 finished work keeps 👀 for good. The emoji per label is
 `reactions.REACTIONS`, one table for both platforms. The outbox yields each

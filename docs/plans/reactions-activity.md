@@ -123,6 +123,13 @@ built only on evidence of a chat that refuses custom reactions.
 judgement and its serve jobs are removed; nothing is guessed on arrival.
 `reactions.on_turn`, called from `session.record`, sets the activity from
 what the collected turn did (its effects, its transcript's tool calls) on
-the message it answered; a plain reply keeps 👀. The outbox never skips a
-👀 (only one whose activity is already placed), and on a row's wake yields
-before the gap fill runs. Items 1 and 5's classifier wording is superseded.
+one message its prompt read (the fold's steering window; the one a send
+replies to, else the newest; a fresh, compaction or errored turn sets
+none); a plain reply keeps 👀, and so does one that only saves a memory or
+writes its own `.valor/` files. The outbox never skips a 👀 (only one whose
+activity is already placed), and on a row's wake yields before the gap fill
+runs. A message that starts a task gets 🫡 at once after 👀; one bound
+`none` to a task keeps 👀 as `final`. Superseded: the classifier wording of
+items 1, 4 and 5, the out-of-scope line on deriving the emoji from a turn's
+tool calls (that is now how it is set), and the Shape and Session tests,
+which `tests/test_reactions.py` now states.
