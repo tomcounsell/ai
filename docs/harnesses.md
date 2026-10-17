@@ -141,8 +141,9 @@ The wrapper then sets:
   plugin gives every subagent but the web agent (Corrections reaching subagents, below).
 - `VALOR_COMPACT`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`: for a
   chat session's turn only (`chat_channel` in the harness), its compaction instructions, which the
-  PreCompact hook of Valor's plugin prints, and the window that makes Claude Code compact at
-  `compact_at`; the two window variables only for a model `WINDOWS` lists (Compaction, below).
+  PreCompact hook of Valor's plugin prints, and the window that makes Claude Code compact only
+  past the forced compaction (`core.settings.compaction`, 650,000 on a 1M window); the two
+  window variables only for a model `WINDOWS` lists (Compaction, below).
 - `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the task's
   `tmpdir` (the workspace's `tmp/` for the working session, a check's
   `checks/<name>/tmp/` for a fresh one; emptied at each turn's start and
@@ -258,25 +259,53 @@ resume throughout (rebuild-baseline.md, Aggregate). Measured live:
 Claude Code's calls fell from 947,155
 input tokens to 75,066 at its compaction; Pi's, in `docs/pi.md`.
 
-**A chat session compacts the way Hermes Agent does** (Tom, 2026-10-17:
-"let's go with Hermes' simpler solution"): by size, positionally, not by
-topic. Hermes (`agent/context_compressor.py`) compacts at half the
-model's window, keeps the first 3 and at least the last 20 messages, and
-writes the middle into one summary that quotes the user's messages,
-newest first, within 24,000 characters. A chat session's turn
-(`harnesses/claude_code.py`, `chat_channel` in the harness) drives Claude
-Code's own compaction to the same shape; no summarizer of Valor's runs.
+**A chat session controls its own compaction** (Tom, 2026-10-17: "you
+should only get auto-compacted against your will until after you've had
+many reminders and passed that 600k"). The summary is shaped the way
+Hermes Agent's is (Tom, earlier the same day: "let's go with Hermes'
+simpler solution"): positional, not by topic. Hermes
+(`agent/context_compressor.py`) keeps the first 3 and at least the last
+20 messages and writes the middle into one summary that quotes the
+user's messages, newest first, within 24,000 characters. Every compaction
+of a chat session (`harnesses/claude_code.py`, `chat_channel` in the
+harness) is Claude Code's own, driven to that shape; no summarizer of
+Valor's runs.
 
-- *When.* `compact_at`: half the model's window (`WINDOWS`), within Tom's
-  150k to 600k, so 500,000 on the frontier seat's 1M. Claude Code 2.1.302
-  compacts at 80% of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` less the 20,000
-  tokens it keeps for output; the 80% is a fraction its server can lower
-  (`tengu_amber_rokovoko`), and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` keeps
-  it from rising. So the turn sets the window to 645,000. A model
-  `WINDOWS` does not list keeps Claude Code's default. Measured
-  (2026-10-17, a scratch session at a 60,000 target): every one of five
-  compactions fired with 62,724 to 67,691 tokens in context, the target
-  plus the prompt that crossed it.
+- *Reminders.* `core.settings.compaction`: on a 1M window, 150k, 250k,
+  350k, 450k, 550k and 600k tokens, each scaled by the window over 1M
+  below it. When the session's last turn passed one that the turn before
+  had not (taken as 0 when the context shrank, as after a compaction),
+  its next prompt says "Your conversation is about N tokens. You may
+  compact it", so each is given once (`session.context_report`). A turn's
+  size is its last complete, sent `gateway.charged` call on the session's
+  model: input, cache read, cache creation and output. A model `WINDOWS`
+  does not list gets no reminders.
+- *When the session asks.* A chat turn that leaves `.valor/compact.md` and
+  neither stopped nor moved the task is followed, in the same run, by a
+  turn resuming its session with `/compact` and the file's text as extra
+  instructions (Claude Code's own command, which runs in `-p`). Its
+  `turn.started` says `compaction: true`: the fold moves the session but
+  neither `steer_since` nor `entry_finished`, so messages that arrived
+  meanwhile reach the next turn; it is never collected, and the kernel's
+  restart (`serve.recollect`) passes it over, so the chat turn's report
+  stays the last one. A compaction that does not finish is told to the
+  session in its next prompt; the chat goes on. Measured (2026-10-17, a
+  scratch session with the plugin and a Telegram `VALOR_COMPACT`, on
+  Claude Code 2.1.302): `-p --resume <id> -- /compact` wrote a manual
+  compact boundary (30,563 tokens to 1,382), and the summary had the
+  three parts of `compact.md`, both open asks and their message ids.
+- *Forced.* Past 650,000 tokens (`FORCE`, scaled like the reminders).
+  Claude Code 2.1.302 compacts at 80% of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+  less the 20,000 tokens it keeps for output; the 80% is a fraction its
+  server can lower (`tengu_amber_rokovoko`), and
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` keeps it from rising. So the turn
+  sets the window to 832,500, and Claude Code's auto-compaction never
+  fires earlier. A model `WINDOWS` does not list keeps Claude Code's
+  default. Measured on the merged threshold (2026-10-17, a scratch
+  session at a 60,000 target): every one of five compactions fired with
+  62,724 to 67,691 tokens in context, the target plus the prompt that
+  crossed it. Earlier (146317905) a chat session compacted at half its
+  window within 150k to 600k.
 - *What is kept.* `skills/sdlc/compact.md`, rendered per channel into
   `VALOR_COMPACT`, which the PreCompact hook of Valor's plugin prints and
   Claude Code takes as the compaction's custom instructions. The summary
@@ -313,6 +342,7 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan is an error, with no `plan.written`, if: the file lacks `path` or `critique_rounds` or `review_rounds`; `path` is not a string; `critique_rounds` or `review_rounds` is not an integer (booleans are not accepted), or is out of range (each must be 0, 1, or 2; a `review_rounds` of 2 is recorded and read as 1); `stakes` (if present) is not a string; `scope` (if present) is not a list; the workspace is not a git repository, the path cannot be passed to git, git itself fails while reading the repository (the error is git's own text), or the plan is not committed at HEAD or is changed in the working tree (git is asked about that path alone, matched literally, through a fresh index read from HEAD and made in the kernel's `output/` directory, which no task profile reaches, so no index bit, cached stat, or `core.fileMode` the turn set hides a change; git's content filters, which the turn can set (`core.autocrlf`, the `text`, `eol`, `ident` and `working-tree-encoding` attributes), can still make differing bytes compare equal, which changes nothing recorded, since the digest is the committed blob's). |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/stop.md` | clarify, plan, build, or patch: a note to Tom that the work is stopped, or, opening `Done:`, finished with nothing to merge | with no other stage signal beside it, the verdict `ended` and `task.ended` (`kind: decided`); Tom's report leads with "This is done; nothing needed merging." for a `Done:` note |
+| `.valor/compact.md` | a chat session's turn: a request to compact the conversation, its text added to the compaction's instructions | the turn is followed, in the same run, by a `/compact` turn in its session (`turn.started` `compaction: true`, never collected); from any other turn an error, ignored (Compaction, above) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one the `turn.collected` row cannot hold (below), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads

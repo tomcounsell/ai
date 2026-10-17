@@ -47,6 +47,9 @@ WORKING = (State.CLARIFY, State.PLAN, State.BUILD, State.PATCH)
 # What the fold records as the state of a fresh session's turn: never a
 # working state, so its session id is never resumed.
 FRESH = "fresh"
+# A chat session's `/compact` turn (`core/session.py`): it resumes the
+# session, but has acted on no message.
+COMPACTION = "compaction"
 
 VERDICTS: dict[State | Check, frozenset[str]] = {
     State.JUDGE: frozenset({"precise", "thin"}),
@@ -380,7 +383,9 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
     entry = {"type": kind, "id": row.get("id"), "payload": p}
     s = f.state
     if kind == "turn.started":
-        f.turn_states[str(p["turn_id"])] = FRESH if p.get("fresh") else str(p.get("state"))
+        f.turn_states[str(p["turn_id"])] = (
+            FRESH if p.get("fresh") else COMPACTION if p.get("compaction") else str(p.get("state"))
+        )
         f.turn_rows[str(p["turn_id"])] = int(row.get("id") or 0)
         return None
     if kind == "message.steered":
@@ -402,7 +407,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             p.get("outcome") == "done"
             and not result.get("is_error")
             and turn_id in f.turn_states
-            and f.turn_states[turn_id] != FRESH
+            and f.turn_states[turn_id] not in (FRESH, COMPACTION)
         ):
             f.steer_since = max(f.steer_since, f.turn_rows.get(turn_id, 0))
         if (

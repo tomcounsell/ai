@@ -357,9 +357,11 @@ questions, deliveries and ends to the session (`child.reported`), never
 to a chat, and the session tells the chat. Its workspace is the project's
 checkout with no setup and no services, brought up to the project's
 branch before each turn, so a reply waits only for the model. Its history
-compacts the way Hermes Agent's does (Tom, 2026-10-17): by size, at half
-the model's window within 150k to 600k tokens (about 500k on the frontier
-seat), into one summary that keeps who is who, open asks, tasks in flight
+compacts when the session chooses (Tom, 2026-10-17: "you control your own
+compaction"): its prompt gives its context size as it passes 150k, 250k,
+350k, 450k, 550k and 600k tokens, it compacts at a natural break by leaving
+`.valor/compact.md`, and only past 650k is it compacted for it. Each time
+it becomes one summary that keeps who is who, open asks, tasks in flight
 and promises, quotes the chat's human messages verbatim, newest first,
 and ends with the recent tail; an email thread's also carries its opening
 forward, a Telegram or Slack chat's does not (`skills/sdlc/compact.md`,

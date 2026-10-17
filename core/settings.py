@@ -192,6 +192,25 @@ SEATS: dict[str, tuple[str, str]] = {
 }
 
 
+# The model windows a chat session compacts against, by pinned id. Claude
+# Code's calls on the frontier seat reached 947,155 input tokens before a
+# compaction (docs/harnesses.md), so it has the 1M window.
+WINDOWS = {"claude-opus-5-5": 1_000_000}
+# A chat session is reminded of its context size as it passes each of these,
+# and compacted for it past `FORCE` (Tom, 2026-10-17), on a 1M window.
+REMIND = (150_000, 250_000, 350_000, 450_000, 550_000, 600_000)
+FORCE = 650_000
+
+
+def compaction(model: str) -> tuple[tuple[int, ...], int] | None:
+    """A chat session's reminders and forced compaction on `model`, scaled to
+    a window under 1M; None for a model `WINDOWS` does not list."""
+    if model not in WINDOWS:
+        return None
+    scale = min(WINDOWS[model], 1_000_000)
+    return tuple(r * scale // 1_000_000 for r in REMIND), FORCE * scale // 1_000_000
+
+
 @dataclass(frozen=True)
 class JudgementPrice:
     """US dollars per million tokens for a judgement leg's model, the day

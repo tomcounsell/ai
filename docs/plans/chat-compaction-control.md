@@ -46,10 +46,13 @@ merged measurement), so a window of 832,500 fires at 650,000. The chat model,
    `session._working_turn_finished` skips it; `core/serve.py`
    `LAST_WORKING_ENDED` excludes it, so a kernel restart never collects it
    and never displaces the chat turn's `last_collected` (effects report,
-   errors). A failed compaction ends the run `failed`, as a failed turn does.
+   errors). A compaction that does not finish is told to the session in its
+   next prompt (`# Your compaction`); the run still ends `listening`, so no
+   `step.failed`, retry or end of the chat follows from it.
 4. **The reminder.** `next_prompt` for a chat session adds `# Your context`
    when the last working turn's size has passed a reminder number that the
-   working turn before it had not passed: "Your context is about N tokens.
+   working turn before it had not passed (taken as 0 when the context
+   shrank, as after any compaction): "Your context is about N tokens.
    You may compact (`.valor/compact.md`); at F it is compacted for you."
    One reminder per number, so 600k reminds once and nothing more until the
    force; crossing two numbers at once gives one. None when a compaction

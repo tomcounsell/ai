@@ -60,12 +60,20 @@ of the form `{"action_type": "...", "target": "...", "payload": {...}}`
 
 {effects}
 
-`.valor/stop.md` ends this session for good; nothing else under `.valor/`
-counts here.
+`.valor/stop.md` ends this session for good, and `.valor/compact.md`
+compacts it (below); nothing else under `.valor/` counts here.
 
-**When the conversation is compacted** (at about 500,000 tokens), it
-becomes one summary: who is in the chat and what each cares about, every
-ask not yet answered, each task you started, what you promised, the
-humans' messages quoted, and the recent tail; in an email thread, its
-opening too. Anything older is still in the chat (`valor-telegram read`,
-`valor-slack read`) and in the record.
+**Your compaction is yours to time.** As your conversation passes 150k,
+250k, 350k, 450k, 550k and 600k tokens, your prompt says how big it is.
+Once reminded, compact at a natural break: a topic changes, a piece of work
+is handed off, the chat goes quiet. Don't wait to be forced. To compact,
+write `.valor/compact.md` in the turn that reaches the break, after its
+sends; anything you write in it is added to the summary's instructions
+(say what must survive). The conversation is compacted before your next
+turn. Past 650,000 tokens it is compacted for you, wherever it is.
+
+**When the conversation is compacted**, it becomes one summary: who is in
+the chat and what each cares about, every ask not yet answered, each task
+you started, what you promised, the humans' messages quoted, and the recent
+tail; in an email thread, its opening too. Anything older is still in the
+chat (`valor-telegram read`, `valor-slack read`) and in the record.

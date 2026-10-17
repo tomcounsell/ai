@@ -101,6 +101,7 @@ async def run_turn(
     state: str | None = None,
     fresh: str | None = None,
     offered: Sequence[str] = (),
+    compaction: bool = False,
 ) -> dict[str, Any]:
     """Run one turn of the task to its end or its stop, in `state` (the
     state machine's state the turn works in, recorded on `turn.started`;
@@ -108,7 +109,9 @@ async def run_turn(
     session (critique, review, docs): its Brief carries the verdict channel,
     and `turn.started` says `fresh: true`, so the fold never resumes its
     session. `offered` is the usage lines of the task's performers, which
-    the working session's Brief lists. Returns the `turn.ended` payload.
+    the working session's Brief lists. `compaction` marks a chat session's
+    `/compact` turn on `turn.started` (`core/session.py`). Returns the
+    `turn.ended` payload.
 
     The turn holds a turn slot (`core/slot.py`) from before its Brief is
     rendered until `turn.ended` is written, except a clarify turn (a
@@ -125,7 +128,7 @@ async def run_turn(
     tmpdirs: list[str] = []
     try:
         async with held:
-            ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs)
+            ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction)
     finally:
         for tmpdir in tmpdirs:
             with contextlib.suppress(OSError):
@@ -160,7 +163,9 @@ def kernel_commit() -> str | None:
         return None
 
 
-async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs) -> dict[str, Any]:
+async def _run_turn(
+    gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction
+) -> dict[str, Any]:
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -192,6 +197,7 @@ async def _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs
                         "turn_id": turn_id,
                         "state": state,
                         **({"fresh": True, "stage": fresh} if fresh else {}),
+                        **({"compaction": True} if compaction else {}),
                         "harness": command.harness,
                         "harness_version": command.harness_version,
                         "argv": command.argv,

@@ -16,6 +16,9 @@ task's workspace, read when the turn ends.
 - `.valor/stop.md`: from a patch turn, Valor's decision to stop the work
   instead of patching again: a note to Tom saying what was built, what
   did not pass, and why it stops. The task ends (`task.ended`).
+- `.valor/compact.md`: from a chat session's turn, a request to compact
+  its conversation before its next turn; any text in it is added to the
+  compaction's instructions.
 - `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
@@ -48,7 +51,7 @@ from typing import Any
 from core import workspace
 
 DIR = ".valor"
-TEXT_SIGNALS = ("question", "no_question", "done", "advice", "stop")
+TEXT_SIGNALS = ("question", "no_question", "done", "advice", "stop", "compact")
 
 
 def kind(value: Any) -> str:
@@ -65,6 +68,7 @@ class Signals:
     done: str | None = None
     advice: str | None = None
     stop: str | None = None
+    compact: str | None = None
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)

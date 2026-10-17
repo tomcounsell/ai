@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
-from core.settings import resolve_model, settings
+from core.settings import compaction, resolve_model, settings
 from core.workspace import current_profile, environment
 
 # The model a turn runs when none is given: the light seat's pinned id, never
@@ -54,10 +54,6 @@ SUBAGENT_OPENING = (
 )
 
 
-# The model windows a chat session compacts against, by pinned id.
-# Claude Code's calls on the frontier seat reached 947,155 input tokens
-# before a compaction (docs/harnesses.md), so it has the 1M window.
-WINDOWS = {"claude-opus-5-5": 1_000_000}
 # Claude Code 2.1.302 compacts at 80% of its auto-compact window less the
 # 20,000 tokens it keeps for output (the 80% is a fraction its server can
 # move; `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` keeps it from rising past 80).
@@ -69,12 +65,6 @@ EMAIL_OPENING = (
     "unchanged from an earlier summary on every update; it is outside part 2's cap and never dropped."
 )
 CHAT_OPENING = "The chat's opening message is kept only as parts 2 and 3 keep any message."
-
-
-def compact_at(window: int) -> int:
-    """Where a chat session compacts: half its model's window, as Hermes
-    Agent does, within Tom's 150k to 600k (2026-10-17)."""
-    return min(max(window // 2, 150_000), 600_000)
 
 
 def compact_text(channel: str) -> str:
@@ -148,10 +138,11 @@ def workspace_turn(
     own `TMPDIR`, which `core.runs` empties at the turn's start and removes
     at its end; `claude_config_dir`, its own Claude Code config directory,
     which holds no login and where its transcript lies; `chat_channel`,
-    set for a chat session, which compacts at `compact_at` its model's
-    window (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` and
-    `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, neither for a model `WINDOWS`
-    does not list) with `compact_text` for instructions (`VALOR_COMPACT`,
+    set for a chat session, which Claude Code compacts only past its
+    model's forced compaction (`core.settings.compaction`;
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+    neither for a model `WINDOWS` does not list), and which compacts
+    itself between turns (`core/session.py`), with `compact_text` for instructions (`VALOR_COMPACT`,
     which the PreCompact hook of Valor's plugin prints). A fresh session
     (critique, review, docs) is this with no `resume`.
 
@@ -184,9 +175,8 @@ def workspace_turn(
         env["VALOR_SUBAGENT_START"] = subagent_start(brief)
         if channel := harness.get("chat_channel"):
             env["VALOR_COMPACT"] = compact_text(channel)
-            if model in WINDOWS:
-                compact_window = compact_at(WINDOWS[model]) * 100 // COMPACT_PCT + OUTPUT_RESERVE
-                env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(compact_window)
+            if marks := compaction(model):
+                env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(marks[1] * 100 // COMPACT_PCT + OUTPUT_RESERVE)
                 env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(COMPACT_PCT)
         if harness.get("tmpdir"):
             env["TMPDIR"] = env["CLAUDE_CODE_TMPDIR"] = harness["tmpdir"]

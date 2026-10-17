@@ -46,9 +46,13 @@ and no other signal counts. A turn ends the run `listening`: it is
 stepped again only when a message wakes it or a task reports
 (`chat_waiting`), never on its own effects' outcomes. Before each turn
 its checkout is brought up to the project's branch (`refresh`). It
-compacts at half its model's window within 150k to 600k tokens, by
-Claude Code's own compaction with `skills/sdlc/compact.md` for
-instructions (`harnesses/claude_code.py`, `compact_at`).
+controls its own compaction: its prompt gives its context size as it
+passes each reminder (`context_report`), and a turn that leaves
+`compact.md` is followed by a `/compact` turn in the same session
+(`turn.started` `compaction`), which acts on no message and is never
+collected. Claude Code compacts it only past the forced compaction
+(`core.settings.compaction`). Either way the summary follows
+`skills/sdlc/compact.md`, through Valor's PreCompact hook.
 """
 
 import asyncio
@@ -61,7 +65,7 @@ from typing import Any
 from core import broker, db, git, ledger, machine, mail, outcomes, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
-from core.settings import settings
+from core.settings import compaction, settings
 
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
@@ -173,6 +177,22 @@ async def run(
         if not ok:
             return {"status": "failed", "state": now, "turn": ended}
         if b.chat:
+            if found.compact is not None:
+                # The session asked to compact: it is, in place, before its next turn.
+                try:
+                    await runs.run_turn(
+                        gateway,
+                        task_id,
+                        turn_for(
+                            compact_prompt(found.compact), ended["result"].get("session_id") or resume, b
+                        ),
+                        dsn=dsn,
+                        state=state,
+                        offered=performers.offered(b.max_effect_class),
+                        compaction=True,
+                    )
+                except tasks.TaskStopped:
+                    return {"status": "stopped"}
             return {"status": "listening", "state": now, "turn": ended}
         if not asking:
             return {"status": "idle", "state": now, "turn": ended}
@@ -285,6 +305,79 @@ def chat_prompt(rows: list[dict]) -> str:
         else:
             lines.append(f"- {intake.chat_line(p)}")
     return "\n".join(["# In the chat since your last turn", "", *lines]) if lines else ""
+
+
+def compact_prompt(text: str) -> str:
+    """The `/compact` turn's prompt: Claude Code's own command, with the
+    text of the session's `compact.md` as extra instructions."""
+    return "/compact" if text == "(empty compact.md)" else f"/compact {text}"
+
+
+def context_size(rows: list[dict], turn_id: str, model: str) -> int | None:
+    """A turn's context when it ended: its last complete, sent model call on
+    the session's model (`gateway.charged`), all of whose input and output
+    the next call carries. Calls are in the order they closed; a turn's
+    subagents run in the foreground, so its last call on its model is the
+    main agent's answer."""
+    size = None
+    for r in rows:
+        p = r["payload"]
+        if r["type"] != "gateway.charged" or p.get("turn_id") != turn_id or p.get("model") != model:
+            continue
+        if p.get("complete") and not p.get("unsent"):
+            u = p.get("usage") or {}
+            size = sum(int(u.get(k) or 0) for k in CONTEXT_USAGE)
+    return size
+
+
+CONTEXT_USAGE = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+
+
+def context_report(rows: list[dict], model: str) -> str:
+    """For a chat session's next prompt: its context size, when its last
+    turn passed a reminder (`core.settings.compaction`) that the turn before
+    had not (taken as 0 when the context shrank, as after a compaction), so
+    each reminder is given once; or what became of a compaction it asked
+    for, when one ran since."""
+    marks = compaction(model)
+    working: list[str] = []
+    compacted = None
+    for r in rows:
+        p = r["payload"]
+        if r["type"] == "turn.started" and not p.get("fresh"):
+            if p.get("compaction"):
+                compacted = p["turn_id"]
+            else:
+                working.append(p["turn_id"])
+                compacted = None
+    if compacted is not None:
+        ended = next(
+            (
+                r["payload"]
+                for r in rows
+                if r["type"] == "turn.ended" and r["payload"].get("turn_id") == compacted
+            ),
+            {},
+        )
+        result = ended.get("result") if isinstance(ended.get("result"), dict) else {}
+        if ended.get("outcome") == "done" and not result.get("is_error"):
+            return ""
+        return (
+            f"# Your compaction\n\nThe compaction you asked for did not finish (it ended "
+            f"{ended.get('outcome') or 'without a result'}); your conversation is as it was. "
+            "Ask again with `.valor/compact.md` when you choose."
+        )
+    sizes = [n for n in (context_size(rows, t, model) for t in working) if n is not None]
+    if marks is None or not sizes:
+        return ""
+    now = sizes[-1]
+    before = sizes[-2] if len(sizes) > 1 and sizes[-2] <= now else 0
+    if not any(before < m <= now for m in marks[0]):
+        return ""
+    return (
+        f"# Your context\n\nYour conversation is about {now:,} tokens. You may compact it "
+        f"(`.valor/compact.md`); past {marks[1]:,} it is compacted for you."
+    )
 
 
 def merged_into_work(brief: tasks.Brief, rows: list[dict]) -> str | None:
@@ -408,6 +501,8 @@ def _stage_verdict(
     for name in ("no_question", "plan", "done"):
         if name not in meant and getattr(found, name) is not None:
             errors.append(f"{name} means nothing in {state}; ignored")
+    if found.compact is not None:
+        errors.append("compact means nothing outside a chat session; ignored")
     # `stop.md` ends the work from any working state, unless another of the
     # state's signals is beside it.
     beside = any(getattr(found, name) is not None for name in meant)
@@ -1037,7 +1132,7 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
         first = b.instruction if f.session is None else None
         report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
         parts = (first, chat_prompt(rows), _failure_report(rows), _advice_report(rows),
-                 _errors_report(f.last_collected), report)  # fmt: skip
+                 _errors_report(f.last_collected), report, context_report(rows, b.model))  # fmt: skip
         return "\n\n".join(x for x in parts if x) or "Continue.", f.session
     if f.session is None:
         prompt = b.instruction
@@ -1063,7 +1158,11 @@ def _working_turn_finished(rows: list[dict], turn_states: dict[str, str]) -> boo
         p = r["payload"]
         result = p.get("result") if isinstance(p.get("result"), dict) else {}
         state = turn_states.get(str(p.get("turn_id")))
-        if p.get("outcome") == "done" and not result.get("is_error") and state not in (None, machine.FRESH):
+        if (
+            p.get("outcome") == "done"
+            and not result.get("is_error")
+            and state not in (None, machine.FRESH, machine.COMPACTION)
+        ):
             return True
     return False
 

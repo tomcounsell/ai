@@ -2,7 +2,8 @@
 subprocess that reads its Brief's stage section and plays that stage by
 writing `.valor/` files and committing to a real git workspace, the way a
 `claude -p` turn would; a chat session's turn, which has no stage, writes
-the requests of the next entry of `chat`. A test steers it through `.git/valor-script.json`
+the requests and signals of the next entry of `chat`, and its `/compact`
+turn only answers (or fails, with `fail_compact`). A test steers it through `.git/valor-script.json`
 (outside the work tree, so it never dirties a candidate), and every turn is
 logged to `.git/valor-turns.jsonl`.
 
@@ -46,6 +47,12 @@ if cfg.get("probe_port"):
 with log.open("a") as f:
     f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": resume, "brief": brief,
                         "port_open": port_open}) + "\n")
+if prompt.startswith("/compact"):  # a chat session's compaction turn: Claude Code's own command
+    if cfg.pop("fail_compact", False):
+        cfg_path.write_text(json.dumps(cfg))
+        sys.exit(1)
+    print(json.dumps({"result": "", "session_id": resume, "is_error": False}))
+    sys.exit(0)
 if cfg.get("sleep_once"):
     import time
     pause = cfg.pop("sleep_once")
@@ -62,7 +69,10 @@ v = pathlib.Path(".valor")
 git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
 if stage is None and cfg.get("chat"):  # a chat session's turn: the next entry's requests
     for name, effect in cfg["chat"].pop(0).items():
-        (v / "effects" / f"{name}.json").write_text(json.dumps(effect))
+        if name.endswith(".md"):  # a signal: compact.md, stop.md
+            (v / name).write_text(effect)
+        else:
+            (v / "effects" / f"{name}.json").write_text(json.dumps(effect))
     cfg_path.write_text(json.dumps(cfg))
 
 def commit(path, text, message):

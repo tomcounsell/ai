@@ -170,6 +170,7 @@ LAST_WORKING_ENDED = (
     "WHERE e.type = 'turn.ended' AND e.payload->>'outcome' <> 'preempted' "
     "AND s.payload->>'state' IS NOT NULL "
     "AND COALESCE((s.payload->>'fresh')::boolean, false) = false "
+    "AND COALESCE((s.payload->>'compaction')::boolean, false) = false "
     "AND (%(task)s::text IS NULL OR e.task_id = %(task)s) "
     "ORDER BY e.task_id, e.id DESC"
 )
