@@ -390,9 +390,10 @@ class ReactionDue:
     received_id: str
     chat_id: str
     message_id: str
-    emoji: str  # the exact code points (`core/reactions.py`)
+    emoji: str  # the channel's own: Telegram's code points, Slack's name (`core/reactions.py`)
     stage: str  # `seen` (👀) or `shape`, which replaces it
     at: str  # the reaction.requested row's at
+    label: str | None = None  # `reactions.REACTIONS`'s; None on a row written before labels
 
 
 class Bridge(Protocol):
@@ -530,6 +531,7 @@ class Outbox:
                 p["emoji"],
                 p["stage"],
                 at.isoformat(),
+                p.get("label"),
             )
             if p["stage"] == "seen" and shaped:
                 await self.reacted(item, superseded=True)

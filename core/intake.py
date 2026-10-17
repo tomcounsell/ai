@@ -110,7 +110,8 @@ and bound `none` with the error, owing a notice; later messages never wait
 behind it. `message.bound` is the first row a binding writes, so a
 second binder of the same message stops there and writes nothing. Last in
 the same transaction, a message bound to a task on a channel that reacts
-gets its reaction row (`reactions.on_bound`).
+gets its reaction row (`reactions.on_bound`), and a session reads each
+message with the reaction on it (`chat_line`).
 """
 
 import re
@@ -894,20 +895,23 @@ async def _chat_start(
         )
     ]
     if rows:
+        shown = await reactions.shown_for(conn, [r[0].get("received_id") for r in rows])
         lines += ["", "What was said before this session began, oldest first:"]
-        lines += [f"- {chat_line(r[0])}" for r in reversed(rows)]
+        lines += [f"- {chat_line(r[0], shown.get(r[0].get('received_id')))}" for r in reversed(rows)]
     return "\n".join(lines)
 
 
-def chat_line(m: dict[str, Any]) -> str:
+def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     """One chat message as a chat session reads it: when, who, its id and
-    the message it replies to, its words, and its files."""
+    the message it replies to, the reaction on it (`reactions.shown`), its
+    words, and its files."""
     try:
         when = datetime.fromisoformat(str(m.get("sent_at"))).astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         when = "an unknown time"
     who = m.get("sender_name") or m.get("sender_id") or "someone"
     ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
+    ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])
     said = (m.get("text") or "").strip() or "(no text)"
     return f"[{when}] {who} ({ids}): {said}" + (f"\n{files}" if files else "")

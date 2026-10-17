@@ -134,7 +134,9 @@ class Wire(Protocol):
     async def mark_read(self, chat_id: int, max_id: int) -> None: ...
     async def react(self, chat_id: int, msg_id: int, emoji: str) -> None:
         """Set the account's reaction on the message to `emoji` alone,
-        replacing any it had. Setting is idempotent, so a repeat is safe."""
+        replacing any it had: Telegram's standard reaction when its list
+        has the emoji, else a Premium custom emoji for it. Setting is
+        idempotent, so a repeat is safe."""
 
 
 # Telegram's test data centre, for the live suite on test accounts.
@@ -162,6 +164,8 @@ class TelethonWire:
         if test_dc:
             self.client.session.set_dc(*TEST_DC)
         self.premium: bool | None = None  # read once on connect
+        self.standard: set[str] | None = None  # Telegram's reaction list, read on the first reaction
+        self.custom: dict[str, int | None] = {}  # an emoji's custom emoji document, by its glyph
 
     # -- connection --------------------------------------------------------
 
@@ -179,8 +183,8 @@ class TelethonWire:
             await self.client.disconnect()
             raise Refused("the session is not signed in; run `python -m bridges.telegram login`")
         if self.premium is None:
-            # Whether the account has Premium, logged once: the reactions it
-            # places are all on the standard list, so they need none.
+            # Whether the account has Premium, logged once: a reaction not on
+            # the standard list is placed as a custom emoji, which needs it.
             try:
                 me = await self.client.get_me()
                 self.premium = bool(getattr(me, "premium", False))
@@ -248,11 +252,33 @@ class TelethonWire:
 
     async def react(self, chat_id: int, msg_id: int, emoji: str) -> None:
         from telethon.tl.functions.messages import SendReactionRequest
-        from telethon.tl.types import ReactionEmoji
 
         peer = await self._call(self.client.get_input_entity(chat_id))
+        reaction = await self._reaction(emoji)
         # Sends no message, so a failure is definite and a repeat sets the same list.
-        await self._call(self.client(SendReactionRequest(peer, msg_id, reaction=[ReactionEmoji(emoji)])))
+        await self._call(self.client(SendReactionRequest(peer, msg_id, reaction=[reaction])))
+
+    async def _reaction(self, emoji: str):
+        """`ReactionEmoji` for an emoji on Telegram's reaction list (logged
+        once when read), else `ReactionCustomEmoji` for the first custom
+        emoji Telegram's search gives for the glyph, kept; with none,
+        `ReactionEmoji`, which Telegram refuses as a result."""
+        from telethon.tl.functions.messages import GetAvailableReactionsRequest, SearchCustomEmojiRequest
+        from telethon.tl.types import ReactionCustomEmoji, ReactionEmoji
+
+        if self.standard is None:
+            got = await self._call(self.client(GetAvailableReactionsRequest(hash=0)))
+            self.standard = {r.reaction for r in got.reactions if not r.inactive}
+            log.info("telegram reactions: %s", " ".join(sorted(self.standard)))
+        if emoji in self.standard:
+            return ReactionEmoji(emoji)
+        if emoji not in self.custom:
+            found = await self._call(self.client(SearchCustomEmojiRequest(emoticon=emoji, hash=0)))
+            self.custom[emoji] = found.document_id[0] if found.document_id else None
+            log.info("telegram custom emoji for %s: %s", emoji, self.custom[emoji])
+        if self.custom[emoji] is None:
+            return ReactionEmoji(emoji)
+        return ReactionCustomEmoji(self.custom[emoji])
 
     # -- sending -----------------------------------------------------------
 

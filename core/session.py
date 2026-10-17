@@ -62,7 +62,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from core import broker, db, git, ledger, machine, mail, outcomes, runs, signals, tasks, workspace
+from core import broker, db, git, ledger, machine, mail, outcomes, reactions, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import compaction, settings
@@ -289,21 +289,36 @@ def chat_waiting(rows: list[dict]) -> bool:
 
 def chat_prompt(rows: list[dict]) -> str:
     """What reached a chat session since its last finished turn began,
-    oldest first: each message as `intake.chat_line` renders it, and each
-    task's report under its task id."""
+    oldest first: each message as `intake.chat_line` renders it, with the
+    reaction on it; each activity reaction set since on a message an
+    earlier turn read (quiet, it wakes nothing); and each task's report
+    under its task id."""
     from core import intake
 
     since = machine.fold(rows).steer_since
+    shown = reactions.shown(rows)
+    read = {
+        r["payload"].get("received_id"): r["payload"].get("message_id")
+        for r in rows
+        if r["type"] in CHAT_ROWS and int(r.get("id") or 0) <= since
+    }
     lines = []
     for r in rows:
-        if r["type"] not in CHAT_ROWS or int(r.get("id") or 0) <= since:
+        if int(r.get("id") or 0) <= since:
             continue
         p = r["payload"]
-        if r["type"] == "child.reported":
+        if r["type"] == "reaction.requested" and p.get("judged") and p.get("received_id") in read:
+            lines.append(
+                f"- The reaction classifier set {reactions.emoji_of(p)} ({p.get('label')}) "
+                f"on message {read[p['received_id']]}"
+            )
+        elif r["type"] not in CHAT_ROWS:
+            continue
+        elif r["type"] == "child.reported":
             lines.append(f"- Your task {p.get('child_id')} reports ({p.get('kind')}):")
             lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]
         else:
-            lines.append(f"- {intake.chat_line(p)}")
+            lines.append(f"- {intake.chat_line(p, shown.get(p.get('received_id')))}")
     return "\n".join(["# In the chat since your last turn", "", *lines]) if lines else ""
 
 
@@ -1144,7 +1159,7 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     else:
         prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."
     advice = _advice_report(rows)
-    steering = _steering(f.steering)
+    steering = _steering(f.steering, reactions.shown(rows))
     notes = _errors_report(f.last_collected)
     failed = _failure_report(rows)
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
@@ -1221,9 +1236,10 @@ def _children_report(found: list[dict[str, Any]]) -> str:
     return "\n".join(["# Reports from your children", "", *lines]) if lines else ""
 
 
-def _steering(steered: list[dict[str, Any]]) -> str:
+def _steering(steered: list[dict[str, Any]], shown: dict[str, str]) -> str:
     """What Tom wrote while the last working turn ran (or since it
-    finished), for the next working turn."""
+    finished), for the next working turn, each with the reaction on it
+    (`reactions.shown`)."""
     if not steered:
         return ""
     by = {(p.get("provenance") or {}).get("by") or "tom" for p in steered}
@@ -1232,7 +1248,12 @@ def _steering(steered: list[dict[str, Any]]) -> str:
         paths = [a["path"] for a in p.get("attachments") or [] if a.get("path")]
         writer = (p.get("provenance") or {}).get("by") or "tom"
         text = p.get("text", "") if by == {"tom"} else f"{writer}: {p.get('text', '')}"
-        lines.append(f"- {text}" + (f" (attachments: {', '.join(paths)})" if paths else ""))
+        mark = shown.get(p.get("received_id"))
+        lines.append(
+            f"- {text}"
+            + (f" (attachments: {', '.join(paths)})" if paths else "")
+            + (f" ({mark})" if mark else "")
+        )
     return "\n".join(lines)
 
 

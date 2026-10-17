@@ -168,20 +168,30 @@ Evidence section counts "decisions escalated to Tom per finished task", and
 
 ### Reactions
 
-The kernel marks a message it acts on (`core/reactions.py`). Binding writes `reaction.requested`
-with 👀 on a message bound to a task, and the `response.shape` judgement
-then writes the reaction for the shape of the ideal response, which
-replaces it; a `stop` gets 👌 at once. The outbox yields each as a
-`ReactionDue`, and the bridge sets it with `Wire.react`
-(`SendReactionRequest` with one `ReactionEmoji`). Setting the account's
-list replaces its earlier reaction, so the message shows one. Every emoji is
-on Telegram's standard reaction list, as the exact code points the list
-holds, so the account needs no Premium; the wire logs on connect whether it
-has it. Like a notice, a reaction is not an effect: no approval, no report.
+The kernel marks a message Valor reads (`core/reactions.py`): every
+message of Tom's in his own chat, every message in a team chat that wakes
+its session (in a `mentions` chat, one naming Valor or replying to him), and
+none that is only heard. Binding writes `reaction.requested` with 👀, and
+the `response.shape` judgement, a classifier apart from the session's
+turn, then reads the activity Valor's response will take: `reply` leaves
+👀; `task` 🫡, `code` 👨‍💻, `web_search` 🔍, `lookup` 🧐, `document` ✍,
+`present` 📊, `issue` 🎫, `schedule` 📅, `send` 📤 replace it; a `stop`
+gets 👌 at once. Tom's reply to finished work gets 👀 alone. The emoji per
+label is `reactions.REACTIONS`, one table for both platforms. The outbox
+yields each as a `ReactionDue`, and the bridge sets it with `Wire.react`
+(`SendReactionRequest` with one reaction). An emoji on Telegram's reaction
+list (`GetAvailableReactionsRequest`, read and logged on the first
+reaction) is sent as `ReactionEmoji`; any other as `ReactionCustomEmoji`,
+the first custom emoji Telegram's search gives for the glyph
+(`SearchCustomEmojiRequest`, logged and kept), which needs the account's
+Premium (logged on connect). Setting the account's list replaces its
+earlier reaction, so the message shows one. Like a notice, a reaction is
+not an effect: no approval, no report. The session reads the reaction
+beside each message (`intake.chat_line`), named as the classifier's.
 
 A reaction is marked through `outbox.reacted`: `reaction.placed`, or
 `reaction.failed` with Telegram's refusal (`REACTION_INVALID`, a chat
-that limits reactions). A flood wait is held and a lost connection logged,
+that limits reactions or refuses custom emoji; the message keeps 👀). A flood wait is held and a lost connection logged,
 and either leaves the reaction unmarked, so the outbox yields it again.
 A 👀 whose message already has its shape reaction is never sent: the
 outbox closes it `superseded`, so a 👀 delayed by a flood wait never

@@ -241,10 +241,13 @@ logged once and tried on the next wake.
 
 **Reactions.** The kernel marks a message it acts on (`core/reactions.py`;
 the Telegram port's Reactions section says when). The outbox yields each
-`reaction.requested` row as a `ReactionDue`; the bridge adds it by its
-Slack name (`eyes`, then `zap`, `technologist`, `writing_hand`,
-`thinking_face`, `ok_hand`, or `shrug`) with `reactions.add`, and a
-shape reaction then removes `eyes`, so the message carries one.
+`reaction.requested` row as a `ReactionDue`; the bridge adds it by the
+Slack name the row carries (`reactions.REACTIONS`: `eyes`, then
+`saluting_face`, `technologist`, `mag`, `face_with_monocle`,
+`writing_hand`, `bar_chart`, `ticket`, `date`, `outbox_tray`, or
+`ok_hand`; a row with no label, written before rows named their emoji, as
+`eyes`) with `reactions.add`, and a shape reaction then removes `eyes`, so
+the message carries one.
 `already_reacted` and `no_reaction` count as done. Slack's refusal
 (`missing_scope` until the app is reinstalled with `reactions:write`) is
 written as `reaction.failed`; a 429 or a lost connection leaves the

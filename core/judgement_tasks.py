@@ -126,12 +126,17 @@ BREADTH = JudgementTask(
 )
 
 _SHAPES = {
-    "short_answer": "a short direct answer in a sentence or a few lines: a fact, a yes or no, a quick opinion",
-    "code_change": "a change to code, a configuration, or a running system, delivered as the work itself",
-    "written_report": "a written report, research, an analysis, or a document longer than a few lines",
-    "question_back": "a question back to the sender, because the message cannot be acted on as it stands",
-    "acknowledge": "an acknowledgement and nothing more: thanks, an approval, a go-ahead, a stop, a remark",
-    "decline": "a refusal or an explanation that it cannot be done",
+    "reply": "a reply and nothing more: an answer from what Valor already knows, an acknowledgement, "
+    "a question back, or a refusal",
+    "task": "starting a task that does the work, where no more specific label below fits",
+    "code": "a change to code, a configuration, or a running system",
+    "web_search": "searching or reading the web",
+    "lookup": "looking something up in Valor's own records: the code, chat history, the ledger, email",
+    "document": "writing a document, a report, research, or an analysis",
+    "present": "making a deck, a one-page explainer, or a video",
+    "issue": "filing or updating a GitHub issue",
+    "schedule": "scheduling: a meeting, a reminder, a calendar event, a routine",
+    "send": "sending something to someone: an email, a file, or a message to another person or chat",
 }
 SHAPE = JudgementTask(
     site="response.shape",
@@ -139,11 +144,13 @@ SHAPE = JudgementTask(
         Question(
             id="shape",
             text=(
-                "What shape would the ideal response to this message take? Judge the response Valor "
-                "should give, not the message: a long message can want a short answer, and a one-line "
-                "request can want a change to code. `bound_as` says what the message is to its task: a "
-                "new request (`start`), an answer to Valor's question, feedback on a delivery, or a "
-                "steer of running work."
+                "What activity will Valor's response to this message mainly take? Judge the response "
+                "Valor should give, not the message: a long message can want only a reply, and a "
+                "one-line request can want a change to code. When it takes several, pick the most "
+                "specific one the sender would see (a code change over starting a task, a web search "
+                "over a reply). `bound_as` says what the message is to its task: a new request "
+                "(`start`), an answer to Valor's question, feedback on a delivery, or a steer of "
+                "running work or of a chat's session."
             ),
             kind=Kind.PICK,
             labels=dict(_SHAPES),
@@ -161,8 +168,8 @@ SHAPE = JudgementTask(
     on_abstain="caution",
     on_failure="caution",
     consumer={
-        "proceed": "the picked shape's reaction replaces 👀 (core/reactions.py)",
-        "caution": "no shape reaction; 👀 stays",
+        "proceed": "the picked activity's reaction replaces 👀, and reply leaves 👀 (core/reactions.py)",
+        "caution": "no activity reaction; 👀 stays",
     },
     serves="Mission item 6",
     guard="none: a label, no gate",

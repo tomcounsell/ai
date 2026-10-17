@@ -83,17 +83,9 @@ def marker(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-# Each reaction's Slack name, by the exact emoji `core/reactions.py` writes.
+# The reaction a shape reaction replaces, and the name a row written before
+# rows named their Slack emoji is placed as.
 SEEN_NAME = "eyes"
-REACTION_NAMES = {
-    "\U0001f440": SEEN_NAME,  # 👀
-    "\u26a1": "zap",  # ⚡
-    "\U0001f468\u200d\U0001f4bb": "technologist",  # 👨‍💻
-    "\u270d": "writing_hand",  # ✍
-    "\U0001f914": "thinking_face",  # 🤔
-    "\U0001f44c": "ok_hand",  # 👌
-    "\U0001f937": "shrug",  # 🤷
-}
 
 
 def notice_key(notice_id: str) -> str:
@@ -333,15 +325,13 @@ class Sender:
     # -- reactions ---------------------------------------------------------
 
     async def react(self, item, outbox) -> None:
-        """Add one due reaction by its Slack name; a `shape` reaction then
-        removes `eyes`, so the message carries one. A 429 or a lost
-        connection leaves it unmarked for a later wake, as a notice is;
-        Slack's refusal (`missing_scope`, `message_not_found`) is its
-        result."""
-        name = REACTION_NAMES.get(item.emoji)
-        if name is None:
-            await outbox.reacted(item, f"no Slack name for {item.emoji!r}")
-            return
+        """Add one due reaction by its Slack name (the row's `emoji`; `eyes`
+        for a row with no label, written before rows named it); a `shape`
+        reaction then removes `eyes`, so the message carries one. A 429 or a
+        lost connection leaves it unmarked for a later wake, as a notice is;
+        Slack's refusal (`missing_scope`, `message_not_found`, `invalid_name`)
+        is its result."""
+        name = item.emoji if item.label else SEEN_NAME
         try:
             channel = await self._channel(self._target(item.chat_id))
             await self.wire.react(channel, item.message_id, name)

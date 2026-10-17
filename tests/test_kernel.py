@@ -902,7 +902,7 @@ def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn)
     label = next(r["payload"] for r in xs if r["type"] == "shape.confirmed")
     assert (label["confirmed"], label["decision"], label["provenance"]["by"]) == (True, "overlaps", "valor")
     steer = next(r["payload"] for r in ys if r["type"] == "message.steered")
-    assert session._steering([steer]) == "Written to you while you worked:\n- valor: only the tests half"
+    assert session._steering([steer], {}) == "Written to you while you worked:\n- valor: only the tests half"
 
 
 # -- corrections and exemplars ----------------------------------------------------
