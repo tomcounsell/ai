@@ -2,7 +2,8 @@
 
 A payload is `{text, reply_to, topic_id, files: [{path, sha256}]}`. Text
 is split by the port's `split_text` (Telegram's limit, in UTF-16 code
-units); files follow as documents. Each message
+units); files follow as documents, an `.ogg` as a voice note (matched by
+kind and size, since Telegram may keep no name on one). Each message
 carries a `random_id` derived from the broker's key (which ends in the
 effect id) and its position, so a repeat of one effect repeats its ids and
 two identical effects differ.
@@ -407,4 +408,7 @@ def _matches(m: Msg, exp: Expected) -> bool:
         return False
     if exp.kind == "text":
         return m.media is None and m.text.strip() == exp.text
-    return m.media is not None and m.media.name == exp.name and (exp.size is None or m.media.size == exp.size)
+    if m.media is None or (exp.size is not None and m.media.size != exp.size):
+        return False
+    # Telegram may keep no file name on a voice note: an Ogg sent is one.
+    return m.media.name == exp.name or (m.media.kind == "voice" and exp.name.lower().endswith(".ogg"))

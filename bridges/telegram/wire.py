@@ -278,17 +278,11 @@ class TelethonWire:
         topic_id: int | None,
     ) -> int:
         from telethon.tl.functions.messages import SendMediaRequest
-        from telethon.tl.types import DocumentAttributeFilename, InputMediaUploadedDocument
 
         peer = await self._call(self.client.get_input_entity(chat_id))
         # The upload sends no message, so a failure there is definite.
         uploaded = await self._call(self.client.upload_file(data, file_name=name))
-        media = InputMediaUploadedDocument(
-            file=uploaded,
-            mime_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
-            attributes=[DocumentAttributeFilename(name)],
-            force_file=True,
-        )
+        media = document(uploaded, data, name)
         request = SendMediaRequest(
             peer, media, message="", reply_to=_reply(reply_to, topic_id), random_id=random_id
         )
@@ -391,6 +385,40 @@ def _reply(reply_to: int | None, topic_id: int | None):
     if topic_id:
         return InputReplyToMessage(reply_to_msg_id=topic_id)
     return None
+
+
+def document(uploaded, data: bytes, name: str):
+    """The uploaded file as Telegram's media: an Ogg (Opus) file is a voice
+    note, played in the chat, with its length; any other file a document."""
+    from telethon.tl.types import (
+        DocumentAttributeAudio,
+        DocumentAttributeFilename,
+        InputMediaUploadedDocument,
+    )
+
+    if name.lower().endswith(".ogg"):
+        return InputMediaUploadedDocument(
+            file=uploaded,
+            mime_type="audio/ogg",
+            attributes=[
+                DocumentAttributeAudio(duration=ogg_seconds(data), voice=True),
+                DocumentAttributeFilename(name),
+            ],
+        )
+    return InputMediaUploadedDocument(
+        file=uploaded,
+        mime_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+        attributes=[DocumentAttributeFilename(name)],
+        force_file=True,
+    )
+
+
+def ogg_seconds(data: bytes) -> int:
+    """An Ogg Opus file's length in whole seconds, at least one: the last
+    page's granule position counts 48 kHz samples (RFC 7845)."""
+    last = data.rfind(b"OggS")
+    granule = int.from_bytes(data[last + 6 : last + 14], "little") if last >= 0 else 0
+    return max(1, round(granule / 48_000))
 
 
 def _sent_id(result, random_id: int) -> int:

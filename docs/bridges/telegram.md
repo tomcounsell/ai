@@ -66,7 +66,7 @@ interpretation.
 | `reply_to` | The `message_id` this message replies to, if any |
 | `thread` | The ancestors the bridge could fetch, oldest first, each `{id, text, attachments}`, nothing downloaded |
 | `topic_id` | The Telegram forum topic, when the message is in one; for Slack, the thread root of a reply |
-| `attachments` | Files the bridge downloaded, each `{name, mime, bytes, path}`, or `{name, mime, bytes, skipped}` with the reason it could not fetch the file |
+| `attachments` | Files the bridge downloaded, each `{name, mime, bytes, path}`, or `{name, mime, bytes, skipped}` with the reason it could not fetch the file; an `audio/*` file also has `transcript`, or `transcript_failed` with the reason |
 | `headers` | Channel facts with no field above: for Telegram, `grouped_id` of an album; for email, the raw headers |
 
 `receive` appends one `message.received` row to the ledger on the bridge's
@@ -250,7 +250,17 @@ download that received no bytes since the previous tick, and the gap fill
 retakes it. A download Telegram refuses is listed with its reason,
 so a turn can say exactly what it could not read; a download cut off by a
 lost connection, a stop, or a stall is taken again by the next gap-fill pass.
-Transcribing or describing media is not the bridge's work.
+
+**Voice notes.** Once a voice note or other `audio/*` file is in, the
+bridge asks the voice process for its words (`core.bridge.transcribe`, off
+the loop; [tools/README.md](../../tools/README.md), Voice) and records them
+as the attachment's `transcript`, beside its path, so a session reads what
+was said and keeps the audio. When the voice process is down or fails,
+the message is recorded with `transcript_failed` and the reason, and is
+not transcribed again. The stall check watches only the download, so a
+long voice note is never cancelled for taking time; it holds up nothing
+behind it, being off the stream. Describing other media is not the
+bridge's work, and Telegram's own transcription is not used.
 
 **After downtime.** The bridge fills the gap itself, on every connect and
 every tick: it pages back through each owned chat to the newest message
@@ -447,6 +457,11 @@ after entity parsing. A longer text is sent as consecutive messages
 the bytes are unchanged, so the digest still holds. A file over 2000 MiB
 is refused when it is requested.
 
+**Voice notes.** A file named `*.ogg` (Opus, as `valor-tts` writes it) is
+sent as a voice note: mime `audio/ogg`, an audio attribute with `voice`
+set and its length in seconds (from the last Ogg page's granule
+position), and its file name. Every other file goes as a document.
+
 **Idempotency.** MTProto's send request carries a `random_id` the server
 uses to detect a repeated send. The performer derives it from the broker's
 idempotency key and the message's place in the send, so a resend of the
@@ -457,7 +472,8 @@ newest message id under the effect id in `telegram-sends.json`.
 that id (message ids in a chat only grow) and keeping the account's own
 messages, skipping ids already recorded as sent, and matching each
 message of the send on its full text (trimmed, as Telegram trims), or its
-file name and size, with its reply target and topic. History, not search,
+file name and size (a voice note, which Telegram may keep without its
+name, by kind and size), with its reply target and topic. History, not search,
 since search reads an index that can lag a send. Clock skew between the
 Mac and Telegram cannot hide a message, since no date is read. A key with
 no record was never sent, since the record precedes the first message, so

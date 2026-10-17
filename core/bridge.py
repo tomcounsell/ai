@@ -45,6 +45,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -616,6 +617,26 @@ def stamp() -> str:
         return git.head(ROOT) or NO_HEAD
     except Exception:  # noqa: BLE001  no trusted git, a refused config: unstamped, and it serves
         return NO_HEAD
+
+
+def transcribe(attachment: dict[str, Any]) -> dict[str, Any]:
+    """An inbound attachment as recorded: an `audio/*` file that was
+    downloaded gains `transcript`, the words the voice process
+    (`tools/voice.py`) heard, or `transcript_failed` with why not; any
+    other attachment is returned as it was. It blocks until the voice
+    process answers, so a bridge runs it off its loop."""
+    if not attachment.get("path") or not str(attachment.get("mime") or "").startswith("audio/"):
+        return attachment
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{settings.voice_port}/transcribe",
+        data=json.dumps({"path": attachment["path"]}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request) as answer:
+            return {**attachment, "transcript": json.load(answer)["text"]}
+    except Exception as e:  # noqa: BLE001  the message is recorded either way, saying why
+        return {**attachment, "transcript_failed": str(e) or type(e).__name__}
 
 
 async def reads(read: Callable[..., Awaitable[list[dict[str, Any]]]], port: int) -> web.AppRunner:

@@ -574,6 +574,14 @@ before a tool changed has the current one, and sets the turn's
 `VALOR_CHAT` (the session's chat, else the project's first) and the read
 ports.
 
+## Speaking a reply
+
+`valor-tts TEXT -o FILE` (`tools/valor_tts.py`) speaks TEXT into an
+`.ogg` (sent to Telegram as a voice note) or `.mp3` (Slack) through the
+voice process ([tools/README.md](../tools/README.md), Voice), on the
+`VALOR_VOICE_PORT` the kernel sets for every turn. It needs no key, since
+the voice runs on the Mac; a turn has no `OPENAI_API_KEY`.
+
 ## Pi, Codex, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`

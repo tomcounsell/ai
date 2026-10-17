@@ -662,7 +662,12 @@ def harness_env(
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 # Each workspace tool's name in `bin/`, and its source in `tools/`.
-WORKSPACE_TOOLS = {"look": "look", "valor-telegram": "valor_read.py", "valor-slack": "valor_read.py"}
+WORKSPACE_TOOLS = {
+    "look": "look",
+    "valor-telegram": "valor_read.py",
+    "valor-slack": "valor_read.py",
+    "valor-tts": "valor_tts.py",
+}
 
 
 def install_tools(bin_dir: Path) -> None:

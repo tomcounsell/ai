@@ -84,6 +84,9 @@ atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
 # A bridge the tests run under `serve` answers history reads on a port the
 # OS chooses, never the live bridges' (`core.bridge.reads`).
 os.environ["VALOR_TELEGRAM_READ_PORT"] = os.environ["VALOR_SLACK_READ_PORT"] = "0"
+# Nothing answers on port 1, so a bridge under test never reaches the live
+# voice process; a test that wants transcripts replaces `kernel.transcribe`.
+os.environ["VALOR_VOICE_PORT"] = "1"
 # The ports reserved for the task services a test provisions (`tests/ports.py`).
 _fd, os.environ["VALOR_TEST_RESERVED_PORTS"] = tempfile.mkstemp(prefix="valor-test-reserved-ports-")
 os.close(_fd)

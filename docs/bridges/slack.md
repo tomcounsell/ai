@@ -86,7 +86,7 @@ live and in gap fill; so are bot messages, and every subtype but none,
 | `text` | Slack's `text` as stored (entities and wrapped links included) |
 | `reply_to`, `topic_id` | The thread root (`thread_ts`) of a reply; none for a top-level message |
 | `thread` | The root and the replies before this one, the last 50 in all, Valor's own posts included, nothing downloaded |
-| `attachments` | Each file fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason |
+| `attachments` | Each file fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason; an `audio/*` file (a clip, a voice memo) also has `transcript` from the voice process, or `transcript_failed` with the reason, as on Telegram ([telegram.md](telegram.md), Voice notes) |
 
 `sender_id` is what Slack's authenticated socket asserts, so a Slack
 record is `verified` the way a Telegram user id is.
@@ -172,7 +172,7 @@ is a target, owned or not. Its payload:
 |---|---|
 | `text` | Sent as written |
 | `reply_to` | A message `ts`; the post goes in that message's thread |
-| `files` | Each a path in the task's workspace and its sha256 |
+| `files` | Each a path in the task's workspace and its sha256; a voice reply is an `.mp3` from `valor-tts`, uploaded like any file, which Slack plays in the message |
 
 A target in a workspace other than the connected one is `broker.Failed`
 ("`<team>` is not a connected workspace"), and nothing is posted.

@@ -482,6 +482,15 @@ class Settings:
     # (`core.bridge.reads`), on 127.0.0.1.
     telegram_read_port: int = field(default_factory=lambda: int(_env("VALOR_TELEGRAM_READ_PORT", "8712")))
     slack_read_port: int = field(default_factory=lambda: int(_env("VALOR_SLACK_READ_PORT", "8713")))
+    # The voice process (`tools/voice.py`), on 127.0.0.1: the bridges'
+    # transcripts and a turn's `valor-tts`. The models and the voice are
+    # its settings, so replacing either is a setting.
+    voice_port: int = field(default_factory=lambda: int(_env("VALOR_VOICE_PORT", "8714")))
+    asr_model: str = field(default_factory=lambda: _env("VALOR_ASR_MODEL", "nemo-parakeet-tdt-0.6b-v3"))
+    tts_model_dir: str = field(
+        default_factory=lambda: _env("VALOR_TTS_MODEL_DIR", str(Path.home() / ".cache" / "kokoro-onnx"))
+    )
+    tts_voice: str = field(default_factory=lambda: _env("VALOR_TTS_VOICE", "am_michael"))
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

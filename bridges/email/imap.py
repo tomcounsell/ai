@@ -17,7 +17,7 @@ from pathlib import Path
 
 import psycopg
 
-from core import intake
+from core import bridge, intake
 from core.settings import settings
 
 from . import parse, smtp
@@ -370,6 +370,9 @@ async def poll(cfg: Config, conn: imaplib.IMAP4, db, ends: Ends | None = None) -
             raw, internal = await _thread(ends, fetch, conn, u)
             parsed = parse.parse_email_message(raw, internal)
             parse.persist(parsed, directory)
+            parsed.fields["attachments"] = [
+                await _thread(ends, bridge.transcribe, a) for a in parsed.fields["attachments"]
+            ]
             result = await intake.receive(db, inbound(parsed, u, uidvalidity))
         except imaplib.IMAP4.abort, psycopg.OperationalError:
             raise  # the IMAP connection or the database's is gone; the watch replaces it

@@ -92,7 +92,7 @@ received until it is marked unread.
 | `reply_to` | `In-Reply-To` |
 | `thread` | One `{"id"}` per id in `References`, oldest first. Their bodies are already in the ledger as received or sent messages, so the bridge does not fetch them |
 | `text` | The subject, a blank line, then the first `text/plain` part, decoded (an unknown charset read as UTF-8); for HTML-only mail, the HTML reduced to text with scripts and styles dropped |
-| `attachments` | Each attachment part saved under `inbound_dir/email/`, named by the sha256 of its bytes, as `{name, mime, bytes, path}` with the filename sanitized; a part that does not decode is `{name, mime, bytes, skipped}` |
+| `attachments` | Each attachment part saved under `inbound_dir/email/`, named by the sha256 of its bytes, as `{name, mime, bytes, path}` with the filename sanitized; a part that does not decode is `{name, mime, bytes, skipped}`; an `audio/*` attachment also has `transcript` from the voice process, or `transcript_failed` with the reason ([telegram.md](telegram.md), Voice notes) |
 | `headers` | `subject`, `date`, `to`, `cc`, the raw `from` and `authentication_results` values as received (topmost first), and `uid` and `uidvalidity` |
 
 The bridge receives mail from owned senders only: Tom's addresses

@@ -49,7 +49,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    and `openssl` (the email tests only); `claude`, `codex`, and
    `npm install -g @earendil-works/pi-coding-agent@1.0.0` (the pin in
    `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
-   browser.
+   browser; `ffmpeg` (the voice process decodes and encodes audio with it).
 3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
    system there: `git -C ~/src/ai branch retired/old-main`, then
    `cd ~/src/ai && git fetch origin && git checkout -B main origin/main && uv sync --frozen`.
@@ -95,15 +95,22 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    brew-nightly and vault-sync jobs, `~/.zshenv`'s loader for
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
-9. **The jobs.** For each of `core serve`, `bridges.telegram`, `bridges.email`
+9. **The jobs.** First the voice models, once per Mac (about 1 GB:
+   Parakeet into `~/.cache/huggingface`, Kokoro into `~/.cache/kokoro-onnx`;
+   Handy's own models folder is not used): `$PY -m tools.voice fetch`.
+   Then for each of `core serve`, `bridges.telegram`, `bridges.email`
    (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
-   reads Slack, `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
+   reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every
+   bridge's audio and speaks `valor-tts`; about 2.3 GB resident once both
+   models are used), `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
    and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    Every job's `PATH` includes `/opt/homebrew/bin`: the `core serve` and
    `core routine` plists print it (`routines.launchd_path`: the system
-   directories, then those of `claude`, `git`, Postgres and `uv`); add it
-   by hand to the others. A plist edited on disk takes effect only after
+   directories, then those of `claude`, `git`, Postgres and `uv`), and the
+   `tools.voice` plist adds ffmpeg's; add it by hand to the others. A
+   rollout restarts the bridges but not `com.valor.voice`: when
+   `tools/voice.py` changed, `launchctl kickstart -k $D/com.valor.voice`. A plist edited on disk takes effect only after
    `launchctl bootout $D/<label>` and a fresh `bootstrap`. On a Mac that
    reads Slack, the app at api.slack.com carries the manifest's user scopes
    (`python -m bridges.slack manifest`); when it gained one (`search:read`
@@ -112,7 +119,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
     passes; `$PY -m core settings` names the machine and the backup folder;
     `$PY -m core routines` lists the routines; a message in each chat the
-    specs name gets 👀; `launchctl list | grep com.valor` lists only the
+    specs name gets 👀; a voice note sent to Valor reaches its session with
+    a `transcript:` line, and `valor-tts hi -o /tmp/hi.ogg` writes a file
+    that plays; `launchctl list | grep com.valor` lists only the
     jobs of step 9 and caffeinate and brew-nightly.
 
 A Mac with no Telegram session or mailbox can run with only the local

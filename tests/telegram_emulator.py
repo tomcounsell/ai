@@ -169,6 +169,9 @@ def make_app() -> web.Application:
         if "data_b64" in b:
             data = base64.b64decode(b["data_b64"])
             media = {"kind": "document", "name": b["name"], "mime": "application/octet-stream"}
+            if b["name"].lower().endswith(".ogg"):
+                # The wire sends an Ogg as a voice note, which Telegram may keep without its name.
+                media = {"kind": "voice", "name": "", "mime": "audio/ogg"}
             media["size"] = len(data)
         elif not text:
             return err("MESSAGE_EMPTY")

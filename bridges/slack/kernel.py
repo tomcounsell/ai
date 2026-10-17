@@ -31,6 +31,7 @@ class Kernel:
     owned: Any
     conn: Any  # an async context manager giving one connection
     inbound_dir: str
+    transcribe: Any  # attachment -> attachment, with its transcript when it is audio; blocks
     serve_tick_s: float
 
 
@@ -65,6 +66,7 @@ def from_core(dsn: str | None = None) -> Kernel:
         owned=intake.owned,
         conn=conn,
         inbound_dir=str(Path(settings.inbound_dir).expanduser()),
+        transcribe=bridge.transcribe,
         serve_tick_s=settings.serve_tick_s,
     )
 

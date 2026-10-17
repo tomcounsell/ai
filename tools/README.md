@@ -20,6 +20,16 @@ Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, befor
 
 - `look` (`read`): a page's screenshot and DOM ([docs/browser.md](../docs/browser.md)).
 - `valor_read.py`, as `valor-telegram` and `valor-slack` (`read`): `read [CHAT] [--search TEXT]` reads or searches a chat's history through its running bridge, with Valor's own account. Standard library and Python 3.9, the turn's `python3`. No send: sends stay broker effects.
+- `valor_tts.py`, as `valor-tts` (`propose`, a workspace file): `valor-tts TEXT -o FILE` speaks TEXT into `FILE.ogg` (a Telegram voice note) or `FILE.mp3` (Slack) through the voice process. No key. Standard library and Python 3.9. Sending it is the chat's send, with the file in `files`.
+
+## Voice
+
+`voice.py`, the launchd job `com.valor.voice` (`python -m tools.voice run | fetch | --plist`), on `127.0.0.1:settings.voice_port` (8714). One process holds both models for every bridge and turn on the Mac, since Parakeet alone peaks near 1.7 GB resident; about 2.3 GB once both have been used.
+
+- `POST /transcribe {path}` -> `{text}`: Parakeet TDT 0.6B v3 (`settings.asr_model`, the model Handy runs) through onnx-asr, int8 on the CPU, with Silero VAD so any length is cut into segments; ffmpeg decodes any audio first. The bridges call it through `core.bridge.transcribe` for every `audio/*` attachment.
+- `POST /speech {text, format}` -> Ogg/Opus or MP3: Kokoro v1.0 (`settings.tts_model_dir`, `~/.cache/kokoro-onnx`) in `settings.tts_voice` (`am_michael`), the old system's model and voice.
+
+The engines are the two functions `listen` and `speak`: another voice or model is a setting (`VALOR_TTS_VOICE`, `VALOR_ASR_MODEL`, `VALOR_TTS_MODEL_DIR`), another engine is one function. `fetch` downloads both models (Parakeet into the Hugging Face cache, Kokoro's two files from the kokoro-onnx release).
 
 ## Judgement legs
 

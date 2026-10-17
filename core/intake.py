@@ -138,7 +138,8 @@ class Inbound:
     reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To; Slack: thread root
     thread: list[dict] = field(default_factory=list)  # {id, text, attachments}, oldest first
     topic_id: str | None = None  # Telegram forum topic; Slack: `thread_ts`
-    attachments: list[dict] = field(default_factory=list)  # {name, mime, bytes, path} or {..., skipped}
+    # {name, mime, bytes, path} or {..., skipped}; audio also has transcript or transcript_failed
+    attachments: list[dict] = field(default_factory=list)
     headers: dict[str, str | list[str]] = field(default_factory=dict)
 
 
@@ -909,11 +910,16 @@ def chat_line(m: dict[str, Any]) -> str:
 
 def _files(attachments: list[dict[str, Any]]) -> str:
     """One line per attachment: its name, type, and path, or why it was
-    not downloaded."""
+    not downloaded; under an audio file, its transcript or why there is
+    none."""
     lines = []
     for a in attachments:
         where = a.get("path") or f"not downloaded: {a.get('skipped')}"
         lines.append(
             f"- {a.get('name') or 'file'} ({a.get('mime') or 'unknown type'}, {a.get('bytes')} bytes): {where}"
         )
+        if "transcript" in a:
+            lines.append(f"  transcript: {a['transcript'] or '(no speech heard)'}")
+        elif "transcript_failed" in a:
+            lines.append(f"  not transcribed: {a['transcript_failed']}")
     return "\n".join(lines)

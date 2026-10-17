@@ -230,6 +230,9 @@ class SlackBridge:
 
     async def _receive(self, chat: str, channel: str, msg: dict[str, Any], *, dm: bool) -> None:
         fields = await inbound.build(self.wire, chat, channel, msg, Path(self.kernel.inbound_dir), dm=dm)
+        fields["attachments"] = [
+            await asyncio.to_thread(self.kernel.transcribe, a) for a in fields["attachments"]
+        ]
         async with self.kernel.conn() as conn:
             await self.kernel.receive(conn, self.kernel.Inbound(**fields))
 

@@ -23,6 +23,9 @@ centre has no ping of its own, so on each `tick` a download that received
 no bytes since the previous `tick` is cancelled. A download that ends
 without the file is retaken by the next gap-fill pass: a pass never
 records a chat as seen past a message whose receive is still running.
+Once the file is in, an audio file is transcribed (`kernel.transcribe`,
+off the loop) before the message is recorded; the stall check no longer
+watches it, so a long voice note is never cancelled for taking time.
 
 On SIGTERM an in-flight perform and its outcome finish before `run`
 returns; downloads still running are stopped and retaken on the next
@@ -237,6 +240,11 @@ class TelegramBridge:
 
     async def _receive(self, msg: Msg, progress=None) -> None:
         fields = await inbound.build(self.wire, msg, Path(self.kernel.inbound_dir), progress)
+        # The file is in: the stall check watches downloads, not transcription.
+        self._received.pop((msg.chat_id, msg.id), None)
+        fields["attachments"] = [
+            await asyncio.to_thread(self.kernel.transcribe, a) for a in fields["attachments"]
+        ]
         async with self.kernel.conn() as conn:
             await self.kernel.receive(conn, self.kernel.Inbound(**fields))
         try:

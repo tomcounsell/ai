@@ -223,11 +223,12 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
 
 
 def _reading_env(b: tasks.Brief) -> dict[str, str]:
-    """What `valor-telegram read` and `valor-slack read` need: the bridges'
-    read ports, and `VALOR_CHAT`, the session's own chat, else the
-    project's first."""
+    """What `valor-telegram read`, `valor-slack read` and `valor-tts` need:
+    the bridges' read ports, the voice process's port, and `VALOR_CHAT`,
+    the session's own chat, else the project's first."""
     env = {"VALOR_TELEGRAM_READ_PORT": str(settings.telegram_read_port),
-           "VALOR_SLACK_READ_PORT": str(settings.slack_read_port)}  # fmt: skip
+           "VALOR_SLACK_READ_PORT": str(settings.slack_read_port),
+           "VALOR_VOICE_PORT": str(settings.voice_port)}  # fmt: skip
     if b.chat:
         return {**env, "VALOR_CHAT": f"{b.chat['channel']}:{b.chat['chat_id']}"}
     try:
