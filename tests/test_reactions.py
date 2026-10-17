@@ -152,7 +152,9 @@ def test_nothing_is_guessed_on_arrival_and_a_plain_reply_keeps_eyes(dsn, team):
     async def go():
         q = await said(dsn, "what time is it in Bangkok?")
         before = await requested(dsn, q["received_id"])
+        memory = "/t/state/work/claude/projects/-t-repo/memory/user-tz.md"
         tools = [("Read", {"file_path": "/w/notes.md"}), ("Write", {"file_path": "/w/repo/.valor/done.md"}),
+                 ("Write", {"file_path": memory}),
                  ("Bash", {"command": "date"})]  # fmt: skip
         label = await worked(dsn, q["task_id"], [send(test_kernel.GROUP, reply_to=q["message_id"])], tools,
                              before=[("Edit", {"file_path": "/w/app.py"})])  # fmt: skip
@@ -217,6 +219,9 @@ def test_each_activity_from_effects_and_tools():
         ("Bash", '{"command": "cat x | grep y"}'): "lookup",
         ("Bash", '{"command": "ls"}'): None, ("Read", '{"file_path": "/w/a.py"}'): None,
         ("Write", '{"file_path": "/w/repo/.valor/effects/a.json"}'): None,
+        ("Write", '{"file_path": "/t/state/work/claude/projects/-t-repo/memory/tom-prefers-pdf.md"}'): None,
+        ("Edit", '{"file_path": "/t/state/work/claude/projects/-t-repo/memory/MEMORY.md"}'): None,
+        ("Write", '{"file_path": "/Users/v/.claude/plans/x.md"}'): None,
     }  # fmt: skip
     for (name, given), label in by_tool.items():
         assert reactions.tool_did(name, json.loads(given)) == label, (name, given)

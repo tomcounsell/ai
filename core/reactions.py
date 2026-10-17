@@ -93,6 +93,9 @@ SENDS = ("telegram.send_message", "slack.send_message", "local.send_message")
 VOICE = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav")
 PRESENT = (".pptx", ".key", ".mp4", ".mov", ".webm")
 DOCUMENT = (".pdf", ".docx", ".doc", ".md", ".txt", ".xlsx", ".csv")
+# Files a turn writes for itself, not as work: its `.valor/` signals, and
+# Claude Code's own (its auto-memory under the config dir's `projects/`).
+OWN_FILES = ("/.valor/", "/claude/projects/", "/.claude/")
 # A tool call's activity by the tool's name, then a Bash command's by its words.
 TOOLS = {"WebSearch": "web_search", "WebFetch": "web_search", "Grep": "lookup", "Glob": "lookup",
          "CronCreate": "schedule"}  # fmt: skip
@@ -177,7 +180,7 @@ def effect_did(request: dict[str, Any], chats: set[str]) -> str | None:
 def tool_did(name: str, given: dict[str, Any]) -> str | None:
     """A tool call's activity, from its name and input; None for a call
     that is part of replying (reading a file, writing the turn's own
-    `.valor/` files)."""
+    `.valor/` files or Claude Code's memory)."""
     if name in TOOLS:
         return TOOLS[name]
     if name.startswith("mcp__byob__"):
@@ -188,7 +191,7 @@ def tool_did(name: str, given: dict[str, Any]) -> str | None:
         return SKILLS.get(str(given.get("skill") or "").rpartition(":")[2])
     if name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = str(given.get("file_path") or given.get("notebook_path") or "")
-        return None if "/.valor/" in path or path.startswith(".valor/") else _of_file(path) or "code"
+        return None if any(m in f"/{path}" for m in OWN_FILES) else _of_file(path) or "code"
     if name == "Bash":
         command = str(given.get("command") or "")
         return next((a for pattern, a in COMMANDS if pattern.search(command)), None)
