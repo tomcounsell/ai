@@ -75,6 +75,19 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `claude plugin install yudame@yudame` and `yudame-dev@yudame`. Not
    `install.sh`: turns take the skills from the plugins, and a second copy
    would load each one twice.
+   Valor's Google sign-in for `gws` ([machine.md](machine.md)), copied
+   from the Cowboy over any old sign-in on this Mac, since an old
+   encrypted credential is loaded first and is dead: `gws auth logout`
+   (it keeps `client_secret.json`), then
+   `for F in credentials.json client_secret.json; do ssh valorengels@valor-the-cowboy cat .config/gws/$F > ~/.config/gws/$F; chmod 600 ~/.config/gws/$F; done`;
+   `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
+   To sign in afresh (on the Cowboy, or after a revocation), at the Mac's
+   screen: `gws auth logout`, then
+   `gws auth login --scopes https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,openid,https://www.googleapis.com/auth/userinfo.email`,
+   approve as valor@yuda.me in Chrome, then
+   `gws auth export --unmasked > ~/.config/gws/credentials.json && chmod 600 ~/.config/gws/credentials.json && rm ~/.config/gws/credentials.enc`.
+   Never `--full` or the default scopes: they carry Cloud scopes, and
+   Yudame's Cloud session control then asks for the sign-in again.
 7. **The handover**, when the old system is there:
    - The old memory, exported while its Redis is up:
      `$OLDPY -I scripts/cutover_export_memory.py $CUT/memory.jsonl` (`PYTHONDONTWRITEBYTECODE=1`).

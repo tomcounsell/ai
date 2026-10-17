@@ -313,6 +313,21 @@ A turn's environment is the operator's, less the kernel's secrets (the `ANTHROPI
 `AI_AGENT` variables, the OpenAI, TypeSafe, OpenRouter, and GitHub push keys, and the `PG*` password
 variables). It carries Valor's own `gh` login, git credential helper, and SSH agent.
 
+It also carries Valor's Google sign-in, valor@yuda.me, which `gws` uses
+for Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks. The refresh
+token is `~/.config/gws/credentials.json`, mode 600: gws's plaintext
+store, so it does not depend on a keychain key and copies to any Mac.
+`token_cache.json` beside it holds the short-lived access token,
+encrypted with the keychain's `gws-cli` key. That cache is disposable:
+gws skips one it cannot decrypt and writes it again. The token holds only
+Workspace scopes, never `cloud-platform` or `pubsub`. Yudame's Google
+Cloud session control makes tokens with Cloud scopes sign in again, which
+is the likely reason the June token, signed in with gws's default
+scopes, failed with `invalid_rapt` on 2026-10-17. It ends
+only when it is revoked, the account's password changes, or its
+2-Step Verification changes. The Gmail app password in `mail-keys` ends
+the same way. Signing in again: rollout step 6.
+
 A turn runs as the machine's one macOS user, so it can read that user's
 login keychain on purpose through the `security` tool, the machine's Claude
 login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
