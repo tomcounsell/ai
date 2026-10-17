@@ -15,9 +15,9 @@ Nothing is guessed on arrival. When a turn of the task is collected
 (`core/session.py`, `record`), `on_turn` reads what the turn actually did:
 the effects it requested and the tools its transcript shows it called
 (`did`). The most specific activity (`ORDER`) becomes the `shape` reaction
-of one message still showing 👀 that the turn was the first to read (marked
-after the turn before it began): the one a send of the turn replies to,
-else the newest. A turn that only replied in the chat
+of one message still showing 👀 that the turn read (its prompt's window,
+since the last turn that spent the steering; a fresh, compaction, or errored
+turn sets nothing): the one a send of the turn replies to, else the newest. A turn that only replied in the chat
 did nothing, so 👀 stays. A `none`-bound message's 👀 is `final` and never
 changes.
 
@@ -48,7 +48,7 @@ from typing import Any
 
 import psycopg
 
-from core import channels, ledger, transcripts
+from core import channels, ledger, machine, transcripts
 
 # Telegram: exact code points, none with the U+FE0F variation selector,
 # which Telegram can refuse. Slack: the emoji's name.
@@ -225,8 +225,12 @@ async def on_turn(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]
     )
     if start is None:
         return None
-    # The messages this turn was the first to read: marked since the turn before it began.
-    since = max((r["id"] for r in rows if r["type"] == "turn.started" and r["id"] < start["id"]), default=0)
+    # The messages this turn read: its prompt's steering window (`steer_since`
+    # before it began), and only when the turn spent it (a fresh, compaction,
+    # or errored turn leaves it to the next).
+    if machine.fold(rows).steer_since != start["id"]:
+        return None
+    since = machine.fold([r for r in rows if r["id"] < start["id"]]).steer_since
     shaped = {r["payload"]["received_id"] for r in rows if r["type"] == "reaction.requested"
               and r["payload"].get("stage") == "shape"}  # fmt: skip
     waiting = [r["payload"] for r in rows if r["type"] == "reaction.requested" and since < r["id"] < start["id"]

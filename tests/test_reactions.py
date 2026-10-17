@@ -37,7 +37,7 @@ def effect(action_type, target="t", **payload):
     return {"request": {"action_type": action_type, "target": target, "payload": payload}, "kind": "held"}
 
 
-async def worked(dsn, task, effects=(), tools=(), before=()) -> str | None:
+async def worked(dsn, task, effects=(), tools=(), before=(), state="clarify", outcome="done") -> str | None:
     """A collected turn of `task`: its transcript holds `tools` (name,
     input) called during it, and `before`, calls of an earlier turn the same
     file still holds. The label `on_turn` writes."""
@@ -50,13 +50,13 @@ async def worked(dsn, task, effects=(), tools=(), before=()) -> str | None:
     body = {"turn_id": turn_id, "name": "s.jsonl", "offset": 0, "chunk": 0,
             "base64": base64.b64encode("\n".join(lines).encode()).decode()}  # fmt: skip
     async with await db.connect(dsn) as conn:
-        await ledger.append(conn, task, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+        await ledger.append(conn, task, "turn.started", {"turn_id": turn_id, "state": state})
         await conn.execute(
             "INSERT INTO documents (kind, id, body) VALUES (%s, %s, %s::jsonb)",
             (transcripts.KIND, f"{turn_id}/s.jsonl/0", json.dumps(body)),
         )
         transcript = {"files": [{"name": "s.jsonl"}]}
-        await ledger.append(conn, task, "turn.ended", {"turn_id": turn_id, "outcome": "done", "result": {},
+        await ledger.append(conn, task, "turn.ended", {"turn_id": turn_id, "outcome": outcome, "result": {},
                                                        "transcript": transcript})  # fmt: skip
         return await reactions.on_turn(conn, task, turn_id, list(effects))
 
@@ -520,3 +520,23 @@ def test_collecting_a_turn_sets_the_activity_its_transcript_shows(dsn, team):
         return await requested(dsn, m["received_id"])
 
     assert [r["label"] for r in run(go())] == ["seen", "web_search"]
+
+
+def test_only_a_turn_that_read_the_message_sets_its_activity(dsn, team):
+    """A fresh (review) or compaction turn, and one that ended in an error,
+    did not act on the steering: they set nothing, and the message stays in
+    the window of the turn that does."""
+
+    async def go():
+        m = await said(dsn, "valor, find the florist's supplier")
+        task = m["task_id"]
+        grep = [("Grep", {"pattern": "x"})]
+        fresh = await worked(dsn, task, tools=grep, state="fresh")
+        compacted = await worked(dsn, task, tools=grep, state="compaction")
+        failed = await worked(dsn, task, tools=grep, outcome="failed")
+        done = await worked(dsn, task, tools=[("WebSearch", {"query": "supplier"})])
+        return (fresh, compacted, failed, done), await requested(dsn, m["received_id"])
+
+    labels, rows = run(go())
+    assert labels == (None, None, None, "web_search")
+    assert [r["label"] for r in rows] == ["seen", "web_search"]
