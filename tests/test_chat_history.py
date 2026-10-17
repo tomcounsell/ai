@@ -314,7 +314,9 @@ def turn_env(tmp_path, **brief):
     return __main__._turn_for("p", None, b)("http://h:1", "b", "t").env
 
 
-def test_each_turn_installs_the_tools_and_names_its_chat(tmp_path):
+def test_each_turn_installs_the_tools_and_names_its_chat(tmp_path, monkeypatch):
+    # A turn's own chat (the suite run inside a task) is no chat of these.
+    monkeypatch.delenv("VALOR_CHAT", raising=False)
     (tmp_path / "bin").mkdir()
     mirror = str(tmp_path / "t" / "kernel.git")
     projects = tmp_path / "projects"
