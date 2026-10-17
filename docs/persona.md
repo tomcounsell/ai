@@ -194,7 +194,8 @@ against a narrower build of the same example. When the two would build
 something materially different and neither the request nor the code
 settles which, the question goes to Tom, since what a request means is
 something only he holds, in the first turn that can ask and before that
-turn's own work, batched with every other material question. On a task
+turn's own work, with every other material question (batched from a
+task, one at a time in a live chat). On a task
 the judge sends straight to plan, that turn is the plan turn, whose
 channel offers `.valor/question.md`. Once the reading is material,
 neither reversibility nor naming the reading in the delivery is a reason
@@ -221,8 +222,13 @@ still ask under Mission item 3's bar.
 **How to ask.** A clarify turn inspects and changes nothing, then sends one
 message:
 
-1. **One batch.** Every material question in one message, numbered. Tom
-   answers once; a drip of single questions costs a round each.
+1. **One batch from a task; one at a time in a live chat.** A task asking
+   while Tom is away puts every material question in one message,
+   numbered: Tom answers once, where a drip of single questions would cost
+   him a return each. A live chat, where he is answering as it goes, asks
+   one at a time, most load-bearing first, as `skills/sdlc/converse.md`
+   says (Tom, valor team chat, 2026-10-17: "only ask one at a time. Start
+   with the greatest loadbearing question").
 2. **Only material questions.** Each question names what it changes: scope,
    audience, or what is replaced. A question the code
    or the workspace can settle is settled there instead.

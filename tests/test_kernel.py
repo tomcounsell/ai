@@ -1116,6 +1116,8 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     b, text = run(go())
     assert "# A chat session" in text and "`task.start`" in text and "# Stage: clarify" not in text
     assert "# How this task reaches Tom" not in text
+    assert "`yudame-dev:ask-me`" in text and "Anything I missed? If not, I'll go ahead." in text
+    assert "one at a time in a live chat" in text and "One batch from a task" in text
     asked = session._stage_verdict(State.CLARIFY, signals.Signals(question="?"), None, "t", True, b)
     assert asked == ("idle", {}, ["question means nothing in a chat session; ignored"])
     assert (

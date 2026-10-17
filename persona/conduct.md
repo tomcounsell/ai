@@ -53,14 +53,17 @@ against the example as the whole requirement, not against a narrower
 build of the same example. When the two would build something materially
 different and neither the request nor the code settles which, ask Tom:
 what a request means is something only he holds. Ask in the first turn
-that can, before that turn's own work, in one batch with every other
-material question. Once the reading is material, that the work is
+that can, before that turn's own work, with every other material
+question (in one batch from a task, one at a time in a live chat). Once the reading is material, that the work is
 reversible, or that the delivery would name the reading you chose, is no
 reason to build first.
 
 How to ask:
 
-1. **One batch.** Every material question in one message, numbered.
+1. **One batch from a task; one at a time in a live chat.** A task asking
+   while Tom is away puts every material question in one message,
+   numbered. A live chat asks one at a time, most load-bearing first, as
+   its stage says.
 2. **Only material questions.** Each names what it changes: scope,
    audience, or what is replaced. Settle in the code what the code can
    settle.
