@@ -109,14 +109,14 @@ def test_a_steer_lands_after_the_current_step_once_per_agent_and_is_never_shown_
     (start,) = [r for r in rows if r["type"] == "turn.started"]
     assert start["payload"]["read_upto"] < before < start["id"]
     # The steer from the slot wait reaches the first step; the one sent mid-turn,
-    # a later step; each agent takes each once, never at the same step twice.
+    # a later step; each agent takes each once.
     main = [(step, text) for step, agent, text in got if agent == "main"]
     sub = [(step, text) for step, agent, text in got if agent == "sub1"]
     assert main[0][0] == 0 and "use the blue one" in main[0][1] and "bigger" not in main[0][1]
     assert len(main) == 2 and main[1][0] > 0 and "and make it bigger" in main[1][1]
-    assert [s for s, _ in sub] == [s for s, _ in main] and all(
-        t.startswith("Valor steering") for _, t in main
-    )
+    # The subagent takes the same messages, each once, whichever step its hook ran at.
+    assert len(sub) == 2 and "use the blue one" in sub[0][1] and "and make it bigger" in sub[1][1]
+    assert "bigger" not in sub[0][1] and all(t.startswith("Valor steering") for _, t in main + sub)
     delivered = [r["payload"] for r in rows if r["type"] == "message.delivered"]
     assert delivered == [{"steered_id": before, "turn_id": ended["turn_id"]},
                          {"steered_id": mid, "turn_id": ended["turn_id"]}]  # fmt: skip

@@ -617,10 +617,11 @@ a message between tool calls too, but only into the main agent; a message
 written while a subagent runs waits for its hand-back, and
 `parent_tool_use_id` does not route it inside. SendMessage reaches only
 background agents, which turns disable. Pi's RPC mode has a native `steer`
-command (`docs/rpc.md` of the pinned release), but Pi runs only fresh sessions
-today (the blind verifier's second seat), which take no steering; a working
-session on Pi, like Codex (`exec` takes nothing once started), gets its
-messages at the next turn.
+command (`docs/rpc.md` of the pinned release), not driven yet: the seats put
+Pi only in a fresh session (the blind verifier's second seat), which takes no
+steering. A working session started on Pi (`core start --harness pi`), like a
+Codex one (`exec` takes nothing once started), gets its messages at the next
+turn.
 
 ## Pi, Codex, and further harnesses
 
