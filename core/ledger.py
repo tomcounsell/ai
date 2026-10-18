@@ -57,6 +57,9 @@ QUIET = (
     # A team chat's message that does not wake its chat session: it reaches
     # the session with the next one that does (`core/intake.py`).
     "message.heard",
+    # A steer a running turn took after a step (`core/runs.py`): it spends
+    # the steer once that turn finishes, and moves nothing.
+    "message.delivered",
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:

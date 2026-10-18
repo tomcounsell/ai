@@ -461,9 +461,18 @@ failed step steps the checkout and its dependencies back when they had moved, li
 `rollout.failed`, and is tried again on the next `serve_tick_s` wake. Once one merge's rollout has
 failed three times (`rollout.NOTICE_AFTER`), Tom gets one notice reporting the step and the reason.
 
-**Steering.** A message for a task mid-turn is a ledger row (`message.steered`), delivered as the
-opening of the next working turn that finishes; only stop interrupts a running turn, and answers and
-feedback work this way. Serves: corrections reach every session.
+**Steering.** A message for a task is a ledger row (`message.steered`). While a working or chat
+turn runs, it reaches the turn after the step in progress, never cutting one off: the runner hears the
+row and writes it to the turn's inbox, and Valor's plugin's PostToolUse hook gives it to every agent of
+the turn, subagents included, at its next step (`core/runs.py`,
+[harnesses.md](harnesses.md#steering-mid-turn)). The turn's main agent taking it is a
+`message.delivered` row, and once that turn finishes the message is spent, so no later prompt shows it
+again. A message the turn did not take opens the next working turn, as does one taken by a turn that
+failed, errored or was stopped (which that turn may already have seen: shown twice, never lost). The
+prompt records the last row it read (`turn.started` `read_upto`), so a message that lands while a turn
+waits for its slot reaches it at its first step, or the next turn. Fresh sessions and Codex turns take
+nothing mid-turn. Only stop interrupts a running turn. Answers and feedback never meet a running turn:
+a question ends its turn, and feedback reopens finished work. Serves: corrections reach every session.
 
 ## Bridges
 

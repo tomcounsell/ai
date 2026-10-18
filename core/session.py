@@ -17,7 +17,9 @@ finding of the join, or Tom's feedback, under a short label; `Continue.`
 once a turn in the state has finished. What the turn should do with it is
 the stage file its Brief carries (`skills/sdlc/<state>.md`). An answer,
 findings, or feedback is spent only by a turn that finishes: after a turn
-that fails or is stopped, the next one opens with it again. Each prompt is
+that fails or is stopped, the next one opens with it again. Tom's steering
+written while a turn runs reaches it after its current step (`mid_turn`);
+what the turn did not take opens the next one. Each prompt is
 followed by what became of the effects the previous turn requested, and
 then by the latest delivery of each child that has delivered.
 
@@ -41,7 +43,9 @@ working session in `clarify`, resumed once per wake. Its prompt is what
 reached it since its last finished turn, in order (`chat_prompt`): the
 chat's messages, woken or heard, each with when, who and its id, and its
 tasks' reports (`child.reported`, `core/notices.py`); its first opens
-with its instruction. It answers by requesting sends; `stop.md` ends it,
+with its instruction. A message that wakes it while a turn runs reaches
+that turn after its current step (`mid_turn`, `core/runs.py`), and its
+next prompt leaves out what the turn took. It answers by requesting sends; `stop.md` ends it,
 and no other signal counts. A turn ends the run `listening`: it is
 stepped again only when a message wakes it or a task reports
 (`chat_waiting`), never on its own effects' outcomes. Before each turn
@@ -125,7 +129,7 @@ async def run(
             if b.chat and asked is None:
                 stale = await asyncio.to_thread(refresh, b)
             if asked is None:
-                prompt, resume = await next_prompt(conn, task_id)
+                prompt, resume, read_upto = await next_prompt(conn, task_id)
             rows = await ledger.read(conn, task_id) if state is State.PATCH and asked is None else []
         if asked is not None:
             advised = await advise(gateway, task_id, dsn, alive, asked)
@@ -145,6 +149,8 @@ async def run(
                 dsn=dsn,
                 state=state,
                 offered=performers.offered(b.max_effect_class),
+                read_upto=read_upto,
+                steering=lambda rows, upto=read_upto, chat=bool(b.chat): mid_turn(rows, upto, chat),
             )
         except tasks.TaskStopped:
             return {"status": "stopped"}
@@ -282,9 +288,38 @@ CHAT_ROWS = ("message.steered", "message.heard", "child.reported")
 
 def chat_waiting(rows: list[dict]) -> bool:
     """Whether a chat session has something to answer: a message that
-    wakes it or a task's report, since its last finished turn began."""
-    since = machine.fold(rows).steer_since
-    return any(r["type"] in CHAT_WAKES and int(r.get("id") or 0) > since for r in rows)
+    wakes it or a task's report, since the prompt of its last finished
+    turn, that the turn did not take mid-turn."""
+    f = machine.fold(rows)
+    return any(
+        r["type"] in CHAT_WAKES and int(r.get("id") or 0) > f.steer_since and r["id"] not in f.spent
+        for r in rows
+    )
+
+
+def mid_turn(rows: list[dict], read_upto: int, chat: bool) -> list[tuple[int, str]]:
+    """What a running turn whose prompt read the rows up to `read_upto` is
+    owed: each `message.steered` row after it, by id, rendered as the next
+    prompt would render it (`_steering`; for a chat, `intake.chat_line`,
+    with the chat's heard messages since the one before it)."""
+    from core import intake
+
+    shown = reactions.shown(rows)
+    owed, heard = [], []
+    for r in rows:
+        if int(r.get("id") or 0) <= read_upto:
+            continue
+        p = r["payload"]
+        if chat and r["type"] in ("message.heard", "message.steered"):
+            heard.append(f"- {intake.chat_line(p, shown.get(p.get('received_id')))}")
+        if r["type"] != "message.steered":
+            continue
+        if chat:
+            owed.append((r["id"], "\n".join(["In the chat since your last step:", *heard])))
+            heard = []
+        else:
+            owed.append((r["id"], _steering([p], shown)))
+    return owed
 
 
 def chat_prompt(rows: list[dict]) -> str:
@@ -295,18 +330,24 @@ def chat_prompt(rows: list[dict]) -> str:
     nothing); and each task's report under its task id."""
     from core import intake
 
-    since = machine.fold(rows).steer_since
+    f = machine.fold(rows)
+    since = f.steer_since
+    # A message the last finished turn took mid-turn came with the chat's
+    # heard messages before it (`mid_turn`): the session has read them.
+    upto = max((i for i in f.spent if i > since), default=since)
     shown = reactions.shown(rows)
     read = {
         r["payload"].get("received_id"): r["payload"].get("message_id")
         for r in rows
-        if r["type"] in CHAT_ROWS and int(r.get("id") or 0) <= since
+        if r["type"] in CHAT_ROWS and (int(r.get("id") or 0) <= since or r["id"] in f.spent)
     }
     lines = []
     for r in rows:
-        if int(r.get("id") or 0) <= since:
+        if int(r.get("id") or 0) <= since or r["id"] in f.spent:
             continue
         p = r["payload"]
+        if r["type"] == "message.heard" and r["id"] < upto:
+            continue
         if r["type"] == "reaction.requested" and p.get("stage") == "shape" and p.get("received_id") in read:
             lines.append(
                 f"- Your reaction on message {read[p['received_id']]} is now {reactions.emoji_of(p)}: "
@@ -1145,9 +1186,12 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
     return None
 
 
-async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
-    """The next turn's prompt and the harness session it resumes."""
+async def next_prompt(conn, task_id: str) -> tuple[str, str | None, int]:
+    """The next turn's prompt, the harness session it resumes, and the last
+    row it read (`turn.started` `read_upto`): a steer after it is owed to
+    the turn mid-turn (`mid_turn`) or to the next."""
     rows = await ledger.read(conn, task_id)
+    read_upto = max((int(r["id"]) for r in rows), default=0)
     f = machine.fold(rows)
     b = await tasks.brief(conn, task_id)
     if b.chat:
@@ -1155,7 +1199,7 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
         report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
         parts = (first, chat_prompt(rows), _failure_report(rows), _advice_report(rows),
                  _errors_report(f.last_collected), report, context_report(rows, b.model))  # fmt: skip
-        return "\n\n".join(x for x in parts if x) or "Continue.", f.session
+        return "\n\n".join(x for x in parts if x) or "Continue.", f.session, read_upto
     if f.session is None:
         prompt = b.instruction
     else:
@@ -1167,7 +1211,7 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
     children = _children_report(await tasks.reports(conn, task_id))
     parts = (prompt, failed, advice, steering, notes, report, children)
-    return "\n\n".join(x for x in parts if x), f.session
+    return "\n\n".join(x for x in parts if x), f.session, read_upto
 
 
 def _working_turn_finished(rows: list[dict], turn_states: dict[str, str]) -> bool:

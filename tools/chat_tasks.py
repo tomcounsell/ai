@@ -123,7 +123,8 @@ class TaskSteer(_ChatTask):
     action_type = "task.steer"
     usage = (
         '`task.steer`: target the task id, payload `{"text": "...", "by": "<who said it>"}`; '
-        "gives that task what the chat added, read at its next turn. To a task that has delivered "
+        "gives that task what the chat added: after its current step when it is working, else at its next "
+        "turn. To a task that has delivered "
         "(merged or ended) it is feedback: the task reopens in its own workspace and conversation, "
         "revises, and reports to you again. A stopped task stays stopped."
     )

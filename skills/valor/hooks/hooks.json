@@ -6,6 +6,16 @@
         "hooks": [{"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/web_only.py\" || exit 2"}]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [{"type": "command", "command": "[ -z \"$VALOR_STEER\" ] || /usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/steer.py\""}]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [{"type": "command", "command": "[ -z \"$VALOR_STEER\" ] || /usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/steer.py\""}]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [{"type": "command", "command": "printf %s \"$VALOR_COMPACT\""}]

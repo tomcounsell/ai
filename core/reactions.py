@@ -16,8 +16,8 @@ Nothing is guessed on arrival. When a turn of the task is collected
 the effects it requested and the tools its transcript shows it called
 (`did`). The most specific activity (`ORDER`) becomes the `shape` reaction
 of one message still showing 👀 that the turn read (its prompt's window,
-since the last turn that spent the steering; a fresh, compaction, or errored
-turn sets nothing): the one a send of the turn replies to, else the newest. A turn that only replied in the chat
+since the last turn that spent the steering, and the steers it took
+mid-turn; a fresh, compaction, or errored turn sets nothing): the one a send of the turn replies to, else the newest. A turn that only replied in the chat
 did nothing, so 👀 stays. A `none`-bound message's 👀 is `final` and never
 changes.
 
@@ -229,14 +229,18 @@ async def on_turn(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]
     if start is None:
         return None
     # The messages this turn read: its prompt's steering window (`steer_since`
-    # before it began), and only when the turn spent it (a fresh, compaction,
-    # or errored turn leaves it to the next).
-    if machine.fold(rows).steer_since != start["id"]:
+    # before it began, up to the last row its prompt read) and the steers it
+    # took mid-turn, and only when the turn spent them (a fresh, compaction,
+    # or errored turn leaves them to the next).
+    f = machine.fold(rows)
+    if turn_id not in f.turn_rows or f.steer_since != f.turn_rows[turn_id]:
         return None
     since = machine.fold([r for r in rows if r["id"] < start["id"]]).steer_since
+    took = {p.get("received_id") for i, p in f.steered if i in f.taken.get(turn_id, set())}
     shaped = {r["payload"]["received_id"] for r in rows if r["type"] == "reaction.requested"
               and r["payload"].get("stage") == "shape"}  # fmt: skip
-    waiting = [r["payload"] for r in rows if r["type"] == "reaction.requested" and since < r["id"] < start["id"]
+    waiting = [r["payload"] for r in rows if r["type"] == "reaction.requested"
+               and (since < r["id"] <= f.turn_rows[turn_id] or r["payload"].get("received_id") in took)
                and r["payload"].get("stage") == "seen" and not r["payload"].get("final")
                and r["payload"]["received_id"] not in shaped]  # fmt: skip
     if not waiting:

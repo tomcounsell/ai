@@ -238,19 +238,24 @@ class Fold:
     last_collected: dict[str, Any] | None = None
     turn_states: dict[str, str] = field(default_factory=dict)
     ignored: list[dict[str, Any]] = field(default_factory=list)
-    # Steering: `message.steered` rows by id, and the id of the
-    # `turn.started` of the last working-session turn that finished. Only
-    # such a turn renders `next_prompt`, so only it spends steering.
+    # Steering: `message.steered` rows by id, and the last row the prompt
+    # of the last working-session turn that finished read (its
+    # `read_upto`, else its `turn.started`). Only such a turn renders
+    # `next_prompt`, so only it spends steering; it also spends what it
+    # took mid-turn (`message.delivered`), which its session, the one the
+    # next turn resumes, holds.
     steered: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
     steer_since: int = 0
     turn_rows: dict[str, int] = field(default_factory=dict)
+    taken: dict[str, set[int]] = field(default_factory=dict)
+    spent: set[int] = field(default_factory=set)
 
     @property
     def steering(self) -> list[dict[str, Any]]:
-        """What Tom wrote after the start of the last working turn that
-        finished without an error, oldest first: the next working turn
-        reads it."""
-        return [p for i, p in self.steered if i > self.steer_since]
+        """What Tom wrote after the prompt of the last working turn that
+        finished without an error, and that no such turn took mid-turn,
+        oldest first: the next working turn reads it."""
+        return [p for i, p in self.steered if i > self.steer_since and i not in self.spent]
 
     @property
     def loops(self) -> Loops:
@@ -386,10 +391,13 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         f.turn_states[str(p["turn_id"])] = (
             FRESH if p.get("fresh") else COMPACTION if p.get("compaction") else str(p.get("state"))
         )
-        f.turn_rows[str(p["turn_id"])] = int(row.get("id") or 0)
+        f.turn_rows[str(p["turn_id"])] = int(p["read_upto"] if "read_upto" in p else row.get("id") or 0)
         return None
     if kind == "message.steered":
         f.steered.append((int(row.get("id") or 0), p))
+        return None
+    if kind == "message.delivered":
+        f.taken.setdefault(str(p["turn_id"]), set()).add(int(p["steered_id"]))
         return None
     if kind == "turn.ended":
         turn_id = str(p["turn_id"])  # read before anything changes, so a malformed row changes nothing
@@ -402,7 +410,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if _session_id(result.get("session_id")) and f.turn_states.get(turn_id) != FRESH:
             f.session = result["session_id"]
         # A turn that ended in an error has not acted on the steering, so it
-        # stays for the next turn.
+        # stays for the next turn, even what it took mid-turn.
         if (
             p.get("outcome") == "done"
             and not result.get("is_error")
@@ -410,6 +418,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             and f.turn_states[turn_id] not in (FRESH, COMPACTION)
         ):
             f.steer_since = max(f.steer_since, f.turn_rows.get(turn_id, 0))
+            f.spent |= f.taken.get(turn_id, set())
         if (
             p.get("outcome") == "done"
             and not result.get("is_error")

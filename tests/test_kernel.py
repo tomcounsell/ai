@@ -690,7 +690,7 @@ def test_a_chat_sessions_steer_of_a_delivered_task_is_feedback_that_reopens_it(d
         done = await steer.perform(action, "k1")
         found = await steer.lookup(action, "k1")
         async with await db.connect(dsn) as conn:
-            prompt, resume = await session.next_prompt(conn, child)
+            prompt, resume, _ = await session.next_prompt(conn, child)
         return done, found, prompt, resume, await bridges.rows(dsn, child)
 
     done, found, prompt, resume, rows = run(go())

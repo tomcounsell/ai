@@ -40,6 +40,17 @@ it survives setsid, re-parenting to launchd, and a process retitling
 itself over its environment (redis-server does), and platform binaries hide
 their environment from other processes altogether.
 
+A message for the task that lands while its working turn runs (a
+`message.steered` row) reaches the turn after its current step, when the
+harness can take it (`TurnCommand.steerable`) and the caller says what the
+turn is owed (`steering`, from `session.mid_turn`). The runner hears the
+row on the one notify loop that hears a stop, writes each owed message as
+one file into the turn's inbox (`<work_dir>/<task>/steer/<turn>`, named to
+the turn as `VALOR_STEER`), and, once the turn has ended, writes a
+`message.delivered` row for each message the turn's main agent took, from
+the inbox's receipts (`taken.jsonl`). A message the turn never took, or
+took in a turn that did not finish, opens the next turn.
+
 A turn with its own Claude Code config directory names its session
 (`TurnCommand.transcript`); once its processes are reaped, its transcript
 is copied into the store (`core.transcripts`) and `turn.ended` records the
@@ -51,6 +62,7 @@ import asyncio
 import contextlib
 import ctypes
 import functools
+import json
 import os
 import platform
 import signal
@@ -68,6 +80,10 @@ if TYPE_CHECKING:
     from core.gateway import Gateway  # gateway -> tasks -> workspace -> runs: a cycle at import
 
 TURN_ENV = "VALOR_TURN"
+STEER_ENV = "VALOR_STEER"
+EVENTS_CHANNEL = "valor_events"
+# Owed to a running turn, from the task's rows: (steered row id, its text).
+Steering = Callable[[list[dict[str, Any]]], list[tuple[int, str]]]
 Transcript = transcripts.Transcript
 
 
@@ -75,6 +91,13 @@ def output_paths(task_id: str, turn_id: str) -> tuple[Path, Path]:
     """Where a turn's stdout and stderr are written."""
     turns = Path(settings.work_dir).expanduser() / task_id / "turns"
     return turns / f"{turn_id}.stdout", turns / f"{turn_id}.stderr"
+
+
+def inbox_path(task_id: str, turn_id: str) -> Path:
+    """Where a running turn's steering is written: beside its TMPDIR, never
+    in it, so neither the clear at its start nor the turn's own use of its
+    TMPDIR loses a message."""
+    return Path(settings.work_dir).expanduser() / task_id / "steer" / turn_id
 
 
 @dataclass
@@ -91,6 +114,9 @@ class TurnCommand:
     transcript: Transcript | None = None
     # The turn's TMPDIR: emptied before it starts, removed once it ends.
     tmpdir: str | None = None
+    # The harness takes a message mid-turn from the inbox `VALOR_STEER`
+    # names (Claude Code: Valor's plugin's PostToolUse hook).
+    steerable: bool = False
 
 
 async def run_turn(
@@ -102,6 +128,8 @@ async def run_turn(
     fresh: str | None = None,
     offered: Sequence[str] = (),
     compaction: bool = False,
+    read_upto: int | None = None,
+    steering: Steering | None = None,
 ) -> dict[str, Any]:
     """Run one turn of the task to its end or its stop, in `state` (the
     state machine's state the turn works in, recorded on `turn.started`;
@@ -110,7 +138,9 @@ async def run_turn(
     and `turn.started` says `fresh: true`, so the fold never resumes its
     session. `offered` is the usage lines of the task's performers, which
     the working session's Brief lists. `compaction` marks a chat session's
-    `/compact` turn on `turn.started` (`core/session.py`). Returns the
+    `/compact` turn on `turn.started` (`core/session.py`). `read_upto`, the
+    last row the turn's prompt read, is recorded on `turn.started`;
+    `steering` says what the turn is owed mid-turn. Returns the
     `turn.ended` payload.
 
     The turn holds a turn slot (`core/slot.py`) from before its Brief is
@@ -128,7 +158,9 @@ async def run_turn(
     tmpdirs: list[str] = []
     try:
         async with held:
-            ended = await _run_turn(gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction)
+            ended = await _run_turn(
+                gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction, read_upto, steering
+            )
     finally:
         for tmpdir in tmpdirs:
             with contextlib.suppress(OSError):
@@ -164,7 +196,7 @@ def kernel_commit() -> str | None:
 
 
 async def _run_turn(
-    gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction
+    gateway, task_id, build, dsn, state, fresh, offered, tmpdirs, compaction, read_upto, steering
 ) -> dict[str, Any]:
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
@@ -198,6 +230,7 @@ async def _run_turn(
                         "state": state,
                         **({"fresh": True, "stage": fresh} if fresh else {}),
                         **({"compaction": True} if compaction else {}),
+                        **({"read_upto": read_upto} if read_upto is not None else {}),
                         "harness": command.harness,
                         "harness_version": command.harness_version,
                         "argv": command.argv,
@@ -215,6 +248,8 @@ async def _run_turn(
             raise
         if command.tmpdir:
             tmpdirs.append(command.tmpdir)
+        inbox = inbox_path(task_id, turn_id) if steering and command.steerable else None
+        written: set[int] = set()
         out_path, err_path = output_paths(task_id, turn_id)
         proc = pumped = None
         waiters: list[asyncio.Future] = []
@@ -227,9 +262,17 @@ async def _run_turn(
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out = files.enter_context(out_path.open("wb"))
                 err = files.enter_context(err_path.open("wb"))
+                env = {**command.env, TURN_ENV: turn_id}
+                wake = asyncio.Event()
+                if inbox is not None:
+                    tmpdirs.append(str(inbox))
+                    await listener.execute(f"LISTEN {EVENTS_CHANNEL}")
+                    await asyncio.to_thread(_clear, str(inbox), True)
+                    await _deliver(dsn, task_id, steering, inbox, written)
+                    env[STEER_ENV] = str(inbox)
                 proc = await asyncio.create_subprocess_exec(
                     *command.argv,
-                    env={**command.env, TURN_ENV: turn_id},
+                    env=env,
                     cwd=command.cwd,
                     stdin=asyncio.subprocess.DEVNULL if command.stdin is None else asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -240,9 +283,16 @@ async def _run_turn(
                     _pump(proc.stdout, out), _pump(proc.stderr, err), _feed(proc, command.stdin)
                 )
                 finished = asyncio.create_task(proc.wait())
-                stopped = asyncio.create_task(_stop_heard(listener, task_id))
+                stopped = asyncio.create_task(_heard(listener, task_id, wake))
                 waiters += [finished, stopped]
-                done, _ = await asyncio.wait(set(waiters), return_when=asyncio.FIRST_COMPLETED)
+                if inbox is not None:
+                    wake.set()  # a steer recorded before the loop listened
+                    waiters.append(
+                        asyncio.create_task(_delivering(dsn, task_id, steering, inbox, written, wake))
+                    )
+                done, _ = await asyncio.wait({finished, stopped}, return_when=asyncio.FIRST_COMPLETED)
+                for waiter in waiters[2:]:
+                    waiter.cancel()
                 if stopped in done:
                     gateway.revoke(task_id)
                     _kill_group(proc.pid)
@@ -285,8 +335,51 @@ async def _run_turn(
         async with conn.transaction():
             if reaped:
                 await ledger.append(conn, task_id, "turn.reaped", {"turn_id": turn_id, "processes": reaped})
+            for steered_id in sorted(_taken(inbox) & written) if inbox is not None else ():
+                await ledger.append(
+                    conn, task_id, "message.delivered", {"steered_id": steered_id, "turn_id": turn_id}
+                )
             ended = await _ended(conn, task_id, ended)
     return ended
+
+
+async def _deliver(dsn, task_id: str, steering: Steering, inbox: Path, written: set[int]) -> None:
+    """Write each message the turn is owed and has not been given into its
+    inbox, one file each, whole: `<steered id>.md`."""
+    async with await db.connect(dsn) as conn:
+        rows = await ledger.read(conn, task_id)
+    for steered_id, text in steering(rows):
+        if steered_id not in written:
+            part = inbox / f".{steered_id}.part"
+            part.write_text(text)
+            os.replace(part, inbox / f"{steered_id}.md")
+            written.add(steered_id)
+
+
+async def _delivering(dsn, task_id, steering: Steering, inbox: Path, written: set[int], wake) -> None:
+    while True:
+        await wake.wait()
+        wake.clear()
+        await _deliver(dsn, task_id, steering, inbox, written)
+
+
+def _taken(inbox: Path) -> set[int]:
+    """The messages the turn's main agent took, from the hook's receipts:
+    one JSON line per message an agent was given, `{"id", "agent"}`, where
+    the main agent is `main`. A line cut short is skipped."""
+    taken = set()
+    try:
+        lines = (inbox / "taken.jsonl").read_text().splitlines()
+    except OSError:
+        return taken
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("agent") == "main" and isinstance(r.get("id"), int):
+            taken.add(r["id"])
+    return taken
 
 
 # What a harness's parsed result holds besides the turn's own words.
@@ -370,10 +463,20 @@ async def _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc:
         exc.add_note(f"turn {turn_id} was not ended: {failed!r}")
 
 
-async def _stop_heard(listener, task_id: str) -> None:
+async def _heard(listener, task_id: str, wake: asyncio.Event) -> None:
+    """The turn's one notify loop: returns on the task's stop; a
+    `message.steered` row of the task wakes its delivery."""
     async for note in listener.notifies():
-        if note.payload == task_id:
-            return
+        if note.channel == tasks.STOP_CHANNEL:
+            if note.payload == task_id:
+                return
+            continue
+        try:
+            row = json.loads(note.payload)
+        except ValueError:
+            continue
+        if row.get("task_id") == task_id and row.get("type") == "message.steered":
+            wake.set()
 
 
 async def _pump(pipe: asyncio.StreamReader, file) -> None:

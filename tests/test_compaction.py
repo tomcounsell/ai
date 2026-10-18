@@ -246,7 +246,7 @@ def test_a_chat_session_that_asks_is_compacted_in_place_before_its_next_turn(dsn
         out = await wake(dsn, task)
         await say(dsn, task, "Still there?", 2)
         async with await db.connect(dsn) as conn:
-            prompt, resume = await session.next_prompt(conn, task)
+            prompt, resume, _ = await session.next_prompt(conn, task)
             recollected = await serve.recollect(conn, task, scripted.performers)
         return out, prompt, resume, recollected, await bridges.rows(dsn, task)
 
@@ -279,7 +279,7 @@ def test_an_empty_request_a_failed_compaction_and_a_stop_beside_one(dsn, tmp_pat
         first = await wake(dsn, task)
         await say(dsn, task, "again", 2)
         async with await db.connect(dsn) as conn:
-            prompt, _ = await session.next_prompt(conn, task)
+            prompt, _, _ = await session.next_prompt(conn, task)
         second = await wake(dsn, task)
         return first, prompt, second, await bridges.rows(dsn, task)
 

@@ -583,6 +583,45 @@ The kernel sets `KOKORO_MODELS_DIR` and `VALOR_TTS_VOICE` in every turn's
 env from `settings.tts_model_dir` and `settings.tts_voice`, so every reply
 has the one voice ([tools/README.md](../tools/README.md), Voice).
 
+## Steering mid-turn
+
+Tom (2026-10-18): a message meant for running work reaches it at the next
+opportunity, after the current step, never by cutting a step off; for
+chat sessions, tasks in every stage, and their subagents.
+
+A working or chat turn of a harness that can take it (`TurnCommand.steerable`,
+Claude Code) gets an inbox, `<work_dir>/<task>/steer/<turn>`, beside its TMPDIR
+and named as `VALOR_STEER`. The runner's one notify loop hears both the task's
+stop and each `message.steered` row of the task, and writes every message the
+turn is owed (`session.mid_turn`: after the prompt's `read_upto`, rendered as
+the next prompt would render it; for a chat, with the heard messages before it)
+as `<id>.md`. Valor's plugin's hook (`skills/valor/hooks/steer.py`, on
+PostToolUse and PostToolUseFailure) gives each agent, the main one and each
+subagent by its `agent_id`, every message it has not taken, as context for its
+next model call, under a lock, printing and then appending one receipt line per
+message. At the turn's end the runner writes `message.delivered` for each
+message the main agent took, in the `turn.ended` transaction, and removes the
+inbox.
+
+Measured (Claude Code 2.1.302, 2026-10-18, with Valor's plugin): a message
+written during an 8-second Bash call reached the main agent right after it, and
+the next call followed the correction; written while a subagent ran, it
+reached the subagent at its next step and the main agent at the subagent's
+hand-back. The subagent reported it but kept to its prompt when the message
+contradicted it (Claude Code's subagents treat text that arrives mid-run as
+untrusted); the main agent followed it. So a correction reliably reaches the
+orchestrating agent at its next step, and a subagent as information.
+
+Not used: Claude Code's `--input-format stream-json` with stdin left open takes
+a message between tool calls too, but only into the main agent; a message
+written while a subagent runs waits for its hand-back, and
+`parent_tool_use_id` does not route it inside. SendMessage reaches only
+background agents, which turns disable. Pi's RPC mode has a native `steer`
+command (`docs/rpc.md` of the pinned release), but Pi runs only fresh sessions
+today (the blind verifier's second seat), which take no steering; a working
+session on Pi, like Codex (`exec` takes nothing once started), gets its
+messages at the next turn.
+
 ## Pi, Codex, and further harnesses
 
 Pi is the second harness: the same port, sandbox profile and `VALOR_TURN`

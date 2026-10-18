@@ -237,6 +237,7 @@ def workspace_turn(
             harness_version=version(settings.claude),
             transcript=transcripts.anchored(harness.get("claude_config_dir"), session_id),
             tmpdir=harness.get("tmpdir"),
+            steerable=True,
         )
 
     return build
