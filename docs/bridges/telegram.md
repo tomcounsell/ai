@@ -177,7 +177,7 @@ reconciles and runs the gap fill. Nothing is guessed on arrival. When a
 turn of the task is collected, what the turn actually did (the effects it
 requested, the tool calls in its transcript) sets the reaction that
 replaces 👀 on one message its prompt read (those that arrived since the
-last turn that took the steering; the one a send of the turn replies to,
+last turn that took the steering, and the steers it took mid-turn; the one a send of the turn replies to,
 else the newest; a fresh, compaction, or errored turn sets none): `task` 🫡,
 `code` 👨‍💻, `web_search` 🔍, `lookup` 🧐, `document` ✍, `present` 📊,
 `issue` 🎫, `schedule` 📅, `send` 📤. A turn that only replied leaves 👀;
@@ -376,8 +376,10 @@ is a steer; in a chat the spec lists under `mentions` (the old teammate
 groups) only one naming Valor ("valor", "@valor", "@valorengels") or replying to his post
 wakes it, and the rest are heard (`message.heard`, quiet) and reach it
 with the next. Each turn's prompt is what came in since the last, with
-when, who and message ids; messages that arrive during a turn go in
-together at the next.
+when, who and message ids; a message that wakes it during a turn reaches
+that turn after its current step, with the heard messages before it, and
+one the turn did not take goes in at the next
+([harnesses.md](../harnesses.md#steering-mid-turn)).
 
 Each chat (a "room") may carry a description of what it is for, beside
 where it is listed: a spec's `rooms` entry for its chat (every group and

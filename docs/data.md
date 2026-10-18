@@ -170,8 +170,9 @@ model calls, its outcome, and every effect it requested. A gateway row holds
 the provider's usage, never the request or response body.
 
 Steering a running task is the architecture's mechanism. Its rows are
-events on the task's stream, read at the next turn boundary. Answers and
-feedback are the two forms the current kernel builds.
+events on the task's stream, read by a running working or chat turn after
+its current step, else at the next turn boundary. Answers and feedback are
+the two forms the current kernel builds.
 
 ## Append-only, enforced twice
 
