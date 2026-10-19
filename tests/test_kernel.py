@@ -784,7 +784,7 @@ def test_the_patch_stage_tells_a_revised_deliverable_how_to_come_back():
     assert "absolute path" in text and "opening `Done:`" in text
 
 
-def test_a_sessions_and_its_childs_notices_are_at_home_in_toms_own_chat_only(dsn, dm):
+def test_a_sessions_and_its_childs_notices_are_at_home_in_the_chat_they_came_from(dsn, dm):
     async def go():
         chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
         child = await child_of(dsn, chat)
@@ -792,11 +792,16 @@ def test_a_sessions_and_its_childs_notices_are_at_home_in_toms_own_chat_only(dsn
         async with await db.connect(dsn) as conn:
             await notices.credential(conn, child, "abc", missing=True)
             homes = [await notices.home(conn, t) for t in (chat, child, team)]
-        return homes, bridges.typed(await bridges.rows(dsn, child), "notice.requested")
+        child_rows, chat_rows = await bridges.rows(dsn, child), await bridges.rows(dsn, chat)
+        return (
+            homes,
+            bridges.typed(child_rows, "notice.requested"),
+            [(r["child_id"] == child, r["kind"]) for r in bridges.typed(chat_rows, "child.reported")],
+        )
 
-    homes, (credential,) = run(go())
-    assert homes == [("slack", dm), ("slack", dm), (None, None)]
-    assert (credential["channel"], credential["chat_id"]) == ("slack", dm)
+    homes, notes, reported = run(go())
+    assert homes == [("slack", dm), ("slack", dm), ("telegram", "-1009")]
+    assert not notes and reported == [(True, "credential")]
 
 
 def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):
@@ -1269,17 +1274,16 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert cb.parent_id == session_id and cb.project == {"name": "flowers"} and found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
     assert started["provenance"]["by"] == "Rain"
-    (reported,) = [p for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
-    assert reported["kind"] == "question"
-    notes = [r["payload"] for r in child_rows if r["type"] == "notice.requested"]
-    assert [(n["kind"], n["chat_id"]) for n in notes] == [("credential", bridges.OPERATOR_CHAT)]
+    reported = [p["kind"] for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
+    assert reported == ["question", "credential"]
+    assert not [r for r in child_rows if r["type"] == "notice.requested"]
     (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]
     assert (answered["text"], answered["provenance"]["by"]) == ("v12", "Kim")
     assert refused == f"task {session_id} does not report to this chat"
     assert machine.fold(child_rows).state is State.STOPPED
 
 
-def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_reaches_tom(dsn, team):
+def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_is_told_there(dsn, team):
     async def go():
         task = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
         async with await db.connect(dsn) as conn:
@@ -1290,7 +1294,7 @@ def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_r
         return [r["payload"] for r in await rows_of(dsn, task) if r["type"] == "notice.requested"]
 
     (reported,) = run(go())
-    assert (reported["chat_id"], reported["reply_to"]) == (bridges.OPERATOR_CHAT, None)
+    assert (reported["chat_id"], reported["reply_to"]) == (GROUP, None)
     assert "an email to x@florist.test" in reported["text"]
 
 

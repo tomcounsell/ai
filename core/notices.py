@@ -12,8 +12,8 @@ a note to Tom (the text of `done.md` above its first `---` line, or
 
 `owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
 and has not requested, to the session it reports to (below), else to the
-task's home chat (`home`), else to `settings.operator_channel` and
-`settings.operator_chat`:
+task's home chat (`home`), the chat its work came in from, else to
+`settings.operator_channel` and `settings.operator_chat`:
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
@@ -40,11 +40,14 @@ the operator chat's session (`intake.operator_session`), started when
 none is open. Each notice it owes is then a `child.reported` row on that
 session (`child_id`, `kind`, `about_key`, `text`), once per `about_key`,
 which wakes the session; the session tells its chat in its own words and
-can answer, steer and stop the task (`tools/chat_tasks.py`). The kinds
-that stay Tom's (`TOMS`) go to Tom directly: the push credential request,
-a binding notice, and a rollout's. So does every notice when there is no
-session to take it: a session's own, a child of a task that is not a
-session, or no operator chat or project for the operator session.
+can answer, steer and stop the task (`tools/chat_tasks.py`). Only a chat
+session speaks to Tom, and only in the chat it serves (Tom's rule of
+2026-10-19), so a session's child reports every kind up to it. The kinds
+that stay Tom's (`TOMS`: the push credential request, a binding notice,
+and a rollout's) skip the operator session: a root task's go to Tom
+directly. So does every notice when there is no session to take it: a
+session's own (to its chat), a child of a task that is not a session, or
+no operator chat or project for the operator session.
 
 A notice with no channel or chat (the operator's unset) is written with a
 `notice.undeliverable` row beside it, so the ledger shows it was never
@@ -88,8 +91,8 @@ async def request(
     ).fetchone()
     if found is not None:
         return None
-    if channel is None and chat_id is None and kind not in TOMS:
-        parent = await reports_to(conn, task_id)
+    if channel is None and chat_id is None:
+        parent = await reports_to(conn, task_id, toms=kind in TOMS)
         if parent is not None:
             return await _to_parent(conn, parent, task_id, kind, about_key, text)
     notice_id = ledger.new_id()
@@ -133,11 +136,12 @@ async def request(
 TOMS = ("credential", "binding", "rollout")
 
 
-async def reports_to(conn, task_id: str) -> str | None:
+async def reports_to(conn, task_id: str, *, toms: bool = False) -> str | None:
     """The session the task reports to: its parent when that is a chat
     session; for a root task that is no session, the operator chat's
-    session. None for a session, a child of a task that is not one, a
-    stream (a channel's id, no task), or no operator session to have."""
+    session, unless the notice is one of Tom's own kinds (`toms`). None for
+    a session, a child of a task that is not one, a stream (a channel's id,
+    no task), or no operator session to have."""
     from core import intake, tasks
 
     try:
@@ -148,7 +152,7 @@ async def reports_to(conn, task_id: str) -> str | None:
         return None
     if b.parent_id is not None:
         return b.parent_id if (await tasks.brief(conn, b.parent_id)).chat else None
-    return await intake.operator_session(conn)
+    return None if toms else await intake.operator_session(conn)
 
 
 async def _to_parent(conn, parent: str, task_id: str, kind: str, about_key: str, text: str) -> str | None:
@@ -167,13 +171,14 @@ async def _to_parent(conn, parent: str, task_id: str, kind: str, about_key: str,
 
 
 async def home(conn, task_id: str) -> tuple[str | None, str | None]:
-    """The chat Tom's notices about the task go to, when it is Tom's own
-    chat (`intake._toms_own`), so he is answered where he asked, as a
-    developer would: a chat session's own chat, a session's child's
-    session's chat, else the chat of the message that started the task.
-    Else (None, None), the operator's. Tom's "Hi Valor" on Telegram,
-    2026-10-16, was answered on Slack."""
-    from core import intake, tasks
+    """The chat the task's notices go to: the chat its work came in from, a
+    team chat as much as Tom's own, since only the chat session speaks to
+    Tom and only in the chat it serves (Tom's rule of 2026-10-19): a chat
+    session's own chat, a session's child's session's chat, else the chat
+    of the message that started the task. Else (None, None), the
+    operator's: a task no chat started, or an email thread, whose bridge
+    sends no notices."""
+    from core import tasks
 
     try:
         b = await tasks.brief(conn, task_id)
@@ -183,7 +188,7 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
     if b is not None and chat is None and b.parent_id is not None:
         chat = (await tasks.brief(conn, b.parent_id)).chat
     if chat:
-        return (chat["channel"], chat["chat_id"]) if intake._toms_own(chat) else (None, None)
+        return (chat["channel"], chat["chat_id"]) if chat["channel"] != "email" else (None, None)
 
     row = await (
         await conn.execute(
@@ -194,7 +199,7 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
             (task_id,),
         )
     ).fetchone()
-    if row is None or not intake._toms_own(row[0]):
+    if row is None or row[0]["channel"] == "email":
         return None, None
     return row[0]["channel"], row[0]["chat_id"]
 

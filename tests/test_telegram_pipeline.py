@@ -220,7 +220,7 @@ def test_the_mailbox_connection_keeps_its_idle_path_alive():
             assert sock.getsockopt(socket.IPPROTO_TCP, idle) == smtp.KEEPALIVE["idle"]
 
 
-def test_a_task_tom_started_in_his_dm_is_answered_there(dsn, tmp_path):
+def test_a_task_a_chat_started_is_answered_there(dsn, tmp_path):
     async def go(chat):
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="Hi Valor"))
@@ -243,4 +243,4 @@ def test_a_task_tom_started_in_his_dm_is_answered_there(dsn, tmp_path):
         operator_chat="T/U",
         projects_dir=str(tmp_path),
     ):
-        assert run(go(OPERATOR)) == [("telegram", OPERATOR)] and run(go("-100")) == [("slack", "T/U")]
+        assert run(go(OPERATOR)) == [("telegram", OPERATOR)] and run(go("-100")) == [("telegram", "-100")]
