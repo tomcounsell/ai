@@ -244,8 +244,9 @@ repository, the commit read, and the key the fetch carried (by name, or
 null for a local path), on the run, or on the objective beside its
 `routine.ran` when the firing starts no run. A repository Valor's account
 cannot read, or a missing key file, is named in the summary as not read, and
-the other businesses go on. Provisioning still fetches anonymously
-(`workspace._cache` without a credential).
+the other businesses go on. Provisioning and the tip fetch carry the same
+key when the Mac has it, so a task works in a private repository Valor's
+account can read.
 
 The file lists each committed decision, its reasoning reference, and its
 conditions:

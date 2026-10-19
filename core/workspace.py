@@ -511,10 +511,11 @@ def _cache(
     loopback: bool = False,
 ) -> Path:
     """The kernel's bare clone of the repository, fetched by its trusted git:
-    a local path, or an HTTPS URL. Without `credential` (provisioning) the
-    URL is fetched anonymously and a repository that needs a credential to
-    fetch is refused. With `credential`, the GitHub key file (the conditions
-    routine), a remote URL is fetched as Valor's GitHub account: each git
+    a local path, or an HTTPS URL. Without `credential` the URL is fetched
+    anonymously and a repository that needs a credential to fetch is
+    refused. With `credential`, the GitHub key file (provisioning and the tip
+    fetch through `_valor_key`, and the conditions routine), a github.com URL
+    is fetched as Valor's GitHub account: each git
     call against it gets a header file of its own
     (`core.credentials.header_file`) and the pins of `git.credential_pins`,
     as the merge's push does. `loopback` lets a loopback http URL be
@@ -554,9 +555,7 @@ def _cache(
         if needs_credential(str(exc)):
             if keyed:
                 raise Refused(f"{origin} refused Valor's GitHub credential; rotate it: {exc}") from None
-            raise Refused(
-                f"{origin} needs a credential to fetch; private repositories are not fetched"
-            ) from None
+            raise Refused(f"{origin} needs a credential to fetch and this Mac has no GitHub key") from None
         raise Refused(f"fetching {origin}: {exc}") from None
     except credentials.CredentialError as exc:
         raise Refused(f"fetching {origin} as Valor: {exc}") from None
@@ -566,9 +565,17 @@ def _cache(
     return cache
 
 
+def _valor_key() -> str | None:
+    """Valor's GitHub key file, when this Mac has one: provisioning and the
+    tip fetch then read any repository Valor's account can, private ones
+    included, as the conditions routine does."""
+    key = settings.github_keyfile
+    return key if Path(key).exists() else None
+
+
 def needs_credential(error: str) -> bool:
-    """Whether git's error says the remote wants a credential: the kernel
-    fetches no private repository."""
+    """Whether git's error says the remote wants a credential: a private
+    repository fetched without Valor's GitHub key."""
     return "Authentication" in error or "could not read Username" in error
 
 
@@ -706,7 +713,7 @@ def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | No
 
 def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, base: str | None,
                source: str | None) -> Provisioned:  # fmt: skip
-    cache = _cache(spec, source, lay.root.parent)
+    cache = _cache(spec, source, lay.root.parent, credential=_valor_key())
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
@@ -1286,7 +1293,7 @@ def fetch_into_mirror(
 def fetch_tip(spec: Spec, mirror: str | Path) -> str:
     """Fetch the project's branch into the kernel's cache, then its tip
     into `mirror` (`refs/valor/tip`); return the tip."""
-    cache = _cache(spec, None, work_dir())
+    cache = _cache(spec, None, work_dir(), credential=_valor_key())
     tip = _commit_of(cache, f"refs/heads/{spec.branch or _remote_head(cache)}")
     git.trusted(Path(mirror), "fetch", "-q", "--no-tags", f"file://{cache}", f"+{tip}:refs/valor/tip")
     return tip

@@ -1397,3 +1397,29 @@ def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, m
     assert machine.fold(rows).state is not State.STOPPED
     (reported,) = [r["payload"] for r in rows if r["type"] == "notice.requested"]
     assert reported["chat_id"] == bridges.OPERATOR_CHAT
+
+
+def test_provisioning_fetches_as_valor_when_the_mac_has_the_github_key(tmp_path, monkeypatch):
+    # A private repository is fetched with Valor's GitHub key; without it, anonymously.
+    passfile = tmp_path / "keys" / "pgpass"
+    passfile.parent.mkdir()
+    monkeypatch.setattr(workspace, "settings", dataclasses.replace(settings, pg_passfile=str(passfile)))
+    carried = []
+
+    def cache(spec, source, work, *, credential=None, loopback=False):
+        carried.append(credential)
+        raise workspace.Refused("stop")
+
+    monkeypatch.setattr(workspace, "_cache", cache)
+    spec = workspace.Spec(
+        name="p", repo="https://github.com/yudame/private.git", kind="python-uv", suite="true"
+    )
+    with pytest.raises(workspace.Refused):
+        workspace.fetch_tip(spec, tmp_path)
+    (passfile.parent / "github-keys").write_text("GITHUB_PUSH_TOKEN=x\n")
+    with pytest.raises(workspace.Refused):
+        workspace.fetch_tip(spec, tmp_path)
+    with pytest.raises(workspace.Refused):
+        workspace._provision(workspace.Layout(tmp_path / "t"), "t", spec, {}, base=None, source=None)
+    key = str(passfile.parent / "github-keys")
+    assert carried == [None, key, key]

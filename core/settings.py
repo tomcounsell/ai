@@ -514,8 +514,8 @@ class Settings:
     def github_keyfile(self) -> str:
         """The GitHub push token (`GITHUB_PUSH_TOKEN`), in the kernel key
         directory, written by `python -m core github-key` and read only by
-        the kernel: the merge performer, the rollout's fetch, and the
-        conditions routine's fetch. Derived from `pg_passfile` as the
+        the kernel: the merge performer, the rollout's fetch, provisioning's
+        and the tip's fetch, and the conditions routine's fetch. Derived from `pg_passfile` as the
         judgement keys are."""
         return str(Path(self.pg_passfile).parent / "github-keys")
 
