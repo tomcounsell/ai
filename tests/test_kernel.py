@@ -792,15 +792,18 @@ def test_a_sessions_and_its_childs_notices_are_at_home_in_the_chat_they_came_fro
         async with await db.connect(dsn) as conn:
             await notices.credential(conn, child, "abc", missing=True)
             homes = [await notices.home(conn, t) for t in (chat, child, team)]
+            heads = [await notices.headline(conn, t) for t in (chat, team, child)]
         child_rows, chat_rows = await bridges.rows(dsn, child), await bridges.rows(dsn, chat)
         return (
             homes,
+            heads,
             bridges.typed(child_rows, "notice.requested"),
             [(r["child_id"] == child, r["kind"]) for r in bridges.typed(chat_rows, "child.reported")],
         )
 
-    homes, notes, reported = run(go())
+    homes, heads, notes, reported = run(go())
     assert homes == [("slack", dm), ("slack", dm), ("telegram", "-1009")]
+    assert heads[:2] == [None, None] and heads[2]
     assert not notes and reported == [(True, "credential")]
 
 

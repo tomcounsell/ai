@@ -261,13 +261,17 @@ def short(instruction: str | None, limit: int = 80) -> str | None:
 async def headline(conn, task_id: str) -> str | None:
     """The task's request, shortened; None for a task with no Brief (or an
     id that names no task, such as the channel a failed binding falls back
-    to)."""
+    to), and for a chat session, whose instruction is its opening, not a
+    request, and whose notices go to the chat it serves (Monday Flowers'
+    ended notice, 2026-10-19, quoted "You are in the mondayflowers team
+    chat...")."""
     from core import tasks
 
     try:
-        return short((await tasks.brief(conn, task_id)).instruction)
+        b = await tasks.brief(conn, task_id)
     except KeyError:
         return None
+    return None if b.chat else short(b.instruction)
 
 
 def lead(head: str | None, sentence: str) -> str:
