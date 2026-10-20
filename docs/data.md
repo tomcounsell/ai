@@ -579,6 +579,6 @@ the ledger and what it recalls into a Brief is [memory.md](memory.md).
    every role, but other databases on the machine cluster trust local
    logins, so a superuser login from an escaped turn is kept out by the
    sandbox alone.
-4. **One backup disk.** The ledger is kept forever and dumped to one
-   external disk, 30 dumps deep (`docs/machine.md`, Backups). There is no
+4. **One backup folder.** The ledger is kept forever and dumped to one
+   folder, on the Mac's own disk unless it names an external one, 30 dumps deep (`docs/machine.md`, Backups). There is no
    second copy elsewhere.

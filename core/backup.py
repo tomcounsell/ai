@@ -4,8 +4,8 @@ Serves "Reliable stop, recovery, and correction": a ledger nobody can edit
 is still lost with the disk. The ledger itself is kept forever and never
 pruned; the dumps of it are kept to `settings.backup_keep`.
 
-`dump` writes one `pg_dump` custom-format file to `settings.backup_dir` (an
-external disk) and a manifest beside it: the event and document counts and
+`dump` writes one `pg_dump` custom-format file to `settings.backup_dir` and
+a manifest beside it: the event and document counts and
 SHA-256 digests, computed from the same snapshot the dump reads, and the
 dump file's own SHA-256. A dump is written as `.partial` and renamed only
 after its manifest is on disk, so a complete name always has a manifest.
@@ -14,8 +14,8 @@ manifest, restores it into a scratch cluster, recomputes the digests, and
 compares.
 
 `backup_dir` is never created: an unmounted volume must fail the dump, not
-fill the boot disk. Names carry no colons, since the disk is exFAT, and
-exFAT's `._` AppleDouble files never match a dump's name.
+fill the boot disk. Names carry no colons, since an external disk may be
+exFAT, and exFAT's `._` AppleDouble files never match a dump's name.
 """
 
 import fcntl
@@ -99,20 +99,16 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _check_disks(cluster_data: Path, backup_dir: Path) -> None:
+def _check_data_dir(cluster_data: Path) -> None:
     """The `pg_data_dir` setting must name the cluster's real data directory,
     since both turn sandbox profiles deny that setting's path (after a
-    Postgres upgrade it goes stale), and a dump must land on another disk."""
+    Postgres upgrade it goes stale)."""
     expected = Path(settings.pg_data_dir)
     if not expected.exists() or expected.resolve() != cluster_data.resolve():
         raise BackupError(
             f"the pg_data_dir setting ({expected}) is not the cluster's data directory ({cluster_data}); "
             "the turn sandbox profiles deny the setting's path, so correct the setting "
             "(after a Postgres upgrade, also run `python -m core secure-login`)"
-        )
-    if os.stat(backup_dir).st_dev == os.stat(cluster_data).st_dev:
-        raise BackupError(
-            f"{backup_dir} is on the same disk as the cluster's data ({cluster_data}); not a backup"
         )
 
 
@@ -146,7 +142,7 @@ def dump(
         if final.exists() or manifest_path.exists():
             raise BackupError(f"{final} already exists")
         with psycopg.connect(dsn) as conn:
-            _check_disks(Path(conn.execute("SHOW data_directory").fetchone()[0]), backup_dir)
+            _check_data_dir(Path(conn.execute("SHOW data_directory").fetchone()[0]))
             conn.rollback()
             fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             try:

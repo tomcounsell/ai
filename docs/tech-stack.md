@@ -172,7 +172,7 @@ turn write ledger rows (rebuild-demonstration.md, Kernel findings 1). The
 kernel cluster's authentication method and role separation are
 [data.md](data.md)'s.
 
-**Backups.** `pg_dump` to an external disk with a manifest, 30 kept, and a
+**Backups.** `pg_dump` to a backup folder with a manifest, 30 kept, and a
 restore into a scratch cluster checked against the manifest
 (`core/backup.py`; [machine.md](machine.md), Backups). Status: **in use**,
 rehearsed once from the command line. The nightly launchd job is in the

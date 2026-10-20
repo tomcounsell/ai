@@ -118,7 +118,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Then for each of `core serve`, `bridges.telegram`, `bridges.email`
    (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
    reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every
-   bridge's audio; about 1.7 GB resident once used), `core backup` (with `VALOR_BACKUP_DIR` on an external disk),
+   bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
    and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    Every job's `PATH` includes `/opt/homebrew/bin`: the `core serve` and

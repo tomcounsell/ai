@@ -381,7 +381,7 @@ class Settings:
     )
 
     # -- backups: the volume's name is the single character U+F028 ------------
-    backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", "/Volumes//valor_temp"))
+    backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", str(Path.home() / "valor-backups")))
     backup_keep: int = field(default_factory=lambda: int(_env("VALOR_BACKUP_KEEP", "30")))
     log_dir: str = field(
         default_factory=lambda: _env("VALOR_LOG_DIR", str(Path.home() / "Library" / "Logs" / "valor"))

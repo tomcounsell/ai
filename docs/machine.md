@@ -425,19 +425,19 @@ the rows.
 ## Backups
 
 `python -m core backup` dumps the kernel database to the `backup_dir`
-setting, an external disk. Its default is `/Volumes/<U+F028>/valor_temp`
-(the volume's name is that one private-use character, which macOS shows as
-blank). On the Cowboy it is set by `VALOR_BACKUP_DIR` to
+setting, by default `~/valor-backups` on the Mac's own disk, which covers a
+bad migration or a damaged database but not the disk itself. On the Cowboy
+it is set by `VALOR_BACKUP_DIR` to its external disk,
 `/Volumes/PINK/valor_temp`, carried in the backup job and in the kernel's
 job, whose rollout backs up before a schema change. Each dump is a
 `pg_dump` custom-format file with a manifest beside it (counts and SHA-256
 digests of the events and documents, read from the dump's own snapshot,
 and the dump's own SHA-256). The newest 30 are kept; the ledger itself is
-kept forever. The dump refuses a missing directory (an unmounted disk), a
-directory on the cluster's own disk, and a `pg_data_dir` setting that is
+kept forever. The dump refuses a missing directory (an unmounted disk) and a
+`pg_data_dir` setting that is
 not the cluster's real data directory (read from the server), since every
 sandbox profile denies that setting's path. One dump runs at a time per
-directory, under an exclusive lock on `.valor_rebuild.lock` there: the disk
+directory, under an exclusive lock on `.valor_rebuild.lock` there: the Cowboy's disk
 is exFAT, which has neither hard links nor an exclusive rename, so the lock
 is what keeps two dumps from taking one name. The directory is synced to
 disk after each dump's renames. `python -m core restore DUMP`
