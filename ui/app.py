@@ -12,7 +12,8 @@ nothing here can write a row.
     /routines          each routine: last run, period spending, runs
     /attention         the attention log, newest first
     /task/ID           one task: what came after each merge, its status,
-                       and its ledger
+                       and its newest ledger rows, payloads cut
+                       (`?all=1`: every row)
     /task/ID/modal     the task's metadata, for the modal a row click opens
 
 Every page carries the old dashboard's header (the pages, and the kernel
@@ -38,6 +39,10 @@ from core.settings import settings
 # A task in one of these states has nothing left to run.
 SETTLED = {"merged", "ended", "stopped", "calibration", "node"}
 RECENT = 15
+# A task page's ledger: its newest rows (`?all=1`: every one), each payload
+# cut to this many characters; `python -m core ledger ID` prints them whole.
+LEDGER_SHOWN = 300
+PAYLOAD_SHOWN = 2000
 
 
 def esc(value: Any) -> str:
@@ -433,17 +438,28 @@ async def _task(conn, request: web.Request) -> tuple[tasks.Brief, dict[str, Any]
 
 async def task_page(conn, request: web.Request) -> web.Response:
     b, state, rows = await _task(conn, request)
+    shown = rows if "all" in request.query else rows[-LEDGER_SHOWN:]
+    cut = len(shown) < len(rows)
     body = (
         f"<p>{esc(b.instruction)}</p>"
         + after_merge_html(await outcomes.after_merge(conn, b, rows))
         + f"<details><summary>status</summary><pre>{esc(json.dumps(state, indent=2, default=str, sort_keys=True))}</pre></details>"
-        + "<h2>Ledger</h2>"
+        + "<h2>Ledger"
+        + (f" <small>newest {len(shown)} of {len(rows)} · <a href='?all=1'>all</a></small>" if cut else "")
+        + "</h2>"
         + table(
             ["#row", "at", "type", "payload"],
-            [[esc(r["id"]), when(r["at"]), esc(r["type"]), f"<pre>{esc(r['payload'])}</pre>"] for r in rows],
+            [[esc(r["id"]), when(r["at"]), esc(r["type"]), f"<pre>{payload(r['payload'])}</pre>"] for r in shown],
         )
     )
     return await layout(conn, first_line(b.instruction, 80), body)
+
+
+def payload(value: Any) -> str:
+    """A ledger payload, escaped and cut to `PAYLOAD_SHOWN` characters."""
+    text = json.dumps(value, default=str, sort_keys=True)
+    more = len(text) - PAYLOAD_SHOWN
+    return esc(text[:PAYLOAD_SHOWN]) + (f"<span class=muted> … {more} more characters</span>" if more > 0 else "")
 
 
 def facts(pairs: list[tuple[str, str]]) -> str:
