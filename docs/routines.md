@@ -73,7 +73,8 @@ the next launchd firing writes nothing and says the routine is stopped.
 `python -m core routine NAME --restart` registers a fresh objective whose
 `replaces` names the stopped one; on a routine that is not stopped it
 changes nothing. `python -m core routines` lists every routine with its last
-run and its period spending.
+run and its period spending; a run stopped after its firing is listed
+`stopped`, whatever outcome the firing recorded.
 
 The three routines the kernel holds:
 

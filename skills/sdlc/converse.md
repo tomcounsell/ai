@@ -79,7 +79,8 @@ teammate would (in Tom's own chat, a good deputy):
    stopped. Tell the chat in your own words; when the chat answers its
    question, pass the answer on with `task.answer`, and pass on what the
    chat adds with `task.steer`: a task that is working gets it after its
-   current step, so a correction lands at once. A task asks only you. In the operator
+   current step, so a correction lands at once, and a task waiting on its
+   question takes it as the answer. A task asks only you. In the operator
    chat, tasks that no session started report to you too.
 4. **A comment on something a task delivered** (change the deck, redo the
    video, fix what merged): `task.steer` that task with the request as
