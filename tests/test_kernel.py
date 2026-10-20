@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 import sys
 import uuid
+from types import SimpleNamespace
 
 import aiohttp
 import psycopg
@@ -16,6 +17,7 @@ import pytest
 
 from core import (
     broker,
+    checks,
     corrections,
     db,
     intake,
@@ -165,6 +167,22 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
     assert elapsed < 20  # far short of the turn's minute, with room for a loaded Mac (3.8 s seen)
     assert not (tmp_path / "tmp").exists()
     assert state["state"] == "stopped" and audit(state) == []
+
+
+def test_stop_heard_ends_on_this_tasks_stop_only(dsn):
+    async def go():
+        task, other = await new_task(dsn), await new_task(dsn)
+        ctx = SimpleNamespace(dsn=dsn, task_id=task)
+        async with checks.stop_heard(ctx) as stop:
+            async with await db.connect(dsn) as conn:
+                await tasks.stop(conn, other, reason="test")
+            await asyncio.sleep(0.5)
+            assert not stop.done()
+            async with await db.connect(dsn) as conn:
+                await tasks.stop(conn, task, reason="test")
+            await asyncio.wait_for(stop, 5)
+
+    run(go())
 
 
 # A turn's scratch in a review session: its TMPDIR was emptied before it, its
