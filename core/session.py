@@ -973,9 +973,11 @@ async def answer(
     by: str = "tom",
     via: str = "the command line",
     role_played: bool = False,
+    effect_key: str | None = None,
 ) -> str:
     """Record the answer to the task's open question. `by` names who wrote
-    it and `role_played` says whether they stood in for Tom. Returns the
+    it and `role_played` says whether they stood in for Tom; `effect_key`
+    names the chat session's `task.steer` that gave it. Returns the
     question's id."""
     text = text.strip()
     if not text:
@@ -997,6 +999,7 @@ async def answer(
                 "question_id": f.open_question,
                 "text": text,
                 "provenance": ledger.provenance(by, via, role_played),
+                **({"effect_key": effect_key} if effect_key else {}),
             },
         )
     return f.open_question

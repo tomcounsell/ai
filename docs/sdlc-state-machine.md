@@ -252,7 +252,8 @@ and starts work as tasks of its own, which report to it
 **Goal.** Tom's answer lands in the context that asked, named on the `question.asked` row.
 
 **Exit evidence.** `question.answered` with Tom's text and provenance (`by`, `via`, `at`,
-`role_played`). The next run resumes the working session with the answer as its prompt, in the state
+`role_played`). A chat session's `task.steer` of a waiting task is its answer, since a waiting task
+reads nothing else. The next run resumes the working session with the answer as its prompt, in the state
 that asked. An answer is spent only by a turn that finishes; after a failed or stopped turn the next
 turn opens with it again.
 

@@ -4,7 +4,8 @@
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
 asked; answers a task's open question with what the chat said; steers a
-task with what the chat added; and stops a task. A steer of a task that has
+task with what the chat added; and stops a task. A steer of a task waiting
+on its question answers it, since a waiting task reads nothing else. A steer of a task that has
 delivered (`merged` or `ended`) is feedback (`session.feedback`), as a
 direct reply to its report is (`core/intake.py`): the task reopens in
 `patch`, in its own workspace, resuming its own harness session, and
@@ -20,8 +21,8 @@ own; each refuses a task that does not report to its session
 (`tasks.reporting`: its children, and the tasks whose report is on it).
 `lookup` reads the ledger, which is how a dangling intent is reconciled:
 a start by its idempotency key on the child's `task.started`, an answer
-by the question it answered, a steer by its key on the `message.steered`
-or `feedback.given` row, a stop by the task's stop.
+by the question it answered, a steer by its key on the `message.steered`,
+`feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
 from core import db, ledger, machine, session, tasks
@@ -124,7 +125,7 @@ class TaskSteer(_ChatTask):
     usage = (
         '`task.steer`: target the task id, payload `{"text": "...", "by": "<who said it>"}`; '
         "gives that task what the chat added: after its current step when it is working, else at its next "
-        "turn. To a task that has delivered "
+        "turn. To a task waiting on its question it is the answer. To a task that has delivered "
         "(merged or ended) it is feedback: the task reopens in its own workspace and conversation, "
         "revises, and reports to you again. A stopped task stays stopped."
     )
@@ -135,7 +136,11 @@ class TaskSteer(_ChatTask):
             await tasks.lock_tree(conn, action.target)
             await ledger.lock(conn, f"task:{action.target}")
             by, text = str(action.payload.get("by") or "valor"), str(action.payload.get("text") or "")
-            if machine.fold(await ledger.read(conn, action.target)).state in (State.MERGED, State.ENDED):
+            state = machine.fold(await ledger.read(conn, action.target)).state
+            if state is State.WAITING:
+                question = await session.answer(conn, action.target, text, by=by, via="chat", effect_key=key)
+                return {"task_id": action.target, "question_id": question}
+            if state in (State.MERGED, State.ENDED):
                 feedback = await session.feedback(
                     conn, action.target, text, by=by, via="chat", effect_key=key
                 )
@@ -149,9 +154,11 @@ class TaskSteer(_ChatTask):
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, action.target)
         for r in rows:
-            if r["type"] in ("message.steered", "feedback.given") and r["payload"].get("effect_key") == key:
-                found = r["payload"].get("feedback_id")
-                return {"task_id": action.target, **({"feedback_id": found} if found else {})}
+            if r["type"] in ("message.steered", "feedback.given", "question.answered") and (
+                r["payload"].get("effect_key") == key
+            ):
+                found = {k: r["payload"][k] for k in ("feedback_id", "question_id") if r["payload"].get(k)}
+                return {"task_id": action.target, **found}
         return None
 
 

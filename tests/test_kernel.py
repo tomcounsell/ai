@@ -721,7 +721,7 @@ def test_a_chat_sessions_steer_of_a_delivered_task_is_feedback_that_reopens_it(d
     assert resume == SESSION
 
 
-@pytest.mark.parametrize("where", [State.BUILD, State.MERGE, State.WAITING, State.STOPPED])
+@pytest.mark.parametrize("where", [State.BUILD, State.MERGE, State.STOPPED])
 def test_a_chat_sessions_steer_of_a_task_not_delivered_or_stopped_stays_a_steer(dsn, where):
     async def go():
         chat = await team_session(dsn)
@@ -735,6 +735,26 @@ def test_a_chat_sessions_steer_of_a_task_not_delivered_or_stopped_stays_a_steer(
     assert [p["text"] for p in bridges.typed(rows, "message.steered")] == ["bolder"]
     assert "feedback_id" not in done and not bridges.typed(rows, "feedback.given")
     assert machine.fold(rows).state is where
+
+
+def test_a_chat_sessions_steer_of_a_waiting_task_answers_its_question(dsn):
+    """A waiting task reads nothing but an answer, so a steer is one: it
+    leaves `waiting`, and the steer's key finds the answer."""
+
+    async def go():
+        chat = await team_session(dsn)
+        child = await delivered(dsn, chat, State.WAITING)
+        async with await db.connect(dsn) as conn:
+            steer = _steer(await tasks.brief(conn, chat), dsn)
+        action = broker.Action("task.steer", child, {"text": "identity first", "by": "tom"})
+        done = await steer.perform(action, "k1")
+        return done, await steer.lookup(action, "k1"), await bridges.rows(dsn, child)
+
+    done, found, rows = run(go())
+    (answered,) = bridges.typed(rows, "question.answered")
+    assert answered["text"] == "identity first" and answered["effect_key"] == "k1"
+    assert done == found == {"task_id": done["task_id"], "question_id": answered["question_id"]}
+    assert not bridges.typed(rows, "message.steered") and machine.fold(rows).state is not State.WAITING
 
 
 def test_a_second_revision_round_with_the_same_words_is_a_second_feedback(dsn):
