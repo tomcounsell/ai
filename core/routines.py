@@ -343,6 +343,8 @@ async def report(conn, name: str, now: datetime | None = None) -> dict[str, Any]
             (await spend(conn, [entry["run"]]))["spent_usd_micros"] if entry["run"] else 0
         )
         entry["state"] = await state_of(conn, entry["run"]) if entry["run"] else None
+        if entry["state"] == "stopped":
+            entry["outcome"] = "stopped"  # a stop after the firing outlives its outcome
     in_period = [e for e in listed if since < e["started_at"] <= now]
     last = listed[-1] if listed else None
     return {

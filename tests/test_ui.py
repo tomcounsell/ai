@@ -6,7 +6,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from core import db, ledger, tasks
+from core import db, ledger, routines, tasks
 from tests.bridges import configure
 from ui.app import make_app
 
@@ -88,6 +88,36 @@ def test_every_page_escapes_what_it_shows(fresh):
 
     for page in asyncio.run(go()):
         assert planted not in page
+
+
+def test_the_task_page_shows_the_newest_rows_with_payloads_cut(fresh):
+    async def go():
+        async with await db.connect(fresh) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="long task"))
+            await ledger.append(conn, task, "turn.started", {"turn_id": "t1", "state": "build", "argv": ["x" * 5000]})
+            for i in range(300):
+                await ledger.append(conn, task, "message.heard", {"text": f"row-{i}"})
+        return await _get(fresh, f"/task/{task}", f"/task/{task}?all=1")
+
+    page, every = asyncio.run(go())
+    assert "row-299" in page and "turn.started" not in page and "newest 300 of 302" in page
+    assert "turn.started" in every and "x" * 5000 not in every and "more characters" in every
+
+
+def test_a_routine_run_stopped_after_its_firing_reads_stopped(fresh):
+    async def go():
+        async with await db.connect(fresh) as conn:
+            objective = await tasks.start(conn, tasks.Brief(instruction="routine gone", routine="gone"))
+            await ledger.append(conn, routines.STREAM, "routine.registered", {
+                "name": "gone", "ceiling": "read", "need": [], "mission_item": "1", "objective": objective,
+            })  # fmt: skip
+            run = await tasks.start_child(conn, objective, instruction="a run")
+            await tasks.stop(conn, run, reason="held")
+            row = {"run": run, "outcome": "running", "summary": "paused", "spent_usd_micros": 0}
+            await ledger.append(conn, objective, "routine.ran", row)
+            return await routines.report(conn, "gone")
+
+    assert asyncio.run(go())["last"]["outcome"] == "stopped"
 
 
 def test_the_modal_shows_a_tasks_metadata(fresh):
