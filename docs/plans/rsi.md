@@ -39,200 +39,202 @@ One month after it ships, all three:
 - What of the `improve-research`, `improve-preflight` and `rsi` skills in `old-system` is reused (rule 10).
 
 
-# Plan (2026-10-20, issue #3655)
+# Plan (2026-10-20, #3655)
 
-Status: Planning. Tracking: https://github.com/tomcounsell/ai/issues/3655.
-Tom's requirements above stay as he wrote them (rule 6). The evidence is
-[synthesis.md](../research/rsi/synthesis.md). Baseline: `f28c9262e`. D1, D2
-and D3 are Done items 1, 2 and 3. **G1–G5** are governance and are listed
-below with their accounting.
+Tom's requirements above stand as written (rule 6). The evidence is in
+[synthesis.md](../research/rsi/synthesis.md) and
+[spikes.md](../research/rsi/spikes.md). D1, D2 and D3 are the three Done
+items. G1–G4 are the governance rows below. Baseline commit: `f28c9262e`.
 
-## Shape: a routine that starts tasks for Tom (D1, D3)
+## Shape: one routine that starts tasks for Tom (D1, D3)
 
-RSI is one routine, `routines/rsi/`. Its findings start ordinary tasks
-through `core/findings.py` `start_fix` (rule 4: the mechanism that already
-starts tasks). There is no case store, no CLI of its own and no merge path
-of its own. It is always on: it runs every 15 minutes, and a run that finds
-no new source rows ends without opening a turn. Concretely, it differs from
-the old controller (375 runs, none for Tom) in five ways:
+RSI is a single routine, `routines/rsi/`. It starts ordinary tasks through
+`core/findings.py` `start_fix` (rule 4). There is no case store, no CLI and
+no merge path. It runs every 15 minutes, all day, under launchd. A run that
+finds no new source rows ends without a turn. It differs from the old
+controller, which ran 375 times with nothing for Tom, in four ways:
 
-1. **It starts from Tom's work.** Every opportunity cites a ledger row
-   from a task that was not started by RSI. The old loop opened cases
-   from its own evidence collection, and its one candidate surface was
-   its own memory-retrieval parameters.
-2. **Its output is a task on a real repository.** That is `yudame/skills`,
-   this repository, or the open-source project where the gap showed. The
-   task goes through the same pipeline and ends in the same merge report
-   to Tom. The old loop's output was rows in its own namespace.
-3. **No precondition stands before work.** The old loop's first real
-   cycle ended `infra_failure` because its own calibration floor (20
-   corrections) was not met.
-4. **It counts use.** An ability is done when a later task of Tom's used
-   it and Tom accepted that delivery, recorded with the date. The status
-   page shows RSI tasks started, merged and used. Used over started is
-   the number to beat; the old loop scored 0 of 375.
-5. **It is the size of a routine.** The old loop took seven lanes and
-   about ten models.
+1. **It starts from Tom's work.** Every opportunity cites a row on a task
+   RSI did not start. The old loop's only candidate was its own
+   memory-retrieval parameters.
+2. **Its output is a task on a real repository:** `yudame/skills`, this
+   one, or the open-source project where the gap showed. The task runs the
+   normal pipeline and ends in a merge report to Tom. The old loop wrote
+   rows to its own namespace.
+3. **Nothing must be true before work starts.** The old loop's first cycle
+   ended `infra_failure` on its own calibration floor.
+4. **It counts use.** An ability is done when a later task of Tom's used it
+   and Tom accepted that delivery, with the date. The number to beat is
+   tasks used over tasks started; the old loop scored 0 of 375.
 
 ## Answers
 
-**Opportunity sources and ranking.** Rows the kernel already writes on
-Tom's tasks: `correction.recorded`, `feedback.given`, `question.asked` (a
-question Valor could have answered), `step.failed` and failed endings,
-`effect.refused`, and gateway spend by kind of task. A link Tom forwards
-with no request is inspiration (charter §4). The persona files it with the
-existing by-hand finding (`python -m core routine rsi --finding … --key
-link:<url>`). Memory is searched for recurrence. One turn per run ranks the
-open opportunities by three things: Tom's attention spent on the gap
-(questions plus feedback rounds), recurrence (the gap seen in two or more
-tasks), and the Done item it serves. It then starts tasks under keys
-`rsi:<row>`. Dedupe keys and turn slots bound the load. The ranking is the
-turn's judgement; there is no scoring engine.
+**Sources and ranking (D1).** Rows the kernel already writes on Tom's
+tasks: corrections, feedback rounds, questions Valor could have answered
+itself, failed steps and tasks, refused effects, and gateway spend by kind
+of task. Links Tom forwards count too; the persona files them as
+inspiration with the existing `core routine rsi --finding … --key
+link:<url>`. One turn per run ranks the open opportunities by three
+things: Tom's attention spent on the gap, recurrence (two or more tasks,
+checked in memory), and which Done item it serves. It then starts tasks
+keyed `rsi:<row>`. Dedupe keys and turn slots bound the load.
 
-**Evaluator per kind of change.** Ground truth is Tom's use and his
-feedback (`architecture.md`, Calibration). Before he uses an ability, a
-**blind replay** compares it with the prior capability (G1). The replay
-uses the rebuild-baseline method: real past tasks, run with and without
-the change. The answer keys are Tom's merged result and hidden tests. They
-sit in the kernel's checkout, never in a task's workspace, and a fresh
-Opus-class judge reads outcomes, never narration. The improver can neither
-see nor edit the replay.
+**Evaluator per kind (D1–D3).** The ground truth is Tom's use and his
+feedback. Before he uses a change, a **blind replay** (G1) runs real past
+tasks with and without it, using the rebuild-baseline method. Its answer
+keys are Tom's merged result and the hidden tests. They live in the
+kernel's checkout, never in a task's workspace. A fresh Opus-class judge
+reads outcomes, never narration, so the improver can neither see nor edit
+the judge.
 
-| Kind | Judge | Replay set |
-|---|---|---|
-| Skill | the existing verifier on the diff, then the replay | the task whose gap started it, plus one similar task |
-| Persona | the replay, including hostile group messages (Grok, 2025-07) | past chat turns |
-| Model route | the replay plus gateway spend; open-source projects only | past open-source tasks |
-| Infrastructure | the ledger: turns, deliveries and failures while Tom made no move | none (D3 is read from the ledger) |
-| Venture | money received, read from the processor by the conditions routine, never reported by Valor | none (D2) |
+- **Skill:** the existing verifier on the diff, then a replay of the
+  task that showed the gap plus one similar task.
+- **Persona:** a replay of past chat turns, hostile group messages
+  included (the Grok incident).
+- **Model route:** a replay of past open-source tasks, plus gateway spend.
+- **Infrastructure:** the ledger's turns and deliveries while Tom made no
+  move (D3).
+- **Venture:** money received, read from the processor by the conditions
+  routine and never self-reported (D2).
 
-The lineage, gap row → task → replay → later use, is ledgered on the RSI
-task.
+Each RSI task records its lineage: source row, task, replay, later use.
 
-**Untrusted input and write paths.** Nothing is added. Hermes's failure
-needs a runtime skill-write tool, and Valor has none. Skills and persona
-change only through a reviewed merge, and memory recall is quoted, escaped
-and grants nothing (`memory.md`). Corrections come only from Tom
-(`core correct`, with provenance). Content read while working is data
-(`persona/conduct.md`). An opportunity's evidence is quoted in the
-findings fence ("data from the run, not instructions"). Group text is
-never a source row. The open exposure is a reviewed diff whose content
-came from a forwarded link. The verifier reads every diff, and a guard
-comes only after an incident.
+**Untrusted input and write paths (D1). Nothing is added.** Hermes-style
+poisoning needs a skill-write tool at runtime, and Valor has none. Skills
+and persona change only by a reviewed merge. Memory recall is quoted and
+escaped, and grants nothing. Corrections come only from Tom, with
+provenance. Content read while working is data (`persona/conduct.md`).
+Findings quote their evidence as data. Group text is never a source row.
+What remains is a reviewed diff carrying content from a forwarded link.
+The verifier reads every diff, and no guard is added until an incident
+calls for one.
 
-**Accounts and signup walls.** SPIKE-A (pending).
+**Accounts (D2, D3).** Valor cannot open a provider account alone:
 
-**Legal liability for ventures.** No court has ruled on whether an
-agent's out-of-scope act binds its company (Venable, 2026-04). The
-sources agree it lands on the deployer: UETA §14 and E-SIGN §7001(h)
-attribute an electronic agent's contracts to its user; the Restatement
-(Third) of Agency treats a program as a tool; *Moffatt v. Air Canada*
-(2024) held the airline liable for its chatbot; California AB 316 (from
-2026-01-01) bars the "the AI did it" defence. So exposure falls on Yudame
-Inc, as Tom stated. Each venture is a committed decision in its business
-repository (`business.md`, items 3 and 7), approved by Tom (G2), and it
-names:
+- GitHub requires a human.
+- Cloudflare's agent path (Stripe Projects) still needs a human to accept
+  the terms and add a card.
+- OpenAI's ID-and-selfie check, Cerebras's card and the phone checks at
+  Mistral and claude.ai need a person at Yudame.
 
-- the legal owner (Yudame Inc or an LLC) as merchant of record, with Tom as
-  signer;
-- each platform account, with the terms clause that permits automated
-  operation (Upwork bans bots; Fiverr bans bot messaging and multiple
-  accounts);
-- a hard cap held at the card or account, not in a prompt (G3), and the
-  largest contract Valor may accept;
-- a kill date and early-kill conditions (a complaint, a chargeback, a
-  platform warning), watched by the conditions routine and put on the
-  strategy-meeting agenda;
-- bot disclosure (California B.O.T. Act; EU AI Act Art. 50 from
-  2026-08-02) and claims checked against FTC Operation AI Comply and the
-  fake-review rule;
-- markets, and the insurance policy that covers it (Verisk's 2026
-  generative-AI exclusions may apply).
+Pooling free tiers is banned (OpenRouter, Cloudflare, Groq) or blocked
+(OpenAI allows one organization per ID). So the rule is one account per
+provider: a human creates it, then Valor runs it.
 
-Everything else is a question for counsel (Needs Tom). Income is expected
-in dollars, and saved inference is the likelier value.
+- **Usable with no program:** Workers AI, Modal ($30 a month), E2B ($100
+  once), Daytona ($200), GitHub Actions.
+- **Founder programs:** AWS Activate and Azure. Anthropic's cohort is
+  closed, and OpenAI's credits come only through VCs.
+- **Free tiers that train on inputs** (Gemini, Mistral, some OpenRouter
+  `:free` models) take open-source work only (G4).
 
-**What Tom sees, and how he steers.** No new digest and no dashboard.
-- RSI merges reach Tom as ordinary merge reports with one lineage line.
+Each credit's expiry is a watched condition. A cloud sandbox for
+open-source tasks is the first D3 opportunity, filed as a backlog finding
+once an account exists.
+
+**Venture liability (D2).** No court has ruled on whether an agent's
+out-of-scope act binds its company. Every source puts the exposure on the
+deployer, Yudame Inc:
+
+- UETA §14 and E-SIGN §7001(h) bind the deployer to the agent's
+  contracts.
+- The Restatement treats a program as a tool, not an agent.
+- *Moffatt v. Air Canada* held the airline liable for its chatbot.
+- California AB 316 (2026) bars the "the AI did it" defence.
+
+A venture is a committed decision in its business repository (Business
+items 3 and 7), approved by Tom (G2). The record names:
+
+- the legal owner and merchant of record, with Tom as signer;
+- each platform account and the clause in its terms that permits an agent
+  (Upwork bans bots);
+- a cap held at the card (G3), and the largest contract Valor may accept;
+- a kill date, plus early-kill conditions (complaint, chargeback,
+  platform warning), which the conditions routine raises on the agenda;
+- bot disclosure (California B.O.T. Act, EU AI Act Art. 50) and FTC-clean
+  claims;
+- its markets and its insurance.
+
+The rest is for counsel. Expect income in dollars; saved inference is the
+likelier value.
+
+**What Tom sees and how he steers (all).** No digest and no dashboard.
+
+- RSI merges arrive as ordinary merge reports, each with a lineage line.
 - Venture proposals, limit raises and credit expiries go on the
-  strategy-meeting agenda (`agenda.item`).
-- The status page's routine row shows started, merged and used.
+  strategy-meeting agenda.
+- The routine's row on the status page shows started, merged and used.
 
-Tom steers four ways:
-- reply to a report (that is feedback);
-- `core correct` or `exemplar`;
-- `/rsi`;
-- stop the routine's objective, which stops all of RSI.
+He steers by replying to a report, by `core correct` or `exemplar`, by
+`/rsi`, or by stopping the routine's objective, which stops all of it.
 
-**Reuse of the old skills (rule 10).**
-- `improve-preflight`: **dropped**. All three of its reads (lease,
-  budget, calibration floor) are controller state that no longer exists.
-- `improve-research`: **dropped as a skill.** Its rules are **ported** as
-  four lines of the routine's instruction: a claim is text with a URL and
-  a retrieval date; an unreachable source is recorded as unreachable; an
-  assumption names what would overturn it; Tom is never asked a research
-  question.
-- `rsi`: **ported**, and this is #3641's `rsi` (one skill, not two). It is
-  a short Valor-plugin skill that grounds itself on the routine's open
-  opportunities and hands the questioning to `ask-me` (it already asks one
-  question at a time). Each answer is written back at once: a fact
-  becomes `core correct`, an idea becomes `--finding`, "plan this" becomes
-  `do-issue`.
+**Old skills (rule 10, D1).**
 
-## Governance this plan would add (none is built without the grant)
+- **`improve-preflight`: dropped.** Its three reads are controller state
+  that no longer exists.
+- **`improve-research`: dropped.** Its rules are ported as lines of the
+  routine's instruction:
+  - a claim carries a URL and a date;
+  - an unreachable source is recorded as unreachable;
+  - an assumption names what would overturn it;
+  - Tom is asked no research questions.
+- **`rsi`: ported.** This is #3641's `rsi`, one skill, not two. It
+  becomes a short Valor-plugin skill: it grounds itself on the open
+  opportunities, then hands the questioning to `ask-me`. Each answer is
+  written back at once:
+  - a fact goes to `core correct`;
+  - an idea goes to `--finding`;
+  - "plan this" goes to `do-issue`.
 
-| | What | Mission item | Incident | Tom's grant |
+## Governance (none is built without its grant; each is ledgered with a 90-day expiry)
+
+| | What | Mission item | Incident | Grant |
 |---|---|---|---|---|
-| G1 | Blind replay before an RSI change is reported as improved | 5 | #3177: 375 runs, none used; lane 5b's judge saw the skill name | **Needs Tom** (the bar is his; the check is not granted) |
-| G2 | Each venture approved by Tom before it starts | Business 8 (conflicts: "nothing held for consent") | none in Valor; Project Vend's giveaways and onion contract | Granted 2026-10-20 (Income); **incident needed** |
-| G3 | $10/day inference and $50/week infrastructure, hard cash only; held as the card's limit at the issuer, no code | Constraint "Bounded authority" (mission says no spend ceiling, 2026-10-16) | none in Valor | Granted 2026-10-20 (Spending); **incident needed** |
-| G4 | Client work stays on Claude and Codex; model-route tasks only on projects with no `client` | Business constraint "Generic across businesses" | none in Valor | Carried 2026-10-20; **incident needed** |
-| G5 | Accounts only by official sign-up and published programs, one per provider | Constraint "Bounded authority" | none in Valor | SPIKE-A; **Needs Tom** |
-
-Each granted guard is ledgered (`core/guards.py`) with a 90-day expiry.
+| G1 | Blind replay before "improved" is claimed | 5 | #3177: 375 runs, none used; lane 5b's judge saw the skill's name | **Needs Tom** |
+| G2 | Tom approves each venture before it starts | Business 8 (says nothing waits on consent) | none in Valor (Project Vend, external) | Tom, 2026-10-20; **incident needed** |
+| G3 | Hard cash: $10/day inference, $50/week infrastructure, as the card's issuer limit (no code) | Bounded authority (mission: "no spend ceiling") | none in Valor | Tom, 2026-10-20; **incident needed** |
+| G4 | Client work stays on Claude/Codex; other models only on open-source projects (specs gain `open_source`) | Generic across businesses | none in Valor | Tom, 2026-10-20; **incident needed** |
 
 ## Needs Tom
 
-1. G1–G5: grant or refuse each one, and name the incident or accept the
-   external one.
-2. The conflicts between this plan and the mission: G2 against Business
-   item 8, and G3 against "no spend ceiling". Amend `mission.md` or narrow
-   the grants.
-3. Counsel (G2): Yudame's state of incorporation, and whether each venture
-   is a separate LLC; whether Yudame's insurance carries the 2026 AI
-   exclusions; whether Stripe, Upwork or a given marketplace lets an agent
-   run the account; EU or California consumers; tax and sales tax per
-   venture.
-4. Identity: phone, company details and card for sign-ups (SPIKE-A).
-5. Persona: may RSI change the persona at all? Charter §12 keeps identity
-   outside autonomous change.
-6. Does Tom want a weekly RSI message beyond merge reports and the agenda?
-7. A read-only Stripe (or bank) adapter for the conditions routine, so D2
-   is read rather than reported.
+1. Grant or refuse G1–G4, and name each one's incident.
+2. Resolve the conflicts with `mission.md`: G2 against Business item 8, and
+   G3 against "no spend ceiling".
+3. Counsel:
+   - Yudame's state of incorporation, and whether each venture should be
+     its own LLC;
+   - whether its insurance carries the 2026 AI exclusions;
+   - whether Stripe or the marketplaces let an agent run an account;
+   - whether to sell to EU or California consumers;
+   - tax per venture.
+4. Which providers to open, and who at Yudame creates each account (phone,
+   card, terms). Whether to apply for AWS Activate and Azure as founder.
+5. Whether RSI may edit the persona. Charter §12 keeps identity out of
+   autonomous change.
+6. Whether a weekly RSI message is wanted.
+7. A read-only Stripe or bank adapter for the conditions routine, so D2 is
+   read rather than reported.
 
-## Build (Large; stage 1 serves D1 and needs no answer above)
+## Build (Large; stage 1 serves D1 and waits on none of the above)
 
-1. `routines/rsi/` with its runner: read the source rows since the last
-   run, skipping tasks under RSI's own objective; open the ranking turn
-   only when there are new rows; start through `start_fix`, extended to
-   take each finding's project.
-2. Lineage and use: the RSI task carries its source row. A later
-   delivery that used the ability writes `rsi.used` naming it, and the
-   status page's routine row counts started, merged and used.
-3. `/rsi`, as ported above (closes #3641's `rsi` item).
-4. After grants: G1's replay runner, then a venture record template and
-   a resource-expiry condition, both reusing the conditions routine.
+1. **The `routines/rsi/` runner.** It reads the source rows since the last
+   run, skipping RSI's own tasks, and opens the ranking turn only when
+   there is something new. `start_fix` is extended to take each finding's
+   project.
+2. **Lineage.** Each task carries its source row. A later delivery that
+   used the ability writes `rsi.used`, and the routine's row counts it.
+3. **`/rsi`,** as above. This closes #3641's `rsi` item.
+4. **After the grants:** G1's replay runner, a venture record template,
+   and resource-expiry conditions.
 
 Tests:
-- a source row on Tom's task starts one task;
-- the same row twice starts one task;
+
+- one source row starts one task, and seeing it again starts none;
 - a row from an RSI task starts none;
 - a run with no new rows opens no turn;
-- `start_fix` honours the finding's project;
-- `rsi.used` is counted on the routine row;
-- the `/rsi` write-backs land as rows.
+- `start_fix` uses the finding's project;
+- `rsi.used` is counted;
+- each `/rsi` write-back lands as a row.
 
-Docs: `routines.md` (the rsi routine) and `architecture.md`.
-
-**Done** is Tom's three Done items, one month after stage 1 ships, recorded
-with dates (rule 5).
+Docs: `routines.md` and `architecture.md`. Done is D1–D3, one month after
+stage 1 ships, each recorded with its date (rule 5).

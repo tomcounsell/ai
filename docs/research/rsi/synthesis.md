@@ -2,7 +2,7 @@
 
 What the four notes (`hermes.md`, `grok-muse.md`, `systems.md`, `resources.md`)
 and two spikes for the plan (provider account terms, venture liability; results
-in `docs/plans/rsi.md`) mean for Valor, 2026-10-20. Read with the old
+in `spikes.md`) mean for Valor, 2026-10-20. Read with the old
 controller's record (#3177). The notes are the evidence; this page states what
 follows from them and does not restate them.
 
@@ -69,5 +69,5 @@ None of the sources measures whether people adopt self-written artifacts. Many
 figures are vendor or second-hand (Hermes dates, PAST-Bench, DGM cost, Muse
 internals). The research for "Muse" picked Meta's Muse agent without
 confirmation that it was the one meant. Legal liability and provider account
-policy were unresearched in the notes. The plan's two spikes cover them, and
+policy were unresearched in the notes. The two spikes in `spikes.md` cover them, and
 their gaps are listed there.
