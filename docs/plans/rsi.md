@@ -37,3 +37,23 @@ One month after it ships, all three:
 - How evaluation runs per kind of change (skill, persona, model, infrastructure, venture).
 - What Tom sees and how often, and how he steers.
 - What of the `improve-research`, `improve-preflight` and `rsi` skills in `old-system` is reused (rule 10).
+
+# Plan (2026-10-20, issue #3655)
+
+Status: Planning. Tracking: https://github.com/tomcounsell/ai/issues/3655.
+The requirements above are Tom's and are not edited by this plan (rule 6).
+
+## Shape: a routine that starts tasks
+(placeholder)
+
+## Answers to the open questions
+(placeholder)
+
+## Governance this plan would add
+(placeholder)
+
+## Needs Tom
+(placeholder)
+
+## Build steps and tests
+(placeholder)
