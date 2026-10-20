@@ -429,14 +429,14 @@ def _run(checkout: Path, argv: list[str], env: dict[str, str], name: str) -> Non
 
 async def services(conn) -> list[dict[str, Any]]:
     """The kernel and each bridge connected or installed on this machine (its
-    launchd plist), from its lock connection (`valor-kernel`,
+    launchd plist), from its lock connection (`valor-kernel@<commit>`,
     `valor-<channel>@<commit>`): `name`, `commit`, and `since`, when it
     connected (None: not connected)."""
     rows = await (
         await conn.execute(
             "SELECT application_name, backend_start FROM pg_stat_activity "
             "WHERE datname = current_database() "
-            "AND (application_name = 'valor-kernel' OR application_name LIKE 'valor-%%@%%')"
+            "AND application_name LIKE 'valor-%%@%%'"
         )
     ).fetchall()
     found = {}

@@ -38,7 +38,7 @@ which task needs Tom, which has a turn running, or what is alive.
   `harness_name`, `model`, `created_at`), `open_questions`, `turn_open` and
   `failed_step`.
 - **Live (`/live`).** `runs.live(conn)`, a read model: the kernel's and
-  each bridge's lock connection (`pg_stat_activity`: `valor-kernel`,
+  each bridge's lock connection (`pg_stat_activity`: `valor-kernel@<commit>`,
   `valor-<channel>@<commit>`) with when it connected; each turn with a
   `turn.started` and no `turn.ended`, with its task, state or fresh stage,
   harness, model, start, and its live processes (`_turn_processes`, the

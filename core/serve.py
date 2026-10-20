@@ -94,6 +94,7 @@ import psycopg
 
 from core import (
     backup,
+    bridge,
     broker,
     db,
     git,
@@ -1057,18 +1058,20 @@ async def serve(
     (default `settings.github_keyfile`); `kick` restarts a bridge's
     launchd job at start (`restart_bridges`)."""
     dsn = dsn or settings.dsn()
-    conn = await db.connect(dsn, application_name="valor-kernel")
+    started = None
+    if checkout is not None:
+        try:
+            started = await git.threaded(git.head, checkout)
+        except git.GitError as exc:
+            _log(f"the kernel's checkout cannot be read; nothing is rolled out by this process: {exc}")
+    # Stamped like a bridge's lock connection, so the dashboard names the commit it runs.
+    name = f"valor-kernel@{started or bridge.NO_HEAD}"
+    conn = await db.connect(dsn, application_name=name)
     listener = await db.connect(dsn, application_name="valor-kernel-listen")
     owned_gateway = gateway is None
     kernel = None
     try:
         await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),))
-        started = None
-        if checkout is not None:
-            try:
-                started = await git.threaded(git.head, checkout)
-            except git.GitError as exc:
-                _log(f"the kernel's checkout cannot be read; nothing is rolled out by this process: {exc}")
         done = await recover(conn, performers, checkout=checkout, running=started, kick=kick)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
         if gateway is None:
@@ -1099,7 +1102,7 @@ async def serve(
                 except Exception as exc:  # noqa: BLE001  the next wake tries again
                     _log(f"kernel wake failed: {exc!r}")
                     if conn.closed:
-                        conn = await db.connect(dsn, application_name="valor-kernel")
+                        conn = await db.connect(dsn, application_name=name)
                         await conn.execute(
                             "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),)
                         )

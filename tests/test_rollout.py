@@ -305,7 +305,7 @@ def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tm
             await ledger.append(conn, task, "rollout.restarting", {"effect_id": effect, "sha": running})
         named = [(f"valor-telegram@{base}", "telegram"), (f"valor-slack@{running}", "slack"),
                  ("valor-email", "email"),  # unstamped: started before stamps
-                 ("valor-email-watch", None), ("valor-kernel", None), (f"valor-bogus@{base}", None),
+                 ("valor-email-watch", None), (f"valor-kernel@{base}", None), (f"valor-bogus@{base}", None),
                  ("valor-telegram-perform", None)]  # fmt: skip
         conns = [await holding(fresh, n, ch) for n, ch in named]
         conns.append(await holding(other, f"valor-local@{base}", "local"))
