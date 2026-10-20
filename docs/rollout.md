@@ -6,7 +6,13 @@ client's projects ([machine.md](machine.md)). The Cowboy went first
 (2026-10-14); its cutover left the old system's files and jobs in place,
 which the 2026-10-16 sweep retired with step 8 below.
 
-**Order.** The Pirate next, then the Captain and the Bald. Those two serve
+The Pirate went second: its handover (step 7) ran 2026-10-19 with the
+kernel in `~/src/ai-kernel-staging`; the swap, retirement and jobs (steps
+3, 8, 9) ran 2026-10-20 as one script, and step 10 passed (Tom's chat and
+voice checks aside). The notes in steps 3, 9 and 10 are what that run
+found.
+
+**Order.** The Captain and the Bald next. Those two serve
 customers and teams and stay on the old system until the new one is shown
 a valid replacement. The bar, Tom's words (2026-10-16): "a successful
 teamwork session in a group telegram chat, where Valor acts properly
@@ -22,6 +28,7 @@ Run from the Mac (or over SSH as `valorengels`), in `bash`:
 ```
 export PATH=/opt/homebrew/bin:/opt/homebrew/opt/postgresql@18/bin:$HOME/.local/bin:$PATH
 export PGPASSFILE=~/.config/valor-kernel/pgpass VALOR_MACHINE="Valor the Pirate"   # this Mac's name
+export VALOR_PGPORT=5433   # only when Postgres 18 is not on 5432 (the Pirate)
 D=gui/$(id -u); LA=~/Library/LaunchAgents; PY=.venv/bin/python
 OLDPY=~/src/ai/.venv/bin/python   # the old system's interpreter, before step 3
 CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
@@ -49,15 +56,18 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    and `openssl` (the email tests only); `claude`, `codex`, and
    `npm install -g @earendil-works/pi-coding-agent@1.0.0` (the pin in
    `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
-   browser; `ffmpeg` (the voice process decodes and encodes audio with it).
+   browser (an MCP server in `~/.claude.json`, not a command); `ffmpeg` (the voice process decodes and encodes audio with it).
 3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
    system there: `git -C ~/src/ai branch retired/old-main`, then
    `cd ~/src/ai && git fetch origin && git checkout -B main origin/main && uv sync --frozen`.
    While the old system still serves, the kernel can instead be readied in
    a clone beside it, `~/src/ai-kernel-staging`, and steps 4 to 6 and 10's
-   suite run from there; after step 7 it is swapped in with
-   `mv ~/src/ai ~/src/ai-old && mv ~/src/ai-kernel-staging ~/src/ai && cd ~/src/ai && git pull --ff-only && uv sync --frozen`,
-   and step 8 is given `~/src/ai-old`.
+   suite run from there; after step 7 it is swapped in: record
+   `cp -p $LA/com.valor.*.plist $CUT/` (its jobs name the staging path),
+   boot each `com.valor.*` job out, then
+   `mv ~/src/ai ~/src/ai-old && mv ~/src/ai-kernel-staging ~/src/ai && cd ~/src/ai && git pull --ff-only && git worktree repair && uv sync --frozen`
+   (the repair re-links worktrees made from staging), step 8 is given
+   `~/src/ai-old`, and step 9 regenerates every job.
    Never commit in it afterwards: a rollout fast-forwards it.
 4. **The kernel database.** `$PY -m core migrate` makes the roles, the
    database and the schema, and runs `secure-login` (`pgpass`, the
@@ -122,6 +132,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
    and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
+   A plist takes only `PLIST_ENV` from the shell, so when regenerating a
+   job that ran before, export its recorded plist's variables except
+   `PATH` and `HOME` first (`plutil -extract EnvironmentVariables json -o - $CUT/<label>.plist`)
+   and compare the two after.
    Every job's `PATH` includes `/opt/homebrew/bin`: the `core serve` and
    `core routine` plists print it (`routines.launchd_path`: the system
    directories, then those of `claude`, `git`, Postgres and `uv`), and the
@@ -135,7 +149,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    and run `python -m bridges.slack keys` if the user token changed.
 10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
     passes; `$PY -m core settings` names the machine and the backup folder;
-    `$PY -m core routines` lists the routines; a message in each chat the
+    `launchctl kickstart $D/com.valor.backup` writes a dump there;
+    `$PY -m core routines` lists the routines, and
+    `launchctl kickstart $D/com.valor.routine.verify` ends with a
+    `suite.ran` event of exit 0; a message in each chat the
     specs name gets 👀; a voice note sent to Valor reaches its session with
     a `transcript:` line and is answered with one that plays; `launchctl list | grep com.valor` lists only the
     jobs of step 9 and caffeinate and brew-nightly.
