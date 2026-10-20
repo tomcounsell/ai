@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The rules · Valor Engels</title>
+<meta name="description" content="The governance paragraph and the ten hard rules that every change to Valor follows, quoted word for word from the repository.">
+<link rel="canonical" href="https://valorengels.com/rules.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The rules · Valor Engels">
+<meta property="og:description" content="The governance paragraph and the ten hard rules that every change to Valor follows, quoted word for word from the repository.">
+<meta property="og:url" content="https://valorengels.com/rules.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="philosophy.html">Philosophy</a>
+      <a href="alignment.html">Alignment</a>
+      <a href="rules.html" aria-current="page">Rules</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="durability.html">Durability</a>
+      <a href="work.html">Work</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">03 ·</span> the rules</p>
+<h1>The rules every change follows.</h1>
+<p class="lede">Two paragraphs and ten rules sit at the top of the repository's <code>CLAUDE.md</code>, and every change to Valor is held to them. They are quoted here word for word. Under each rule is one plain line on what it means in practice.</p>
+
+<section id="governance">
+  <p class="sec-label">The governing constraint</p>
+  <h2>Governance is restrained by structure, not sentiment</h2>
+  <p>Safety machinery has a failure mode of its own. The old system's failure was guardrails grinding it to a halt, and an early trial of the rebuild repeated it: it stalled three times on an invented spending cap and a per-call refusal, waiting on Tom each time. This paragraph is the answer. A limit has to name the mission item it serves and an incident that already happened without it, and Tom has to grant it. Every grant expires.</p>
+  <blockquote class="verbatim"><p><b>Governance is restrained by structure, not sentiment.</b> Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of <code>CLAUDE.md</code>, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.</p><p><b>Tests are not governance.</b> A test that asserts documented behavior or a documented invariant is part of the code. It is not a check, gate, hook, validator, review round, or approval step, and it needs no incident or grant.</p></blockquote>
+  <p>The paragraph lives in four places in the same words: <code>CLAUDE.md</code>, the persona rendered into every turn, the Not-here section of every directory README, and the mission. Every turn also reads it as correction 1. Only five guards are in force today. Four are the checkpoints of Tom's pipeline decision of 2026-10-01: the request judge, the test-breadth check, the critique loop, and the review checkpoint. The fifth runs web pages only inside a dedicated web agent. Each is ledgered with its incident, its mission item and a ninety-day expiry.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#what-the-governance-constraint-means-in-practice">docs/mission.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p>
+</section>
+
+<section id="hard-rules">
+  <p class="sec-label">Hard rules</p>
+  <h2>Ten rules, adopted 2026-10-15</h2>
+  <p>The rules came from a review of the rebuild's missteps, which ended in one decision: strip the restrictions out, rather than build more, until a turn can do what a developer running Claude Code in the same repository can do.</p>
+  <ol class="rules">
+    <li><b>Developer parity.</b> A turn gets everything a developer running Claude Code in that repository gets: the project's <code>CLAUDE.md</code> and skills, the team plugins, MCP, web, a real browser, and Valor's own accounts (GitHub, Sentry, email). Removing any of it is governance under rule 3.<p class="why">In practice: a turn gets Valor's own GitHub, git and Sentry access, the project's own CLAUDE.md and skills, the team plugins, MCP servers, a logged-in browser and the web. The turn sandbox denies only the kernel's key directory, its Postgres data and port, and the backup disk.</p></li>
+    <li><b>Capability on Tom's ask.</b> When Tom asks for a capability, or the old system had one Tom used, it is built or ported now. "Second need" applies only to abstractions Valor invents for itself. Nothing is deleted for disuse without Tom seeing the list first.<p class="why">The "second need" rule in Mission item 5 is for abstractions Valor invents for itself. It never delays something Tom asked for.</p></li>
+    <li><b>Governance means any limit.</b> Isolation, sandboxing, denials, allowlists, refusals, capability removals, and verification layers are governance, as the paragraph above says.<p class="why">This widens the governance paragraph above to every kind of limit, so a restriction can't come back under a different name.</p></li>
+    <li><b>One mechanism per concern.</b> A job already done by one mechanism is never given a second. A second layer is a new instance under rule 3.<p class="why">Each concern has exactly one mechanism: one ledger, one broker for effects, one way for a turn to reach the kernel, one chat session per chat.</p></li>
+    <li><b>Done means used.</b> A task, milestone or cutover is done when Tom has used its result on a real project, recorded with the date. Suites and replays are evidence, never the finish line.<p class="why">Suites and replays are evidence. The finish line is Tom using the result on a real project, recorded with the date.</p></li>
+    <li><b>Bars do not move.</b> A done criterion is met or Tom drops it in writing. No agent rewrites, replaces or marks one done on its own say-so.<p class="why">A done criterion is a commitment. An agent that finds it hard to meet says so; it doesn't rewrite it.</p></li>
+    <li><b>Real work outnumbers self-work.</b> In any week, most merged tasks are on projects other than Valor.<p class="why">Counted by week: work on Valor itself stays the minority of what merges, and the rest is the work Valor exists to do.</p></li>
+    <li><b>Bloat is refused, not budgeted.</b> No line count is a bar (Tom, 2026-10-16). Production code that nothing in production uses fails the suite (<code>tests/test_bloat.py</code>). The reviewer refuses a line that buys nothing the request needs: dead code, a second mechanism for one job, handling for a failure that has not happened, a component written where one existed, prose that restates the code. The full suite runs in under 5 minutes on one Mac. A plan file fits on one page.<p class="why">The bloat test runs vulture over production code. A reviewer refuses dead code, second mechanisms, handling for failures that never happened, and prose that restates the code.</p></li>
+    <li><b>A bug fix is a commit.</b> A defect gets a fix and a test, with no plan file, no critique round and no separate review.<p class="why">A defect is fixed in the code, with a test, and never guarded. No plan, no critique round, no separate review.</p></li>
+    <li><b>Reuse before writing.</b> Before writing a component, take it from Claude Code itself, an existing library, the old system or cori. Writing one from scratch names why none of those fit.<p class="why">Before writing a component: Claude Code itself, a library, the old system, or cori. Writing from scratch has to say why none fit.</p></li>
+  </ol>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md, Hard rules</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/strip.md">docs/plans/strip.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_bloat.py">tests/test_bloat.py</a></p>
+</section>
+
+<div class="page-next">
+  <a href="alignment.html"><span class="lbl">Previous</span>← Alignment and corrigibility</a>
+  <a href="pipeline.html"><span class="lbl">Next</span>The pipeline →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-20</span>
+  </div>
+</footer>
+</body>
+</html>

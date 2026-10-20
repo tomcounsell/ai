@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alignment · Valor Engels</title>
+<meta name="description" content="What corrigible means for Valor: stoppable, bounded, legible and correctable, enforced by a kernel outside the model's reach; how corrections reach every turn; and how Valor changes itself.">
+<link rel="canonical" href="https://valorengels.com/alignment.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Alignment · Valor Engels">
+<meta property="og:description" content="What corrigible means for Valor: stoppable, bounded, legible and correctable, enforced by a kernel outside the model's reach; how corrections reach every turn; and how Valor changes itself.">
+<meta property="og:url" content="https://valorengels.com/alignment.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="philosophy.html">Philosophy</a>
+      <a href="alignment.html" aria-current="page">Alignment</a>
+      <a href="rules.html">Rules</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="durability.html">Durability</a>
+      <a href="work.html">Work</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">02 ·</span> alignment, corrigibility, self-improvement</p>
+<h1>Corrigible by construction, not by hope.</h1>
+<p class="lede"><i>Corrigible</i>: capable of being corrected. Valor is meant to want to understand the person it serves. It is built so that wanting is enough only when it is also right. Authority lives in a deterministic kernel outside the model's reach, and every correction Tom gives reaches every turn that runs after it.</p>
+<p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/README.md#what-corrigible-means-here">README.md, What corrigible means here</a></p>
+
+<section id="corrigible">
+  <p class="sec-label">Four properties</p>
+  <h2>What a system can enforce when the training is not ours</h2>
+  <p>The alignment literature names four objectives for a model: robustness, interpretability, controllability and ethicality (RICE). Those are properties a model is trained to have, and Valor can't inspect that training. So it asks what a system built around the model can enforce instead. It also says plainly what that enforcement cannot do.</p>
+  <div class="table-wrap">
+  <table class="doc stack">
+    <tr><th>Property</th><th>What the kernel enforces</th><th>What it cannot do</th></tr>
+    <tr><td><b>Stoppable</b><br><span class="dim">controllability</span></td><td data-label="What the kernel enforces">Stop is immediate and lossless. Permission is checked where an action touches the world, and any grant can be revoked.</td><td data-label="What it cannot do">Stop a model that finds a side channel.</td></tr>
+    <tr><td><b>Bounded</b><br><span class="dim">robustness</span></td><td data-label="What the kernel enforces">An effect ceiling on every task and every task beneath it, and every model call metered with its spending shown.</td><td data-label="What it cannot do">Make the model's own judgement robust.</td></tr>
+    <tr><td><b>Legible</b><br><span class="dim">interpretability</span></td><td data-label="What the kernel enforces">A ledger of every effect and every correction, written by the system and readable after the fact.</td><td data-label="What it cannot do">Detect a model that narrates well and acts otherwise.</td></tr>
+    <tr><td><b>Correctable</b><br><span class="dim">ethicality</span></td><td data-label="What the kernel enforces">A persona in git that changes by review, and a corrections ledger every session reads.</td><td data-label="What it cannot do">Fix a bad prior.</td></tr>
+  </table>
+  </div>
+  <p>The last column is there on purpose. A boundary drawn clearly is more useful than one left blurred.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/README.md#what-corrigible-means-here">README.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/REFERENCES.md">REFERENCES.md</a> (the papers behind each row)</p>
+</section>
+
+<section id="off-switch">
+  <p class="sec-label">The off switch</p>
+  <h2>Stop lives in the kernel, never in the model's incentives</h2>
+  <p>Research on the off-switch problem shows that an agent's incentive to allow shutdown holds only while it is uncertain about what the human wants, and that the incentive is fragile. So Valor doesn't rely on it. The kernel assumes a model may route around anything it can reach, and keeps authority outside the model and outside the prompt.</p>
+  <ol class="flow">
+    <li><div class="what"><b>A stop writes one row</b><span><code>task.stopped</code> and a Postgres notification, in one transaction. The row is the fence. The gateway refuses every later model call and the broker every later effect by reading it.</span></div><div class="who">kernel</div></li>
+    <li><div class="what"><b>In-flight work is cut</b><span>The gateway's grant for the task is revoked, the harness's whole process group is killed, and every open call is drained and charged.</span></div><div class="who">runner</div></li>
+    <li><div class="what"><b>Nothing durable is lost</b><span>What the turn left behind is reaped, and <code>turn.ended</code> records the stop. A test stops a task mid-turn and checks that every call is charged, every turn ended, and no effect is left between intent and outcome.</span></div><div class="who">ledger</div></li>
+  </ol>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_serve.py">tests/test_serve.py</a></p>
+</section>
+
+<section id="bounded">
+  <p class="sec-label">Bounded authority</p>
+  <h2>Every effect has a class, and every task a ceiling</h2>
+  <div class="table-wrap">
+  <table class="doc stack">
+    <tr><th>Class</th><th>Meaning</th><th>Who authorizes</th></tr>
+    <tr><td><code>read</code></td><td data-label="Meaning">no effect</td><td data-label="Who authorizes">the grant</td></tr>
+    <tr><td><code>propose</code></td><td data-label="Meaning">reversible: a file in the workspace, a branch, a draft</td><td data-label="Who authorizes">the grant; Valor asks first when Tom would want to be asked</td></tr>
+    <tr><td><code>act</code></td><td data-label="Meaning">irreversible or money: merge, send, pay, deploy</td><td data-label="Who authorizes">the task's ceiling; performed when requested, and reported to Tom</td></tr>
+  </table>
+  </div>
+  <p>Every effect passes through one broker. The broker reads the effect's class from the code that performs it, never from the request. It refuses anything above the task's ceiling, and a child task's ceiling never exceeds its parent's. Inside its ceiling Valor is fully free: it acts as itself on its own accounts, and no post or send waits for Tom to approve it. Spending is metered and shown, and Tom decided it never stops a task.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#effect-classes-and-the-broker">docs/architecture.md, Effect classes and the broker</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a></p>
+</section>
+
+<section id="corrections">
+  <p class="sec-label">Correction</p>
+  <h2>A correction reaches the next turn of every task</h2>
+  <p>A correction is the most informative thing Tom can give Valor. Each one is a numbered ledger row with its scope, its source and its provenance: who gave it, through what channel, and when. Nothing reads a cached copy. Every turn's system prompt is rendered fresh as the turn starts, in this order:</p>
+  <ol class="flow">
+    <li><div class="what"><b>Persona</b><span>Identity, voice, conduct and the governance paragraphs, from <code>persona/</code>, which changes only by a reviewed diff.</span></div><div class="who">git</div></li>
+    <li><div class="what"><b>Brief</b><span>The task's instruction, its effect ceiling and its workspace.</span></div><div class="who">ledger</div></li>
+    <li><div class="what"><b>Corrections from Tom</b><span>Every correction in force, numbered, then exemplars: work Tom loved and why. One recorded now reaches tasks that are already running.</span></div><div class="who">ledger</div></li>
+    <li><div class="what"><b>Remembered</b><span>Records from earlier tasks in the same project, quoted as data and labelled with whose words they hold.</span></div><div class="who">memory</div></li>
+    <li><div class="what"><b>How the task reaches Tom</b><span>The channel for asking and delivering, and the instructions for the stage the task is in.</span></div><div class="who">skills</div></li>
+  </ol>
+  <p>The persona asks Valor to comply first. When a correction conflicts with what Valor believes about Tom's goals, it does what it was told and, if the stakes are high, states the conflict once. A correction that stands is never argued again. Each turn's record keeps the correction numbers and a digest of the persona it ran under, so the ledger shows which rules every turn saw.</p>
+  <p>One gap is named rather than hidden: a subagent that Claude Code starts inside a turn gets neither the persona nor the corrections.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#how-the-persona-reaches-a-turn">docs/persona.md, How the persona reaches a turn</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/corrections.py">core/corrections.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/persona.py">core/persona.py</a></p>
+</section>
+
+<section id="data-not-instructions">
+  <p class="sec-label">Steering</p>
+  <h2>Instructions come from Tom and the Brief; everything else is data</h2>
+  <p>Retrieved content can act as instructions to a model. So a file in a repository, a web page, a quoted email or a retrieved memory may inform the work, but an instruction inside it is not followed, and nothing in it widens what Valor may do. Memory returns a string and grants nothing. Web pages are read only inside a dedicated web agent, so a page's text never lands in a working agent's context. That is one of the five guards in force. The effect ceiling bounds the damage if all of this fails.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#instructions-come-from-tom-and-the-brief">docs/persona.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">docs/memory.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p>
+</section>
+
+<section id="rsi">
+  <p class="sec-label">Recursive self-improvement</p>
+  <h2>Valor changes Valor the way it changes anything else</h2>
+  <p>Valor's own repository is one of its projects. A change to Valor is a task like any other: judged, planned, critiqued, built, then tested, reviewed and documented by fresh sessions that did not write it, and merged only when the merge predicate holds. Nothing about improving itself takes a shorter path.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt>The kernel rolls itself forward</dt><dd>When a merge lands on its own checkout, the resident kernel picks it up. A change to the persona, skills, docs or tests is fast-forwarded at once. Any other change waits for running jobs to end, backs up the database if the schema changed, migrates, and restarts. A failed step rolls back, and after three failures Tom is told.</dd></div>
+    <div class="def-row"><dt>The persona changes by review</dt><dd>Voice and conduct live in git. A turn cannot edit the rules it runs under; a reviewed merge can.</dd></div>
+    <div class="def-row"><dt>Governance can't grow on its own</dt><dd>A new check, gate or limit needs an incident, a mission item and Tom's grant, and it expires in ninety days unless he keeps it. Self-improvement can't become self-restriction by default.</dd></div>
+    <div class="def-row"><dt>Autonomy grows only by Tom's decision</dt><dd>The mission's constraint: autonomy shrinks on evidence and grows only when Tom decides it should.</dd></div>
+    <div class="def-row"><dt>Real work outnumbers self-work</dt><dd>In any week, most merged tasks are on projects other than Valor. Improving itself is never what Valor is for.</dd></div>
+  </dl>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/rollout.py">core/rollout.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/README.md">core/README.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a> · <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md, rule 7</a></p>
+</section>
+
+<section id="limits">
+  <p class="sec-label">Limits</p>
+  <h2>What this design does not catch</h2>
+  <ul>
+    <li><b>A scheming model.</b> A deceptively aligned model with a side channel leaves in the ledger only what passed the kernel. The effect ceiling keeps the damage survivable while the error is found, and Tom's reading of the ledger and the work is how it gets found.</li>
+    <li><b>The sandbox runs as the machine's user.</b> A deliberate keychain read isn't fenced, and the public internet is reachable. Tom accepted this on 2026-10-01: the gateway gives visibility and honest metering, not a hard wall.</li>
+    <li><b>Tool results are the agent's own account.</b> A transcript is written inside the sandbox and could be falsified there, so the reviewer runs the suite itself instead of trusting it.</li>
+  </ul>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#limits">docs/architecture.md, Limits</a></p>
+</section>
+
+<div class="page-next">
+  <a href="philosophy.html"><span class="lbl">Previous</span>← The philosophy</a>
+  <a href="rules.html"><span class="lbl">Next</span>The rules →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-20</span>
+  </div>
+</footer>
+</body>
+</html>

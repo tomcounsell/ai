@@ -23,14 +23,15 @@
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="../index.html"><span class="name">Valor</span><span class="sub">System Docs</span></a>
+    <a class="brand" href="../index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
     <nav>
       <a href="../index.html">Overview</a>
-      <a href="../runtime.html">Runtime</a>
+      <a href="../philosophy.html">Philosophy</a>
+      <a href="../alignment.html">Alignment</a>
+      <a href="../rules.html">Rules</a>
       <a href="../pipeline.html">Pipeline</a>
-      <a href="../memory.html">Memory</a>
-      <a href="../reflections.html">Reflections</a>
-      <a href="../codebase.html">Codebase</a>
+      <a href="../durability.html">Durability</a>
+      <a href="../work.html">Work</a>
       <a href="../research.html" aria-current="page">Research</a>
     </nav>
   </div>
@@ -40,6 +41,7 @@
 
 <p class="kicker"><span class="n">Research ·</span> May 2026</p>
 <h1>OpenHuman vs Hermes</h1>
+<p class="dated-note">Written before Valor's rebuild, which cut over on 2026-10-14. The comparison describes the earlier system (Redis, Popoto, a worker and a bridge). For how Valor works now, start at the <a href="../index.html">overview</a>.</p>
 <p class="lede">Two open, self-hosted agent stacks landed in the same window, both claiming persistent memory, tool use, and autonomous skill — and they are not competing for the same problem. Mix them up at the architecture stage and you waste a quarter.</p>
 
 <div class="diagram-wrap">
@@ -114,7 +116,7 @@
       <dd>Hermes is betting that shareable, self-improving skills become an ecosystem. Worth watching whether or not you build on it.</dd>
     </div>
   </dl>
-  <p>The first lesson is why Valor's own <a href="../memory.html">memory</a> runs two stores at once: it is simultaneously a single-operator system (which earns it a legible file layer humans read) and an always-on agent consulted at tool-call granularity (which demands an indexed, ranked object store). The comparison's dichotomy, resolved by refusing to pick a side.</p>
+  <p>The first lesson is why Valor's own <a href="../durability.html#memory">memory</a> runs two stores at once: it is simultaneously a single-operator system (which earns it a legible file layer humans read) and an always-on agent consulted at tool-call granularity (which demands an indexed, ranked object store). The comparison's dichotomy, resolved by refusing to pick a side.</p>
 </section>
 
 <div class="page-next">
@@ -126,11 +128,11 @@
 
 <footer class="site">
   <div class="inner">
-    <span>valor engels · research archive</span>
+    <span>valor engels · how the system works</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
-    <span>study dated may 2026 · products move fast, verdicts age</span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-20</span>
   </div>
 </footer>
-
 </body>
 </html>

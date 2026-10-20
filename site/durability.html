@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Durability · Valor Engels</title>
+<meta name="description" content="How Valor keeps its state: one Postgres ledger that cannot be edited, integrity without foreign keys, intent before outcome, recovery after a crash, retries, and memory.">
+<link rel="canonical" href="https://valorengels.com/durability.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Durability · Valor Engels">
+<meta property="og:description" content="How Valor keeps its state: one Postgres ledger that cannot be edited, integrity without foreign keys, intent before outcome, recovery after a crash, retries, and memory.">
+<meta property="og:url" content="https://valorengels.com/durability.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="philosophy.html">Philosophy</a>
+      <a href="alignment.html">Alignment</a>
+      <a href="rules.html">Rules</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="durability.html" aria-current="page">Durability</a>
+      <a href="work.html">Work</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">05 ·</span> durability and the data model</p>
+<h1>One ledger, and everything read from it.</h1>
+<p class="lede">Valor keeps its state in one Postgres database used as a document store: write-once JSONB documents, an append-only events table, and no foreign keys. Every model call, turn, effect, question, answer, correction and stop is a row. Everything the kernel knows about a task is computed from those rows when it's needed, so a crash or a stop at any instant leaves nothing to reconcile.</p>
+
+<section id="tables">
+  <p class="sec-label">The data model</p>
+  <h2>Two tables</h2>
+  <h3><code>events</code>, the ledger</h3>
+  <div class="table-wrap">
+  <table class="doc">
+    <tr><th>Column</th><th>Meaning</th></tr>
+    <tr><td class="mono">id</td><td>The order of the ledger. Every reader orders by it.</td></tr>
+    <tr><td class="mono">task_id</td><td>The stream the row belongs to: a task's id, or a named stream such as <code>corrections</code> or <code>guards</code>.</td></tr>
+    <tr><td class="mono">type</td><td>The event type, <code>noun.verb</code>: <code>turn.started</code>, <code>effect.intent</code>, <code>question.answered</code>.</td></tr>
+    <tr><td class="mono">payload</td><td>The event's fields, as JSONB. Ids of what the row regards live here.</td></tr>
+    <tr><td class="mono">at</td><td>Wall time of the insert, for people reading the ledger. Order comes from <code>id</code> alone.</td></tr>
+  </table>
+  </div>
+  <h3><code>documents</code>, written once</h3>
+  <p>Keyed by <code>(kind, id)</code>. The <code>task</code> document is the Brief as the task started: instruction, effect ceiling, workspace, model, and where a merge goes. The kernel can't update a document, so anything that changes about a task after it starts is an event on its stream, never an edit to its Brief. A <code>transcript</code> document holds a turn's Claude Code transcript in chunks. A new kind of document needs no migration.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/schema.sql">core/schema.sql</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#the-tables">docs/data.md, The tables</a></p>
+</section>
+
+<section id="append-only">
+  <p class="sec-label">Append-only</p>
+  <h2>Locked twice</h2>
+  <dl class="def-list">
+    <div class="def-row"><dt>Grants<span class="hint">the first lock</span></dt><dd>The kernel's role, <code>valor_kernel</code>, holds <code>SELECT</code> and <code>INSERT</code> only. It has no update, delete or truncate privilege, so the system cannot edit its own record.</dd></div>
+    <div class="def-row"><dt>Trigger<span class="hint">the second lock</span></dt><dd><code>reject_mutation()</code> raises on any update, delete or truncate of <code>events</code>, even for the table's owner, so a stray statement can't rewrite the ledger by accident.</dd></div>
+    <div class="def-row"><dt>Out of a turn's reach</dt><dd>Each turn's sandbox denies the kernel's database and key directory. An early demonstration found that Postgres trusted every loopback connection, so a turn could have written rows as the kernel. The fix was separation, not a check.</dd></div>
+  </dl>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#append-only-enforced-twice">docs/data.md, Append-only, enforced twice</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#the-ledger">docs/architecture.md, The ledger</a></p>
+</section>
+
+<section id="integrity">
+  <p class="sec-label">Integrity without foreign keys</p>
+  <h2>Partial unique indexes make double-writes impossible</h2>
+  <p>A row names what it belongs to by an id inside its payload. In place of a foreign-key lattice, partial unique indexes make a class of double-write impossible at the database, whatever the kernel code does. A few of them:</p>
+  <div class="table-wrap">
+  <table class="doc">
+    <tr><th>Index</th><th>What it prevents</th></tr>
+    <tr><td class="mono">events_one_call_row</td><td>A model call opened or charged twice</td></tr>
+    <tr><td class="mono">events_one_effect_row</td><td>Two intents or two outcomes for one effect</td></tr>
+    <tr><td class="mono">events_one_stop</td><td>A task stopped twice</td></tr>
+    <tr><td class="mono">events_one_turn_row</td><td>One turn collected twice, which would make two candidates from one turn</td></tr>
+    <tr><td class="mono">events_one_message</td><td>One inbound message recorded twice</td></tr>
+    <tr><td class="mono">events_one_notice</td><td>The same thing told to Tom twice</td></tr>
+  </table>
+  </div>
+  <p>Writers take a transaction-scoped advisory lock on the task, so a model call and a stop racing on one task can't both win. Session locks name the processes that must be single: one resident kernel per machine, one run per task, one bridge per channel. A lock is released when its process dies, so no unlock code has to run.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#integrity-without-foreign-keys">docs/data.md, Integrity without foreign keys</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/ledger.py">core/ledger.py</a></p>
+</section>
+
+<section id="intent">
+  <p class="sec-label">Effects</p>
+  <h2>Intent before outcome</h2>
+  <p>An effect's <code>effect.intent</code> row commits before the code that performs it runs, and its <code>effect.outcome</code> row after. A kill between the two leaves an intent with no outcome, never a silent effect. On restart the kernel rebuilds the action from the intent and asks the target. For a merge, does the branch hold the commit? Present is written <code>done</code> and absent <code>failed</code>. If the target doesn't answer, nothing is written, and the effect stays in flight until it can be known.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#intent-before-outcome">docs/data.md, Intent before outcome</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
+</section>
+
+<section id="recovery">
+  <p class="sec-label">The resident kernel</p>
+  <h2>Recover first, then wake on every row</h2>
+  <p><code>python -m core serve</code> is one process per machine, kept alive by launchd. When it starts, it recovers before it does anything else:</p>
+  <ul>
+    <li>charges each model call a dead kernel left open, at its estimate;</li>
+    <li>kills the processes of each turn left with no end, and records it as <code>interrupted</code>;</li>
+    <li>collects a turn that ended but was never collected;</li>
+    <li>reconciles each push and merge whose intent has no outcome;</li>
+    <li>sweeps task services that nothing holds;</li>
+    <li>finishes rolling out a merge to its own code, restarting the bridges that code reaches.</li>
+  </ul>
+  <p>Then it wakes on every ledger notification and on a timer, and takes one step for each task that has new rows.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt>Retries that double</dt><dd>A step that fails is tried again after a delay that doubles from a minute, and the next turn opens with the reason. At four failures in a row of one state the task ends, with a report to Tom. A merge that fails is retried the same way, and the fifth failure ends the task.</dd></div>
+    <div class="def-row"><dt>Turn slots</dt><dd>At most <code>max_turns</code> harness turns or checks run at once on a machine (default 2), each holding a session lock. A task that went idle steps behind every ready one, so it never holds a slot from other work.</dd></div>
+    <div class="def-row"><dt>An answer is never lost</dt><dd>Tom's answer or feedback is spent only by a turn that finishes. After a turn fails or is stopped, the next turn opens with it again.</dd></div>
+    <div class="def-row"><dt>Backups</dt><dd><code>python -m core backup</code> dumps the kernel database with a manifest and keeps the newest 30. <code>restore</code> restores a dump into a scratch cluster and checks it against its manifest.</dd></div>
+  </dl>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/README.md#entry-points">core/README.md, Entry points</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/serve.py">core/serve.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/slot.py">core/slot.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/backup.py">core/backup.py</a></p>
+</section>
+
+<section id="harnesses">
+  <p class="sec-label">Harnesses</p>
+  <h2>A turn is one subprocess</h2>
+  <p>The kernel never knows which agent it runs. A harness port gives it the command line, environment and working directory for one turn, and says how to read the result. The main harness is Claude Code, one <code>claude -p</code> per turn, resumed by session id. Pi is a second harness. Every model call goes through the kernel's gateway, which meters it and records its price on the task.</p>
+  <p>A turn reaches the kernel only through files it leaves under <code>.valor/</code> in its workspace: a question, a plan, a delivery, a request for advice, or one file per effect it wants. The kernel reads them carefully, because the turn controls them. It follows no link and reads only a regular file.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/runs.py">core/runs.py</a> · <a href="https://github.com/tomcounsell/ai/tree/main/harnesses">harnesses/</a></p>
+</section>
+
+<section id="bridges">
+  <p class="sec-label">Bridges</p>
+  <h2>Bridges are I/O only</h2>
+  <p>Telegram, email, Slack and a local chat page are each a process of their own. A bridge records each inbound message as one row and hands the kernel's outbound records to its medium. The kernel's loop is the one execution engine. A send is an <code>act</code> effect: the broker holds it, and the owning bridge's outbox performs it and settles its own sends after a crash.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#bridges">docs/architecture.md, Bridges</a> · <a href="https://github.com/tomcounsell/ai/tree/main/docs/bridges">docs/bridges/</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/bridge.py">core/bridge.py</a></p>
+</section>
+
+<section id="memory">
+  <p class="sec-label">Memory</p>
+  <h2>Memory reads the ledger and grants nothing</h2>
+  <p>A preference Tom stated in one task should reach a later task in the same project that never stated it. Memory is popoto's Postgres backend, in its own schema, owned by a role that has no privilege on the ledger.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt>What is kept</dt><dd>After each turn, the kernel ingests the rows memory hasn't taken: task instructions, Tom's answers and feedback, the corrections stream, and the text of each turn's transcript. These are raw entries, with no model call to extract them.</dd></div>
+    <div class="def-row"><dt>How it is recalled</dt><dd>A working session's Brief gains a Remembered section: BM25 search over the task's instruction among records of the same project, plus the records Valor has judged to be standards of working, from any client. At most ten records, quoted as data and labelled with whose words they hold.</dd></div>
+    <div class="def-row"><dt>Where it lives</dt><dd>Designed for a shared Postgres the four Macs reach, so working standards travel between clients while client facts stay with their client. Until that store's host is chosen, each Mac keeps memory in its own kernel database. A fact that turns up in the wrong client's Brief is corrected, and that record stops being recalled outside its client.</dd></div>
+    <div class="def-row"><dt>Safety</dt><dd>Nothing read from memory changes a ceiling or a grant. Memory never writes the ledger. Fresh sessions get no recall.</dd></div>
+  </dl>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">docs/memory.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/memory.py">core/memory.py</a> · <a href="https://github.com/tomcounsell/ai/tree/main/memory">memory/</a></p>
+</section>
+
+<div class="page-next">
+  <a href="pipeline.html"><span class="lbl">Previous</span>← The pipeline</a>
+  <a href="work.html"><span class="lbl">Next</span>The work →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-20</span>
+  </div>
+</footer>
+</body>
+</html>

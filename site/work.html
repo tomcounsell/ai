@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The work · Valor Engels</title>
+<meta name="description" content="What Valor does day to day: one session per chat, team chats and engineering chats, tasks that report back, what reaches Tom, the machines, and the routines that run on a schedule.">
+<link rel="canonical" href="https://valorengels.com/work.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="The work · Valor Engels">
+<meta property="og:description" content="What Valor does day to day: one session per chat, team chats and engineering chats, tasks that report back, what reaches Tom, the machines, and the routines that run on a schedule.">
+<meta property="og:url" content="https://valorengels.com/work.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="philosophy.html">Philosophy</a>
+      <a href="alignment.html">Alignment</a>
+      <a href="rules.html">Rules</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="durability.html">Durability</a>
+      <a href="work.html" aria-current="page">Work</a>
+      <a href="research.html">Research</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">06 ·</span> the work</p>
+<h1>One voice in every chat, workers behind it.</h1>
+<p class="lede">Valor works in the chats a team already uses: Telegram groups, Slack, email threads, and Tom's own direct messages. In each chat, one long-lived session is Valor's voice. It reads, answers, stays quiet, or hands the work to a task that carries it to a result and reports back.</p>
+
+<section id="sessions">
+  <p class="sec-label">Chats</p>
+  <h2>Read and dispatch</h2>
+  <p>Each chat Valor is in has one session, and every message there that doesn't belong to running work is that session's next prompt. The session reads the chat, memory, task status and the repository itself. Everything else it hands on:</p>
+  <dl class="def-list">
+    <div class="def-row"><dt>Something small</dt><dd>A lookup across many files, a summary, a quick check: a subagent inside the session's own turn.</dd></div>
+    <div class="def-row"><dt>Anything on the web</dt><dd>A search, a page, a link someone sent: the dedicated web agent, which any agent at any depth can start.</dd></div>
+    <div class="def-row"><dt>Anything with a deliverable or a merge</dt><dd>A change, a bug, a feature, a document, an investigation: a task. The task does the work and reports to the session that started it, never to the chat. Only the session speaks in its chat, and it tells the chat in its own words.</dd></div>
+  </dl>
+  <p>When Tom raises an idea that is still being talked through, the session shapes it first and starts nothing. It asks what only Tom could settle, one question per message, and ends with a readback. In Tom's own chat, his exact <code>stop</code> stops every task reporting to that session at once.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#one-voice-that-orchestrates">docs/persona.md, One voice that orchestrates</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tools/chat_tasks.py">tools/chat_tasks.py</a></p>
+</section>
+
+<section id="rooms">
+  <p class="sec-label">Rooms</p>
+  <h2>Team chats stay quiet; engineering has its own groups</h2>
+  <p>Each chat, or "room", can carry a description of what it's for. The description rides in every turn's prompt beside the persona, so no compaction removes it. Team chats and engineering chats behave differently:</p>
+  <div class="cols-2">
+    <div>
+      <h3>Team chats</h3>
+      <p>Valor waits to be mentioned: a message naming Valor, or replying to one of its posts, wakes the session, and the rest is heard quietly. No engineering work starts there. Web search and filing GitHub issues are fine, and engineering requests are pointed to the project's engineering group.</p>
+    </div>
+    <div>
+      <h3>Engineering chats and Tom's own</h3>
+      <p>Every message reaches the session, which answers and starts tasks. Tom's own chat is a one-to-one with the CEO.</p>
+    </div>
+  </div>
+  <p>On Telegram and Slack, a message Valor reads gets 👀 at once. When the turn finishes, the kernel swaps it for an emoji showing what the turn actually did, read from its effects and tool calls, never guessed.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/bridges/telegram.md">docs/bridges/telegram.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/intake.py">core/intake.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/reactions.py">core/reactions.py</a></p>
+</section>
+
+<section id="reaches-tom">
+  <p class="sec-label">Attention</p>
+  <h2>What reaches Tom</h2>
+  <p>Tom's attention is counted like money: every point where he acts on a task is a ledger row with its provenance. Only a few kinds of message reach him:</p>
+  <ul>
+    <li><b>A question</b>, only when the answer would change the outcome or the authority, with the default Valor will assume.</li>
+    <li><b>A delivery</b>: what was built, how it was verified, what was not, and the decisions he may want to change.</li>
+    <li><b>A report</b> for each irreversible effect that left, such as a merge, and for a task that ended without finishing.</li>
+    <li><b>An agenda</b> for a strategy meeting, when a committed decision's watched condition has been met.</li>
+  </ul>
+  <p>Anything Valor makes for a person, whether a deck, a one-page explainer or a report, is a PDF by default, laid out to read on a phone without zooming.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#the-attention-log">docs/mission.md, The attention log</a> · <a href="https://github.com/tomcounsell/ai/blob/main/persona/delivery.md">persona/delivery.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/notices.py">core/notices.py</a></p>
+</section>
+
+<section id="machines">
+  <p class="sec-label">Machines</p>
+  <h2>Four Macs, one per client</h2>
+  <p>Every project of a client runs on that client's Mac, and Valor is logged into the same accounts for all of them. Each Mac keeps its own kernel, ledger and bridges, so the hard boundary between clients is the machine and the accounts on it. Production runs on Valor's Macs, never on Tom's. Postgres, the kernel process and the bridges run resident. Everything else starts for one task and is gone when it ends, including each task's own Postgres.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">docs/machine.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/workspace.md">docs/workspace.md</a></p>
+</section>
+
+<section id="routines">
+  <p class="sec-label">Routines</p>
+  <h2>Scheduled work is a task like any other</h2>
+  <p>A routine is work Valor does on a schedule instead of on request. launchd supplies the time; the kernel supplies everything else. Each run is a task with a Brief, an effect ceiling and metered spending, recorded in the ledger and stoppable at any instant. A routine is never a bare script, because a script outside the kernel has no meter, no ceiling and no ledger.</p>
+  <div class="table-wrap">
+  <table class="doc">
+    <tr><th>Routine</th><th>What it does</th></tr>
+    <tr><td class="mono">verify</td><td>Runs a project's suite at the head of its branch, and starts one fix task for each group of red tests no task already holds.</td></tr>
+    <tr><td class="mono">expiry</td><td>Lists guards and routines past their ninety days, as a report to Tom. It deletes nothing itself.</td></tr>
+    <tr><td class="mono">conditions</td><td>Checks each committed business decision's watched conditions against the business's own data, and puts each one met on the next strategy meeting's agenda.</td></tr>
+  </table>
+  </div>
+  <p>Nothing a routine finds is pushed to Tom unless it needs a decision.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/routines.md">docs/routines.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/routines">routines/</a></p>
+</section>
+
+<div class="page-next">
+  <a href="durability.html"><span class="lbl">Previous</span>← Durability</a>
+  <a href="research.html"><span class="lbl">Next</span>Research →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-20</span>
+  </div>
+</footer>
+</body>
+</html>
