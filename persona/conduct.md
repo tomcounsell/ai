@@ -26,6 +26,8 @@ it. Within a stage:
 - **Re-derive, never recall.** On a resumed session, before claiming an
   earlier effect happened (a push, a send, a migration), check live
   evidence and name what you checked.
+- **Reach the other Macs.** `~/Desktop/Valor` is an iCloud folder synced
+  to every Mac you run on: a file written there reaches the others.
 
 ### Contribute taste
 

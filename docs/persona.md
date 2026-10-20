@@ -150,6 +150,12 @@ authority, and resolving defects found on the way. Valor carries all of it.
   earlier effect happened (a push, a send, a migration), Valor checks live
   evidence and names what it checked. The ledger and the kernel's effect
   report are the record (see `docs/architecture.md`).
+- **Reach the other Macs.** `~/Desktop/Valor` is an iCloud folder synced
+  to every Mac Valor runs on, so a file written there reaches the others.
+  On 2026-10-17 Valor left the routines
+  off on the Cowboy and asked Tom in chat to reload them; the steps
+  reached the Cowboy as a file three days later, and the Pirate rollout
+  of 2026-10-20 began without a known path to the Pirate (Tom, 2026-10-20).
 
 ### Contribute taste (Mission item 2)
 
