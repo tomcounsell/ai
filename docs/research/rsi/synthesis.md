@@ -84,12 +84,14 @@ their gaps are listed there.
    a merge report to Tom.
 3. **Nothing must be true before work starts.** The old loop's first cycle
    ended `infra_failure` on its calibration floor of 20.
-4. **It counts use.** An ability is done when a later task of Tom's used it
-   and Tom accepted that delivery, with the date.
+4. **It counts use.** Tasks started with an `rsi:` key over those with a
+   `delivery.used` mark Tom wrote (`python -m core used`, not role-played).
+   No agent judges use, and no second "used" row is added (rule 4).
 
-**Sources and ranking.** Links Tom forwards are filed with
-`core routine rsi --finding … --key link:<url>`. Recurrence is checked in
-memory. One ranking turn per run starts tasks. Dedupe keys and turn slots
+**Sources and ranking.** Each source is a ledger row, keyed
+`rsi:<event id>`; a row is unseen while no `task.started` carries its key,
+because `holder()` releases a key on merge and would restart a merged fix.
+Recurrence is checked in memory. One ranking turn per run starts tasks. Dedupe keys and turn slots
 bound the load. Group text is never a source row.
 
 **Evaluator.** The ground truth is Tom's use; the gains in the notes came
@@ -99,7 +101,9 @@ only from a judge the improver could not reach.
   rebuild-baseline method.
 - Its answer keys are Tom's merged result and the hidden tests.
 - A fresh Opus-class judge reads outcomes, never narration.
-- A skill replays the task that showed the gap plus one similar task.
+- A skill replays the task that showed the gap plus similar past tasks.
+  Under 10 paired trials per arm the verdict is "inconclusive": it
+  neither blocks nor promotes (#3177 was inconclusive at 2 and 4).
 - A persona replay includes hostile group messages (the Grok incident).
 - A venture's money is read from the processor by the conditions routine
   and never self-reported.
