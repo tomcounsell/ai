@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Valor Engels · An AI coworker with its own machines and its own judgement</title>
-<meta name="description" content="Valor Engels is an AI coworker built and operated by Tom Counsell: one identity on every channel, its own machines and accounts, and a kernel that keeps every task bounded, recorded and stoppable. This site explains how it works.">
+<meta name="description" content="Valor Engels is an AI coworker built and operated by Tom Counsell. This site explains what Valor is, how it works, and the rules it runs under, with every claim linked to its source.">
 <link rel="canonical" href="https://valorengels.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Valor Engels · An AI coworker with its own machines and its own judgement">
-<meta property="og:description" content="Valor Engels is an AI coworker built and operated by Tom Counsell: one identity on every channel, its own machines and accounts, and a kernel that keeps every task bounded, recorded and stoppable. This site explains how it works.">
+<meta property="og:description" content="Valor Engels is an AI coworker built and operated by Tom Counsell. This site explains what Valor is, how it works, and the rules it runs under, with every claim linked to its source.">
 <meta property="og:url" content="https://valorengels.com/">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -44,8 +44,8 @@
     <div class="hero-copy">
       <p class="kicker"><span class="n">valor engels ·</span> an AI coworker</p>
       <h1>An AI coworker with its own machines and its own judgement.</h1>
-      <p class="lede">Valor Engels is an AI coworker, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. Tom is the CEO; Valor works as his deputy, product owner and general manager. Tom gives it work in conversation, and Valor carries it from an incomplete idea to a finished result: a merged pull request, a deck, a post, a client's agent. It brings back only the decisions that need him.</p>
-      <p class="lede">This site explains what Valor is, what it does, and how the plumbing works. Every claim links to the doc or code file it comes from in the <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">public repository</a>.</p>
+      <p class="lede">Valor Engels is an AI coworker, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. Tom is the CEO; Valor is his deputy and general manager. Tom hands it work in conversation and gets back a finished result: a merged pull request, a deck, a client's agent.</p>
+      <p class="lede">This site explains how it works. Each claim links to its source in the <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">public repository</a>.</p>
       <div class="cta-row">
         <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor</a>
         <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Connect on LinkedIn</a>
@@ -75,122 +75,58 @@
     </aside>
   </div>
 </div>
-
-<section id="identity">
-  <p class="sec-label">01 · Identity</p>
-  <h2>One name on every channel</h2>
-  <p>Valor is one identity. Everyone who reaches Valor reaches it under this one name, on every channel, and every reply, commit, pull request, comment and email it writes leaves as Valor Engels. There is no per-channel persona and no mode in which Valor sends as Tom or as anyone else. The boundary is access: Valor holds none of Tom's accounts, so it cannot act as Tom.</p>
-  <dl class="def-list">
-    <div class="def-row"><dt>Name</dt><dd>Valor Engels</dd></div>
-    <div class="def-row"><dt>Email and Google Workspace</dt><dd><a href="mailto:valor@yuda.me">valor@yuda.me</a></dd></div>
-    <div class="def-row"><dt>Organization</dt><dd><a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a></dd></div>
-    <div class="def-row"><dt>Timezone</dt><dd>UTC+7 (Asia/Bangkok)</dd></div>
-    <div class="def-row"><dt>Telegram, GitHub, X, LinkedIn</dt><dd>@valorengels</dd></div>
-    <div class="def-row"><dt>Operator</dt><dd>Tom Counsell</dd></div>
-  </dl>
-  <p>Those fields are structured data, rendered into the text at the top of every turn Valor runs. Yes, Valor reads its own email.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">persona/identity.toml</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">docs/persona.md, Identity</a></p>
-</section>
-
 <section id="shape">
-  <p class="sec-label">02 · The shape</p>
+  <p class="sec-label">01 · How it works</p>
   <h2>A message becomes a task in a ledger</h2>
-  <p>Each chat Valor is in has one long-lived session, and it is the one voice there. It reads the chat, answers, stays quiet, or starts a task. A task is a record in a Postgres ledger that the system cannot edit. A deterministic kernel drives the task through its stages and decides what it may do. A frontier model does the work inside each stage, one turn at a time.</p>
-  <div class="diagram-wrap">
-  <svg viewBox="0 0 1000 230" role="img" aria-label="A chat message reaches the chat's session, which starts a task. The kernel drives the task to a delivery. Every step is a row in the append-only ledger.">
-    <defs>
-      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker>
-    </defs>
-    <rect class="dg-box" x="20" y="40" width="190" height="62"/>
-    <text class="dg-title" x="115" y="66" text-anchor="middle">Telegram · Slack · email</text>
-    <text class="dg-sub" x="115" y="85" text-anchor="middle">a message in a chat</text>
-
-    <rect class="dg-box" x="275" y="40" width="190" height="62"/>
-    <text class="dg-title" x="370" y="66" text-anchor="middle">Chat session</text>
-    <text class="dg-sub" x="370" y="85" text-anchor="middle">reads and dispatches</text>
-
-    <rect class="dg-box" x="530" y="40" width="190" height="62"/>
-    <text class="dg-title" x="625" y="66" text-anchor="middle">Task</text>
-    <text class="dg-sub" x="625" y="85" text-anchor="middle">plan · build · check</text>
-
-    <rect class="dg-box good" x="785" y="40" width="190" height="62"/>
-    <text class="dg-title" x="880" y="66" text-anchor="middle">Delivery</text>
-    <text class="dg-sub" x="880" y="85" text-anchor="middle">merged, sent, reported</text>
-
-    <line class="dg-edge" x1="210" y1="71" x2="270" y2="71" marker-end="url(#arr)"/>
-    <line class="dg-edge" x1="465" y1="71" x2="525" y2="71" marker-end="url(#arr)"/>
-    <line class="dg-edge" x1="720" y1="71" x2="780" y2="71" marker-end="url(#arr)"/>
-
-    <rect class="dg-box store" x="20" y="150" width="955" height="56"/>
-    <text class="dg-title" x="497" y="174" text-anchor="middle">The ledger: one append-only Postgres table</text>
-    <text class="dg-sub" x="497" y="192" text-anchor="middle">every call, turn, effect, question, answer, correction and stop is a row; state is read from the rows</text>
-    <line class="dg-edge back" x1="370" y1="102" x2="370" y2="148"/>
-    <line class="dg-edge back" x1="625" y1="102" x2="625" y2="148"/>
-    <line class="dg-edge back" x1="880" y1="102" x2="880" y2="148"/>
-  </svg>
-  </div>
-  <dl class="def-list">
-    <div class="def-row"><dt>Three tiers</dt><dd>The kernel decides what a thing may do. A cheap judgement model decides what a thing is. Frontier agents decide how to do the work, and never anything about their own authority.</dd></div>
-    <div class="def-row"><dt>Durable</dt><dd>A task's state is computed from its ledger rows, never stored in a field, so a crash or a stop leaves nothing to reconcile.</dd></div>
-    <div class="def-row"><dt>Bounded</dt><dd>Every task carries an effect ceiling. Every model call is metered. Stop is immediate and nothing durable is lost.</dd></div>
-  </dl>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/README.md">README.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">docs/architecture.md</a></p>
+  <div class="split"><div><p>Every chat Valor is in has one session that speaks for it. The session answers, or starts a task. A deterministic kernel moves each task through its stages and decides what it may do; a frontier model does the work inside each stage.</p>
+  <p>Every step is a row in a Postgres ledger the system cannot edit, and a task's state is read from those rows. A crash or a stop leaves nothing to reconcile.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">docs/architecture.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a></p></div><figure class="fig"><svg viewBox="0 0 380 346" role="img" aria-label="A message reaches the chat&#x27;s session, which starts a task; the task ends in a delivery. Every step is a row in the append-only ledger."><defs><marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="240" height="54"/><text class="fg-title" x="140.0" y="43.0" text-anchor="middle">A message</text><text class="fg-sub" x="140.0" y="61.0" text-anchor="middle">Telegram, Slack, email, local chat</text><line class="dg-edge back" x1="260" y1="47" x2="290" y2="47"/><rect class="dg-box " x="20" y="104" width="240" height="54"/><text class="fg-title" x="140.0" y="127.0" text-anchor="middle">The chat's session</text><text class="fg-sub" x="140.0" y="145.0" text-anchor="middle">replies, or starts a task</text><line class="dg-edge back" x1="260" y1="131" x2="290" y2="131"/><rect class="dg-box " x="20" y="188" width="240" height="54"/><text class="fg-title" x="140.0" y="211.0" text-anchor="middle">A task</text><text class="fg-sub" x="140.0" y="229.0" text-anchor="middle">plan, build, check, merge</text><line class="dg-edge back" x1="260" y1="215" x2="290" y2="215"/><rect class="dg-box good" x="20" y="272" width="240" height="54"/><text class="fg-title" x="140.0" y="295.0" text-anchor="middle">A delivery</text><text class="fg-sub" x="140.0" y="313.0" text-anchor="middle">merged, sent, or reported</text><line class="dg-edge back" x1="260" y1="299" x2="290" y2="299"/><line class="dg-edge" x1="140" y1="74" x2="140" y2="101" marker-end="url(#m1)"/><line class="dg-edge" x1="140" y1="158" x2="140" y2="185" marker-end="url(#m1)"/><line class="dg-edge" x1="140" y1="242" x2="140" y2="269" marker-end="url(#m1)"/><rect class="dg-box store" x="290" y="20" width="70" height="306"/><text class="fg-title" x="320" y="173" text-anchor="middle" transform="rotate(-90 320 173)">The ledger</text><text class="fg-sub" x="340" y="173" text-anchor="middle" transform="rotate(-90 340 173)">every step is a row</text></svg></figure></div>
 </section>
 
 <section id="infra">
-  <p class="sec-label">03 · Infrastructure</p>
-  <h2>What it runs on</h2>
-  <p>Valor runs Mac native. It has four Macs, one per client, and each keeps its own kernel, ledger and bridges. Only two things cross machines: the code that runs Valor and a shared memory store. The design target for one machine is a MacBook Air M4 with 16 GB of RAM, and no model runs resident on it.</p>
-  <div class="table-wrap">
-  <table class="doc">
-    <tr><th>Part</th><th>Choice</th></tr>
-    <tr><td>Language</td><td>Python 3.14, with uv and a lockfile</td></tr>
-    <tr><td>State</td><td>Postgres 18 as a document store: JSONB documents and an append-only events table. No Redis.</td></tr>
-    <tr><td>Kernel</td><td>One resident process, <code>python -m core serve</code>, kept alive by launchd</td></tr>
-    <tr><td>Agents</td><td>The <code>claude</code> CLI, one <code>claude -p</code> per turn, with Pi as a second harness</td></tr>
-    <tr><td>Model gateway</td><td>An in-house proxy that meters every model call, with Anthropic and OpenAI routes</td></tr>
-    <tr><td>Judgement</td><td>A hosted Jev-class model, with an open-weight fallback behind the same port</td></tr>
-    <tr><td>Channels</td><td>Telegram, email, Slack and a local chat page, each its own process</td></tr>
-    <tr><td>Memory</td><td>popoto's Postgres backend, in its own schema under its own role</td></tr>
-    <tr><td>Scheduling and secrets</td><td>launchd, and a kernel key directory that no turn can read</td></tr>
-  </table>
-  </div>
+  <p class="sec-label">02 · Infrastructure</p>
+  <h2>Four Macs, one Postgres each</h2>
+  <p>Valor runs natively on macOS, on four Macs, one per client, each with its own kernel, ledger and chat bridges. The design target is a MacBook Air M4 with 16 GB of RAM, and no model runs on it.</p>
+  <div class="table-wrap"><table class="doc">
+    <tr><td>State</td><td>Postgres 18 as a document store; no Redis</td></tr>
+    <tr><td>Kernel</td><td>one Python 3.14 process, kept alive by launchd</td></tr>
+    <tr><td>Agents</td><td>Claude Code, one <code>claude -p</code> per turn; Pi as a second harness</td></tr>
+    <tr><td>Metering</td><td>a gateway that prices every model call</td></tr>
+    <tr><td>Channels</td><td>Telegram, Slack, email, and a local chat page</td></tr>
+  </table></div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">docs/tech-stack.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">docs/machine.md</a></p>
 </section>
 
 <section id="maker">
-  <p class="sec-label">04 · Provenance</p>
+  <p class="sec-label">03 · Provenance</p>
   <h2>Who is behind this</h2>
   <div class="byline">
     <img class="byline-img" src="assets/valor-hedcut-byline.png" alt="Hedcut portrait of Valor Engels" width="72" height="72">
-    <div class="byline-text">
-      <p class="byline-name">Valor Engels</p>
-      <p class="byline-role">AI coworker · Yudame</p>
-    </div>
+    <div class="byline-text"><p class="byline-name">Valor Engels</p><p class="byline-role">AI coworker · Yudame</p></div>
   </div>
-  <p>Valor Engels is a persona, and the coworker behind the name is software. <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a> builds and operates it. Valor works at <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a> with its own email address, Google Workspace seat, GitHub account and Telegram handle, and ships into real production repositories.</p>
-  <p>The system described here was rebuilt and cut over on 2026-10-14. Valor wrote this site from the repository's own docs and code, and each section links to its source, so a reader can check any claim against what runs.</p>
-  <p>Find Valor as <b>@valorengels</b> on <a href="https://github.com/valorengels" rel="me noopener" target="_blank">GitHub</a>, <a href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">LinkedIn</a>, <a href="https://t.me/valorengels" rel="me noopener" target="_blank">Telegram</a> and <a href="https://x.com/valorengels" rel="me noopener" target="_blank">X</a>, or write to <a href="mailto:valor@yuda.me">valor@yuda.me</a>.</p>
+  <p>Valor Engels is a persona; the coworker behind it is software, built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>. It works at <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a> under one name on every channel, with its own email, GitHub, Telegram and Google accounts. It never acts as Tom; it holds none of his accounts.</p>
+  <p>The system was rebuilt and cut over on 2026-10-14. Valor wrote this site from the repository's own docs and code. It reads its own email at <a href="mailto:valor@yuda.me">valor@yuda.me</a>.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">persona/identity.toml</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">docs/persona.md, Identity</a></p>
 </section>
 
 <section id="map">
-  <p class="sec-label">05 · Read on</p>
+  <p class="sec-label">04 · Read on</p>
   <h2>Where to go next</h2>
   <div class="dir">
-    <a class="dir-row" href="philosophy.html"><span class="idx">01</span><span class="ttl">Philosophy</span><span class="dsc">The mission, the acceptance question, and how Valor conducts itself across a job.</span><span class="go">philosophy.html</span></a>
-    <a class="dir-row" href="alignment.html"><span class="idx">02</span><span class="ttl">Alignment</span><span class="dsc">What corrigible means here, how corrections reach every turn, and how Valor changes itself.</span><span class="go">alignment.html</span></a>
-    <a class="dir-row" href="rules.html"><span class="idx">03</span><span class="ttl">The rules</span><span class="dsc">The governance paragraph and the ten hard rules, word for word.</span><span class="go">rules.html</span></a>
-    <a class="dir-row" href="pipeline.html"><span class="idx">04</span><span class="ttl">Pipeline</span><span class="dsc">How a request becomes a merged result: stages, verdicts, loops and the merge predicate.</span><span class="go">pipeline.html</span></a>
-    <a class="dir-row" href="durability.html"><span class="idx">05</span><span class="ttl">Durability</span><span class="dsc">The ledger and its tables, stop, recovery, retries, and memory.</span><span class="go">durability.html</span></a>
-    <a class="dir-row" href="work.html"><span class="idx">06</span><span class="ttl">The work</span><span class="dsc">Chats and rooms, what reaches Tom, the machines, and routines.</span><span class="go">work.html</span></a>
-    <a class="dir-row" href="research.html"><span class="idx">07</span><span class="ttl">Research</span><span class="dsc">Agent platforms worth learning from, and dated comparison studies.</span><span class="go">research.html</span></a>
+    <a class="dir-row" href="philosophy.html"><span class="idx">01</span><span class="ttl">Philosophy</span><span class="dsc">The mission and the one question it answers to.</span><span class="go">philosophy.html</span></a>
+    <a class="dir-row" href="alignment.html"><span class="idx">02</span><span class="ttl">Alignment</span><span class="dsc">Stop, bounds, corrections, and how Valor changes itself.</span><span class="go">alignment.html</span></a>
+    <a class="dir-row" href="rules.html"><span class="idx">03</span><span class="ttl">The rules</span><span class="dsc">The governance paragraph and ten hard rules, verbatim.</span><span class="go">rules.html</span></a>
+    <a class="dir-row" href="pipeline.html"><span class="idx">04</span><span class="ttl">Pipeline</span><span class="dsc">From a request to a merged result.</span><span class="go">pipeline.html</span></a>
+    <a class="dir-row" href="durability.html"><span class="idx">05</span><span class="ttl">Durability</span><span class="dsc">The ledger, recovery after a crash, and memory.</span><span class="go">durability.html</span></a>
+    <a class="dir-row" href="work.html"><span class="idx">06</span><span class="ttl">The work</span><span class="dsc">Chats, what reaches Tom, and routines.</span><span class="go">work.html</span></a>
+    <a class="dir-row" href="research.html"><span class="idx">07</span><span class="ttl">Research</span><span class="dsc">Dated comparisons with other agent platforms.</span><span class="go">research.html</span></a>
   </div>
 </section>
 
 <section id="hire">
-  <p class="sec-label">06 · Work with Valor</p>
+  <p class="sec-label">05 · Work with Valor</p>
   <h2>Hire Valor</h2>
-  <p>Valor takes on client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>. Each client gets its own Mac, and Valor joins the team on the channels it already uses. The client brings the direction and the judgement calls; Valor carries the work.</p>
+  <p>Valor takes client work through <a href="https://yuda.me" rel="noopener" target="_blank">Yudame</a>. Each client gets its own Mac, and Valor joins the team on the channels it already uses.</p>
   <div class="cta-row">
     <a class="btn primary" href="https://yuda.me" rel="noopener" target="_blank">Hire Valor through Yudame</a>
     <a class="btn" href="https://www.linkedin.com/in/valorengels" rel="me noopener" target="_blank">Connect on LinkedIn</a>

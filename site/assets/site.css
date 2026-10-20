@@ -575,6 +575,21 @@ blockquote.verbatim p { margin: 0 0 12px; }
   max-width: var(--measure);
 }
 
+/* ---------- figures: narrow SVGs that read at phone width ---------- */
+
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 25rem); gap: 44px; align-items: start; max-width: none; }
+.split > div > p, .split > div > ul { max-width: none; }
+.fig { margin: 8px 0 22px; max-width: 25rem; }
+.fig svg { display: block; width: 100%; height: auto; }
+.fg-title { font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2328; }
+.fg-sub { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #59636e; }
+.fg-lbl { font: 11.5px "SF Mono", ui-monospace, Menlo, monospace; fill: #59636e; }
+.fg-mono { font: 12px "SF Mono", ui-monospace, Menlo, monospace; fill: #953800; }
+.fg-rule { stroke: #e4e8ec; stroke-width: 1; }
+.dg-box.opt { stroke-dasharray: 5 4; }
+.dg-box.hl { fill: #ddf4ff; stroke: #0969da; }
+.dg-box.bad { stroke: #cf222e; }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 900px) {
@@ -582,6 +597,7 @@ blockquote.verbatim p { margin: 0 0 12px; }
   .hero-card { margin-top: 6px; max-width: 340px; }
   .cols-2, .cols-3 { grid-template-columns: 1fr; gap: 8px; }
   .def-row { grid-template-columns: 1fr; gap: 4px; }
+  .split { grid-template-columns: 1fr; gap: 0; }
   .dir a.dir-row { grid-template-columns: 2.4rem 1fr; gap: 4px 12px; }
   .dir .dsc { grid-column: 2; }
   .dir .go { display: none; }

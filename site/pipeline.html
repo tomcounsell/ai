@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pipeline · Valor Engels</title>
-<meta name="description" content="How a request becomes a merged result: the stages a task passes through, the verdict each ends with, the loops the plan sets, and the three terms of the merge predicate.">
+<meta name="description" content="How a request becomes a merged result: the stages, the loops the plan sets, and the three terms of the merge predicate.">
 <link rel="canonical" href="https://valorengels.com/pipeline.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Pipeline · Valor Engels">
-<meta property="og:description" content="How a request becomes a merged result: the stages a task passes through, the verdict each ends with, the loops the plan sets, and the three terms of the merge predicate.">
+<meta property="og:description" content="How a request becomes a merged result: the stages, the loops the plan sets, and the three terms of the merge predicate.">
 <meta property="og:url" content="https://valorengels.com/pipeline.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -41,49 +41,28 @@
 
 <p class="kicker"><span class="n">04 ·</span> the SDLC pipeline</p>
 <h1>From a request to a merged result.</h1>
-<p class="lede">A task passes through a fixed set of checkpoints. Each ends with a verdict from a small set, and a table in kernel code says where each verdict leads. The work inside a stage is a skill, and the agent decides how to do it. Which stage a task is in, what comes next, and what may leave the machine are the kernel's.</p>
+<p class="lede">Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel decides which stage comes next and what may leave the machine.</p>
 
 <section id="stages">
   <p class="sec-label">The path</p>
-  <h2>Every stage is a checkpoint</h2>
-  <p>Tom set the shape on 2026-10-01. Each stage states a goal and the evidence that ends it, not the steps. The plan sets how many loops a task gets. Test, review and docs run in parallel on the same commit.</p>
-  <ol class="flow">
-    <li><div class="what"><b>Intake</b><span>The request is recorded once, verbatim, with its source.</span></div><div class="who">kernel</div></li>
-    <li><div class="what"><b>Judge</b><span>A cheap classifier reads the request before anyone builds: is it <code>precise</code> or <code>thin</code>? One-line asks, asks that lean on an example, and asks naming existing UI without scope are thin.</span></div><div class="who">judgement tier</div></li>
-    <li class="loop"><div class="what"><b>Clarify, if thin</b><span>Inspect the code, then ask only what inspection cannot settle, in one message, each question with a stated default. Or find nothing material and proceed. The task waits while Tom answers.</span></div><div class="who">working session</div></li>
-    <li><div class="what"><b>Plan</b><span>The approach, the stakes in a sentence, the critique loop (0 to 2) and the review loop (0 or 1), and any related tech debt pulled into scope.</span></div><div class="who">working session</div></li>
-    <li class="loop"><div class="what"><b>Critique</b><span>A fresh session reads the plan before any code exists. <code>sound</code> goes to build. <code>revise</code> sends it back to plan while the critique rounds last; after that its findings ride into the build.</span></div><div class="who">fresh session</div></li>
-    <li><div class="what"><b>Build</b><span>A candidate commit that does what the plan says, with the tests the plan named.</span></div><div class="who">working session</div></li>
-    <li><div class="what"><b>Checks, in parallel</b><span><b>Test</b>: the suite at the candidate passes where it passed at the base, and a breadth check asks whether the tests exercise what the diff changed. <b>Review</b>: an independent verdict from a session that did not build. <b>Docs</b>: no doc says something the candidate made untrue.</span></div><div class="who">three fresh sessions</div></li>
-    <li class="loop"><div class="what"><b>Patch</b><span>The session that built resumes, with every finding from the three checks together, and the checks run again on the new candidate.</span></div><div class="who">working session, resumed</div></li>
-    <li><div class="what"><b>Merge</b><span>The kernel merges when the merge predicate holds, and Tom gets one report of what shipped. Feedback by reply reopens the task in patch.</span></div><div class="who">kernel and broker</div></li>
-  </ol>
-  <p>Any state can end in <code>stopped</code>, and nothing leaves it. A task that can't finish ends with a report to Tom saying what was built, what didn't pass, and why it stopped.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md, The model in one table</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc">skills/sdlc/</a> (one file per stage)</p>
+  <h2>Eight stages, two loops</h2>
+  <div class="split"><div><p>A cheap classifier reads each request first. A thin one, such as a one-line ask or one leaning on an example, goes to clarify: inspect, then ask only what the code can't answer, or proceed.</p>
+  <p>Critique reads the plan before any code exists. After every build, test, review and docs check the same commit in parallel, and their findings go back together in one patch.</p>
+  <p>Any stage can end in <code>stopped</code>, and nothing leaves it.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc/">skills/sdlc/</a></p></div><figure class="fig"><svg viewBox="0 0 380 636" role="img" aria-label="The SDLC pipeline: intake, judge, clarify if thin, plan, critique (revise loops to plan), build, checks in parallel (findings loop to patch), merge."><defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="60" y="20" width="230" height="50"/><text class="fg-title" x="175.0" y="41.0" text-anchor="middle">Intake</text><text class="fg-sub" x="175.0" y="59.0" text-anchor="middle">recorded once, verbatim</text><rect class="dg-box " x="60" y="98" width="230" height="50"/><text class="fg-title" x="175.0" y="119.0" text-anchor="middle">Judge</text><text class="fg-sub" x="175.0" y="137.0" text-anchor="middle">precise or thin?</text><rect class="dg-box opt" x="60" y="176" width="230" height="50"/><text class="fg-title" x="175.0" y="197.0" text-anchor="middle">Clarify</text><text class="fg-sub" x="175.0" y="215.0" text-anchor="middle">ask, or find nothing to ask</text><rect class="dg-box " x="60" y="254" width="230" height="50"/><text class="fg-title" x="175.0" y="275.0" text-anchor="middle">Plan</text><text class="fg-sub" x="175.0" y="293.0" text-anchor="middle">approach, stakes, loop counts</text><rect class="dg-box " x="60" y="332" width="230" height="50"/><text class="fg-title" x="175.0" y="353.0" text-anchor="middle">Critique</text><text class="fg-sub" x="175.0" y="371.0" text-anchor="middle">a fresh session reads the plan</text><rect class="dg-box " x="60" y="410" width="230" height="50"/><text class="fg-title" x="175.0" y="431.0" text-anchor="middle">Build</text><text class="fg-sub" x="175.0" y="449.0" text-anchor="middle">a candidate commit</text><rect class="dg-box " x="60" y="488" width="230" height="50"/><text class="fg-title" x="175.0" y="509.0" text-anchor="middle">Checks</text><text class="fg-sub" x="175.0" y="527.0" text-anchor="middle">test · review · docs, in parallel</text><rect class="dg-box good" x="60" y="566" width="230" height="50"/><text class="fg-title" x="175.0" y="587.0" text-anchor="middle">Merge</text><text class="fg-sub" x="175.0" y="605.0" text-anchor="middle">when the predicate holds</text><line class="dg-edge" x1="175.0" y1="70" x2="175.0" y2="95" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="148" x2="175.0" y2="173" marker-end="url(#m4)"/><text class="fg-lbl" x="183.0" y="166.0">thin</text><line class="dg-edge" x1="175.0" y1="226" x2="175.0" y2="251" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="304" x2="175.0" y2="329" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="382" x2="175.0" y2="407" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="460" x2="175.0" y2="485" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="538" x2="175.0" y2="563" marker-end="url(#m4)"/><path class="dg-edge back" d="M 60 123.0 C 22 123.0, 22 279.0, 57 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="14" y="201.0" text-anchor="middle" transform="rotate(-90 14 201.0)">precise</text><path class="dg-edge back" d="M 290 357.0 C 330 357.0, 330 279.0, 293 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="322.0" text-anchor="start">revise</text><path class="dg-edge back" d="M 290 513.0 C 330 513.0, 330 435.0, 293 435.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="478.0" text-anchor="start">patch</text></svg></figure></div>
 </section>
 
 <section id="sessions">
   <p class="sec-label">Two kinds of session</p>
-  <h2>The builder keeps its context; the checkers never share it</h2>
-  <div class="cols-2">
-    <div>
-      <h3>The working session</h3>
-      <p>Clarify, plan, build and patch resume one harness session. Valor keeps its context across a question, a send-back and feedback. A patch is that session resumed, never a new agent.</p>
-    </div>
-    <div>
-      <h3>Fresh sessions</h3>
-      <p>Critique, review, docs and the advisor each start fresh and never read the working session. Each works in a git worktree of the exact commit it judges. The reviewer may run the suite itself, because a transcript is the builder's own account.</p>
-    </div>
-  </div>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#the-turn">docs/architecture.md, The turn</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a></p>
+  <h2>The builder keeps its context; the checkers never see it</h2>
+  <p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and Tom's feedback. Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself rather than trust the builder's transcript.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a></p>
 </section>
 
 <section id="loops">
   <p class="sec-label">Loops</p>
-  <h2>The plan sets the loops from the stakes</h2>
-  <p>A small reversible change in well-tested code gets 0. A change to stored data, money, authentication, migrations or the kernel itself gets 2 critique rounds and 1 review round. Critique may raise either count, never lower it, so the builder's call on its own stakes is read by a session that didn't make it. Send-backs are counted from ledger rows, never from a counter field.</p>
-  <p>When the rounds are spent, a result with only test-breadth gaps merges with the gaps listed. Anything else gets one last patch round, in which Valor decides as project manager whether to patch once more or stop. Work that doesn't converge stops, rather than spending on itself.</p>
-  <p class="pull">A task patches on findings at most its review rounds plus one times before it merges or ends.</p>
+  <h2>The plan sets its own loops from the stakes</h2>
+  <p>A small reversible change gets none. A change to stored data, money, authentication or the kernel gets two critique rounds and one review round. Critique can raise those counts, never lower them. Once the rounds are spent, Valor decides whether to patch once more or stop and tell Tom why, so work that doesn't converge stops instead of spending on itself.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#loops">docs/sdlc-state-machine.md, Loops</a></p>
 </section>
 
@@ -91,20 +70,12 @@
   <p class="sec-label">The merge predicate</p>
   <h2>Three terms, each read from a row</h2>
   <ol class="rules">
-    <li><b>One current candidate, with its checks decided.</b></li>
-    <li><b>Test passed, or showed only breadth gaps with the plan's rounds spent.</b></li>
+    <li><b>One current candidate, its checks decided.</b></li>
+    <li><b>Test passed, or showed only breadth gaps with the rounds spent.</b></li>
     <li><b>Review passed.</b></li>
   </ol>
-  <p>The broker reads the predicate in the same transaction that writes the merge's intent. A term that doesn't hold is written as a refusal naming it. The target repository and branch are recorded when the task starts, from the project's spec, and no turn can change them. Docs still run on every candidate but don't hold the merge.</p>
-  <p>If the target branch moved, a clean and disjoint move is carried: the kernel replays the verified commits onto the new tip with no turn at all. Otherwise the work goes to patch to rebase. A rebase spends no round and has no cap, because each rejection means another merge landed.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md">docs/sdlc-state-machine.md</a></p>
-</section>
-
-<section id="fold">
-  <p class="sec-label">State</p>
-  <h2>State is a fold over the ledger</h2>
-  <p>Nothing writes a "current state" column. The kernel reads a task's rows in order and folds them to exactly one state. Postgres refuses any verdict outside its enum when the row is written, so the fold is total: every prefix of the ledger maps to exactly one state, and a property test checks it on generated ledgers. State belongs to the task, never to the session running it, so losing a session loses no state.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#state-is-a-fold-over-events">docs/data.md, State is a fold over events</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_machine.py">tests/test_machine.py</a></p>
+  <p>The broker reads the predicate in the same transaction that writes the merge's intent. The target repository and branch were fixed when the task started, and no turn can change them. If the branch moved meanwhile, a clean move is replayed with no turn at all; otherwise the work goes back to rebase.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
 </section>
 
 <div class="page-next">
