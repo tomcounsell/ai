@@ -105,8 +105,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 8. **Retire the old system:** `scripts/retire_old.sh [OLD_CLONE...]`. It
    stops and removes the old jobs, the old Redis, the old Claude Code
    hooks, skills, agents, commands and memory MCP server, the old
-   command-line tools and caches, the old data in the checkout and in any
-   old clone kept aside, and the container runtime's images. Data goes to
+   command-line tools and caches, and the old data in the checkout. An old
+   clone kept aside is moved whole, and the container runtime's images
+   are removed. Data goes to
    `~/valor-retired/<date>`, never deleted. It leaves the caffeinate,
    brew-nightly and vault-sync jobs, `~/.zshenv`'s loader for
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the

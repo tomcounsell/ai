@@ -8,7 +8,7 @@
 #   scripts/retire_old.sh [OLD_CHECKOUT...]
 #
 # Each OLD_CHECKOUT (an old system's clone kept aside, e.g. ~/src/_archive_/ai-dinosaur)
-# has its data/, logs/ and .env archived and is then removed. The kernel's own
+# is moved whole into the archive, stashes, worktrees and ignored files with it. The kernel's own
 # checkout loses only the old system's ignored data/, logs/, telegram_sessions/
 # and clean session worktrees; a worktree with changes is kept and listed.
 set -u
@@ -71,7 +71,7 @@ for X in agents commands hooks mcp-servers; do keep ~/.claude/$X claude && say "
 # 4. The old command-line tools and the old system's state and caches.
 for B in ~/.local/bin/sdlc-tool ~/.local/bin/valor-*; do keep "$B" bin && say "$(basename "$B") retired"; done
 keep ~/.valor dot-valor && say "~/.valor retired"
-rm -rf ~/.cache/valor ~/.cache/valor-encoder ~/.cache/kokoro-onnx
+rm -rf ~/.cache/valor ~/.cache/valor-encoder
 
 # 5. The old system's files in the kernel's checkout, and old checkouts kept aside.
 cd "$KERNEL" || exit 1
@@ -85,12 +85,7 @@ done
 git worktree prune
 for O in "$@"; do
   [ -d "$O" ] && [ "$(cd "$O" && pwd -P)" != "$KERNEL" ] || continue
-  N=$(basename "$O"); mkdir -p "$A/$N"
-  # Commits no remote has, as a bundle: `git clone` it to read them back.
-  [ -n "$(git -C "$O" log --branches --not --remotes --oneline 2>/dev/null | head -1)" ] &&
-    git -C "$O" bundle create "$A/$N/unpushed.bundle" --branches --not --remotes >/dev/null 2>&1
-  for X in data logs .env; do [ -e "$O/$X" ] && mv "$O/$X" "$A/$N/"; done
-  rm -rf "$O" && say "$O removed, its data kept"
+  mv "$O" "$A/" && say "$O moved to $A/$(basename "$O")"
 done
 
 # 6. Apple's container runtime: only the removed VM verifier used it.
