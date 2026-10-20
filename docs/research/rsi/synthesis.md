@@ -71,3 +71,74 @@ internals). The research for "Muse" picked Meta's Muse agent without
 confirmation that it was the one meant. Legal liability and provider account
 policy were unresearched in the notes. The two spikes in `spikes.md` cover them, and
 their gaps are listed there.
+
+## Reasoning behind the plan
+
+**How it differs from the old controller.**
+
+1. **It starts from Tom's work.** Every opportunity cites a row on a task
+   RSI did not start. The old loop's only candidate was its own
+   memory-retrieval parameters.
+2. **Its output is a task on a real repository:** `yudame/skills`, this
+   one, or the open-source project where the gap showed. That task ends in
+   a merge report to Tom.
+3. **Nothing must be true before work starts.** The old loop's first cycle
+   ended `infra_failure` on its calibration floor of 20.
+4. **It counts use.** An ability is done when a later task of Tom's used it
+   and Tom accepted that delivery, with the date.
+
+**Sources and ranking.** Links Tom forwards are filed with
+`core routine rsi --finding … --key link:<url>`. Recurrence is checked in
+memory. One ranking turn per run starts tasks. Dedupe keys and turn slots
+bound the load. Group text is never a source row.
+
+**Evaluator.** The ground truth is Tom's use; the gains in the notes came
+only from a judge the improver could not reach.
+
+- The replay runs real past tasks with and without the change, using the
+  rebuild-baseline method.
+- Its answer keys are Tom's merged result and the hidden tests.
+- A fresh Opus-class judge reads outcomes, never narration.
+- A skill replays the task that showed the gap plus one similar task.
+- A persona replay includes hostile group messages (the Grok incident).
+- A venture's money is read from the processor by the conditions routine
+  and never self-reported.
+
+**Write paths.**
+
+- Hermes-style poisoning needs a skill-write tool at runtime; Valor has
+  none.
+- Corrections come only from Tom, with provenance.
+- Content read while working is data (`persona/conduct.md`), and findings
+  quote their evidence as data.
+
+The one exposure left is a reviewed diff carrying a forwarded link's
+content. No guard is added before it causes an incident.
+
+**Accounts.** Each credit's expiry is a watched condition. Free tiers that
+train on inputs take open-source work only (G4). The first D3 opportunity,
+filed once an account exists, is a cloud sandbox for open-source tasks.
+
+**Venture record.** A venture is a committed decision in its business
+repository (Business items 3 and 7). Its record names:
+
+- the legal owner and merchant of record, with Tom as signer;
+- each platform account and the clause in its terms that permits an agent;
+- the cap held at the card, and the largest contract Valor may accept;
+- a kill date and early-kill conditions (a complaint, a chargeback, a
+  platform warning), raised on the agenda by the conditions routine;
+- bot disclosure and FTC-clean claims.
+
+**Old skills.** `improve-preflight` read controller state that no longer
+exists. The four rules ported from `improve-research` are:
+
+- a claim carries a URL and a date;
+- an unreachable source is recorded as unreachable;
+- an assumption names what would overturn it;
+- Tom is asked no research questions.
+
+`/rsi` writes each answer back at once:
+
+- a fact goes to `core correct`;
+- an idea goes to `--finding`;
+- "plan this" goes to `do-issue`.
