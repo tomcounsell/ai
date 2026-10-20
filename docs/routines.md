@@ -306,8 +306,9 @@ rule. Workspace reclaim, which removes things, is not; it is work.
   its effects, and its end are ledger rows like any task's. A run's result
   is its delivery, read with `python -m core status <task>`.
 - **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
-  `VALOR_UI_PORT`): every task, one task with its ledger, the attention log, and each routine with its last run, its last
-  result and its period spending. It is read-only and answers GET only; the
+  `VALOR_UI_PORT`): tasks and what needs Tom, what is alive (`/live`), one task
+  with its ledger, the attention log, and each routine with its last run,
+  its last result, its period spending and its runs. It is read-only and answers GET only; the
   address is the loopback one.
 - **Attention.** A question from a routine reaches Tom through the same
   path as any task's question and is ledgered with its answer and

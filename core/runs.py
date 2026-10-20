@@ -515,6 +515,117 @@ def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
     return _stop(_turn_processes(turn_id, pgid))
 
 
+async def live(conn) -> dict[str, Any]:
+    """What is alive, for the status page: `turns`, each turn with a `turn.started` and no
+    `turn.ended`, oldest first, with its task and instruction, state or fresh stage,
+    harness, model, start, live process ids, and its session's subagents
+    (`subagents`); `ended`, the newest `RECENT_TURNS` turns that ended, with
+    their task, state, outcome, start and end."""
+    open_turns = await (
+        await conn.execute(
+            "SELECT s.task_id, s.at, s.payload, d.body->>'instruction' FROM events s "
+            "LEFT JOIN documents d ON d.kind = 'task' AND d.id = s.task_id "
+            "WHERE s.type = 'turn.started' AND NOT EXISTS "
+            "(SELECT 1 FROM events e WHERE e.task_id = s.task_id AND e.type = 'turn.ended' "
+            "AND e.payload->>'turn_id' = s.payload->>'turn_id') ORDER BY s.id"
+        )
+    ).fetchall()
+    turns = []
+    for task_id, at, p, instruction in open_turns:
+        argv = p.get("argv") or []
+        turns.append(
+            {
+                "task_id": task_id,
+                "instruction": instruction,
+                "turn_id": p["turn_id"],
+                "state": p.get("stage") if p.get("fresh") else p.get("state"),
+                "harness": p.get("harness"),
+                "model": _flag(argv, "--model"),
+                "at": at,
+                "pids": _turn_processes(p["turn_id"], None),
+                "subagents": subagents(task_id, _flag(argv, "--session-id") or _flag(argv, "--resume")),
+            }
+        )
+    ended = await (
+        await conn.execute(
+            "SELECT e.task_id, d.body->>'instruction', "
+            "CASE WHEN (s.payload->>'fresh')::boolean THEN s.payload->>'stage' ELSE s.payload->>'state' END, "
+            "e.payload->>'outcome', s.at, e.at FROM events e "
+            "JOIN events s ON s.task_id = e.task_id AND s.type = 'turn.started' "
+            "AND s.payload->>'turn_id' = e.payload->>'turn_id' "
+            "LEFT JOIN documents d ON d.kind = 'task' AND d.id = e.task_id "
+            "WHERE e.type = 'turn.ended' ORDER BY e.id DESC LIMIT %s",
+            (RECENT_TURNS,),
+        )
+    ).fetchall()
+    return {
+        "turns": turns,
+        "ended": [
+            dict(zip(("task_id", "instruction", "state", "outcome", "started", "at"), r, strict=True))
+            for r in ended
+        ],
+    }
+
+
+RECENT_TURNS = 8
+
+
+def _flag(argv: list[str], name: str) -> str | None:
+    return next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == name), None)
+
+
+def turns(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A task's turns from its ledger rows, oldest first: `state` (the stage
+    of a fresh turn), `harness`, `model`, `session` (the Claude Code
+    session it ran in), `started`, and `ended` and `outcome` (None while
+    it runs)."""
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        p = row["payload"]
+        if row["type"] == "turn.started":
+            argv = p.get("argv") or []
+            found[p["turn_id"]] = {
+                "state": p.get("stage") if p.get("fresh") else p.get("state"),
+                "harness": p.get("harness"),
+                "model": _flag(argv, "--model"),
+                "session": _flag(argv, "--session-id") or _flag(argv, "--resume"),
+                "started": row["at"],
+                "ended": None,
+                "outcome": None,
+            }
+        elif row["type"] == "turn.ended" and p["turn_id"] in found:
+            found[p["turn_id"]].update(ended=row["at"], outcome=p.get("outcome"))
+    return list(found.values())
+
+
+def subagents(task_id: str, session_id: str | None) -> list[dict[str, Any]]:
+    """The subagents of a task's Claude Code session, from each one's
+    `agent-*.meta.json` under the task's `state/work` or `checks/*` config
+    directory: `type`, `description`, `depth`, `finished`, and when its
+    transcript was last written (`at`)."""
+    if not session_id:
+        return []
+    root = Path(settings.work_dir).expanduser() / task_id
+    found = []
+    for anchor in ("state/work", "checks/*"):
+        for meta in sorted(root.glob(f"{anchor}/claude/projects/*/{session_id}/subagents/agent-*.meta.json")):
+            try:
+                m = json.loads(meta.read_text())
+                written = meta.with_name(meta.name.removesuffix(".meta.json") + ".jsonl").stat().st_mtime
+            except OSError, ValueError:
+                continue
+            found.append(
+                {
+                    "type": m.get("agentType"),
+                    "description": m.get("description"),
+                    "depth": m.get("spawnDepth") or 1,
+                    "finished": bool(m.get("finished")),
+                    "at": written,
+                }
+            )
+    return sorted(found, key=lambda s: s["at"])
+
+
 def reap_sandboxed(name: str, control: str) -> list[dict[str, Any]]:
     """Stop every process of this user under a sandbox that denies the mach
     name `name` and not `control` (an App Sandbox denies every such name):

@@ -452,10 +452,13 @@ on `aiohttp`, serving one page on `127.0.0.1`. What each bridge does
 is [bridges/telegram.md](bridges/telegram.md),
 [bridges/email.md](bridges/email.md), [bridges/slack.md](bridges/slack.md), and [bridges/local.md](bridges/local.md).
 
-**Dashboard.** Read-only views over `core/` read models: tasks, spend, the
-ledger, the attention log, and each routine's last run
-and period spending (`ui/README.md`). It is aiohttp, serves GET only on
-`127.0.0.1:8790`. Status: **in use**.
+**Dashboard.** Read-only views over `core/` read models: tasks (needing
+Tom, active, recent, children collapsed under their root, each opening a
+metadata modal), what is alive (services, open turns and their subagents),
+the ledger, the attention log, and each routine's last run and period
+spending (`ui/README.md`). It is aiohttp, server-rendered with one small
+script (`ui/static/app.js`), and serves GET only on `127.0.0.1:8790`.
+Status: **in use**.
 
 ## 10. Scheduling, secrets, telemetry
 

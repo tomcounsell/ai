@@ -4,8 +4,10 @@ The read-only dashboard.
 
 ## Scope
 
-- Views over `core/` read models: tasks, metered spending, the ledger, the attention log, and each routine with its last run and period spending.
+- Views over `core/` read models: tasks grouped as Needs you, Active and Recent with children under their root, what is alive (`/live`: lock connections, open turns with their processes and subagents, recently ended turns), metered spending, the ledger, the attention log, and each routine with its last run and period spending.
 - What came after a task's merges: the index's counts (merges, feedback after, used, reworked by), and on the task page an After merge table (head, time, feedback, used marks, paths, later merges sharing code or only docs, revert and on-branch) and a Used list of deliveries marked with no merge.
+- The old dashboard's dark theme and header on every page: "Valor System", the page buttons, and Services (the kernel and each installed bridge, green with uptime or red when not connected; `rollout.services`).
+- Children and older routine runs collapse under a ▶ count toggle (CSS only). A click on a task row opens its metadata in a modal (`/task/ID/modal`). Ids are never printed; a row carries its task as `data-task`. `static/style.css` holds the theme; `static/app.js`, the one script, opens the modal and reloads `/live` while none is open.
 - `python -m ui` serves `127.0.0.1:8790` (`VALOR_UI_PORT`), aiohttp, GET only; `ui/app.py` holds the pages.
 - Read-only. Stops and replies come by message, not here.
 

@@ -77,6 +77,7 @@ import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from core import binaries, credentials, git, targets
 
@@ -424,3 +425,27 @@ def _run(checkout: Path, argv: list[str], env: dict[str, str], name: str) -> Non
         if proc.returncode != 0:
             tail = git.read_output(err, True).strip().splitlines()[-5:]
             raise RuntimeError(f"{name} exited with status {proc.returncode}: {' / '.join(tail)}")
+
+
+async def services(conn) -> list[dict[str, Any]]:
+    """The kernel and each bridge connected or installed on this machine (its
+    launchd plist), from its lock connection (`valor-kernel`,
+    `valor-<channel>@<commit>`): `name`, `commit`, and `since`, when it
+    connected (None: not connected)."""
+    rows = await (
+        await conn.execute(
+            "SELECT application_name, backend_start FROM pg_stat_activity "
+            "WHERE datname = current_database() "
+            "AND (application_name = 'valor-kernel' OR application_name LIKE 'valor-%%@%%')"
+        )
+    ).fetchall()
+    found = {}
+    for app, since in rows:
+        name, _, commit = app.removeprefix("valor-").partition("@")
+        found[name] = {"name": name, "commit": commit or None, "since": since}
+    agents = Path.home() / "Library/LaunchAgents"
+    installed = [c for c, label in BRIDGES.items() if (agents / f"{label}.plist").exists()]
+    return [
+        found.get(name, {"name": name, "commit": None, "since": None})
+        for name in ["kernel", *sorted(set(installed) | found.keys() - {"kernel"})]
+    ]

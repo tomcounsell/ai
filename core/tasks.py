@@ -939,22 +939,27 @@ def _counts(attention: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 
 async def index(conn) -> list[dict[str, Any]]:
-    """Every task, newest first: its id, instruction, state, parent, metered
-    spending, attention counts, what came after its merges
-    (`outcomes.summary`: `merges`, `feedback_after`, `used`, `reworked`),
-    and the time of its last row. The status page's task list; it runs no
-    git."""
+    """Every task, newest first: its id, instruction, state, parent, the
+    Brief's `project` name, `chat`, `routine`, `harness_name`, `model` and
+    `created_at`, metered spending, attention counts, the text of each
+    question not yet answered (`open_questions`), whether a turn is running
+    (`turn_open`), whether its latest step failed (`failed_step`), what came
+    after its merges (`outcomes.summary`: `merges`, `feedback_after`,
+    `used`, `reworked`), and the time of its last row. The status page's
+    task list; it runs no git."""
     done = await outcomes.done_merges(conn)
     ids = await (
         await conn.execute(
-            "SELECT id, body->>'instruction', body->>'parent_id' FROM documents WHERE kind = 'task'"
+            "SELECT id, body->>'instruction', body->>'parent_id', body->'project'->>'name', body->'chat', "
+            "body->>'routine', body->>'harness_name', body->>'model', created_at "
+            "FROM documents WHERE kind = 'task'"
         )
     ).fetchall()
     found = []
-    for task_id, instruction, parent_id in ids:
+    for task_id, instruction, parent_id, project, chat, routine, harness_name, model, created_at in ids:
         rows = await ledger.read(conn, task_id)
         f = machine.fold(rows)
-        _, _, attention = _digest(rows)
+        turns, _, attention = _digest(rows)
         state = (
             "calibration"
             if f.calibration
@@ -969,9 +974,20 @@ async def index(conn) -> list[dict[str, Any]]:
                 "task_id": task_id,
                 "instruction": instruction,
                 "parent_id": parent_id,
+                "project": project,
+                "chat": chat,
+                "routine": routine,
+                "harness_name": harness_name,
+                "model": model,
+                "created_at": created_at,
                 "state": state,
                 "spent_usd_micros": spending(rows)["spent_usd_micros"],
                 "attention_counts": _counts(attention),
+                "open_questions": [
+                    a["question"] for a in attention if a["kind"] == "question" and a["answer"] is None
+                ],
+                "turn_open": None in turns.values(),
+                "failed_step": failed_step(rows) is not None,
                 **outcomes.summary(rows, done),
                 "last_at": max((r["at"] for r in rows if r.get("at")), default=None),
             }
