@@ -7,7 +7,11 @@ On 2026-10-20 Tom set the content in priority order: "Valor's identity,
 maker, account links, infra references (can mostly keep as is); the
 guiding philosophy; alignment, corrigibility, RSI; the hard rules; SDLC
 pipeline; durability strategy and db models". He asked to review the look
-from screenshots before anything is published.
+from screenshots before anything is published. Those two messages reached
+this task from the valor chat session (the "written to you while you
+worked" notes of 2026-10-20), not from answers.md. They supersede its
+"publish once the site is ready" only in holding the publish until Tom has
+seen the look.
 
 **Premise, checked.** `site/` came back unchanged from the old system
 (0965d3125). Its runtime, memory, reflections, codebase and pipeline pages
@@ -51,14 +55,29 @@ at files on `main`.
       tables, recovery and reaping, retries, turn slots and rollout
       restarts, from `core/README.md`, `docs/architecture.md`,
       `docs/data.md` and the model or schema files they name. Also a short
-      tour of harnesses and bridges (`docs/harnesses.md`, `docs/bridges/`).
-2. **Research.** `research.html` and `research/*.html` stay as they are,
-   with one dated note on each saying it compares the system as it was
-   before the 2026-10-14 cutover.
+      tour of harnesses and bridges (`docs/harnesses.md`, `docs/bridges/`),
+      plus a **memory** section (`docs/memory.md`, `memory/`): what is
+      kept, where, and how it is recalled into a turn.
+   7. `work.html`: what Valor does, covering projects and rooms
+      (`projects/`, room descriptions, team chats compared with eng
+      chats), tasks from a message to a merged PR and what reaches Tom
+      (`skills/sdlc/converse.md`, `persona/delivery.md`), and **routines**
+      (`docs/routines.md`, `routines/`). Placed after the pipeline in the
+      nav, because Tom's list does not name it.
+2. **Research.** The article text of `research.html` and `research/*.html`
+   stays unchanged. Their shared nav and footer are swapped for the new
+   site's. Each in-text link to a deleted page is pointed at the matching
+   new page, with no change to the words around it. Each article gets one
+   dated note saying it compares the system as it was before the
+   2026-10-14 cutover.
 3. **Removed.** `runtime.html`, `memory.html`, `reflections.html`,
-   `codebase.html` and `assets/graph.js`, a 36k-line snapshot of the old
-   codebase. `src/index.js` answers each old URL with a 301 to its nearest
-   new page, so existing links keep working. `sitemap.xml` and `404.html`
+   `codebase.html`, `assets/graph.js` (a 36k-line snapshot of the old
+   codebase), and `assets/site.js`, which only renders that graph
+   (`window.VALOR_GRAPH`, all 134 lines). `src/index.js` answers each old URL
+   with a 301 so existing links keep working: `/runtime.html` and
+   `/codebase.html` go to `/durability.html`, `/memory.html` to
+   `/durability.html#memory`, and `/reflections.html` to
+   `/work.html#routines`. `sitemap.xml` and `404.html`
    are updated to match.
 4. **Deploy restored.** `wrangler.jsonc` and `src/index.js` come back as
    they were, plus the redirect map. `scripts/deploy-site.sh` reads the
@@ -73,8 +92,11 @@ at files on `main`.
 ## Order of work
 
 1. Build the home page, `philosophy.html` and `rules.html`.
-2. Screenshot them with BYOB on a phone and on desktop, then write the
-   PNG paths to the chat session for Tom's review of the look.
+2. Screenshot them with BYOB on a phone and on desktop, saving the PNGs
+   inside the workspace, and leave their absolute paths and sha256s to the
+   chat session. That session asked for exactly this and attaches them to
+   Tom on Telegram as files, since a bare path on this machine is no use to
+   him.
 3. Build the rest, adjusting to his feedback.
 4. Publish only after Tom approves the look, check the live URLs, and
    report.
@@ -91,14 +113,18 @@ at files on `main`.
 ## Tests (`tests/test_site.py`)
 
 - Every internal `href`/`src` in `site/` resolves to a file, and every
-  `#anchor` exists on its target page.
-- Every link into `github.com/tomcounsell/ai/blob/main/<path>` names a path
-  that exists in this checkout, so a renamed doc breaks the suite, not the
-  site.
+  `#anchor` exists on its target page. A redirect is not a file: no page
+  links to a deleted URL.
+- Every link into `github.com/tomcounsell/ai/blob/main/<path>` or
+  `.../tree/main/<path>` names a path that exists in this checkout, a file
+  for `blob` and a directory for `tree`. A renamed doc then breaks the
+  suite, not the site.
 - `sitemap.xml` lists exactly the HTML pages in `site/` (404 excluded).
-- No page contains a Telegram chat id (`-100` followed by digits), a token
-  shape (`ops_`, `sk-`, `ghp_`, 40-character hex), or an email address
-  other than valor@yuda.me. This is the documented rule for a public site.
+- No file in `site/` contains a Telegram chat id (`-100\d{6,}`), a token
+  shape (`\bsk-[A-Za-z0-9]{20,}`, `\bghp_[A-Za-z0-9]{36}`,
+  `\bops_[A-Za-z0-9]{20,}`), or an email address other than valor@yuda.me.
+  There is no bare hex check, because commit hashes are legitimate. This is
+  the documented rule for a public site.
 - Each old URL in the redirect map of `src/index.js` points at a page that
   exists.
 
